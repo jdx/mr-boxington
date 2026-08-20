@@ -59,9 +59,12 @@ pub fn duration_ns(duration: Duration) -> u64 {
     duration.as_nanos().try_into().unwrap_or(u64::MAX)
 }
 
-#[cfg(windows)]
+/// Generate an unpredictable alphanumeric string.
+///
+/// Only the Windows named-pipe endpoint needs this, but it is compiled
+/// everywhere so that every platform's CI type-checks it.
 pub fn random_string(length: usize) -> String {
-    use rand::Rng as _;
+    use rand::RngExt as _;
     use rand::distr::Alphanumeric;
 
     rand::rng()
@@ -84,6 +87,15 @@ mod tests {
 
         write_atomic(&path, b"[]\n").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"[]\n");
+    }
+
+    #[test]
+    fn random_strings_have_the_requested_length_and_differ() {
+        let first = random_string(12);
+        assert_eq!(first.chars().count(), 12);
+        assert!(first.chars().all(|character| character.is_alphanumeric()));
+        assert_ne!(first, random_string(12));
+        assert!(random_string(0).is_empty());
     }
 
     #[test]

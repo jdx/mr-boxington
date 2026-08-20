@@ -852,12 +852,9 @@ mod tests {
         assert!(values.contains_key(SOCKET_ENV));
         assert!(values.contains_key(STAGING_ENV));
         assert_eq!(values.get(BUILD_ENV).unwrap().len(), 64);
-        assert!(
-            values
-                .get("RUSTC_WRAPPER")
-                .unwrap()
-                .ends_with(RUSTC_SHIM_STEM)
-        );
+        // The shim carries an .exe suffix on Windows, so compare stems.
+        let wrapper = Path::new(values.get("RUSTC_WRAPPER").unwrap());
+        assert_eq!(wrapper.file_stem().unwrap(), RUSTC_SHIM_STEM);
         assert_eq!(values.get(PREVIOUS_RUSTC_WRAPPER_ENV).unwrap(), "existing");
         assert_eq!(values.get("CARGO_INCREMENTAL").unwrap(), "0");
         assert!(!values.contains_key(VERIFY_ENV));
