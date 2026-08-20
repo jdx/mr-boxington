@@ -114,6 +114,12 @@ impl CacheSession {
         if let Some(previous) = environment.insert("RUSTC_WRAPPER".into(), shim.clone())
             && previous != shim
         {
+            // The shim defers to a wrapper that was already configured rather
+            // than compiling around it, since that wrapper may do more than
+            // cache. Say so, because the alternative is a silent no-op.
+            warn!(
+                "RUSTC_WRAPPER is already set to {previous}; deferring to it, so this build is not cached"
+            );
             environment.insert(PREVIOUS_RUSTC_WRAPPER_ENV.into(), previous);
         }
         // Incremental compilation is never cacheable, so it is disabled rather
@@ -220,6 +226,12 @@ fn action_remote_cache(config: &Config, store: &Path) -> Result<Option<AgentRemo
         download_timeout: config.http.download_timeout,
         retries: config.http.retries,
     })?;
+    // Release builds publish artifacts that must not depend on a cache, so they
+    // do not read one either. The CLI already skips the whole session; this
+    // keeps a library caller from reaching the remote behind its back.
+    if crate::policy::release_context() {
+        return Ok(None);
+    }
     let Some(mode) = crate::policy::effective_remote_cache_mode(config.remote.mode) else {
         return Ok(None);
     };
