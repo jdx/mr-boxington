@@ -1,0 +1,10 @@
+[package]
+name = "mbx"
+version = "0.0.0"
+description = "A build cache for Rust projects"
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
