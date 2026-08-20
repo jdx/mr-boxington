@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 const MAX_EXECUTABLE_IDENTITIES: usize = 64;
 const MAX_EXECUTABLE_IDENTITY_SIZE: usize = 64 * 1024;
@@ -37,6 +37,11 @@ pub struct AgentRemoteCache {
 
 /// Wire protocol version used between an in-process cache agent and its shims.
 pub const AGENT_PROTOCOL_VERSION: u8 = 1;
+/// Largest single protocol request the agent will read.
+///
+/// Requests are small JSON objects; the largest legitimate ones carry an output
+/// tree or a batch of digests, which stay far below this.
+const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
 /// A request accepted by the task-scoped cache agent.
 #[derive(Debug, Serialize, Deserialize)]
@@ -1729,9 +1734,8 @@ impl CacheAgent {
         S: AsyncRead + AsyncWrite + Unpin,
     {
         let (reader, mut writer) = tokio::io::split(stream);
-        let mut lines = BufReader::new(reader).lines();
-        let hello = lines
-            .next_line()
+        let mut reader = BufReader::new(reader);
+        let hello = read_request(&mut reader)
             .await?
             .ok_or_else(|| eyre::eyre!("connection closed before the agent handshake"))?;
         let request: AgentRequest = serde_json::from_str(&hello)?;
@@ -1776,7 +1780,7 @@ impl CacheAgent {
         )
         .await?;
 
-        while let Some(line) = lines.next_line().await? {
+        while let Some(line) = read_request(&mut reader).await? {
             let response = match serde_json::from_str(&line) {
                 Ok(request) => self.respond(request).await,
                 Err(error) => AgentResponse::Error {
@@ -1786,6 +1790,42 @@ impl CacheAgent {
             send_response(&mut writer, &response).await?;
         }
         Ok(())
+    }
+}
+
+/// Read one newline-delimited request, refusing one that grows past the cap.
+///
+/// Any process running as this user can open the session socket, so a request
+/// that never terminates its line must not be able to grow the agent's memory
+/// without bound.
+async fn read_request<R>(reader: &mut R) -> Result<Option<String>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut line = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            break;
+        }
+        let (consumed, complete) = match available.iter().position(|byte| *byte == b'\n') {
+            Some(index) => (index, true),
+            None => (available.len(), false),
+        };
+        if line.len() + consumed > MAX_REQUEST_BYTES {
+            bail!("agent request exceeded {MAX_REQUEST_BYTES} bytes");
+        }
+        line.extend_from_slice(&available[..consumed]);
+        // The newline itself is consumed but never kept.
+        reader.consume(consumed + usize::from(complete));
+        if complete {
+            return Ok(Some(String::from_utf8(line)?));
+        }
+    }
+    if line.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(String::from_utf8(line)?))
     }
 }
 
@@ -1937,6 +1977,32 @@ mod tests {
             serde_json::from_str(&response).unwrap(),
             AgentResponse::Hello { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn rejects_a_request_that_never_ends_its_line() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move { agent.handle_connection(server).await });
+
+        handshake(&mut client, "test-version").await;
+        // Never send a newline: the agent must give up rather than buffer
+        // whatever a peer is willing to write.
+        let filler = vec![b'x'; 64 * 1024];
+        let mut written = 0usize;
+        while written <= MAX_REQUEST_BYTES {
+            if client.write_all(&filler).await.is_err() {
+                break;
+            }
+            written += filler.len();
+        }
+
+        let error = task.await.unwrap().err().unwrap();
+        assert!(
+            error.to_string().contains("exceeded"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]

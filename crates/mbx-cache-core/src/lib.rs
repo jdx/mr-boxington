@@ -767,13 +767,22 @@ impl RemoteCacheClient {
         digest.validate()?;
         let url = self.blob_endpoint(digest)?;
         retry_async("GET", &url, self.retries, || async {
-            let response = self
+            let mut response = self
                 .request(reqwest::Method::GET, url.clone(), media_type)
                 .await?
                 .send()
                 .await?
                 .error_for_status()?;
-            let bytes = response.bytes().await?.to_vec();
+            // Stop reading as soon as the response outgrows the digest it claims
+            // to satisfy. A server that streams more than it promised must not be
+            // able to exhaust this process before verification rejects it.
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await? {
+                if bytes.len() as u64 + chunk.len() as u64 > digest.size {
+                    bail!("remote cache blob exceeded the size of its digest");
+                }
+                bytes.extend_from_slice(&chunk);
+            }
             if !digest.matches_bytes(&bytes)? {
                 bail!("remote cache blob failed digest verification");
             }
@@ -798,7 +807,14 @@ impl RemoteCacheClient {
             fs::create_dir_all(staging_dir)?;
             let temporary = tempfile::NamedTempFile::new_in(staging_dir)?;
             let mut output = tokio::fs::File::from_std(temporary.reopen()?);
+            // Bound the download by the digest's own size so an oversized
+            // response cannot fill the disk before verification rejects it.
+            let mut written = 0u64;
             while let Some(chunk) = response.chunk().await? {
+                written += chunk.len() as u64;
+                if written > digest.size {
+                    bail!("remote cache blob exceeded the size of its digest");
+                }
                 output.write_all(&chunk).await?;
             }
             output.flush().await?;
@@ -1769,6 +1785,46 @@ mod tests {
         assert_eq!(header, "Bearer test-token");
         assert!(header.is_sensitive());
         assert!(authorization_header(Some(" ")).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn rejects_blob_larger_than_its_digest() {
+        let mut server = mockito::Server::new_async().await;
+        let digest = CacheDigest::blake3(b"small");
+        let endpoint = format!(
+            "/v{PROTOCOL_VERSION}/blobs/{}/{}/{}",
+            digest.algorithm, digest.hash, digest.size
+        );
+        server
+            .mock("GET", endpoint.as_str())
+            .with_status(200)
+            .with_header("content-type", BLOB_MEDIA_TYPE)
+            .with_body(vec![b'x'; 4096])
+            .expect(2)
+            .create_async()
+            .await;
+        let client = test_client(&server);
+        let staging = tempfile::tempdir().unwrap();
+
+        let buffered = client
+            .get_blob(&digest, BLOB_MEDIA_TYPE)
+            .await
+            .err()
+            .unwrap();
+        let streamed = client
+            .get_blob_file(&digest, staging.path())
+            .await
+            .err()
+            .unwrap();
+
+        for error in [buffered, streamed] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("exceeded the size of its digest"),
+                "unexpected error: {error}"
+            );
+        }
     }
 
     fn test_client(server: &mockito::ServerGuard) -> RemoteCacheClient {
