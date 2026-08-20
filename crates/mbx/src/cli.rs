@@ -83,8 +83,7 @@ fn build(config: &Config, arguments: &[String]) -> Result<ExitCode> {
     }
 
     let working_dir = std::env::current_dir()?;
-    let workspace_root = workspace_root(&working_dir);
-    let target_dir = target_dir(&workspace_root, &working_dir, arguments);
+    let roots = resolve_roots(&cargo, arguments, &working_dir);
     let session_dir = tempfile::Builder::new().prefix("mbx-session-").tempdir()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -92,9 +91,14 @@ fn build(config: &Config, arguments: &[String]) -> Result<ExitCode> {
 
     runtime.block_on(async {
         let session = CacheSession::start(session_dir.path(), config).await?;
-        let mut environment = BTreeMap::new();
+        let mut environment = inherited_environment(|name| std::env::var(name).ok());
         let run = session
-            .begin(&workspace_root, &target_dir, arguments, &mut environment)
+            .begin(
+                &roots.workspace_root,
+                &roots.target_dir,
+                arguments,
+                &mut environment,
+            )
             .await;
 
         let status = run_cargo(&cargo, arguments, environment);
@@ -205,34 +209,99 @@ fn workspace_root(start: &Path) -> PathBuf {
     lockfile.or(manifest).unwrap_or_else(|| start.to_path_buf())
 }
 
-/// Resolve the directory cargo will write build outputs to.
+/// Settings the shim maps out of its cache keys.
+#[derive(Debug, PartialEq, Eq)]
+struct Roots {
+    workspace_root: PathBuf,
+    target_dir: PathBuf,
+}
+
+/// Carry a `RUSTC_WRAPPER` the caller already configured into the session.
 ///
-/// `--target-dir` beats `CARGO_TARGET_DIR`, which beats the default beneath the
-/// workspace, matching cargo. A target directory set through cargo
-/// configuration is still not found here, which costs cache hits for those
-/// output paths but never correctness: an unmapped path bypasses the cache.
-fn target_dir(workspace_root: &Path, working_dir: &Path, arguments: &[String]) -> PathBuf {
-    let requested = target_dir_argument(arguments)
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from))
-        .filter(|dir| !dir.as_os_str().is_empty());
-    match requested {
-        // Cargo resolves a relative target directory against the invocation
-        // directory, not the workspace root.
-        Some(dir) if dir.is_relative() => working_dir.join(dir),
-        Some(dir) => dir,
-        None => workspace_root.join("target"),
+/// The session records it so the shim can defer to it; without this it would be
+/// dropped silently and whatever it does would stop happening.
+fn inherited_environment(get_env: impl Fn(&str) -> Option<String>) -> BTreeMap<String, String> {
+    let mut environment = BTreeMap::new();
+    if let Some(wrapper) = get_env("RUSTC_WRAPPER").filter(|value| !value.is_empty()) {
+        environment.insert("RUSTC_WRAPPER".into(), wrapper);
+    }
+    environment
+}
+
+/// Resolve the workspace root and target directory cargo will actually use.
+///
+/// Cargo is the only authority: the target directory can come from the
+/// environment, a flag, or cargo's own configuration, and `--manifest-path` can
+/// move the whole build elsewhere. Inference is kept as a fallback, and costs
+/// only cache hits when it is wrong, since an unmapped path bypasses.
+fn resolve_roots(cargo: &std::ffi::OsStr, arguments: &[String], working_dir: &Path) -> Roots {
+    let reported = cargo_roots(cargo, arguments);
+    let workspace_root = reported
+        .as_ref()
+        .map(|roots| roots.workspace_root.clone())
+        .unwrap_or_else(|| workspace_root(working_dir));
+    // An explicit flag outranks anything cargo reports from configuration.
+    let target_dir = target_dir_argument(arguments)
+        .map(|value| absolute(working_dir, value))
+        .or_else(|| reported.map(|roots| roots.target_dir))
+        .or_else(|| {
+            std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .filter(|dir| !dir.as_os_str().is_empty())
+                .map(|dir| absolute(working_dir, &dir.to_string_lossy()))
+        })
+        .unwrap_or_else(|| workspace_root.join("target"));
+    Roots {
+        workspace_root,
+        target_dir,
     }
 }
 
-/// Read `--target-dir <path>` or `--target-dir=<path>` out of cargo's arguments.
+/// Cargo resolves a relative directory against the invocation directory.
+fn absolute(working_dir: &Path, value: &str) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        path
+    } else {
+        working_dir.join(path)
+    }
+}
+
+fn cargo_roots(cargo: &std::ffi::OsStr, arguments: &[String]) -> Option<Roots> {
+    let mut command = Command::new(cargo);
+    command.args(["metadata", "--no-deps", "--format-version", "1"]);
+    // Describe the project the build will actually operate on.
+    if let Some(manifest) = flag_value(arguments, "--manifest-path") {
+        command.args(["--manifest-path", manifest]);
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_cargo_roots(&output.stdout)
+}
+
+fn parse_cargo_roots(metadata: &[u8]) -> Option<Roots> {
+    let metadata: serde_json::Value = serde_json::from_slice(metadata).ok()?;
+    Some(Roots {
+        workspace_root: PathBuf::from(metadata.get("workspace_root")?.as_str()?),
+        target_dir: PathBuf::from(metadata.get("target_directory")?.as_str()?),
+    })
+}
+
 fn target_dir_argument(arguments: &[String]) -> Option<&str> {
+    flag_value(arguments, "--target-dir")
+}
+
+/// Read `--flag <value>` or `--flag=<value>` out of cargo's arguments.
+fn flag_value<'a>(arguments: &'a [String], flag: &str) -> Option<&'a str> {
+    let joined = format!("{flag}=");
     let mut arguments = arguments.iter();
     while let Some(argument) = arguments.next() {
-        if let Some(value) = argument.strip_prefix("--target-dir=") {
+        if let Some(value) = argument.strip_prefix(&joined) {
             return Some(value);
         }
-        if argument == "--target-dir" {
+        if argument == flag {
             return arguments.next().map(String::as_str);
         }
     }
@@ -282,53 +351,65 @@ mod tests {
     }
 
     #[test]
-    fn target_dir_defaults_under_the_workspace() {
-        let root = Path::new("/workspace");
-        let cwd = Path::new("/workspace/crates/member");
-        assert_eq!(target_dir(root, cwd, &[]), Path::new("/workspace/target"));
-    }
-
-    #[test]
-    fn target_dir_follows_the_cargo_argument() {
-        let root = Path::new("/workspace");
-        let cwd = Path::new("/elsewhere");
+    fn reads_both_flag_spellings() {
         let joined = ["build".to_string(), "--target-dir=/tmp/out".to_string()];
         let split = [
             "build".to_string(),
             "--target-dir".to_string(),
             "/tmp/out".to_string(),
         ];
+        let dangling = ["build".to_string(), "--target-dir".to_string()];
 
-        assert_eq!(target_dir(root, cwd, &joined), Path::new("/tmp/out"));
-        assert_eq!(target_dir(root, cwd, &split), Path::new("/tmp/out"));
+        assert_eq!(target_dir_argument(&joined), Some("/tmp/out"));
+        assert_eq!(target_dir_argument(&split), Some("/tmp/out"));
+        assert_eq!(target_dir_argument(&dangling), None);
+        assert_eq!(target_dir_argument(&["build".to_string()]), None);
     }
 
     #[test]
-    fn target_dir_resolves_a_relative_argument_against_the_working_directory() {
-        let root = Path::new("/workspace");
-        let cwd = Path::new("/workspace/crates/member");
-        let arguments = [
-            "build".to_string(),
-            "--target-dir".to_string(),
-            "out".to_string(),
-        ];
+    fn reads_the_roots_cargo_reports() {
+        let metadata = br#"{
+            "workspace_root": "/elsewhere/project",
+            "target_directory": "/var/cache/shared-target",
+            "packages": []
+        }"#;
 
         assert_eq!(
-            target_dir(root, cwd, &arguments),
+            parse_cargo_roots(metadata).unwrap(),
+            Roots {
+                workspace_root: PathBuf::from("/elsewhere/project"),
+                target_dir: PathBuf::from("/var/cache/shared-target"),
+            }
+        );
+    }
+
+    #[test]
+    fn ignores_unusable_cargo_metadata() {
+        assert!(parse_cargo_roots(b"not json").is_none());
+        assert!(parse_cargo_roots(br#"{"packages": []}"#).is_none());
+    }
+
+    #[test]
+    fn resolves_a_relative_directory_against_the_working_directory() {
+        let cwd = Path::new("/workspace/crates/member");
+        assert_eq!(
+            absolute(cwd, "out"),
             Path::new("/workspace/crates/member/out")
         );
+        assert_eq!(absolute(cwd, "/tmp/out"), Path::new("/tmp/out"));
     }
 
     #[test]
-    fn target_dir_ignores_a_trailing_flag_without_a_value() {
-        let root = Path::new("/workspace");
-        let cwd = Path::new("/workspace");
-        let arguments = ["build".to_string(), "--target-dir".to_string()];
+    fn carries_an_inherited_wrapper_into_the_session() {
+        let with = inherited_environment(|name| {
+            (name == "RUSTC_WRAPPER").then(|| "/usr/bin/sccache".to_string())
+        });
+        assert_eq!(with.get("RUSTC_WRAPPER").unwrap(), "/usr/bin/sccache");
 
-        assert_eq!(
-            target_dir(root, cwd, &arguments),
-            Path::new("/workspace/target")
-        );
+        // An empty value is how a shell unsets it in practice.
+        let empty = inherited_environment(|name| (name == "RUSTC_WRAPPER").then(String::new));
+        assert!(empty.is_empty());
+        assert!(inherited_environment(|_| None).is_empty());
     }
 
     #[test]

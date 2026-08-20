@@ -78,15 +78,15 @@ pub fn gc(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
     }
 
     // An action result whose objects are gone can only produce a miss, so drop
-    // it rather than leave the index pointing at nothing.
-    if outcome.removed_objects > 0 {
-        let cas = LocalCas::new(store);
-        for entry in &results {
-            if action_result_is_dangling(&cas, &entry.path)? && remove(&entry.path)? {
-                live_bytes = live_bytes.saturating_sub(entry.size);
-                outcome.removed_action_results += 1;
-                outcome.removed_bytes += entry.size;
-            }
+    // it rather than leave the index pointing at nothing. This runs whether or
+    // not this call evicted anything, since another process may have, and a
+    // store that is over budget on results alone still needs the sweep.
+    let cas = LocalCas::new(store);
+    for entry in &results {
+        if action_result_is_dangling(&cas, &entry.path)? && remove(&entry.path)? {
+            live_bytes = live_bytes.saturating_sub(entry.size);
+            outcome.removed_action_results += 1;
+            outcome.removed_bytes += entry.size;
         }
     }
 
