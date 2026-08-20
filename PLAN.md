@@ -80,11 +80,11 @@ the same binary, the agent handshake can require strict version equality.
 Two modes:
 
 - **Session mode** (under `mbx build`): talks to the agent over the socket;
-  gets prefetch, batched uploads, and staged blob packs.
-- **Standalone mode** (no `MBX_SOCKET`): reads/writes the local store
-  directly and optionally performs synchronous remote reads. This makes
-  `build.rustc-wrapper = "<path>/mbx-rustc"` in `.cargo/config.toml` useful for
-  plain `cargo build` without the wrapper. `mbx setup` installs this.
+  gets prefetch, batched uploads, and staged blob packs. This is the only mode
+  today.
+- **Standalone mode** (no `MBX_SOCKET`): would read and write the local store
+  directly, making `build.rustc-wrapper` useful for plain `cargo build`. Blocked
+  on cross-process prefetch manifests — see future work.
 
 On any unsupported invocation, error, or bypass condition the shim execs the
 real rustc transparently. Correctness beats hit rate everywhere.
@@ -210,9 +210,7 @@ The failure mode is a recompile, never a wrong result.
    from mise: own config, own identity, inlined utils.
 6. `feat: mbx CLI` — `build`, `gc`, and `cache` commands, plus the cold/warm and
    second-checkout integration tests.
-7. `feat: standalone shim mode` — cache reads and writes without a session, so
-   plain `cargo build` benefits through `build.rustc-wrapper`, plus `mbx setup`.
-8. `docs: usage` — real README behind an experimental banner.
+7. `docs: usage` — real README behind an experimental banner.
 
 Server repo follow-up (separate stack in `jdx/mbx-cache`): rebrand crate,
 env vars, and wire constants to match `mbx-cache-core` exactly.
@@ -226,6 +224,19 @@ env vars, and wire constants to match `mbx-cache-core` exactly.
   checkout so deleting a worktree releases its artifacts.
 - **Deferred materialization** — leave artifacts in the CAS until read
   (biggest win for `cargo check`-heavy workflows).
+- **Revisit `CARGO_INCREMENTAL=0`.** The session disables incremental
+  compilation for everything, workspace members included. Incremental actions
+  bypass the cache anyway, so leaving members incremental may simply be better
+  for the inner loop; settle it with the measurement on a real workspace.
+- **Standalone shim mode**, so `build.rustc-wrapper` helps plain `cargo build`
+  and `mbx setup` becomes worth having. This needs cross-process prefetch
+  manifests first: `begin_task` derives its run id from the process id, so each
+  of the many rustc processes cargo spawns would get its own manifest and see
+  none of the others' predictions. Without prediction the shim can only use a
+  dep-info file left by an earlier build, which is exactly the case a cold
+  target directory does not have — so the feature is not worth shipping until
+  runs can be shared. Either make the run id deterministic per identity, or
+  persist predictions as they are recorded instead of at commit.
 - **Link caching** — cache bin/dylib link outputs (hardest correctness
   surface, deliberately last).
 - **Shared protocol crate** between client and server.
