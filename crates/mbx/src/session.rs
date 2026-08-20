@@ -119,11 +119,12 @@ impl CacheSession {
             self.staging.to_string_lossy().into_owned(),
         );
         environment.insert(BUILD_ENV.into(), protocol_build);
-        if self.verify {
-            environment.insert(VERIFY_ENV.into(), "1".into());
-        } else {
-            environment.remove(VERIFY_ENV);
-        }
+        // Always state this explicitly: removing the key would leave the shim
+        // inheriting whatever the parent environment had.
+        environment.insert(
+            VERIFY_ENV.into(),
+            if self.verify { "1" } else { "0" }.into(),
+        );
         if let Some(previous) = environment.insert("RUSTC_WRAPPER".into(), shim.clone())
             && previous != shim
         {
@@ -750,6 +751,14 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
     }
 }
 
+/// Whether the shim should verify cached results against a real compilation.
+///
+/// An empty value or `0` is off, matching how the configuration reads it, so
+/// that an explicit disable cannot be mistaken for an enable.
+pub(crate) fn verify_requested() -> bool {
+    std::env::var_os(VERIFY_ENV).is_some_and(|value| !value.is_empty() && value != "0")
+}
+
 pub(crate) fn request_agent(requests: &[AgentRequest]) -> Result<Vec<AgentResponse>> {
     let socket =
         std::env::var_os(SOCKET_ENV).ok_or_else(|| eyre::eyre!("{SOCKET_ENV} is not set"))?;
@@ -913,7 +922,7 @@ mod tests {
         assert_eq!(wrapper.file_stem().unwrap(), RUSTC_SHIM_STEM);
         assert_eq!(values.get(PREVIOUS_RUSTC_WRAPPER_ENV).unwrap(), "existing");
         assert_eq!(values.get("CARGO_INCREMENTAL").unwrap(), "0");
-        assert!(!values.contains_key(VERIFY_ENV));
+        assert_eq!(values.get(VERIFY_ENV).unwrap(), "0");
 
         session.finish().await.unwrap();
     }

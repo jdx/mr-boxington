@@ -40,7 +40,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     let working_dir = std::env::current_dir()?;
     let outputs = invocation.outputs(&working_dir)?;
 
-    let verify = std::env::var_os(session::VERIFY_ENV).is_some();
+    let verify = session::verify_requested();
     let mut verification = None;
     let mut action_lookup_attempted = false;
     if outputs.dep_info.is_file()

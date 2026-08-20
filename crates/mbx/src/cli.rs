@@ -82,8 +82,9 @@ fn build(config: &Config, arguments: &[String]) -> Result<ExitCode> {
         return run_cargo(&cargo, arguments, BTreeMap::new());
     }
 
-    let workspace_root = workspace_root(&std::env::current_dir()?);
-    let target_dir = target_dir(&workspace_root);
+    let working_dir = std::env::current_dir()?;
+    let workspace_root = workspace_root(&working_dir);
+    let target_dir = target_dir(&workspace_root, &working_dir, arguments);
     let session_dir = tempfile::Builder::new().prefix("mbx-session-").tempdir()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -206,15 +207,36 @@ fn workspace_root(start: &Path) -> PathBuf {
 
 /// Resolve the directory cargo will write build outputs to.
 ///
-/// Only the environment and the default location are consulted. A target
-/// directory set through cargo configuration is not found here, which costs
-/// cache hits for those output paths but never correctness: an unmapped path
-/// bypasses the cache.
-fn target_dir(workspace_root: &Path) -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR")
+/// `--target-dir` beats `CARGO_TARGET_DIR`, which beats the default beneath the
+/// workspace, matching cargo. A target directory set through cargo
+/// configuration is still not found here, which costs cache hits for those
+/// output paths but never correctness: an unmapped path bypasses the cache.
+fn target_dir(workspace_root: &Path, working_dir: &Path, arguments: &[String]) -> PathBuf {
+    let requested = target_dir_argument(arguments)
         .map(PathBuf::from)
-        .filter(|dir| dir.is_absolute())
-        .unwrap_or_else(|| workspace_root.join("target"))
+        .or_else(|| std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from))
+        .filter(|dir| !dir.as_os_str().is_empty());
+    match requested {
+        // Cargo resolves a relative target directory against the invocation
+        // directory, not the workspace root.
+        Some(dir) if dir.is_relative() => working_dir.join(dir),
+        Some(dir) => dir,
+        None => workspace_root.join("target"),
+    }
+}
+
+/// Read `--target-dir <path>` or `--target-dir=<path>` out of cargo's arguments.
+fn target_dir_argument(arguments: &[String]) -> Option<&str> {
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        if let Some(value) = argument.strip_prefix("--target-dir=") {
+            return Some(value);
+        }
+        if argument == "--target-dir" {
+            return arguments.next().map(String::as_str);
+        }
+    }
+    None
 }
 
 /// Reject a build invocation that cargo would not accept anyway.
@@ -262,7 +284,51 @@ mod tests {
     #[test]
     fn target_dir_defaults_under_the_workspace() {
         let root = Path::new("/workspace");
-        assert_eq!(target_dir(root), Path::new("/workspace/target"));
+        let cwd = Path::new("/workspace/crates/member");
+        assert_eq!(target_dir(root, cwd, &[]), Path::new("/workspace/target"));
+    }
+
+    #[test]
+    fn target_dir_follows_the_cargo_argument() {
+        let root = Path::new("/workspace");
+        let cwd = Path::new("/elsewhere");
+        let joined = ["build".to_string(), "--target-dir=/tmp/out".to_string()];
+        let split = [
+            "build".to_string(),
+            "--target-dir".to_string(),
+            "/tmp/out".to_string(),
+        ];
+
+        assert_eq!(target_dir(root, cwd, &joined), Path::new("/tmp/out"));
+        assert_eq!(target_dir(root, cwd, &split), Path::new("/tmp/out"));
+    }
+
+    #[test]
+    fn target_dir_resolves_a_relative_argument_against_the_working_directory() {
+        let root = Path::new("/workspace");
+        let cwd = Path::new("/workspace/crates/member");
+        let arguments = [
+            "build".to_string(),
+            "--target-dir".to_string(),
+            "out".to_string(),
+        ];
+
+        assert_eq!(
+            target_dir(root, cwd, &arguments),
+            Path::new("/workspace/crates/member/out")
+        );
+    }
+
+    #[test]
+    fn target_dir_ignores_a_trailing_flag_without_a_value() {
+        let root = Path::new("/workspace");
+        let cwd = Path::new("/workspace");
+        let arguments = ["build".to_string(), "--target-dir".to_string()];
+
+        assert_eq!(
+            target_dir(root, cwd, &arguments),
+            Path::new("/workspace/target")
+        );
     }
 
     #[test]
