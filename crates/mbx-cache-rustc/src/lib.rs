@@ -79,6 +79,8 @@ pub enum BypassReason {
     SplitOutputDirectories,
     #[error("rustc output path has no file name: {0}")]
     InvalidOutputPath(PathBuf),
+    #[error("rustc -o with an emit that has no explicit path is not modeled: {0}")]
+    ImplicitEmitWithOutputFile(PathBuf),
     #[error("native library lookup is not cacheable yet")]
     NativeLibrary,
     #[error("rustc search path kind is not cacheable yet: {0}")]
@@ -203,6 +205,17 @@ impl RustcInvocation {
                     .map(|path| absolute_path(path, working_dir))
             })
             .unwrap_or_else(|| normalize_components(working_dir));
+        // rustc applies `-o` to every emit that has no path of its own, so the
+        // file names cannot be derived from the crate name here. Cargo always
+        // uses --out-dir instead, so refusing to model this costs nothing.
+        if let Some(output) = &explicit_output
+            && self.emits.iter().any(|emit| {
+                emit.path.is_none()
+                    && matches!(emit.kind.as_str(), "dep-info" | "link" | "metadata")
+            })
+        {
+            return Err(BypassReason::ImplicitEmitWithOutputFile(output.clone()));
+        }
         let mut files = BTreeSet::new();
         let mut dep_info = None;
         for emit in &self.emits {
@@ -1150,7 +1163,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_multiple_outputs_with_an_explicit_output_stem() {
+    fn refuses_an_output_file_with_implicit_emit_paths() {
         let working_dir = absolute(&["workspace"]);
         let invocation = RustcInvocation::parse(&args(&[
             "--crate-name=widget",
@@ -1162,15 +1175,36 @@ mod tests {
         ]))
         .unwrap();
 
+        // rustc applies -o to every emit that has no path of its own, so the
+        // artifact names cannot be derived from the crate name.
+        assert_eq!(
+            invocation.outputs(&working_dir).unwrap_err(),
+            BypassReason::ImplicitEmitWithOutputFile(working_dir.join("target/custom.rlib"))
+        );
+    }
+
+    #[test]
+    fn resolves_an_output_file_when_every_emit_names_its_path() {
+        let working_dir = absolute(&["workspace"]);
+        let invocation = RustcInvocation::parse(&args(&[
+            "--crate-name=widget",
+            "--crate-type=lib",
+            "--emit=dep-info=target/widget.d,metadata=target/widget.rmeta,link=target/widget.rlib",
+            "-o",
+            "target/custom.rlib",
+            "src/lib.rs",
+        ]))
+        .unwrap();
+
         assert_eq!(
             invocation.outputs(&working_dir).unwrap(),
             RustcOutputs {
                 directory: working_dir.join("target"),
                 files: vec![
-                    working_dir.join("target/libwidget.rlib"),
-                    working_dir.join("target/libwidget.rmeta"),
+                    working_dir.join("target/widget.rlib"),
+                    working_dir.join("target/widget.rmeta"),
                 ],
-                dep_info: working_dir.join("target/custom.d"),
+                dep_info: working_dir.join("target/widget.d"),
             }
         );
     }
