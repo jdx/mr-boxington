@@ -47,8 +47,8 @@ mbx build [-- <cargo args>]
      │    ├─ local CAS + action cache (~/.cache/mbx)
      │    └─ optional remote cache client (blob packs, OIDC/token auth)
      ├─ env injection: RUSTC_WRAPPER=<session>/mbx-rustc, MBX_SOCKET,
-     │    MBX_STAGING_DIR,
-     │    MBX_TASK, CARGO_INCREMENTAL=0, MBX_PREVIOUS_RUSTC_WRAPPER chaining
+     │    MBX_STAGING_DIR, MBX_BUILD, MBX_WORKSPACE_ROOT, MBX_TARGET_DIR,
+     │    CARGO_INCREMENTAL=0, MBX_PREVIOUS_RUSTC_WRAPPER chaining
      ├─ run cargo
      └─ finish: flush staged uploads, print stats, optional JSON report
 ```
@@ -89,15 +89,35 @@ Two modes:
 On any unsupported invocation, error, or bypass condition the shim execs the
 real rustc transparently. Correctness beats hit rate everywhere.
 
+### Path mapping
+
+Cache keys hold no absolute paths. The session passes the workspace root and the
+target directory to the shim, which maps them to `${workspace}` and `${target}`
+placeholders along with `${cargo_home}`, `${rustup_home}`, and `${home}`.
+
+Both roots have to be passed in rather than inferred: cargo compiles a
+dependency with its working directory inside the registry, so the shim sees no
+sign of the workspace whose target directory it is writing to. Mapping the
+target directory first, ahead of the workspace that usually contains it, also
+keeps keys stable when the target directory moves elsewhere.
+
+A path that matches no root bypasses the cache rather than entering a key. The
+roots come from `cargo metadata`, since a target directory can be set by flag,
+environment, or cargo configuration, and `--manifest-path` can move the build
+elsewhere entirely.
+
 ### Cache identity
 
 mise keyed its session manifests by task definition. mbx defines its own
-identity (v1): a canonical JSON of `{version, workspace_root_marker, command}`
-where `workspace_root_marker` is path-mapped so identical projects in
-different worktrees share manifests. The identity only namespaces
-prefetch manifests — action keys themselves come from `mbx-cache-rustc` and
-are identity-independent. Bumping the identity version invalidates manifests,
-not cached actions.
+identity (v1): a canonical JSON of `{version, workspace, command}`, where
+`workspace` is the digest of `Cargo.lock` rather than the checkout path, so
+separate worktrees of one dependency graph share a manifest. A project with no
+lockfile falls back to its directory name.
+
+The identity only namespaces prefetch manifests — action keys come from
+`mbx-cache-rustc` and are independent of it. A wrong identity costs a cold
+prefetch, never a wrong result, so bumping the version invalidates manifests
+and not cached actions.
 
 ## Protocol
 
@@ -109,6 +129,7 @@ Same protocol as mise action-cache v1, renamed. The wire rename table:
 | `mise-cache-protocol` header | `mbx-cache-protocol` |
 | `mise-cache-namespace` header | `mbx-cache-namespace` |
 | `MISEPK01` blob-pack magic | `MBXPACK1` |
+| `MISE_CACHE_TASK` env var | `MBX_BUILD` |
 | `MISE_CACHE_*` env vars | `MBX_*` (client), `MBX_CACHE_*` (server) |
 | `mise-cache-rustc` shim stem | `mbx-rustc` |
 
@@ -123,6 +144,7 @@ Protocol version stays 1; nothing in the wild speaks the old names.
   `build.rustc-wrapper` in `~/.cargo/config.toml`. If that key already names
   another wrapper, such as sccache, setup reports it and changes nothing:
   silently displacing a wrapper the user chose is worse than doing nothing.
+  Depends on standalone shim mode, so it lands with it.
 - `mbx-rustc` (argv0) — the shim; not invoked by humans.
 
 ## Configuration
@@ -185,10 +207,12 @@ The failure mode is a recompile, never a wrong result.
 3. `feat: mbx-cache-core` — port from mise with wire renames; tests included.
 4. `feat: mbx-cache-rustc` — port; depends on core.
 5. `feat: session + shim library` — port mise's session/shim glue, severed
-   from mise: own config, own identity, inlined utils, standalone shim mode.
-6. `feat: mbx CLI` — `build`, `gc`, `cache`, `setup` commands.
-7. `docs: usage + integration tests` — real README (experimental banner),
-   cold/warm/second-checkout integration tests.
+   from mise: own config, own identity, inlined utils.
+6. `feat: mbx CLI` — `build`, `gc`, and `cache` commands, plus the cold/warm and
+   second-checkout integration tests.
+7. `feat: standalone shim mode` — cache reads and writes without a session, so
+   plain `cargo build` benefits through `build.rustc-wrapper`, plus `mbx setup`.
+8. `docs: usage` — real README behind an experimental banner.
 
 Server repo follow-up (separate stack in `jdx/mbx-cache`): rebrand crate,
 env vars, and wire constants to match `mbx-cache-core` exactly.

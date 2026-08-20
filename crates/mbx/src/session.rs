@@ -27,6 +27,8 @@ const SOCKET_ENV: &str = "MBX_SOCKET";
 pub(crate) const STAGING_ENV: &str = "MBX_STAGING_DIR";
 pub(crate) const BUILD_ENV: &str = "MBX_BUILD";
 pub(crate) const VERIFY_ENV: &str = "MBX_VERIFY";
+pub(crate) const WORKSPACE_ROOT_ENV: &str = "MBX_WORKSPACE_ROOT";
+pub(crate) const TARGET_DIR_ENV: &str = "MBX_TARGET_DIR";
 const PREVIOUS_RUSTC_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WRAPPER";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const IDENTITY_VERSION: u8 = 1;
@@ -82,6 +84,7 @@ impl CacheSession {
     pub async fn begin(
         &self,
         workspace_root: &Path,
+        target_dir: &Path,
         command: &[String],
         environment: &mut BTreeMap<String, String>,
     ) -> Option<ActionRun> {
@@ -100,6 +103,16 @@ impl CacheSession {
             }
         };
         let shim = self.rustc_shim.to_string_lossy().into_owned();
+        // The shim maps these roots out of its cache keys; a dependency compiles
+        // with its working directory in the registry, so it cannot find them.
+        environment.insert(
+            WORKSPACE_ROOT_ENV.into(),
+            workspace_root.to_string_lossy().into_owned(),
+        );
+        environment.insert(
+            TARGET_DIR_ENV.into(),
+            target_dir.to_string_lossy().into_owned(),
+        );
         environment.insert(SOCKET_ENV.into(), self.socket.clone());
         environment.insert(
             STAGING_ENV.into(),
@@ -883,7 +896,12 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let mut values = BTreeMap::from([("RUSTC_WRAPPER".into(), "existing".into())]);
         let run = session
-            .begin(workspace.path(), &["build".to_string()], &mut values)
+            .begin(
+                workspace.path(),
+                &workspace.path().join("target"),
+                &["build".to_string()],
+                &mut values,
+            )
             .await;
 
         assert!(run.is_some());
@@ -913,7 +931,12 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let mut values = BTreeMap::new();
         session
-            .begin(workspace.path(), &["build".to_string()], &mut values)
+            .begin(
+                workspace.path(),
+                &workspace.path().join("target"),
+                &["build".to_string()],
+                &mut values,
+            )
             .await;
 
         assert_eq!(values.get(VERIFY_ENV).unwrap(), "1");

@@ -9,6 +9,8 @@ repository.workspace = true
 
 [dependencies]
 bytesize = "2"
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11"
 dirs = "6"
 eyre = "0.6"
 log = "0.4"
@@ -22,6 +24,11 @@ tempfile = "3"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 toml = "0.9"
 which = "8"
+
+[dev-dependencies]
+filetime = "0.2"
+serde_json = "1"
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
