@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/mbx", "crates/mbx-cache-core"]
+members = ["crates/mbx", "crates/mbx-cache-core", "crates/mbx-cache-rustc"]
 
 [workspace.package]
 edition = "2024"

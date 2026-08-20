@@ -1,0 +1,22 @@
+[package]
+name = "mbx-cache-rustc"
+version = "0.0.0"
+description = "Conservative rustc action analysis and key construction for mbx"
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+mbx-cache-core = { path = "../mbx-cache-core", version = "0.0.0", default-features = false }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = ["rustls"]
+native-tls = ["mbx-cache-core/native-tls"]
+rustls = ["mbx-cache-core/rustls"]
+rustls-native-roots = ["mbx-cache-core/rustls-native-roots"]
