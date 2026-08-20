@@ -746,13 +746,11 @@ fn request_agent_at(socket: &OsString, requests: &[AgentRequest]) -> Result<Vec<
 fn request_agent_at(socket: &OsString, requests: &[AgentRequest]) -> Result<Vec<AgentResponse>> {
     let endpoint = socket.to_string_lossy().into_owned();
     tokio::runtime::Builder::new_current_thread()
-        .enable_io()
+        .enable_all()
         .build()?
         .block_on(async move {
             use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-            let mut stream = tokio::net::windows::named_pipe::ClientOptions::new()
-                .open(&endpoint)
-                .wrap_err("failed to connect to the cache session")?;
+            let mut stream = connect_pipe(&endpoint).await?;
             let request = AgentRequest::Hello {
                 protocol: AGENT_PROTOCOL_VERSION,
                 client_version: VERSION.into(),
@@ -780,6 +778,34 @@ fn request_agent_at(socket: &OsString, requests: &[AgentRequest]) -> Result<Vec<
             }
             Ok(responses)
         })
+}
+
+/// Open the agent's pipe, waiting out the instances that are already busy.
+///
+/// The agent keeps one spare instance and creates the next only after accepting,
+/// so the rustc processes cargo runs in parallel routinely arrive to a busy
+/// pipe. Without this they would fall back to uncached compiles.
+#[cfg(windows)]
+async fn connect_pipe(endpoint: &str) -> Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    use std::time::Instant;
+    use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+
+    const RETRY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(5);
+
+    let deadline = Instant::now() + RETRY_DEADLINE;
+    loop {
+        match tokio::net::windows::named_pipe::ClientOptions::new().open(endpoint) {
+            Ok(client) => return Ok(client),
+            Err(error)
+                if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32)
+                    && Instant::now() < deadline => {}
+            Err(error) => {
+                return Err(error).wrap_err("failed to connect to the cache session");
+            }
+        }
+        tokio::time::sleep(RETRY_DELAY).await;
+    }
 }
 
 #[cfg(unix)]
