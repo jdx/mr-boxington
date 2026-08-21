@@ -4,8 +4,8 @@ use futures_util::TryStreamExt as _;
 use log::warn;
 use reqwest::StatusCode;
 use reqwest::header::{
-    ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, ETAG, HeaderMap, HeaderValue, IF_MATCH,
-    IF_NONE_MATCH,
+    ACCEPT, AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, ETAG, HeaderMap,
+    HeaderValue, IF_MATCH, IF_NONE_MATCH,
 };
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
@@ -375,6 +375,10 @@ struct RemoteCacheCapabilities {
     features: CapabilityFeatures,
     #[serde(default)]
     limits: CapabilityLimits,
+    /// Content codings the server accepts and produces; always includes
+    /// `identity`, and compression is used only when `zstd` is offered.
+    #[serde(default)]
+    compressors: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -402,6 +406,17 @@ struct BlobPackLimits {
     max_bytes: u64,
 }
 
+/// What one capabilities exchange settled, cached for the session.
+///
+/// `Default` is also the answer for a server with no capabilities endpoint:
+/// no blob packs and no compression, which is exactly how every request
+/// behaved before either feature existed.
+#[derive(Debug, Clone, Copy, Default)]
+struct NegotiatedCapabilities {
+    blob_packs: Option<BlobPackLimits>,
+    zstd_uploads: bool,
+}
+
 #[derive(Serialize)]
 struct DigestList<'a> {
     digests: &'a [CacheDigest],
@@ -420,7 +435,7 @@ pub struct RemoteCacheClient {
     credential: RemoteCacheCredential,
     download_timeout: Duration,
     retries: i64,
-    capabilities: tokio::sync::OnceCell<Option<BlobPackLimits>>,
+    capabilities: tokio::sync::OnceCell<NegotiatedCapabilities>,
     blob_packs_disabled: AtomicBool,
 }
 
@@ -516,6 +531,10 @@ impl RemoteCacheClient {
     }
 
     async fn blob_pack_limits(&self) -> Result<Option<BlobPackLimits>> {
+        Ok(self.negotiated_capabilities().await?.blob_packs)
+    }
+
+    async fn negotiated_capabilities(&self) -> Result<NegotiatedCapabilities> {
         self.capabilities
             .get_or_try_init(|| async {
                 let url = self.capabilities_endpoint()?;
@@ -530,7 +549,7 @@ impl RemoteCacheClient {
                         | StatusCode::METHOD_NOT_ALLOWED
                         | StatusCode::NOT_IMPLEMENTED
                 ) {
-                    return Ok(None);
+                    return Ok(NegotiatedCapabilities::default());
                 }
                 let bytes =
                     read_bounded_json(response.error_for_status()?, "capabilities").await?;
@@ -541,25 +560,39 @@ impl RemoteCacheClient {
                         capabilities.protocol.major
                     );
                 }
-                if !capabilities.features.blob_packs {
-                    return Ok(None);
-                }
-                let max_items = usize::try_from(capabilities.limits.max_batch_items)
-                    .ok()
-                    .filter(|limit| *limit > 0)
-                    .ok_or_else(|| {
-                        eyre!("remote cache blob packs require a positive max_batch_items limit")
-                    })?;
-                if capabilities.limits.max_pack_bytes == 0 {
-                    bail!("remote cache blob packs require a positive max_pack_bytes limit");
-                }
-                Ok(Some(BlobPackLimits {
-                    max_items: max_items.min(MAX_STAGED_BLOB_PACK_ITEMS),
-                    max_bytes: capabilities
-                        .limits
-                        .max_pack_bytes
-                        .min(MAX_STAGED_BLOB_PACK_BYTES),
-                }))
+                // Compression is negotiated, never assumed: a body sent with a
+                // coding the server did not offer would be stored corrupt or
+                // rejected, so absence of the advertisement means identity.
+                let zstd_uploads = capabilities
+                    .compressors
+                    .iter()
+                    .any(|compressor| compressor == "zstd");
+                let blob_packs = if capabilities.features.blob_packs {
+                    let max_items = usize::try_from(capabilities.limits.max_batch_items)
+                        .ok()
+                        .filter(|limit| *limit > 0)
+                        .ok_or_else(|| {
+                            eyre!(
+                                "remote cache blob packs require a positive max_batch_items limit"
+                            )
+                        })?;
+                    if capabilities.limits.max_pack_bytes == 0 {
+                        bail!("remote cache blob packs require a positive max_pack_bytes limit");
+                    }
+                    Some(BlobPackLimits {
+                        max_items: max_items.min(MAX_STAGED_BLOB_PACK_ITEMS),
+                        max_bytes: capabilities
+                            .limits
+                            .max_pack_bytes
+                            .min(MAX_STAGED_BLOB_PACK_BYTES),
+                    })
+                } else {
+                    None
+                };
+                Ok(NegotiatedCapabilities {
+                    blob_packs,
+                    zstd_uploads,
+                })
             })
             .await
             .copied()
@@ -835,33 +868,59 @@ impl RemoteCacheClient {
 
     pub async fn put_blob(&self, upload: &BlobUpload) -> Result<()> {
         let url = self.blob_endpoint(&upload.digest)?;
+        // A failed negotiation downgrades to identity rather than failing the
+        // upload: compression is an economy, not a requirement.
+        let compress = self
+            .negotiated_capabilities()
+            .await
+            .map(|capabilities| capabilities.zstd_uploads)
+            .unwrap_or(false);
         retry_async("PUT", &url, self.retries, || async {
-            let (length, body) = match &upload.source {
-                BlobSource::Bytes(bytes) => {
-                    (bytes.len() as u64, reqwest::Body::from(bytes.clone()))
-                }
-                BlobSource::File(file) => {
-                    let file = tokio::fs::File::open(file.path()).await?;
-                    let length = file.metadata().await?.len();
-                    let stream = tokio_util::io::ReaderStream::new(file);
-                    (length, reqwest::Body::wrap_stream(stream))
-                }
-                BlobSource::Path(path) => {
-                    let file = tokio::fs::File::open(path).await?;
-                    let length = file.metadata().await?.len();
-                    let stream = tokio_util::io::ReaderStream::new(file);
-                    (length, reqwest::Body::wrap_stream(stream))
-                }
-            };
-            let response = self
+            let request = self
                 .request(reqwest::Method::PUT, url.clone(), BLOB_MEDIA_TYPE)
                 .await?
                 .header(CONTENT_TYPE, BLOB_MEDIA_TYPE)
-                .header(CONTENT_LENGTH, length)
-                .header(IF_NONE_MATCH, "*")
-                .body(body)
-                .send()
-                .await?;
+                .header(IF_NONE_MATCH, "*");
+            let request = if compress {
+                // Compressed and therefore chunked: the length of the encoded
+                // stream is not known up front, and the digest already tells
+                // the server the decompressed size it must enforce.
+                let reader: Box<dyn tokio::io::AsyncRead + Send + Sync + Unpin> = match &upload
+                    .source
+                {
+                    BlobSource::Bytes(bytes) => Box::new(std::io::Cursor::new(bytes.clone())),
+                    BlobSource::File(file) => Box::new(tokio::fs::File::open(file.path()).await?),
+                    BlobSource::Path(path) => Box::new(tokio::fs::File::open(path).await?),
+                };
+                let encoder = async_compression::tokio::bufread::ZstdEncoder::new(
+                    tokio::io::BufReader::new(reader),
+                );
+                request
+                    .header(CONTENT_ENCODING, "zstd")
+                    .body(reqwest::Body::wrap_stream(
+                        tokio_util::io::ReaderStream::new(encoder),
+                    ))
+            } else {
+                let (length, body) = match &upload.source {
+                    BlobSource::Bytes(bytes) => {
+                        (bytes.len() as u64, reqwest::Body::from(bytes.clone()))
+                    }
+                    BlobSource::File(file) => {
+                        let file = tokio::fs::File::open(file.path()).await?;
+                        let length = file.metadata().await?.len();
+                        let stream = tokio_util::io::ReaderStream::new(file);
+                        (length, reqwest::Body::wrap_stream(stream))
+                    }
+                    BlobSource::Path(path) => {
+                        let file = tokio::fs::File::open(path).await?;
+                        let length = file.metadata().await?.len();
+                        let stream = tokio_util::io::ReaderStream::new(file);
+                        (length, reqwest::Body::wrap_stream(stream))
+                    }
+                };
+                request.header(CONTENT_LENGTH, length).body(body)
+            };
+            let response = request.send().await?;
             if response.status() != StatusCode::PRECONDITION_FAILED {
                 response.error_for_status()?;
             }
@@ -1915,6 +1974,105 @@ mod tests {
                 "unexpected error: {error}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn uploads_compress_when_the_server_offers_zstd() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/v1/capabilities")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "protocol":{"major":1},
+                    "compressors":["identity","zstd"]
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let payload = b"compressible cached output ".repeat(64);
+        let expected = payload.clone();
+        let put = server
+            .mock("PUT", mockito::Matcher::Regex("^/v1/blobs/".into()))
+            .match_header("content-encoding", "zstd")
+            .match_request(move |request| {
+                let body = request.body().expect("upload body");
+                // Smaller on the wire, and decoding returns the exact payload:
+                // the compression is real, not just a header.
+                body.len() < expected.len()
+                    && zstd::decode_all(body.as_slice()).ok().as_deref() == Some(&expected[..])
+            })
+            .with_status(201)
+            .create_async()
+            .await;
+
+        let client = test_client(&server);
+        client
+            .put_blob(&BlobUpload {
+                digest: CacheDigest::blake3(&payload),
+                source: BlobSource::Bytes(payload.clone()),
+            })
+            .await
+            .unwrap();
+        put.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn uploads_stay_identity_without_the_advertisement() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/v1/capabilities")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!({"protocol":{"major":1}}).to_string())
+            .create_async()
+            .await;
+        let payload = b"uncompressed cached output".to_vec();
+        let put = server
+            .mock("PUT", mockito::Matcher::Regex("^/v1/blobs/".into()))
+            .match_body(mockito::Matcher::from(payload.clone()))
+            .match_request(|request| request.header("content-encoding").is_empty())
+            .with_status(201)
+            .create_async()
+            .await;
+
+        let client = test_client(&server);
+        client
+            .put_blob(&BlobUpload {
+                digest: CacheDigest::blake3(&payload),
+                source: BlobSource::Bytes(payload.clone()),
+            })
+            .await
+            .unwrap();
+        put.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn downloads_decompress_zstd_responses() {
+        let mut server = mockito::Server::new_async().await;
+        let payload = b"compressible cached output ".repeat(64);
+        let digest = CacheDigest::blake3(&payload);
+        let compressed = zstd::encode_all(payload.as_slice(), 0).unwrap();
+        assert!(compressed.len() < payload.len());
+        server
+            .mock(
+                "GET",
+                format!("/v1/blobs/blake3/{}/{}", digest.hash, digest.size).as_str(),
+            )
+            .with_status(200)
+            .with_header("content-type", BLOB_MEDIA_TYPE)
+            .with_header("content-encoding", "zstd")
+            .with_body(compressed)
+            .create_async()
+            .await;
+
+        let client = test_client(&server);
+        // Digest verification runs on what the transport hands back, so this
+        // passes only if the zstd body was transparently decompressed.
+        let bytes = client.get_blob(&digest, BLOB_MEDIA_TYPE).await.unwrap();
+        assert_eq!(bytes, payload);
     }
 
     fn test_client(server: &mockito::ServerGuard) -> RemoteCacheClient {
