@@ -235,6 +235,9 @@ fn inherited_environment(get_env: impl Fn(&str) -> Option<String>) -> BTreeMap<S
 /// move the whole build elsewhere. Inference is kept as a fallback, and costs
 /// only cache hits when it is wrong, since an unmapped path bypasses.
 fn resolve_roots(cargo: &std::ffi::OsStr, arguments: &[String], working_dir: &Path) -> Roots {
+    // Everything below inspects cargo's own flags only; the real build still
+    // receives the full argument list untouched.
+    let arguments = cargo_arguments(arguments);
     let reported = cargo_roots(cargo, arguments);
     // `-C` moves the directory cargo resolves relative paths against, so the
     // fallbacks below have to follow it rather than this process's cwd.
@@ -279,6 +282,20 @@ const PROBE_GLOBAL_FLAGS: [&str; 3] = ["-C", "--config", "-Z"];
 /// because a probe left to itself may reach the registry the build was told to
 /// stay away from.
 const PROBE_MANIFEST_TOGGLES: [&str; 3] = ["--offline", "--frozen", "--locked"];
+
+/// Cargo's own arguments, stopping at the `--` that hands the rest to rustc.
+///
+/// The separator matters more than it looks: past it, `-C` is a codegen option,
+/// not a directory for cargo to run in, and `-C opt-level=3` is ordinary. Reading
+/// one as the other would point the probe and the path mapping at a directory
+/// that does not exist, so every action would bypass.
+fn cargo_arguments(arguments: &[String]) -> &[String] {
+    let end = arguments
+        .iter()
+        .position(|argument| argument == "--")
+        .unwrap_or(arguments.len());
+    &arguments[..end]
+}
 
 /// Collect the occurrences of `flags` from `arguments`, preserving order and
 /// repeats. Cargo allows `--flag value`, `--flag=value`, and, for the short
@@ -499,6 +516,44 @@ mod tests {
             forwarded_flags(&arguments, &PROBE_GLOBAL_FLAGS)
                 .iter()
                 .all(|argument| argument != "--release")
+        );
+    }
+
+    #[test]
+    fn rustc_flags_after_the_separator_are_not_cargo_globals() {
+        let arguments = [
+            "build",
+            "--config",
+            "build.jobs=2",
+            "--",
+            "-C",
+            "opt-level=3",
+            "-Zunstable-thing",
+            "--config",
+            "not.cargos=1",
+        ]
+        .map(String::from);
+
+        // Only the flag before `--` belongs to cargo. Forwarding rustc's `-C`
+        // would send the probe looking for a directory called "opt-level=3".
+        assert_eq!(
+            forwarded_flags(cargo_arguments(&arguments), &PROBE_GLOBAL_FLAGS),
+            ["--config", "build.jobs=2"]
+        );
+        let working_dir = Path::new("/workspace");
+        assert_eq!(
+            invocation_dir(cargo_arguments(&arguments), working_dir),
+            working_dir
+        );
+        // Without the separator the same tokens are cargo's, and -C wins.
+        let no_separator: Vec<String> = arguments
+            .iter()
+            .filter(|argument| *argument != "--")
+            .cloned()
+            .collect();
+        assert_eq!(
+            invocation_dir(cargo_arguments(&no_separator), working_dir),
+            Path::new("/workspace/opt-level=3")
         );
     }
 
