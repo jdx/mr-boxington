@@ -236,19 +236,22 @@ fn inherited_environment(get_env: impl Fn(&str) -> Option<String>) -> BTreeMap<S
 /// only cache hits when it is wrong, since an unmapped path bypasses.
 fn resolve_roots(cargo: &std::ffi::OsStr, arguments: &[String], working_dir: &Path) -> Roots {
     let reported = cargo_roots(cargo, arguments);
+    // `-C` moves the directory cargo resolves relative paths against, so the
+    // fallbacks below have to follow it rather than this process's cwd.
+    let invocation_dir = invocation_dir(arguments, working_dir);
     let workspace_root = reported
         .as_ref()
         .map(|roots| roots.workspace_root.clone())
-        .unwrap_or_else(|| workspace_root(working_dir));
+        .unwrap_or_else(|| workspace_root(&invocation_dir));
     // An explicit flag outranks anything cargo reports from configuration.
     let target_dir = target_dir_argument(arguments)
-        .map(|value| absolute(working_dir, value))
+        .map(|value| absolute(&invocation_dir, value))
         .or_else(|| reported.map(|roots| roots.target_dir))
         .or_else(|| {
             std::env::var_os("CARGO_TARGET_DIR")
                 .map(PathBuf::from)
                 .filter(|dir| !dir.as_os_str().is_empty())
-                .map(|dir| absolute(working_dir, &dir.to_string_lossy()))
+                .map(|dir| absolute(&invocation_dir, &dir.to_string_lossy()))
         })
         .unwrap_or_else(|| workspace_root.join("target"));
     Roots {
@@ -267,12 +270,65 @@ fn absolute(working_dir: &Path, value: &str) -> PathBuf {
     }
 }
 
+/// Cargo options that belong before the subcommand and change what `cargo
+/// metadata` would report. `-C` moves the whole invocation, and `--config` can
+/// set `build.target-dir` outright, so a probe that drops them describes a
+/// different tree than the one being built.
+const PROBE_GLOBAL_FLAGS: [&str; 3] = ["-C", "--config", "-Z"];
+/// Options cargo accepts only after the subcommand. The network flags matter
+/// because a probe left to itself may reach the registry the build was told to
+/// stay away from.
+const PROBE_MANIFEST_TOGGLES: [&str; 3] = ["--offline", "--frozen", "--locked"];
+
+/// Collect the occurrences of `flags` from `arguments`, preserving order and
+/// repeats. Cargo allows `--flag value`, `--flag=value`, and, for the short
+/// forms, `-Zvalue`.
+fn forwarded_flags(arguments: &[String], flags: &[&str]) -> Vec<String> {
+    let mut forwarded = Vec::new();
+    let mut remaining = arguments.iter();
+    while let Some(argument) = remaining.next() {
+        if let Some((flag, value)) = argument
+            .split_once('=')
+            .filter(|(flag, _)| flags.contains(flag))
+        {
+            forwarded.push(flag.to_string());
+            forwarded.push(value.to_string());
+        } else if flags.contains(&argument.as_str()) {
+            if let Some(value) = remaining.next() {
+                forwarded.push(argument.clone());
+                forwarded.push(value.clone());
+            }
+        } else if flags
+            .iter()
+            .any(|flag| flag.len() == 2 && argument.len() > 2 && argument.starts_with(flag))
+        {
+            forwarded.push(argument.clone());
+        }
+    }
+    forwarded
+}
+
+/// The directory cargo resolves relative paths against, which `-C` can move.
+fn invocation_dir(arguments: &[String], working_dir: &Path) -> PathBuf {
+    flag_value(arguments, "-C")
+        .map(|value| absolute(working_dir, value))
+        .unwrap_or_else(|| working_dir.to_path_buf())
+}
+
 fn cargo_roots(cargo: &std::ffi::OsStr, arguments: &[String]) -> Option<Roots> {
     let mut command = Command::new(cargo);
+    // Globals come first; cargo rejects them after the subcommand.
+    command.args(forwarded_flags(arguments, &PROBE_GLOBAL_FLAGS));
     command.args(["metadata", "--no-deps", "--format-version", "1"]);
     // Describe the project the build will actually operate on.
     if let Some(manifest) = flag_value(arguments, "--manifest-path") {
         command.args(["--manifest-path", manifest]);
+    }
+    for toggle in arguments
+        .iter()
+        .filter(|argument| PROBE_MANIFEST_TOGGLES.contains(&argument.as_str()))
+    {
+        command.arg(toggle);
     }
     let output = command.output().ok()?;
     if !output.status.success() {
@@ -410,6 +466,81 @@ mod tests {
         let empty = inherited_environment(|name| (name == "RUSTC_WRAPPER").then(String::new));
         assert!(empty.is_empty());
         assert!(inherited_environment(|_| None).is_empty());
+    }
+
+    #[test]
+    fn forwards_repeated_and_attached_global_flags() {
+        let arguments = [
+            "build",
+            "--config",
+            "build.target-dir=\"/one\"",
+            "--config=net.offline=true",
+            "-Zunstable-options",
+            "-C",
+            "/tree",
+            "--release",
+        ]
+        .map(String::from);
+
+        assert_eq!(
+            forwarded_flags(&arguments, &PROBE_GLOBAL_FLAGS),
+            [
+                "--config",
+                "build.target-dir=\"/one\"",
+                "--config",
+                "net.offline=true",
+                "-Zunstable-options",
+                "-C",
+                "/tree",
+            ]
+        );
+        // A flag the probe does not understand must not leak into it.
+        assert!(
+            forwarded_flags(&arguments, &PROBE_GLOBAL_FLAGS)
+                .iter()
+                .all(|argument| argument != "--release")
+        );
+    }
+
+    #[test]
+    fn a_config_set_target_dir_reaches_the_probe() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "").unwrap();
+        let manifest = root.join("Cargo.toml");
+        let configured = root.join("configured-target");
+
+        // Without the override cargo reports the default; with it the probe has
+        // to report the same directory the build will write to, or the outputs
+        // go unmapped and every action bypasses the cache.
+        let arguments = [
+            "build".to_string(),
+            "--offline".to_string(),
+            "--manifest-path".to_string(),
+            manifest.display().to_string(),
+        ];
+        let default = resolve_roots(std::ffi::OsStr::new("cargo"), &arguments, root);
+        assert_eq!(default.target_dir, root.join("target"));
+
+        let overridden = [
+            arguments.to_vec(),
+            vec![
+                "--config".to_string(),
+                // A TOML literal string: a Windows path's backslashes are
+                // escape sequences inside a basic string, which silently
+                // mangled the value and left the probe reporting the default.
+                format!("build.target-dir='{}'", configured.display()),
+            ],
+        ]
+        .concat();
+        let roots = resolve_roots(std::ffi::OsStr::new("cargo"), &overridden, root);
+        assert_eq!(roots.target_dir, configured);
     }
 
     #[test]
