@@ -77,6 +77,19 @@ fn restores_a_wiped_target_directory_from_the_store() {
         count(&cold, "stored_bytes") > 0,
         "a cold build should publish its outputs: {cold}"
     );
+    // A cold target directory leaves nothing to derive an action key from, so
+    // these compilations run without the cache ever being consulted. Reported
+    // apart from misses: counting them as zero of both says the cache was asked
+    // and found nothing, which is not what happened.
+    assert_eq!(
+        count(&cold, "misses"),
+        0,
+        "a cold build looks nothing up, so it cannot miss: {cold}"
+    );
+    assert!(
+        count(&cold, "unconsulted") > 0,
+        "a cold build should report the compilations it had no key for: {cold}"
+    );
 
     // Load-bearing, not cleanup: the wipe is what forces the warm build to
     // restore from the store. Left in place, cargo would find the cold build's

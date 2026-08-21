@@ -137,7 +137,16 @@ fn restore_predicted_result(
         AgentResponse::ActionPrediction {
             prediction: Some(prediction),
         } => prediction,
-        AgentResponse::ActionPrediction { prediction: None } => return Ok(None),
+        AgentResponse::ActionPrediction { prediction: None } => {
+            // No usable action key: either no dep-info from an earlier build or
+            // dep-info that did not yield one, and now no prediction either.
+            // This compilation runs without an action-result lookup ever being
+            // made, which is not a miss and has to be counted as its own thing
+            // or the summary reads as though a lookup happened and found
+            // nothing.
+            session::record_unconsulted();
+            return Ok(None);
+        }
         AgentResponse::Error { message } => bail!(message),
         _ => bail!("cache agent returned an unexpected action prediction response"),
     };
