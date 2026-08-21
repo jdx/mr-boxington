@@ -1,0 +1,25 @@
+[tasks.build]
+alias = "b"
+run = "cargo build --workspace --all-targets"
+
+[tasks.test]
+alias = "t"
+run = "cargo test --workspace"
+
+[tasks.format]
+run = "cargo fmt --all"
+
+[tasks.lint]
+run = [
+  "cargo fmt --all --check",
+  "cargo clippy --workspace --all-features --all-targets -- -D warnings",
+]
+
+[tasks.lint-fix]
+run = [
+  "cargo fmt --all",
+  "cargo clippy --workspace --all-features --all-targets --fix --allow-dirty --allow-staged -- -D warnings",
+]
+
+[tasks.ci]
+depends = ["lint", "build", "test"]

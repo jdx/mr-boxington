@@ -1,0 +1,13 @@
+[workspace]
+resolver = "3"
+members = ["crates/mbx"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+homepage = "https://github.com/jdx/mr-boxington"
+repository = "https://github.com/jdx/mr-boxington"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
