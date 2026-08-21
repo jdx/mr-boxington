@@ -1,8 +1,9 @@
-//! Remote-cache write policy.
+//! What the surrounding context permits, whatever the configuration asks for.
 //!
 //! Cache writes are only trusted from a CI context that a pull request cannot
 //! influence, so untrusted contexts read the remote cache but never publish to
-//! it. Release builds do not participate at all.
+//! it. Release builds do not participate at all, and CI never compiles
+//! incrementally.
 
 use mbx_cache_core::RemoteCacheMode;
 
@@ -29,6 +30,20 @@ fn effective_remote_cache_mode_with(
 /// Whether this is a release build, which never uses the cache.
 pub fn release_context() -> bool {
     release_context_with(|name| std::env::var(name).ok())
+}
+
+/// Whether incremental compilation is worth allowing here.
+///
+/// CI is the one place the answer is no regardless of configuration: a runner
+/// starts with no incremental state to build on, and an incrementally built
+/// member emits a different rlib than a cached one, so every crate above it in
+/// the graph misses. The inner loop is the only thing incremental buys.
+pub fn incremental_allowed(configured: bool) -> bool {
+    incremental_allowed_with(configured, |name| std::env::var(name).ok())
+}
+
+fn incremental_allowed_with(configured: bool, get_env: impl Fn(&str) -> Option<String>) -> bool {
+    configured && !env_truthy(get_env("CI"))
 }
 
 fn trusted_cache_writer(get_env: &impl Fn(&str) -> Option<String>) -> bool {
@@ -123,6 +138,13 @@ mod tests {
             effective_remote_cache_mode_with(RemoteCacheMode::ReadWrite, &merge_request),
             Some(RemoteCacheMode::ReadOnly)
         );
+    }
+
+    #[test]
+    fn ci_never_compiles_incrementally() {
+        assert!(!incremental_allowed_with(true, env(&[("CI", "true")])));
+        assert!(incremental_allowed_with(true, env(&[])));
+        assert!(!incremental_allowed_with(false, env(&[])));
     }
 
     #[test]

@@ -82,6 +82,25 @@ fn build(config: &Config, arguments: &[String]) -> Result<ExitCode> {
         return run_cargo(&cargo, arguments, BTreeMap::new());
     }
 
+    let mut config = config.clone();
+    let incremental = policy::incremental_allowed(config.incremental);
+    if config.incremental && !incremental {
+        log::warn!(
+            "incremental compilation is disabled here; it needs an earlier build to build on"
+        );
+    }
+    // An enabled build stops overriding CARGO_INCREMENTAL rather than setting
+    // it, so a 0 already in the environment still wins -- which CI images and
+    // rust-cache set as a matter of course. Say so, because the alternative is
+    // a setting that silently does nothing.
+    if incremental && std::env::var("CARGO_INCREMENTAL").as_deref() == Ok("0") {
+        log::warn!(
+            "CARGO_INCREMENTAL=0 is set in the environment, so this build is not incremental after all"
+        );
+    }
+    config.incremental = incremental;
+    let config = &config;
+
     let working_dir = std::env::current_dir()?;
     let roots = resolve_roots(&cargo, arguments, &working_dir);
     let session_dir = tempfile::Builder::new().prefix("mbx-session-").tempdir()?;

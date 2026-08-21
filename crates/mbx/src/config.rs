@@ -18,6 +18,7 @@ const DEFAULT_HTTP_RETRIES: i64 = 3;
 struct ConfigFile {
     cache_dir: Option<PathBuf>,
     stats_report: Option<PathBuf>,
+    incremental: Option<bool>,
     remote: RemoteFile,
     http: HttpFile,
 }
@@ -46,6 +47,9 @@ pub struct Config {
     pub cache_dir: PathBuf,
     pub stats_report: Option<PathBuf>,
     pub verify: bool,
+    /// Let cargo compile workspace members incrementally, rather than forcing
+    /// `CARGO_INCREMENTAL=0` for the whole build.
+    pub incremental: bool,
     pub remote: RemoteSettings,
     pub http: HttpSettings,
 }
@@ -122,7 +126,13 @@ impl Config {
             stats_report: get_env("MBX_STATS_REPORT")
                 .map(PathBuf::from)
                 .or(file.stats_report),
-            verify: get_env("MBX_VERIFY").is_some_and(|value| !value.is_empty() && value != "0"),
+            verify: get_env("MBX_VERIFY").is_some_and(|value| enabled(&value)),
+            incremental: match get_env("MBX_INCREMENTAL") {
+                // The environment decides outright when it is set, so a `0`
+                // there turns off what the file turned on.
+                Some(value) => enabled(&value),
+                None => file.incremental.unwrap_or(false),
+            },
             remote: RemoteSettings {
                 url: get_env("MBX_REMOTE_URL").or(file.remote.url),
                 namespace: get_env("MBX_REMOTE_NAMESPACE").or(file.remote.namespace),
@@ -141,6 +151,11 @@ impl Config {
     pub fn store_dir(&self) -> PathBuf {
         self.cache_dir.join("actions")
     }
+}
+
+/// Whether an environment value asks for a feature. Empty and `0` do not.
+fn enabled(value: &str) -> bool {
+    !value.is_empty() && value != "0"
 }
 
 fn optional_duration(
@@ -231,6 +246,7 @@ mod tests {
         assert_eq!(config.remote.mode, RemoteCacheMode::ReadWrite);
         assert!(config.remote.url.is_none());
         assert!(!config.verify);
+        assert!(!config.incremental);
         assert!(config.store_dir().ends_with("actions"));
     }
 
@@ -251,6 +267,15 @@ mod tests {
             Config::from_parts(ConfigFile::default(), env(&[("MBX_HTTP_RETRIES", "many")]))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn the_environment_can_turn_off_what_the_file_turned_on() {
+        let file: ConfigFile = toml::from_str("incremental = true").unwrap();
+        let config = Config::from_parts(file.clone(), env(&[])).unwrap();
+        assert!(config.incremental);
+        let config = Config::from_parts(file, env(&[("MBX_INCREMENTAL", "0")])).unwrap();
+        assert!(!config.incremental);
     }
 
     #[test]
