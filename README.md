@@ -16,8 +16,10 @@ See [PLAN.md](PLAN.md) for the design and the road to v1.
 - **Caches each rustc action once.** A compilation you have done before is
   restored instead of repeated, whatever directory you are in.
 - **Deduplicates across checkouts.** Cache keys hold no absolute paths, so a
-  second worktree of the same dependency graph builds warm. Each keeps its own
-  `target/` directory, so there is no cargo lock contention between them.
+  second worktree of the same dependency graph builds largely warm — measured at
+  65% of actions on mise, with the shortfall explained under limits below. Each
+  keeps its own `target/` directory, so there is no cargo lock contention
+  between them.
 - **Collects garbage.** `mbx gc` evicts to a size budget, which cargo has never
   done for `target/`.
 - **Shares through a remote.** CI and teammates can restore from a
@@ -137,6 +139,15 @@ Not yet:
   session to talk to, and per-process prefetch manifests cannot be shared
   across the many rustc processes cargo spawns, so `build.rustc-wrapper` and an
   `mbx setup` command are waiting on that. Use `mbx build`.
+- **A crate whose compilation consumes `OUT_DIR` does not share across
+  checkouts.** That covers any crate with a build script that generates code
+  included via `include!(concat!(env!("OUT_DIR"), …))`. `OUT_DIR` is an absolute
+  path and an input to the compilation, so two checkouts produce different keys.
+  This is deliberate rather than an oversight: a crate is free to bake that path
+  into its artifact, and nothing in the inputs distinguishes one that does from
+  one that does not, so treating the value as interchangeable could hand you an
+  artifact containing another checkout's path. Crates whose build scripts only
+  emit cfgs or link directives share normally.
 - **Linking is not cached**, so binaries and dylibs always link.
 - **Incremental compilation is disabled** inside `mbx build`. Cargo builds
   dependencies non-incrementally anyway, which is where the cache earns its
