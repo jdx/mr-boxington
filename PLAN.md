@@ -19,7 +19,9 @@ a standalone home. mise will eventually consume mbx and drop its embedded copy.
    content-addressed store, materializes them into target dirs via
    reflink/hardlink, and evicts with a byte-budget LRU that a build runs on its
    own schedule (`mbx gc`, or automatically). Eviction prefers what no checkout
-   on disk still needs, so deleting a worktree releases what only it used.
+   on disk still needs, so deleting a worktree releases what only it used, and
+   mbx can place the target directories themselves so the outputs of a checkout
+   that is gone are collected rather than stranded.
 3. **Git worktrees build cold.** Fingerprints embed absolute paths, so a fresh
    worktree rebuilds everything. mbx's action keys use path mapping, so a new
    worktree starts mostly warm while keeping its own target dir (no cargo lock
@@ -166,7 +168,8 @@ Protocol version stays 1; nothing in the wild speaks the old names.
 - `mbx gc [--max-size <bytes|human>]` — LRU-evict the store to a byte budget,
   defaulting to the configured one. `mbx build` does the same when a sweep is
   due.
-- `mbx cache dir` / `mbx cache stats` — store location and contents summary.
+- `mbx cache dir` / `mbx cache stats` — store location and contents summary,
+  including the managed target directories.
 - `mbx setup` — install the persistent standalone shim and wire
   `build.rustc-wrapper` in `~/.cargo/config.toml`. If that key already names
   another wrapper, such as sccache, setup reports it and changes nothing:
@@ -192,6 +195,8 @@ Env vars first, optional `~/.config/mbx/config.toml` second, defaults last.
 | `MBX_GC_AUTO` | `gc.auto` | `true` | sweep the store after a build |
 | `MBX_GC_MAX_SIZE` | `gc.max_size` | `20GiB` | size the store is swept back to |
 | `MBX_GC_INTERVAL` | `gc.interval` | `1h` | how often a build may sweep |
+| `MBX_TARGET_VIEWS` | `target.views` | `false` | let mbx place target directories |
+| `MBX_TARGET_ROOT` | `target.root` | `<cache dir>/targets` | where it places them |
 | `MBX_HTTP_TIMEOUT` | `http.timeout` | `30s` | connect/read timeout |
 | `MBX_HTTP_DOWNLOAD_TIMEOUT` | `http.download_timeout` | `10m` | blob downloads |
 | `MBX_HTTP_RETRIES` | `http.retries` | `3` | request retries |
@@ -210,6 +215,18 @@ Credentials are never sent in the clear: an authenticated remote must be HTTPS,
 with an exception for loopback development servers. Redirects are not followed at
 all, so a bearer token or OIDC assertion cannot be forwarded to a host the
 operator did not configure.
+
+### Target-dir views
+
+Opt-in, because moving where a build writes is not a decision to make for
+someone. `MBX_TARGET_VIEWS` places the default target directory at
+`<target root>/v1/<digest of the workspace root>` and symlinks `target` to it,
+keyed by path alone so one checkout keeps one target directory whatever it
+builds. A record beside the directory names the checkout it belongs to -- beside
+and not inside, since `cargo clean` empties the directory and an untraceable
+target directory could never be collected. Placement declines whenever it would
+overrule a flag, the environment, a cargo configuration, or an existing real
+`target/`.
 
 ### Concurrency
 
@@ -261,9 +278,6 @@ env vars, and wire constants to match `mbx-cache-core` exactly.
 - **Predictive prefetch by default** — download the predicted action set for
   the whole dep graph in parallel at build start (the prediction plumbing
   already exists in the agent).
-- **Target-dir views** — manage `CARGO_TARGET_DIR` placement. The other half of
-  this item shipped: a build records its checkout, and collection prefers what
-  no surviving checkout needs.
 - **Deferred materialization** — leave artifacts in the CAS until read
   (biggest win for `cargo check`-heavy workflows).
 - **Decide the `CARGO_INCREMENTAL` default.** `MBX_INCREMENTAL=1` now opts into

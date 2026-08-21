@@ -16,6 +16,9 @@ See [PLAN.md](PLAN.md) for the design and the road to v1.
 
 - **Caches each rustc action once.** A compilation you have done before is
   restored instead of repeated, whatever directory you are in.
+- **Manages target directories.** Optionally places them under a root of its
+  own, so a checkout you delete stops leaving gigabytes behind and `target/`
+  becomes a link rather than a pile.
 - **Deduplicates across checkouts.** Cache keys hold no absolute paths, so a
   second worktree of the same dependency graph builds largely warm — measured at
   65% of actions on mise, with the shortfall explained under limits below. Each
@@ -134,6 +137,8 @@ defaults.
 | `MBX_GC_AUTO` | `gc.auto` | `true` | sweep the store after a build |
 | `MBX_GC_MAX_SIZE` | `gc.max_size` | `20GiB` | size the store is swept back to |
 | `MBX_GC_INTERVAL` | `gc.interval` | `1h` | how often a build may sweep |
+| `MBX_TARGET_VIEWS` | `target.views` | `false` | let mbx place target directories |
+| `MBX_TARGET_ROOT` | `target.root` | `<cache dir>/targets` | where it places them |
 | `MBX_HTTP_TIMEOUT` | `http.timeout` | `30s` | connect and read timeout |
 | `MBX_HTTP_DOWNLOAD_TIMEOUT` | `http.download_timeout` | `10m` | blob downloads |
 | `MBX_HTTP_RETRIES` | `http.retries` | `3` | request retries |
@@ -146,6 +151,35 @@ defaults.
 url = "https://cache.example.com"
 namespace = "acme/backend"
 ```
+
+## Target directories
+
+Cargo writes build outputs to `<workspace>/target`, which ties them to the
+checkout: delete a worktree and the outputs go with it, and nothing else ever
+reclaims them. Turn on `MBX_TARGET_VIEWS` and mbx places them under a root of
+its own instead, leaving `target` behind as a symlink so every path you type
+still works:
+
+```sh
+MBX_TARGET_VIEWS=1 mbx build build
+ls -l target          # target -> ~/.cache/mbx/targets/v1/<digest of this checkout>
+```
+
+Now the outputs outlive the checkout, so collecting them becomes mbx's job: a
+target directory whose checkout no longer exists is unambiguous garbage, and
+`mbx gc` frees it along with everything else. That is usually the largest thing
+collection reclaims.
+
+Relocating costs nothing in cache hits. The shim maps the target directory to
+`${target}` before anything else, so an action keys the same wherever its
+outputs land -- turning this on does not cold-start a warm cache.
+
+mbx declines rather than guessing when placement would overrule someone:
+
+- a target directory named by `--target-dir`, `CARGO_TARGET_DIR`, or
+  `build.target-dir` stays where it was asked for;
+- a real `target/` directory is somebody's build outputs, so it is left alone.
+  Remove it first if you want a managed one.
 
 ## Remote caching
 
@@ -188,7 +222,7 @@ slower than either, and it is how the cache is qualified.
 ## Status and limits
 
 Working today: local caching, cross-checkout reuse, remote push and pull,
-automatic garbage collection.
+automatic garbage collection, managed target directories.
 
 Not yet:
 
@@ -245,9 +279,14 @@ Not yet:
   is what keeps that from mattering much: a wrong order inside the set nothing
   has abandoned costs a recompile.
 - **The budget covers cached objects and their results**, not the whole cache
-  directory. Prediction manifests, checkout records, and remote download
-  staging sit outside it, so the directory is always somewhat larger than the
-  number you set.
+  directory. Prediction manifests, checkout records, managed target
+  directories, and remote download staging sit outside it, so the directory is
+  always somewhat larger than the number you set. Target directories are
+  collected when their checkout is gone rather than against a budget.
+- **Managed target directories need a symlink**, which Windows only lets a
+  privileged or developer-mode process create. Where the link cannot be made,
+  mbx says so and leaves the target directory where cargo put it. A directory
+  junction would work without privileges and is not implemented yet.
 
 ## License
 

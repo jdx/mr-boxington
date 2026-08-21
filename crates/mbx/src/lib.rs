@@ -9,6 +9,7 @@ pub mod config;
 pub mod policy;
 pub mod session;
 pub mod store;
+pub mod target;
 pub mod util;
 
 mod rustc;

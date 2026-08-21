@@ -2,7 +2,7 @@
 
 use crate::config::Config;
 use crate::session::CacheSession;
-use crate::{policy, store};
+use crate::{policy, store, target};
 use bytesize::ByteSize;
 use clap::{Args, Parser, Subcommand};
 use eyre::{Context, Result, bail};
@@ -108,7 +108,14 @@ fn build(config: &Config, arguments: &[String]) -> Result<ExitCode> {
     let config = &config;
 
     let working_dir = std::env::current_dir()?;
-    let roots = resolve_roots(&cargo, arguments, &working_dir);
+    let mut roots = resolve_roots(&cargo, arguments, &working_dir);
+    // Placed before the session starts, because the target directory is what
+    // the shim maps out of its cache keys and it has to be the one cargo will
+    // actually write to.
+    let placed = target::place(config, &roots.workspace_root, &roots.target_dir);
+    if let Some(directory) = &placed {
+        roots.target_dir = directory.clone();
+    }
     let session_dir = tempfile::Builder::new().prefix("mbx-session-").tempdir()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -117,6 +124,12 @@ fn build(config: &Config, arguments: &[String]) -> Result<ExitCode> {
     let status = runtime.block_on(async {
         let session = CacheSession::start(session_dir.path(), config).await?;
         let mut environment = inherited_environment(|name| std::env::var(name).ok(), &working_dir);
+        if let Some(directory) = &placed {
+            environment.insert(
+                CARGO_TARGET_DIR_ENV.into(),
+                directory.to_string_lossy().into_owned(),
+            );
+        }
         let run = session
             .begin(
                 &roots.workspace_root,
@@ -195,7 +208,20 @@ fn gc(config: &Config, max_bytes: u64) -> Result<()> {
             outcome.removed_checkout_records
         );
     }
+    let pruned = target::prune(&config.target.root)?;
+    if pruned.removed_views > 0 {
+        println!("{}", target_removals(&pruned));
+    }
     Ok(())
+}
+
+/// One line describing the target directories a sweep freed.
+fn target_removals(outcome: &target::PruneOutcome) -> String {
+    format!(
+        "freed {} target directories of checkouts that are gone ({})",
+        outcome.removed_views,
+        ByteSize::b(outcome.removed_bytes).display().iec(),
+    )
 }
 
 /// One line describing what a sweep evicted.
@@ -222,10 +248,22 @@ fn sweep_store(config: &Config) {
         return;
     }
     match store::sweep_if_due(&config.store_dir(), config.gc.max_bytes, config.gc.interval) {
-        Ok(Some(outcome)) if outcome.removed_bytes > 0 => {
-            crate::session::note(&format!("gc: {}", evictions(&outcome)));
+        Ok(Some(outcome)) => {
+            if outcome.removed_bytes > 0 {
+                crate::session::note(&format!("gc: {}", evictions(&outcome)));
+            }
+            // Inside the same throttled sweep: a target directory whose
+            // checkout is gone is the largest thing collection ever frees, and
+            // walking for it on every build would be the slowest.
+            match target::prune(&config.target.root) {
+                Ok(pruned) if pruned.removed_views > 0 => {
+                    crate::session::note(&format!("gc: {}", target_removals(&pruned)));
+                }
+                Ok(_) => {}
+                Err(error) => log::warn!("target directories were not collected: {error}"),
+            }
         }
-        Ok(_) => {}
+        Ok(None) => {}
         Err(error) => log::warn!("the store was not swept: {error}"),
     }
 }
@@ -251,6 +289,12 @@ fn cache_stats(config: &Config) -> Result<()> {
     println!(
         "checkouts: {} live, {} stale",
         stats.live_checkouts, stats.stale_checkouts
+    );
+    let views = target::stats(&config.target.root)?;
+    println!(
+        "target directories: {} ({})",
+        views.views,
+        ByteSize::b(views.bytes).display().iec()
     );
     Ok(())
 }

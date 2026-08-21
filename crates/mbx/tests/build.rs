@@ -561,3 +561,132 @@ fn deleting_a_checkout_releases_what_only_it_used() {
         "the surviving checkout should still be warm: {warm}"
     );
 }
+
+/// Managed target directories rest on a symlink standing in for `target`, and
+/// Windows only lets a privileged or developer-mode process create one, so mbx
+/// leaves the target directory where cargo put it there. These cover the
+/// platforms where the feature is available.
+#[cfg(unix)]
+mod target_views {
+    use super::*;
+
+    fn managed(project: &Path) -> std::path::PathBuf {
+        std::fs::read_link(project.join("target")).expect("target should be a link")
+    }
+
+    #[test]
+    fn a_managed_target_directory_keeps_the_workspace_clean() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(project.path());
+
+        build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("cold.json"),
+            &[("MBX_TARGET_VIEWS", "1")],
+        );
+
+        let directory = managed(project.path());
+        assert!(
+            directory.starts_with(store.path().join("targets")),
+            "outputs should land under the managed root, not the workspace: {}",
+            directory.display()
+        );
+        // The link is the point: a relocation that breaks the paths people type
+        // would not be worth the disk it reclaims.
+        assert!(
+            project.path().join("target/debug/libfixture.rlib").exists(),
+            "the workspace should still reach its own build outputs"
+        );
+    }
+
+    #[test]
+    fn a_managed_target_directory_still_hits_the_cache() {
+        let store = tempfile::tempdir().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(first.path());
+        write_project(second.path());
+
+        build(
+            first.path(),
+            store.path(),
+            &reports.path().join("first.json"),
+        );
+        let (warm, _) = build_with(
+            second.path(),
+            store.path(),
+            &reports.path().join("second.json"),
+            &[("MBX_TARGET_VIEWS", "1")],
+        );
+
+        // The shim maps the target directory out of its keys before anything
+        // else, so moving it must not cost a single hit.
+        assert!(
+            count(&warm, "hits") > 0,
+            "a relocated target directory should still reuse the first build: {warm}"
+        );
+    }
+
+    #[test]
+    fn deleting_a_checkout_frees_its_managed_target_directory() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(project.path());
+
+        build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("cold.json"),
+            &[("MBX_TARGET_VIEWS", "1")],
+        );
+        let directory = managed(project.path());
+        assert!(tree_bytes(&directory) > 0);
+
+        // Outputs used to live inside the checkout and die with it. Now that
+        // they outlive it, collecting them is mbx's job.
+        std::fs::remove_dir_all(project.path()).unwrap();
+        let output = mbx(store.path(), &["gc", "--max-size", "20GiB"]);
+
+        assert!(
+            !directory.exists(),
+            "the target directory of a checkout that is gone should be freed"
+        );
+        assert!(
+            output.contains("freed 1 target directories"),
+            "gc should say what it freed: {output}"
+        );
+    }
+
+    #[test]
+    fn a_real_target_directory_is_never_displaced() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(project.path());
+        // A build that ran before the feature was turned on.
+        build(
+            project.path(),
+            store.path(),
+            &reports.path().join("cold.json"),
+        );
+        assert!(project.path().join("target").is_dir());
+
+        build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("warm.json"),
+            &[("MBX_TARGET_VIEWS", "1")],
+        );
+
+        assert!(
+            std::fs::read_link(project.path().join("target")).is_err(),
+            "existing build outputs are not ours to move"
+        );
+        assert!(project.path().join("target/debug/libfixture.rlib").exists());
+    }
+}
