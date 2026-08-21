@@ -86,9 +86,16 @@ impl LocalCas {
         verify: bool,
     ) -> Result<PathBuf> {
         let destination = self.path_for(digest)?;
-        if let Some(existing) = self.find(digest)? {
-            return Ok(existing);
-        }
+        // A blob that fails verification cannot be restored from, and nothing
+        // else repairs it: the read path reports an error rather than a miss,
+        // so without republishing over it the digest stays poisoned until
+        // eviction happens to reclaim it. `LocalActionCache::store` already
+        // recovers this way one layer up.
+        let replace_invalid = match self.find(digest) {
+            Ok(Some(existing)) => return Ok(existing),
+            Ok(None) => false,
+            Err(_) => true,
+        };
         let parent = destination.parent().expect("CAS path has a parent");
         fs::create_dir_all(parent)?;
         let staging = tempfile::tempdir_in(parent)?;
@@ -103,6 +110,12 @@ impl LocalCas {
         }
         if fs::metadata(&temporary)?.len() != digest.size {
             bail!("staged blob size does not match the declared CAS digest");
+        }
+        if replace_invalid {
+            temporary
+                .persist(&destination)
+                .map_err(|error| error.error)?;
+            return Ok(destination);
         }
         match temporary.persist_noclobber(&destination) {
             Ok(()) => Ok(destination),
@@ -119,9 +132,16 @@ impl LocalCas {
         write: impl FnOnce(&mut tempfile::NamedTempFile) -> Result<()>,
     ) -> Result<PathBuf> {
         let destination = self.path_for(digest)?;
-        if let Some(existing) = self.find(digest)? {
-            return Ok(existing);
-        }
+        // A blob that fails verification cannot be restored from, and nothing
+        // else repairs it: the read path reports an error rather than a miss,
+        // so without republishing over it the digest stays poisoned until
+        // eviction happens to reclaim it. `LocalActionCache::store` already
+        // recovers this way one layer up.
+        let replace_invalid = match self.find(digest) {
+            Ok(Some(existing)) => return Ok(existing),
+            Ok(None) => false,
+            Err(_) => true,
+        };
         let parent = destination.parent().expect("CAS path has a parent");
         fs::create_dir_all(parent)?;
         let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
@@ -129,6 +149,12 @@ impl LocalCas {
         temporary.flush()?;
         if !digest.matches_file(temporary.path())? {
             bail!("staged blob does not match the declared CAS digest");
+        }
+        if replace_invalid {
+            temporary
+                .persist(&destination)
+                .map_err(|error| error.error)?;
+            return Ok(destination);
         }
         match temporary.persist_noclobber(&destination) {
             Ok(_) => Ok(destination),
@@ -319,6 +345,34 @@ mod tests {
         fs::write(path, b"corrupt").unwrap();
 
         assert!(cas.find(&digest).is_err());
+    }
+
+    #[test]
+    fn republishes_over_a_corrupt_blob() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = LocalCas::new(directory.path());
+        let digest = CacheDigest::blake3(b"cached object");
+        let path = cas.store_bytes(&digest, b"cached object").unwrap();
+        fs::write(&path, b"corrupt").unwrap();
+
+        assert_eq!(cas.store_bytes(&digest, b"cached object").unwrap(), path);
+        assert_eq!(fs::read(&path).unwrap(), b"cached object");
+        assert_eq!(cas.find(&digest).unwrap(), Some(path));
+    }
+
+    #[test]
+    fn republishes_a_file_over_a_corrupt_blob() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = LocalCas::new(directory.path().join("cache"));
+        let source = directory.path().join("source");
+        fs::write(&source, b"cached object").unwrap();
+        let digest = CacheDigest::blake3(b"cached object");
+        let path = cas.store_file(&digest, &source).unwrap();
+        fs::write(&path, b"corrupt").unwrap();
+
+        assert_eq!(cas.store_file(&digest, &source).unwrap(), path);
+        assert_eq!(fs::read(&path).unwrap(), b"cached object");
+        assert_eq!(cas.find(&digest).unwrap(), Some(path));
     }
 
     #[test]
