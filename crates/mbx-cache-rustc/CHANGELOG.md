@@ -1,0 +1,17 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.0.0...mbx-cache-rustc-v0.1.0) - 2026-08-21
+
+### Added
+
+- *(release)* publish prebuilt binaries on a tag ([#14](https://github.com/jdx/mr-boxington/pull/14))
+- *(session)* log why each compilation was not cached ([#11](https://github.com/jdx/mr-boxington/pull/11))
+- *(session)* count compilations the cache declined ([#10](https://github.com/jdx/mr-boxington/pull/10))
+- *(cache-rustc)* add rustc action analysis ([#5](https://github.com/jdx/mr-boxington/pull/5))
