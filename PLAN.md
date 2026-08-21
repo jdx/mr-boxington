@@ -222,6 +222,9 @@ The failure mode is a recompile, never a wrong result.
 6. `feat: mbx CLI` — `build`, `gc`, and `cache` commands, plus the cold/warm and
    second-checkout integration tests.
 7. `docs: usage` — real README behind an experimental banner.
+8. `feat: release binaries` — tagged release workflow producing one
+   self-contained archive per target, checksummed, so installing mbx in CI
+   is a single download.
 
 Server repo follow-up (separate stack in `jdx/mbx-cache`): rebrand crate,
 env vars, and wire constants to match `mbx-cache-core` exactly.

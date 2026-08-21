@@ -1,6 +1,6 @@
 [package]
 name = "mbx-cache-core"
-version = "0.0.0"
+version.workspace = true
 description = "Action cache protocol, CAS, authentication, and transport primitives for mbx"
 edition.workspace = true
 license.workspace = true

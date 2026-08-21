@@ -1,8 +1,9 @@
 # mr boxington
 
 > **Please ignore this project.** It is an experiment and is not intended for
-> others to use yet. Nothing here is stable or supported, the protocol may
-> change without notice, and there are no releases.
+> others to use yet. Nothing here is stable or supported, and the protocol may
+> change without notice. Releases exist so CI can install a binary, not as a
+> promise that any of it keeps working.
 
 `mbx` is a build cache for Rust projects. It wraps cargo, caches individual
 rustc compilations in a content-addressed store shared by every project and
@@ -29,10 +30,30 @@ See [PLAN.md](PLAN.md) for the design and the road to v1.
 It is a cargo wrapper, not a cargo replacement. Cargo keeps resolution, feature
 unification, build planning, and linking.
 
+## Install
+
+Every release attaches one archive per target, holding the `mbx` binary and
+nothing else, so extracting it into a directory on `PATH` is the whole install.
+The Linux binaries are statically linked against musl and need nothing from the
+host.
+
+```sh
+curl -fsSL https://github.com/jdx/mr-boxington/releases/latest/download/mbx-x86_64-unknown-linux-musl.tar.gz | tar -xzf - -C ~/.local/bin
+```
+
+Targets: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
+`aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`
+(a `.zip`). `SHA256SUMS` on the release covers all of them.
+
+Asset names carry no version, so pin one in CI by swapping `latest/download`
+for a tag: `releases/download/v0.1.0/mbx-x86_64-unknown-linux-musl.tar.gz`.
+`mbx --version` reports which build you have.
+
+Building from source works too: `cargo build --release`.
+
 ## Usage
 
 ```sh
-cargo build --release            # build mbx itself, for now
 mbx build build                  # == cargo build
 mbx build test --all-features    # == cargo test --all-features
 ```

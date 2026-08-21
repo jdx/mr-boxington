@@ -1,0 +1,134 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# A release is not cancellable: a half-uploaded set of assets is worse than a
+# slow one.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Check the tag matches the crate version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          crate="$(cargo metadata --format-version 1 --no-deps |
+            jq -r '.packages[] | select(.name == "mbx") | .version')"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$crate" != "$tag" ]; then
+            echo "tag $GITHUB_REF_NAME does not match crate version $crate" >&2
+            exit 1
+          fi
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            bin: mbx
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            bin: mbx
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            bin: mbx
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            bin: mbx
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            bin: mbx.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install the musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        shell: bash
+        # rustls brings in aws-lc-sys, which compiles C: cc-rs looks for a
+        # target-prefixed compiler, and Debian's musl-tools only ships
+        # `musl-gcc`. Naming it for both musl targets is harmless elsewhere,
+        # since nothing else consults these variables.
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked --package mbx --target ${{ matrix.target }}
+
+      - name: Check the binary runs
+        # Every target but this one is native to its runner.
+        if: matrix.target != 'x86_64-apple-darwin'
+        shell: bash
+        run: ./target/${{ matrix.target }}/release/${{ matrix.bin }} --version
+
+      # The archive is flat and holds only the binary, so extracting it
+      # straight into a directory on PATH is the whole install.
+      - name: Archive
+        if: runner.os != 'Windows'
+        run: tar -czf "mbx-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" ${{ matrix.bin }}
+
+      - name: Archive
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd "target/${{ matrix.target }}/release"
+          7z a "$GITHUB_WORKSPACE/mbx-${{ matrix.target }}.zip" ${{ matrix.bin }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: mbx-${{ matrix.target }}
+          path: mbx-${{ matrix.target }}.*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          pattern: mbx-*
+          merge-multiple: true
+
+      - name: Checksum every archive
+        run: |
+          cd dist
+          sha256sum -- * >"$RUNNER_TEMP/SHA256SUMS"
+          mv "$RUNNER_TEMP/SHA256SUMS" .
+          cat SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --generate-notes \
+            dist/*
