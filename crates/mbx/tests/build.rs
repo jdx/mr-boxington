@@ -35,7 +35,18 @@ fn cargo() -> std::ffi::OsString {
 
 /// Build `project` against `store`, returning the run's statistics.
 fn build(project: &Path, store: &Path, report: &Path) -> serde_json::Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+    build_with(project, store, report, &[])
+}
+
+/// Build as `build` does, with `settings` added to the environment.
+fn build_with(
+    project: &Path,
+    store: &Path,
+    report: &Path,
+    settings: &[(&str, &str)],
+) -> serde_json::Value {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mbx"));
+    command
         .current_dir(project)
         .args(["build", "build", "--offline"])
         .env("MBX_CACHE_DIR", store)
@@ -43,8 +54,15 @@ fn build(project: &Path, store: &Path, report: &Path) -> serde_json::Value {
         // Cargo's own environment for this test would otherwise redirect the
         // fixture's output into this crate's target directory.
         .env_remove("CARGO_TARGET_DIR")
-        .output()
-        .expect("mbx should run");
+        // Both of these decide whether cargo compiles incrementally, so a test
+        // that says nothing about it must not inherit an answer from the
+        // machine it runs on -- least of all from CI.
+        .env_remove("MBX_INCREMENTAL")
+        .env_remove("CI");
+    for (name, value) in settings {
+        command.env(name, value);
+    }
+    let output = command.output().expect("mbx should run");
     assert!(
         output.status.success(),
         "build failed: {}",
@@ -58,6 +76,45 @@ fn count(stats: &serde_json::Value, field: &str) -> u64 {
     stats[field]
         .as_u64()
         .unwrap_or_else(|| panic!("{field} should be a number"))
+}
+
+#[test]
+fn incremental_is_opt_in_and_reaches_cargo() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("default.json"),
+    );
+    assert_eq!(
+        incremental_sessions(project.path()),
+        0,
+        "the default build should still force CARGO_INCREMENTAL=0"
+    );
+
+    let stats = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("incremental.json"),
+        &[("MBX_INCREMENTAL", "1")],
+    );
+    assert!(
+        incremental_sessions(project.path()) > 0,
+        "cargo should have compiled the member incrementally: {stats}"
+    );
+}
+
+/// How many incremental sessions rustc left behind. Cargo creates the directory
+/// either way, so its contents are the only evidence that anything used it.
+fn incremental_sessions(project: &Path) -> usize {
+    match std::fs::read_dir(project.join("target/debug/incremental")) {
+        Ok(entries) => entries.count(),
+        Err(_) => 0,
+    }
 }
 
 #[test]

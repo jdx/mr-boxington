@@ -35,7 +35,8 @@ a standalone home. mise will eventually consume mbx and drop its embedded copy.
 - Caching linking or non-rlib/metadata artifacts (future work).
 - Competing with rustc incremental for workspace members. Cargo builds
   dependencies non-incrementally by default; mbx caches those. Incremental
-  compilations bypass the cache by design.
+  compilations bypass the cache by design, and `MBX_INCREMENTAL=1` opts into
+  that trade rather than trying to cache them.
 - A daemon. The agent lives for the duration of one `mbx build`.
 
 ## Architecture
@@ -241,10 +242,14 @@ env vars, and wire constants to match `mbx-cache-core` exactly.
   checkout so deleting a worktree releases its artifacts.
 - **Deferred materialization** — leave artifacts in the CAS until read
   (biggest win for `cargo check`-heavy workflows).
-- **Revisit `CARGO_INCREMENTAL=0`.** The session disables incremental
-  compilation for everything, workspace members included. Incremental actions
-  bypass the cache anyway, so leaving members incremental may simply be better
-  for the inner loop; settle it with the measurement on a real workspace.
+- **Decide the `CARGO_INCREMENTAL` default.** `MBX_INCREMENTAL=1` now opts into
+  leaving members incremental (off by default, forced off in CI), so the
+  measurement is finally possible; the default itself is still unsettled. It
+  cannot be decided per crate: extern rlibs enter the action key by content, and
+  an incrementally built member emits different rlib bytes, so turning it on for
+  one member cold-misses its whole dependent subtree. Measure on a multi-member
+  workspace — mise is one crate, so nearly all of its 65% is dependencies and
+  the trade-off will not show there.
 - **Standalone shim mode**, so `build.rustc-wrapper` helps plain `cargo build`
   and `mbx setup` becomes worth having. This needs cross-process prefetch
   manifests first: `begin_task` derives its run id from the process id, so each

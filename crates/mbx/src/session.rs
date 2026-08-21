@@ -40,6 +40,7 @@ pub struct CacheSession {
     rustc_shim: PathBuf,
     staging: PathBuf,
     verify: bool,
+    incremental: bool,
     agent: CacheAgent,
     started: Instant,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
@@ -68,6 +69,7 @@ impl CacheSession {
             rustc_shim: shim,
             staging,
             verify: config.verify,
+            incremental: config.incremental,
             agent,
             started: Instant::now(),
             shutdown: Mutex::new(Some(shutdown_tx)),
@@ -137,9 +139,17 @@ impl CacheSession {
             );
             environment.insert(PREVIOUS_RUSTC_WRAPPER_ENV.into(), previous);
         }
-        // Incremental compilation is never cacheable, so it is disabled rather
-        // than left to bypass every action.
-        environment.insert("CARGO_INCREMENTAL".into(), "0".into());
+        if self.incremental {
+            // Hand the decision back to cargo, which compiles local packages
+            // incrementally in dev profiles and never in release. Not
+            // overriding is the whole of the feature: the actions themselves
+            // still bypass, they are just faster to recompile.
+            environment.remove("CARGO_INCREMENTAL");
+        } else {
+            // Incremental compilation is never cacheable, so it is disabled
+            // rather than left to bypass every action.
+            environment.insert("CARGO_INCREMENTAL".into(), "0".into());
+        }
         action_run
     }
 
@@ -959,6 +969,7 @@ mod tests {
             cache_dir: cache_dir.to_path_buf(),
             stats_report: None,
             verify: false,
+            incremental: false,
             remote: Default::default(),
             http: Default::default(),
         }
@@ -993,6 +1004,34 @@ mod tests {
         assert_eq!(values.get(PREVIOUS_RUSTC_WRAPPER_ENV).unwrap(), "existing");
         assert_eq!(values.get("CARGO_INCREMENTAL").unwrap(), "0");
         assert_eq!(values.get(VERIFY_ENV).unwrap(), "0");
+
+        session.finish().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn incremental_builds_leave_cargo_incremental_alone() {
+        let cache = tempfile::tempdir().unwrap();
+        let session_dir = tempfile::tempdir().unwrap();
+        let mut config = test_config(cache.path());
+        config.incremental = true;
+        let session = CacheSession::start(session_dir.path(), &config)
+            .await
+            .unwrap();
+
+        let workspace = tempfile::tempdir().unwrap();
+        let mut values = BTreeMap::new();
+        session
+            .begin(
+                workspace.path(),
+                &workspace.path().join("target"),
+                &["build".to_string()],
+                &mut values,
+            )
+            .await;
+
+        // Absent, not "1": cargo's own per-profile default is what we want, and
+        // forcing the value on would turn incremental on for release too.
+        assert!(!values.contains_key("CARGO_INCREMENTAL"));
 
         session.finish().await.unwrap();
     }

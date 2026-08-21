@@ -100,6 +100,7 @@ defaults.
 | `MBX_REMOTE_OIDC_AUDIENCE` | `remote.oidc_audience` | unset | CI OIDC audience |
 | `MBX_REMOTE_MODE` | `remote.mode` | `read-write` | or `read-only`, `write-only` |
 | `MBX_STATS_REPORT` | `stats_report` | unset | write a JSON report here |
+| `MBX_INCREMENTAL` | `incremental` | off | let cargo compile workspace members incrementally |
 | `MBX_HTTP_TIMEOUT` | `http.timeout` | `30s` | connect and read timeout |
 | `MBX_HTTP_DOWNLOAD_TIMEOUT` | `http.download_timeout` | `10m` | blob downloads |
 | `MBX_HTTP_RETRIES` | `http.retries` | `3` | request retries |
@@ -172,9 +173,19 @@ Not yet:
   artifact containing another checkout's path. Crates whose build scripts only
   emit cfgs or link directives share normally.
 - **Linking is not cached**, so binaries and dylibs always link.
-- **Incremental compilation is disabled** inside `mbx build`. Cargo builds
+- **Incremental compilation is off by default** inside `mbx build`. Cargo builds
   dependencies non-incrementally anyway, which is where the cache earns its
-  keep.
+  keep, and an incremental compilation is never cacheable.
+
+  `MBX_INCREMENTAL=1` stops forcing it off and hands the decision back to cargo,
+  which trades cache reuse for a faster edit-rebuild loop. Members you just
+  edited were going to miss regardless, so incremental recompiles them faster
+  than the cache can — but a member built incrementally emits a different rlib
+  than a cached one, and extern rlibs enter the action key by content, so every
+  crate above it in the graph misses too. Worth it when you rebuild one leaf
+  crate repeatedly; not worth it when a second worktree of the same workspace is
+  what you want warm. CI ignores the setting: a fresh runner has no earlier
+  build to build on, so there is nothing to gain and reuse to lose.
 
 ## License
 

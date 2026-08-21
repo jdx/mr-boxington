@@ -82,6 +82,16 @@ fn build(config: &Config, arguments: &[String]) -> Result<ExitCode> {
         return run_cargo(&cargo, arguments, BTreeMap::new());
     }
 
+    let mut config = config.clone();
+    let incremental = policy::incremental_allowed(config.incremental);
+    if config.incremental && !incremental {
+        log::warn!(
+            "incremental compilation is disabled here; it needs an earlier build to build on"
+        );
+    }
+    config.incremental = incremental;
+    let config = &config;
+
     let working_dir = std::env::current_dir()?;
     let roots = resolve_roots(&cargo, arguments, &working_dir);
     let session_dir = tempfile::Builder::new().prefix("mbx-session-").tempdir()?;
