@@ -96,10 +96,8 @@ impl LocalCas {
         reflink_copy::reflink_or_copy(source, &temporary)?;
         let temporary = tempfile::TempPath::try_from_path(temporary)?;
         make_owner_writable(&temporary)?;
-        fs::OpenOptions::new()
-            .write(true)
-            .open(&temporary)?
-            .sync_all()?;
+        // Not fsynced: every read verifies the digest, so a blob torn by a
+        // crash is detected and treated as absent rather than trusted.
         if verify && !digest.matches_file(&temporary)? {
             bail!("staged blob does not match the declared CAS digest");
         }
@@ -129,7 +127,6 @@ impl LocalCas {
         let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
         write(&mut temporary)?;
         temporary.flush()?;
-        temporary.as_file().sync_all()?;
         if !digest.matches_file(temporary.path())? {
             bail!("staged blob does not match the declared CAS digest");
         }
@@ -233,7 +230,6 @@ impl LocalActionCache {
         let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
         temporary.write_all(&canonical_json(result)?)?;
         temporary.flush()?;
-        temporary.as_file().sync_all()?;
         if replace_invalid {
             temporary
                 .persist(&destination)
