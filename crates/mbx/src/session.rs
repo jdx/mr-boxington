@@ -268,6 +268,7 @@ struct StatsReport {
     divergences: u64,
     prefetched_actions: u64,
     prefetch_runs: u64,
+    bypasses: BTreeMap<String, u64>,
     downloaded_bytes: u64,
     uploaded_bytes: u64,
     stored_bytes: u64,
@@ -299,6 +300,7 @@ impl From<&AgentStats> for StatsReport {
             divergences: stats.divergences,
             prefetched_actions: stats.prefetched_actions,
             prefetch_runs: stats.prefetch_runs,
+            bypasses: stats.bypasses.clone(),
             downloaded_bytes: stats.downloaded_bytes,
             uploaded_bytes: stats.uploaded_bytes,
             stored_bytes: stats.stored_bytes,
@@ -334,6 +336,7 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
         && stats.verifications == 0
         && stats.downloaded_bytes == 0
         && stats.uploaded_bytes == 0
+        && stats.bypasses.is_empty()
     {
         return;
     }
@@ -346,6 +349,18 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
         ByteSize::b(stats.uploaded_bytes).display().iec(),
         ByteSize::b(stats.stored_bytes).display().iec(),
     ));
+    if !stats.bypasses.is_empty() {
+        let total: u64 = stats.bypasses.values().sum();
+        // Most frequent first: the head of this list is where the next win is.
+        let mut reasons: Vec<_> = stats.bypasses.iter().collect();
+        reasons.sort_by(|left, right| right.1.cmp(left.1).then(left.0.cmp(right.0)));
+        let detail = reasons
+            .iter()
+            .map(|(kind, count)| format!("{count} {kind}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        note(&format!("cache bypassed {total} compilations: {detail}"));
+    }
     let remote_lookup_duration_ns = stats
         .remote_manifest_lookup_duration_ns
         .saturating_add(stats.remote_action_lookup_duration_ns);
@@ -692,9 +707,10 @@ pub fn run_rustc_shim() -> ExitCode {
     if std::env::var_os(PREVIOUS_RUSTC_WRAPPER_ENV).is_none() {
         match crate::rustc::compile(&rustc, &arguments) {
             Ok(exit_code) => return exit_code,
-            Err(_error) => {
+            Err(error) => {
+                record_bypass(&error);
                 #[cfg(debug_assertions)]
-                eprintln!("mbx: rustc cache bypassed: {_error:#}");
+                eprintln!("mbx: rustc cache bypassed: {error:#}");
             }
         }
     }
@@ -757,6 +773,19 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
 /// that an explicit disable cannot be mistaken for an enable.
 pub(crate) fn verify_requested() -> bool {
     std::env::var_os(VERIFY_ENV).is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+/// Tell the session that this compilation was not cacheable.
+///
+/// Bypasses never reach the agent otherwise, so without this they are invisible
+/// outside a debug build. Reported by reason kind rather than message, since
+/// several reasons carry a path or a flag.
+fn record_bypass(error: &eyre::Report) {
+    let kind = error
+        .downcast_ref::<mbx_cache_rustc::BypassReason>()
+        .map_or("other", mbx_cache_rustc::BypassReason::kind);
+    // A shim running outside a session has nowhere to report, which is fine.
+    let _ = request_agent(&[AgentRequest::RecordBypass { kind: kind.into() }]);
 }
 
 pub(crate) fn request_agent(requests: &[AgentRequest]) -> Result<Vec<AgentResponse>> {

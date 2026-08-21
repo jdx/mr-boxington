@@ -12,6 +12,16 @@ pub use dep_info::{DepInfoCommand, DiscoveredInputs, RustcDepInfo};
 pub const ACTION_SCHEMA_VERSION: u8 = 1;
 pub const ADAPTER_VERSION: u8 = 1;
 
+impl BypassReason {
+    /// A stable, low-cardinality name for this reason.
+    ///
+    /// Many variants carry a path or a flag, so `Display` text cannot be
+    /// aggregated; statistics group by this instead.
+    pub fn kind(&self) -> &'static str {
+        self.into()
+    }
+}
+
 const SUPPORTED_CODEGEN_OPTIONS: &[&str] = &[
     "codegen-units",
     "control-flow-guard",
@@ -45,7 +55,8 @@ const SUPPORTED_CODEGEN_OPTIONS: &[&str] = &[
     "tls-model",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error, strum::IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
 pub enum BypassReason {
     #[error("rustc argument {index} is not valid UTF-8")]
     NonUtf8Argument { index: usize },
@@ -1026,6 +1037,21 @@ fn slash_path(path: &Path) -> Result<String, BypassReason> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bypass_kinds_are_stable_and_field_independent() {
+        assert_eq!(BypassReason::CompilerQuery.kind(), "compiler-query");
+        assert_eq!(BypassReason::Incremental.kind(), "incremental");
+        assert_eq!(
+            BypassReason::UnsupportedCrateType("bin".into()).kind(),
+            "unsupported-crate-type"
+        );
+        // Two reasons of one kind group together despite differing fields.
+        assert_eq!(
+            BypassReason::UnmappedAbsolutePath(PathBuf::from("/a")).kind(),
+            BypassReason::UnmappedAbsolutePath(PathBuf::from("/b")).kind()
+        );
+    }
+
     use super::*;
 
     fn args(values: &[&str]) -> Vec<OsString> {

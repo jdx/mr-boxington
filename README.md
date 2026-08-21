@@ -41,7 +41,13 @@ activity prints nothing:
 
 ```
 cache: 12 hits, 3 misses, 12 prefetched; 4.1 MiB downloaded, 0 B uploaded, 1.2 MiB stored locally
+cache bypassed 7 compilations: 5 unsupported-crate-type, 2 unsupported-search-path
 ```
+
+The second line accounts for compilations mbx declined to cache, grouped by
+reason. It is the honest counterpart to the hit rate: a build can hit every
+action it looked up and still spend most of its time on work that never entered
+the cache.
 
 Store management:
 
