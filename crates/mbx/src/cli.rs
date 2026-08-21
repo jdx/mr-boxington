@@ -89,6 +89,15 @@ fn build(config: &Config, arguments: &[String]) -> Result<ExitCode> {
             "incremental compilation is disabled here; it needs an earlier build to build on"
         );
     }
+    // An enabled build stops overriding CARGO_INCREMENTAL rather than setting
+    // it, so a 0 already in the environment still wins -- which CI images and
+    // rust-cache set as a matter of course. Say so, because the alternative is
+    // a setting that silently does nothing.
+    if incremental && std::env::var("CARGO_INCREMENTAL").as_deref() == Ok("0") {
+        log::warn!(
+            "CARGO_INCREMENTAL=0 is set in the environment, so this build is not incremental after all"
+        );
+    }
     config.incremental = incremental;
     let config = &config;
 

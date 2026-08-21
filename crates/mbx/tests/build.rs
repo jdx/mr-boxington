@@ -54,10 +54,13 @@ fn build_with(
         // Cargo's own environment for this test would otherwise redirect the
         // fixture's output into this crate's target directory.
         .env_remove("CARGO_TARGET_DIR")
-        // Both of these decide whether cargo compiles incrementally, so a test
-        // that says nothing about it must not inherit an answer from the
-        // machine it runs on -- least of all from CI.
+        // All three decide whether cargo compiles incrementally, so a test that
+        // says nothing about it must not inherit an answer from the machine it
+        // runs on. CARGO_INCREMENTAL is the one that bites: an enabled build
+        // defers to it, and `Swatinem/rust-cache` sets it to 0 for the whole
+        // job, so leaving it would make this suite pass locally and fail in CI.
         .env_remove("MBX_INCREMENTAL")
+        .env_remove("CARGO_INCREMENTAL")
         .env_remove("CI");
     for (name, value) in settings {
         command.env(name, value);

@@ -185,7 +185,10 @@ Not yet:
   crate above it in the graph misses too. Worth it when you rebuild one leaf
   crate repeatedly; not worth it when a second worktree of the same workspace is
   what you want warm. CI ignores the setting: a fresh runner has no earlier
-  build to build on, so there is nothing to gain and reuse to lose.
+  build to build on, so there is nothing to gain and reuse to lose. Since the
+  setting stops overriding `CARGO_INCREMENTAL` rather than setting it, a `0`
+  already in your environment still wins, and `mbx` says so rather than leaving
+  you to wonder.
 
 ## License
 
