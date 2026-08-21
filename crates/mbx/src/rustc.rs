@@ -381,10 +381,10 @@ fn stage_cached_output(
         .wrap_err_with(|| format!("failed to materialize cached rustc output {}", node.name))?;
     let temporary = tempfile::TempPath::try_from_path(temporary)?;
     make_owner_writable(&temporary)?;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&temporary)?
-        .sync_all()?;
+    // Deliberately not fsynced. These are build artifacts in a target
+    // directory, and cargo does not sync its own outputs either, so syncing
+    // here buys no durability the build relies on -- it only costs one fsync
+    // per restored file, which on a large workspace is most of the restore.
     if !node.digest.matches_file(&temporary)? {
         bail!(
             "cached rustc output failed digest verification: {}",
