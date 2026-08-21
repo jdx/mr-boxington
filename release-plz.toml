@@ -1,0 +1,30 @@
+[workspace]
+# Releases happen by merging a release PR, not by any push that happens to
+# carry a version bump. Same choice as jdx/mbx-cache.
+release_always = false
+git_release_enable = true
+# Drafted so release.yml can attach binaries before anyone sees it — a release
+# that appears without its assets is worse than one that appears a minute
+# later. release-plz.yml undrafts it once the upload succeeds.
+git_release_draft = true
+
+[[package]]
+name = "mbx"
+publish = true
+# release-plz would otherwise tag the binary crate `mbx-vX.Y.Z`. The README's
+# install URLs are written against `v{version}`, and this is the tag people
+# reference, so it takes the bare name. Same workaround as jdx/tak.
+git_tag_name = "v{{ version }}"
+git_release_enable = true
+
+[[package]]
+name = "mbx-cache-core"
+publish = true
+# A library: crates.io is its distribution. A GitHub release for it would carry
+# no assets and would sit drafted forever, since only the `mbx` tag is undrafted.
+git_release_enable = false
+
+[[package]]
+name = "mbx-cache-rustc"
+publish = true
+git_release_enable = false
