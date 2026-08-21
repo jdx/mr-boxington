@@ -264,6 +264,7 @@ struct StatsReport {
     lookups: u64,
     hits: u64,
     misses: u64,
+    unconsulted: u64,
     compiler_invocations_avoided: u64,
     verifications: u64,
     divergences: u64,
@@ -296,6 +297,7 @@ impl From<&AgentStats> for StatsReport {
             lookups: stats.lookups,
             hits: stats.hits,
             misses: cache_misses(stats),
+            unconsulted: stats.unconsulted,
             compiler_invocations_avoided: stats.hits,
             verifications: stats.verifications,
             divergences: stats.divergences,
@@ -333,6 +335,7 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
         );
     }
     if stats.lookups == 0
+        && stats.unconsulted == 0
         && stats.stores == 0
         && stats.verifications == 0
         && stats.downloaded_bytes == 0
@@ -350,6 +353,16 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
         ByteSize::b(stats.uploaded_bytes).display().iec(),
         ByteSize::b(stats.stored_bytes).display().iec(),
     ));
+    if stats.unconsulted > 0 {
+        // A cold target directory hits this for everything it compiles, and
+        // reporting only hits and misses there says "0 hits, 0 misses" -- which
+        // reads as though the cache was asked and had nothing, rather than that
+        // it was never asked. These compilations are still stored afterwards.
+        note(&format!(
+            "cache could not look up {} compilations: no dep-info from an earlier build and no prediction to derive a key from",
+            stats.unconsulted,
+        ));
+    }
     if !stats.bypasses.is_empty() {
         let total: u64 = stats.bypasses.values().sum();
         // Most frequent first: the head of this list is where the next win is.
@@ -788,6 +801,12 @@ fn record_bypass(error: &eyre::Report) {
     append_bypass_log(kind, error);
     // A shim running outside a session has nowhere to report, which is fine.
     let _ = request_agent(&[AgentRequest::RecordBypass { kind: kind.into() }]);
+}
+
+/// Record a compilation the cache had no key to look up with.
+pub(crate) fn record_unconsulted() {
+    // A shim running outside a session has nowhere to report, which is fine.
+    let _ = request_agent(&[AgentRequest::RecordUnconsulted]);
 }
 
 /// Append the full reason to `MBX_BYPASS_LOG`, when one is configured.

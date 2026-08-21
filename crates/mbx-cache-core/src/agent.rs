@@ -74,6 +74,9 @@ pub enum AgentRequest {
     RecordBypass {
         kind: String,
     },
+    /// A compilation the adapter could not look up, having no key to look up
+    /// with. Distinct from a bypass: these are cached once compiled.
+    RecordUnconsulted,
     RecordActionVerification {
         matched: bool,
         restore: RestoreStats,
@@ -137,6 +140,7 @@ pub enum AgentResponse {
     ActionHitRecorded,
     ActionVerificationRecorded,
     BypassRecorded,
+    UnconsultedRecorded,
     ActionStored {
         path: PathBuf,
     },
@@ -159,6 +163,11 @@ pub struct AgentStats {
     pub session_duration_ns: u64,
     /// Number of action-result lookups.
     pub lookups: u64,
+    /// Compilations no lookup was possible for, because nothing supplied a key.
+    ///
+    /// Counted separately from a miss, which is a lookup that found nothing.
+    /// Both compile, but only a miss says the cache was asked.
+    pub unconsulted: u64,
     /// Number of lookups that found a valid local action result.
     pub hits: u64,
     /// Number of newly stored content-addressed objects.
@@ -221,6 +230,7 @@ pub struct ActionPrediction {
 #[derive(Default)]
 struct AtomicAgentStats {
     lookups: AtomicU64,
+    unconsulted: AtomicU64,
     hits: AtomicU64,
     stores: AtomicU64,
     stored_bytes: AtomicU64,
@@ -690,6 +700,7 @@ impl CacheAgent {
         AgentStats {
             session_duration_ns: 0,
             lookups: self.stats.lookups.load(Ordering::Relaxed),
+            unconsulted: self.stats.unconsulted.load(Ordering::Relaxed),
             hits: self.stats.hits.load(Ordering::Relaxed),
             stores: self.stats.stores.load(Ordering::Relaxed),
             stored_bytes: self.stats.stored_bytes.load(Ordering::Relaxed),
@@ -1389,6 +1400,10 @@ impl CacheAgent {
                 *self.stats.bypasses.lock().unwrap().entry(kind).or_insert(0) += 1;
                 Ok(AgentResponse::BypassRecorded)
             }
+            AgentRequest::RecordUnconsulted => {
+                self.stats.unconsulted.fetch_add(1, Ordering::Relaxed);
+                Ok(AgentResponse::UnconsultedRecorded)
+            }
             AgentRequest::RecordActionVerification { matched, restore } => {
                 self.record_materialization(restore);
                 self.stats.verifications.fetch_add(1, Ordering::Relaxed);
@@ -2016,6 +2031,23 @@ mod tests {
             error.to_string().contains("exceeded"),
             "unexpected error: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn counts_compilations_it_could_not_look_up() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+
+        for _ in 0..3 {
+            agent.respond(AgentRequest::RecordUnconsulted).await;
+        }
+
+        let stats = agent.stats();
+        assert_eq!(stats.unconsulted, 3);
+        // Not a miss: nothing was looked up, and a hit rate computed over these
+        // would be a rate over lookups that never happened.
+        assert_eq!(stats.lookups, 0);
+        assert_eq!(stats.hits, 0);
     }
 
     #[tokio::test]
