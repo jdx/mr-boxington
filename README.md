@@ -51,6 +51,8 @@ for a tag: `releases/download/v0.1.0/mbx-x86_64-unknown-linux-musl.tar.gz`.
 
 Building from source works too: `cargo build --release`.
 
+Releases are cut by release-plz; see [RELEASING.md](RELEASING.md).
+
 ## Usage
 
 ```sh

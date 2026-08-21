@@ -225,6 +225,9 @@ The failure mode is a recompile, never a wrong result.
 8. `feat: release binaries` — tagged release workflow producing one
    self-contained archive per target, checksummed, so installing mbx in CI
    is a single download.
+9. `chore: release-plz` — versioning, changelog, tagging, and crates.io
+   publishing move to release-plz, matching the other jdx.dev CLIs. See
+   [RELEASING.md](RELEASING.md).
 
 Server repo follow-up (separate stack in `jdx/mbx-cache`): rebrand crate,
 env vars, and wire constants to match `mbx-cache-core` exactly.
