@@ -42,4 +42,6 @@ Two things live outside the repository, and releases fail without them:
 If the tag was created but the binaries failed to build, fix the problem and
 run the `release` workflow manually with that tag. It rebuilds, re-attaches
 with `--clobber`, and undrafts the release itself — dispatching by hand is the
-one path where nothing else would.
+one path where nothing else would. If the tag exists but its release does not,
+because release-plz failed after tagging or the draft was deleted, that run
+recreates it rather than failing.

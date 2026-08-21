@@ -140,11 +140,27 @@ jobs:
           sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
 
+      # Called from release-plz.yml the release always exists, drafted, and
+      # `gh` resolves a draft by tag fine. Dispatched by hand it may not: the
+      # documented recovery is for a tag that exists whose release does not,
+      # because release-plz failed after tagging or someone deleted the draft.
+      # Uploading into nothing would fail there, so create it first. Same guard
+      # as jdx/mbx-cache. `--verify-tag` keeps a mistyped tag from conjuring a
+      # release for a ref that does not exist.
       - name: Attach to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
-        run: gh release upload "$TAG" release-assets/* --repo "${{ github.repository }}" --clobber
+        run: |
+          if ! gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "${{ github.repository }}" \
+              --draft \
+              --generate-notes \
+              --title "$TAG" \
+              --verify-tag
+          fi
+          gh release upload "$TAG" release-assets/* --repo "${{ github.repository }}" --clobber
 
       # Called from release-plz.yml, undrafting is that workflow's job — it
       # happens after this one returns. Run by hand, nothing else will do it,
