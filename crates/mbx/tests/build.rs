@@ -7,10 +7,19 @@ use std::path::Path;
 use std::process::Command;
 
 fn write_project(directory: &Path) {
+    write_named_project(directory, "fixture");
+}
+
+/// Write the fixture under `name`.
+///
+/// The name reaches the lockfile, and the lockfile is what the build identity
+/// is keyed on, so two differently named fixtures are two different identities
+/// -- which is what it takes to tell one checkout's artifacts from another's.
+fn write_named_project(directory: &Path, name: &str) {
     std::fs::create_dir_all(directory.join("src")).unwrap();
     std::fs::write(
         directory.join("Cargo.toml"),
-        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
     )
     .unwrap();
     std::fs::write(
@@ -35,16 +44,19 @@ fn cargo() -> std::ffi::OsString {
 
 /// Build `project` against `store`, returning the run's statistics.
 fn build(project: &Path, store: &Path, report: &Path) -> serde_json::Value {
-    build_with(project, store, report, &[])
+    build_with(project, store, report, &[]).0
 }
 
 /// Build as `build` does, with `settings` added to the environment.
+///
+/// Returns what the build said on stderr alongside its statistics, because some
+/// of what mbx reports -- a sweep, for one -- is only ever said there.
 fn build_with(
     project: &Path,
     store: &Path,
     report: &Path,
     settings: &[(&str, &str)],
-) -> serde_json::Value {
+) -> (serde_json::Value, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_mbx"));
     command
         .current_dir(project)
@@ -74,8 +86,51 @@ fn build_with(
         "build failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let report = std::fs::read(report).expect("a statistics report should be written");
-    serde_json::from_slice(&report).expect("the report should be JSON")
+    let stats = std::fs::read(report).expect("a statistics report should be written");
+    (
+        serde_json::from_slice(&stats).expect("the report should be JSON"),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// Run `mbx` against `store` and return its stdout.
+fn mbx(store: &Path, arguments: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        .args(arguments)
+        .env("MBX_CACHE_DIR", store)
+        .output()
+        .expect("mbx should run");
+    assert!(
+        output.status.success(),
+        "{arguments:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// The bytes `mbx gc` weighs against its budget.
+fn store_bytes(store: &Path) -> u64 {
+    tree_bytes(&store.join("actions/cas")) + tree_bytes(&store.join("actions/action-results"))
+}
+
+/// Total size of every file under `directory`.
+fn tree_bytes(directory: &Path) -> u64 {
+    let mut total = 0;
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        let Ok(listing) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in listing.flatten() {
+            let metadata = entry.metadata().expect("the entry should be readable");
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else if metadata.is_file() {
+                total += metadata.len();
+            }
+        }
+    }
+    total
 }
 
 fn count(stats: &serde_json::Value, field: &str) -> u64 {
@@ -102,7 +157,7 @@ fn incremental_is_opt_in_and_reaches_cargo() {
         "the default build should still force CARGO_INCREMENTAL=0"
     );
 
-    let stats = build_with(
+    let (stats, _) = build_with(
         project.path(),
         store.path(),
         &reports.path().join("incremental.json"),
@@ -303,7 +358,7 @@ fn two_checkouts_share(generated: Generated, settings: &[(&str, &str)]) -> bool 
         &reports.path().join("first.json"),
         settings,
     );
-    let stats = build_with(
+    let (stats, _) = build_with(
         second.path(),
         store.path(),
         &reports.path().join("second.json"),
@@ -324,4 +379,129 @@ fn an_empty_store_reports_nothing() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("objects: 0"), "unexpected output: {stdout}");
+}
+
+#[test]
+fn a_build_records_the_checkout_it_ran_in() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+    );
+
+    // The record is what later tells the collector this checkout exists, so a
+    // build that leaves none has silently opted out of being protected.
+    let records = store.path().join("actions/checkouts/v1");
+    assert!(
+        tree_bytes(&records) > 0,
+        "the build should record its checkout under {}",
+        records.display()
+    );
+}
+
+#[test]
+fn a_build_sweeps_the_store_to_its_budget() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+
+    let (_, stderr) = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+        // A one-byte budget swept every build: nothing this build stored can
+        // stay, so the sweep is unambiguous.
+        &[("MBX_GC_MAX_SIZE", "1"), ("MBX_GC_INTERVAL", "0")],
+    );
+
+    assert!(
+        stderr.contains("gc: evicted"),
+        "the sweep should say what it evicted: {stderr}"
+    );
+    let stats = mbx(store.path(), &["cache", "stats"]);
+    assert!(
+        stats.contains("objects: 0"),
+        "the store should be swept empty: {stats}"
+    );
+}
+
+#[test]
+fn automatic_sweeps_can_be_turned_off() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+
+    let (_, stderr) = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+        &[
+            ("MBX_GC_MAX_SIZE", "1"),
+            ("MBX_GC_INTERVAL", "0"),
+            ("MBX_GC_AUTO", "0"),
+        ],
+    );
+
+    assert!(!stderr.contains("gc:"), "no sweep should run: {stderr}");
+    let stats = mbx(store.path(), &["cache", "stats"]);
+    assert!(
+        !stats.contains("objects: 0"),
+        "the store should be left alone: {stats}"
+    );
+}
+
+/// Two checkouts, one deleted, a budget that fits only one of them.
+///
+/// Plain recency would keep the deleted checkout's newer artifacts and evict
+/// the surviving one's, so the survivor coming back warm is the whole claim.
+#[test]
+fn deleting_a_checkout_releases_what_only_it_used() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let surviving = tempfile::tempdir().unwrap();
+    let deleted = tempfile::tempdir().unwrap();
+    write_named_project(surviving.path(), "surviving");
+    write_named_project(deleted.path(), "deleted");
+
+    build(
+        surviving.path(),
+        store.path(),
+        &reports.path().join("surviving.json"),
+    );
+    // Budget the store as it stood with one checkout in it, plus slack. The
+    // slack matters: an action result is only dropped once its objects are
+    // gone, which happens after eviction has already decided how deep to go, so
+    // a budget set to the exact byte forces eviction one object further than
+    // the arithmetic suggests. At a real budget that rounding is noise; at this
+    // scale it is the whole margin.
+    let budget = store_bytes(store.path()) + 4096;
+    build(
+        deleted.path(),
+        store.path(),
+        &reports.path().join("deleted.json"),
+    );
+    std::fs::remove_dir_all(deleted.path()).unwrap();
+
+    mbx(store.path(), &["gc", "--max-size", &budget.to_string()]);
+
+    // Load-bearing, not cleanup: the wipe is what forces the next build to go
+    // to the store, which is the only way to see what survived the sweep.
+    std::fs::remove_dir_all(surviving.path().join("target")).unwrap();
+    let warm = build(
+        surviving.path(),
+        store.path(),
+        &reports.path().join("warm.json"),
+    );
+
+    assert!(
+        count(&warm, "hits") > 0,
+        "the surviving checkout should still be warm: {warm}"
+    );
 }

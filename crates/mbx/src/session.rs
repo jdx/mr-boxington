@@ -44,6 +44,7 @@ pub struct CacheSession {
     incremental: bool,
     share_out_dir: bool,
     agent: CacheAgent,
+    store: PathBuf,
     started: Instant,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
     server: Mutex<Option<JoinHandle<Result<()>>>>,
@@ -60,9 +61,9 @@ impl CacheSession {
         std::fs::create_dir(&staging)?;
         let store = config.store_dir();
         let agent = if let Some(remote) = action_remote_cache(config, &store)? {
-            CacheAgent::new_remote(store, VERSION, remote)
+            CacheAgent::new_remote(store.clone(), VERSION, remote)
         } else {
-            CacheAgent::new(store, VERSION)
+            CacheAgent::new(store.clone(), VERSION)
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (socket, server) = spawn_server(session_dir, agent.clone(), shutdown_rx).await?;
@@ -74,6 +75,7 @@ impl CacheSession {
             incremental: config.incremental,
             share_out_dir: config.share_out_dir,
             agent,
+            store,
             started: Instant::now(),
             shutdown: Mutex::new(Some(shutdown_tx)),
             server: Mutex::new(Some(server)),
@@ -95,6 +97,14 @@ impl CacheSession {
         environment: &mut BTreeMap<String, String>,
     ) -> Option<ActionRun> {
         let identity = build_identity(workspace_root, command);
+        // Recorded before the build rather than after it: a build that fails
+        // still means this checkout is here and using the store, and the record
+        // is what stops the collector treating its artifacts as abandoned.
+        if let Err(error) =
+            crate::store::record_checkout(&self.store, &identity, workspace_root, target_dir)
+        {
+            warn!("this checkout was not recorded as a cache root: {error}");
+        }
         let (protocol_build, action_run) = match self.agent.begin_task(&identity).await {
             Ok(run) => (
                 run.clone(),
@@ -413,7 +423,7 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
 }
 
 /// Write to stderr without failing the build when the pipe is closed.
-fn note(message: &str) {
+pub(crate) fn note(message: &str) {
     use std::io::Write as _;
     let _ = writeln!(std::io::stderr(), "{message}");
 }
@@ -1005,6 +1015,7 @@ mod tests {
             share_out_dir: false,
             remote: Default::default(),
             http: Default::default(),
+            gc: Default::default(),
         }
     }
 

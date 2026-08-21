@@ -36,9 +36,10 @@ struct BuildArgs {
 
 #[derive(Args)]
 struct GcArgs {
-    /// Size the store may occupy afterwards, for example 20GB.
+    /// Size the store may occupy afterwards, for example 20GiB. Defaults to the
+    /// configured budget.
     #[arg(long, value_name = "SIZE")]
-    max_size: ByteSize,
+    max_size: Option<ByteSize>,
 }
 
 #[derive(Args)]
@@ -61,7 +62,12 @@ pub fn run() -> Result<ExitCode> {
     let config = Config::load()?;
     match cli.command {
         Commands::Build(args) => build(&config, &args.arguments),
-        Commands::Gc(args) => gc(&config, args.max_size.as_u64()).map(|()| ExitCode::SUCCESS),
+        Commands::Gc(args) => gc(
+            &config,
+            args.max_size
+                .map_or(config.gc.max_bytes, |requested| requested.as_u64()),
+        )
+        .map(|()| ExitCode::SUCCESS),
         Commands::Cache(args) => match args.command {
             CacheCommands::Dir => {
                 println!("{}", config.store_dir().display());
@@ -108,7 +114,7 @@ fn build(config: &Config, arguments: &[String]) -> Result<ExitCode> {
         .enable_all()
         .build()?;
 
-    runtime.block_on(async {
+    let status = runtime.block_on(async {
         let session = CacheSession::start(session_dir.path(), config).await?;
         let mut environment = inherited_environment(|name| std::env::var(name).ok(), &working_dir);
         let run = session
@@ -138,7 +144,12 @@ fn build(config: &Config, arguments: &[String]) -> Result<ExitCode> {
             Err(error) => log::warn!("the cache session did not shut down cleanly: {error}"),
         }
         status
-    })
+    });
+    // Outside the runtime, so a walk of the whole store cannot occupy a worker
+    // thread, and after cargo has exited, so it adds nothing to the build the
+    // user is waiting on.
+    sweep_store(config);
+    status
 }
 
 fn run_cargo(
@@ -178,14 +189,46 @@ fn exit_code(status: std::process::ExitStatus) -> ExitCode {
 fn gc(config: &Config, max_bytes: u64) -> Result<()> {
     let store = config.store_dir();
     let outcome = store::gc(&store, max_bytes)?;
-    println!(
+    println!("{}", evictions(&outcome));
+    if outcome.removed_checkout_records > 0 {
+        println!(
+            "dropped {} checkout records whose checkout is gone",
+            outcome.removed_checkout_records
+        );
+    }
+    Ok(())
+}
+
+/// One line describing what a sweep evicted.
+///
+/// Shared so the explicit command and the automatic sweep cannot drift into
+/// describing the same outcome two different ways.
+fn evictions(outcome: &store::GcOutcome) -> String {
+    format!(
         "evicted {} objects and {} action results ({}); {} remain",
         outcome.removed_objects,
         outcome.removed_action_results,
         ByteSize::b(outcome.removed_bytes).display().iec(),
         ByteSize::b(outcome.remaining_bytes).display().iec(),
-    );
-    Ok(())
+    )
+}
+
+/// Keep the store inside its budget, at most once per configured interval.
+///
+/// Reported like the cache summary beside it: a sweep that evicted nothing says
+/// nothing. A sweep that fails is logged and forgotten -- the build is already
+/// over, and its exit status is the build's answer, not the collector's.
+fn sweep_store(config: &Config) {
+    if !config.gc.auto {
+        return;
+    }
+    match store::sweep_if_due(&config.store_dir(), config.gc.max_bytes, config.gc.interval) {
+        Ok(Some(outcome)) if outcome.removed_bytes > 0 => {
+            crate::session::note(&format!("gc: {}", evictions(&outcome)));
+        }
+        Ok(_) => {}
+        Err(error) => log::warn!("the store was not swept: {error}"),
+    }
 }
 
 fn cache_stats(config: &Config) -> Result<()> {
@@ -205,6 +248,10 @@ fn cache_stats(config: &Config) -> Result<()> {
     println!(
         "total: {}",
         ByteSize::b(stats.total_bytes()).display().iec()
+    );
+    println!(
+        "checkouts: {} live, {} gone",
+        stats.live_checkouts, stats.stale_checkouts
     );
     Ok(())
 }
