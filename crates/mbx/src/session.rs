@@ -30,6 +30,7 @@ pub(crate) const VERIFY_ENV: &str = "MBX_VERIFY";
 pub(crate) const WORKSPACE_ROOT_ENV: &str = "MBX_WORKSPACE_ROOT";
 pub(crate) const TARGET_DIR_ENV: &str = "MBX_TARGET_DIR";
 const PREVIOUS_RUSTC_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WRAPPER";
+pub(crate) const BYPASS_LOG_ENV: &str = "MBX_BYPASS_LOG";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const IDENTITY_VERSION: u8 = 1;
 
@@ -784,8 +785,48 @@ fn record_bypass(error: &eyre::Report) {
     let kind = error
         .downcast_ref::<mbx_cache_rustc::BypassReason>()
         .map_or("other", mbx_cache_rustc::BypassReason::kind);
+    append_bypass_log(kind, error);
     // A shim running outside a session has nowhere to report, which is fine.
     let _ = request_agent(&[AgentRequest::RecordBypass { kind: kind.into() }]);
+}
+
+/// Append the full reason to `MBX_BYPASS_LOG`, when one is configured.
+///
+/// The aggregate counts say which kinds dominate; this says exactly which flag
+/// or path caused each one. It exists because stderr cannot be relied on:
+/// cargo swallows the output of its own probe invocations, so some bypasses are
+/// invisible there.
+fn append_bypass_log(kind: &str, error: &eyre::Report) {
+    let Some(path) = std::env::var_os(BYPASS_LOG_ENV).filter(|path| !path.is_empty()) else {
+        return;
+    };
+    // O_APPEND places each write at the end of the file, so one write per
+    // record is what keeps parallel shims from splicing their lines together.
+    // Records are a single short line for that reason: a write the kernel had
+    // to break up could still interleave, and nothing here can prevent it.
+    let line = format!("{kind}\t{error:#}\n");
+    if let Err(problem) = append_line(&path, &line) {
+        // Say so once. This runs per compilation and a destination that cannot
+        // be written now will fail for every later record too, so warning each
+        // time would bury the build in identical lines. Without this the
+        // requested log is simply absent, with nothing explaining why.
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            eprintln!(
+                "mbx warning: {BYPASS_LOG_ENV} was not written ({}): {problem}",
+                Path::new(&path).display()
+            );
+        });
+    }
+}
+
+fn append_line(path: &OsString, line: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(line.as_bytes())
 }
 
 pub(crate) fn request_agent(requests: &[AgentRequest]) -> Result<Vec<AgentResponse>> {
