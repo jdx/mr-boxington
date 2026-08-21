@@ -30,6 +30,7 @@ pub(crate) const VERIFY_ENV: &str = "MBX_VERIFY";
 pub(crate) const WORKSPACE_ROOT_ENV: &str = "MBX_WORKSPACE_ROOT";
 pub(crate) const TARGET_DIR_ENV: &str = "MBX_TARGET_DIR";
 const PREVIOUS_RUSTC_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WRAPPER";
+const BYPASS_LOG_ENV: &str = "MBX_BYPASS_LOG";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const IDENTITY_VERSION: u8 = 1;
 
@@ -784,8 +785,31 @@ fn record_bypass(error: &eyre::Report) {
     let kind = error
         .downcast_ref::<mbx_cache_rustc::BypassReason>()
         .map_or("other", mbx_cache_rustc::BypassReason::kind);
+    append_bypass_log(kind, error);
     // A shim running outside a session has nowhere to report, which is fine.
     let _ = request_agent(&[AgentRequest::RecordBypass { kind: kind.into() }]);
+}
+
+/// Append the full reason to `MBX_BYPASS_LOG`, when one is configured.
+///
+/// The aggregate counts say which kinds dominate; this says exactly which flag
+/// or path caused each one. It exists because stderr cannot be relied on:
+/// cargo swallows the output of its own probe invocations, so some bypasses are
+/// invisible there.
+fn append_bypass_log(kind: &str, error: &eyre::Report) {
+    let Some(path) = std::env::var_os(BYPASS_LOG_ENV).filter(|path| !path.is_empty()) else {
+        return;
+    };
+    // One write per line so parallel shims interleave whole records.
+    let line = format!("{kind}\t{error:#}\n");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write as _;
+        let _ = file.write_all(line.as_bytes());
+    }
 }
 
 pub(crate) fn request_agent(requests: &[AgentRequest]) -> Result<Vec<AgentResponse>> {

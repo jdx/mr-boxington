@@ -660,7 +660,9 @@ impl<'a> Parser<'a> {
 
     fn parse_short(&mut self, value: &str) -> Result<(), BypassReason> {
         match value {
-            "-h" | "-V" => return Err(BypassReason::CompilerQuery),
+            // `-vV` is how cargo and build scripts ask for the verbose
+            // version, so it is a query rather than a flag left unmodeled.
+            "-h" | "-V" | "-vV" => return Err(BypassReason::CompilerQuery),
             "-g" | "-O" | "-v" => {
                 self.parsed.push(Argument::Plain(value.into()));
                 return Ok(());
@@ -1037,6 +1039,16 @@ fn slash_path(path: &Path) -> Result<String, BypassReason> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn verbose_version_is_a_query_not_an_unmodeled_flag() {
+        // cargo runs `rustc -vV` to identify the compiler; reporting it as an
+        // unmodeled flag sends people hunting for a gap that is not there.
+        assert_eq!(
+            RustcInvocation::parse(&args(&["-vV"])).unwrap_err(),
+            BypassReason::CompilerQuery
+        );
+    }
+
     #[test]
     fn bypass_kinds_are_stable_and_field_independent() {
         assert_eq!(BypassReason::CompilerQuery.kind(), "compiler-query");

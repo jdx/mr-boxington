@@ -79,6 +79,7 @@ defaults.
 | `MBX_HTTP_DOWNLOAD_TIMEOUT` | `http.download_timeout` | `10m` | blob downloads |
 | `MBX_HTTP_RETRIES` | `http.retries` | `3` | request retries |
 | `MBX_VERIFY` | — | unset | compile anyway and compare against the cache |
+| `MBX_BYPASS_LOG` | — | unset | append the full reason for every uncached compilation to this file |
 
 ```toml
 # ~/.config/mbx/config.toml
