@@ -43,6 +43,13 @@ const BLOB_PACK_BLOBS_HEADER: &str = "mbx-cache-pack-blobs";
 const BLOB_PACK_BYTES_HEADER: &str = "mbx-cache-pack-bytes";
 const BLOB_PACK_MAGIC: &[u8; 8] = b"MBXPACK1";
 const BLOB_PACK_HEADER_BYTES: u64 = 1 + 32 + 8;
+/// Cap the JSON bodies a remote cache can hand back. Blob downloads are bounded
+/// by the size their digest promises, but action results and manifests carry no
+/// such claim, so without an explicit ceiling a hostile or broken server can
+/// stream until this process runs out of memory -- for manifests, long before
+/// `validate_task_manifest` ever sees the payload. The bound matches the agent's
+/// own request ceiling so both ends of the protocol refuse the same magnitude.
+const MAX_REMOTE_JSON_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_STAGED_BLOB_PACK_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_STAGED_BLOB_PACK_ITEMS: usize = 2 * 1024;
 const BLOB_PACK_TIMEOUT_BYTES_PER_UNIT: u64 = MAX_STAGED_BLOB_PACK_BYTES / 4;
@@ -660,12 +667,8 @@ impl RemoteCacheClient {
             if response.status() == StatusCode::NOT_FOUND {
                 return Ok(None);
             }
-            Ok(Some(
-                response
-                    .error_for_status()?
-                    .json::<RemoteActionResult>()
-                    .await?,
-            ))
+            let bytes = read_bounded_json(response.error_for_status()?, "action result").await?;
+            Ok(Some(serde_json::from_slice::<RemoteActionResult>(&bytes)?))
         })
         .await?;
         if let Some(result) = &result
@@ -716,7 +719,7 @@ impl RemoteCacheClient {
             }
             let response = response.error_for_status()?;
             let etag = parse_strong_etag(response.headers().get(ETAG))?;
-            let bytes = response.bytes().await?.to_vec();
+            let bytes = read_bounded_json(response, "action manifest").await?;
             if blake3::hash(&bytes).to_hex().as_str() != etag {
                 bail!("remote action manifest ETag does not match its body");
             }
@@ -896,6 +899,29 @@ fn blob_pack_download_timeout(base: Duration, digests: &[CacheDigest]) -> Durati
     let item_units = u64::try_from(item_units).unwrap_or(u64::MAX);
     let multiplier = byte_units.max(item_units).max(1);
     base.saturating_mul(u32::try_from(multiplier).unwrap_or(u32::MAX))
+}
+
+/// Buffer a JSON response body, refusing to grow past [`MAX_REMOTE_JSON_BYTES`].
+/// A declared `Content-Length` is rejected up front so an oversized body costs
+/// nothing to refuse; the streaming check then covers servers that understate or
+/// omit it.
+async fn read_bounded_json(response: reqwest::Response, what: &str) -> Result<Vec<u8>> {
+    if let Some(length) = response.content_length()
+        && length > MAX_REMOTE_JSON_BYTES
+    {
+        bail!(
+            "remote cache {what} declared {length} bytes, over the {MAX_REMOTE_JSON_BYTES} byte limit"
+        );
+    }
+    let mut response = response;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len() as u64 + chunk.len() as u64 > MAX_REMOTE_JSON_BYTES {
+            bail!("remote cache {what} exceeded the {MAX_REMOTE_JSON_BYTES} byte limit");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 async fn decode_blob_pack(
@@ -1822,6 +1848,45 @@ mod tests {
                 error
                     .to_string()
                     .contains("exceeded the size of its digest"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_action_json_larger_than_the_limit() {
+        let mut server = mockito::Server::new_async().await;
+        let key = CacheDigest::blake3(b"action");
+        let oversized = vec![b'x'; MAX_REMOTE_JSON_BYTES as usize + 1];
+        for kind in ["action-results", "action-manifests"] {
+            server
+                .mock(
+                    "GET",
+                    format!(
+                        "/v{PROTOCOL_VERSION}/{kind}/{}/{}/{}",
+                        key.algorithm, key.hash, key.size
+                    )
+                    .as_str(),
+                )
+                .with_status(200)
+                // The manifest path parses the ETag before the body, so the
+                // limit only gets its say once a well-formed one is present.
+                .with_header("etag", &format!("\"{}\"", blake3::hash(b"any").to_hex()))
+                .with_body(oversized.clone())
+                .create_async()
+                .await;
+        }
+        let client = test_client(&server);
+
+        // Neither endpoint's body is bounded by a digest, so the limit is the
+        // only thing standing between a hostile server and this process's memory.
+        for error in [
+            client.get_action_result(&key).await.err().unwrap(),
+            client.get_action_manifest(&key).await.err().unwrap(),
+        ] {
+            assert!(
+                error.to_string().contains("over the")
+                    || error.to_string().contains("exceeded the"),
                 "unexpected error: {error}"
             );
         }
