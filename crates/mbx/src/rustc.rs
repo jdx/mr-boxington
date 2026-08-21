@@ -6,7 +6,7 @@ use mbx_cache_core::{
 };
 use mbx_cache_rustc::{
     ActionContext, CompilerIdentity, DiscoveredInputs, PathMapping, RustcAction, RustcDepInfo,
-    RustcInputPrediction, RustcInvocation, RustcOutputs,
+    RustcInputPrediction, RustcInvocation, RustcOutputs, normalize_mapped_path,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -36,21 +36,35 @@ struct StagedOutputs {
 }
 
 pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode> {
-    let invocation = RustcInvocation::parse(arguments)?;
     let working_dir = std::env::current_dir()?;
+    let portable = Portable::detect(&working_dir);
+    let arguments = portable.applied_to(arguments);
+    let invocation = RustcInvocation::parse(&arguments)?;
     let outputs = invocation.outputs(&working_dir)?;
 
     let verify = session::verify_requested();
     let mut verification = None;
     let mut action_lookup_attempted = false;
     if outputs.dep_info.is_file()
-        && let Ok((action, discovered)) =
-            action_from_current_dep_info(rustc, &invocation, &outputs.dep_info, &working_dir)
+        && let Ok((candidates, discovered)) = action_from_current_dep_info(
+            rustc,
+            &invocation,
+            &outputs.dep_info,
+            &working_dir,
+            &portable,
+        )
     {
         action_lookup_attempted = true;
-        match restore_result(&action, &outputs, &discovered, !verify) {
-            Ok(Some(cached)) => {
-                record_prediction(rustc, &invocation, &action, &discovered, &working_dir);
+        match restore_candidates(&candidates, &outputs, &discovered, !verify) {
+            Ok(Some((action, cached))) => {
+                record_prediction(
+                    rustc,
+                    &invocation,
+                    &action,
+                    &discovered,
+                    &working_dir,
+                    &portable,
+                );
                 if verify {
                     verification = Some(cached);
                 } else {
@@ -65,7 +79,14 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
         }
     }
     if !action_lookup_attempted {
-        match restore_predicted_result(rustc, &invocation, &outputs, &working_dir, !verify) {
+        match restore_predicted_result(
+            rustc,
+            &invocation,
+            &outputs,
+            &working_dir,
+            &portable,
+            !verify,
+        ) {
             Ok(Some(cached)) => {
                 if verify {
                     verification = Some(cached);
@@ -83,7 +104,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
 
     let compilation_started = SystemTime::now();
     let output = Command::new(rustc)
-        .args(arguments)
+        .args(&arguments)
         .current_dir(&working_dir)
         .output()
         .wrap_err("failed to execute rustc")?;
@@ -98,14 +119,27 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     }
     if output.status.success() {
         let publication: Result<()> = (|| {
-            let (action, discovered) =
-                action_from_dep_info(rustc, &invocation, &outputs.dep_info, &working_dir)?;
+            let (candidates, discovered) = action_from_dep_info(
+                rustc,
+                &invocation,
+                &outputs.dep_info,
+                &working_dir,
+                &portable,
+            )?;
             discovered.verify_not_modified_since(compilation_started)?;
             discovered.verify()?;
             let mut cacheable_outputs = outputs.files.clone();
             cacheable_outputs.push(outputs.dep_info.clone());
+            let action = candidates.publishable(&portable, &outputs.files)?;
             publish_result(&action.digest, &action.bytes, &cacheable_outputs, &output)?;
-            record_prediction(rustc, &invocation, &action, &discovered, &working_dir);
+            record_prediction(
+                rustc,
+                &invocation,
+                &action.digest,
+                &discovered,
+                &working_dir,
+                &portable,
+            );
             Ok(())
         })();
         if let Err(error) = publication {
@@ -120,11 +154,12 @@ fn restore_predicted_result(
     invocation: &RustcInvocation,
     outputs: &RustcOutputs,
     working_dir: &Path,
+    portable: &Portable,
     restore_outputs: bool,
 ) -> Result<Option<CachedCompilation>> {
     let task = std::env::var(session::BUILD_ENV)
         .wrap_err_with(|| format!("{} is not set", session::BUILD_ENV))?;
-    let mut context = base_action_context(rustc, working_dir)?;
+    let mut context = base_action_context(rustc, working_dir, portable)?;
     let invocation_digest = invocation.invocation_digest(&context)?;
     let responses = session::request_agent(&[AgentRequest::FindActionPrediction {
         task,
@@ -159,12 +194,86 @@ fn restore_predicted_result(
     }
     let discovered = input_prediction.discover(working_dir, &context.path_mappings)?;
     discovered.clone().apply_to(&mut context)?;
-    let action = invocation.action(context)?;
-    let restored = restore_result(&action, outputs, &discovered, restore_outputs)?;
-    if restored.is_some() {
-        record_prediction_value(invocation_digest, action.digest.clone(), prediction.payload);
+    let candidates = ActionCandidates::build(invocation, context)?;
+    let restored = restore_candidates(&candidates, outputs, &discovered, restore_outputs)?;
+    match restored {
+        Some((action, cached)) => {
+            record_prediction_value(invocation_digest, action, prediction.payload);
+            Ok(Some(cached))
+        }
+        None => Ok(None),
     }
-    Ok(restored)
+}
+
+/// The keys one compilation may be published under, most portable first.
+///
+/// A compilation whose environment holds nothing portable has exactly one key,
+/// the literal one, which is what every action looked like before
+/// [`Portable`] existed.
+struct ActionCandidates {
+    /// Normalizes the portable environment values, so two checkouts agree.
+    portable: Option<RustcAction>,
+    /// What the compilation falls back to when an output carries one of those
+    /// values anyway.
+    literal: RustcAction,
+}
+
+impl ActionCandidates {
+    fn build(invocation: &RustcInvocation, context: ActionContext) -> Result<Self> {
+        // Only worth a second key if a portable name is actually an input here.
+        // Crates that never read one keep the key they always had.
+        let applies = context
+            .portable_environment
+            .iter()
+            .any(|name| context.environment.contains_key(name));
+        let literal_context = ActionContext {
+            portable_environment: BTreeSet::new(),
+            ..context.clone()
+        };
+        Ok(Self {
+            portable: applies.then(|| invocation.action(context)).transpose()?,
+            literal: invocation.action(literal_context)?,
+        })
+    }
+
+    /// The key this compilation is published under.
+    ///
+    /// The portable key is only honest if no output carries the value it
+    /// normalized away. `--remap-path-prefix` covers the paths rustc records
+    /// itself, but not one a crate reads through `env!` and keeps as a string,
+    /// and nothing in the inputs distinguishes the two shapes -- so the outputs
+    /// are read.
+    fn publishable(&self, portable: &Portable, outputs: &[PathBuf]) -> Result<&RustcAction> {
+        match &self.portable {
+            Some(action) if portable.outputs_are_clean(outputs)? => Ok(action),
+            _ => Ok(&self.literal),
+        }
+    }
+
+    /// Every key to look up, most portable first.
+    fn ordered(&self) -> impl Iterator<Item = &RustcAction> {
+        self.portable.iter().chain(std::iter::once(&self.literal))
+    }
+}
+
+/// Try each candidate key, returning the digest that hit alongside its result.
+///
+/// Both keys are tried because either shape may be on the other side of the
+/// lookup: a crate that keeps `OUT_DIR` in a string was published literally,
+/// and without the second lookup it would never hit, not even in the checkout
+/// that compiled it.
+fn restore_candidates(
+    candidates: &ActionCandidates,
+    outputs: &RustcOutputs,
+    discovered: &DiscoveredInputs,
+    restore_outputs: bool,
+) -> Result<Option<(CacheDigest, CachedCompilation)>> {
+    for action in candidates.ordered() {
+        if let Some(cached) = restore_result(action, outputs, discovered, restore_outputs)? {
+            return Ok(Some((action.digest.clone(), cached)));
+        }
+    }
+    Ok(None)
 }
 
 fn action_from_dep_info(
@@ -172,9 +281,10 @@ fn action_from_dep_info(
     invocation: &RustcInvocation,
     dep_info: &Path,
     working_dir: &Path,
-) -> Result<(RustcAction, DiscoveredInputs)> {
+    portable: &Portable,
+) -> Result<(ActionCandidates, DiscoveredInputs)> {
     let dep_info = RustcDepInfo::read(dep_info)?;
-    action_from_parsed_dep_info(rustc, invocation, &dep_info, working_dir)
+    action_from_parsed_dep_info(rustc, invocation, &dep_info, working_dir, portable)
 }
 
 fn action_from_current_dep_info(
@@ -182,10 +292,11 @@ fn action_from_current_dep_info(
     invocation: &RustcInvocation,
     dep_info: &Path,
     working_dir: &Path,
-) -> Result<(RustcAction, DiscoveredInputs)> {
+    portable: &Portable,
+) -> Result<(ActionCandidates, DiscoveredInputs)> {
     let dep_info = RustcDepInfo::read(dep_info)?;
     verify_environment(&dep_info.environment)?;
-    action_from_parsed_dep_info(rustc, invocation, &dep_info, working_dir)
+    action_from_parsed_dep_info(rustc, invocation, &dep_info, working_dir, portable)
 }
 
 fn action_from_parsed_dep_info(
@@ -193,20 +304,26 @@ fn action_from_parsed_dep_info(
     invocation: &RustcInvocation,
     dep_info: &RustcDepInfo,
     working_dir: &Path,
-) -> Result<(RustcAction, DiscoveredInputs)> {
+    portable: &Portable,
+) -> Result<(ActionCandidates, DiscoveredInputs)> {
     let discovered = invocation.discover_inputs(dep_info, working_dir)?;
-    let mut context = base_action_context(rustc, working_dir)?;
+    let mut context = base_action_context(rustc, working_dir, portable)?;
     discovered.clone().apply_to(&mut context)?;
-    let action = invocation.action(context)?;
-    Ok((action, discovered))
+    let candidates = ActionCandidates::build(invocation, context)?;
+    Ok((candidates, discovered))
 }
 
-fn base_action_context(rustc: &OsStr, working_dir: &Path) -> Result<ActionContext> {
+fn base_action_context(
+    rustc: &OsStr,
+    working_dir: &Path,
+    portable: &Portable,
+) -> Result<ActionContext> {
     Ok(ActionContext {
         compiler: compiler_identity(rustc)?,
         working_dir: working_dir.to_path_buf(),
-        path_mappings: path_mappings(working_dir),
+        path_mappings: portable.mappings.clone(),
         environment: BTreeMap::new(),
+        portable_environment: portable.names.clone(),
         inputs: Vec::new(),
     })
 }
@@ -214,16 +331,17 @@ fn base_action_context(rustc: &OsStr, working_dir: &Path) -> Result<ActionContex
 fn record_prediction(
     rustc: &OsStr,
     invocation: &RustcInvocation,
-    action: &RustcAction,
+    action: &CacheDigest,
     discovered: &DiscoveredInputs,
     working_dir: &Path,
+    portable: &Portable,
 ) {
     let result = (|| {
-        let context = base_action_context(rustc, working_dir)?;
+        let context = base_action_context(rustc, working_dir, portable)?;
         let invocation_digest = invocation.invocation_digest(&context)?;
         let prediction = invocation.prediction(&context, discovered)?;
         let payload = String::from_utf8(canonical_json(&prediction)?)?;
-        record_prediction_value(invocation_digest, action.digest.clone(), payload);
+        record_prediction_value(invocation_digest, action.clone(), payload);
         Result::<()>::Ok(())
     })();
     if let Err(error) = result {
@@ -655,6 +773,129 @@ fn identity_field<'a>(verbose: &'a str, field: &str) -> Result<&'a str> {
         .ok_or_else(|| eyre::eyre!("rustc identity is missing {field}"))
 }
 
+/// Environment inputs eligible for remapping.
+///
+/// Deliberately just the one. `OUT_DIR` lives under the target directory, so
+/// remapping it confines the change to generated sources, and it is the value
+/// the plan identifies as the cross-checkout shortfall. Widening this list
+/// widens which paths disappear from debug info, which is its own decision.
+const PORTABLE_ENVIRONMENT: &[&str] = &["OUT_DIR"];
+
+/// The environment values whose absolute paths this compilation was made
+/// independent of.
+///
+/// `OUT_DIR` is the one that matters: every crate that includes build-script
+/// output reads it, its value differs per checkout, and keeping it in the key
+/// verbatim is what stops those compilations sharing between checkouts.
+///
+/// Two things must hold before a key may normalize such a value, and this type
+/// is responsible for both. `--remap-path-prefix` makes rustc record the
+/// placeholder instead of the real path, which covers debug info, spans, and
+/// diagnostics -- everything rustc writes itself. It does not cover a value the
+/// crate reads through `env!` and keeps as a string, so the outputs are read
+/// before publishing and the portable key is used only if none carries it.
+struct Portable {
+    /// Path mappings for this compilation, ordered as keys need them.
+    mappings: Vec<PathMapping>,
+    /// Flags appended to the real rustc invocation, one per remapped value.
+    arguments: Vec<OsString>,
+    /// Names whose values an action key may normalize.
+    names: BTreeSet<String>,
+    /// The literal values, for the check before publishing.
+    values: Vec<String>,
+}
+
+impl Portable {
+    fn detect(working_dir: &Path) -> Self {
+        let mut portable = Self {
+            mappings: PathMapping::ordered(&path_mappings(working_dir)),
+            arguments: Vec::new(),
+            names: BTreeSet::new(),
+            values: Vec::new(),
+        };
+        if !session::share_out_dir_requested() {
+            return portable;
+        }
+        for name in PORTABLE_ENVIRONMENT {
+            let Some(value) = std::env::var(name)
+                .ok()
+                .filter(|value| Path::new(value).is_absolute())
+            else {
+                continue;
+            };
+            // A value under no known root is one no key could agree on anyway,
+            // so there is nothing to remap and nothing to promise.
+            let Ok(placeholder) =
+                normalize_mapped_path(Path::new(&value), working_dir, &portable.mappings)
+            else {
+                continue;
+            };
+            let mut flag = OsString::from("--remap-path-prefix=");
+            flag.push(&value);
+            flag.push("=");
+            flag.push(&placeholder);
+            portable.arguments.push(flag);
+            portable.names.insert((*name).to_string());
+            portable.values.push(value);
+        }
+        portable
+    }
+
+    /// The compiler arguments, with the remapping flags appended.
+    fn applied_to(&self, arguments: &[OsString]) -> Vec<OsString> {
+        let mut applied = arguments.to_vec();
+        applied.extend(self.arguments.iter().cloned());
+        applied
+    }
+
+    /// Whether the outputs are free of every value a portable key normalized.
+    ///
+    /// The dep-info file is not one of them: it records absolute input paths by
+    /// construction, and is restored as written for every action that already
+    /// shares across checkouts today. Judging the artifact by it would reject
+    /// every compilation.
+    fn outputs_are_clean(&self, outputs: &[PathBuf]) -> Result<bool> {
+        if self.values.is_empty() {
+            return Ok(false);
+        }
+        for output in outputs {
+            let contents = std::fs::read(output)
+                .wrap_err_with(|| format!("failed to read rustc output {}", output.display()))?;
+            if self.values.iter().any(|value| carries(&contents, value)) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// Whether `contents` holds `value` anywhere, in either separator spelling.
+///
+/// rustc writes paths with the platform separator in some places and forward
+/// slashes in others, and a value missed here becomes a wrong answer rather
+/// than a slow one, so both spellings are searched.
+fn carries(contents: &[u8], value: &str) -> bool {
+    if contains(contents, value.as_bytes()) {
+        return true;
+    }
+    value.contains('\\') && contains(contents, value.replace('\\', "/").as_bytes())
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    let Some((first, rest)) = needle.split_first() else {
+        return false;
+    };
+    let mut offset = 0;
+    while let Some(index) = haystack[offset..].iter().position(|byte| byte == first) {
+        let start = offset + index;
+        if haystack[start + 1..].starts_with(rest) {
+            return true;
+        }
+        offset = start + 1;
+    }
+    false
+}
+
 fn path_mappings(working_dir: &Path) -> Vec<PathMapping> {
     let mut mappings = Vec::new();
     let mut roots = BTreeSet::new();
@@ -907,6 +1148,65 @@ fn exit_code(status: ExitStatus) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn portable_for(values: &[&str]) -> Portable {
+        Portable {
+            mappings: Vec::new(),
+            arguments: Vec::new(),
+            names: values.iter().map(|_| "OUT_DIR".to_string()).collect(),
+            values: values.iter().map(|value| (*value).to_string()).collect(),
+        }
+    }
+
+    /// `--remap-path-prefix` covers the paths rustc writes itself, so most
+    /// artifacts come out clean. A crate that keeps the value as a string does
+    /// not, and that is the case the outputs are read to catch.
+    #[test]
+    fn an_output_carrying_a_normalized_value_is_not_portable() {
+        let root = tempfile::tempdir().unwrap();
+        let out_dir = "/checkout/target/debug/build/widget-abc/out";
+        let clean = root.path().join("clean.rlib");
+        std::fs::write(
+            &clean,
+            b"rustc output naming ${target}/debug/build/widget-abc/out",
+        )
+        .unwrap();
+        let carries = root.path().join("carries.rlib");
+        std::fs::write(&carries, format!("compiled in {out_dir} at some offset")).unwrap();
+
+        let portable = portable_for(&[out_dir]);
+        assert!(
+            portable
+                .outputs_are_clean(std::slice::from_ref(&clean))
+                .unwrap()
+        );
+        assert!(
+            !portable
+                .outputs_are_clean(std::slice::from_ref(&carries))
+                .unwrap()
+        );
+        // One dirty output is enough: the artifact is published as a set.
+        assert!(!portable.outputs_are_clean(&[clean, carries]).unwrap());
+    }
+
+    /// Nothing was made portable, so there is no portable key to publish under
+    /// and no claim to check.
+    #[test]
+    fn nothing_portable_is_never_clean() {
+        assert!(!portable_for(&[]).outputs_are_clean(&[]).unwrap());
+    }
+
+    #[test]
+    fn a_value_is_found_at_any_offset_and_in_either_spelling() {
+        assert!(carries(b"/a/b", "/a/b"));
+        assert!(carries(b"...../a/b.....", "/a/b"));
+        assert!(carries(b"/a/a/b", "/a/b"));
+        assert!(!carries(b"/a/", "/a/b"));
+        assert!(!carries(b"", "/a/b"));
+        // A Windows value may have been written with forward slashes.
+        assert!(carries(b"c:/a/b", "c:\\a\\b"));
+        assert!(!carries(b"c:/a/c", "c:\\a\\b"));
+    }
 
     fn staged_outputs(root: &Path, entries: Vec<(&[u8], PathBuf)>) -> StagedOutputs {
         let directory = tempfile::tempdir_in(root).unwrap();

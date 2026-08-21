@@ -61,7 +61,10 @@ fn build_with(
         // job, so leaving it would make this suite pass locally and fail in CI.
         .env_remove("MBX_INCREMENTAL")
         .env_remove("CARGO_INCREMENTAL")
-        .env_remove("CI");
+        .env_remove("CI")
+        // Same reason: a test asserting the default cross-checkout behaviour
+        // must not read an answer out of the developer's environment.
+        .env_remove("MBX_SHARE_OUT_DIR");
     for (name, value) in settings {
         command.env(name, value);
     }
@@ -203,9 +206,21 @@ fn a_second_checkout_starts_warm() {
     );
 }
 
-/// Write a fixture whose build script generates code, optionally exposing
-/// `OUT_DIR` to the compilation.
-fn write_generated_project(directory: &Path, consume_out_dir: bool) {
+/// How a fixture's library uses its build script's output.
+#[derive(Clone, Copy)]
+enum Generated {
+    /// A cfg only, so the compilation never reads `OUT_DIR`.
+    Cfg,
+    /// Includes the generated file. `OUT_DIR` becomes an input, but only rustc
+    /// records the path, so `--remap-path-prefix` can take it back out.
+    Include,
+    /// Keeps `OUT_DIR` in a string constant. That lands in the artifact itself,
+    /// where no remapping reaches it.
+    Text,
+}
+
+/// Write a fixture whose build script generates code, used as `generated` says.
+fn write_generated_project(directory: &Path, generated: Generated) {
     std::fs::create_dir_all(directory.join("src")).unwrap();
     std::fs::write(
         directory.join("Cargo.toml"),
@@ -217,10 +232,18 @@ fn write_generated_project(directory: &Path, consume_out_dir: bool) {
         "use std::{env, fs, path::PathBuf};\n         fn main() {\n         \u{20}   let out = PathBuf::from(env::var(\"OUT_DIR\").unwrap());\n         \u{20}   fs::write(out.join(\"generated.rs\"), \"pub const VALUE: u32 = 7;\\n\").unwrap();\n         \u{20}   println!(\"cargo:rustc-cfg=generated\");\n         }\n",
     )
     .unwrap();
-    let lib = if consume_out_dir {
-        "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\npub fn value() -> u32 { VALUE }\n"
-    } else {
-        "#[cfg(generated)]\npub fn value() -> u32 { 7 }\n"
+    let lib = match generated {
+        Generated::Cfg => "#[cfg(generated)]\npub fn value() -> u32 { 7 }\n".to_string(),
+        Generated::Include => {
+            "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\npub fn value() -> u32 { VALUE }\n"
+                .to_string()
+        }
+        Generated::Text => {
+            "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\n\
+             pub const WHERE: &str = env!(\"OUT_DIR\");\n\
+             pub fn value() -> u32 { VALUE }\n"
+                .to_string()
+        }
     };
     std::fs::write(directory.join("src/lib.rs"), lib).unwrap();
     let status = Command::new(cargo())
@@ -236,31 +259,57 @@ fn write_generated_project(directory: &Path, consume_out_dir: bool) {
 /// and could bake into the artifact.
 #[test]
 fn out_dir_decides_whether_two_checkouts_share() {
-    for (consume_out_dir, expect_hits) in [(false, true), (true, false)] {
-        let store = tempfile::tempdir().unwrap();
-        let first = tempfile::tempdir().unwrap();
-        let second = tempfile::tempdir().unwrap();
-        let reports = tempfile::tempdir().unwrap();
-        write_generated_project(first.path(), consume_out_dir);
-        write_generated_project(second.path(), consume_out_dir);
-
-        build(
-            first.path(),
-            store.path(),
-            &reports.path().join("first.json"),
-        );
-        let stats = build(
-            second.path(),
-            store.path(),
-            &reports.path().join("second.json"),
-        );
-
+    for (generated, expect_hits) in [(Generated::Cfg, true), (Generated::Include, false)] {
         assert_eq!(
-            count(&stats, "hits") > 0,
+            two_checkouts_share(generated, &[]),
             expect_hits,
-            "consume_out_dir={consume_out_dir} gave {stats}"
+            "the default should not share a compilation that reads OUT_DIR"
         );
     }
+}
+
+/// With sharing on, the compilation is remapped so rustc records the
+/// placeholder instead of the real `OUT_DIR`, and the include-only shape crosses
+/// checkouts. The shape that keeps the value in a string still does not: the
+/// remapping cannot reach into the artifact, and mbx reads the outputs rather
+/// than assuming it can.
+///
+/// The pair is the test. Either half alone would pass for the wrong reason.
+#[test]
+fn sharing_out_dir_crosses_checkouts_only_where_the_artifact_allows_it() {
+    let sharing = [("MBX_SHARE_OUT_DIR", "1")];
+    for (generated, expect_hits) in [(Generated::Include, true), (Generated::Text, false)] {
+        assert_eq!(
+            two_checkouts_share(generated, &sharing),
+            expect_hits,
+            "sharing changed the wrong shape"
+        );
+    }
+}
+
+/// Build the same fixture in two checkouts, reporting whether the second one
+/// reused anything from the first.
+fn two_checkouts_share(generated: Generated, settings: &[(&str, &str)]) -> bool {
+    let store = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_generated_project(first.path(), generated);
+    write_generated_project(second.path(), generated);
+
+    build_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+        settings,
+    );
+    let stats = build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+        settings,
+    );
+    count(&stats, "hits") > 0
 }
 
 #[test]

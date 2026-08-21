@@ -110,13 +110,24 @@ elsewhere entirely.
 
 Environment *values* are a deliberate exception: they enter the key verbatim,
 unmapped. The one that matters is `OUT_DIR`, which every crate that includes
-build-script output consumes, and which differs per checkout. Mapping it would
-lift cross-checkout sharing — measured at 65% of actions on mise — but a crate
-may bake that path into its artifact, and no input distinguishes one that does
-from one that does not. Both fixtures behave identically from the cache's point
-of view, so mapping the value could restore an artifact carrying another
-checkout's path. The conservative choice costs hits; the alternative can be
-wrong.
+build-script output consumes, and which differs per checkout. Mapping it lifts
+cross-checkout sharing — measured at 65% of actions on mise — but a crate may
+bake that path into its artifact, and no *input* distinguishes one that does
+from one that does not.
+
+`MBX_SHARE_OUT_DIR` (off by default) resolves that by not relying on the inputs
+alone. It makes the compilation independent of the value with
+`--remap-path-prefix`, so rustc records the placeholder wherever it records a
+path itself, and then reads the outputs before publishing: a compilation whose
+artifact still carries the value keeps its own checkout's key. Both halves are
+load-bearing. Without the remap the outputs always carry the path, in rmeta and
+in debug info, and nothing shares; without reading the outputs, a crate that
+keeps `env!("OUT_DIR")` in a string constant would be shared wrongly.
+
+What that does not cover is a value a crate derives from `OUT_DIR` instead of
+embedding — its length, or a hash of it. That is why the default stays off, and
+why flipping it is gated on verify-mode qualification over a real workspace
+rather than on the measurement alone.
 
 ### Cache identity
 
@@ -259,6 +270,19 @@ env vars, and wire constants to match `mbx-cache-core` exactly.
   target directory does not have — so the feature is not worth shipping until
   runs can be shared. Either make the run id deterministic per identity, or
   persist predictions as they are recorded instead of at commit.
+- **Default `MBX_SHARE_OUT_DIR` on**, once a verify-mode run over a real
+  workspace has qualified it. Blocked on the verify-mode gap below rather than
+  on the feature itself.
+- **Verify mode across checkouts.** `MBX_VERIFY=1` compares restored outputs to
+  a fresh compilation byte for byte, which a cross-checkout restore of a
+  *workspace member* cannot pass: cargo compiles members in place, so each
+  checkout's artifact records its own source path, and the cache serves one
+  checkout's bytes to the other. That is true today, without
+  `MBX_SHARE_OUT_DIR`, and it is why the canary cannot currently qualify
+  cross-checkout sharing. Remapping `${workspace}` the way `OUT_DIR` is now
+  remapped would fix it, at the cost of every backtrace into your own code
+  naming a placeholder — a much larger change in what a build produces, and its
+  own decision.
 - **Link caching** — cache bin/dylib link outputs (hardest correctness
   surface, deliberately last).
 - **Shared protocol crate** between client and server.
