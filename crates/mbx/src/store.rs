@@ -105,6 +105,11 @@ fn remove(path: &Path) -> Result<bool> {
 
 /// Whether an action result references an object the store no longer has.
 ///
+/// The digests checked here are exactly the ones `LocalActionCache::store`
+/// requires. If the sweep checked fewer, eviction could leave an entry that
+/// cannot be republished -- `store` would reject the identical result for a
+/// missing blob while the index still claimed to hold it.
+///
 /// Only the top-level objects are checked; a result whose output tree lost a
 /// nested object still restores as a miss, which is safe.
 fn action_result_is_dangling(cas: &LocalCas, path: &Path) -> Result<bool> {
@@ -119,9 +124,13 @@ fn action_result_is_dangling(cas: &LocalCas, path: &Path) -> Result<bool> {
     let Ok(result) = serde_json::from_slice::<RemoteActionResult>(&bytes) else {
         return Ok(false);
     };
-    for digest in [result.metadata.as_ref(), result.output_root.as_ref()]
-        .into_iter()
-        .flatten()
+    for digest in [
+        Some(&result.action),
+        result.metadata.as_ref(),
+        result.output_root.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
     {
         // A verification failure leaves the object unusable, same as missing.
         if cas.find(digest).unwrap_or(None).is_none() {
@@ -250,6 +259,32 @@ mod tests {
             }
         );
         assert_eq!(stats(store).unwrap().objects, 1);
+    }
+
+    #[test]
+    fn drops_an_action_result_whose_descriptor_blob_is_gone() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path();
+        let action = store_object(store, b"action key");
+        let output_root = store_object(store, b"output root blob");
+        let result = RemoteActionResult {
+            version: 1,
+            action: action.clone(),
+            metadata: None,
+            output_root: Some(output_root.clone()),
+        };
+        let cache = LocalActionCache::new(store);
+        cache.store(&result).unwrap();
+
+        // Evict only the descriptor blob, leaving the output root in place.
+        std::fs::remove_file(LocalCas::new(store).find(&action).unwrap().unwrap()).unwrap();
+
+        let outcome = gc(store, u64::MAX).unwrap();
+
+        // Left behind, this entry would report a hit that `store` could never
+        // republish, since publication requires the descriptor blob.
+        assert_eq!(outcome.removed_action_results, 1);
+        assert!(cache.find(&action).unwrap().is_none());
     }
 
     #[test]
