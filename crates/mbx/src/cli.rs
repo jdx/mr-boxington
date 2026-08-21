@@ -248,10 +248,31 @@ fn inherited_environment(
 /// move the whole build elsewhere. Inference is kept as a fallback, and costs
 /// only cache hits when it is wrong, since an unmapped path bypasses.
 fn resolve_roots(cargo: &std::ffi::OsStr, arguments: &[String], working_dir: &Path) -> Roots {
+    resolve_roots_with(
+        cargo,
+        arguments,
+        working_dir,
+        std::env::var_os(CARGO_TARGET_DIR_ENV),
+    )
+}
+
+/// The environment name cargo reads for the target directory. It outranks a
+/// config-set `build.target-dir`, so both the probe and the fallback below have
+/// to agree on one value for it.
+const CARGO_TARGET_DIR_ENV: &str = "CARGO_TARGET_DIR";
+
+/// [`resolve_roots`] with the ambient `CARGO_TARGET_DIR` passed in rather than
+/// read here, so a caller can resolve as if the variable were unset.
+fn resolve_roots_with(
+    cargo: &std::ffi::OsStr,
+    arguments: &[String],
+    working_dir: &Path,
+    target_dir_env: Option<std::ffi::OsString>,
+) -> Roots {
     // Everything below inspects cargo's own flags only; the real build still
     // receives the full argument list untouched.
     let arguments = cargo_arguments(arguments);
-    let reported = cargo_roots(cargo, arguments);
+    let reported = cargo_roots(cargo, arguments, target_dir_env.as_deref());
     // `-C` moves the directory cargo resolves relative paths against, so the
     // fallbacks below have to follow it rather than this process's cwd.
     let invocation_dir = invocation_dir(arguments, working_dir);
@@ -264,7 +285,7 @@ fn resolve_roots(cargo: &std::ffi::OsStr, arguments: &[String], working_dir: &Pa
         .map(|value| absolute(&invocation_dir, value))
         .or_else(|| reported.map(|roots| roots.target_dir))
         .or_else(|| {
-            std::env::var_os("CARGO_TARGET_DIR")
+            target_dir_env
                 .map(PathBuf::from)
                 .filter(|dir| !dir.as_os_str().is_empty())
                 .map(|dir| absolute(&invocation_dir, &dir.to_string_lossy()))
@@ -345,8 +366,19 @@ fn invocation_dir(arguments: &[String], working_dir: &Path) -> PathBuf {
         .unwrap_or_else(|| working_dir.to_path_buf())
 }
 
-fn cargo_roots(cargo: &std::ffi::OsStr, arguments: &[String]) -> Option<Roots> {
+fn cargo_roots(
+    cargo: &std::ffi::OsStr,
+    arguments: &[String],
+    target_dir_env: Option<&std::ffi::OsStr>,
+) -> Option<Roots> {
     let mut command = Command::new(cargo);
+    // Say what the probe should see rather than letting it inherit: cargo lets
+    // this variable outrank configuration, so a probe that disagrees with the
+    // caller about it describes a different target directory than the build's.
+    match target_dir_env {
+        Some(dir) => command.env(CARGO_TARGET_DIR_ENV, dir),
+        None => command.env_remove(CARGO_TARGET_DIR_ENV),
+    };
     // Globals come first; cargo rejects them after the subcommand.
     command.args(forwarded_flags(arguments, &PROBE_GLOBAL_FLAGS));
     command.args(["metadata", "--no-deps", "--format-version", "1"]);
@@ -631,13 +663,19 @@ mod tests {
         // Without the override cargo reports the default; with it the probe has
         // to report the same directory the build will write to, or the outputs
         // go unmapped and every action bypasses the cache.
+        //
+        // Both halves resolve as if `CARGO_TARGET_DIR` were unset. Cargo lets
+        // that variable outrank a config-set `build.target-dir`, so leaving the
+        // ambient one in place would make the probe correctly report it instead
+        // of what is under test -- and the test would fail for anyone who
+        // exports it, which plenty of developers do.
         let arguments = [
             "build".to_string(),
             "--offline".to_string(),
             "--manifest-path".to_string(),
             manifest.display().to_string(),
         ];
-        let default = resolve_roots(std::ffi::OsStr::new("cargo"), &arguments, root);
+        let default = resolve_roots_with(std::ffi::OsStr::new("cargo"), &arguments, root, None);
         assert_eq!(default.target_dir, root.join("target"));
 
         let overridden = [
@@ -651,7 +689,7 @@ mod tests {
             ],
         ]
         .concat();
-        let roots = resolve_roots(std::ffi::OsStr::new("cargo"), &overridden, root);
+        let roots = resolve_roots_with(std::ffi::OsStr::new("cargo"), &overridden, root, None);
         assert_eq!(roots.target_dir, configured);
     }
 
