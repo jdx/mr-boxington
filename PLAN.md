@@ -120,7 +120,9 @@ Protocol version stays 1; nothing in the wild speaks the old names.
 - `mbx gc [--max-size <bytes|human>]` — LRU-evict the store to a byte budget.
 - `mbx cache dir` / `mbx cache stats` — store location and contents summary.
 - `mbx setup` — install the persistent standalone shim and wire
-  `build.rustc-wrapper` in `~/.cargo/config.toml`.
+  `build.rustc-wrapper` in `~/.cargo/config.toml`. If that key already names
+  another wrapper, such as sccache, setup reports it and changes nothing:
+  silently displacing a wrapper the user chose is worse than doing nothing.
 - `mbx-rustc` (argv0) — the shim; not invoked by humans.
 
 ## Configuration
