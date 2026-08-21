@@ -70,6 +70,10 @@ pub enum AgentRequest {
         action: CacheDigest,
         restore: RestoreStats,
     },
+    /// A compilation the adapter declined to cache, grouped by reason.
+    RecordBypass {
+        kind: String,
+    },
     RecordActionVerification {
         matched: bool,
         restore: RestoreStats,
@@ -132,6 +136,7 @@ pub enum AgentResponse {
     },
     ActionHitRecorded,
     ActionVerificationRecorded,
+    BypassRecorded,
     ActionStored {
         path: PathBuf,
     },
@@ -148,7 +153,7 @@ pub enum AgentResponse {
 }
 
 /// Aggregate cache activity for one task session.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentStats {
     /// End-to-end lifetime of the task-scoped cache session.
     pub session_duration_ns: u64,
@@ -170,6 +175,8 @@ pub struct AgentStats {
     pub uploaded_bytes: u64,
     /// Complete actions staged before an adapter requested them.
     pub prefetched_actions: u64,
+    /// Compilations that were not cacheable, counted by reason.
+    pub bypasses: BTreeMap<String, u64>,
     /// Number of task manifest requests made to the remote cache.
     pub remote_manifest_lookups: u64,
     /// Cumulative time spent requesting remote task manifests.
@@ -234,6 +241,7 @@ struct AtomicAgentStats {
     prefetch_runs: AtomicU64,
     prefetch_duration_ns: AtomicU64,
     materialization_duration_ns: AtomicU64,
+    bypasses: Mutex<BTreeMap<String, u64>>,
     restored_output_files: AtomicU64,
     restored_output_bytes: AtomicU64,
 }
@@ -690,6 +698,7 @@ impl CacheAgent {
             downloaded_bytes: self.stats.downloaded_bytes.load(Ordering::Relaxed),
             uploaded_bytes: self.stats.uploaded_bytes.load(Ordering::Relaxed),
             prefetched_actions: self.stats.prefetched_actions.load(Ordering::Relaxed),
+            bypasses: self.stats.bypasses.lock().unwrap().clone(),
             remote_manifest_lookups: self.stats.remote_manifest_lookups.load(Ordering::Relaxed),
             remote_manifest_lookup_duration_ns: self
                 .stats
@@ -1376,6 +1385,10 @@ impl CacheAgent {
             AgentRequest::RecordActionHit { action, restore } => {
                 self.record_action_hit(&action, restore)
             }
+            AgentRequest::RecordBypass { kind } => {
+                *self.stats.bypasses.lock().unwrap().entry(kind).or_insert(0) += 1;
+                Ok(AgentResponse::BypassRecorded)
+            }
             AgentRequest::RecordActionVerification { matched, restore } => {
                 self.record_materialization(restore);
                 self.stats.verifications.fetch_add(1, Ordering::Relaxed);
@@ -2003,6 +2016,26 @@ mod tests {
             error.to_string().contains("exceeded"),
             "unexpected error: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn counts_bypasses_by_reason() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+
+        for kind in [
+            "unsupported-crate-type",
+            "unsupported-crate-type",
+            "incremental",
+        ] {
+            agent
+                .respond(AgentRequest::RecordBypass { kind: kind.into() })
+                .await;
+        }
+
+        let stats = agent.stats();
+        assert_eq!(stats.bypasses.get("unsupported-crate-type"), Some(&2));
+        assert_eq!(stats.bypasses.get("incremental"), Some(&1));
     }
 
     #[tokio::test]

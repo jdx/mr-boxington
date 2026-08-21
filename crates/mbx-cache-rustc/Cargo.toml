@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 mbx-cache-core = { path = "../mbx-cache-core", version = "0.0.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
+strum = { version = "0.28", features = ["derive"] }
 thiserror = "2"
 
 [dev-dependencies]
