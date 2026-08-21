@@ -20,8 +20,9 @@ a standalone home. mise will eventually consume mbx and drop its embedded copy.
    reflink/hardlink, and evicts with a byte-budget LRU (`mbx gc`).
 3. **Git worktrees build cold.** Fingerprints embed absolute paths, so a fresh
    worktree rebuilds everything. mbx's action keys use path mapping, so a new
-   worktree is warm from its first build while keeping its own target dir (no
-   cargo lock contention, no incremental-artifact thrashing).
+   worktree starts mostly warm while keeping its own target dir (no cargo lock
+   contention, no incremental-artifact thrashing). Mostly, not entirely: see
+   the note on `OUT_DIR` under path mapping.
 4. **CI caching is coarse.** Tarball-the-target-dir caching is slow,
    size-capped, and all-or-nothing. mbx restores exactly the actions a build
    needs, in batched blob packs, from an ephemeral runner's empty store.
@@ -105,6 +106,16 @@ A path that matches no root bypasses the cache rather than entering a key. The
 roots come from `cargo metadata`, since a target directory can be set by flag,
 environment, or cargo configuration, and `--manifest-path` can move the build
 elsewhere entirely.
+
+Environment *values* are a deliberate exception: they enter the key verbatim,
+unmapped. The one that matters is `OUT_DIR`, which every crate that includes
+build-script output consumes, and which differs per checkout. Mapping it would
+lift cross-checkout sharing — measured at 65% of actions on mise — but a crate
+may bake that path into its artifact, and no input distinguishes one that does
+from one that does not. Both fixtures behave identically from the cache's point
+of view, so mapping the value could restore an artifact carrying another
+checkout's path. The conservative choice costs hits; the alternative can be
+wrong.
 
 ### Cache identity
 

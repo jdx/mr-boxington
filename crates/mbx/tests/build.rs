@@ -78,6 +78,9 @@ fn restores_a_wiped_target_directory_from_the_store() {
         "a cold build should publish its outputs: {cold}"
     );
 
+    // Load-bearing, not cleanup: the wipe is what forces the warm build to
+    // restore from the store. Left in place, cargo would find the cold build's
+    // outputs and the test would pass without exercising the cache at all.
     std::fs::remove_dir_all(project.path().join("target")).unwrap();
 
     let warm = build(
@@ -88,6 +91,12 @@ fn restores_a_wiped_target_directory_from_the_store() {
     assert!(
         count(&warm, "hits") > 0,
         "the rebuilt target directory should be restored: {warm}"
+    );
+    // A hit that never lands on disk is still a broken restore, so check the
+    // artifact itself rather than trusting the counter.
+    assert!(
+        project.path().join("target/debug/libfixture.rlib").exists(),
+        "the restored artifact should be materialized: {warm}"
     );
     assert_eq!(
         count(&warm, "compiler_invocations_avoided"),
@@ -119,6 +128,66 @@ fn a_second_checkout_starts_warm() {
         count(&warm, "hits") > 0,
         "a checkout at another path should reuse the first build: {warm}"
     );
+}
+
+/// Write a fixture whose build script generates code, optionally exposing
+/// `OUT_DIR` to the compilation.
+fn write_generated_project(directory: &Path, consume_out_dir: bool) {
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::write(
+        directory.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n         [lints.rust]\nunexpected_cfgs = { level = \"allow\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("build.rs"),
+        "use std::{env, fs, path::PathBuf};\n         fn main() {\n         \u{20}   let out = PathBuf::from(env::var(\"OUT_DIR\").unwrap());\n         \u{20}   fs::write(out.join(\"generated.rs\"), \"pub const VALUE: u32 = 7;\\n\").unwrap();\n         \u{20}   println!(\"cargo:rustc-cfg=generated\");\n         }\n",
+    )
+    .unwrap();
+    let lib = if consume_out_dir {
+        "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\npub fn value() -> u32 { VALUE }\n"
+    } else {
+        "#[cfg(generated)]\npub fn value() -> u32 { 7 }\n"
+    };
+    std::fs::write(directory.join("src/lib.rs"), lib).unwrap();
+    let status = Command::new(cargo())
+        .current_dir(directory)
+        .args(["generate-lockfile", "--offline"])
+        .status()
+        .expect("cargo should run");
+    assert!(status.success());
+}
+
+/// A build script alone does not stop two checkouts sharing a cache. Consuming
+/// `OUT_DIR` does, because its value is an absolute path the compilation reads
+/// and could bake into the artifact.
+#[test]
+fn out_dir_decides_whether_two_checkouts_share() {
+    for (consume_out_dir, expect_hits) in [(false, true), (true, false)] {
+        let store = tempfile::tempdir().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_generated_project(first.path(), consume_out_dir);
+        write_generated_project(second.path(), consume_out_dir);
+
+        build(
+            first.path(),
+            store.path(),
+            &reports.path().join("first.json"),
+        );
+        let stats = build(
+            second.path(),
+            store.path(),
+            &reports.path().join("second.json"),
+        );
+
+        assert_eq!(
+            count(&stats, "hits") > 0,
+            expect_hits,
+            "consume_out_dir={consume_out_dir} gave {stats}"
+        );
+    }
 }
 
 #[test]
