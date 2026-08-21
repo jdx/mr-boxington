@@ -532,8 +532,9 @@ impl RemoteCacheClient {
                 ) {
                     return Ok(None);
                 }
-                let capabilities: RemoteCacheCapabilities =
-                    response.error_for_status()?.json().await?;
+                let bytes =
+                    read_bounded_json(response.error_for_status()?, "capabilities").await?;
+                let capabilities: RemoteCacheCapabilities = serde_json::from_slice(&bytes)?;
                 if capabilities.protocol.major != PROTOCOL_VERSION {
                     bail!(
                         "remote cache capability protocol {} is incompatible with client protocol {PROTOCOL_VERSION}",
@@ -1851,6 +1852,30 @@ mod tests {
                 "unexpected error: {error}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_capabilities() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", format!("/v{PROTOCOL_VERSION}/capabilities").as_str())
+            .with_status(200)
+            .with_body(vec![b'x'; MAX_REMOTE_JSON_BYTES as usize + 1])
+            .create_async()
+            .await;
+
+        // Negotiation runs before any other request, so an unbounded body here
+        // would exhaust the process before the other limits ever apply.
+        let error = test_client(&server)
+            .blob_pack_limits()
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains("over the") || error.contains("exceeded the"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]
