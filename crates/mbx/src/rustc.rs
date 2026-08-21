@@ -138,11 +138,12 @@ fn restore_predicted_result(
             prediction: Some(prediction),
         } => prediction,
         AgentResponse::ActionPrediction { prediction: None } => {
-            // Nothing supplied a key: no dep-info from an earlier build, and no
-            // prediction to derive one from. This compilation is about to run
-            // without the cache ever being asked, which is not a miss and has
-            // to be counted as its own thing or the summary reads as though the
-            // cache was consulted and came up empty.
+            // No usable action key: either no dep-info from an earlier build or
+            // dep-info that did not yield one, and now no prediction either.
+            // This compilation runs without an action-result lookup ever being
+            // made, which is not a miss and has to be counted as its own thing
+            // or the summary reads as though a lookup happened and found
+            // nothing.
             session::record_unconsulted();
             return Ok(None);
         }

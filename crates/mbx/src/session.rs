@@ -359,7 +359,7 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
         // reads as though the cache was asked and had nothing, rather than that
         // it was never asked. These compilations are still stored afterwards.
         note(&format!(
-            "cache could not look up {} compilations: no dep-info from an earlier build and no prediction to derive a key from",
+            "cache could not look up {} compilations: no usable dep-info from an earlier build and no prediction to derive an action key from",
             stats.unconsulted,
         ));
     }

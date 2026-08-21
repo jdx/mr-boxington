@@ -163,10 +163,11 @@ pub struct AgentStats {
     pub session_duration_ns: u64,
     /// Number of action-result lookups.
     pub lookups: u64,
-    /// Compilations no lookup was possible for, because nothing supplied a key.
+    /// Compilations no action-result lookup was possible for, because no usable
+    /// action key was available.
     ///
     /// Counted separately from a miss, which is a lookup that found nothing.
-    /// Both compile, but only a miss says the cache was asked.
+    /// Both compile, but only a miss says a lookup happened.
     pub unconsulted: u64,
     /// Number of lookups that found a valid local action result.
     pub hits: u64,

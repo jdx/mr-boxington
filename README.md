@@ -66,7 +66,7 @@ activity prints nothing:
 
 ```
 cache: 12 hits, 3 misses, 12 prefetched; 4.1 MiB downloaded, 0 B uploaded, 1.2 MiB stored locally
-cache could not look up 4 compilations: no dep-info from an earlier build and no prediction to derive a key from
+cache could not look up 4 compilations: no usable dep-info from an earlier build and no prediction to derive an action key from
 cache bypassed 7 compilations: 5 unsupported-crate-type, 2 unsupported-search-path
 ```
 
@@ -77,11 +77,12 @@ the cache.
 
 The line above it is the other half of that honesty, and it dominates a genuinely
 cold build. An action key comes from a dep-info file an earlier build left
-behind, or from a prediction recorded by one; with neither, mbx has nothing to
-look up and compiles without asking. Those compilations are stored afterwards,
-so they are not bypasses, and they are not misses either -- a miss is a lookup
-that found nothing. Counting them as neither is what once made a cold build
-report `0 hits, 0 misses` while writing a gigabyte into the store.
+behind, or from a prediction recorded by one. Without a usable key from either
+-- no dep-info at all, or dep-info that does not yield one -- mbx has nothing to
+look up and compiles without making the lookup. Those compilations are stored
+afterwards, so they are not bypasses, and they are not misses either: a miss is
+a lookup that found nothing. Counting them as neither is what once made a cold
+build report `0 hits, 0 misses` while writing a gigabyte into the store.
 
 Store management:
 
