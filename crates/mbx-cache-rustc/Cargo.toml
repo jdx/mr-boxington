@@ -1,6 +1,6 @@
 [package]
 name = "mbx-cache-rustc"
-version = "0.0.0"
+version.workspace = true
 description = "Conservative rustc action analysis and key construction for mbx"
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-mbx-cache-core = { path = "../mbx-cache-core", version = "0.0.0", default-features = false }
+mbx-cache-core = { path = "../mbx-cache-core", version = "0.1.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 strum = { version = "0.28", features = ["derive"] }
 thiserror = "2"
