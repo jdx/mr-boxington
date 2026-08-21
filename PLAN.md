@@ -152,7 +152,9 @@ This client-side check is a convenience, not a boundary — a client can set any
 are what actually enforce who may publish.
 
 Credentials are never sent in the clear: an authenticated remote must be HTTPS,
-with an exception for loopback development servers.
+with an exception for loopback development servers. Redirects are not followed at
+all, so a bearer token or OIDC assertion cannot be forwarded to a host the
+operator did not configure.
 
 ### Concurrency
 
