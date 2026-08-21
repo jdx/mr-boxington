@@ -91,7 +91,7 @@ fn build(config: &Config, arguments: &[String]) -> Result<ExitCode> {
 
     runtime.block_on(async {
         let session = CacheSession::start(session_dir.path(), config).await?;
-        let mut environment = inherited_environment(|name| std::env::var(name).ok());
+        let mut environment = inherited_environment(|name| std::env::var(name).ok(), &working_dir);
         let run = session
             .begin(
                 &roots.workspace_root,
@@ -220,10 +220,23 @@ struct Roots {
 ///
 /// The session records it so the shim can defer to it; without this it would be
 /// dropped silently and whatever it does would stop happening.
-fn inherited_environment(get_env: impl Fn(&str) -> Option<String>) -> BTreeMap<String, String> {
+fn inherited_environment(
+    get_env: impl Fn(&str) -> Option<String>,
+    working_dir: &Path,
+) -> BTreeMap<String, String> {
     let mut environment = BTreeMap::new();
     if let Some(wrapper) = get_env("RUSTC_WRAPPER").filter(|value| !value.is_empty()) {
         environment.insert("RUSTC_WRAPPER".into(), wrapper);
+    }
+    // Cargo gives every shim its own working directory, so a relative
+    // destination would scatter records across crate directories -- or fail
+    // outright in a read-only registry checkout. Resolve it here, against the
+    // directory the user typed it in, like every other path the shim receives.
+    if let Some(log) = get_env(crate::session::BYPASS_LOG_ENV).filter(|value| !value.is_empty()) {
+        environment.insert(
+            crate::session::BYPASS_LOG_ENV.into(),
+            absolute(working_dir, &log).display().to_string(),
+        );
     }
     environment
 }
@@ -474,15 +487,59 @@ mod tests {
 
     #[test]
     fn carries_an_inherited_wrapper_into_the_session() {
-        let with = inherited_environment(|name| {
-            (name == "RUSTC_WRAPPER").then(|| "/usr/bin/sccache".to_string())
-        });
+        let cwd = Path::new("/workspace");
+        let with = inherited_environment(
+            |name| (name == "RUSTC_WRAPPER").then(|| "/usr/bin/sccache".to_string()),
+            cwd,
+        );
         assert_eq!(with.get("RUSTC_WRAPPER").unwrap(), "/usr/bin/sccache");
 
         // An empty value is how a shell unsets it in practice.
-        let empty = inherited_environment(|name| (name == "RUSTC_WRAPPER").then(String::new));
+        let empty = inherited_environment(|name| (name == "RUSTC_WRAPPER").then(String::new), cwd);
         assert!(empty.is_empty());
-        assert!(inherited_environment(|_| None).is_empty());
+        assert!(inherited_environment(|_| None, cwd).is_empty());
+    }
+
+    #[test]
+    fn absolutizes_the_bypass_log_before_the_shims_inherit_it() {
+        let cwd = Path::new("/workspace");
+        let relative = inherited_environment(
+            |name| (name == crate::session::BYPASS_LOG_ENV).then(|| "bypass.log".to_string()),
+            cwd,
+        );
+        // Left relative, each shim would resolve this against whichever crate
+        // directory cargo happened to give it. Compare as paths: the separator
+        // is not the same on every platform.
+        assert_eq!(
+            Path::new(relative.get(crate::session::BYPASS_LOG_ENV).unwrap()),
+            cwd.join("bypass.log")
+        );
+
+        // An absolute destination is passed through untouched. Ask the platform
+        // for one -- a leading slash is not absolute on Windows.
+        let already = std::env::temp_dir().join("bypass.log");
+        assert!(
+            already.is_absolute(),
+            "{} should be absolute",
+            already.display()
+        );
+        let given = already.display().to_string();
+        let absolute_path = inherited_environment(
+            |name| (name == crate::session::BYPASS_LOG_ENV).then(|| given.clone()),
+            cwd,
+        );
+        assert_eq!(
+            Path::new(absolute_path.get(crate::session::BYPASS_LOG_ENV).unwrap()),
+            already
+        );
+
+        assert!(
+            !inherited_environment(
+                |name| (name == crate::session::BYPASS_LOG_ENV).then(String::new),
+                cwd
+            )
+            .contains_key(crate::session::BYPASS_LOG_ENV)
+        );
     }
 
     #[test]
