@@ -40,7 +40,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     let working_dir = std::env::current_dir()?;
     let outputs = invocation.outputs(&working_dir)?;
 
-    let verify = std::env::var_os(session::VERIFY_ENV).is_some();
+    let verify = session::verify_requested();
     let mut verification = None;
     let mut action_lookup_attempted = false;
     if outputs.dep_info.is_file()
@@ -649,13 +649,17 @@ fn identity_field<'a>(verbose: &'a str, field: &str) -> Result<&'a str> {
 fn path_mappings(working_dir: &Path) -> Vec<PathMapping> {
     let mut mappings = Vec::new();
     let mut roots = BTreeSet::new();
-    add_mapping(
-        &mut mappings,
-        &mut roots,
-        working_dir.to_path_buf(),
-        "workspace",
-    );
+    // The target directory comes first, and before the workspace that usually
+    // contains it: output paths are the ones that differ between checkouts, and
+    // mapping them explicitly also keeps keys stable when the target directory
+    // is moved out of the workspace.
+    //
+    // Cargo compiles a dependency with its working directory inside the
+    // registry, not in the workspace, so neither root can be inferred from the
+    // working directory -- the session passes both in.
     for (name, placeholder) in [
+        (session::TARGET_DIR_ENV, "target"),
+        (session::WORKSPACE_ROOT_ENV, "workspace"),
         ("CARGO_HOME", "cargo_home"),
         ("RUSTUP_HOME", "rustup_home"),
         ("HOME", "home"),
@@ -666,6 +670,16 @@ fn path_mappings(working_dir: &Path) -> Vec<PathMapping> {
         {
             add_mapping(&mut mappings, &mut roots, root, placeholder);
         }
+    }
+    // Without a session there is no workspace root to trust, so fall back to
+    // the working directory rather than bypassing every action.
+    if !roots.iter().any(|root| working_dir.starts_with(root)) {
+        add_mapping(
+            &mut mappings,
+            &mut roots,
+            working_dir.to_path_buf(),
+            "workspace",
+        );
     }
     mappings
 }

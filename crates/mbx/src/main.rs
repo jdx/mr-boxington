@@ -7,6 +7,16 @@ fn main() -> ExitCode {
         return mbx::session::run_rustc_shim();
     }
 
-    eprintln!("mbx: the command line is not implemented yet; see PLAN.md");
-    ExitCode::from(1)
+    env_logger::Builder::from_env(env_logger::Env::default().filter_or("MBX_LOG", "info"))
+        .format_target(false)
+        .format_timestamp(None)
+        .init();
+
+    match mbx::cli::run() {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("mbx: {error:#}");
+            ExitCode::FAILURE
+        }
+    }
 }
