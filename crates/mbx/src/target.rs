@@ -58,14 +58,32 @@ pub struct PruneOutcome {
 /// reason not to be clever:
 ///
 /// - the feature is off, which is the default;
+/// - a flag or the environment named the target directory, so moving it would
+///   be overriding the person who said where it goes. This is asked separately
+///   from where the directory actually is, because `--target-dir target` names
+///   the default location and still means the caller chose it -- and cargo
+///   prefers that flag over the `CARGO_TARGET_DIR` placement would set, so
+///   relocating anyway leaves cargo writing one place while the shim maps
+///   another and the build quietly stops using the cache at all;
 /// - the target directory is not the one cargo would have picked by default,
-///   which means a flag, the environment, or a cargo configuration named it,
-///   and moving it would be overriding the person who said where it goes;
+///   which means a cargo configuration named it;
 /// - `<workspace>/target` is a real directory, which is somebody's build
 ///   outputs. Replacing it with a link would strand them, and deleting it is
 ///   not this function's business.
-pub fn place(config: &Config, workspace_root: &Path, target_dir: &Path) -> Option<PathBuf> {
+pub fn place(
+    config: &Config,
+    workspace_root: &Path,
+    target_dir: &Path,
+    requested: bool,
+) -> Option<PathBuf> {
     if !config.target.views {
+        return None;
+    }
+    if requested {
+        log::debug!(
+            "leaving the target directory at {} where it was asked for",
+            target_dir.display()
+        );
         return None;
     }
     if target_dir != workspace_root.join("target") {
@@ -383,7 +401,7 @@ mod tests {
         let config = test_config(directory.path(), true);
         let workspace = checkout(directory.path(), "project");
 
-        let managed = place(&config, &workspace, &workspace.join("target")).unwrap();
+        let managed = place(&config, &workspace, &workspace.join("target"), false).unwrap();
 
         assert!(managed.is_absolute(), "the shim maps only absolute roots");
         assert!(managed.starts_with(views_root(&config.target.root)));
@@ -402,8 +420,8 @@ mod tests {
         let config = test_config(directory.path(), true);
         let workspace = checkout(directory.path(), "project");
 
-        let first = place(&config, &workspace, &workspace.join("target")).unwrap();
-        let second = place(&config, &workspace, &workspace.join("target")).unwrap();
+        let first = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+        let second = place(&config, &workspace, &workspace.join("target"), false).unwrap();
 
         assert_eq!(first, second);
         assert_eq!(stats(&config.target.root).unwrap().views, 1);
@@ -415,8 +433,25 @@ mod tests {
         let config = test_config(directory.path(), false);
         let workspace = checkout(directory.path(), "project");
 
-        assert!(place(&config, &workspace, &workspace.join("target")).is_none());
+        assert!(place(&config, &workspace, &workspace.join("target"), false).is_none());
         assert!(!workspace.join("target").exists());
+    }
+
+    #[test]
+    fn leaves_a_requested_target_directory_alone_even_at_the_default_place() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = test_config(directory.path(), true);
+        let workspace = checkout(directory.path(), "project");
+
+        // `--target-dir target` names the default location and still means the
+        // caller chose it. Cargo prefers that flag over the CARGO_TARGET_DIR
+        // placement would set, so relocating would leave cargo writing one
+        // place while the shim mapped another -- measured as a build that
+        // looked nothing up and stored almost nothing.
+        assert!(place(&config, &workspace, &workspace.join("target"), true).is_none());
+
+        assert!(!workspace.join("target").exists());
+        assert_eq!(stats(&config.target.root).unwrap(), ViewStats::default());
     }
 
     #[test]
@@ -428,7 +463,7 @@ mod tests {
         // A flag, the environment, or a cargo configuration put it here, and
         // that outranks any placement of ours.
         let elsewhere = directory.path().join("chosen");
-        assert!(place(&config, &workspace, &elsewhere).is_none());
+        assert!(place(&config, &workspace, &elsewhere, false).is_none());
         assert_eq!(stats(&config.target.root).unwrap(), ViewStats::default());
     }
 
@@ -441,7 +476,7 @@ mod tests {
         std::fs::create_dir_all(existing.join("debug")).unwrap();
         std::fs::write(existing.join("debug/libfixture.rlib"), b"outputs").unwrap();
 
-        assert!(place(&config, &workspace, &existing).is_none());
+        assert!(place(&config, &workspace, &existing, false).is_none());
 
         assert!(
             existing.join("debug/libfixture.rlib").exists(),
@@ -460,7 +495,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let config = test_config(directory.path(), true);
         let workspace = checkout(directory.path(), "project");
-        let managed = place(&config, &workspace, &workspace.join("target")).unwrap();
+        let managed = place(&config, &workspace, &workspace.join("target"), false).unwrap();
         std::fs::write(managed.join("artifact"), b"outputs").unwrap();
 
         // Somebody replaced the link with a directory of their own. The
@@ -470,7 +505,7 @@ mod tests {
         remove_link(&workspace.join("target")).unwrap();
         std::fs::create_dir_all(workspace.join("target")).unwrap();
 
-        assert!(place(&config, &workspace, &workspace.join("target")).is_none());
+        assert!(place(&config, &workspace, &workspace.join("target"), false).is_none());
 
         assert_eq!(stats(&config.target.root).unwrap().views, 1);
         assert!(managed.join("artifact").exists());
@@ -489,8 +524,8 @@ mod tests {
         let gone = checkout(directory.path(), "gone");
         let staying = checkout(directory.path(), "staying");
 
-        let removed = place(&config, &gone, &gone.join("target")).unwrap();
-        let kept = place(&config, &staying, &staying.join("target")).unwrap();
+        let removed = place(&config, &gone, &gone.join("target"), false).unwrap();
+        let kept = place(&config, &staying, &staying.join("target"), false).unwrap();
         std::fs::write(removed.join("artifact"), vec![0_u8; 512]).unwrap();
         std::fs::write(kept.join("artifact"), vec![0_u8; 256]).unwrap();
         std::fs::remove_dir_all(&gone).unwrap();
@@ -514,7 +549,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let config = test_config(directory.path(), true);
         let workspace = checkout(directory.path(), "project");
-        let managed = place(&config, &workspace, &workspace.join("target")).unwrap();
+        let managed = place(&config, &workspace, &workspace.join("target"), false).unwrap();
         std::fs::write(managed.join("artifact"), b"outputs").unwrap();
 
         let outcome = prune(&config.target.root).unwrap();
@@ -528,7 +563,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let config = test_config(directory.path(), true);
         let workspace = checkout(directory.path(), "project");
-        let managed = place(&config, &workspace, &workspace.join("target")).unwrap();
+        let managed = place(&config, &workspace, &workspace.join("target"), false).unwrap();
         std::fs::remove_dir_all(&workspace).unwrap();
         // `cargo clean` cannot reach the record, but a corrupt one still must
         // not turn into a licence to delete a directory full of outputs.
