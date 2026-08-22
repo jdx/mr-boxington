@@ -86,26 +86,51 @@ pub fn place(config: &Config, workspace_root: &Path, target_dir: &Path) -> Optio
         );
         return None;
     }
+    // The link is what decides whether placement happens at all, so it goes
+    // first and nothing is written until it is in place. A refusal has to leave
+    // no trace: an unused directory and record would be counted and reported
+    // for a checkout nothing manages, and worse, a refusal must not disturb a
+    // record an earlier placement wrote -- the directory that one names may be
+    // full of outputs, and the record is the only thing that can trace it.
+    let link = match link_view(target_dir, &managed) {
+        Ok(link) => link,
+        Err(error) => {
+            log::warn!("{error}");
+            return None;
+        }
+    };
+    // Recorded before the directory exists, so a directory can never exist that
+    // `prune` has no way to see.
+    if let Err(error) = record_view(&config.target.root, workspace_root) {
+        log::warn!("the managed target directory was not recorded: {error}");
+        if matches!(link, Link::Created) {
+            // Undo this call's own link and nothing else. Left behind it would
+            // redirect every later build into a directory no record names.
+            if let Err(error) = remove_link(target_dir) {
+                log::warn!(
+                    "the unused link {} was not removed: {error}",
+                    target_dir.display()
+                );
+            }
+        }
+        return None;
+    }
+    // Cargo would create this itself on the way to writing in it. Doing it here
+    // keeps the link from dangling in the meantime, which is what someone
+    // listing the workspace would see.
     if let Err(error) = std::fs::create_dir_all(&managed) {
         log::warn!(
             "the managed target directory {} was not created: {error}",
             managed.display()
         );
-        return None;
     }
-    if let Err(error) = record_view(&config.target.root, workspace_root) {
-        // Without the record the directory cannot be collected later, which is
-        // the entire point of managing it.
-        log::warn!("the managed target directory was not recorded: {error}");
-        return None;
-    }
-    match link_view(target_dir, &managed) {
-        Ok(()) => Some(managed),
-        Err(error) => {
-            log::warn!("{error}");
-            None
-        }
-    }
+    Some(managed)
+}
+
+/// Whether a link had to be made, or was already pointing the right way.
+enum Link {
+    Existing,
+    Created,
 }
 
 /// Point `target_dir` at `managed` so the paths people type keep working.
@@ -115,11 +140,11 @@ pub fn place(config: &Config, workspace_root: &Path, target_dir: &Path) -> Optio
 /// already there, and Windows only allows a symlink to be created by a
 /// privileged or developer-mode process, where the honest answer is to leave
 /// the outputs where cargo would have put them.
-fn link_view(target_dir: &Path, managed: &Path) -> Result<()> {
+fn link_view(target_dir: &Path, managed: &Path) -> Result<Link> {
     match std::fs::read_link(target_dir) {
         // Already pointing where it should. Re-linking would race a concurrent
         // build for no gain.
-        Ok(existing) if existing == managed => return Ok(()),
+        Ok(existing) if existing == managed => return Ok(Link::Existing),
         Ok(existing) => {
             eyre::bail!(
                 "{} already links to {}, so it was left alone",
@@ -135,12 +160,29 @@ fn link_view(target_dir: &Path, managed: &Path) -> Result<()> {
         }
         Err(_) => {}
     }
-    symlink_dir(managed, target_dir).wrap_err_with(|| {
-        format!(
-            "could not link {} to a managed target directory",
-            target_dir.display()
-        )
-    })
+    symlink_dir(managed, target_dir)
+        .map(|()| Link::Created)
+        .wrap_err_with(|| {
+            format!(
+                "could not link {} to a managed target directory",
+                target_dir.display()
+            )
+        })
+}
+
+/// Unlink a directory symlink without following it.
+///
+/// Windows unlinks one with `remove_dir` -- it removes the link, never what the
+/// link points at -- while `remove_file` refuses. Unix is the other way round.
+fn remove_link(path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        std::fs::remove_dir(path)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::remove_file(path)
+    }
 }
 
 #[cfg(unix)]
@@ -404,6 +446,39 @@ mod tests {
         assert!(
             existing.join("debug/libfixture.rlib").exists(),
             "somebody's build outputs are not ours to move or delete"
+        );
+        assert_eq!(
+            stats(&config.target.root).unwrap(),
+            ViewStats::default(),
+            "a refusal that leaves a directory and a record behind would report \
+             a managed target directory for a checkout nothing manages"
+        );
+    }
+
+    #[test]
+    fn a_refusal_leaves_an_earlier_placement_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = test_config(directory.path(), true);
+        let workspace = checkout(directory.path(), "project");
+        let managed = place(&config, &workspace, &workspace.join("target")).unwrap();
+        std::fs::write(managed.join("artifact"), b"outputs").unwrap();
+
+        // Somebody replaced the link with a directory of their own. The
+        // placement already on disk still owns a full target directory, and
+        // dropping its record would leave that directory untraceable -- which
+        // means never collected.
+        remove_link(&workspace.join("target")).unwrap();
+        std::fs::create_dir_all(workspace.join("target")).unwrap();
+
+        assert!(place(&config, &workspace, &workspace.join("target")).is_none());
+
+        assert_eq!(stats(&config.target.root).unwrap().views, 1);
+        assert!(managed.join("artifact").exists());
+        std::fs::remove_dir_all(&workspace).unwrap();
+        assert_eq!(
+            prune(&config.target.root).unwrap().removed_views,
+            1,
+            "the earlier placement must still be collectable"
         );
     }
 
