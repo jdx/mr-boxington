@@ -17,9 +17,14 @@ hex = "0.4"
 log = "0.4"
 rand = "0.10"
 reflink-copy = "0.1"
+async-compression = { version = "0.4", default-features = false, features = [
+  "tokio",
+  "zstd",
+] }
 reqwest = { version = "0.13", default-features = false, features = [
   "json",
   "stream",
+  "zstd",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -33,6 +38,7 @@ url = "2"
 
 [dev-dependencies]
 mockito = "1"
+zstd = "0.13"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
 
 [features]
