@@ -249,8 +249,12 @@ fn scan_checkouts(store: &Path) -> Result<CheckoutScan> {
     for entry in listing {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        // Anything that is not an identity was not written by mbx.
-        if !is_task_identity(&name) {
+        // Anything that is not a directory named for an identity was not written
+        // by mbx. Both halves matter: `walk_files` tolerates only a missing
+        // directory, so a plain file whose name happens to look like an identity
+        // would fail the whole scan -- and that scan runs inside every sweep,
+        // including the automatic one after a build.
+        if !is_task_identity(&name) || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
             continue;
         }
         for record in walk_files(&entry.path())? {
@@ -935,6 +939,25 @@ mod tests {
             LocalCas::new(&store).find(&orphan).unwrap().is_none(),
             "an expired claim roots nothing"
         );
+    }
+
+    #[test]
+    fn ignores_what_it_did_not_write_beside_the_checkout_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path().join("store");
+        let checkout = directory.path().join("project");
+        std::fs::create_dir_all(&checkout).unwrap();
+        record_checkout(&store, &"3".repeat(64), &checkout, &checkout.join("target")).unwrap();
+
+        // A plain file whose name reads like an identity used to fail the scan,
+        // and with it every sweep and every `cache stats`.
+        let intruder = store.join(CHECKOUTS_DIR).join("4".repeat(64));
+        std::fs::write(&intruder, b"not a directory of records").unwrap();
+        std::fs::write(store.join(CHECKOUTS_DIR).join("notes.txt"), b"nor this").unwrap();
+
+        assert_eq!(stats(&store).unwrap().live_checkouts, 1);
+        assert_eq!(gc(&store, u64::MAX).unwrap().removed_checkout_records, 0);
+        assert!(intruder.exists(), "and nothing of theirs is deleted either");
     }
 
     #[test]

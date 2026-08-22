@@ -98,16 +98,18 @@ mbx gc --max-size 20GiB
 A build sweeps the store itself when one is due -- at most once per
 `MBX_GC_INTERVAL`, and only reporting when it evicted something:
 
-```
+```text
 gc: evicted 128 objects and 3 action results (1.2 GiB); 18.9 GiB remain
 ```
 
-A store inside its budget is never touched. When one is over budget, the
-objects that go first are the ones no checkout on disk still needs: `mbx build`
-records the checkout it ran in, and a checkout that has been deleted stops
-protecting what only it used. Worktrees of one `Cargo.lock` share their cached
-compilations, so removing one of those releases nothing while a sibling remains
--- the sibling genuinely still needs them.
+A store inside its budget loses no cached compilations; a sweep that finds one
+there still tidies its own bookkeeping, dropping the records of checkouts that
+have gone. When a store is over budget, the objects that go first are the ones
+no checkout on disk still needs: `mbx build` records the checkout it ran in, and
+a checkout that has been deleted stops protecting what only it used. Worktrees
+of one `Cargo.lock` share their cached compilations, so removing one of those
+releases nothing while a sibling remains -- the sibling genuinely still needs
+them.
 
 Evicting an object that is still in use costs a recompile and nothing else, so
 `gc` is always safe to run.
