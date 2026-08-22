@@ -41,6 +41,10 @@ pub struct StoreStats {
     pub action_results: u64,
     pub action_result_bytes: u64,
     pub live_checkouts: u64,
+    /// Claims that root nothing any more: a checkout that is gone, or one that
+    /// is still there but has not renewed this claim inside the retention
+    /// window. Reported as stale rather than gone because those are different
+    /// things and only one of them means the directory is missing.
     pub stale_checkouts: u64,
 }
 
@@ -288,20 +292,23 @@ fn claim_has_expired(record: &CheckoutRecord) -> bool {
 
 /// Whether the checkout a record names is still on disk.
 ///
-/// Absence is believed only when the checkout's parent directory is still
-/// there. Deleting a worktree, or a whole project directory, leaves the parent
-/// behind; a volume being ejected or a network mount going away takes several
-/// levels with it, and that is the case worth being careful about -- a
-/// temporarily absent mount must not un-root a checkout that is really there.
-/// An error counts as present for the same reason. Being wrong in this
-/// direction only delays collection; the other way round throws away a warm
-/// cache someone is still using.
+/// Absence is believed only when the checkout is definitely absent *and* its
+/// parent directory is definitely still there. Deleting a worktree, or a whole
+/// project directory, leaves the parent behind; a volume being ejected or a
+/// network mount going away takes several levels with it, and that is the case
+/// worth being careful about -- a temporarily absent mount must not un-root a
+/// checkout that is really there.
+///
+/// So both questions are asked the same way: only a definite answer counts, and
+/// an error at either step means live. Being wrong in that direction only
+/// delays collection; the other way round throws away a warm cache someone is
+/// still using.
 fn checkout_is_live(workspace_root: &Path) -> bool {
-    if workspace_root.try_exists().unwrap_or(true) {
+    if !matches!(workspace_root.try_exists(), Ok(false)) {
         return true;
     }
     match workspace_root.parent() {
-        Some(parent) => !parent.try_exists().unwrap_or(true),
+        Some(parent) => !matches!(parent.try_exists(), Ok(true)),
         // A root directory has no parent to corroborate anything with.
         None => true,
     }
@@ -859,7 +866,9 @@ mod tests {
 
         assert_eq!(stats(&store).unwrap().live_checkouts, 1);
         std::fs::remove_dir_all(&gone).unwrap();
-        assert_eq!(stats(&store).unwrap().stale_checkouts, 1);
+        let after = stats(&store).unwrap();
+        assert_eq!(after.stale_checkouts, 1);
+        assert_eq!(after.live_checkouts, 0);
 
         let outcome = gc(&store, u64::MAX).unwrap();
 
@@ -926,6 +935,27 @@ mod tests {
             LocalCas::new(&store).find(&orphan).unwrap().is_none(),
             "an expired claim roots nothing"
         );
+    }
+
+    #[test]
+    fn keeps_a_checkout_whose_absence_it_cannot_corroborate() {
+        let directory = tempfile::tempdir().unwrap();
+
+        // A checkout that is gone from a parent that is still there is the one
+        // case worth believing: that is what deleting a worktree looks like.
+        let parent = directory.path().join("worktrees");
+        std::fs::create_dir_all(&parent).unwrap();
+        assert!(!checkout_is_live(&parent.join("removed")));
+
+        // A checkout whose parent went with it looks like an ejected volume or a
+        // mount that is temporarily away, and un-rooting those would throw away
+        // a cache somebody is still using.
+        assert!(checkout_is_live(
+            &directory.path().join("gone/deeper/still")
+        ));
+
+        // And anything still on disk is live whatever its parent says.
+        assert!(checkout_is_live(directory.path()));
     }
 
     #[test]

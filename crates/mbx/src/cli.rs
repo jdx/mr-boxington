@@ -192,7 +192,7 @@ fn gc(config: &Config, max_bytes: u64) -> Result<()> {
     println!("{}", evictions(&outcome));
     if outcome.removed_checkout_records > 0 {
         println!(
-            "dropped {} checkout records whose checkout is gone",
+            "dropped {} stale checkout records",
             outcome.removed_checkout_records
         );
     }
@@ -250,7 +250,7 @@ fn cache_stats(config: &Config) -> Result<()> {
         ByteSize::b(stats.total_bytes()).display().iec()
     );
     println!(
-        "checkouts: {} live, {} gone",
+        "checkouts: {} live, {} stale",
         stats.live_checkouts, stats.stale_checkouts
     );
     Ok(())
