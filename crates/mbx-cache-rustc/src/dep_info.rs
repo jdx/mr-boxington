@@ -569,6 +569,7 @@ mod tests {
             working_dir: root.to_path_buf(),
             path_mappings: vec![crate::PathMapping::new(root, "workspace")],
             environment: BTreeMap::new(),
+            portable_environment: BTreeSet::new(),
             inputs: Vec::new(),
         };
         discovered.clone().apply_to(&mut context).unwrap();

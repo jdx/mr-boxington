@@ -109,6 +109,7 @@ defaults.
 | `MBX_REMOTE_TOKEN_FILE` | `remote.token_file` | unset | token read from a file |
 | `MBX_REMOTE_OIDC_AUDIENCE` | `remote.oidc_audience` | unset | CI OIDC audience |
 | `MBX_REMOTE_MODE` | `remote.mode` | `read-write` | or `read-only`, `write-only` |
+| `MBX_SHARE_OUT_DIR` | `share_out_dir` | off | share compilations that read `OUT_DIR` |
 | `MBX_STATS_REPORT` | `stats_report` | unset | write a JSON report here |
 | `MBX_INCREMENTAL` | `incremental` | off | let cargo compile workspace members incrementally |
 | `MBX_HTTP_TIMEOUT` | `http.timeout` | `30s` | connect and read timeout |
@@ -174,14 +175,30 @@ Not yet:
   across the many rustc processes cargo spawns, so `build.rustc-wrapper` and an
   `mbx setup` command are waiting on that. Use `mbx build`.
 - **A crate whose compilation consumes `OUT_DIR` does not share across
-  checkouts.** That covers any crate with a build script that generates code
-  included via `include!(concat!(env!("OUT_DIR"), …))`. `OUT_DIR` is an absolute
-  path and an input to the compilation, so two checkouts produce different keys.
-  This is deliberate rather than an oversight: a crate is free to bake that path
-  into its artifact, and nothing in the inputs distinguishes one that does from
-  one that does not, so treating the value as interchangeable could hand you an
-  artifact containing another checkout's path. Crates whose build scripts only
-  emit cfgs or link directives share normally.
+  checkouts by default.** That covers any crate with a build script that
+  generates code included via `include!(concat!(env!("OUT_DIR"), …))`. `OUT_DIR`
+  is an absolute path and an input to the compilation, so two checkouts produce
+  different keys. Crates whose build scripts only emit cfgs or link directives
+  share normally.
+
+  `MBX_SHARE_OUT_DIR=1` lifts this. It does two things, and needs both:
+  it passes `--remap-path-prefix` so rustc records the cache placeholder rather
+  than the real path — which covers debug info, spans, and diagnostics — and
+  then, before publishing, it reads the outputs and only uses the shared key if
+  none of them carries the value anyway. The second half is not redundant: a
+  crate that keeps `env!("OUT_DIR")` in a string constant puts the real path in
+  its artifact, where no remapping reaches it, and such a compilation stays
+  keyed to its own checkout.
+
+  The cost is that generated sources appear in debug info as
+  `${target}/debug/build/…` instead of a path a debugger can open, which is why
+  this is opt-in. The residual gap is a value a crate *derives* from `OUT_DIR`
+  rather than embedding — its length, say, or a hash of it. Reading the outputs
+  cannot see that, so it is not covered.
+
+  On this repository's own dependency graph (285 crates), a second checkout hit
+  139 of the 147 compilations it looked up by default, and all 147 with the
+  option on.
 - **Linking is not cached**, so binaries and dylibs always link.
 - **Incremental compilation is off by default** inside `mbx build`. Cargo builds
   dependencies non-incrementally anyway, which is where the cache earns its

@@ -19,6 +19,7 @@ struct ConfigFile {
     cache_dir: Option<PathBuf>,
     stats_report: Option<PathBuf>,
     incremental: Option<bool>,
+    share_out_dir: Option<bool>,
     remote: RemoteFile,
     http: HttpFile,
 }
@@ -50,6 +51,12 @@ pub struct Config {
     /// Let cargo compile workspace members incrementally, rather than forcing
     /// `CARGO_INCREMENTAL=0` for the whole build.
     pub incremental: bool,
+    /// Let a compilation that reads `OUT_DIR` be shared between checkouts.
+    ///
+    /// Off by default: it changes the compilation, remapping the generated
+    /// sources out of debug info, and its safety rests on reading the outputs
+    /// rather than on the inputs alone.
+    pub share_out_dir: bool,
     pub remote: RemoteSettings,
     pub http: HttpSettings,
 }
@@ -132,6 +139,10 @@ impl Config {
                 // there turns off what the file turned on.
                 Some(value) => enabled(&value),
                 None => file.incremental.unwrap_or(false),
+            },
+            share_out_dir: match get_env("MBX_SHARE_OUT_DIR") {
+                Some(value) => enabled(&value),
+                None => file.share_out_dir.unwrap_or(false),
             },
             remote: RemoteSettings {
                 url: get_env("MBX_REMOTE_URL").or(file.remote.url),

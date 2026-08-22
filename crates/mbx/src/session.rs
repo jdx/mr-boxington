@@ -27,6 +27,7 @@ const SOCKET_ENV: &str = "MBX_SOCKET";
 pub(crate) const STAGING_ENV: &str = "MBX_STAGING_DIR";
 pub(crate) const BUILD_ENV: &str = "MBX_BUILD";
 pub(crate) const VERIFY_ENV: &str = "MBX_VERIFY";
+pub(crate) const SHARE_OUT_DIR_ENV: &str = "MBX_SHARE_OUT_DIR";
 pub(crate) const WORKSPACE_ROOT_ENV: &str = "MBX_WORKSPACE_ROOT";
 pub(crate) const TARGET_DIR_ENV: &str = "MBX_TARGET_DIR";
 const PREVIOUS_RUSTC_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WRAPPER";
@@ -41,6 +42,7 @@ pub struct CacheSession {
     staging: PathBuf,
     verify: bool,
     incremental: bool,
+    share_out_dir: bool,
     agent: CacheAgent,
     started: Instant,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
@@ -70,6 +72,7 @@ impl CacheSession {
             staging,
             verify: config.verify,
             incremental: config.incremental,
+            share_out_dir: config.share_out_dir,
             agent,
             started: Instant::now(),
             shutdown: Mutex::new(Some(shutdown_tx)),
@@ -127,6 +130,10 @@ impl CacheSession {
         environment.insert(
             VERIFY_ENV.into(),
             if self.verify { "1" } else { "0" }.into(),
+        );
+        environment.insert(
+            SHARE_OUT_DIR_ENV.into(),
+            if self.share_out_dir { "1" } else { "0" }.into(),
         );
         if let Some(previous) = environment.insert("RUSTC_WRAPPER".into(), shim.clone())
             && previous != shim
@@ -799,6 +806,12 @@ pub(crate) fn verify_requested() -> bool {
     std::env::var_os(VERIFY_ENV).is_some_and(|value| !value.is_empty() && value != "0")
 }
 
+/// Whether the shim may make a compilation independent of its `OUT_DIR` so two
+/// checkouts can share it. Read the same way as verify mode.
+pub(crate) fn share_out_dir_requested() -> bool {
+    std::env::var_os(SHARE_OUT_DIR_ENV).is_some_and(|value| !value.is_empty() && value != "0")
+}
+
 /// Tell the session that this compilation was not cacheable.
 ///
 /// Bypasses never reach the agent otherwise, so without this they are invisible
@@ -989,6 +1002,7 @@ mod tests {
             stats_report: None,
             verify: false,
             incremental: false,
+            share_out_dir: false,
             remote: Default::default(),
             http: Default::default(),
         }

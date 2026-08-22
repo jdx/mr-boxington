@@ -336,6 +336,44 @@ impl PathMapping {
             placeholder: placeholder.into(),
         }
     }
+
+    /// Order mappings deepest root first, which is what normalization needs:
+    /// a target directory inside the workspace has to win over the workspace.
+    pub fn ordered(mappings: &[PathMapping]) -> Vec<PathMapping> {
+        let mut ordered = mappings.to_vec();
+        ordered.sort_by_key(|mapping| std::cmp::Reverse(mapping.root.components().count()));
+        ordered
+    }
+}
+
+/// Map an absolute path to its cache-key placeholder form.
+///
+/// `mappings` must already be ordered by [`PathMapping::ordered`]. Exposed for
+/// callers that need the placeholder text before an action exists -- notably to
+/// build the `--remap-path-prefix` flag that makes a compilation independent of
+/// a path in its environment.
+pub fn normalize_mapped_path(
+    path: &Path,
+    working_dir: &Path,
+    mappings: &[PathMapping],
+) -> Result<String, BypassReason> {
+    let absolute = if path.is_absolute() {
+        normalize_components(path)
+    } else {
+        normalize_components(&working_dir.join(path))
+    };
+    for mapping in mappings {
+        let root = normalize_components(&mapping.root);
+        if let Ok(relative) = absolute.strip_prefix(&root) {
+            let suffix = slash_path(relative)?;
+            return Ok(if suffix.is_empty() {
+                format!("${{{}}}", mapping.placeholder)
+            } else {
+                format!("${{{}}}/{suffix}", mapping.placeholder)
+            });
+        }
+    }
+    Err(BypassReason::UnmappedAbsolutePath(absolute))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -357,6 +395,13 @@ pub struct ActionContext {
     pub working_dir: PathBuf,
     pub path_mappings: Vec<PathMapping>,
     pub environment: BTreeMap<String, Option<String>>,
+    /// Environment inputs whose absolute values the compilation has been made
+    /// independent of, and whose values the key therefore normalizes.
+    ///
+    /// Naming one here is a claim about the compilation, not a preference: the
+    /// caller must both neutralize the value inside it (with
+    /// `--remap-path-prefix`) and confirm no output carries the value anyway.
+    pub portable_environment: BTreeSet<String>,
     pub inputs: Vec<ActionInput>,
 }
 
@@ -803,9 +848,7 @@ struct ActionBuilder<'a> {
 
 impl<'a> ActionBuilder<'a> {
     fn new(invocation: &'a RustcInvocation, mut context: ActionContext) -> Self {
-        context
-            .path_mappings
-            .sort_by_key(|mapping| std::cmp::Reverse(mapping.root.components().count()));
+        context.path_mappings = PathMapping::ordered(&context.path_mappings);
         Self {
             invocation,
             mappings: context.path_mappings.clone(),
@@ -816,9 +859,7 @@ impl<'a> ActionBuilder<'a> {
     fn build(self) -> Result<RustcAction, BypassReason> {
         self.validate_mappings()?;
         let invocation = self.invocation_descriptor()?;
-        // rustc may embed these values verbatim through `env!`; unlike paths
-        // used to locate inputs and outputs, changing them changes the artifact.
-        let environment = self.context.environment.clone();
+        let environment = self.environment_descriptor()?;
 
         let mut inputs = BTreeMap::<String, CacheDigest>::new();
         for input in &self.context.inputs {
@@ -952,24 +993,30 @@ impl<'a> ActionBuilder<'a> {
         }
     }
 
+    /// Environment values enter the key verbatim, because rustc may embed one
+    /// through `env!`: unlike a path used to locate an input, changing the value
+    /// changes the artifact.
+    ///
+    /// A name in `portable_environment` is the exception the caller has earned.
+    /// Its value normalizes like any other path, so two checkouts agree on it.
+    fn environment_descriptor(&self) -> Result<BTreeMap<String, Option<String>>, BypassReason> {
+        self.context
+            .environment
+            .iter()
+            .map(|(name, value)| {
+                let value = match value {
+                    Some(value) if self.context.portable_environment.contains(name) => {
+                        Some(self.normalize_path(Path::new(value))?)
+                    }
+                    value => value.clone(),
+                };
+                Ok((name.clone(), value))
+            })
+            .collect()
+    }
+
     fn normalize_path(&self, path: &Path) -> Result<String, BypassReason> {
-        let absolute = if path.is_absolute() {
-            normalize_components(path)
-        } else {
-            normalize_components(&self.context.working_dir.join(path))
-        };
-        for mapping in &self.mappings {
-            let root = normalize_components(&mapping.root);
-            if let Ok(relative) = absolute.strip_prefix(&root) {
-                let suffix = slash_path(relative)?;
-                return Ok(if suffix.is_empty() {
-                    format!("${{{}}}", mapping.placeholder)
-                } else {
-                    format!("${{{}}}/{suffix}", mapping.placeholder)
-                });
-            }
-        }
-        Err(BypassReason::UnmappedAbsolutePath(absolute))
+        normalize_mapped_path(path, &self.context.working_dir, &self.mappings)
     }
 }
 
@@ -1107,6 +1154,7 @@ mod tests {
                 PathMapping::new(sysroot(), "sysroot"),
             ],
             environment: BTreeMap::from([("CARGO_PKG_VERSION".into(), Some("1.0.0".into()))]),
+            portable_environment: BTreeSet::new(),
             inputs: inputs
                 .iter()
                 .map(|(path, contents)| ActionInput {
@@ -1331,6 +1379,7 @@ mod tests {
             working_dir: workspace.clone(),
             path_mappings: vec![PathMapping::new(&workspace, "workspace")],
             environment: BTreeMap::new(),
+            portable_environment: BTreeSet::new(),
             inputs: Vec::new(),
         };
         let dep_info = RustcDepInfo {
@@ -1405,6 +1454,87 @@ mod tests {
                 .unwrap();
         assert!(descriptor.contains(&expected), "{descriptor}");
         assert_ne!(first.digest, second.digest);
+    }
+
+    /// The counterpart to the test above. Naming `OUT_DIR` portable normalizes
+    /// its value like any other path, which is what lets two checkouts agree on
+    /// a compilation that reads it. The caller earns the claim by remapping the
+    /// value inside the compilation and reading the outputs; the key only
+    /// records that it was made.
+    #[test]
+    fn portable_environment_values_normalize_across_checkouts() {
+        let other = absolute(&["other", "checkout"]);
+        let output = other.join("target/debug/deps");
+        let relocated = RustcInvocation::parse(&[
+            "--crate-name=widget".into(),
+            "--edition=2024".into(),
+            "src/lib.rs".into(),
+            "--crate-type=lib".into(),
+            "--emit=dep-info,metadata,link".into(),
+            "-Cembed-bitcode=no".into(),
+            "-Cmetadata=abc123".into(),
+            format!("--out-dir={}", output.display()).into(),
+            format!("-Ldependency={}", output.display()).into(),
+            format!("--extern=serde={}", output.join("libserde.rlib").display()).into(),
+            format!("--sysroot={}", sysroot().display()).into(),
+            "--cap-lints=allow".into(),
+        ])
+        .unwrap();
+
+        let here = |portable: bool| {
+            let mut context = context(&[
+                ("src/lib.rs", "source"),
+                ("target/debug/deps/libserde.rlib", "serde"),
+            ]);
+            context.environment.insert(
+                "OUT_DIR".into(),
+                Some(
+                    workspace()
+                        .join("target/debug/build/widget/out")
+                        .display()
+                        .to_string(),
+                ),
+            );
+            if portable {
+                context.portable_environment.insert("OUT_DIR".into());
+            }
+            common_invocation().action(context).unwrap().digest
+        };
+        let there = |portable: bool| {
+            let mut context = context(&[]);
+            context.working_dir = other.clone();
+            context.path_mappings[0].root = other.join("target");
+            context.path_mappings[1].root = other.clone();
+            context.inputs = vec![
+                ActionInput {
+                    path: "src/lib.rs".into(),
+                    digest: digest("source"),
+                },
+                ActionInput {
+                    path: "target/debug/deps/libserde.rlib".into(),
+                    digest: digest("serde"),
+                },
+            ];
+            context.environment.insert(
+                "OUT_DIR".into(),
+                Some(
+                    other
+                        .join("target/debug/build/widget/out")
+                        .display()
+                        .to_string(),
+                ),
+            );
+            if portable {
+                context.portable_environment.insert("OUT_DIR".into());
+            }
+            relocated.action(context).unwrap().digest
+        };
+
+        assert_ne!(here(false), there(false));
+        assert_eq!(here(true), there(true));
+        // A different key, not a relabelled one: an artifact compiled without
+        // the remapping must never be restored under the portable key.
+        assert_ne!(here(false), here(true));
     }
 
     #[test]
