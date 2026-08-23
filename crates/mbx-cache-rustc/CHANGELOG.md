@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.1.0...mbx-cache-rustc-v0.2.0) - 2026-08-22
+
+### Added
+
+- *(session)* share compilations that read OUT_DIR across checkouts ([#21](https://github.com/jdx/mr-boxington/pull/21))
+
 ## [0.1.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.0.0...mbx-cache-rustc-v0.1.0) - 2026-08-21
 
 ### Added
