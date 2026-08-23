@@ -205,7 +205,25 @@ fn exit_code(status: std::process::ExitStatus) -> ExitCode {
 
 fn gc(config: &Config, max_bytes: u64) -> Result<()> {
     let store = config.store_dir();
-    let outcome = store::gc(&store, max_bytes)?;
+    let outcome = store::gc(&store, max_bytes);
+    // Independent collections: a broken action store must not prevent the
+    // command from freeing the usually much larger target directories.
+    let pruned = target::prune(&config.target.root);
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            match pruned {
+                Ok(pruned) if pruned.removed_views > 0 => {
+                    println!("{}", target_removals(&pruned));
+                }
+                Ok(_) => {}
+                Err(prune_error) => {
+                    log::warn!("target directories were not collected: {prune_error}");
+                }
+            }
+            return Err(error);
+        }
+    };
     println!("{}", evictions(&outcome));
     if outcome.removed_checkout_records > 0 {
         println!(
@@ -213,7 +231,7 @@ fn gc(config: &Config, max_bytes: u64) -> Result<()> {
             outcome.removed_checkout_records
         );
     }
-    let pruned = target::prune(&config.target.root)?;
+    let pruned = pruned?;
     if pruned.removed_views > 0 {
         println!("{}", target_removals(&pruned));
     }

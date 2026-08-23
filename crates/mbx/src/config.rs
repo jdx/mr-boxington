@@ -191,10 +191,14 @@ impl Config {
         let target = TargetSettings {
             views: optional_bool("MBX_TARGET_VIEWS", &get_env, file.target.views)?
                 .unwrap_or_default(),
-            root: get_env("MBX_TARGET_ROOT")
+            root: match get_env("MBX_TARGET_ROOT")
                 .map(PathBuf::from)
                 .or(file.target.root)
-                .unwrap_or_else(|| cache_dir.join("targets")),
+            {
+                Some(root) if root.is_absolute() => root,
+                Some(root) => cache_dir.join(root),
+                None => cache_dir.join("targets"),
+            },
         };
         Ok(Self {
             cache_dir,
@@ -392,6 +396,20 @@ mod tests {
             "moving where a build writes is opted into, never assumed"
         );
         assert_eq!(config.target.root, config.cache_dir.join("targets"));
+    }
+
+    #[test]
+    fn relative_target_roots_are_anchored_to_the_cache_directory() {
+        let config = Config::from_parts(
+            ConfigFile::default(),
+            env(&[
+                ("MBX_CACHE_DIR", "/cache"),
+                ("MBX_TARGET_ROOT", "target-views"),
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(config.target.root, PathBuf::from("/cache/target-views"));
     }
 
     #[test]

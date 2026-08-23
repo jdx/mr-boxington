@@ -700,6 +700,45 @@ mod target_views {
     }
 
     #[test]
+    fn explicit_gc_still_frees_targets_when_store_collection_fails() {
+        let store = tempfile::tempdir().unwrap();
+        let gone = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(gone.path());
+
+        build_with(
+            gone.path(),
+            store.path(),
+            &reports.path().join("gone.json"),
+            &[("MBX_TARGET_VIEWS", "1")],
+        );
+        let directory = managed(gone.path());
+        std::fs::remove_dir_all(gone.path()).unwrap();
+        let cas = store.path().join("actions/cas/v1");
+        std::fs::remove_dir_all(&cas).unwrap();
+        std::fs::write(&cas, b"not a directory").unwrap();
+
+        let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+            .args(["gc", "--max-size", "20GiB"])
+            .env("MBX_CACHE_DIR", store.path())
+            .output()
+            .expect("mbx should run");
+
+        assert!(
+            !output.status.success(),
+            "the broken store should be reported"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("freed 1 target directories"),
+            "successful target collection should still be reported"
+        );
+        assert!(
+            !directory.exists(),
+            "explicit gc should collect targets independently of the store"
+        );
+    }
+
+    #[test]
     fn a_real_target_directory_is_never_displaced() {
         let store = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
