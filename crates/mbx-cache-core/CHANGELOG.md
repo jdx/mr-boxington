@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.2.0...mbx-cache-core-v0.3.0) - 2026-08-23
+
+### Added
+
+- *(store)* collect automatically, and release deleted checkouts first ([#23](https://github.com/jdx/mr-boxington/pull/23))
+
 ## [0.2.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.1.0...mbx-cache-core-v0.2.0) - 2026-08-22
 
 ### Added
