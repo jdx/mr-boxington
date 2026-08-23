@@ -159,7 +159,7 @@ pub fn gc(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
     // last sweep stops protecting its artifacts during this one.
     let checkouts = scan_checkouts(store)?;
     for path in &checkouts.stale_records {
-        if remove(path)? {
+        if matches!(remove(path)?, Removal::Removed) {
             outcome.removed_checkout_records += 1;
         }
         // The identity directory is left behind empty otherwise. It may hold
@@ -178,16 +178,10 @@ pub fn gc(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
         // each class goes oldest-first. A store with no records at all roots
         // nothing and this is exactly the LRU it was before.
         objects.sort_by_cached_key(|entry| (rooted.contains(&entry.path), entry.used));
-        for entry in &objects {
-            if live_bytes <= max_bytes {
-                break;
-            }
-            if remove(&entry.path)? {
-                live_bytes = live_bytes.saturating_sub(entry.size);
-                outcome.removed_objects += 1;
-                outcome.removed_bytes += entry.size;
-            }
-        }
+        let evicted = evict_objects(&objects, &rooted, live_bytes, max_bytes, remove)?;
+        live_bytes = evicted.remaining_bytes;
+        outcome.removed_objects += evicted.removed_objects;
+        outcome.removed_bytes += evicted.removed_bytes;
     }
 
     // An action result whose objects are gone can only produce a miss, so drop
@@ -196,10 +190,16 @@ pub fn gc(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
     // store that is over budget on results alone still needs the sweep.
     let cas = LocalCas::new(store);
     for entry in &results {
-        if action_result_is_dangling(&cas, &entry.path)? && remove(&entry.path)? {
-            live_bytes = live_bytes.saturating_sub(entry.size);
-            outcome.removed_action_results += 1;
-            outcome.removed_bytes += entry.size;
+        if action_result_is_dangling(&cas, &entry.path)? {
+            match remove(&entry.path)? {
+                Removal::Removed => {
+                    live_bytes = live_bytes.saturating_sub(entry.size);
+                    outcome.removed_action_results += 1;
+                    outcome.removed_bytes += entry.size;
+                }
+                Removal::Missing => live_bytes = live_bytes.saturating_sub(entry.size),
+                Removal::Blocked => {}
+            }
         }
     }
 
@@ -414,21 +414,72 @@ fn root_digest(cas: &LocalCas, rooted: &mut HashSet<PathBuf>, digest: &CacheDige
     }
 }
 
-fn remove(path: &Path) -> Result<bool> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Removal {
+    Removed,
+    Missing,
+    Blocked,
+}
+
+fn remove(path: &Path) -> Result<Removal> {
     match std::fs::remove_file(path) {
-        Ok(()) => Ok(true),
+        Ok(()) => Ok(Removal::Removed),
         // A concurrent build may have evicted or replaced it already.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Removal::Missing),
         // Windows refuses to unlink a file another process holds open, which is
         // what a concurrent build reading this blob looks like. Skipping it
         // leaves the store over budget until the next sweep; failing would
         // abandon the sweep and leave it over budget for longer.
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
             log::debug!("could not evict {}: {error}", path.display());
-            Ok(false)
+            Ok(Removal::Blocked)
         }
         Err(error) => Err(error).wrap_err_with(|| format!("failed to evict {}", path.display())),
     }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ObjectEvictions {
+    removed_objects: u64,
+    removed_bytes: u64,
+    remaining_bytes: u64,
+}
+
+/// Evict sorted objects without crossing the checkout-protection boundary
+/// when an unrooted object cannot be removed.
+fn evict_objects(
+    objects: &[Entry],
+    rooted: &HashSet<PathBuf>,
+    mut live_bytes: u64,
+    max_bytes: u64,
+    mut remove_file: impl FnMut(&Path) -> Result<Removal>,
+) -> Result<ObjectEvictions> {
+    let mut outcome = ObjectEvictions::default();
+    let mut blocked_unrooted = false;
+    for entry in objects {
+        if live_bytes <= max_bytes {
+            break;
+        }
+        let is_rooted = rooted.contains(&entry.path);
+        if is_rooted && blocked_unrooted {
+            // A locked unrooted blob is temporarily part of the irreducible
+            // store. Deleting a live checkout's artifacts in its place would
+            // invert the protection ordering this collector promises.
+            break;
+        }
+        match remove_file(&entry.path)? {
+            Removal::Removed => {
+                live_bytes = live_bytes.saturating_sub(entry.size);
+                outcome.removed_objects += 1;
+                outcome.removed_bytes += entry.size;
+            }
+            Removal::Missing => live_bytes = live_bytes.saturating_sub(entry.size),
+            Removal::Blocked if !is_rooted => blocked_unrooted = true,
+            Removal::Blocked => {}
+        }
+    }
+    outcome.remaining_bytes = live_bytes;
+    Ok(outcome)
 }
 
 /// Whether an action result references an object the store no longer has.
@@ -667,6 +718,44 @@ mod tests {
             }
         );
         assert_eq!(stats(store).unwrap().objects, 1);
+    }
+
+    #[test]
+    fn a_blocked_unrooted_object_does_not_cost_a_rooted_one() {
+        let locked = PathBuf::from("locked-unrooted");
+        let removable = PathBuf::from("removable-unrooted");
+        let protected = PathBuf::from("rooted");
+        let objects = [&locked, &removable, &protected]
+            .into_iter()
+            .map(|path| Entry {
+                path: path.clone(),
+                size: 10,
+                used: SystemTime::UNIX_EPOCH,
+            })
+            .collect::<Vec<_>>();
+        let rooted = HashSet::from([protected.clone()]);
+        let mut attempted = Vec::new();
+
+        let outcome = evict_objects(&objects, &rooted, 30, 5, |path| {
+            attempted.push(path.to_path_buf());
+            Ok(if path == locked {
+                Removal::Blocked
+            } else {
+                Removal::Removed
+            })
+        })
+        .unwrap();
+
+        assert_eq!(attempted, vec![locked, removable]);
+        assert_eq!(
+            outcome,
+            ObjectEvictions {
+                removed_objects: 1,
+                removed_bytes: 10,
+                remaining_bytes: 20,
+            },
+            "a locked unrooted blob should leave the store over budget before protected objects are evicted"
+        );
     }
 
     #[test]

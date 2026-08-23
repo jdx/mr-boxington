@@ -188,6 +188,7 @@ Env vars first, optional `~/.config/mbx/config.toml` second, defaults last.
 | `MBX_REMOTE_OIDC_AUDIENCE` | `remote.oidc_audience` | unset | CI OIDC auth |
 | `MBX_REMOTE_MODE` | `remote.mode` | `read-write` | or `read-only`/`write-only` |
 | `MBX_STATS_REPORT` | `stats_report` | unset | write JSON stats to path |
+| `MBX_SHARE_OUT_DIR` | `share_out_dir` | off | share compilations that read `OUT_DIR` |
 | `MBX_GC_AUTO` | `gc.auto` | `true` | sweep the store after a build |
 | `MBX_GC_MAX_SIZE` | `gc.max_size` | `20GiB` | size the store is swept back to |
 | `MBX_GC_INTERVAL` | `gc.interval` | `1h` | how often a build may sweep |
