@@ -197,7 +197,7 @@ impl Drop for CacheSession {
     }
 }
 
-/// An in-flight build's action manifest, committed when the build succeeds.
+/// An in-flight build's completed action manifest.
 pub struct ActionRun {
     run: String,
     agent: CacheAgent,

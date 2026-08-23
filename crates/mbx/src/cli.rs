@@ -128,15 +128,14 @@ fn build(config: &Config, arguments: &[String]) -> Result<ExitCode> {
 
         let status = run_cargo(&cargo, arguments, environment);
 
-        // A failed build has nothing to publish, and its manifest would record
-        // actions that never completed.
-        match (&status, run) {
-            (Ok(code), Some(run)) if *code == ExitCode::SUCCESS => {
-                if let Err(error) = run.commit().await {
-                    log::warn!("the build manifest was not committed: {error}");
-                }
-            }
-            _ => {}
+        // The shim records a prediction only after a compilation has either
+        // been restored or published successfully. Preserve that completed
+        // portion even when a later compilation makes cargo fail: it is still
+        // useful to the retry, and the collector must know it is reachable.
+        if let Some(run) = run
+            && let Err(error) = run.commit().await
+        {
+            log::warn!("the build manifest was not committed: {error}");
         }
 
         match session.finish().await {

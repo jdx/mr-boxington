@@ -423,7 +423,7 @@ impl CacheAgent {
         }
     }
 
-    /// Load the last successful action manifest for a task into this session.
+    /// Load the last committed action manifest for a task into this session.
     pub async fn begin_task(&self, task: &str) -> Result<String> {
         validate_task_identity(task)?;
         let (remote_manifest, mut remote_etag) = if self.remote_mode.reads() {
@@ -512,7 +512,7 @@ impl CacheAgent {
         }
     }
 
-    /// Atomically publish the candidate manifest collected by a successful task.
+    /// Atomically publish the completed actions collected by a task run.
     pub async fn commit_task(&self, run: &str) -> Result<()> {
         validate_task_identity(run)?;
         let state = self

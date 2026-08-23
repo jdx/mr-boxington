@@ -38,6 +38,39 @@ fn write_named_project(directory: &Path, name: &str) {
     assert!(status.success(), "the fixture should resolve offline");
 }
 
+/// Write a workspace whose dependency builds before a member that fails.
+fn write_partially_failing_project(directory: &Path) {
+    std::fs::create_dir_all(directory.join("good/src")).unwrap();
+    std::fs::create_dir_all(directory.join("bad/src")).unwrap();
+    std::fs::write(
+        directory.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"good\", \"bad\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("good/Cargo.toml"),
+        "[package]\nname = \"good\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(directory.join("good/src/lib.rs"), "pub fn good() {}\n").unwrap();
+    std::fs::write(
+        directory.join("bad/Cargo.toml"),
+        "[package]\nname = \"bad\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ngood = { path = \"../good\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("bad/src/lib.rs"),
+        "use good as _;\ncompile_error!(\"expected failure\");\n",
+    )
+    .unwrap();
+    let status = Command::new(cargo())
+        .current_dir(directory)
+        .args(["generate-lockfile", "--offline"])
+        .status()
+        .expect("cargo should run");
+    assert!(status.success(), "the fixture should resolve offline");
+}
+
 fn cargo() -> std::ffi::OsString {
     std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into())
 }
@@ -401,6 +434,29 @@ fn a_build_records_the_checkout_it_ran_in() {
         tree_bytes(&records) > 0,
         "the build should record its checkout under {}",
         records.display()
+    );
+}
+
+#[test]
+fn a_failed_build_records_the_compilations_it_completed() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_partially_failing_project(project.path());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        .current_dir(project.path())
+        .args(["build", "build", "--workspace", "--offline"])
+        .env("MBX_CACHE_DIR", store.path())
+        .env("MBX_GC_AUTO", "0")
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_INCREMENTAL")
+        .output()
+        .expect("mbx should run");
+
+    assert!(!output.status.success(), "the bad member should fail");
+    assert!(
+        tree_bytes(&store.path().join("actions/task-manifests/v1")) > 0,
+        "the successful dependency should still be recorded as reachable"
     );
 }
 
