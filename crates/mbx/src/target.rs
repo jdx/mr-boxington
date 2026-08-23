@@ -159,10 +159,23 @@ enum Link {
 /// privileged or developer-mode process, where the honest answer is to leave
 /// the outputs where cargo would have put them.
 fn link_view(target_dir: &Path, managed: &Path) -> Result<Link> {
-    match std::fs::read_link(target_dir) {
+    let replaced = match std::fs::read_link(target_dir) {
         // Already pointing where it should. Re-linking would race a concurrent
         // build for no gain.
         Ok(existing) if existing == managed => return Ok(Link::Existing),
+        Ok(existing) if managed_link_target(&existing, managed) => {
+            // This is one of our links, but no longer the view this checkout
+            // should use. That happens after a checkout moves, its old view is
+            // pruned, or the configured target root changes. Replace the link
+            // and leave the old directory and record for their own collector.
+            remove_link(target_dir).wrap_err_with(|| {
+                format!(
+                    "could not replace the outdated managed target link {}",
+                    target_dir.display()
+                )
+            })?;
+            Some(existing)
+        }
         Ok(existing) => {
             eyre::bail!(
                 "{} already links to {}, so it was left alone",
@@ -176,16 +189,45 @@ fn link_view(target_dir: &Path, managed: &Path) -> Result<Link> {
                 target_dir.display()
             );
         }
-        Err(_) => {}
-    }
-    symlink_dir(managed, target_dir)
-        .map(|()| Link::Created)
-        .wrap_err_with(|| {
+        Err(_) => None,
+    };
+    if let Err(error) = symlink_dir(managed, target_dir) {
+        if let Some(previous) = replaced
+            && let Err(restore_error) = symlink_dir(&previous, target_dir)
+        {
+            eyre::bail!(
+                "could not link {} to a managed target directory: {error}; its previous managed link could not be restored: {restore_error}",
+                target_dir.display()
+            );
+        }
+        return Err(error).wrap_err_with(|| {
             format!(
                 "could not link {} to a managed target directory",
                 target_dir.display()
             )
-        })
+        });
+    }
+    Ok(Link::Created)
+}
+
+/// Whether a link target is a view mbx previously placed.
+///
+/// A view still carrying its record proves ownership directly. A pruned view
+/// has lost that record and directory, so its digest-shaped path under the
+/// configured views root is the remaining evidence. Other symlinks are never
+/// replaced, including dangling ones.
+fn managed_link_target(existing: &Path, managed: &Path) -> bool {
+    let Some(name) = existing.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !mbx_cache_core::is_task_identity(name) {
+        return false;
+    }
+    if existing.parent() == managed.parent() {
+        return true;
+    }
+    read_view_record(&existing.with_extension("json"))
+        .is_some_and(|record| view_key(&record.workspace_root) == name)
 }
 
 /// Unlink a directory symlink without following it.
@@ -425,6 +467,34 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(stats(&config.target.root).unwrap().views, 1);
+    }
+
+    #[test]
+    fn replaces_an_outdated_managed_target_link() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = test_config(&directory.path().join("first"), true);
+        let second = test_config(&directory.path().join("second"), true);
+        let workspace = checkout(directory.path(), "project");
+        let old = place(&first, &workspace, &workspace.join("target"), false).unwrap();
+
+        let new = place(&second, &workspace, &workspace.join("target"), false).unwrap();
+
+        assert_ne!(old, new);
+        assert_eq!(std::fs::read_link(workspace.join("target")).unwrap(), new);
+        assert!(new.is_dir());
+    }
+
+    #[test]
+    fn leaves_somebody_elses_dangling_link_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = test_config(directory.path(), true);
+        let workspace = checkout(directory.path(), "project");
+        let target = workspace.join("target");
+        let elsewhere = directory.path().join("missing");
+        symlink_dir(&elsewhere, &target).unwrap();
+
+        assert!(place(&config, &workspace, &target, false).is_none());
+        assert_eq!(std::fs::read_link(target).unwrap(), elsewhere);
     }
 
     #[test]

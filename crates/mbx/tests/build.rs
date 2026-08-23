@@ -663,6 +663,43 @@ mod target_views {
     }
 
     #[test]
+    fn a_store_sweep_failure_still_frees_managed_target_directories() {
+        let store = tempfile::tempdir().unwrap();
+        let gone = tempfile::tempdir().unwrap();
+        let current = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_named_project(gone.path(), "gone");
+        write_named_project(current.path(), "current");
+
+        build_with(
+            gone.path(),
+            store.path(),
+            &reports.path().join("gone.json"),
+            &[("MBX_TARGET_VIEWS", "1")],
+        );
+        let directory = managed(gone.path());
+        std::fs::remove_dir_all(gone.path()).unwrap();
+
+        // Make the due store sweep fail after it writes its throttle stamp.
+        // Target collection is independent and must not be skipped with it.
+        let cas = store.path().join("actions/cas/v1");
+        std::fs::remove_dir_all(&cas).unwrap();
+        std::fs::write(&cas, b"not a directory").unwrap();
+        let (_, stderr) = build_with(
+            current.path(),
+            store.path(),
+            &reports.path().join("current.json"),
+            &[("MBX_TARGET_VIEWS", "1"), ("MBX_GC_INTERVAL", "0")],
+        );
+
+        assert!(stderr.contains("the store was not swept"), "{stderr}");
+        assert!(
+            !directory.exists(),
+            "target collection should still run when store collection fails"
+        );
+    }
+
+    #[test]
     fn a_real_target_directory_is_never_displaced() {
         let store = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();

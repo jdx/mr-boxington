@@ -257,19 +257,30 @@ fn sweep_store(config: &Config) {
             if outcome.removed_bytes > 0 {
                 crate::session::note(&format!("gc: {}", evictions(&outcome)));
             }
-            // Inside the same throttled sweep: a target directory whose
-            // checkout is gone is the largest thing collection ever frees, and
-            // walking for it on every build would be the slowest.
-            match target::prune(&config.target.root) {
-                Ok(pruned) if pruned.removed_views > 0 => {
-                    crate::session::note(&format!("gc: {}", target_removals(&pruned)));
-                }
-                Ok(_) => {}
-                Err(error) => log::warn!("target directories were not collected: {error}"),
-            }
+            prune_targets(config);
         }
         Ok(None) => {}
-        Err(error) => log::warn!("the store was not swept: {error}"),
+        Err(error) => {
+            log::warn!("the store was not swept: {error}");
+            // `sweep_if_due` stamps before collecting. If collection fails,
+            // target views are still due now and will otherwise wait through
+            // the full interval before getting another chance.
+            prune_targets(config);
+        }
+    }
+}
+
+/// Collect target views as the other half of a due automatic sweep.
+fn prune_targets(config: &Config) {
+    // A target directory whose checkout is gone is the largest thing
+    // collection ever frees, and walking for it on every build would be the
+    // slowest, so callers keep this inside the store sweep's throttle.
+    match target::prune(&config.target.root) {
+        Ok(pruned) if pruned.removed_views > 0 => {
+            crate::session::note(&format!("gc: {}", target_removals(&pruned)));
+        }
+        Ok(_) => {}
+        Err(error) => log::warn!("target directories were not collected: {error}"),
     }
 }
 
