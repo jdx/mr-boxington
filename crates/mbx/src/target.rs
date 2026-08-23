@@ -121,24 +121,23 @@ pub fn place(
     // `prune` has no way to see.
     if let Err(error) = record_view(&config.target.root, workspace_root) {
         log::warn!("the managed target directory was not recorded: {error}");
-        if matches!(link, Link::Created) {
-            // Undo this call's own link and nothing else. Left behind it would
-            // redirect every later build into a directory no record names.
-            if let Err(error) = remove_link(target_dir) {
-                log::warn!(
-                    "the unused link {} was not removed: {error}",
-                    target_dir.display()
-                );
-            }
+        // Undo this call's own link and nothing else. Left behind it would
+        // redirect every later build into a directory no record names. A link
+        // replaced during recovery goes back to its previous managed view.
+        if let Err(error) = rollback_link(target_dir, &link) {
+            log::warn!(
+                "the unused link {} was not rolled back: {error}",
+                target_dir.display()
+            );
         }
         return None;
     }
     // Cargo would create this itself on the way to writing in it. Doing it here
     // keeps the link from dangling in the meantime, which is what someone
     // listing the workspace would see.
-    if let Err(error) = std::fs::create_dir_all(&managed) {
+    if let Err(error) = prepare_view(&managed, &link) {
         log::warn!(
-            "the managed target directory {} was not created: {error}",
+            "the managed target directory {} was not prepared: {error}",
             managed.display()
         );
     }
@@ -149,6 +148,7 @@ pub fn place(
 enum Link {
     Existing,
     Created,
+    Replaced(PathBuf),
 }
 
 /// Point `target_dir` at `managed` so the paths people type keep working.
@@ -166,8 +166,7 @@ fn link_view(target_dir: &Path, managed: &Path) -> Result<Link> {
         Ok(existing) if managed_link_target(&existing, managed) => {
             // This is one of our links, but no longer the view this checkout
             // should use. That happens after a checkout moves, its old view is
-            // pruned, or the configured target root changes. Replace the link
-            // and leave the old directory and record for their own collector.
+            // pruned, or the configured target root changes.
             remove_link(target_dir).wrap_err_with(|| {
                 format!(
                     "could not replace the outdated managed target link {}",
@@ -207,7 +206,56 @@ fn link_view(target_dir: &Path, managed: &Path) -> Result<Link> {
             )
         });
     }
-    Ok(Link::Created)
+    Ok(replaced.map_or(Link::Created, Link::Replaced))
+}
+
+/// Put a link back the way it was before this placement attempt.
+fn rollback_link(target_dir: &Path, link: &Link) -> Result<()> {
+    match link {
+        Link::Existing => Ok(()),
+        Link::Created => remove_link(target_dir).map_err(Into::into),
+        Link::Replaced(previous) => {
+            remove_link(target_dir)?;
+            symlink_dir(previous, target_dir).wrap_err("could not restore the previous link")
+        }
+    }
+}
+
+/// Create a new view, carrying forward and retiring an outdated one.
+fn prepare_view(managed: &Path, link: &Link) -> Result<()> {
+    let Link::Replaced(previous) = link else {
+        return std::fs::create_dir_all(managed).map_err(Into::into);
+    };
+    match std::fs::rename(previous, managed) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(managed)?;
+        }
+        Err(_) => {
+            // A root can cross filesystems, where rename cannot carry the old
+            // view forward. Establish the new view before retiring the old
+            // one; a rebuild is preferable to an orphan nothing will scan.
+            std::fs::create_dir_all(managed)?;
+            std::fs::remove_dir_all(previous).wrap_err_with(|| {
+                format!(
+                    "could not retire the old target view {}",
+                    previous.display()
+                )
+            })?;
+        }
+    }
+    let record = previous.with_extension("json");
+    if let Err(error) = std::fs::remove_file(&record)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(error).wrap_err_with(|| {
+            format!(
+                "could not retire the old target record {}",
+                record.display()
+            )
+        });
+    }
+    Ok(())
 }
 
 /// Whether a link target is a view mbx previously placed.
@@ -476,12 +524,16 @@ mod tests {
         let second = test_config(&directory.path().join("second"), true);
         let workspace = checkout(directory.path(), "project");
         let old = place(&first, &workspace, &workspace.join("target"), false).unwrap();
+        std::fs::write(old.join("artifact"), b"outputs").unwrap();
 
         let new = place(&second, &workspace, &workspace.join("target"), false).unwrap();
 
         assert_ne!(old, new);
         assert_eq!(std::fs::read_link(workspace.join("target")).unwrap(), new);
-        assert!(new.is_dir());
+        assert!(new.join("artifact").is_file(), "the old view should move");
+        assert!(!old.exists(), "the old root must not retain an orphan");
+        assert_eq!(stats(&first.target.root).unwrap(), ViewStats::default());
+        assert_eq!(stats(&second.target.root).unwrap().views, 1);
     }
 
     #[test]
