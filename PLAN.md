@@ -17,7 +17,9 @@ a standalone home. mise will eventually consume mbx and drop its embedded copy.
 2. **Target directories fill disks.** Cargo never garbage-collects and never
    deduplicates across checkouts. mbx stores artifacts once in a
    content-addressed store, materializes them into target dirs via
-   reflink/hardlink, and evicts with a byte-budget LRU (`mbx gc`).
+   reflink/hardlink, and evicts with a byte-budget LRU that a build runs on its
+   own schedule (`mbx gc`, or automatically). Eviction prefers what no checkout
+   on disk still needs, so deleting a worktree releases what only it used.
 3. **Git worktrees build cold.** Fingerprints embed absolute paths, so a fresh
    worktree rebuilds everything. mbx's action keys use path mapping, so a new
    worktree starts mostly warm while keeping its own target dir (no cargo lock
@@ -161,7 +163,9 @@ Protocol version stays 1; nothing in the wild speaks the old names.
 ## Command surface (v1)
 
 - `mbx build [-- <cargo args>]` — run cargo under a cache session.
-- `mbx gc [--max-size <bytes|human>]` — LRU-evict the store to a byte budget.
+- `mbx gc [--max-size <bytes|human>]` — LRU-evict the store to a byte budget,
+  defaulting to the configured one. `mbx build` does the same when a sweep is
+  due.
 - `mbx cache dir` / `mbx cache stats` — store location and contents summary.
 - `mbx setup` — install the persistent standalone shim and wire
   `build.rustc-wrapper` in `~/.cargo/config.toml`. If that key already names
@@ -184,6 +188,10 @@ Env vars first, optional `~/.config/mbx/config.toml` second, defaults last.
 | `MBX_REMOTE_OIDC_AUDIENCE` | `remote.oidc_audience` | unset | CI OIDC auth |
 | `MBX_REMOTE_MODE` | `remote.mode` | `read-write` | or `read-only`/`write-only` |
 | `MBX_STATS_REPORT` | `stats_report` | unset | write JSON stats to path |
+| `MBX_SHARE_OUT_DIR` | `share_out_dir` | off | share compilations that read `OUT_DIR` |
+| `MBX_GC_AUTO` | `gc.auto` | `true` | sweep the store after a build |
+| `MBX_GC_MAX_SIZE` | `gc.max_size` | `20GiB` | size the store is swept back to |
+| `MBX_GC_INTERVAL` | `gc.interval` | `1h` | how often a build may sweep |
 | `MBX_HTTP_TIMEOUT` | `http.timeout` | `30s` | connect/read timeout |
 | `MBX_HTTP_DOWNLOAD_TIMEOUT` | `http.download_timeout` | `10m` | blob downloads |
 | `MBX_HTTP_RETRIES` | `http.retries` | `3` | request retries |
@@ -208,7 +216,11 @@ operator did not configure.
 Sessions do not coordinate. Several `mbx build` runs and an `mbx gc` can share
 one store: manifest updates take a file lock, CAS writes are content-addressed
 and idempotent, and an eviction racing a restore turns that action into a miss.
-The failure mode is a recompile, never a wrong result.
+The automatic sweep is throttled by a stamp file rather than coordinated, so two
+builds finishing together may both sweep; checkout records are written whole,
+one file per checkout and identity, so there is nothing for them to race over.
+The failure mode is a recompile, never a wrong result -- the automatic sweep
+makes that race routine rather than rare, not worse.
 
 ## CI story
 
@@ -249,8 +261,9 @@ env vars, and wire constants to match `mbx-cache-core` exactly.
 - **Predictive prefetch by default** — download the predicted action set for
   the whole dep graph in parallel at build start (the prediction plumbing
   already exists in the agent).
-- **Target-dir views** — manage `CARGO_TARGET_DIR` placement; GC roots per
-  checkout so deleting a worktree releases its artifacts.
+- **Target-dir views** — manage `CARGO_TARGET_DIR` placement. The other half of
+  this item shipped: a build records its checkout, and collection prefers what
+  no surviving checkout needs.
 - **Deferred materialization** — leave artifacts in the CAS until read
   (biggest win for `cargo check`-heavy workflows).
 - **Decide the `CARGO_INCREMENTAL` default.** `MBX_INCREMENTAL=1` now opts into

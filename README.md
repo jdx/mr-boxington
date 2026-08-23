@@ -21,8 +21,10 @@ See [PLAN.md](PLAN.md) for the design and the road to v1.
   65% of actions on mise, with the shortfall explained under limits below. Each
   keeps its own `target/` directory, so there is no cargo lock contention
   between them.
-- **Collects garbage.** `mbx gc` evicts to a size budget, which cargo has never
-  done for `target/`.
+- **Collects garbage.** The store has a size budget, and a build sweeps it back
+  under that budget on its own -- something cargo has never done for `target/`.
+  A checkout that no longer exists loses its artifacts before a live project
+  does.
 - **Shares through a remote.** CI and teammates can restore from a
   [self-hosted server](https://github.com/jdx/mbx-cache); an ephemeral runner
   with an empty store pulls only the actions its build needs.
@@ -89,8 +91,25 @@ Store management:
 ```sh
 mbx cache dir       # where the store lives
 mbx cache stats     # what it holds
-mbx gc --max-size 20GB
+mbx gc              # sweep to the configured budget
+mbx gc --max-size 20GiB
 ```
+
+A build sweeps the store itself when one is due -- at most once per
+`MBX_GC_INTERVAL`, and only reporting when it evicted something:
+
+```text
+gc: evicted 128 objects and 3 action results (1.2 GiB); 18.9 GiB remain
+```
+
+A store inside its budget loses no cached compilations; a sweep that finds one
+there still tidies its own bookkeeping, dropping the records of checkouts that
+have gone. When a store is over budget, the objects that go first are the ones
+no checkout on disk still needs: `mbx build` records the checkout it ran in, and
+a checkout that has been deleted stops protecting what only it used. Worktrees
+of one `Cargo.lock` share their cached compilations, so removing one of those
+releases nothing while a sibling remains -- the sibling genuinely still needs
+them.
 
 Evicting an object that is still in use costs a recompile and nothing else, so
 `gc` is always safe to run.
@@ -112,6 +131,9 @@ defaults.
 | `MBX_SHARE_OUT_DIR` | `share_out_dir` | off | share compilations that read `OUT_DIR` |
 | `MBX_STATS_REPORT` | `stats_report` | unset | write a JSON report here |
 | `MBX_INCREMENTAL` | `incremental` | off | let cargo compile workspace members incrementally |
+| `MBX_GC_AUTO` | `gc.auto` | `true` | sweep the store after a build |
+| `MBX_GC_MAX_SIZE` | `gc.max_size` | `20GiB` | size the store is swept back to |
+| `MBX_GC_INTERVAL` | `gc.interval` | `1h` | how often a build may sweep |
 | `MBX_HTTP_TIMEOUT` | `http.timeout` | `30s` | connect and read timeout |
 | `MBX_HTTP_DOWNLOAD_TIMEOUT` | `http.download_timeout` | `10m` | blob downloads |
 | `MBX_HTTP_RETRIES` | `http.retries` | `3` | request retries |
@@ -166,7 +188,7 @@ slower than either, and it is how the cache is qualified.
 ## Status and limits
 
 Working today: local caching, cross-checkout reuse, remote push and pull,
-garbage collection.
+automatic garbage collection.
 
 Not yet:
 
@@ -216,6 +238,16 @@ Not yet:
   setting stops overriding `CARGO_INCREMENTAL` rather than setting it, a `0`
   already in your environment still wins, and `mbx` says so rather than leaving
   you to wonder.
+- **Eviction order is an approximation.** Within what a sweep is willing to
+  evict, the oldest goes first by access time -- which `relatime` coarsens to
+  roughly a day and `noatime` suppresses altogether, leaving the order to fall
+  back on when an object was stored. Recording which checkouts are still here
+  is what keeps that from mattering much: a wrong order inside the set nothing
+  has abandoned costs a recompile.
+- **The budget covers cached objects and their results**, not the whole cache
+  directory. Prediction manifests, checkout records, and remote download
+  staging sit outside it, so the directory is always somewhat larger than the
+  number you set.
 
 ## License
 

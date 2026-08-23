@@ -3,7 +3,7 @@ use crate::{
     ManifestPutOutcome, RemoteActionResult, RemoteCacheClient, RemoteCacheMode, RustcMetadata,
     canonical_json,
 };
-use eyre::{Result, bail};
+use eyre::{Context, Result, bail};
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream};
 use log::warn;
 use serde::{Deserialize, Serialize};
@@ -409,7 +409,7 @@ impl CacheAgent {
             action_locks: Arc::new(Mutex::new(BTreeMap::new())),
             stats: Arc::new(AtomicAgentStats::default()),
             executable_identities: Arc::new(Mutex::new(BTreeMap::new())),
-            manifest_dir: Arc::new(cache_dir.join("task-manifests").join("v1")),
+            manifest_dir: Arc::new(task_manifest_dir(&cache_dir)),
             task_actions: Arc::new(Mutex::new(BTreeMap::new())),
             next_task_run: Arc::new(AtomicU64::new(0)),
             manifest_write_lock: Arc::new(Mutex::new(())),
@@ -423,7 +423,7 @@ impl CacheAgent {
         }
     }
 
-    /// Load the last successful action manifest for a task into this session.
+    /// Load the last committed action manifest for a task into this session.
     pub async fn begin_task(&self, task: &str) -> Result<String> {
         validate_task_identity(task)?;
         let (remote_manifest, mut remote_etag) = if self.remote_mode.reads() {
@@ -512,7 +512,7 @@ impl CacheAgent {
         }
     }
 
-    /// Atomically publish the candidate manifest collected by a successful task.
+    /// Atomically publish the completed actions collected by a task run.
     pub async fn commit_task(&self, run: &str) -> Result<()> {
         validate_task_identity(run)?;
         let state = self
@@ -1858,15 +1858,58 @@ where
     }
 }
 
-fn validate_task_identity(task: &str) -> Result<()> {
-    if task.len() != 64
-        || !task
+/// Whether `task` is a well-formed task action identity.
+///
+/// Identities name files and directories in the store, so anything that reads
+/// the store back has to be able to tell an identity from whatever else a user
+/// left lying there.
+pub fn is_task_identity(task: &str) -> bool {
+    task.len() == 64
+        && task
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
+}
+
+fn validate_task_identity(task: &str) -> Result<()> {
+    if !is_task_identity(task) {
         bail!("invalid task action identity");
     }
     Ok(())
+}
+
+/// Where a store keeps its task prediction manifests.
+fn task_manifest_dir(store: &Path) -> PathBuf {
+    store.join("task-manifests").join("v1")
+}
+
+/// The action digests a task's prediction manifest recorded.
+///
+/// Read straight off disk rather than through an agent, because a collector
+/// needs the action set of tasks no session is running. A manifest that is
+/// missing or no longer parseable yields no actions rather than an error: this
+/// is a prediction index, so the worst a thin answer costs is a cold prefetch,
+/// or an object collected earlier than it deserved.
+pub fn task_manifest_actions(store: &Path, task: &str) -> Result<Vec<CacheDigest>> {
+    validate_task_identity(task)?;
+    let path = task_manifest_dir(store).join(format!("{task}.json"));
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).wrap_err_with(|| format!("failed to read {}", path.display()));
+        }
+    };
+    let Ok(manifest) = serde_json::from_slice::<TaskActionManifest>(&bytes) else {
+        return Ok(Vec::new());
+    };
+    if validate_task_manifest(&manifest, task).is_err() {
+        return Ok(Vec::new());
+    }
+    Ok(manifest
+        .predictions
+        .into_iter()
+        .map(|prediction| prediction.action)
+        .collect())
 }
 
 fn validate_action_prediction(prediction: &ActionPrediction) -> Result<()> {
@@ -3678,5 +3721,74 @@ mod tests {
             AgentResponse::Error { .. }
         ));
         task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn reports_the_action_digests_a_task_manifest_recorded() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = directory.path().join("cache");
+        let task = "b".repeat(64);
+        let action = CacheDigest::blake3(b"recorded action");
+
+        let agent = CacheAgent::new(&cache, "test-version");
+        let run = agent.begin_task(&task).await.unwrap();
+        assert!(matches!(
+            agent
+                .respond(AgentRequest::RecordActionPrediction {
+                    task: run.clone(),
+                    prediction: ActionPrediction {
+                        invocation: CacheDigest::blake3(b"an invocation"),
+                        action: action.clone(),
+                        adapter: "rustc".into(),
+                        payload: "{}".into(),
+                    },
+                })
+                .await,
+            AgentResponse::ActionPredictionRecorded
+        ));
+        agent.commit_task(&run).await.unwrap();
+
+        assert_eq!(task_manifest_actions(&cache, &task).unwrap(), vec![action]);
+    }
+
+    #[test]
+    fn reports_no_actions_for_a_task_without_a_usable_manifest() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = directory.path();
+        let task = "c".repeat(64);
+        assert!(task_manifest_actions(cache, &task).unwrap().is_empty());
+
+        // A manifest the current code can no longer parse is worth exactly as
+        // much as a missing one, and neither is worth failing a sweep over.
+        let path = task_manifest_dir(cache).join(format!("{task}.json"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"not json").unwrap();
+        assert!(task_manifest_actions(cache, &task).unwrap().is_empty());
+
+        // A manifest naming a different task is somebody else's; claiming its
+        // actions would root objects this task never used.
+        fs::write(
+            &path,
+            serde_json::to_vec(&TaskActionManifest {
+                version: TASK_ACTION_MANIFEST_VERSION,
+                task: "d".repeat(64),
+                predictions: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(task_manifest_actions(cache, &task).unwrap().is_empty());
+
+        assert!(task_manifest_actions(cache, "not-an-identity").is_err());
+    }
+
+    #[test]
+    fn recognizes_only_well_formed_task_identities() {
+        assert!(is_task_identity(&"a".repeat(64)));
+        assert!(is_task_identity(&"0123456789abcdef".repeat(4)));
+        assert!(!is_task_identity(&"A".repeat(64)));
+        assert!(!is_task_identity(&"g".repeat(64)));
+        assert!(!is_task_identity(&"a".repeat(63)));
+        assert!(!is_task_identity(""));
     }
 }
