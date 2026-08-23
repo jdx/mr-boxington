@@ -110,7 +110,7 @@ pub fn place(
     // for a checkout nothing manages, and worse, a refusal must not disturb a
     // record an earlier placement wrote -- the directory that one names may be
     // full of outputs, and the record is the only thing that can trace it.
-    let link = match link_view(target_dir, &managed) {
+    let link = match link_view(target_dir, &managed, workspace_root) {
         Ok(link) => link,
         Err(error) => {
             log::warn!("{error}");
@@ -158,12 +158,12 @@ enum Link {
 /// already there, and Windows only allows a symlink to be created by a
 /// privileged or developer-mode process, where the honest answer is to leave
 /// the outputs where cargo would have put them.
-fn link_view(target_dir: &Path, managed: &Path) -> Result<Link> {
+fn link_view(target_dir: &Path, managed: &Path, workspace_root: &Path) -> Result<Link> {
     let replaced = match std::fs::read_link(target_dir) {
         // Already pointing where it should. Re-linking would race a concurrent
         // build for no gain.
         Ok(existing) if existing == managed => return Ok(Link::Existing),
-        Ok(existing) if managed_link_target(&existing, managed) => {
+        Ok(existing) if replaceable_managed_link(&existing, managed, workspace_root) => {
             // This is one of our links, but no longer the view this checkout
             // should use. That happens after a checkout moves, its old view is
             // pruned, or the configured target root changes.
@@ -264,18 +264,24 @@ fn prepare_view(managed: &Path, link: &Link) -> Result<()> {
 /// has lost that record and directory, so its digest-shaped path under the
 /// configured views root is the remaining evidence. Other symlinks are never
 /// replaced, including dangling ones.
-fn managed_link_target(existing: &Path, managed: &Path) -> bool {
+fn replaceable_managed_link(existing: &Path, managed: &Path, workspace_root: &Path) -> bool {
     let Some(name) = existing.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
     if !mbx_cache_core::is_task_identity(name) {
         return false;
     }
-    if existing.parent() == managed.parent() {
-        return true;
+    if let Some(record) = read_view_record(&existing.with_extension("json"))
+        && view_key(&record.workspace_root) == name
+    {
+        return record.workspace_root == workspace_root
+            || !crate::store::checkout_is_live(&record.workspace_root);
     }
-    read_view_record(&existing.with_extension("json"))
-        .is_some_and(|record| view_key(&record.workspace_root) == name)
+    // A collector removes the record and directory together. With neither
+    // left, a digest-shaped dangling link under this root is safe to recover;
+    // a directory with a missing or corrupt record is not evidence of ours to
+    // move, and uncertainty must leave it alone.
+    existing.parent() == managed.parent() && matches!(existing.try_exists(), Ok(false))
 }
 
 /// Unlink a directory symlink without following it.
@@ -547,6 +553,23 @@ mod tests {
 
         assert!(place(&config, &workspace, &target, false).is_none());
         assert_eq!(std::fs::read_link(target).unwrap(), elsewhere);
+    }
+
+    #[test]
+    fn leaves_another_live_checkouts_view_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = test_config(directory.path(), true);
+        let original = checkout(directory.path(), "original");
+        let copied = checkout(directory.path(), "copied");
+        let managed = place(&config, &original, &original.join("target"), false).unwrap();
+        std::fs::write(managed.join("artifact"), b"outputs").unwrap();
+        symlink_dir(&managed, &copied.join("target")).unwrap();
+
+        assert!(place(&config, &copied, &copied.join("target"), false).is_none());
+
+        assert_eq!(std::fs::read_link(copied.join("target")).unwrap(), managed);
+        assert!(managed.join("artifact").exists());
+        assert_eq!(stats(&config.target.root).unwrap().views, 1);
     }
 
     #[test]
