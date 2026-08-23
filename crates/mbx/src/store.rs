@@ -307,7 +307,7 @@ fn claim_has_expired(record: &CheckoutRecord) -> bool {
 /// an error at either step means live. Being wrong in that direction only
 /// delays collection; the other way round throws away a warm cache someone is
 /// still using.
-fn checkout_is_live(workspace_root: &Path) -> bool {
+pub(crate) fn checkout_is_live(workspace_root: &Path) -> bool {
     if !matches!(workspace_root.try_exists(), Ok(false)) {
         return true;
     }

@@ -2,7 +2,7 @@
 
 use crate::config::Config;
 use crate::session::CacheSession;
-use crate::{policy, store};
+use crate::{policy, store, target};
 use bytesize::ByteSize;
 use clap::{Args, Parser, Subcommand};
 use eyre::{Context, Result, bail};
@@ -108,7 +108,19 @@ fn build(config: &Config, arguments: &[String]) -> Result<ExitCode> {
     let config = &config;
 
     let working_dir = std::env::current_dir()?;
-    let roots = resolve_roots(&cargo, arguments, &working_dir);
+    let mut roots = resolve_roots(&cargo, arguments, &working_dir);
+    // Placed before the session starts, because the target directory is what
+    // the shim maps out of its cache keys and it has to be the one cargo will
+    // actually write to.
+    let placed = target::place(
+        config,
+        &roots.workspace_root,
+        &roots.target_dir,
+        roots.target_dir_requested,
+    );
+    if let Some(directory) = &placed {
+        roots.target_dir = directory.clone();
+    }
     let session_dir = tempfile::Builder::new().prefix("mbx-session-").tempdir()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -117,6 +129,12 @@ fn build(config: &Config, arguments: &[String]) -> Result<ExitCode> {
     let status = runtime.block_on(async {
         let session = CacheSession::start(session_dir.path(), config).await?;
         let mut environment = inherited_environment(|name| std::env::var(name).ok(), &working_dir);
+        if let Some(directory) = &placed {
+            environment.insert(
+                CARGO_TARGET_DIR_ENV.into(),
+                directory.to_string_lossy().into_owned(),
+            );
+        }
         let run = session
             .begin(
                 &roots.workspace_root,
@@ -187,7 +205,25 @@ fn exit_code(status: std::process::ExitStatus) -> ExitCode {
 
 fn gc(config: &Config, max_bytes: u64) -> Result<()> {
     let store = config.store_dir();
-    let outcome = store::gc(&store, max_bytes)?;
+    let outcome = store::gc(&store, max_bytes);
+    // Independent collections: a broken action store must not prevent the
+    // command from freeing the usually much larger target directories.
+    let pruned = target::prune(&config.target.root);
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            match pruned {
+                Ok(pruned) if pruned.removed_views > 0 => {
+                    println!("{}", target_removals(&pruned));
+                }
+                Ok(_) => {}
+                Err(prune_error) => {
+                    log::warn!("target directories were not collected: {prune_error}");
+                }
+            }
+            return Err(error);
+        }
+    };
     println!("{}", evictions(&outcome));
     if outcome.removed_checkout_records > 0 {
         println!(
@@ -195,7 +231,20 @@ fn gc(config: &Config, max_bytes: u64) -> Result<()> {
             outcome.removed_checkout_records
         );
     }
+    let pruned = pruned?;
+    if pruned.removed_views > 0 {
+        println!("{}", target_removals(&pruned));
+    }
     Ok(())
+}
+
+/// One line describing the target directories a sweep freed.
+fn target_removals(outcome: &target::PruneOutcome) -> String {
+    format!(
+        "freed {} target directories of checkouts that are gone ({})",
+        outcome.removed_views,
+        ByteSize::b(outcome.removed_bytes).display().iec(),
+    )
 }
 
 /// One line describing what a sweep evicted.
@@ -222,11 +271,34 @@ fn sweep_store(config: &Config) {
         return;
     }
     match store::sweep_if_due(&config.store_dir(), config.gc.max_bytes, config.gc.interval) {
-        Ok(Some(outcome)) if outcome.removed_bytes > 0 => {
-            crate::session::note(&format!("gc: {}", evictions(&outcome)));
+        Ok(Some(outcome)) => {
+            if outcome.removed_bytes > 0 {
+                crate::session::note(&format!("gc: {}", evictions(&outcome)));
+            }
+            prune_targets(config);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            log::warn!("the store was not swept: {error}");
+            // `sweep_if_due` stamps before collecting. If collection fails,
+            // target views are still due now and will otherwise wait through
+            // the full interval before getting another chance.
+            prune_targets(config);
+        }
+    }
+}
+
+/// Collect target views as the other half of a due automatic sweep.
+fn prune_targets(config: &Config) {
+    // A target directory whose checkout is gone is the largest thing
+    // collection ever frees, and walking for it on every build would be the
+    // slowest, so callers keep this inside the store sweep's throttle.
+    match target::prune(&config.target.root) {
+        Ok(pruned) if pruned.removed_views > 0 => {
+            crate::session::note(&format!("gc: {}", target_removals(&pruned)));
         }
         Ok(_) => {}
-        Err(error) => log::warn!("the store was not swept: {error}"),
+        Err(error) => log::warn!("target directories were not collected: {error}"),
     }
 }
 
@@ -251,6 +323,12 @@ fn cache_stats(config: &Config) -> Result<()> {
     println!(
         "checkouts: {} live, {} stale",
         stats.live_checkouts, stats.stale_checkouts
+    );
+    let views = target::stats(&config.target.root)?;
+    println!(
+        "target directories: {} ({})",
+        views.views,
+        ByteSize::b(views.bytes).display().iec()
     );
     Ok(())
 }
@@ -279,6 +357,15 @@ fn workspace_root(start: &Path) -> PathBuf {
 struct Roots {
     workspace_root: PathBuf,
     target_dir: PathBuf,
+    /// Whether a flag or the environment named the target directory outright.
+    ///
+    /// Cargo prefers `--target-dir` over `CARGO_TARGET_DIR`, so a build carrying
+    /// that flag cannot be moved by setting the environment: cargo would write
+    /// where the flag says while the shim had been told the managed path, and
+    /// the whole build would stop keying against anything it could reuse. The
+    /// value can equal the default location and still have been asked for, so
+    /// comparing paths cannot answer this.
+    target_dir_requested: bool,
 }
 
 /// Carry a `RUSTC_WRAPPER` the caller already configured into the session.
@@ -345,8 +432,11 @@ fn resolve_roots_with(
         .as_ref()
         .map(|roots| roots.workspace_root.clone())
         .unwrap_or_else(|| workspace_root(&invocation_dir));
+    let flagged = target_dir_argument(arguments);
+    let from_environment = target_dir_env.as_ref().is_some_and(|dir| !dir.is_empty());
+    let target_dir_requested = flagged.is_some() || from_environment;
     // An explicit flag outranks anything cargo reports from configuration.
-    let target_dir = target_dir_argument(arguments)
+    let target_dir = flagged
         .map(|value| absolute(&invocation_dir, value))
         .or_else(|| reported.map(|roots| roots.target_dir))
         .or_else(|| {
@@ -359,6 +449,7 @@ fn resolve_roots_with(
     Roots {
         workspace_root,
         target_dir,
+        target_dir_requested,
     }
 }
 
@@ -469,6 +560,10 @@ fn parse_cargo_roots(metadata: &[u8]) -> Option<Roots> {
     Some(Roots {
         workspace_root: PathBuf::from(metadata.get("workspace_root")?.as_str()?),
         target_dir: PathBuf::from(metadata.get("target_directory")?.as_str()?),
+        // What cargo reports has folded configuration in already, so it cannot
+        // say whether anyone asked. Only the caller's own flags and environment
+        // answer that, and `resolve_roots_with` reads them itself.
+        target_dir_requested: false,
     })
 }
 
@@ -562,7 +657,50 @@ mod tests {
             Roots {
                 workspace_root: PathBuf::from("/elsewhere/project"),
                 target_dir: PathBuf::from("/var/cache/shared-target"),
+                target_dir_requested: false,
             }
+        );
+    }
+
+    #[test]
+    fn records_whether_anyone_asked_where_the_target_directory_goes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let plain = ["build".to_string(), "--offline".to_string()];
+
+        assert!(
+            !resolve_roots_with(std::ffi::OsStr::new("cargo"), &plain, root, None)
+                .target_dir_requested,
+            "nothing asked, so placement is free to move it"
+        );
+
+        // The value is the default location, and the flag still means the caller
+        // chose it. Cargo prefers the flag over the `CARGO_TARGET_DIR` a
+        // placement would set, so this is the case that must not be moved.
+        let flagged = [
+            "build".to_string(),
+            "--offline".to_string(),
+            "--target-dir".to_string(),
+            "target".to_string(),
+        ];
+        assert!(
+            resolve_roots_with(std::ffi::OsStr::new("cargo"), &flagged, root, None)
+                .target_dir_requested
+        );
+
+        assert!(
+            resolve_roots_with(
+                std::ffi::OsStr::new("cargo"),
+                &plain,
+                root,
+                Some("/somewhere/else".into())
+            )
+            .target_dir_requested
+        );
+        assert!(
+            !resolve_roots_with(std::ffi::OsStr::new("cargo"), &plain, root, Some("".into()))
+                .target_dir_requested,
+            "an empty variable names nothing, which is how cargo reads it too"
         );
     }
 

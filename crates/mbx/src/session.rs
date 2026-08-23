@@ -1016,6 +1016,10 @@ mod tests {
             remote: Default::default(),
             http: Default::default(),
             gc: Default::default(),
+            target: crate::config::TargetSettings {
+                views: false,
+                root: cache_dir.join("targets"),
+            },
         }
     }
 

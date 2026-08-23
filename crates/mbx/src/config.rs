@@ -27,6 +27,7 @@ struct ConfigFile {
     remote: RemoteFile,
     http: HttpFile,
     gc: GcFile,
+    target: TargetFile,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -38,6 +39,13 @@ struct RemoteFile {
     token_file: Option<PathBuf>,
     oidc_audience: Option<String>,
     mode: Option<RemoteCacheMode>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct TargetFile {
+    views: Option<bool>,
+    root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -73,6 +81,7 @@ pub struct Config {
     pub remote: RemoteSettings,
     pub http: HttpSettings,
     pub gc: GcSettings,
+    pub target: TargetSettings,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -90,6 +99,13 @@ pub struct HttpSettings {
     pub timeout: Duration,
     pub download_timeout: Duration,
     pub retries: i64,
+}
+
+/// Where build outputs are written, and whether mbx places them.
+#[derive(Debug, Clone)]
+pub struct TargetSettings {
+    pub views: bool,
+    pub root: PathBuf,
 }
 
 /// How the store is kept inside its budget.
@@ -172,9 +188,22 @@ impl Config {
             interval: optional_duration("MBX_GC_INTERVAL", &get_env, file.gc.interval.as_deref())?
                 .unwrap_or(DEFAULT_GC_INTERVAL),
         };
+        let target = TargetSettings {
+            views: optional_bool("MBX_TARGET_VIEWS", &get_env, file.target.views)?
+                .unwrap_or_default(),
+            root: match get_env("MBX_TARGET_ROOT")
+                .map(PathBuf::from)
+                .or(file.target.root)
+            {
+                Some(root) if root.is_absolute() => root,
+                Some(root) => cache_dir.join(root),
+                None => cache_dir.join("targets"),
+            },
+        };
         Ok(Self {
             cache_dir,
             gc,
+            target,
             stats_report: get_env("MBX_STATS_REPORT")
                 .map(PathBuf::from)
                 .or(file.stats_report),
@@ -315,6 +344,9 @@ mod tests {
             auto = false
             max_size = "1GiB"
             interval = "6h"
+            [target]
+            views = true
+            root = "/from/file/targets"
             "#,
         )
         .unwrap();
@@ -326,6 +358,7 @@ mod tests {
                 ("MBX_REMOTE_MODE", "write-only"),
                 ("MBX_HTTP_TIMEOUT", "250ms"),
                 ("MBX_GC_MAX_SIZE", "2GiB"),
+                ("MBX_TARGET_ROOT", "/from/env/targets"),
             ]),
         )
         .unwrap();
@@ -340,6 +373,8 @@ mod tests {
         assert_eq!(config.http.retries, 9);
         assert!(!config.gc.auto);
         assert_eq!(config.gc.interval, Duration::from_secs(6 * 60 * 60));
+        assert_eq!(config.target.root, PathBuf::from("/from/env/targets"));
+        assert!(config.target.views);
     }
 
     #[test]
@@ -356,6 +391,25 @@ mod tests {
         assert!(config.gc.auto, "collection runs until it is turned off");
         assert_eq!(config.gc.max_bytes, DEFAULT_GC_MAX_SIZE);
         assert_eq!(config.gc.interval, DEFAULT_GC_INTERVAL);
+        assert!(
+            !config.target.views,
+            "moving where a build writes is opted into, never assumed"
+        );
+        assert_eq!(config.target.root, config.cache_dir.join("targets"));
+    }
+
+    #[test]
+    fn relative_target_roots_are_anchored_to_the_cache_directory() {
+        let config = Config::from_parts(
+            ConfigFile::default(),
+            env(&[
+                ("MBX_CACHE_DIR", "/cache"),
+                ("MBX_TARGET_ROOT", "target-views"),
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(config.target.root, PathBuf::from("/cache/target-views"));
     }
 
     #[test]
@@ -387,6 +441,13 @@ mod tests {
         // worse than saying so.
         assert!(
             Config::from_parts(ConfigFile::default(), env(&[("MBX_GC_AUTO", "maybe")])).is_err()
+        );
+        assert!(
+            Config::from_parts(
+                ConfigFile::default(),
+                env(&[("MBX_TARGET_VIEWS", "sometimes")])
+            )
+            .is_err()
         );
     }
 
