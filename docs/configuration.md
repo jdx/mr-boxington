@@ -1,13 +1,15 @@
 # Configuration
 
-mbx loads environment variables over `~/.config/mbx/config.toml`, then falls
-back to defaults. Unknown TOML keys are rejected so misspelled settings do not
-silently do nothing.
+mbx loads environment variables over `mbx/config.toml` in the platform
+configuration directory, then falls back to defaults. This honors platform and
+XDG overrides through the operating system's configuration-directory lookup.
+Unknown TOML keys are rejected so misspelled settings do not silently do
+nothing.
 
 ## Example
 
 ```toml
-# ~/.config/mbx/config.toml
+# <config directory>/mbx/config.toml
 cache_dir = "/var/cache/mbx"
 incremental = false
 share_out_dir = false
@@ -33,35 +35,10 @@ retries = 3
 
 ## Settings
 
-| Environment | TOML key | Default | Purpose |
-| --- | --- | --- | --- |
-| `MBX_CACHE_DIR` | `cache_dir` | platform cache directory | Cache root |
-| `MBX_STATS_REPORT` | `stats_report` | unset | Write a JSON build report |
-| `MBX_INCREMENTAL` | `incremental` | `false` | Let local workspace members compile incrementally |
-| `MBX_SHARE_OUT_DIR` | `share_out_dir` | `false` | Share eligible compilations that read `OUT_DIR` |
-| `MBX_GC_AUTO` | `gc.auto` | `true` | Sweep after a build when due |
-| `MBX_GC_MAX_SIZE` | `gc.max_size` | `20GiB` | Action-store budget |
-| `MBX_GC_INTERVAL` | `gc.interval` | `1h` | Minimum interval between automatic sweeps |
-| `MBX_TARGET_VIEWS` | `target.views` | `true` | Let mbx place eligible target directories |
-| `MBX_TARGET_ROOT` | `target.root` | `<cache>/targets` | Managed target root |
-| `MBX_REMOTE_URL` | `remote.url` | unset | Remote cache URL |
-| `MBX_REMOTE_NAMESPACE` | `remote.namespace` | unset | Remote namespace; required with a URL |
-| `MBX_REMOTE_TOKEN` | `remote.token` | unset | Bearer token |
-| `MBX_REMOTE_TOKEN_FILE` | `remote.token_file` | unset | File containing a bearer token |
-| `MBX_REMOTE_OIDC_AUDIENCE` | `remote.oidc_audience` | unset | CI OIDC audience |
-| `MBX_REMOTE_MODE` | `remote.mode` | `read-write` | `read-write`, `read-only`, or `write-only` |
-| `MBX_HTTP_TIMEOUT` | `http.timeout` | `30s` | Connect and request timeout |
-| `MBX_HTTP_DOWNLOAD_TIMEOUT` | `http.download_timeout` | `10m` | Blob download timeout |
-| `MBX_HTTP_RETRIES` | `http.retries` | `3` | Request retries |
-
-## Diagnostic environment variables
-
-These are environment-only:
-
-| Environment | Purpose |
-| --- | --- |
-| `MBX_VERIFY` | Compile and consult the cache, then compare outputs |
-| `MBX_BYPASS_LOG` | Append the full reason for every bypassed compilation |
+The complete settings reference—including TOML keys, environment variables,
+types, defaults, choices, and environment-only diagnostics—is generated from
+the same usage-rs declaration mbx uses at runtime. See
+[CLI and configuration reference](/cli#configuration).
 
 `MBX_VERIFY=1` is deliberately slower. It qualifies correctness; it is not a
 normal build mode.

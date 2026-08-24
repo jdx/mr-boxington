@@ -1,14 +1,14 @@
 //! Configuration, resolved from environment variables over an optional file.
 //!
-//! Precedence is environment, then `~/.config/mbx/config.toml`, then defaults.
+//! Precedence is environment, then the platform configuration file, then defaults.
 
 use crate::util::parse_duration;
 use bytesize::ByteSize;
-use eyre::{Context, Result};
+use eyre::{Context, Result, bail};
 use mbx_cache_core::RemoteCacheMode;
-use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
+use usage_config::{EnvLayer, FileLayer, FileScope, Layers};
 
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_HTTP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
@@ -16,53 +16,107 @@ const DEFAULT_HTTP_RETRIES: i64 = 3;
 /// Stated in IEC units so the budget reads the way `mbx gc` reports it back.
 const DEFAULT_GC_MAX_SIZE: u64 = 20 * 1024 * 1024 * 1024;
 const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
-const DEFAULT_TARGET_VIEWS: bool = true;
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-struct ConfigFile {
+/// The single declaration used to resolve and document mbx configuration.
+#[derive(Debug, usage::Config)]
+#[usage(file(
+    path = "<config directory>/mbx/config.toml",
+    scope = "global",
+    format = "toml"
+))]
+pub(crate) struct RawConfig {
+    /// Cache root.
+    #[usage(env = "MBX_CACHE_DIR", default_note = "platform cache directory")]
     cache_dir: Option<PathBuf>,
+    /// Write a JSON build report to this path.
+    #[usage(env = "MBX_STATS_REPORT")]
     stats_report: Option<PathBuf>,
-    incremental: Option<bool>,
-    share_out_dir: Option<bool>,
-    remote: RemoteFile,
-    http: HttpFile,
-    gc: GcFile,
-    target: TargetFile,
+    /// Compile and consult the cache, then compare outputs.
+    #[usage(env = "MBX_VERIFY", default = false, scope = "env")]
+    verify: bool,
+    /// Let local workspace members compile incrementally.
+    #[usage(env = "MBX_INCREMENTAL", default = false)]
+    incremental: bool,
+    /// Share eligible compilations that read `OUT_DIR`.
+    #[usage(env = "MBX_SHARE_OUT_DIR", default = false)]
+    share_out_dir: bool,
+    /// Append the full reason for every bypassed compilation to this path.
+    #[usage(key = "bypass_log", env = "MBX_BYPASS_LOG", scope = "env")]
+    _bypass_log: Option<PathBuf>,
+    #[usage(flatten)]
+    remote: RawRemote,
+    #[usage(flatten)]
+    http: RawHttp,
+    #[usage(flatten)]
+    gc: RawGc,
+    #[usage(flatten)]
+    target: RawTarget,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-struct RemoteFile {
+#[derive(Debug, usage::Config)]
+#[usage(prefix = "remote")]
+struct RawRemote {
+    /// Remote cache URL.
+    #[usage(env = "MBX_REMOTE_URL", ty = "url")]
     url: Option<String>,
+    /// Remote namespace; required when a URL is configured.
+    #[usage(env = "MBX_REMOTE_NAMESPACE")]
     namespace: Option<String>,
+    /// Bearer token for the remote cache.
+    #[usage(env = "MBX_REMOTE_TOKEN")]
     token: Option<String>,
+    /// File containing a bearer token.
+    #[usage(env = "MBX_REMOTE_TOKEN_FILE")]
     token_file: Option<PathBuf>,
+    /// CI OIDC audience.
+    #[usage(env = "MBX_REMOTE_OIDC_AUDIENCE")]
     oidc_audience: Option<String>,
-    mode: Option<RemoteCacheMode>,
+    /// Remote access mode.
+    #[usage(
+        env = "MBX_REMOTE_MODE",
+        default = "read-write",
+        choices("read-write", "read-only", "write-only")
+    )]
+    mode: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-struct TargetFile {
-    views: Option<bool>,
+#[derive(Debug, usage::Config)]
+#[usage(prefix = "target")]
+struct RawTarget {
+    /// Let mbx place eligible target directories under the managed root.
+    #[usage(env = "MBX_TARGET_VIEWS", default = true)]
+    views: bool,
+    /// Managed target root.
+    #[usage(env = "MBX_TARGET_ROOT", default_note = "<cache_dir>/targets")]
     root: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-struct GcFile {
-    auto: Option<bool>,
-    max_size: Option<String>,
-    interval: Option<String>,
+#[derive(Debug, usage::Config)]
+#[usage(prefix = "gc")]
+struct RawGc {
+    /// Sweep after a build when collection is due.
+    #[usage(env = "MBX_GC_AUTO", default = true)]
+    auto: bool,
+    /// Action-store budget.
+    #[usage(env = "MBX_GC_MAX_SIZE", default = "20GiB")]
+    max_size: String,
+    /// Minimum interval between automatic sweeps.
+    #[usage(env = "MBX_GC_INTERVAL", default = "1h", ty = "duration")]
+    interval: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-struct HttpFile {
-    timeout: Option<String>,
-    download_timeout: Option<String>,
-    retries: Option<i64>,
+#[derive(Debug, usage::Config)]
+#[usage(prefix = "http")]
+struct RawHttp {
+    /// Connect and request timeout.
+    #[usage(env = "MBX_HTTP_TIMEOUT", default = "30s", ty = "duration")]
+    timeout: String,
+    /// Blob download timeout.
+    #[usage(env = "MBX_HTTP_DOWNLOAD_TIMEOUT", default = "10m", ty = "duration")]
+    download_timeout: String,
+    /// Request retries.
+    #[usage(env = "MBX_HTTP_RETRIES", default = 3)]
+    retries: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -140,62 +194,52 @@ impl Default for HttpSettings {
 impl Config {
     /// Load configuration for this machine.
     pub fn load() -> Result<Self> {
-        let file = match config_file_path() {
-            Some(path) => read_config_file(&path)?,
-            None => ConfigFile::default(),
-        };
-        Self::from_parts(file, |name| std::env::var(name).ok())
+        let env = EnvLayer::from_process();
+        let file = config_file_path().map(|path| FileLayer::at(path, FileScope::Global));
+        Self::from_layers(&env, file.as_ref())
     }
 
-    fn from_parts(file: ConfigFile, get_env: impl Fn(&str) -> Option<String>) -> Result<Self> {
-        let cache_dir = get_env("MBX_CACHE_DIR")
-            .map(PathBuf::from)
-            .or(file.cache_dir)
-            .or_else(default_cache_dir)
-            .ok_or_else(|| {
-                eyre::eyre!("could not determine a cache directory; set MBX_CACHE_DIR")
-            })?;
-        let mode = match get_env("MBX_REMOTE_MODE") {
-            Some(value) => value
-                .parse()
-                .wrap_err_with(|| format!("invalid MBX_REMOTE_MODE: {value}"))?,
-            None => file.remote.mode.unwrap_or_default(),
-        };
+    fn from_layers(env: &EnvLayer, file: Option<&FileLayer>) -> Result<Self> {
+        let mut layers = Layers::new().then(env);
+        if let Some(file) = file {
+            layers = layers.then(file);
+        }
+        let resolved = usage_config::resolve(RawConfig::SETTINGS_REGISTRY, layers)?;
+        if !resolved.warnings.is_empty() {
+            let problems = resolved
+                .warnings
+                .iter()
+                .map(|warning| match &warning.origin {
+                    Some(origin) => format!("{} ({})", warning.message, origin.describe()),
+                    None => warning.message.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!("invalid configuration:\n{problems}");
+        }
+        let raw = RawConfig::read(&resolved)?;
+        Self::from_raw(raw)
+    }
+
+    fn from_raw(raw: RawConfig) -> Result<Self> {
+        let cache_dir = raw.cache_dir.or_else(default_cache_dir).ok_or_else(|| {
+            eyre::eyre!("could not determine a cache directory; set MBX_CACHE_DIR")
+        })?;
+        let mode = raw.remote.mode.parse().wrap_err("invalid remote.mode")?;
         let http = HttpSettings {
-            timeout: optional_duration("MBX_HTTP_TIMEOUT", &get_env, file.http.timeout.as_deref())?
-                .unwrap_or(DEFAULT_HTTP_TIMEOUT),
-            download_timeout: optional_duration(
-                "MBX_HTTP_DOWNLOAD_TIMEOUT",
-                &get_env,
-                file.http.download_timeout.as_deref(),
-            )?
-            .unwrap_or(DEFAULT_HTTP_DOWNLOAD_TIMEOUT),
-            retries: match get_env("MBX_HTTP_RETRIES") {
-                Some(value) => value
-                    .parse()
-                    .wrap_err_with(|| format!("invalid MBX_HTTP_RETRIES: {value}"))?,
-                None => file.http.retries.unwrap_or(DEFAULT_HTTP_RETRIES),
-            },
+            timeout: parse_duration(&raw.http.timeout).wrap_err("invalid http.timeout")?,
+            download_timeout: parse_duration(&raw.http.download_timeout)
+                .wrap_err("invalid http.download_timeout")?,
+            retries: raw.http.retries,
         };
         let gc = GcSettings {
-            auto: optional_bool("MBX_GC_AUTO", &get_env, file.gc.auto)?
-                .unwrap_or(GcSettings::default().auto),
-            max_bytes: optional_byte_size(
-                "MBX_GC_MAX_SIZE",
-                &get_env,
-                file.gc.max_size.as_deref(),
-            )?
-            .unwrap_or(DEFAULT_GC_MAX_SIZE),
-            interval: optional_duration("MBX_GC_INTERVAL", &get_env, file.gc.interval.as_deref())?
-                .unwrap_or(DEFAULT_GC_INTERVAL),
+            auto: raw.gc.auto,
+            max_bytes: parse_byte_size(&raw.gc.max_size).wrap_err("invalid gc.max_size")?,
+            interval: parse_duration(&raw.gc.interval).wrap_err("invalid gc.interval")?,
         };
         let target = TargetSettings {
-            views: optional_bool("MBX_TARGET_VIEWS", &get_env, file.target.views)?
-                .unwrap_or(DEFAULT_TARGET_VIEWS),
-            root: match get_env("MBX_TARGET_ROOT")
-                .map(PathBuf::from)
-                .or(file.target.root)
-            {
+            views: raw.target.views,
+            root: match raw.target.root {
                 Some(root) if root.is_absolute() => root,
                 Some(root) => cache_dir.join(root),
                 None => cache_dir.join("targets"),
@@ -205,28 +249,16 @@ impl Config {
             cache_dir,
             gc,
             target,
-            stats_report: get_env("MBX_STATS_REPORT")
-                .map(PathBuf::from)
-                .or(file.stats_report),
-            verify: get_env("MBX_VERIFY").is_some_and(|value| enabled(&value)),
-            incremental: match get_env("MBX_INCREMENTAL") {
-                // The environment decides outright when it is set, so a `0`
-                // there turns off what the file turned on.
-                Some(value) => enabled(&value),
-                None => file.incremental.unwrap_or(false),
-            },
-            share_out_dir: match get_env("MBX_SHARE_OUT_DIR") {
-                Some(value) => enabled(&value),
-                None => file.share_out_dir.unwrap_or(false),
-            },
+            stats_report: raw.stats_report,
+            verify: raw.verify,
+            incremental: raw.incremental,
+            share_out_dir: raw.share_out_dir,
             remote: RemoteSettings {
-                url: get_env("MBX_REMOTE_URL").or(file.remote.url),
-                namespace: get_env("MBX_REMOTE_NAMESPACE").or(file.remote.namespace),
-                token: get_env("MBX_REMOTE_TOKEN").or(file.remote.token),
-                token_file: get_env("MBX_REMOTE_TOKEN_FILE")
-                    .map(PathBuf::from)
-                    .or(file.remote.token_file),
-                oidc_audience: get_env("MBX_REMOTE_OIDC_AUDIENCE").or(file.remote.oidc_audience),
+                url: raw.remote.url,
+                namespace: raw.remote.namespace,
+                token: raw.remote.token,
+                token_file: raw.remote.token_file,
+                oidc_audience: raw.remote.oidc_audience,
                 mode,
             },
             http,
@@ -239,73 +271,17 @@ impl Config {
     }
 }
 
-/// Whether an environment value asks for a feature. Empty and `0` do not.
-fn enabled(value: &str) -> bool {
-    !value.is_empty() && value != "0"
-}
-
 /// Resolve a byte size, written either plainly or with a unit.
 ///
 /// Both IEC and SI spellings parse -- `20GiB` and `20GB` are different numbers,
 /// and sizes are reported back in IEC, so the two are not interchangeable.
-fn optional_byte_size(
-    name: &str,
-    get_env: &impl Fn(&str) -> Option<String>,
-    from_file: Option<&str>,
-) -> Result<Option<u64>> {
-    let Some(value) = get_env(name).or_else(|| from_file.map(str::to_owned)) else {
-        return Ok(None);
-    };
+fn parse_byte_size(value: &str) -> Result<u64> {
     // `ByteSize`'s parse error is a bare `String`, so it cannot be a source.
     value
         .trim()
         .parse::<ByteSize>()
-        .map(|size| Some(size.as_u64()))
-        .map_err(|error| eyre::eyre!("invalid {name}: {error}"))
-}
-
-/// Resolve a setting that is on unless it is turned off.
-///
-/// `MBX_VERIFY` reads its own environment variable as "set to anything but
-/// zero", which can only express a default of off. A setting that defaults to
-/// on has to be able to say no, and has to reject a value it cannot read
-/// rather than guess which way the user meant it.
-fn optional_bool(
-    name: &str,
-    get_env: &impl Fn(&str) -> Option<String>,
-    from_file: Option<bool>,
-) -> Result<Option<bool>> {
-    let Some(value) = get_env(name) else {
-        return Ok(from_file);
-    };
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(Some(true)),
-        "0" | "false" | "no" | "off" | "" => Ok(Some(false)),
-        other => Err(eyre::eyre!("invalid {name}: {other}")),
-    }
-}
-
-fn optional_duration(
-    name: &str,
-    get_env: &impl Fn(&str) -> Option<String>,
-    from_file: Option<&str>,
-) -> Result<Option<Duration>> {
-    match get_env(name) {
-        Some(value) => parse_duration(&value)
-            .map(Some)
-            .wrap_err_with(|| format!("invalid {name}")),
-        None => from_file.map(parse_duration).transpose(),
-    }
-}
-
-fn read_config_file(path: &Path) -> Result<ConfigFile> {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => {
-            toml::from_str(&contents).wrap_err_with(|| format!("invalid {}", path.display()))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ConfigFile::default()),
-        Err(error) => Err(error).wrap_err_with(|| format!("failed to read {}", path.display())),
-    }
+        .map(|size| size.as_u64())
+        .map_err(|error| eyre::eyre!(error))
 }
 
 fn config_file_path() -> Option<PathBuf> {
@@ -319,20 +295,25 @@ fn default_cache_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
-    fn env(values: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
-        let values: HashMap<String, String> = values
-            .iter()
-            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
-            .collect();
-        move |name: &str| values.get(name).cloned()
+    fn configured(file: Option<&str>, values: &[(&str, &str)]) -> Result<Config> {
+        let env = EnvLayer::new(
+            values
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), (*value).to_string())),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let file = file.map(|contents| {
+            let path = directory.path().join("config.toml");
+            std::fs::write(&path, contents).unwrap();
+            FileLayer::at(path, FileScope::Global)
+        });
+        Config::from_layers(&env, file.as_ref())
     }
 
     #[test]
     fn environment_overrides_the_file() {
-        let file: ConfigFile = toml::from_str(
-            r#"
+        let file = r#"
             cache_dir = "/from/file"
             [remote]
             url = "https://file.example"
@@ -348,19 +329,17 @@ mod tests {
             [target]
             views = true
             root = "/from/file/targets"
-            "#,
-        )
-        .unwrap();
-        let config = Config::from_parts(
-            file,
-            env(&[
+            "#;
+        let config = configured(
+            Some(file),
+            &[
                 ("MBX_CACHE_DIR", "/from/env"),
                 ("MBX_REMOTE_URL", "https://env.example"),
                 ("MBX_REMOTE_MODE", "write-only"),
                 ("MBX_HTTP_TIMEOUT", "250ms"),
                 ("MBX_GC_MAX_SIZE", "2GiB"),
                 ("MBX_TARGET_ROOT", "/from/env/targets"),
-            ]),
+            ],
         )
         .unwrap();
 
@@ -380,7 +359,7 @@ mod tests {
 
     #[test]
     fn defaults_apply_without_configuration() {
-        let config = Config::from_parts(ConfigFile::default(), env(&[])).unwrap();
+        let config = configured(None, &[]).unwrap();
         assert_eq!(config.http.timeout, DEFAULT_HTTP_TIMEOUT);
         assert_eq!(config.http.download_timeout, DEFAULT_HTTP_DOWNLOAD_TIMEOUT);
         assert_eq!(config.http.retries, DEFAULT_HTTP_RETRIES);
@@ -402,9 +381,7 @@ mod tests {
     #[test]
     fn managed_targets_can_be_turned_off() {
         for value in ["0", "false", "no", "off", ""] {
-            let config =
-                Config::from_parts(ConfigFile::default(), env(&[("MBX_TARGET_VIEWS", value)]))
-                    .unwrap();
+            let config = configured(None, &[("MBX_TARGET_VIEWS", value)]).unwrap();
             assert!(
                 !config.target.views,
                 "MBX_TARGET_VIEWS={value:?} should disable managed targets"
@@ -414,12 +391,12 @@ mod tests {
 
     #[test]
     fn relative_target_roots_are_anchored_to_the_cache_directory() {
-        let config = Config::from_parts(
-            ConfigFile::default(),
-            env(&[
+        let config = configured(
+            None,
+            &[
                 ("MBX_CACHE_DIR", "/cache"),
                 ("MBX_TARGET_ROOT", "target-views"),
-            ]),
+            ],
         )
         .unwrap();
 
@@ -428,53 +405,26 @@ mod tests {
 
     #[test]
     fn rejects_unparseable_values() {
-        assert!(
-            Config::from_parts(
-                ConfigFile::default(),
-                env(&[("MBX_REMOTE_MODE", "sideways")])
-            )
-            .is_err()
-        );
-        assert!(
-            Config::from_parts(ConfigFile::default(), env(&[("MBX_HTTP_TIMEOUT", "later")]))
-                .is_err()
-        );
-        assert!(
-            Config::from_parts(ConfigFile::default(), env(&[("MBX_HTTP_RETRIES", "many")]))
-                .is_err()
-        );
-        assert!(
-            Config::from_parts(ConfigFile::default(), env(&[("MBX_GC_MAX_SIZE", "lots")])).is_err()
-        );
-        assert!(
-            Config::from_parts(ConfigFile::default(), env(&[("MBX_GC_INTERVAL", "later")]))
-                .is_err()
-        );
+        assert!(configured(None, &[("MBX_REMOTE_MODE", "sideways")]).is_err());
+        assert!(configured(None, &[("MBX_HTTP_TIMEOUT", "later")]).is_err());
+        assert!(configured(None, &[("MBX_HTTP_RETRIES", "many")]).is_err());
+        assert!(configured(None, &[("MBX_GC_MAX_SIZE", "lots")]).is_err());
+        assert!(configured(None, &[("MBX_GC_INTERVAL", "later")]).is_err());
         // A budget that cannot be read must not be guessed at, and neither must
         // a switch: silently collecting to the wrong number, or not at all, is
         // worse than saying so.
-        assert!(
-            Config::from_parts(ConfigFile::default(), env(&[("MBX_GC_AUTO", "maybe")])).is_err()
-        );
-        assert!(
-            Config::from_parts(
-                ConfigFile::default(),
-                env(&[("MBX_TARGET_VIEWS", "sometimes")])
-            )
-            .is_err()
-        );
+        assert!(configured(None, &[("MBX_GC_AUTO", "maybe")]).is_err());
+        assert!(configured(None, &[("MBX_TARGET_VIEWS", "sometimes")]).is_err());
     }
 
     #[test]
     fn collection_runs_until_it_is_turned_off() {
         for value in ["0", "false", "no", "off", ""] {
-            let config =
-                Config::from_parts(ConfigFile::default(), env(&[("MBX_GC_AUTO", value)])).unwrap();
+            let config = configured(None, &[("MBX_GC_AUTO", value)]).unwrap();
             assert!(!config.gc.auto, "MBX_GC_AUTO={value:?} should disable");
         }
         for value in ["1", "true", "yes", "on", "ON"] {
-            let config =
-                Config::from_parts(ConfigFile::default(), env(&[("MBX_GC_AUTO", value)])).unwrap();
+            let config = configured(None, &[("MBX_GC_AUTO", value)]).unwrap();
             assert!(config.gc.auto, "MBX_GC_AUTO={value:?} should enable");
         }
     }
@@ -488,31 +438,42 @@ mod tests {
             ("20GB", 20_000_000_000),
             ("1024", 1024),
         ] {
-            let config =
-                Config::from_parts(ConfigFile::default(), env(&[("MBX_GC_MAX_SIZE", value)]))
-                    .unwrap();
+            let config = configured(None, &[("MBX_GC_MAX_SIZE", value)]).unwrap();
             assert_eq!(config.gc.max_bytes, expected, "{value} should parse");
         }
     }
 
     #[test]
     fn the_environment_can_turn_off_what_the_file_turned_on() {
-        let file: ConfigFile = toml::from_str("incremental = true").unwrap();
-        let config = Config::from_parts(file.clone(), env(&[])).unwrap();
+        let file = "incremental = true";
+        let config = configured(Some(file), &[]).unwrap();
         assert!(config.incremental);
-        let config = Config::from_parts(file, env(&[("MBX_INCREMENTAL", "0")])).unwrap();
+        let config = configured(Some(file), &[("MBX_INCREMENTAL", "0")]).unwrap();
         assert!(!config.incremental);
+    }
+
+    #[test]
+    fn unknown_file_keys_are_rejected() {
+        let error = configured(Some("not_a_setting = true"), &[]).unwrap_err();
+        assert!(error.to_string().contains("not_a_setting"), "{error}");
     }
 
     #[test]
     fn verify_is_off_for_empty_and_zero() {
         for value in ["", "0"] {
-            let config =
-                Config::from_parts(ConfigFile::default(), env(&[("MBX_VERIFY", value)])).unwrap();
+            let config = configured(None, &[("MBX_VERIFY", value)]).unwrap();
             assert!(!config.verify, "MBX_VERIFY={value:?} should not enable");
         }
-        let config =
-            Config::from_parts(ConfigFile::default(), env(&[("MBX_VERIFY", "1")])).unwrap();
+        let config = configured(None, &[("MBX_VERIFY", "1")]).unwrap();
         assert!(config.verify);
+    }
+
+    #[test]
+    fn the_usage_spec_declares_files_environment_and_defaults() {
+        let spec = RawConfig::spec_kdl();
+        assert!(spec.contains(r#"file "<config directory>/mbx/config.toml""#));
+        assert!(spec.contains(r#"env "MBX_GC_MAX_SIZE""#));
+        assert!(spec.contains(r#"prop "gc.max_size""#));
+        assert!(spec.contains(r#"default="20GiB""#));
     }
 }
