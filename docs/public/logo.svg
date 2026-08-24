@@ -16,14 +16,15 @@
   <path d="m266 91-106 54v131l106-56z" fill="url(#side)" stroke="#5c3a16" stroke-linejoin="round" stroke-width="8"/>
   <path d="M160 145v131" fill="none" stroke="#5c3a16" stroke-width="8"/>
   <path d="m118 59 104 53v36" fill="none" stroke="#9b611c" stroke-linejoin="round" stroke-width="12"/>
-  <g fill="#24373b">
-    <circle cx="104" cy="159" r="10"/>
-    <circle cx="157" cy="185" r="10"/>
-    <path d="M115 188c11 3 19 9 24 18-14 3-25 0-32-10-3 13-12 20-26 22 0-12 5-23 17-33z"/>
+  <g transform="matrix(1 .509 0 1 54 91)" stroke="#24373b" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="34" cy="50" r="7" fill="#24373b" stroke="none"/>
+    <circle cx="72" cy="50" r="7" fill="#24373b" stroke="none"/>
+    <circle cx="72" cy="50" r="14" fill="none" stroke-width="4"/>
+    <path d="m82 60 5 20" fill="none" stroke-width="4"/>
+    <path d="M53 76c-8-12-24-12-32 1 12-1 21 4 27 12 4-4 6-8 5-13Z" fill="#24373b" stroke="none"/>
+    <path d="M53 76c8-12 24-12 32 1-12-1-21 4-27 12-4-4-6-8-5-13Z" fill="#24373b" stroke="none"/>
+    <path d="m51 108-25-13 2 27 23-8Z" fill="#34545b" stroke-width="4"/>
+    <path d="m55 108 25-13-2 27-23-8Z" fill="#34545b" stroke-width="4"/>
+    <path d="m48 104 10 1 1 14-12-2Z" fill="#e9b650" stroke-width="4"/>
   </g>
-  <g fill="#34545b" stroke="#203438" stroke-linejoin="round" stroke-width="5">
-    <path d="m105 222 29-10 25 24-31 12z"/>
-    <path d="m159 236 31-4-2 31-29-7z"/>
-  </g>
-  <path d="m140 224 19 12-8 18-21-10z" fill="#e9b650" stroke="#203438" stroke-linejoin="round" stroke-width="5"/>
 </svg>
