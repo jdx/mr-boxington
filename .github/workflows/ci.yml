@@ -132,9 +132,11 @@ jobs:
         id: semver-packages
         if: github.event_name == 'pull_request'
         shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
           baseline_dir="$(mktemp -d)"
-          git worktree add --detach "$baseline_dir" "origin/${{ github.base_ref }}"
+          git worktree add --detach "$baseline_dir" "origin/$BASE_REF"
           packages="$({
             comm -12 \
               <(cargo metadata --no-deps --format-version 1 | jq -r '.workspace_members as $members | [.packages[] | select(.id as $id | $members | index($id)) | .name] | sort | .[]') \
