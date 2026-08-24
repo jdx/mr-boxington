@@ -17,6 +17,21 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+      - name: Build documentation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mise run check:docs
+          mise run build:docs
+
   lint:
     runs-on: namespace-profile-endev-linux-amd64
     steps:
@@ -103,6 +118,7 @@ jobs:
     permissions: {}
     needs:
       - compatibility
+      - docs
       - lint
       - supply-chain
       - public-api
@@ -115,6 +131,7 @@ jobs:
     steps:
       - name: Check job results
         if: |
+          needs.docs.result != 'success' ||
           needs.lint.result != 'success' ||
           needs.compatibility.result != 'success' ||
           needs.supply-chain.result != 'success' ||

@@ -10,21 +10,13 @@ on:
       - "crates/mbx/**"
       - "mise.toml"
       - ".github/workflows/docs.yml"
-  pull_request:
-    paths:
-      - "docs/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "crates/mbx/**"
-      - "mise.toml"
-      - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions: {}
 
 concurrency:
   group: pages-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 jobs:
   build:
