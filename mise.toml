@@ -1,37 +1,72 @@
 [env]
-_.path = ["test/bats/bin", "{{ env.CARGO_TARGET_DIR | default(value='target') }}/debug"]
+_.path = ["test/bats/bin"]
+
+[tasks.bootstrap]
+hide = true
+run = [
+  "cargo build --package mbx --target-dir target/mbx-bootstrap-build",
+  "mkdir -p target/mbx-bootstrap",
+  "cp target/mbx-bootstrap-build/debug/mbx target/mbx-bootstrap/mbx",
+]
+run_windows = [
+  "cargo build --package mbx --target-dir target/mbx-bootstrap-build",
+  "New-Item -ItemType Directory -Force target/mbx-bootstrap | Out-Null",
+  "Copy-Item -Force target/mbx-bootstrap-build/debug/mbx.exe target/mbx-bootstrap/mbx.exe",
+]
 
 [tasks.build]
 alias = "b"
-run = "cargo build --workspace --all-targets"
+depends = ["bootstrap"]
+run = "./target/mbx-bootstrap/mbx build --workspace --all-targets"
+run_windows = "./target/mbx-bootstrap/mbx.exe build --workspace --all-targets"
 
 [tasks.test]
 alias = "t"
-description = "Run cargo and Bats tests"
-depends = ["test:cargo", "test:bats"]
+description = "Run Rust and behavioral tests"
+depends = ["test:cargo", "test:e2e"]
 
 [tasks."test:cargo"]
 description = "Run Rust tests"
-run = "cargo test --workspace"
+depends = ["bootstrap"]
+run = "./target/mbx-bootstrap/mbx test --workspace"
+run_windows = "./target/mbx-bootstrap/mbx.exe test --workspace"
+
+[tasks."test:e2e"]
+description = "Run platform behavioral tests"
+depends = ["build"]
+run = "MBX_BIN=$PWD/target/mbx-bootstrap/mbx bats test"
+run_windows = "pwsh e2e-win/run.ps1"
 
 [tasks."test:bats"]
 description = "Run behavioral tests"
 depends = ["build"]
-run = "bats test"
+run = "MBX_BIN=$PWD/target/mbx-bootstrap/mbx bats test"
 
 [tasks.format]
-run = "cargo fmt --all"
+depends = ["bootstrap"]
+run = "./target/mbx-bootstrap/mbx fmt --all"
+run_windows = "./target/mbx-bootstrap/mbx.exe fmt --all"
 
 [tasks.lint]
+depends = ["bootstrap"]
 run = [
-  "cargo fmt --all --check",
-  "cargo clippy --workspace --all-features --all-targets -- -D warnings",
+  "./target/mbx-bootstrap/mbx fmt --all --check",
+  "./target/mbx-bootstrap/mbx clippy --workspace --all-features --all-targets -- -D warnings",
+]
+run_windows = [
+  "./target/mbx-bootstrap/mbx.exe fmt --all --check",
+  "./target/mbx-bootstrap/mbx.exe clippy --workspace --all-features --all-targets -- -D warnings",
 ]
 
 [tasks.lint-fix]
+depends = ["bootstrap"]
 run = [
-  "cargo fmt --all",
-  "cargo clippy --workspace --all-features --all-targets --fix --allow-dirty --allow-staged -- -D warnings",
+  "./target/mbx-bootstrap/mbx fmt --all",
+  "./target/mbx-bootstrap/mbx clippy --workspace --all-features --all-targets --fix --allow-dirty --allow-staged -- -D warnings",
+]
+run_windows = [
+  "./target/mbx-bootstrap/mbx.exe fmt --all",
+  "./target/mbx-bootstrap/mbx.exe clippy --workspace --all-features --all-targets --fix --allow-dirty --allow-staged -- -D warnings",
 ]
 
 [tasks.ci]
@@ -51,7 +86,9 @@ run = "aube install && exec aube run docs:build"
 
 [tasks."render:docs"]
 description = "Generate reference documentation from the usage spec"
-run = "cargo run --quiet -p mbx -- __usage_spec__ | usage generate markdown --file - --replace-pre-with-code-fences --out-file docs/cli.md"
+depends = ["bootstrap"]
+run = "./target/mbx-bootstrap/mbx __usage_spec__ | usage generate markdown --file - --replace-pre-with-code-fences --out-file docs/cli.md"
+run_windows = "./target/mbx-bootstrap/mbx.exe __usage_spec__ | usage generate markdown --file - --replace-pre-with-code-fences --out-file docs/cli.md"
 
 [tasks."check:docs"]
 description = "Check that generated documentation is current"

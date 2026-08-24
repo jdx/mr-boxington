@@ -39,8 +39,13 @@ jobs:
       - uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1.6.1
         with:
           cache: rust
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+      - name: Bootstrap mbx
+        run: |
+          cargo build --package mbx --target-dir target/mbx-bootstrap-build
+          mkdir -p target/mbx-bootstrap
+          cp target/mbx-bootstrap-build/debug/mbx target/mbx-bootstrap/mbx
+      - run: ./target/mbx-bootstrap/mbx fmt --all --check
+      - run: ./target/mbx-bootstrap/mbx clippy --workspace --all-features --all-targets -- -D warnings
 
   test:
     strategy:
@@ -68,11 +73,26 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: rustup target add wasm32-unknown-unknown
-      - run: cargo build --workspace --all-targets
-      - run: cargo test --workspace
-      - name: Run behavioral tests
+      - name: Bootstrap mbx
+        shell: bash
+        run: |
+          cargo build --package mbx --target-dir target/mbx-bootstrap-build
+          mkdir -p target/mbx-bootstrap
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp target/mbx-bootstrap-build/debug/mbx.exe target/mbx-bootstrap/mbx.exe
+          else
+            cp target/mbx-bootstrap-build/debug/mbx target/mbx-bootstrap/mbx
+          fi
+      - run: ./target/mbx-bootstrap/mbx${{ runner.os == 'Windows' && '.exe' || '' }} build --workspace --all-targets
+      - run: ./target/mbx-bootstrap/mbx${{ runner.os == 'Windows' && '.exe' || '' }} test --workspace
+      - name: Run Bats behavioral tests
         if: runner.os != 'Windows'
+        env:
+          MBX_BIN: ${{ github.workspace }}/target/mbx-bootstrap/mbx
         run: test/bats/bin/bats test
+      - name: Windows end-to-end tests
+        if: runner.os == 'Windows'
+        run: pwsh e2e-win/run.ps1
 
   compatibility:
     runs-on: namespace-profile-endev-linux-amd64

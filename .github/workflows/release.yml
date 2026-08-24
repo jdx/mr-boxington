@@ -65,6 +65,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Bootstrap mbx
+        shell: bash
+        run: |
+          cargo build --package mbx --target-dir target/mbx-bootstrap-build
+          mkdir -p target/mbx-bootstrap
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp target/mbx-bootstrap-build/debug/mbx.exe target/mbx-bootstrap/mbx.exe
+          else
+            cp target/mbx-bootstrap-build/debug/mbx target/mbx-bootstrap/mbx
+          fi
+
       - name: Install the musl toolchain
         if: endsWith(matrix.target, '-musl')
         run: |
@@ -78,9 +89,12 @@ jobs:
         # `musl-gcc`. Naming it for both musl targets is harmless elsewhere,
         # since nothing else consults these variables.
         env:
+          # workflow_call preserves the caller's branch context, so tell mbx
+          # explicitly that this artifact build must bypass its cache.
+          MBX_RELEASE: 1
           CC_x86_64_unknown_linux_musl: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
-        run: cargo build --release --locked --package mbx --target ${{ matrix.target }}
+        run: ./target/mbx-bootstrap/mbx${{ runner.os == 'Windows' && '.exe' || '' }} build --release --locked --package mbx --target ${{ matrix.target }}
 
       - name: Check the binary runs
         # Every target but this one is native to its runner.
