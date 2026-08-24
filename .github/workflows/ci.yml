@@ -132,6 +132,74 @@ jobs:
           cargo +nightly-2026-08-02 fuzz run dep_info -- -runs=1000
           cargo +nightly-2026-08-02 fuzz run rustc_paths -- -runs=1000
 
+  performance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install Valgrind
+        if: github.event_name == 'pull_request'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind
+      - name: Build benchmark driver
+        run: mise run perf:prepare
+      - name: Measure instruction counts
+        if: github.event_name == 'pull_request'
+        run: |
+          mkdir -p "$RUNNER_TEMP/mbx-measurements/tak"
+          tak run --record
+          tak history | tee "$RUNNER_TEMP/mbx-measurements/tak/history.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Compare instruction counts with the PR base
+        id: tak_compare
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        shell: bash
+        run: |
+          if git ls-remote --exit-code origin refs/notes/tak >/dev/null 2>&1; then
+            tak compare "origin/${GITHUB_BASE_REF}" \
+              | tee "$RUNNER_TEMP/mbx-measurements/tak/comparison.md" \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No shared tak history yet; this PR will seed it after merge." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Stage benchmark driver
+        run: cp target/release/mbx "$RUNNER_TEMP/mbx-benchmark-driver"
+      - name: Measure cold and warm workspace builds
+        run: |
+          python3 benchmarks/measure_builds.py \
+            --mbx "$RUNNER_TEMP/mbx-benchmark-driver" \
+            --workspace "$GITHUB_WORKSPACE" \
+            --output "$RUNNER_TEMP/mbx-measurements/build"
+      - name: Publish job summary
+        if: always()
+        run: |
+          find "$RUNNER_TEMP/mbx-measurements" -name '*.md' -type f -print0 \
+            | sort -z \
+            | xargs -0 -r cat >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mbx-measurements-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mbx-measurements
+          if-no-files-found: error
+          retention-days: 90
+      - name: Enforce instruction-count regression gate
+        if: steps.tak_compare.outcome == 'failure'
+        run: exit 1
+
   final:
     permissions: {}
     needs:
@@ -141,6 +209,7 @@ jobs:
       - lint
       - supply-chain
       - public-api
+      - performance
       - test
     runs-on: namespace-profile-endev-linux-amd64
     timeout-minutes: 1
@@ -156,6 +225,7 @@ jobs:
           needs.compatibility.result != 'success' ||
           needs.supply-chain.result != 'success' ||
           needs.public-api.result != 'success' ||
+          needs.performance.result != 'success' ||
           needs.test.result != 'success'
         run: exit 1
       - run: echo "All CI jobs completed successfully"

@@ -307,6 +307,8 @@ env vars, and wire constants to match `mbx-cache-core` exactly.
 - **Signed provenance** for shared caches (sigstore), enabling org-level and
   eventually public warm caches.
 - **RE-API bridge** for existing Bazel-ecosystem cache servers.
-- **Shim overhead benchmark** in CI with a hard warm-exec budget (mise
-  enforced 2ms; keep that bar).
+- **Instruction-counted startup benchmarks** in CI via `tak`, with history in
+  `refs/notes/tak` and regression comparisons once the first main baseline is
+  recorded. Keep wall-clock timing report-only because shared runners are
+  noisy; the cold/warm workspace harness separately gates cache correctness.
 - **mise integration** — mise consumes mbx and removes its embedded copy.

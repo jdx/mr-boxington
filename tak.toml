@@ -1,0 +1,23 @@
+# Instruction-counted benchmarks measured by tak (https://tak.jdx.dev).
+#
+# `/usr/bin/true` is the process-startup control. `mbx --help` captures the
+# fixed CLI startup and command-tree cost without consulting Cargo, the network,
+# or mutable cache state. The transparent rustc shim ultimately `exec`s the
+# compiler, so cachegrind cannot attribute a stable instruction count to that
+# process boundary; end-to-end cache behavior is covered separately.
+
+[gate]
+pct = 1.0
+
+[runner]
+class = "gha-ubuntu24.04-x64-valgrind3.22-rust1.97.1"
+
+[bench.startup_control]
+cmd = ["/usr/bin/true", "-vV"]
+runs = 20
+warmup = 3
+
+[bench.mbx_help]
+cmd = ["./target/release/mbx", "--help"]
+runs = 20
+warmup = 3

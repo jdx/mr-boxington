@@ -58,7 +58,23 @@ description = "Check that generated documentation is current"
 depends = ["render:docs"]
 run = "git diff --exit-code -- docs/cli.md"
 
+[tasks."perf:prepare"]
+description = "Build the fixed benchmark subject"
+run = "cargo build --release --locked -p mbx"
+
+[tasks.perf]
+description = "Measure instruction-counted performance benchmarks"
+depends = ["perf:prepare"]
+run = "tak run"
+
+[tasks."perf:record"]
+description = "Record performance benchmarks in local git notes"
+depends = ["perf:prepare"]
+run = "tak run --record"
+
 [tools]
+"github:jdx/tak" = "0.0.7"
 aube = "latest"
 node = "24"
+rust = "1.97.1"
 usage = "6.3.0"
