@@ -11,7 +11,11 @@ _common_setup() {
   if [[ "$target_dir" != /* ]]; then
     target_dir="$PROJECT_ROOT/$target_dir"
   fi
-  export MBX_BIN="${MBX_BIN:-$target_dir/debug/mbx}"
+  MBX_BIN="${MBX_BIN:-$target_dir/debug/mbx}"
+  if [[ "$MBX_BIN" != /* ]]; then
+    MBX_BIN="$PROJECT_ROOT/$MBX_BIN"
+  fi
+  export MBX_BIN
 
   if [[ ! -x "$MBX_BIN" ]]; then
     echo "mbx binary not found; run 'mise run build' first: $MBX_BIN" >&2

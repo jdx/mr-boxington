@@ -21,8 +21,8 @@ Run only Bats tests, one file, or one named case:
 
 ```bash
 mise run test:bats
-bats test/cli.bats
-bats test/cli.bats --filter "isolated store"
+test/bats/bin/bats test/cli.bats
+test/bats/bin/bats --filter "isolated store" test/cli.bats
 ```
 
 Every test loads `test/test_helper/common_setup.bash`, which selects the debug
