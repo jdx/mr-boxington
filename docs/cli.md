@@ -2,12 +2,13 @@
 # `mbx`
 - **Version:** 0.3.0
 
-Run any Cargo subcommand with the build cache enabled. The subcommand and all of its arguments are passed through unchanged, including Cargo aliases and installed subcommands. `cache` and `gc` are reserved for mbx's own store-management commands.
+Run any Cargo subcommand with the build cache enabled. The subcommand and all of its arguments are passed through unchanged, including Cargo aliases and installed subcommands. `cache`, `gc`, and `setup` are reserved for mbx's own commands.
 
 Examples:
   mbx build --release
   mbx test --workspace
   mbx clippy --all-targets -- -D warnings
+  mbx setup
 
 
 - **Usage:** `mbx <SUBCOMMAND>`
@@ -15,6 +16,15 @@ Examples:
 ## Flags
 - **`-h --help`** — Print help
 - **`-V --version`** — Print version
+
+## `mbx setup`
+
+- **Usage:** `mbx setup`
+
+Install a persistent rustc wrapper for plain Cargo commands.
+
+### Flags
+- **`-h --help`** — Print help
 
 ## `mbx gc`
 

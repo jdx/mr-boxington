@@ -43,7 +43,12 @@ enum Materialization {
 
 pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode> {
     let working_dir = std::env::current_dir()?;
-    let portable = Portable::detect(&working_dir);
+    // The orchestrated session supplies the target root. A persistent wrapper
+    // has no parent session, so first parse just enough of the invocation to
+    // learn its output directory and use that as the stable target mapping.
+    let initial_invocation = RustcInvocation::parse(arguments)?;
+    let initial_outputs = initial_invocation.outputs(&working_dir)?;
+    let portable = Portable::detect(&working_dir, Some(&initial_outputs.directory));
     let arguments = portable.applied_to(arguments);
     let invocation = RustcInvocation::parse(&arguments)?;
     let outputs = invocation.outputs(&working_dir)?;
@@ -163,10 +168,9 @@ fn restore_predicted_result(
     portable: &Portable,
     restore_outputs: bool,
 ) -> Result<Option<CachedCompilation>> {
-    let task = std::env::var(session::BUILD_ENV)
-        .wrap_err_with(|| format!("{} is not set", session::BUILD_ENV))?;
     let mut context = base_action_context(rustc, working_dir, portable)?;
     let invocation_digest = invocation.invocation_digest(&context)?;
+    let task = prediction_task(&invocation_digest);
     let responses = session::request_agent(&[AgentRequest::FindActionPrediction {
         task,
         invocation: invocation_digest.clone(),
@@ -357,8 +361,7 @@ fn record_prediction(
 
 fn record_prediction_value(invocation: CacheDigest, action: CacheDigest, payload: String) {
     let result = (|| {
-        let task = std::env::var(session::BUILD_ENV)
-            .wrap_err_with(|| format!("{} is not set", session::BUILD_ENV))?;
+        let task = prediction_task(&invocation);
         let responses = session::request_agent(&[AgentRequest::RecordActionPrediction {
             task,
             prediction: ActionPrediction {
@@ -377,6 +380,18 @@ fn record_prediction_value(invocation: CacheDigest, action: CacheDigest, payload
     if let Err(error) = result {
         eprintln!("mbx warning: action prediction was not recorded: {error:#}");
     }
+}
+
+/// Select the session run, or a bounded persistent-manifest shard when this
+/// shim was installed directly in Cargo configuration.
+fn prediction_task(invocation: &CacheDigest) -> String {
+    std::env::var(session::BUILD_ENV).unwrap_or_else(|_| {
+        // A global manifest would eventually hit the prediction count limit.
+        // Sharding by the invocation digest keeps related reads and writes
+        // together while bounding each manifest independently.
+        let shard = invocation.hash.get(..2).unwrap_or(&invocation.hash);
+        CacheDigest::blake3(format!("standalone-predictions-v1\0{shard}").as_bytes()).hash
+    })
 }
 
 fn verify_environment(environment: &BTreeMap<String, Option<String>>) -> Result<()> {
@@ -841,9 +856,9 @@ struct Portable {
 }
 
 impl Portable {
-    fn detect(working_dir: &Path) -> Self {
+    fn detect(working_dir: &Path, target_output: Option<&Path>) -> Self {
         let mut portable = Self {
-            mappings: PathMapping::ordered(&path_mappings(working_dir)),
+            mappings: PathMapping::ordered(&path_mappings(working_dir, target_output)),
             arguments: Vec::new(),
             names: BTreeSet::new(),
             values: Vec::new(),
@@ -931,7 +946,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     false
 }
 
-fn path_mappings(working_dir: &Path) -> Vec<PathMapping> {
+fn path_mappings(working_dir: &Path, target_output: Option<&Path>) -> Vec<PathMapping> {
     let mut mappings = Vec::new();
     let mut roots = BTreeSet::new();
     // The target directory comes first, and before the workspace that usually
@@ -942,8 +957,17 @@ fn path_mappings(working_dir: &Path) -> Vec<PathMapping> {
     // Cargo compiles a dependency with its working directory inside the
     // registry, not in the workspace, so neither root can be inferred from the
     // working directory -- the session passes both in.
+    let configured_target = std::env::var_os(session::TARGET_DIR_ENV)
+        .map(PathBuf::from)
+        .filter(|root| root.is_absolute());
+    if let Some(root) = configured_target.or_else(|| {
+        target_output
+            .filter(|root| root.is_absolute())
+            .map(standalone_target_root)
+    }) {
+        add_mapping(&mut mappings, &mut roots, root, "target");
+    }
     for (name, placeholder) in [
-        (session::TARGET_DIR_ENV, "target"),
         (session::WORKSPACE_ROOT_ENV, "workspace"),
         ("CARGO_HOME", "cargo_home"),
         ("RUSTUP_HOME", "rustup_home"),
@@ -967,6 +991,20 @@ fn path_mappings(working_dir: &Path) -> Vec<PathMapping> {
         );
     }
     mappings
+}
+
+/// Infer the profile subtree shared by rustc outputs and build-script output.
+///
+/// Cargo normally writes compilations to `<target>/<profile>/deps` (or the
+/// same shape below a target-triple directory). Mapping the profile parent,
+/// rather than only `deps`, also covers generated inputs below `build/`.
+fn standalone_target_root(output: &Path) -> PathBuf {
+    if output.file_name() == Some(OsStr::new("deps"))
+        && let Some(root) = output.parent().and_then(Path::parent)
+    {
+        return root.to_path_buf();
+    }
+    output.to_path_buf()
 }
 
 fn add_mapping(
@@ -999,9 +1037,13 @@ fn replay_bytes(stdout_bytes: &[u8], stderr_bytes: &[u8]) -> Result<()> {
 }
 
 fn staging_directory() -> Result<tempfile::TempDir> {
-    let root = std::env::var_os(session::STAGING_ENV)
-        .map(PathBuf::from)
-        .ok_or_else(|| eyre::eyre!("{} is not set", session::STAGING_ENV))?;
+    let root = match std::env::var_os(session::STAGING_ENV).filter(|root| !root.is_empty()) {
+        Some(root) => PathBuf::from(root),
+        None => crate::config::Config::load()?
+            .store_dir()
+            .join("standalone-staging"),
+    };
+    std::fs::create_dir_all(&root)?;
     Ok(tempfile::tempdir_in(root)?)
 }
 

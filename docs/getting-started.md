@@ -49,6 +49,21 @@ The command and its arguments are passed to Cargo unchanged. Cargo still owns
 dependency resolution, feature unification, build planning, and linking. mbx
 also forwards Cargo aliases and installed subcommands.
 
+## Enable plain Cargo commands
+
+```sh
+mbx setup
+```
+
+Setup installs a persistent `mbx-rustc` wrapper and adds it as Cargo's global
+`build.rustc-wrapper`. It never replaces a wrapper that is already configured.
+Rerun setup after upgrading mbx so the installed wrapper matches the new
+version.
+
+The persistent wrapper uses the local action store. Continue to run commands
+through `mbx` when you need a remote cache, build statistics, managed target
+directories, or automatic collection.
+
 ## Read the result
 
 After a build that used the cache, mbx prints a summary to stderr:

@@ -29,6 +29,7 @@ supported compilations it has seen before.
 mbx build                  # cargo build, with caching
 mbx test --all-features    # cargo test --all-features, with caching
 mbx clippy --workspace     # cargo clippy --workspace, with caching
+mbx setup                  # cache future plain cargo commands locally
 ```
 
 ## Why mbx?
@@ -109,6 +110,19 @@ to disable managed placement and the prompt.
 
 [Learn about managed targets →](https://mr-boxington.jdx.dev/managed-targets)
 
+## Plain Cargo commands
+
+Run `mbx setup` once to install a persistent rustc wrapper and configure it in
+Cargo's global configuration. Afterwards, ordinary `cargo build`, `cargo test`,
+and other Cargo commands use the local action store without a daemon. Setup
+leaves the configuration untouched when `build.rustc-wrapper` already names
+another tool, such as sccache.
+
+The persistent wrapper deliberately stays local-only: use `mbx <subcommand>`
+when a build needs remote prefetch, session statistics, managed targets, or
+automatic collection. Rerun `mbx setup` after upgrading mbx to refresh the
+installed wrapper binary.
+
 ## Worktree and CI warming
 
 An equivalent rustc action keys the same across checkout paths. One worktree's
@@ -130,9 +144,8 @@ An `mbx` Cargo command starts an in-process cache agent, points Cargo at a rustc
 derives an action key, restores cached outputs when possible, or runs the real
 compiler and publishes a successful result.
 
-Anything mbx cannot model exactly bypasses the cache. Linking is not cached,
-incremental compilation is off by default, and plain `cargo build` does not use
-mbx. Correctness comes before hit rate.
+Anything mbx cannot model exactly bypasses the cache. Linking is not cached and
+incremental compilations bypass the cache. Correctness comes before hit rate.
 
 [Read the architecture and limits →](https://mr-boxington.jdx.dev/how-it-works)
 

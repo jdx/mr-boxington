@@ -135,6 +135,18 @@ fn mappings_do_not_duplicate_home_placeholders() {
 }
 
 #[test]
+fn standalone_target_mapping_covers_the_profile_tree() {
+    assert_eq!(
+        standalone_target_root(Path::new("/tmp/target/debug/deps")),
+        Path::new("/tmp/target")
+    );
+    assert_eq!(
+        standalone_target_root(Path::new("/tmp/target/triple/release/deps")),
+        Path::new("/tmp/target/triple")
+    );
+}
+
+#[test]
 fn validates_exact_rustc_output_set() {
     let root = tempfile::tempdir().unwrap();
     let outputs = test_outputs(root.path());
