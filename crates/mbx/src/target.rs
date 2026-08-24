@@ -25,8 +25,9 @@ use crate::config::Config;
 use eyre::{Context, Result};
 use mbx_cache_core::CacheDigest;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const VIEWS_DIR: &str = "v1";
 const VIEW_RECORD_VERSION: u8 = 1;
@@ -50,6 +51,9 @@ pub struct ViewStats {
 pub struct PruneOutcome {
     pub removed_views: u64,
     pub removed_bytes: u64,
+    pub removed_stale_views: u64,
+    pub removed_live_views: u64,
+    pub remaining_bytes: u64,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -479,26 +483,87 @@ pub fn stats(root: &Path) -> Result<ViewStats> {
 /// usually serve, but it would also delete something the person who owns that
 /// directory can still see, which is a different kind of surprise.
 pub fn prune(root: &Path) -> Result<PruneOutcome> {
+    collect(root, None, None, false)
+}
+
+/// Collect abandoned, expired, and over-budget managed target directories.
+///
+/// Limits are opt-in. Abandoned checkouts are always collected; live views
+/// are considered oldest-first only when an age or size policy requests it.
+pub fn collect(
+    root: &Path,
+    max_bytes: Option<u64>,
+    max_age: Option<Duration>,
+    dry_run: bool,
+) -> Result<PruneOutcome> {
     let mut outcome = PruneOutcome::default();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let mut entries = Vec::new();
     for (record_path, directory) in views(root)? {
         let Some(record) = read_view_record(&record_path) else {
             // A record this build cannot read names no checkout, and a target
             // directory nobody can trace is not one to delete on a guess.
             continue;
         };
-        if crate::store::checkout_is_live(&record.workspace_root) {
+        let bytes = tree_bytes(&directory);
+        entries.push((
+            record_path,
+            directory,
+            record.updated_secs,
+            bytes,
+            crate::store::checkout_is_live(&record.workspace_root),
+        ));
+    }
+    let mut remaining = entries.iter().map(|entry| entry.3).sum::<u64>();
+    let mut selected = HashSet::new();
+    for (record_path, _, updated, bytes, live) in &entries {
+        let expired = max_age.is_some_and(|age| now.saturating_sub(*updated) > age.as_secs());
+        if !live || expired {
+            selected.insert(record_path.clone());
+            remaining = remaining.saturating_sub(*bytes);
+        }
+    }
+    if let Some(max_bytes) = max_bytes
+        && remaining > max_bytes
+    {
+        entries.sort_by_key(|entry| entry.2);
+        for (record_path, _, _, bytes, _) in &entries {
+            if remaining <= max_bytes {
+                break;
+            }
+            if selected.insert(record_path.clone()) {
+                remaining = remaining.saturating_sub(*bytes);
+            }
+        }
+    }
+
+    for (record_path, directory, _, bytes, live) in entries {
+        if !selected.contains(&record_path) {
             continue;
         }
-        let bytes = tree_bytes(&directory);
-        match std::fs::remove_dir_all(&directory) {
+        let removal = if dry_run {
+            Ok(())
+        } else {
+            std::fs::remove_dir_all(&directory)
+        };
+        match removal {
             Ok(()) => {
                 outcome.removed_views += 1;
                 outcome.removed_bytes += bytes;
+                if live {
+                    outcome.removed_live_views += 1;
+                } else {
+                    outcome.removed_stale_views += 1;
+                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 outcome.removed_views += 1;
             }
             Err(error) => {
+                outcome.remaining_bytes = outcome.remaining_bytes.saturating_add(bytes);
                 log::warn!(
                     "could not remove the target directory {}: {error}",
                     directory.display()
@@ -507,7 +572,8 @@ pub fn prune(root: &Path) -> Result<PruneOutcome> {
             }
         }
         // Last, so a failed removal above leaves the record to try again with.
-        if let Err(error) = std::fs::remove_file(&record_path)
+        if !dry_run
+            && let Err(error) = std::fs::remove_file(&record_path)
             && error.kind() != std::io::ErrorKind::NotFound
         {
             log::warn!(
@@ -516,6 +582,7 @@ pub fn prune(root: &Path) -> Result<PruneOutcome> {
             );
         }
     }
+    outcome.remaining_bytes = remaining;
     Ok(outcome)
 }
 

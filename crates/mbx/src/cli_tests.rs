@@ -469,6 +469,8 @@ fn managed_target_config(root: &Path) -> Config {
         target: crate::config::TargetSettings {
             views: true,
             root: root.join("targets"),
+            max_bytes: None,
+            max_age: None,
         },
     }
 }

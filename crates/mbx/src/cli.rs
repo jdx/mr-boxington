@@ -101,6 +101,9 @@ struct GcArgs {
     /// Print a stable machine-readable report.
     #[usage(long)]
     json: bool,
+    /// Show what collection would remove without changing any files.
+    #[usage(long)]
+    dry_run: bool,
 }
 
 #[derive(usage::Args)]
@@ -162,6 +165,7 @@ pub fn run() -> Result<ExitCode> {
             &config,
             args.max_size
                 .map_or(config.gc.max_bytes, |requested| requested.as_u64()),
+            args.dry_run,
             args.json,
         )
         .map(|()| ExitCode::SUCCESS),
@@ -635,18 +639,52 @@ fn exit_code(status: std::process::ExitStatus) -> ExitCode {
     }
 }
 
-fn gc(config: &Config, max_bytes: u64, json: bool) -> Result<()> {
+fn gc(config: &Config, max_bytes: u64, dry_run: bool, json: bool) -> Result<()> {
     let store = config.store_dir();
-    let outcome = store::gc(&store, max_bytes);
+    // The collector below remains the authority for store errors. Estimating
+    // a combined budget must not prevent independent target collection when
+    // the action store is damaged.
+    let store_bytes = store::stats(&store)
+        .map(|stats| stats.total_bytes())
+        .unwrap_or(max_bytes);
+    let target_bytes = target::stats(&config.target.root)?.bytes;
+    let target_budget = config
+        .gc
+        .max_total_bytes
+        .map_or(config.target.max_bytes, |total| {
+            let budget = total.saturating_sub(store_bytes.min(max_bytes));
+            Some(
+                config
+                    .target
+                    .max_bytes
+                    .map_or(budget, |target| target.min(budget)),
+            )
+        });
+    let pruned = target::collect(
+        &config.target.root,
+        target_budget,
+        config.target.max_age,
+        dry_run,
+    );
+    let projected_target_bytes = pruned
+        .as_ref()
+        .map_or(target_bytes, |outcome| outcome.remaining_bytes);
+    let store_budget = config.gc.max_total_bytes.map_or(max_bytes, |total| {
+        max_bytes.min(total.saturating_sub(projected_target_bytes))
+    });
+    let outcome = if dry_run {
+        store::gc_dry_run(&store, store_budget)
+    } else {
+        store::gc(&store, store_budget)
+    };
     // Independent collections: a broken action store must not prevent the
     // command from freeing the usually much larger target directories.
-    let pruned = target::prune(&config.target.root);
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
             match pruned {
                 Ok(pruned) if !json && pruned.removed_views > 0 => {
-                    println!("{}", target_removals(&pruned));
+                    println!("{}", target_removals(&pruned, dry_run));
                 }
                 Ok(_) => {}
                 Err(prune_error) => {
@@ -661,6 +699,7 @@ fn gc(config: &Config, max_bytes: u64, json: bool) -> Result<()> {
         print_json(&GcReport {
             version: 1,
             max_bytes,
+            dry_run,
             action_store: GcActionStoreReport {
                 removed_objects: outcome.removed_objects,
                 removed_action_results: outcome.removed_action_results,
@@ -674,31 +713,36 @@ fn gc(config: &Config, max_bytes: u64, json: bool) -> Result<()> {
             },
         })?;
     } else {
-        print_gc_store_outcome(&outcome);
+        print_gc_store_outcome(&outcome, dry_run);
         let pruned = pruned?;
         if pruned.removed_views > 0 {
-            println!("{}", target_removals(&pruned));
+            println!("{}", target_removals(&pruned, dry_run));
         }
     }
     Ok(())
 }
 
-fn print_gc_store_outcome(outcome: &store::GcOutcome) {
-    println!("{}", evictions(outcome));
+fn print_gc_store_outcome(outcome: &store::GcOutcome, dry_run: bool) {
+    let prefix = if dry_run { "would have " } else { "" };
+    println!("{prefix}{}", evictions(&outcome));
     if outcome.removed_checkout_records > 0 {
         println!(
-            "dropped {} stale checkout records",
+            "{prefix}dropped {} stale checkout records",
             outcome.removed_checkout_records
         );
     }
 }
 
 /// One line describing the target directories a sweep freed.
-fn target_removals(outcome: &target::PruneOutcome) -> String {
+fn target_removals(outcome: &target::PruneOutcome, dry_run: bool) -> String {
+    let verb = if dry_run { "would free" } else { "freed" };
     format!(
-        "freed {} target directories of checkouts that are gone ({})",
+        "{verb} {} target directories ({}, {} abandoned and {} live); {} remain",
         outcome.removed_views,
         ByteSize::b(outcome.removed_bytes).display().iec(),
+        outcome.removed_stale_views,
+        outcome.removed_live_views,
+        ByteSize::b(outcome.remaining_bytes).display().iec(),
     )
 }
 
@@ -748,9 +792,24 @@ fn prune_targets(config: &Config) {
     // A target directory whose checkout is gone is the largest thing
     // collection ever frees, and walking for it on every build would be the
     // slowest, so callers keep this inside the store sweep's throttle.
-    match target::prune(&config.target.root) {
+    let target_budget = config.gc.max_total_bytes.and_then(|total| {
+        store::stats(&config.store_dir())
+            .ok()
+            .map(|stats| total.saturating_sub(stats.total_bytes()))
+    });
+    let target_budget = match (config.target.max_bytes, target_budget) {
+        (Some(configured), Some(total)) => Some(configured.min(total)),
+        (configured, None) => configured,
+        (None, total) => total,
+    };
+    match target::collect(
+        &config.target.root,
+        target_budget,
+        config.target.max_age,
+        false,
+    ) {
         Ok(pruned) if pruned.removed_views > 0 => {
-            crate::session::note(&format!("gc: {}", target_removals(&pruned)));
+            crate::session::note(&format!("gc: {}", target_removals(&pruned, false)));
         }
         Ok(_) => {}
         Err(error) => log::warn!("target directories were not collected: {error}"),
@@ -829,6 +888,7 @@ struct CacheStatsReport {
 struct GcReport {
     version: u8,
     max_bytes: u64,
+    dry_run: bool,
     action_store: GcActionStoreReport,
     targets: GcTargetReport,
 }

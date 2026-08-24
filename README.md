@@ -91,6 +91,7 @@ or collect it explicitly with:
 mbx cache stats
 mbx gc
 mbx gc --max-size 3GB
+mbx gc --dry-run
 ```
 
 For a checkout without an existing `target/`, managed target directories are

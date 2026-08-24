@@ -64,6 +64,8 @@ pub fn parse_duration(value: &str) -> Result<Duration> {
         (digits, 60 * 1_000)
     } else if let Some(digits) = value.strip_suffix('h') {
         (digits, 60 * 60 * 1_000)
+    } else if let Some(digits) = value.strip_suffix('d') {
+        (digits, 24 * 60 * 60 * 1_000)
     } else {
         (value, 1_000)
     };

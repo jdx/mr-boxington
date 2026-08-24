@@ -145,6 +145,15 @@ fn checkout_record_path(store: &Path, identity: &str, workspace_root: &Path) -> 
 /// the mount records one, so the ordering is an approximation either way.
 /// Evicting a live object costs a recompile, never correctness.
 pub fn gc(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
+    gc_with_mode(store, max_bytes, false)
+}
+
+/// Describe the collection `gc` would perform without changing the store.
+pub fn gc_dry_run(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
+    gc_with_mode(store, max_bytes, true)
+}
+
+fn gc_with_mode(store: &Path, max_bytes: u64, dry_run: bool) -> Result<GcOutcome> {
     let mut objects = walk_files(&store.join(CAS_DIR))?;
     let results = walk_files(&store.join(ACTION_RESULTS_DIR))?;
     let mut live_bytes = objects
@@ -159,16 +168,17 @@ pub fn gc(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
     // last sweep stops protecting its artifacts during this one.
     let checkouts = scan_checkouts(store)?;
     for path in &checkouts.stale_records {
-        if matches!(remove(path)?, Removal::Removed) {
+        if dry_run || matches!(remove(path)?, Removal::Removed) {
             outcome.removed_checkout_records += 1;
         }
         // The identity directory is left behind empty otherwise. It may hold
         // other checkouts, in which case this fails and that is the answer.
-        if let Some(parent) = path.parent() {
+        if !dry_run && let Some(parent) = path.parent() {
             let _ = std::fs::remove_dir(parent);
         }
     }
 
+    let mut virtually_removed = HashSet::new();
     if live_bytes > max_bytes {
         // Reachability costs a read per action result and per output tree, so
         // it is computed only when something is actually about to be evicted.
@@ -178,7 +188,14 @@ pub fn gc(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
         // each class goes oldest-first. A store with no records at all roots
         // nothing and this is exactly the LRU it was before.
         objects.sort_by_cached_key(|entry| (rooted.contains(&entry.path), entry.used));
-        let evicted = evict_objects(&objects, &rooted, live_bytes, max_bytes, remove)?;
+        let evicted = evict_objects(&objects, &rooted, live_bytes, max_bytes, |path| {
+            if dry_run {
+                virtually_removed.insert(path.to_path_buf());
+                Ok(Removal::Removed)
+            } else {
+                remove(path)
+            }
+        })?;
         live_bytes = evicted.remaining_bytes;
         outcome.removed_objects += evicted.removed_objects;
         outcome.removed_bytes += evicted.removed_bytes;
@@ -190,8 +207,12 @@ pub fn gc(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
     // store that is over budget on results alone still needs the sweep.
     let cas = LocalCas::new(store);
     for entry in &results {
-        if action_result_is_dangling(&cas, &entry.path)? {
-            match remove(&entry.path)? {
+        if action_result_is_dangling(&cas, &entry.path, &virtually_removed)? {
+            match if dry_run {
+                Removal::Removed
+            } else {
+                remove(&entry.path)?
+            } {
                 Removal::Removed => {
                     live_bytes = live_bytes.saturating_sub(entry.size);
                     outcome.removed_action_results += 1;
@@ -499,7 +520,11 @@ fn evict_objects(
 ///
 /// Only the top-level objects are checked; a result whose output tree lost a
 /// nested object still restores as a miss, which is safe.
-fn action_result_is_dangling(cas: &LocalCas, path: &Path) -> Result<bool> {
+fn action_result_is_dangling(
+    cas: &LocalCas,
+    path: &Path,
+    virtually_removed: &HashSet<PathBuf>,
+) -> Result<bool> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -521,7 +546,7 @@ fn action_result_is_dangling(cas: &LocalCas, path: &Path) -> Result<bool> {
     {
         match cas.path_for(digest) {
             Ok(path) => {
-                if !path.exists() {
+                if virtually_removed.contains(&path) || !path.exists() {
                     return Ok(true);
                 }
             }

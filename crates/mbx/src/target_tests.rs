@@ -14,6 +14,8 @@ fn test_config(root: &Path, views: bool) -> Config {
         target: TargetSettings {
             views,
             root: root.join("targets"),
+            max_bytes: None,
+            max_age: None,
         },
     }
 }
@@ -321,6 +323,9 @@ fn frees_the_target_directory_of_a_checkout_that_is_gone() {
         PruneOutcome {
             removed_views: 1,
             removed_bytes: 512,
+            removed_stale_views: 1,
+            remaining_bytes: 256,
+            ..PruneOutcome::default()
         }
     );
     assert!(!removed.exists());
@@ -338,8 +343,61 @@ fn keeps_the_target_directory_of_an_idle_checkout() {
 
     let outcome = prune(&config.target.root).unwrap();
 
-    assert_eq!(outcome, PruneOutcome::default());
+    assert_eq!(outcome.remaining_bytes, 7);
+    assert_eq!(outcome.removed_views, 0);
     assert!(managed.join("artifact").exists());
+}
+
+#[test]
+fn target_budget_collects_oldest_live_view_first() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let old_workspace = checkout(directory.path(), "old");
+    let new_workspace = checkout(directory.path(), "new");
+    let old = place(
+        &config,
+        &old_workspace,
+        &old_workspace.join("target"),
+        false,
+    )
+    .unwrap();
+    let new = place(
+        &config,
+        &new_workspace,
+        &new_workspace.join("target"),
+        false,
+    )
+    .unwrap();
+    std::fs::write(old.join("artifact"), vec![0_u8; 5]).unwrap();
+    std::fs::write(new.join("artifact"), vec![0_u8; 10]).unwrap();
+    let old_record = view_record_path(&config.target.root, &old_workspace);
+    let mut record: ViewRecord =
+        serde_json::from_slice(&std::fs::read(&old_record).unwrap()).unwrap();
+    record.updated_secs = 1;
+    std::fs::write(&old_record, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    let outcome = collect(&config.target.root, Some(10), None, false).unwrap();
+
+    assert_eq!(outcome.removed_live_views, 1);
+    assert_eq!(outcome.removed_bytes, 5);
+    assert_eq!(outcome.remaining_bytes, 10);
+    assert!(!old.exists());
+    assert!(new.exists());
+}
+
+#[test]
+fn dry_run_leaves_selected_target_views_in_place() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    let managed = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    std::fs::write(managed.join("artifact"), b"outputs").unwrap();
+
+    let outcome = collect(&config.target.root, Some(0), None, true).unwrap();
+
+    assert_eq!(outcome.removed_live_views, 1);
+    assert!(managed.join("artifact").exists());
+    assert!(view_record_path(&config.target.root, &workspace).exists());
 }
 
 #[test]

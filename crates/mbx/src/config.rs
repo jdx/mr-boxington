@@ -90,6 +90,12 @@ struct RawTarget {
     /// Managed target root.
     #[usage(env = "MBX_TARGET_ROOT", default_note = "<cache_dir>/targets")]
     root: Option<PathBuf>,
+    /// Managed-target budget. Live views are collected oldest-first when set.
+    #[usage(env = "MBX_TARGET_MAX_SIZE")]
+    max_size: Option<String>,
+    /// Collect live managed targets that have not been used this long.
+    #[usage(env = "MBX_TARGET_MAX_AGE", ty = "duration")]
+    max_age: Option<String>,
 }
 
 #[derive(Debug, usage::Config)]
@@ -101,6 +107,9 @@ struct RawGc {
     /// Action-store budget.
     #[usage(env = "MBX_GC_MAX_SIZE", default = "20GiB")]
     max_size: String,
+    /// Combined action-store and managed-target budget.
+    #[usage(env = "MBX_GC_MAX_TOTAL_SIZE")]
+    max_total_size: Option<String>,
     /// Minimum interval between automatic sweeps.
     #[usage(env = "MBX_GC_INTERVAL", default = "1h", ty = "duration")]
     interval: String,
@@ -162,6 +171,8 @@ pub struct HttpSettings {
 pub struct TargetSettings {
     pub views: bool,
     pub root: PathBuf,
+    pub max_bytes: Option<u64>,
+    pub max_age: Option<Duration>,
 }
 
 /// How the store is kept inside its budget.
@@ -169,6 +180,7 @@ pub struct TargetSettings {
 pub struct GcSettings {
     pub auto: bool,
     pub max_bytes: u64,
+    pub max_total_bytes: Option<u64>,
     pub interval: Duration,
 }
 
@@ -177,6 +189,7 @@ impl Default for GcSettings {
         Self {
             auto: true,
             max_bytes: DEFAULT_GC_MAX_SIZE,
+            max_total_bytes: None,
             interval: DEFAULT_GC_INTERVAL,
         }
     }
@@ -236,6 +249,13 @@ impl Config {
         let gc = GcSettings {
             auto: raw.gc.auto,
             max_bytes: parse_byte_size(&raw.gc.max_size).wrap_err("invalid gc.max_size")?,
+            max_total_bytes: raw
+                .gc
+                .max_total_size
+                .as_deref()
+                .map(parse_byte_size)
+                .transpose()
+                .wrap_err("invalid gc.max_total_size")?,
             interval: parse_duration(&raw.gc.interval).wrap_err("invalid gc.interval")?,
         };
         let target = TargetSettings {
@@ -245,6 +265,20 @@ impl Config {
                 Some(root) => cache_dir.join(root),
                 None => cache_dir.join("targets"),
             },
+            max_bytes: raw
+                .target
+                .max_size
+                .as_deref()
+                .map(parse_byte_size)
+                .transpose()
+                .wrap_err("invalid target.max_size")?,
+            max_age: raw
+                .target
+                .max_age
+                .as_deref()
+                .map(parse_duration)
+                .transpose()
+                .wrap_err("invalid target.max_age")?,
         };
         Ok(Self {
             cache_dir,
@@ -418,12 +452,35 @@ mod tests {
         assert!(config.store_dir().ends_with("actions"));
         assert!(config.gc.auto, "collection runs until it is turned off");
         assert_eq!(config.gc.max_bytes, DEFAULT_GC_MAX_SIZE);
+        assert_eq!(config.gc.max_total_bytes, None);
         assert_eq!(config.gc.interval, DEFAULT_GC_INTERVAL);
         assert!(
             config.target.views,
             "eligible target directories are managed"
         );
         assert_eq!(config.target.root, config.cache_dir.join("targets"));
+        assert_eq!(config.target.max_bytes, None);
+        assert_eq!(config.target.max_age, None);
+    }
+
+    #[test]
+    fn reads_target_and_whole_cache_retention_limits() {
+        let config = configured(
+            None,
+            &[
+                ("MBX_TARGET_MAX_SIZE", "8GiB"),
+                ("MBX_TARGET_MAX_AGE", "14d"),
+                ("MBX_GC_MAX_TOTAL_SIZE", "12GiB"),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(config.target.max_bytes, Some(8 * 1024 * 1024 * 1024));
+        assert_eq!(
+            config.target.max_age,
+            Some(Duration::from_secs(14 * 86_400))
+        );
+        assert_eq!(config.gc.max_total_bytes, Some(12 * 1024 * 1024 * 1024));
     }
 
     #[test]
@@ -457,7 +514,10 @@ mod tests {
         assert!(configured(None, &[("MBX_HTTP_TIMEOUT", "later")]).is_err());
         assert!(configured(None, &[("MBX_HTTP_RETRIES", "many")]).is_err());
         assert!(configured(None, &[("MBX_GC_MAX_SIZE", "lots")]).is_err());
+        assert!(configured(None, &[("MBX_GC_MAX_TOTAL_SIZE", "lots")]).is_err());
         assert!(configured(None, &[("MBX_GC_INTERVAL", "later")]).is_err());
+        assert!(configured(None, &[("MBX_TARGET_MAX_SIZE", "lots")]).is_err());
+        assert!(configured(None, &[("MBX_TARGET_MAX_AGE", "later")]).is_err());
         // A budget that cannot be read must not be guessed at, and neither must
         // a switch: silently collecting to the wrong number, or not at all, is
         // worse than saying so.

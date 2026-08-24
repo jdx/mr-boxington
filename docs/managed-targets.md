@@ -24,9 +24,23 @@ mbx records the checkout associated with each target view. Once that
 checkout no longer exists, `mbx gc` can remove its target directory. Cached
 compilations shared with a live checkout remain protected.
 
-Managed target directories are collected when their checkout disappears; they
-are not counted against `gc.max_size`. The size budget covers cached objects
-and action results.
+Managed target directories are collected when their checkout disappears. By
+default, live checkouts keep their outputs indefinitely. Optional retention
+limits can collect the least-recently-used live views as well:
+
+```toml
+[target]
+max_size = "30GiB"
+max_age = "30d"
+
+[gc]
+# Covers both managed targets and the action store.
+max_total_size = "50GiB"
+```
+
+`target.max_size` and `target.max_age` are deliberately unset by default.
+`gc.max_size` continues to cover cached objects and action results only. Use
+`mbx gc --dry-run` to inspect the effect of any policy without deleting files.
 
 ## When mbx leaves a target alone
 

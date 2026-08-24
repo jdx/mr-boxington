@@ -141,6 +141,18 @@ fn leaves_a_store_within_budget_alone() {
 }
 
 #[test]
+fn dry_run_reports_evictions_without_removing_objects() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    let digest = store_object(store, b"kept for now");
+
+    let outcome = gc_dry_run(store, 0).unwrap();
+
+    assert_eq!(outcome.removed_objects, 1);
+    assert!(LocalCas::new(store).find(&digest).unwrap().is_some());
+}
+
+#[test]
 fn a_blocked_unrooted_object_does_not_cost_a_rooted_one() {
     let locked = PathBuf::from("locked-unrooted");
     let removable = PathBuf::from("removable-unrooted");

@@ -54,7 +54,7 @@ Install a persistent rustc wrapper for plain Cargo commands.
 
 ## `mbx gc`
 
-- **Usage:** `mbx gc [--max-size <SIZE>] [--json]`
+- **Usage:** `mbx gc [--max-size <SIZE>] [--json] [--dry-run]`
 
 Collect stale managed targets and evict cached objects until the store fits a size budget.
 
@@ -63,6 +63,7 @@ A missing cached object is rebuilt when it is needed again.
 ### Flags
 - **`--max-size <SIZE>`** — Size the store may occupy afterwards, for example 20GiB. Defaults to the configured budget.
 - **`--json`** — Print a stable machine-readable report.
+- **`--dry-run`** — Show what collection would remove without changing any files.
 - **`-h --help`** — Print help
 
 ## `mbx cache`
@@ -154,6 +155,14 @@ Minimum interval between automatic sweeps.
 - **Set with:** `MBX_GC_MAX_SIZE`
 
 Action-store budget.
+
+### `gc.max_total_size`
+
+- **Type:** `option<string>`
+- **Optional:** true
+- **Set with:** `MBX_GC_MAX_TOTAL_SIZE`
+
+Combined action-store and managed-target budget.
 
 ### `http.download_timeout`
 
@@ -256,6 +265,22 @@ Share eligible compilations that read `OUT_DIR`.
 - **Set with:** `MBX_STATS_REPORT`
 
 Write a JSON build report to this path.
+
+### `target.max_age`
+
+- **Type:** `option<duration>`
+- **Optional:** true
+- **Set with:** `MBX_TARGET_MAX_AGE`
+
+Collect live managed targets that have not been used this long.
+
+### `target.max_size`
+
+- **Type:** `option<string>`
+- **Optional:** true
+- **Set with:** `MBX_TARGET_MAX_SIZE`
+
+Managed-target budget. Live views are collected oldest-first when set.
 
 ### `target.root`
 

@@ -13,6 +13,8 @@ fn test_config(cache_dir: &Path) -> Config {
         target: crate::config::TargetSettings {
             views: false,
             root: cache_dir.join("targets"),
+            max_bytes: None,
+            max_age: None,
         },
     }
 }
