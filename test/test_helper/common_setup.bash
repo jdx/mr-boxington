@@ -7,7 +7,11 @@ _common_setup() {
 
   export PROJECT_ROOT
   PROJECT_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
-  export MBX_BIN="${MBX_BIN:-$PROJECT_ROOT/target/debug/mbx}"
+  local target_dir="${CARGO_TARGET_DIR:-$PROJECT_ROOT/target}"
+  if [[ "$target_dir" != /* ]]; then
+    target_dir="$PROJECT_ROOT/$target_dir"
+  fi
+  export MBX_BIN="${MBX_BIN:-$target_dir/debug/mbx}"
 
   if [[ ! -x "$MBX_BIN" ]]; then
     echo "mbx binary not found; run 'mise run build' first: $MBX_BIN" >&2
