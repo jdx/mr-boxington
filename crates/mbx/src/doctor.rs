@@ -76,13 +76,13 @@ fn render(checks: &[Check], json: bool) -> Result<ExitCode> {
             "{}",
             serde_json::to_string_pretty(&DoctorReport {
                 version: 1,
-                checks: &checks,
+                checks,
                 failures,
                 warnings,
             })?
         );
     } else {
-        for check in &checks {
+        for check in checks {
             let marker = match check.severity {
                 Severity::Pass => "ok",
                 Severity::Warn => "warn",

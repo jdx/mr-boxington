@@ -656,8 +656,8 @@ fn gc(config: &Config, max_bytes: u64, json: bool) -> Result<()> {
             return Err(error);
         }
     };
-    let pruned = pruned?;
     if json {
+        let pruned = pruned?;
         print_json(&GcReport {
             version: 1,
             max_bytes,
@@ -674,18 +674,23 @@ fn gc(config: &Config, max_bytes: u64, json: bool) -> Result<()> {
             },
         })?;
     } else {
-        println!("{}", evictions(&outcome));
-        if outcome.removed_checkout_records > 0 {
-            println!(
-                "dropped {} stale checkout records",
-                outcome.removed_checkout_records
-            );
-        }
+        print_gc_store_outcome(&outcome);
+        let pruned = pruned?;
         if pruned.removed_views > 0 {
             println!("{}", target_removals(&pruned));
         }
     }
     Ok(())
+}
+
+fn print_gc_store_outcome(outcome: &store::GcOutcome) {
+    println!("{}", evictions(outcome));
+    if outcome.removed_checkout_records > 0 {
+        println!(
+            "dropped {} stale checkout records",
+            outcome.removed_checkout_records
+        );
+    }
 }
 
 /// One line describing the target directories a sweep freed.
@@ -755,8 +760,8 @@ fn prune_targets(config: &Config) {
 fn cache_stats(config: &Config, json: bool) -> Result<()> {
     let store = config.store_dir();
     let stats = store::stats(&store)?;
-    let views = target::stats(&config.target.root)?;
     if json {
+        let views = target::stats(&config.target.root)?;
         return print_json(&CacheStatsReport {
             version: 1,
             store: store.display().to_string(),
@@ -790,6 +795,7 @@ fn cache_stats(config: &Config, json: bool) -> Result<()> {
         "checkouts: {} live, {} stale",
         stats.live_checkouts, stats.stale_checkouts
     );
+    let views = target::stats(&config.target.root)?;
     println!(
         "target directories: {} ({})",
         views.views,
