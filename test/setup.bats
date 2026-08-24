@@ -105,7 +105,8 @@ EOF
   assert_file_not_exist "$wrapper"
   assert_file_contains "$CARGO_HOME/config.toml" "# keep me"
   assert_file_contains "$CARGO_HOME/config.toml" "offline = true"
-  refute_file_contains "$CARGO_HOME/config.toml" "rustc-wrapper"
+  run grep -F "rustc-wrapper" "$CARGO_HOME/config.toml"
+  assert_failure
 
   run "$MBX_BIN" setup --uninstall
   assert_success
