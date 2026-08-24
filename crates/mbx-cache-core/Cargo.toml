@@ -19,6 +19,7 @@ fslock = "0.2"
 futures-util = "0.3"
 hex = "0.4"
 log = "0.4"
+mbx-cache-protocol = { path = "../mbx-cache-protocol", version = "0.3.0" }
 rand = "0.10"
 reflink-copy = "0.1"
 async-compression = { version = "0.4", default-features = false, features = [
@@ -32,7 +33,6 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_json_canonicalizer = "0.3"
 sha2 = "0.11"
 strum = { version = "0.28", features = ["derive"] }
 tempfile = "3"

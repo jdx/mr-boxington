@@ -20,6 +20,12 @@ protocol-version decision are reviewed together.
 
 ## Remote cache protocol
 
+The dependency-light `mbx-cache-protocol` crate owns the remote wire records,
+capability schema, media types, headers, and blob-pack framing constants. Both
+the client and server compile against that crate; transport, authentication,
+storage, and adapter execution remain implementation details of their
+respective packages.
+
 Remote cache endpoints live below `/v{PROTOCOL_VERSION}/` and every request
 carries `mbx-cache-protocol` and `mbx-cache-namespace` headers. The v1 baseline
 uses these resources:

@@ -40,8 +40,7 @@ use reqwest::header::{
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 use std::collections::BTreeSet;
-use std::fs::{self, File};
-use std::io::Read;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,33 +52,20 @@ mod agent;
 mod local;
 
 pub use agent::{
-    AGENT_PROTOCOL_VERSION, ActionPrediction, AgentRemoteCache, AgentRequest, AgentResponse,
-    AgentStats, CacheAgent, RestoreStats, is_task_identity, task_manifest_actions,
+    AGENT_PROTOCOL_VERSION, AgentRemoteCache, AgentRequest, AgentResponse, AgentStats, CacheAgent,
+    RestoreStats, is_task_identity, task_manifest_actions,
 };
 pub use local::{LocalActionCache, LocalCas};
-
-/// Major version of the HTTP cache protocol implemented by this crate.
-pub const PROTOCOL_VERSION: u8 = 1;
-const PROTOCOL_HEADER: &str = "mbx-cache-protocol";
-const NAMESPACE_HEADER: &str = "mbx-cache-namespace";
-/// Media type for canonical [`RemoteActionResult`] JSON records.
-pub const ACTION_RESULT_MEDIA_TYPE: &str = "application/vnd.mbx.cache-action-result.v1+json";
-/// Media type for canonical [`CacheDirectory`] JSON records.
-pub const DIRECTORY_MEDIA_TYPE: &str = "application/vnd.mbx.cache-directory.v1+json";
-/// Media type for adapter-specific action metadata blobs.
-pub const CLIENT_METADATA_MEDIA_TYPE: &str = "application/vnd.mbx.cache-client-metadata.v1+json";
-/// Media type for task-to-action prediction manifests.
-pub const TASK_ACTION_MANIFEST_MEDIA_TYPE: &str =
-    "application/vnd.mbx.cache-task-action-manifest.v1+json";
-/// Media type for opaque content-addressed blobs.
-pub const BLOB_MEDIA_TYPE: &str = "application/octet-stream";
-/// Media type for framed batches of content-addressed blobs.
-pub const BLOB_PACK_MEDIA_TYPE: &str = "application/vnd.mbx.cache-blob-pack.v1";
-const DIGEST_LIST_MEDIA_TYPE: &str = "application/vnd.mbx.cache-digests.v1+json";
-const BLOB_PACK_BLOBS_HEADER: &str = "mbx-cache-pack-blobs";
-const BLOB_PACK_BYTES_HEADER: &str = "mbx-cache-pack-bytes";
-const BLOB_PACK_MAGIC: &[u8; 8] = b"MBXPACK1";
-const BLOB_PACK_HEADER_BYTES: u64 = 1 + 32 + 8;
+pub use mbx_cache_protocol::{
+    ACTION_RESULT_MEDIA_TYPE, ActionPrediction, ActionResult as RemoteActionResult,
+    BLOB_MEDIA_TYPE, BLOB_PACK_BLOBS_HEADER, BLOB_PACK_BYTES_HEADER, BLOB_PACK_HEADER_BYTES,
+    BLOB_PACK_MAGIC, BLOB_PACK_MEDIA_TYPE, CLIENT_METADATA_MEDIA_TYPE, Capabilities,
+    CapabilityFeatures, CapabilityLimits, CapabilityProtocol, DIGEST_LIST_MEDIA_TYPE,
+    DIRECTORY_MEDIA_TYPE, Digest as CacheDigest, DigestAlgorithm, Directory as CacheDirectory,
+    DirectoryNode as CacheDirectoryNode, FileNode as CacheFileNode, NAMESPACE_HEADER,
+    PROTOCOL_HEADER, PROTOCOL_VERSION, RustcMetadata, SymlinkNode as CacheSymlinkNode,
+    TASK_ACTION_MANIFEST_MEDIA_TYPE, TaskActionManifest,
+};
 /// Cap the JSON bodies a remote cache can hand back. Blob downloads are bounded
 /// by the size their digest promises, but action results and manifests carry no
 /// such claim, so without an explicit ceiling a hostile or broken server can
@@ -97,7 +83,7 @@ const BLOB_PACK_TIMEOUT_ITEMS_PER_UNIT: usize = MAX_STAGED_BLOB_PACK_ITEMS / 4;
 /// Action digests are computed from these bytes, so callers must not use
 /// serde's struct field order as part of the wire contract.
 pub fn canonical_json(value: &impl Serialize) -> Result<Vec<u8>> {
-    Ok(serde_json_canonicalizer::to_vec(value)?)
+    Ok(mbx_cache_protocol::canonical_json(value)?)
 }
 
 #[derive(
@@ -157,196 +143,6 @@ pub struct RemoteCacheConfig {
     pub download_timeout: Duration,
     /// Number of attempts after the initial request for retryable failures.
     pub retries: i64,
-}
-
-/// Algorithm-tagged digest and byte length of a cache object.
-///
-/// Digests received from an external source should be checked with
-/// [`CacheDigest::validate`] before they are used to construct paths.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct CacheDigest {
-    /// Hash algorithm name (`blake3` or `sha256`).
-    pub algorithm: String,
-    /// Lowercase hexadecimal hash value.
-    pub hash: String,
-    /// Exact uncompressed object length in bytes.
-    pub size: u64,
-}
-
-impl CacheDigest {
-    /// Compute a BLAKE3 digest for an in-memory object.
-    pub fn blake3(bytes: &[u8]) -> Self {
-        Self {
-            algorithm: "blake3".into(),
-            hash: blake3::hash(bytes).to_hex().to_string(),
-            size: bytes.len() as u64,
-        }
-    }
-
-    /// Hash a file while counting the bytes read in the same streaming pass.
-    pub fn blake3_file(path: &Path) -> Result<Self> {
-        let (hash, size) = hash_file_blake3(path)?;
-        Ok(Self {
-            algorithm: "blake3".into(),
-            hash,
-            size,
-        })
-    }
-
-    /// Validate the algorithm name and hexadecimal hash representation.
-    pub fn validate(&self) -> Result<()> {
-        if self.algorithm != "blake3" && self.algorithm != "sha256" {
-            bail!("unsupported remote cache digest algorithm");
-        }
-        if self.hash.len() != 64
-            || !self
-                .hash
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            bail!("invalid remote cache digest");
-        }
-        Ok(())
-    }
-
-    /// Return whether `bytes` have this digest and declared length.
-    pub fn matches_bytes(&self, bytes: &[u8]) -> Result<bool> {
-        self.validate()?;
-        if self.size != bytes.len() as u64 {
-            return Ok(false);
-        }
-        let hash = match self.algorithm.as_str() {
-            "blake3" => blake3::hash(bytes).to_hex().to_string(),
-            "sha256" => hex::encode(sha2::Sha256::digest(bytes)),
-            _ => unreachable!("digest algorithm was validated"),
-        };
-        Ok(self.hash == hash)
-    }
-
-    /// Stream a file and return whether it has this digest and length.
-    pub fn matches_file(&self, path: &Path) -> Result<bool> {
-        self.validate()?;
-        let (hash, size) = match self.algorithm.as_str() {
-            "blake3" => hash_file_blake3(path)?,
-            "sha256" => hash_file_sha256(path)?,
-            _ => unreachable!("digest algorithm was validated"),
-        };
-        Ok(self.size == size && self.hash == hash)
-    }
-}
-
-fn hash_file_blake3(path: &Path) -> Result<(String, u64)> {
-    let mut file = File::open(path)?;
-    let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0; 64 * 1024];
-    let mut size = 0;
-    loop {
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-        size += count as u64;
-    }
-    Ok((hasher.finalize().to_hex().to_string(), size))
-}
-
-fn hash_file_sha256(path: &Path) -> Result<(String, u64)> {
-    let mut file = File::open(path)?;
-    let mut hasher = sha2::Sha256::new();
-    let mut buffer = [0; 64 * 1024];
-    let mut size = 0;
-    loop {
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-        size += count as u64;
-    }
-    Ok((hex::encode(hasher.finalize()), size))
-}
-
-/// A canonical action-result record referencing objects in the CAS.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RemoteActionResult {
-    /// Digest of the canonical action descriptor this record satisfies.
-    pub action: CacheDigest,
-    /// Optional adapter metadata blob, such as [`RustcMetadata`].
-    #[serde(default)]
-    pub metadata: Option<CacheDigest>,
-    /// Optional digest of the root [`CacheDirectory`] containing outputs.
-    #[serde(default)]
-    pub output_root: Option<CacheDigest>,
-    /// Action-result schema version.
-    pub version: u8,
-}
-
-/// A canonical directory object stored in the CAS.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CacheDirectory {
-    /// Child directory entries, sorted canonically by name.
-    pub directories: Vec<CacheDirectoryNode>,
-    /// Child file entries, sorted canonically by name.
-    pub files: Vec<CacheFileNode>,
-    /// Child symbolic-link entries, sorted canonically by name.
-    pub symlinks: Vec<CacheSymlinkNode>,
-    /// Directory-object schema version.
-    pub version: u8,
-}
-
-/// A child directory entry in a canonical cache directory.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CacheDirectoryNode {
-    /// Digest of the child [`CacheDirectory`].
-    pub digest: CacheDigest,
-    /// Platform mode bits recorded for the directory.
-    pub mode: u32,
-    /// Single path-component name within the parent directory.
-    pub name: String,
-}
-
-/// A file entry in a canonical cache directory.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CacheFileNode {
-    /// Digest of the file contents.
-    pub digest: CacheDigest,
-    /// Whether the file should be restored as executable.
-    pub executable: bool,
-    /// Platform mode bits recorded for the file.
-    pub mode: u32,
-    /// Single path-component name within the parent directory.
-    pub name: String,
-}
-
-/// A symbolic-link entry in a canonical cache directory.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CacheSymlinkNode {
-    /// Platform mode bits recorded for the symbolic link.
-    pub mode: u32,
-    /// Single path-component name within the parent directory.
-    pub name: String,
-    /// Link target text exactly as recorded by the producer.
-    pub target: String,
-}
-
-/// Rust-specific action metadata stored alongside compiled outputs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RustcMetadata {
-    /// Metadata schema version.
-    pub version: u8,
-    /// Adapter-defined output kind.
-    pub kind: String,
-    /// Digest of captured compiler standard output.
-    pub stdout: CacheDigest,
-    /// Digest of captured compiler standard error.
-    pub stderr: CacheDigest,
 }
 
 /// Backing data for a blob upload.
@@ -470,37 +266,7 @@ fn optional_u64_header(headers: &HeaderMap, name: &str) -> Result<Option<u64>> {
     Ok(Some(value))
 }
 
-#[derive(Debug, Deserialize)]
-struct RemoteCacheCapabilities {
-    protocol: CapabilityProtocol,
-    #[serde(default)]
-    features: CapabilityFeatures,
-    #[serde(default)]
-    limits: CapabilityLimits,
-    /// Content codings the server accepts and produces; always includes
-    /// `identity`, and compression is used only when `zstd` is offered.
-    #[serde(default)]
-    compressors: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CapabilityProtocol {
-    major: u8,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct CapabilityFeatures {
-    #[serde(default)]
-    blob_packs: bool,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct CapabilityLimits {
-    #[serde(default)]
-    max_batch_items: u64,
-    #[serde(default)]
-    max_pack_bytes: u64,
-}
+type RemoteCacheCapabilities = Capabilities;
 
 #[derive(Debug, Clone, Copy)]
 struct BlobPackLimits {

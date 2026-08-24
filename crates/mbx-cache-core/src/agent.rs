@@ -1,7 +1,7 @@
 use crate::{
-    BlobSource, BlobUpload, CacheDigest, CacheDirectory, LocalActionCache, LocalCas,
-    ManifestPutOutcome, RemoteActionResult, RemoteCacheClient, RemoteCacheMode, RustcMetadata,
-    canonical_json,
+    ActionPrediction, BlobSource, BlobUpload, CacheDigest, CacheDirectory, LocalActionCache,
+    LocalCas, ManifestPutOutcome, RemoteActionResult, RemoteCacheClient, RemoteCacheMode,
+    RustcMetadata, TaskActionManifest, canonical_json,
 };
 use eyre::{Context, Result, bail};
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream};
@@ -290,21 +290,6 @@ pub struct AgentStats {
     pub copied_output_bytes: u64,
 }
 
-/// Adapter-owned data needed to reconstruct an action before fresh dependency
-/// discovery is available.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ActionPrediction {
-    /// Invocation digest used to locate this prediction.
-    pub invocation: CacheDigest,
-    /// Full action digest produced when the prediction was recorded.
-    pub action: CacheDigest,
-    /// Adapter name that owns and understands `payload`.
-    pub adapter: String,
-    /// Adapter-defined serialized input prediction.
-    pub payload: String,
-}
-
 #[derive(Default)]
 struct AtomicAgentStats {
     lookups: AtomicU64,
@@ -421,14 +406,6 @@ pub struct CacheAgent {
     remote_transfers: Arc<tokio::sync::Semaphore>,
     prefetch_transfers: Arc<tokio::sync::Semaphore>,
     prefetch_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TaskActionManifest {
-    version: u8,
-    task: String,
-    predictions: Vec<ActionPrediction>,
 }
 
 #[derive(Serialize)]
