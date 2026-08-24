@@ -158,7 +158,6 @@ fn resolves_cargo_library_outputs() {
                 working_dir.join("target/debug/deps/libwidget-abc123.rlib"),
                 working_dir.join("target/debug/deps/libwidget-abc123.rmeta"),
             ],
-            executable_files: BTreeSet::new(),
             dep_info: working_dir.join("target/debug/deps/widget-abc123.d"),
         }
     );
@@ -184,8 +183,7 @@ fn resolves_a_compiler_linked_wasm_binary() {
         invocation.outputs(&working_dir).unwrap(),
         RustcOutputs {
             directory: working_dir.join("target/wasm32-unknown-unknown/debug/deps"),
-            files: vec![executable.clone()],
-            executable_files: BTreeSet::from([executable]),
+            files: vec![executable],
             dep_info: working_dir.join("target/wasm32-unknown-unknown/debug/deps/widget-abc123.d"),
         }
     );
@@ -229,7 +227,7 @@ fn custom_wasm_linker_modes_still_bypass() {
     ]);
     assert_eq!(
         RustcInvocation::parse(&arguments),
-        Err(BypassReason::UnsupportedLinkerConfiguration(
+        Err(BypassReason::UnknownCodegenOption(
             "link-self-contained".into()
         ))
     );
@@ -305,7 +303,6 @@ fn resolves_an_output_file_when_every_emit_names_its_path() {
                 working_dir.join("target/widget.rlib"),
                 working_dir.join("target/widget.rmeta"),
             ],
-            executable_files: BTreeSet::new(),
             dep_info: working_dir.join("target/widget.d"),
         }
     );

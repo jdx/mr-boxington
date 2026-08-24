@@ -80,7 +80,6 @@ fn test_outputs(root: &Path) -> RustcOutputs {
     let directory = root.join("out");
     RustcOutputs {
         files: vec![directory.join("libdemo.rlib")],
-        executable_files: BTreeSet::new(),
         dep_info: directory.join("demo.d"),
         directory,
     }
@@ -259,11 +258,11 @@ fn rejects_executable_rustc_outputs() {
 }
 
 #[test]
-fn accepts_only_declared_executable_rustc_outputs() {
+fn accepts_wasm_executable_rustc_outputs() {
     let root = tempfile::tempdir().unwrap();
     let mut outputs = test_outputs(root.path());
-    outputs.executable_files.insert(outputs.files[0].clone());
-    let mut file = test_file("libdemo.rlib");
+    outputs.files = vec![outputs.directory.join("demo.wasm")];
+    let mut file = test_file("demo.wasm");
     file.executable = true;
 
     assert!(validated_outputs(test_output_directory(file), &outputs).is_ok());

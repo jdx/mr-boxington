@@ -152,9 +152,6 @@ pub enum BypassReason {
     /// Native-library lookup is not modeled as a precise input.
     #[error("native library lookup is not cacheable yet")]
     NativeLibrary,
-    /// A linker-affecting compiler configuration is not modeled.
-    #[error("rustc linker configuration is not cacheable yet: {0}")]
-    UnsupportedLinkerConfiguration(String),
     /// A library search-path kind is not modeled.
     #[error("rustc search path kind is not cacheable yet: {0}")]
     UnsupportedSearchPath(String),
@@ -280,8 +277,6 @@ pub struct RustcOutputs {
     pub directory: PathBuf,
     /// Cacheable library, metadata, and/or compiler-linked wasm files.
     pub files: Vec<PathBuf>,
-    /// Outputs that must retain executable permissions when restored.
-    pub executable_files: BTreeSet<PathBuf>,
     /// Dep-info file used for precise input discovery.
     pub dep_info: PathBuf,
 }
@@ -343,7 +338,6 @@ impl RustcInvocation {
             return Err(BypassReason::ImplicitEmitWithOutputFile(output.clone()));
         }
         let mut files = BTreeSet::new();
-        let mut executable_files = BTreeSet::new();
         let mut dep_info = None;
         for emit in &self.emits {
             if emit.kind == "dep-info" {
@@ -365,12 +359,12 @@ impl RustcInvocation {
                 dep_info = Some(path);
                 continue;
             }
-            let (prefix, extension, executable) = match emit.kind.as_str() {
+            let (prefix, extension) = match emit.kind.as_str() {
                 "link" => match self.link_output {
-                    LinkOutput::Library => ("lib", "rlib", false),
-                    LinkOutput::WasmExecutable => ("", "wasm", true),
+                    LinkOutput::Library => ("lib", "rlib"),
+                    LinkOutput::WasmExecutable => ("", "wasm"),
                 },
-                "metadata" => ("lib", "rmeta", false),
+                "metadata" => ("lib", "rmeta"),
                 _ => continue,
             };
             let path = if let Some(path) = &emit.path {
@@ -387,9 +381,6 @@ impl RustcInvocation {
             if path.parent() != Some(output_directory.as_path()) {
                 return Err(BypassReason::SplitOutputDirectories);
             }
-            if executable {
-                executable_files.insert(path.clone());
-            }
             files.insert(path);
         }
         let dep_info = dep_info.ok_or(BypassReason::NoDepInfo)?;
@@ -399,7 +390,6 @@ impl RustcInvocation {
         Ok(RustcOutputs {
             directory: output_directory,
             files: files.into_iter().collect(),
-            executable_files,
             dep_info,
         })
     }
@@ -449,7 +439,10 @@ impl RustcOutputs {
     /// Whether `path` is a linked program whose executable permission is part
     /// of the declared output contract.
     pub fn is_executable(&self, path: &Path) -> bool {
-        self.executable_files.contains(path)
+        self.files.iter().any(|output| output == path)
+            && path
+                .extension()
+                .is_some_and(|extension| extension == "wasm")
     }
 }
 
@@ -1026,7 +1019,7 @@ impl<'a> Parser<'a> {
             if self.parsed.iter().any(|argument| {
                 matches!(argument, Argument::Plain(value) if value == "--codegen=link-self-contained" || value.starts_with("--codegen=link-self-contained="))
             }) {
-                return Err(BypassReason::UnsupportedLinkerConfiguration(
+                return Err(BypassReason::UnknownCodegenOption(
                     "link-self-contained".into(),
                 ));
             }
