@@ -237,6 +237,20 @@ pub fn place(
             return None;
         }
     };
+    let record_path = view_record_path(&config.target.root, workspace_root);
+    let previous_record = match read_record_state(&record_path) {
+        Ok(record) => record,
+        Err(error) => {
+            log::warn!("the existing target record could not be preserved: {error}");
+            if let Err(error) = rollback_link(target_dir, &link) {
+                log::warn!(
+                    "the unused link {} was not rolled back: {error}",
+                    target_dir.display()
+                );
+            }
+            return None;
+        }
+    };
     // Recorded before the directory exists, so a directory can never exist that
     // `prune` has no way to see.
     if let Err(error) = record_view(&config.target.root, workspace_root) {
@@ -260,6 +274,25 @@ pub fn place(
             "the managed target directory {} was not prepared: {error}",
             managed.display()
         );
+        // A newly created link is the migration path: nothing used it before
+        // this attempt, so both the link and record can be rolled back and an
+        // existing target backup can be restored. Replacing an older managed
+        // view may already have moved its directory, so keep the established
+        // link and record in that recovery case.
+        if matches!(&link, Link::Created) {
+            match rollback_link(target_dir, &link) {
+                Ok(()) => {
+                    if let Err(error) = restore_record_state(&record_path, previous_record) {
+                        log::warn!("the target record was not rolled back: {error}");
+                    }
+                }
+                Err(error) => log::warn!(
+                    "the unused link {} was not rolled back: {error}",
+                    target_dir.display()
+                ),
+            }
+            return None;
+        }
     }
     Some(managed)
 }
@@ -524,6 +557,25 @@ fn record_view(root: &Path, workspace_root: &Path) -> Result<()> {
     crate::util::write_atomic(&view_record_path(root, workspace_root), &contents)
 }
 
+fn read_record_state(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).wrap_err_with(|| format!("could not read {}", path.display())),
+    }
+}
+
+fn restore_record_state(path: &Path, previous: Option<Vec<u8>>) -> Result<()> {
+    if let Some(contents) = previous {
+        return crate::util::write_atomic(path, &contents);
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).wrap_err_with(|| format!("could not remove {}", path.display())),
+    }
+}
+
 fn read_view_record(path: &Path) -> Option<ViewRecord> {
     let bytes = std::fs::read(path).ok()?;
     let record = serde_json::from_slice::<ViewRecord>(&bytes).ok()?;
@@ -744,6 +796,29 @@ mod tests {
             std::fs::read(target.join("artifact")).unwrap(),
             b"old output"
         );
+    }
+
+    #[test]
+    fn a_preparation_failure_restores_existing_outputs_and_record_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = test_config(directory.path(), true);
+        let workspace = checkout(directory.path(), "project");
+        let target = workspace.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("artifact"), b"old output").unwrap();
+        let managed = view_dir(&config.target.root, &workspace);
+        std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+        std::fs::write(&managed, b"not a directory").unwrap();
+
+        let outcome = migrate_existing(&config, &workspace, &target, false).unwrap();
+
+        assert_eq!(outcome, MigrationOutcome::default());
+        assert_eq!(
+            std::fs::read(target.join("artifact")).unwrap(),
+            b"old output"
+        );
+        assert_eq!(std::fs::read(&managed).unwrap(), b"not a directory");
+        assert!(!view_record_path(&config.target.root, &workspace).exists());
     }
 
     #[cfg(unix)]

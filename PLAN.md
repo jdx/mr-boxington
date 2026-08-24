@@ -195,7 +195,7 @@ Env vars first, optional `~/.config/mbx/config.toml` second, defaults last.
 | `MBX_GC_AUTO` | `gc.auto` | `true` | sweep the store after a build |
 | `MBX_GC_MAX_SIZE` | `gc.max_size` | `20GiB` | size the store is swept back to |
 | `MBX_GC_INTERVAL` | `gc.interval` | `1h` | how often a build may sweep |
-| `MBX_TARGET_VIEWS` | `target.views` | `false` | let mbx place target directories |
+| `MBX_TARGET_VIEWS` | `target.views` | `true` | let mbx place target directories |
 | `MBX_TARGET_ROOT` | `target.root` | `<cache dir>/targets` | where it places them |
 | `MBX_HTTP_TIMEOUT` | `http.timeout` | `30s` | connect/read timeout |
 | `MBX_HTTP_DOWNLOAD_TIMEOUT` | `http.download_timeout` | `10m` | blob downloads |
@@ -218,8 +218,8 @@ operator did not configure.
 
 ### Target-dir views
 
-Opt-in, because moving where a build writes is not a decision to make for
-someone. `MBX_TARGET_VIEWS` places the default target directory at
+Enabled by default, with `MBX_TARGET_VIEWS=0` as the opt-out.
+`MBX_TARGET_VIEWS` places the default target directory at
 `<target root>/v1/<digest of the workspace root>` and symlinks `target` to it,
 keyed by path alone so one checkout keeps one target directory whatever it
 builds. A record beside the directory names the checkout it belongs to -- beside

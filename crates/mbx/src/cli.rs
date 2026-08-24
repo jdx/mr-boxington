@@ -432,7 +432,8 @@ fn workspace_root(start: &Path) -> PathBuf {
 struct Roots {
     workspace_root: PathBuf,
     target_dir: PathBuf,
-    /// Whether a flag or the environment named the target directory outright.
+    /// Whether a flag, environment variable, or Cargo configuration named the
+    /// target directory outright.
     ///
     /// Cargo prefers `--target-dir` over `CARGO_TARGET_DIR`, so a build carrying
     /// that flag cannot be moved by setting the environment: cargo would write
@@ -509,7 +510,9 @@ fn resolve_roots_with(
         .unwrap_or_else(|| workspace_root(&invocation_dir));
     let flagged = target_dir_argument(arguments);
     let from_environment = target_dir_env.as_ref().is_some_and(|dir| !dir.is_empty());
-    let target_dir_requested = flagged.is_some() || from_environment;
+    let target_dir_requested = flagged.is_some()
+        || from_environment
+        || cargo_config_may_set_target_dir(arguments, &invocation_dir);
     // An explicit flag outranks anything cargo reports from configuration.
     let target_dir = flagged
         .map(|value| absolute(&invocation_dir, value))
@@ -636,14 +639,80 @@ fn parse_cargo_roots(metadata: &[u8]) -> Option<Roots> {
         workspace_root: PathBuf::from(metadata.get("workspace_root")?.as_str()?),
         target_dir: PathBuf::from(metadata.get("target_directory")?.as_str()?),
         // What cargo reports has folded configuration in already, so it cannot
-        // say whether anyone asked. Only the caller's own flags and environment
-        // answer that, and `resolve_roots_with` reads them itself.
+        // say whether anyone asked. The caller's flags, environment, and Cargo
+        // configuration answer that, and `resolve_roots_with` reads them itself.
         target_dir_requested: false,
     })
 }
 
 fn target_dir_argument(arguments: &[String]) -> Option<&str> {
     flag_value(arguments, "--target-dir")
+}
+
+/// Whether Cargo configuration may have named the target directory.
+///
+/// `cargo metadata` reports only the resolved path, so an explicit
+/// `build.target-dir = "target"` is otherwise indistinguishable from Cargo's
+/// default. Any explicit config file passed on the command line is treated
+/// conservatively because it may include another file.
+fn cargo_config_may_set_target_dir(arguments: &[String], invocation_dir: &Path) -> bool {
+    if std::env::var_os("CARGO_BUILD_TARGET_DIR").is_some_and(|value| !value.is_empty()) {
+        return true;
+    }
+    if config_arguments(arguments).any(|value| {
+        value
+            .split_once('=')
+            .is_none_or(|(key, _)| key.trim() == "build.target-dir")
+    }) {
+        return true;
+    }
+
+    let project_configs = invocation_dir.ancestors().flat_map(|directory| {
+        let cargo = directory.join(".cargo");
+        [cargo.join("config.toml"), cargo.join("config")]
+    });
+    let home_configs = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".cargo")))
+        .into_iter()
+        .flat_map(|cargo| [cargo.join("config.toml"), cargo.join("config")]);
+    project_configs
+        .chain(home_configs)
+        .any(|path| cargo_config_file_may_set_target_dir(&path))
+}
+
+fn config_arguments(arguments: &[String]) -> impl Iterator<Item = &str> {
+    let mut values = Vec::new();
+    let mut remaining = arguments.iter();
+    while let Some(argument) = remaining.next() {
+        if let Some(value) = argument.strip_prefix("--config=") {
+            values.push(value);
+        } else if argument == "--config"
+            && let Some(value) = remaining.next()
+        {
+            values.push(value.as_str());
+        }
+    }
+    values.into_iter()
+}
+
+fn cargo_config_file_may_set_target_dir(path: &Path) -> bool {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    let Ok(config) = toml::from_str::<toml::Value>(&contents) else {
+        // Cargo will reject it, but mbx must not mutate a target directory on
+        // the way to that error.
+        return true;
+    };
+    config
+        .get("build")
+        .and_then(|build| build.get("target-dir"))
+        .is_some()
+        // An included file may contain the setting; Cargo owns that merge.
+        || config.get("include").is_some()
 }
 
 /// Read `--flag <value>` or `--flag=<value>` out of cargo's arguments.
@@ -961,6 +1030,37 @@ mod tests {
         .concat();
         let roots = resolve_roots_with(std::ffi::OsStr::new("cargo"), &overridden, root, None);
         assert_eq!(roots.target_dir, configured);
+        assert!(roots.target_dir_requested);
+    }
+
+    #[test]
+    fn a_cargo_config_that_names_the_default_target_is_still_explicit() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "").unwrap();
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::write(
+            root.join(".cargo/config.toml"),
+            "[build]\ntarget-dir = \"target\"\n",
+        )
+        .unwrap();
+        let arguments = ["build".to_string(), "--offline".to_string()];
+
+        let roots = resolve_roots_with(
+            std::ffi::OsStr::new("cargo-that-does-not-exist"),
+            &arguments,
+            root,
+            None,
+        );
+
+        assert_eq!(roots.target_dir, root.join("target"));
+        assert!(roots.target_dir_requested);
     }
 
     #[test]
