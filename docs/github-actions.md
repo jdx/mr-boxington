@@ -1,65 +1,54 @@
 # GitHub Actions
 
-The simplest GitHub-hosted setup stores mbx's local cache in GitHub Actions
-cache. A cache written by `main` can warm pull requests, including pull requests
-from forks, without giving external contributors access to a private cache host.
+[`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action)
+installs mbx and connects it to either GitHub Actions cache or an mbx-compatible
+server.
 
-## Build the cache on main
+## GitHub Actions cache
+
+The default backend restores mbx's local store on every run and saves an entry
+only after a successful push to the repository's default branch. Pull requests,
+including pull requests from forks, are restore-only.
 
 ```yaml
-name: rust-cache
-
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:
-
 permissions:
   contents: read
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.cargo/.global-cache
-            ~/.cache/mbx
-          key: ${{ runner.os }}-${{ runner.arch }}-mbx-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-mbx-
-      - uses: jdx/mise-action@v4
-        with:
-          cache: false
-          install_args: github:jdx/mr-boxington
-      - run: mbx build --workspace --all-features
-      - run: mbx gc --max-size 3GB
-        if: always()
+steps:
+  - uses: actions/checkout@v7
+  - uses: jdx/mr-boxington-action@v1
+  - run: mbx test --workspace
 ```
 
-Each `main` build restores the preceding cache, adds the actions needed by the
-new commit, trims it to a repository-friendly budget, and saves an immutable
-entry for its SHA.
-
-## Restore it in pull requests
-
-Use the restore-only action so pull requests never create a cache entry:
+Before saving, the action prunes the store to 3 GB. Set `max-size` to change the
+budget, or change `cache-generation` when an upgrade or policy change should
+start fresh:
 
 ```yaml
-- uses: actions/cache/restore@v6
+- uses: jdx/mr-boxington-action@v1
+  with:
+    version: 0.3.0
+    cache-generation: v2
+    max-size: 5GB
+```
+
+The operating system and architecture are included in generated keys. Advanced
+workflows can provide complete `cache-key` and `restore-keys` inputs.
+
+## Manual GitHub cache setup
+
+The equivalent pieces can be assembled directly when Cargo download caches or
+custom save policies need to share the same entry:
+
+```yaml
+- uses: actions/cache@v6
   with:
     path: |
       ~/.cargo/registry
       ~/.cargo/git
       ~/.cargo/.global-cache
       ~/.cache/mbx
-    key: ${{ runner.os }}-${{ runner.arch }}-mbx-${{ github.event.pull_request.base.sha }}
+    key: ${{ runner.os }}-${{ runner.arch }}-mbx-${{ github.sha }}
     restore-keys: |
       ${{ runner.os }}-${{ runner.arch }}-mbx-
 - uses: jdx/mise-action@v4
@@ -67,34 +56,41 @@ Use the restore-only action so pull requests never create a cache entry:
     cache: false
     install_args: github:jdx/mr-boxington
 - run: mbx test --workspace
+- run: mbx gc --max-size 3GB
+  if: always()
 ```
 
-The operating system, architecture, and an explicit cache generation belong in
-the key. Change the prefix when an mbx upgrade or cache-format change should
-start fresh.
+Use `actions/cache/restore` instead of `actions/cache` in pull requests so they
+cannot create entries.
 
 ::: tip Pin actions in production
 The examples use major tags for readability. Pin third-party actions to full
 commit SHAs in a real workflow.
 :::
 
-## Self-hosted remote cache
+## Cache server
 
 For trusted runners and teams, mbx can talk to a compatible remote server such
-as [`jdx/mbx-cache`](https://github.com/jdx/mbx-cache). Configure the URL,
-namespace, and OIDC audience:
+as [`jdx/mbx-cache`](https://github.com/jdx/mbx-cache). The action exports the
+remote configuration for subsequent steps:
 
 ```yaml
 permissions:
   contents: read
   id-token: write
 
-env:
-  MBX_REMOTE_URL: https://cache.example.com
-  MBX_REMOTE_NAMESPACE: acme/backend
-  MBX_REMOTE_OIDC_AUDIENCE: mbx-cache
+steps:
+  - uses: actions/checkout@v7
+  - uses: jdx/mr-boxington-action@v1
+    with:
+      backend: server
+      server-url: https://cache.example.com
+      namespace: acme/backend
+      oidc-audience: mbx-cache
+  - run: mbx build --workspace --all-features
 ```
 
 Only a push to a protected branch may write. Pull requests degrade to read-only,
 and tag or release builds do not use the remote cache at all. If fork authors
-must not reach the host, use GitHub Actions cache for those jobs instead.
+must not reach the host, use the GitHub backend for those jobs instead. A bearer
+token can be supplied with the action's `token` input when OIDC is unavailable.
