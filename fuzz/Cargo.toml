@@ -1,0 +1,39 @@
+[package]
+name = "mbx-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+mbx-cache-core = { path = "../crates/mbx-cache-core", default-features = false, features = ["fuzzing", "rustls"] }
+mbx-cache-rustc = { path = "../crates/mbx-cache-rustc", default-features = false, features = ["rustls"] }
+tempfile = "3"
+tokio = { version = "1", features = ["rt"] }
+
+[[bin]]
+name = "blob_pack"
+path = "fuzz_targets/blob_pack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dep_info"
+path = "fuzz_targets/dep_info.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rustc_paths"
+path = "fuzz_targets/rustc_paths.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

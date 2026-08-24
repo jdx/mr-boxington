@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use url::{Host, Url};
 
 mod agent;
@@ -1107,9 +1107,21 @@ async fn decode_blob_pack(
     staging_dir: &Path,
 ) -> Result<DownloadedBlobPack> {
     let metadata = BlobPackResponseMetadata::from_headers(response.headers())?;
-    let requested = requested.iter().cloned().collect::<BTreeSet<_>>();
     let stream = response.bytes_stream().map_err(std::io::Error::other);
-    let mut reader = tokio_util::io::StreamReader::new(stream);
+    let reader = tokio_util::io::StreamReader::new(stream);
+    decode_blob_pack_reader(reader, metadata, requested, staging_dir).await
+}
+
+async fn decode_blob_pack_reader<R>(
+    mut reader: R,
+    metadata: BlobPackResponseMetadata,
+    requested: &[CacheDigest],
+    staging_dir: &Path,
+) -> Result<DownloadedBlobPack>
+where
+    R: AsyncRead + Unpin,
+{
+    let requested = requested.iter().cloned().collect::<BTreeSet<_>>();
     let mut magic = [0_u8; BLOB_PACK_MAGIC.len()];
     reader.read_exact(&mut magic).await?;
     if &magic != BLOB_PACK_MAGIC {
@@ -1189,6 +1201,25 @@ async fn decode_blob_pack(
         blobs,
         metadata,
     })
+}
+
+/// Exercise the production blob-pack decoder without constructing an HTTP
+/// response. This narrow entry point exists for the workspace's fuzz target.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub async fn fuzz_decode_blob_pack(
+    bytes: &[u8],
+    requested: &[CacheDigest],
+    staging_dir: &Path,
+) -> Result<()> {
+    decode_blob_pack_reader(
+        bytes,
+        BlobPackResponseMetadata::default(),
+        requested,
+        staging_dir,
+    )
+    .await
+    .map(drop)
 }
 
 enum BlobPackHasher {

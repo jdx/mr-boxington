@@ -1,1 +1,7 @@
 /target
+fuzz/artifacts
+fuzz/coverage
+fuzz/corpus/*/*
+!fuzz/corpus/*/basic
+!fuzz/corpus/*/invalid_algorithm
+fuzz/target
