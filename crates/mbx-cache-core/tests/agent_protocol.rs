@@ -5,7 +5,7 @@ use mbx_cache_core::{
     RestoreStats, RustcMetadata, TASK_ACTION_MANIFEST_MEDIA_TYPE, canonical_json,
 };
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 const V1_FIXTURE: &str = include_str!("fixtures/agent-protocol-v1.jsonl");
@@ -53,6 +53,28 @@ fn environment() -> BTreeMap<String, Option<String>> {
         ("RUSTFLAGS".into(), Some("-Cdebuginfo=1".into())),
         ("UNSET".into(), None),
     ])
+}
+
+macro_rules! define_variant_coverage {
+    ($variant_name:ident, $expected:ident, $type:ty, { $($pattern:pat => $name:literal),+ $(,)? }) => {
+        const $expected: &[&str] = &[$($name),+];
+
+        fn $variant_name(value: &$type) -> &'static str {
+            match value {
+                $($pattern => $name),+
+            }
+        }
+    };
+}
+
+fn assert_variant_coverage<'a>(
+    expected: &[&'a str],
+    actual: impl IntoIterator<Item = &'a str>,
+    protocol: &str,
+) {
+    let expected = expected.iter().copied().collect::<BTreeSet<_>>();
+    let actual = actual.into_iter().collect::<BTreeSet<_>>();
+    assert_eq!(actual, expected, "missing {protocol} golden vectors");
 }
 
 fn requests() -> Vec<(&'static str, AgentRequest)> {
@@ -160,6 +182,7 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
                 path: Some(PathBuf::from("cache/blob")),
             },
         ),
+        ("response.blob_missing", AgentResponse::Blob { path: None }),
         (
             "response.blobs",
             AgentResponse::Blobs {
@@ -177,6 +200,10 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
             AgentResponse::ActionResult {
                 result: Some(result()),
             },
+        ),
+        (
+            "response.action_result_missing",
+            AgentResponse::ActionResult { result: None },
         ),
         (
             "response.action_hit_recorded",
@@ -204,6 +231,10 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
             },
         ),
         (
+            "response.action_prediction_missing",
+            AgentResponse::ActionPrediction { prediction: None },
+        ),
+        (
             "response.action_prediction_recorded",
             AgentResponse::ActionPredictionRecorded,
         ),
@@ -212,6 +243,10 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
             AgentResponse::ExecutableIdentity {
                 stdout: Some(b"rustc".to_vec()),
             },
+        ),
+        (
+            "response.executable_identity_missing",
+            AgentResponse::ExecutableIdentity { stdout: None },
         ),
         (
             "response.error",
@@ -249,15 +284,31 @@ fn v1_protocol_shapes_match_the_conformance_fixture() {
             .split_once('\t')
             .expect("fixture line must contain a tab");
         if name.starts_with("request.") {
-            request_variants_are_exhaustive(serde_json::from_str(json).unwrap());
+            request_variant_name(&serde_json::from_str(json).unwrap());
         } else if name.starts_with("response.") {
-            response_variants_are_exhaustive(serde_json::from_str(json).unwrap());
+            response_variant_name(&serde_json::from_str(json).unwrap());
         }
     }
-    for (name, request) in requests() {
+    let requests = requests();
+    assert_variant_coverage(
+        EXPECTED_REQUEST_VARIANTS,
+        requests
+            .iter()
+            .map(|(_, request)| request_variant_name(request)),
+        "request",
+    );
+    for (name, request) in requests {
         assert_fixture(&mut expected, name, &request);
     }
-    for (name, response) in responses() {
+    let responses = responses();
+    assert_variant_coverage(
+        EXPECTED_RESPONSE_VARIANTS,
+        responses
+            .iter()
+            .map(|(_, response)| response_variant_name(response)),
+        "response",
+    );
+    for (name, response) in responses {
         assert_fixture(&mut expected, name, &response);
     }
     assert_fixture(&mut expected, "record.action_result", &result());
@@ -319,40 +370,36 @@ fn v1_protocol_constants_match_the_contract() {
     );
 }
 
-fn request_variants_are_exhaustive(request: AgentRequest) {
-    match request {
-        AgentRequest::Hello { .. }
-        | AgentRequest::FindBlob { .. }
-        | AgentRequest::FindBlobs { .. }
-        | AgentRequest::StoreBlob { .. }
-        | AgentRequest::FindActionResult { .. }
-        | AgentRequest::RecordActionHit { .. }
-        | AgentRequest::RecordBypass { .. }
-        | AgentRequest::RecordUnconsulted
-        | AgentRequest::RecordActionVerification { .. }
-        | AgentRequest::StoreActionResult { .. }
-        | AgentRequest::FindActionPrediction { .. }
-        | AgentRequest::RecordActionPrediction { .. }
-        | AgentRequest::FindExecutableIdentity { .. }
-        | AgentRequest::StoreExecutableIdentity { .. } => {}
-    }
-}
+define_variant_coverage!(request_variant_name, EXPECTED_REQUEST_VARIANTS, AgentRequest, {
+    AgentRequest::Hello { .. } => "hello",
+    AgentRequest::FindBlob { .. } => "find_blob",
+    AgentRequest::FindBlobs { .. } => "find_blobs",
+    AgentRequest::StoreBlob { .. } => "store_blob",
+    AgentRequest::FindActionResult { .. } => "find_action_result",
+    AgentRequest::RecordActionHit { .. } => "record_action_hit",
+    AgentRequest::RecordBypass { .. } => "record_bypass",
+    AgentRequest::RecordUnconsulted => "record_unconsulted",
+    AgentRequest::RecordActionVerification { .. } => "record_action_verification",
+    AgentRequest::StoreActionResult { .. } => "store_action_result",
+    AgentRequest::FindActionPrediction { .. } => "find_action_prediction",
+    AgentRequest::RecordActionPrediction { .. } => "record_action_prediction",
+    AgentRequest::FindExecutableIdentity { .. } => "find_executable_identity",
+    AgentRequest::StoreExecutableIdentity { .. } => "store_executable_identity",
+});
 
-fn response_variants_are_exhaustive(response: AgentResponse) {
-    match response {
-        AgentResponse::Hello { .. }
-        | AgentResponse::Blob { .. }
-        | AgentResponse::Blobs { .. }
-        | AgentResponse::Stored { .. }
-        | AgentResponse::ActionResult { .. }
-        | AgentResponse::ActionHitRecorded
-        | AgentResponse::ActionVerificationRecorded
-        | AgentResponse::BypassRecorded
-        | AgentResponse::UnconsultedRecorded
-        | AgentResponse::ActionStored { .. }
-        | AgentResponse::ActionPrediction { .. }
-        | AgentResponse::ActionPredictionRecorded
-        | AgentResponse::ExecutableIdentity { .. }
-        | AgentResponse::Error { .. } => {}
-    }
-}
+define_variant_coverage!(response_variant_name, EXPECTED_RESPONSE_VARIANTS, AgentResponse, {
+    AgentResponse::Hello { .. } => "hello",
+    AgentResponse::Blob { .. } => "blob",
+    AgentResponse::Blobs { .. } => "blobs",
+    AgentResponse::Stored { .. } => "stored",
+    AgentResponse::ActionResult { .. } => "action_result",
+    AgentResponse::ActionHitRecorded => "action_hit_recorded",
+    AgentResponse::ActionVerificationRecorded => "action_verification_recorded",
+    AgentResponse::BypassRecorded => "bypass_recorded",
+    AgentResponse::UnconsultedRecorded => "unconsulted_recorded",
+    AgentResponse::ActionStored { .. } => "action_stored",
+    AgentResponse::ActionPrediction { .. } => "action_prediction",
+    AgentResponse::ActionPredictionRecorded => "action_prediction_recorded",
+    AgentResponse::ExecutableIdentity { .. } => "executable_identity",
+    AgentResponse::Error { .. } => "error",
+});

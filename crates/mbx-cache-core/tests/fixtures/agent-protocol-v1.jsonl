@@ -14,17 +14,21 @@ request.find_executable_identity	{"environment":{"RUSTFLAGS":"-Cdebuginfo=1","UN
 request.store_executable_identity	{"environment":{"RUSTFLAGS":"-Cdebuginfo=1","UNSET":null},"executable":"bin/rustc","stdout":[114,117,115,116,99],"type":"store_executable_identity"}
 response.hello	{"agent_version":"0.3.0","protocol":1,"type":"hello"}
 response.blob	{"path":"cache/blob","type":"blob"}
+response.blob_missing	{"path":null,"type":"blob"}
 response.blobs	{"paths":["cache/blob",null],"type":"blobs"}
 response.stored	{"path":"cache/blob","type":"stored"}
 response.action_result	{"result":{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"metadata":null,"output_root":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"version":1},"type":"action_result"}
+response.action_result_missing	{"result":null,"type":"action_result"}
 response.action_hit_recorded	{"type":"action_hit_recorded"}
 response.action_verification_recorded	{"type":"action_verification_recorded"}
 response.bypass_recorded	{"type":"bypass_recorded"}
 response.unconsulted_recorded	{"type":"unconsulted_recorded"}
 response.action_stored	{"path":"cache/action","type":"action_stored"}
 response.action_prediction	{"prediction":{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"adapter":"rustc","invocation":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"payload":"{}"},"type":"action_prediction"}
+response.action_prediction_missing	{"prediction":null,"type":"action_prediction"}
 response.action_prediction_recorded	{"type":"action_prediction_recorded"}
 response.executable_identity	{"stdout":[114,117,115,116,99],"type":"executable_identity"}
+response.executable_identity_missing	{"stdout":null,"type":"executable_identity"}
 response.error	{"message":"incompatible protocol","type":"error"}
 record.action_result	{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"metadata":null,"output_root":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"version":1}
 record.directory	{"directories":[],"files":[{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"executable":false,"mode":420,"name":"lib.rlib"}],"symlinks":[],"version":1}
