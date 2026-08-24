@@ -126,7 +126,7 @@ fn parses_verbose_rustc_identity() {
 #[test]
 fn mappings_do_not_duplicate_home_placeholders() {
     let directory = tempfile::tempdir().unwrap();
-    let mappings = path_mappings(directory.path());
+    let mappings = path_mappings(directory.path(), None, None);
     let placeholders = mappings
         .iter()
         .map(|mapping| &mapping.placeholder)
@@ -137,12 +137,22 @@ fn mappings_do_not_duplicate_home_placeholders() {
 #[test]
 fn standalone_target_mapping_covers_the_profile_tree() {
     assert_eq!(
-        standalone_target_root(Path::new("/tmp/target/debug/deps")),
+        standalone_target_root(Path::new("/tmp/target/debug/deps"), None),
         Path::new("/tmp/target")
     );
     assert_eq!(
-        standalone_target_root(Path::new("/tmp/target/triple/release/deps")),
-        Path::new("/tmp/target/triple")
+        standalone_target_root(
+            Path::new("/tmp/target/x86_64-unknown-linux-gnu/release/deps"),
+            Some("x86_64-unknown-linux-gnu"),
+        ),
+        Path::new("/tmp/target")
+    );
+    assert_eq!(
+        standalone_target_root(
+            Path::new("/tmp/target/custom/release/deps"),
+            Some("/tmp/targets/custom.json"),
+        ),
+        Path::new("/tmp/target")
     );
 }
 

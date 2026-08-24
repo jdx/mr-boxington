@@ -48,7 +48,11 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     // learn its output directory and use that as the stable target mapping.
     let initial_invocation = RustcInvocation::parse(arguments)?;
     let initial_outputs = initial_invocation.outputs(&working_dir)?;
-    let portable = Portable::detect(&working_dir, Some(&initial_outputs.directory));
+    let portable = Portable::detect(
+        &working_dir,
+        Some(&initial_outputs.directory),
+        initial_invocation.target(),
+    );
     let arguments = portable.applied_to(arguments);
     let invocation = RustcInvocation::parse(&arguments)?;
     let outputs = invocation.outputs(&working_dir)?;
@@ -856,9 +860,9 @@ struct Portable {
 }
 
 impl Portable {
-    fn detect(working_dir: &Path, target_output: Option<&Path>) -> Self {
+    fn detect(working_dir: &Path, target_output: Option<&Path>, target: Option<&str>) -> Self {
         let mut portable = Self {
-            mappings: PathMapping::ordered(&path_mappings(working_dir, target_output)),
+            mappings: PathMapping::ordered(&path_mappings(working_dir, target_output, target)),
             arguments: Vec::new(),
             names: BTreeSet::new(),
             values: Vec::new(),
@@ -946,7 +950,11 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     false
 }
 
-fn path_mappings(working_dir: &Path, target_output: Option<&Path>) -> Vec<PathMapping> {
+fn path_mappings(
+    working_dir: &Path,
+    target_output: Option<&Path>,
+    target: Option<&str>,
+) -> Vec<PathMapping> {
     let mut mappings = Vec::new();
     let mut roots = BTreeSet::new();
     // The target directory comes first, and before the workspace that usually
@@ -963,7 +971,7 @@ fn path_mappings(working_dir: &Path, target_output: Option<&Path>) -> Vec<PathMa
     if let Some(root) = configured_target.or_else(|| {
         target_output
             .filter(|root| root.is_absolute())
-            .map(standalone_target_root)
+            .map(|output| standalone_target_root(output, target))
     }) {
         add_mapping(&mut mappings, &mut roots, root, "target");
     }
@@ -998,11 +1006,17 @@ fn path_mappings(working_dir: &Path, target_output: Option<&Path>) -> Vec<PathMa
 /// Cargo normally writes compilations to `<target>/<profile>/deps` (or the
 /// same shape below a target-triple directory). Mapping the profile parent,
 /// rather than only `deps`, also covers generated inputs below `build/`.
-fn standalone_target_root(output: &Path) -> PathBuf {
+fn standalone_target_root(output: &Path, target: Option<&str>) -> PathBuf {
     if output.file_name() == Some(OsStr::new("deps"))
-        && let Some(root) = output.parent().and_then(Path::parent)
+        && let Some(profile_root) = output.parent().and_then(Path::parent)
     {
-        return root.to_path_buf();
+        let target_component = target.and_then(|target| Path::new(target).file_stem());
+        if target_component.is_some_and(|target| profile_root.file_name() == Some(target))
+            && let Some(root) = profile_root.parent()
+        {
+            return root.to_path_buf();
+        }
+        return profile_root.to_path_buf();
     }
     output.to_path_buf()
 }

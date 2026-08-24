@@ -443,6 +443,7 @@ struct TaskActionState {
     manifest: String,
     baseline_loaded: bool,
     predictions: BTreeMap<CacheDigest, ActionPrediction>,
+    pending_predictions: BTreeMap<CacheDigest, ActionPrediction>,
     remote_etag: Option<String>,
 }
 
@@ -548,6 +549,7 @@ impl CacheAgent {
                     .into_iter()
                     .map(|prediction| (prediction.invocation.clone(), prediction))
                     .collect(),
+                pending_predictions: BTreeMap::new(),
                 remote_etag,
             }
         } else {
@@ -621,7 +623,11 @@ impl CacheAgent {
                         .collect::<BTreeMap<_, _>>()
                 })
                 .unwrap_or_default();
-            predictions.extend(state.predictions);
+            // Only publish predictions recorded by this run. `predictions`
+            // also contains the baseline loaded by `begin_task`; extending
+            // with that snapshot would overwrite newer entries committed by
+            // another agent process after this run began.
+            predictions.extend(state.pending_predictions);
             let manifest = TaskActionManifest {
                 version: TASK_ACTION_MANIFEST_VERSION,
                 task: task.clone(),
@@ -1807,6 +1813,9 @@ impl CacheAgent {
         }
         state
             .predictions
+            .insert(prediction.invocation.clone(), prediction.clone());
+        state
+            .pending_predictions
             .insert(prediction.invocation.clone(), prediction);
         Ok(AgentResponse::ActionPredictionRecorded)
     }
