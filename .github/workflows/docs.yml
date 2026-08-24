@@ -41,6 +41,8 @@ jobs:
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
         if: github.ref == 'refs/heads/main'
       - name: Build with VitePress
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           mise run check:docs
           mise run build:docs
