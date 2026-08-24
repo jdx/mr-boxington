@@ -424,6 +424,97 @@ async fn publishes_only_successfully_committed_task_action_manifests() {
 }
 
 #[tokio::test]
+async fn concurrent_task_commits_do_not_republish_stale_baselines() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let task = "d".repeat(64);
+    let first_invocation = CacheDigest::blake3(b"first invocation");
+    let old = ActionPrediction {
+        invocation: first_invocation.clone(),
+        action: CacheDigest::blake3(b"old action"),
+        adapter: "rustc".into(),
+        payload: "{}".into(),
+    };
+
+    let seed = CacheAgent::new(&cache, "test-version");
+    let seed_run = seed.begin_task(&task).await.unwrap();
+    assert!(matches!(
+        seed.respond(AgentRequest::RecordActionPrediction {
+            task: seed_run.clone(),
+            prediction: old,
+        })
+        .await,
+        AgentResponse::ActionPredictionRecorded
+    ));
+    seed.commit_task(&seed_run).await.unwrap();
+
+    // Both agents load the old value before either publishes. The second
+    // commit must merge only its new entry, not its stale baseline.
+    let first = CacheAgent::new(&cache, "test-version");
+    let second = CacheAgent::new(&cache, "test-version");
+    let first_run = first.begin_task(&task).await.unwrap();
+    let second_run = second.begin_task(&task).await.unwrap();
+    let updated = ActionPrediction {
+        invocation: first_invocation.clone(),
+        action: CacheDigest::blake3(b"updated action"),
+        adapter: "rustc".into(),
+        payload: "{}".into(),
+    };
+    assert!(matches!(
+        first
+            .respond(AgentRequest::RecordActionPrediction {
+                task: first_run.clone(),
+                prediction: updated.clone(),
+            })
+            .await,
+        AgentResponse::ActionPredictionRecorded
+    ));
+    first.commit_task(&first_run).await.unwrap();
+
+    let second_prediction = ActionPrediction {
+        invocation: CacheDigest::blake3(b"second invocation"),
+        action: CacheDigest::blake3(b"second action"),
+        adapter: "rustc".into(),
+        payload: "{}".into(),
+    };
+    assert!(matches!(
+        second
+            .respond(AgentRequest::RecordActionPrediction {
+                task: second_run.clone(),
+                prediction: second_prediction.clone(),
+            })
+            .await,
+        AgentResponse::ActionPredictionRecorded
+    ));
+    second.commit_task(&second_run).await.unwrap();
+
+    let reader = CacheAgent::new(&cache, "test-version");
+    let reader_run = reader.begin_task(&task).await.unwrap();
+    assert!(matches!(
+        reader
+            .respond(AgentRequest::FindActionPrediction {
+                task: reader_run.clone(),
+                invocation: first_invocation,
+            })
+            .await,
+        AgentResponse::ActionPrediction {
+            prediction: Some(prediction)
+        } if prediction == updated
+    ));
+    assert!(matches!(
+        reader
+            .respond(AgentRequest::FindActionPrediction {
+                task: reader_run,
+                invocation: second_prediction.invocation.clone(),
+            })
+            .await,
+        AgentResponse::ActionPrediction {
+            prediction: Some(prediction)
+        } if prediction == second_prediction
+    ));
+}
+
+#[tokio::test]
 async fn round_trips_task_actions_between_fresh_local_caches() {
     let directory = tempfile::tempdir().unwrap();
     let mut server = mockito::Server::new_async().await;

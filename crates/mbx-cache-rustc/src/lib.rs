@@ -260,6 +260,7 @@ pub struct RustcInvocation {
     out_dir: Option<PathBuf>,
     explicit_output: Option<PathBuf>,
     emits: Vec<Emit>,
+    target: Option<String>,
 }
 
 /// The cacheable files and dependency manifest produced by a rustc invocation.
@@ -287,6 +288,11 @@ impl RustcInvocation {
     /// Return the source input passed to rustc.
     pub fn source(&self) -> &Path {
         &self.source
+    }
+
+    /// Return the explicitly selected compilation target, if any.
+    pub fn target(&self) -> Option<&str> {
+        self.target.as_deref()
     }
 
     /// Resolve the rlib/rmeta files produced by this invocation.
@@ -627,6 +633,7 @@ struct Parser<'a> {
     extra_filename: String,
     out_dir: Option<PathBuf>,
     explicit_output: Option<PathBuf>,
+    target: Option<String>,
 }
 
 impl<'a> Parser<'a> {
@@ -644,6 +651,7 @@ impl<'a> Parser<'a> {
             extra_filename: String::new(),
             out_dir: None,
             explicit_output: None,
+            target: None,
         }
     }
 
@@ -685,6 +693,7 @@ impl<'a> Parser<'a> {
             out_dir: self.out_dir,
             explicit_output: self.explicit_output,
             emits: self.emits,
+            target: self.target,
         })
     }
 
@@ -742,6 +751,7 @@ impl<'a> Parser<'a> {
             }
             "target" => {
                 let value = self.take_value(&rendered_flag, inline)?;
+                self.target = Some(value.clone());
                 if value.ends_with(".json") || value.contains(['/', '\\']) {
                     let path = PathBuf::from(value);
                     self.required_inputs.push(path.clone());

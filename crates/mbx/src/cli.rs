@@ -2,6 +2,7 @@
 
 use crate::config::Config;
 use crate::session::CacheSession;
+use crate::util::workspace_root;
 use crate::{policy, store, target};
 use bytesize::ByteSize;
 use eyre::{Context, Result};
@@ -16,7 +17,7 @@ use std::process::{Command, ExitCode};
     version,
     config = crate::config::RawConfig,
     about = "A build cache for Rust projects",
-    long_about = "Run any Cargo subcommand with the build cache enabled. The subcommand and all of its arguments are passed through unchanged, including Cargo aliases and installed subcommands. `cache` and `gc` are reserved for mbx's own store-management commands.\n\nExamples:\n  mbx build --release\n  mbx test --workspace\n  mbx clippy --all-targets -- -D warnings",
+    long_about = "Run any Cargo subcommand with the build cache enabled. The subcommand and all of its arguments are passed through unchanged, including Cargo aliases and installed subcommands. `cache`, `gc`, and `setup` are reserved for mbx's own commands.\n\nExamples:\n  mbx build --release\n  mbx test --workspace\n  mbx clippy --all-targets -- -D warnings\n  mbx setup",
     unknown_flags = "error"
 )]
 struct Cli {
@@ -26,6 +27,8 @@ struct Cli {
 
 #[derive(usage::Subcommands)]
 enum Commands {
+    /// Install a persistent rustc wrapper for plain Cargo commands.
+    Setup,
     /// Collect stale managed targets and evict cached objects until the store fits a size budget.
     ///
     /// A missing cached object is rebuilt when it is needed again.
@@ -63,6 +66,7 @@ pub fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     let config = Config::load()?;
     match cli.command {
+        Commands::Setup => setup().map(|()| ExitCode::SUCCESS),
         Commands::Gc(args) => gc(
             &config,
             args.max_size
@@ -78,6 +82,75 @@ pub fn run() -> Result<ExitCode> {
         },
         Commands::Cargo(arguments) => cargo(&config, &arguments),
     }
+}
+
+fn setup() -> Result<()> {
+    let executable = std::env::current_exe().wrap_err("failed to locate the mbx executable")?;
+    let data = dirs::data_local_dir()
+        .ok_or_else(|| eyre::eyre!("the platform data directory could not be located"))?;
+    let install_dir = data.join("mbx").join("bin");
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".cargo")))
+        .ok_or_else(|| eyre::eyre!("Cargo's configuration directory could not be located"))?;
+    let config_path =
+        if cargo_home.join("config.toml").exists() || !cargo_home.join("config").exists() {
+            cargo_home.join("config.toml")
+        } else {
+            cargo_home.join("config")
+        };
+    setup_at(&executable, &install_dir, &config_path)
+}
+
+fn setup_at(executable: &Path, install_dir: &Path, config_path: &Path) -> Result<()> {
+    let contents = match std::fs::read_to_string(config_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let mut document = contents
+        .parse::<toml_edit::DocumentMut>()
+        .wrap_err_with(|| format!("failed to parse {}", config_path.display()))?;
+    let shim_name = if cfg!(windows) {
+        format!("{}.exe", crate::session::RUSTC_SHIM_STEM)
+    } else {
+        crate::session::RUSTC_SHIM_STEM.into()
+    };
+    let shim = install_dir.join(shim_name);
+    if let Some(configured) = document
+        .get("build")
+        .and_then(toml_edit::Item::as_table_like)
+        .and_then(|build| build.get("rustc-wrapper"))
+    {
+        if configured.as_str() == Some(shim.to_string_lossy().as_ref()) {
+            std::fs::create_dir_all(install_dir)?;
+            crate::session::install_shim(executable, install_dir)?;
+            println!("refreshed {}; Cargo was already configured", shim.display());
+            return Ok(());
+        }
+        println!(
+            "left {} unchanged: build.rustc-wrapper is already {}",
+            config_path.display(),
+            configured
+        );
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(install_dir)?;
+    let shim = crate::session::install_shim(executable, install_dir)?;
+    document["build"]["rustc-wrapper"] = toml_edit::value(shim.to_string_lossy().into_owned());
+    let parent = config_path
+        .parent()
+        .ok_or_else(|| eyre::eyre!("Cargo configuration path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    crate::util::write_atomic(config_path, document.to_string().as_bytes())?;
+    println!(
+        "installed {} and configured {}",
+        shim.display(),
+        config_path.display()
+    );
+    println!("plain cargo commands now use mbx's local action cache");
+    Ok(())
 }
 
 fn cargo(config: &Config, arguments: &[String]) -> Result<ExitCode> {
@@ -409,25 +482,6 @@ fn cache_stats(config: &Config) -> Result<()> {
         ByteSize::b(views.bytes).display().iec()
     );
     Ok(())
-}
-
-/// Find the workspace root above `start`.
-///
-/// The outermost directory holding a `Cargo.lock` is preferred, since that is
-/// the one cargo resolves against; a directory holding only a `Cargo.toml`
-/// stands in when there is no lockfile yet.
-fn workspace_root(start: &Path) -> PathBuf {
-    let mut lockfile = None;
-    let mut manifest = None;
-    for directory in start.ancestors() {
-        if directory.join("Cargo.lock").is_file() {
-            lockfile = Some(directory.to_path_buf());
-        }
-        if directory.join("Cargo.toml").is_file() {
-            manifest = Some(directory.to_path_buf());
-        }
-    }
-    lockfile.or(manifest).unwrap_or_else(|| start.to_path_buf())
 }
 
 /// Settings the shim maps out of its cache keys.

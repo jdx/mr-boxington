@@ -363,6 +363,7 @@ fn mbx_commands_still_take_precedence() {
 fn cli_exposes_its_usage_spec() {
     let spec = Cli::to_kdl();
     assert!(spec.contains("external_subcommand #true"));
+    assert!(spec.contains("cmd setup"));
     assert!(spec.contains("cmd gc"));
     assert!(spec.contains("cmd cache"));
     assert!(spec.contains("config {"));
@@ -432,4 +433,52 @@ fn declining_the_target_prompt_preserves_outputs() {
 
     assert!(!accepted);
     assert!(target_dir.join("artifact").is_file());
+}
+
+#[test]
+fn setup_preserves_cargo_configuration_and_installs_the_wrapper() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = directory
+        .path()
+        .join(if cfg!(windows) { "mbx.exe" } else { "mbx" });
+    std::fs::write(&executable, b"mbx binary").unwrap();
+    let install = directory.path().join("data/bin");
+    let config = directory.path().join("cargo/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "# keep me\n[net]\noffline = true\n").unwrap();
+
+    setup_at(&executable, &install, &config).unwrap();
+
+    let written = std::fs::read_to_string(&config).unwrap();
+    assert!(written.contains("# keep me"));
+    let document = written.parse::<toml_edit::DocumentMut>().unwrap();
+    assert_eq!(document["net"]["offline"].as_bool(), Some(true));
+    let wrapper = document["build"]["rustc-wrapper"].as_str().unwrap();
+    assert!(Path::new(wrapper).is_file());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        assert_ne!(
+            std::fs::metadata(wrapper).unwrap().permissions().mode() & 0o100,
+            0
+        );
+    }
+}
+
+#[test]
+fn setup_never_displaces_an_existing_wrapper() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = directory.path().join("mbx");
+    std::fs::write(&executable, b"mbx binary").unwrap();
+    let install = directory.path().join("data/bin");
+    let config = directory.path().join("cargo/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let original = "[build]\nrustc-wrapper = \"sccache\"\n";
+    std::fs::write(&config, original).unwrap();
+
+    setup_at(&executable, &install, &config).unwrap();
+
+    assert_eq!(std::fs::read_to_string(config).unwrap(), original);
+    assert!(!install.exists());
 }

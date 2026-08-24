@@ -88,9 +88,10 @@ Two modes:
 - **Session mode** (under an mbx-wrapped Cargo command): talks to the agent over the socket;
   gets prefetch, batched uploads, and staged blob packs. This is the only mode
   today.
-- **Standalone mode** (no `MBX_SOCKET`): would read and write the local store
-  directly, making `build.rustc-wrapper` useful for plain `cargo build`. Blocked
-  on cross-process prefetch manifests — see future work.
+- **Standalone mode** (no `MBX_SOCKET`): reads and writes the local store
+  directly for plain Cargo commands. Prediction manifests are sharded by
+  invocation digest and committed immediately, so independent rustc wrapper
+  processes share them without a daemon.
 
 On any unsupported invocation, error, or bypass condition the shim execs the
 real rustc transparently. Correctness beats hit rate everywhere.
@@ -174,7 +175,6 @@ Protocol version stays 1; nothing in the wild speaks the old names.
   `build.rustc-wrapper` in `~/.cargo/config.toml`. If that key already names
   another wrapper, such as sccache, setup reports it and changes nothing:
   silently displacing a wrapper the user chose is worse than doing nothing.
-  Depends on standalone shim mode, so it lands with it.
 - `mbx-rustc` (argv0) — the shim; not invoked by humans.
 
 ## Configuration
@@ -288,15 +288,6 @@ env vars, and wire constants to match `mbx-cache-core` exactly.
   one member cold-misses its whole dependent subtree. Measure on a multi-member
   workspace — mise is one crate, so nearly all of its 65% is dependencies and
   the trade-off will not show there.
-- **Standalone shim mode**, so `build.rustc-wrapper` helps plain `cargo build`
-  and `mbx setup` becomes worth having. This needs cross-process prefetch
-  manifests first: `begin_task` derives its run id from the process id, so each
-  of the many rustc processes cargo spawns would get its own manifest and see
-  none of the others' predictions. Without prediction the shim can only use a
-  dep-info file left by an earlier build, which is exactly the case a cold
-  target directory does not have — so the feature is not worth shipping until
-  runs can be shared. Either make the run id deterministic per identity, or
-  persist predictions as they are recorded instead of at commit.
 - **Default `MBX_SHARE_OUT_DIR` on**, once a verify-mode run over a real
   workspace has qualified it. Blocked on the verify-mode gap below rather than
   on the feature itself.

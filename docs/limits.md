@@ -2,11 +2,14 @@
 
 mr boxington favors correct uncached work over risky cache reuse.
 
-## Run Cargo through mbx
+## Plain Cargo has local-only caching
 
-Plain Cargo commands do not start the session agent, so they get no mbx cache.
-Use `mbx build`, `mbx test`, `mbx clippy`, and the same pattern for other Cargo
-subcommands.
+After `mbx setup`, plain Cargo commands use the local action store. They do not
+start a session agent, so remote transfers, build statistics, managed targets,
+and automatic collection still require `mbx build`, `mbx test`, or the same
+pattern for another Cargo subcommand. Cargo's normal incremental workspace
+compilations continue to bypass the action cache; dependencies, which Cargo
+normally builds non-incrementally, remain cacheable.
 
 ## Linking is not cached
 

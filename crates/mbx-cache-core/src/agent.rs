@@ -47,7 +47,7 @@ pub const AGENT_PROTOCOL_VERSION: u8 = 1;
 const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
 /// A request accepted by the task-scoped cache agent.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentRequest {
     /// Negotiate protocol and application versions.
@@ -159,7 +159,7 @@ pub struct RestoreStats {
 }
 
 /// A response returned by the task-scoped cache agent.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentResponse {
     /// Successful protocol negotiation.
@@ -443,6 +443,7 @@ struct TaskActionState {
     manifest: String,
     baseline_loaded: bool,
     predictions: BTreeMap<CacheDigest, ActionPrediction>,
+    pending_predictions: BTreeMap<CacheDigest, ActionPrediction>,
     remote_etag: Option<String>,
 }
 
@@ -548,6 +549,7 @@ impl CacheAgent {
                     .into_iter()
                     .map(|prediction| (prediction.invocation.clone(), prediction))
                     .collect(),
+                pending_predictions: BTreeMap::new(),
                 remote_etag,
             }
         } else {
@@ -621,7 +623,11 @@ impl CacheAgent {
                         .collect::<BTreeMap<_, _>>()
                 })
                 .unwrap_or_default();
-            predictions.extend(state.predictions);
+            // Only publish predictions recorded by this run. `predictions`
+            // also contains the baseline loaded by `begin_task`; extending
+            // with that snapshot would overwrite newer entries committed by
+            // another agent process after this run began.
+            predictions.extend(state.pending_predictions);
             let manifest = TaskActionManifest {
                 version: TASK_ACTION_MANIFEST_VERSION,
                 task: task.clone(),
@@ -826,6 +832,23 @@ impl CacheAgent {
             copied_output_files: self.stats.copied_output_files.load(Ordering::Relaxed),
             copied_output_bytes: self.stats.copied_output_bytes.load(Ordering::Relaxed),
         }
+    }
+
+    /// Handle requests without a transport connection.
+    ///
+    /// Persistent wrappers use this entry point when Cargo invokes mbx outside
+    /// an orchestrated session. It intentionally has the same response
+    /// semantics as [`Self::handle_connection`], while leaving framing and the
+    /// version handshake to callers that actually cross a process boundary.
+    pub async fn handle_requests(
+        &self,
+        requests: impl IntoIterator<Item = AgentRequest>,
+    ) -> Vec<AgentResponse> {
+        let mut responses = Vec::new();
+        for request in requests {
+            responses.push(self.respond(request).await);
+        }
+        responses
     }
 
     fn write_lock(&self, digest: &CacheDigest) -> Arc<tokio::sync::Mutex<()>> {
@@ -1790,6 +1813,9 @@ impl CacheAgent {
         }
         state
             .predictions
+            .insert(prediction.invocation.clone(), prediction.clone());
+        state
+            .pending_predictions
             .insert(prediction.invocation.clone(), prediction);
         Ok(AgentResponse::ActionPredictionRecorded)
     }

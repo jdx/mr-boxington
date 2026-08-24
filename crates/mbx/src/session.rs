@@ -11,6 +11,7 @@ use mbx_cache_core::{
     CacheDigest, RemoteCacheClient, RemoteCacheConfig, canonical_json,
 };
 use serde::Serialize;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
@@ -484,6 +485,17 @@ pub fn install_shim(executable: &Path, directory: &Path) -> Result<PathBuf> {
             format!("failed to install the rustc shim by hard link ({link_error}) or copy")
         })?;
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Some filesystems do not retain executable permissions when the
+        // cross-device fallback copies the running binary. Cargo must be able
+        // to invoke the installed wrapper directly.
+        let mut permissions = std::fs::metadata(&shim)?.permissions();
+        permissions.set_mode(permissions.mode() | 0o100);
+        std::fs::set_permissions(&shim, permissions)?;
+    }
     Ok(shim)
 }
 
@@ -899,9 +911,100 @@ fn append_line(path: &OsString, line: &str) -> std::io::Result<()> {
 }
 
 pub(crate) fn request_agent(requests: &[AgentRequest]) -> Result<Vec<AgentResponse>> {
-    let socket =
-        std::env::var_os(SOCKET_ENV).ok_or_else(|| eyre::eyre!("{SOCKET_ENV} is not set"))?;
-    request_agent_at(&socket, requests)
+    match std::env::var_os(SOCKET_ENV).filter(|socket| !socket.is_empty()) {
+        Some(socket) => request_agent_at(&socket, requests),
+        None => request_standalone_agent(requests),
+    }
+}
+
+/// Serve a persistent Cargo wrapper directly from the local store.
+///
+/// There is deliberately no remote access here: the short-lived process has
+/// no trusted session policy or opportunity to batch transfers. Prediction
+/// manifests are still persisted after every successful record so the many
+/// wrapper processes in one Cargo build, and later builds, share what they
+/// learn without a daemon.
+fn request_standalone_agent(requests: &[AgentRequest]) -> Result<Vec<AgentResponse>> {
+    thread_local! {
+        static STANDALONE_AGENT: RefCell<Option<StandaloneAgent>> = const { RefCell::new(None) };
+    }
+
+    STANDALONE_AGENT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            let config = Config::load()?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            *slot = Some(StandaloneAgent {
+                agent: CacheAgent::new(config.store_dir(), VERSION),
+                runtime,
+                runs: BTreeMap::new(),
+            });
+        }
+        let standalone = slot.as_mut().expect("standalone agent was initialized");
+        let StandaloneAgent {
+            agent,
+            runtime,
+            runs,
+        } = standalone;
+        runtime.block_on(async {
+            let mut responses = Vec::with_capacity(requests.len());
+            for request in requests.iter().cloned() {
+                let (request, run_to_commit) = match request {
+                    AgentRequest::FindActionPrediction { task, invocation } => {
+                        let run = match runs.get(&task) {
+                            Some(run) => run.clone(),
+                            None => {
+                                let run = agent.begin_task(&task).await?;
+                                runs.insert(task.clone(), run.clone());
+                                run
+                            }
+                        };
+                        (
+                            AgentRequest::FindActionPrediction {
+                                task: run,
+                                invocation,
+                            },
+                            None,
+                        )
+                    }
+                    AgentRequest::RecordActionPrediction { task, prediction } => {
+                        let run = match runs.remove(&task) {
+                            Some(run) => run,
+                            None => agent.begin_task(&task).await?,
+                        };
+                        (
+                            AgentRequest::RecordActionPrediction {
+                                task: run.clone(),
+                                prediction,
+                            },
+                            Some(run),
+                        )
+                    }
+                    request => (request, None),
+                };
+                let response = agent
+                    .handle_requests(std::iter::once(request))
+                    .await
+                    .into_iter()
+                    .next()
+                    .expect("one request returns one response");
+                let succeeded = !matches!(response, AgentResponse::Error { .. });
+                responses.push(response);
+                if succeeded && let Some(run) = run_to_commit {
+                    agent.commit_task(&run).await?;
+                }
+            }
+            Ok(responses)
+        })
+    })
+}
+
+struct StandaloneAgent {
+    agent: CacheAgent,
+    runtime: tokio::runtime::Runtime,
+    runs: BTreeMap<String, String>,
 }
 
 #[cfg(unix)]
