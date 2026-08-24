@@ -1,293 +1,143 @@
-# mr boxington
+<p align="center">
+  <img src="docs/public/logo.svg" alt="Mr Boxington, a friendly cache box wearing a monocle and bow tie" width="220">
+</p>
 
-> **Please ignore this project.** It is an experiment and is not intended for
-> others to use yet. Nothing here is stable or supported, and the protocol may
-> change without notice. Releases exist so CI can install a binary, not as a
-> promise that any of it keeps working.
+<h1 align="center">mr boxington</h1>
 
-`mbx` is a build cache for Rust projects. It wraps cargo, caches individual
-rustc compilations in a content-addressed store shared by every project and
-worktree on your machine, and can share those compilations with CI and
-teammates through a remote cache.
+<p align="center">
+  <strong>Build it once.</strong><br>
+  A Cargo wrapper that shares compiled work across worktrees and CI—and prunes build storage automatically.
+</p>
 
-See [PLAN.md](PLAN.md) for the design and the road to v1.
+<p align="center">
+  <a href="https://mr-boxington.jdx.dev">Documentation</a>
+  ·
+  <a href="https://github.com/jdx/mr-boxington/releases">Releases</a>
+  ·
+  <a href="PLAN.md">Road to v1</a>
+</p>
 
-## What it does
+> [!WARNING]
+> mr boxington is pre-1.0. The cache format and behavior may change without
+> notice, and releases are not a stability promise.
 
-- **Caches each rustc action once.** A compilation you have done before is
-  restored instead of repeated, whatever directory you are in.
-- **Manages target directories.** Optionally places them under a root of its
-  own, so a checkout you delete stops leaving gigabytes behind and `target/`
-  becomes a link rather than a pile.
-- **Deduplicates across checkouts.** Cache keys hold no absolute paths, so a
-  second worktree of the same dependency graph builds largely warm — measured at
-  65% of actions on mise, with the shortfall explained under limits below. Each
-  keeps its own `target/` directory, so there is no cargo lock contention
-  between them.
-- **Collects garbage.** The store has a size budget, and a build sweeps it back
-  under that budget on its own -- something cargo has never done for `target/`.
-  A checkout that no longer exists loses its artifacts before a live project
-  does.
-- **Shares through a remote.** CI and teammates can restore from a
-  [self-hosted server](https://github.com/jdx/mbx-cache); an ephemeral runner
-  with an empty store pulls only the actions its build needs.
+`mbx` wraps ordinary Cargo commands with a content-addressed rustc cache. Cargo
+still resolves dependencies, plans builds, and links outputs; mbx restores
+supported compilations it has seen before.
 
-It is a cargo wrapper, not a cargo replacement. Cargo keeps resolution, feature
-unification, build planning, and linking.
+```sh
+mbx build                  # cargo build, with caching
+mbx test --all-features    # cargo test --all-features, with caching
+mbx clippy --workspace     # cargo clippy --workspace, with caching
+```
+
+## Why mbx?
+
+- **Warm every worktree.** Cache keys contain no checkout-specific absolute
+  paths, so building one checkout warms its siblings automatically without
+  sharing a Cargo target lock.
+- **Prune automatically.** mbx sweeps its action store back to a size budget
+  and, by default, removes managed target directories after their checkout
+  disappears.
+- **Warm CI safely.** GitHub Actions cache can warm fork pull requests from a
+  cache built on `main`, while a self-hosted remote can serve trusted runners
+  and teammates. Pull requests never publish remote objects.
+- **See the whole result.** mbx reports hits, misses, actions it could not look
+  up, and actions it deliberately bypassed. A high hit rate cannot hide work
+  that never entered the cache.
 
 ## Install
 
-Every release attaches one archive per target, holding the `mbx` binary and
-nothing else, so extracting it into a directory on `PATH` is the whole install.
-The Linux binaries are statically linked against musl and need nothing from the
-host.
+With [mise](https://mise.jdx.dev):
 
 ```sh
-curl -fsSL https://github.com/jdx/mr-boxington/releases/latest/download/mbx-x86_64-unknown-linux-musl.tar.gz | tar -xzf - -C ~/.local/bin
+mise use -g github:jdx/mr-boxington
 ```
 
-Targets: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
-`aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`
-(a `.zip`). `SHA256SUMS` on the release covers all of them.
-
-Asset names carry no version, so pin one in CI by swapping `latest/download`
-for a tag: `releases/download/v0.1.0/mbx-x86_64-unknown-linux-musl.tar.gz`.
-`mbx --version` reports which build you have.
-
-Building from source works too: `cargo build --release`.
-
-Releases are cut by release-plz; see [RELEASING.md](RELEASING.md).
-
-## Usage
+With Cargo:
 
 ```sh
-mbx build build                  # == cargo build
-mbx build test --all-features    # == cargo test --all-features
+cargo install mbx
 ```
 
-`mbx build` passes everything after it to cargo unchanged. When the cache did
-anything at all, it summarises that on stderr afterwards — a build with no cache
-activity prints nothing:
-
-```
-cache: 12 hits, 3 misses, 12 prefetched; 4.1 MiB downloaded, 0 B uploaded, 1.2 MiB stored locally
-cache could not look up 4 compilations: no usable dep-info from an earlier build and no prediction to derive an action key from
-cache bypassed 7 compilations: 5 unsupported-crate-type, 2 unsupported-search-path
-```
-
-The last line accounts for compilations mbx declined to cache, grouped by
-reason. It is the honest counterpart to the hit rate: a build can hit every
-action it looked up and still spend most of its time on work that never entered
-the cache.
-
-The line above it is the other half of that honesty, and it dominates a genuinely
-cold build. An action key comes from a dep-info file an earlier build left
-behind, or from a prediction recorded by one. Without a usable key from either
--- no dep-info at all, or dep-info that does not yield one -- mbx has nothing to
-look up and compiles without making the lookup. Those compilations are stored
-afterwards, so they are not bypasses, and they are not misses either: a miss is
-a lookup that found nothing. Counting them as neither is what once made a cold
-build report `0 hits, 0 misses` while writing a gigabyte into the store.
-
-Store management:
+Or install the latest Linux x86-64 release archive:
 
 ```sh
-mbx cache dir       # where the store lives
-mbx cache stats     # what it holds
-mbx gc              # sweep to the configured budget
-mbx gc --max-size 20GiB
+mkdir -p ~/.local/bin
+curl -fsSL https://github.com/jdx/mr-boxington/releases/latest/download/mbx-x86_64-unknown-linux-musl.tar.gz \
+  | tar -xzf - -C ~/.local/bin
 ```
 
-A build sweeps the store itself when one is due -- at most once per
-`MBX_GC_INTERVAL`, and only reporting when it evicted something:
+Release archives also cover Linux ARM64, Apple Silicon, Intel macOS, and
+Windows x86-64. Every release includes `SHA256SUMS`.
 
-```text
-gc: evicted 128 objects and 3 action results (1.2 GiB); 18.9 GiB remain
-```
+[See all installation options →](https://mr-boxington.jdx.dev/getting-started)
 
-A store inside its budget loses no cached compilations; a sweep that finds one
-there still tidies its own bookkeeping, dropping the records of checkouts that
-have gone. When a store is over budget, the objects that go first are the ones
-no checkout on disk still needs: `mbx build` records the checkout it ran in, and
-a checkout that has been deleted stops protecting what only it used. Worktrees
-of one `Cargo.lock` share their cached compilations, so removing one of those
-releases nothing while a sibling remains -- the sibling genuinely still needs
-them.
+## Automatic pruning
 
-Evicting an object that is still in use costs a recompile and nothing else, so
-`gc` is always safe to run.
-
-## Configuration
-
-Environment variables win over `~/.config/mbx/config.toml`, which wins over the
-defaults.
-
-| Environment | Config key | Default | Meaning |
-| --- | --- | --- | --- |
-| `MBX_CACHE_DIR` | `cache_dir` | platform cache dir | store root |
-| `MBX_REMOTE_URL` | `remote.url` | unset | remote cache base URL |
-| `MBX_REMOTE_NAMESPACE` | `remote.namespace` | unset | required with a URL |
-| `MBX_REMOTE_TOKEN` | `remote.token` | unset | bearer token |
-| `MBX_REMOTE_TOKEN_FILE` | `remote.token_file` | unset | token read from a file |
-| `MBX_REMOTE_OIDC_AUDIENCE` | `remote.oidc_audience` | unset | CI OIDC audience |
-| `MBX_REMOTE_MODE` | `remote.mode` | `read-write` | or `read-only`, `write-only` |
-| `MBX_SHARE_OUT_DIR` | `share_out_dir` | off | share compilations that read `OUT_DIR` |
-| `MBX_STATS_REPORT` | `stats_report` | unset | write a JSON report here |
-| `MBX_INCREMENTAL` | `incremental` | off | let cargo compile workspace members incrementally |
-| `MBX_GC_AUTO` | `gc.auto` | `true` | sweep the store after a build |
-| `MBX_GC_MAX_SIZE` | `gc.max_size` | `20GiB` | size the store is swept back to |
-| `MBX_GC_INTERVAL` | `gc.interval` | `1h` | how often a build may sweep |
-| `MBX_TARGET_VIEWS` | `target.views` | `false` | let mbx place target directories |
-| `MBX_TARGET_ROOT` | `target.root` | `<cache dir>/targets` | where it places them |
-| `MBX_HTTP_TIMEOUT` | `http.timeout` | `30s` | connect and read timeout |
-| `MBX_HTTP_DOWNLOAD_TIMEOUT` | `http.download_timeout` | `10m` | blob downloads |
-| `MBX_HTTP_RETRIES` | `http.retries` | `3` | request retries |
-| `MBX_VERIFY` | — | unset | compile anyway and compare against the cache |
-| `MBX_BYPASS_LOG` | — | unset | append the full reason for every uncached compilation to this file |
-
-```toml
-# ~/.config/mbx/config.toml
-[remote]
-url = "https://cache.example.com"
-namespace = "acme/backend"
-```
-
-## Target directories
-
-Cargo writes build outputs to `<workspace>/target`, which ties them to the
-checkout: delete a worktree and the outputs go with it, and nothing else ever
-reclaims them. Turn on `MBX_TARGET_VIEWS` and mbx places them under a root of
-its own instead, leaving `target` behind as a symlink so every path you type
-still works:
+The action store is swept automatically to a 20 GiB budget by default. Inspect
+or collect it explicitly with:
 
 ```sh
-MBX_TARGET_VIEWS=1 mbx build build
-ls -l target          # target -> ~/.cache/mbx/targets/v1/<digest of this checkout>
+mbx cache stats
+mbx gc
+mbx gc --max-size 3GB
 ```
 
-Now the outputs outlive the checkout, so collecting them becomes mbx's job: a
-target directory whose checkout no longer exists is unambiguous garbage, and
-`mbx gc` frees it along with everything else. That is usually the largest thing
-collection reclaims.
+For a checkout without an existing `target/`, managed target directories are
+enabled automatically:
 
-Relocating costs nothing in cache hits. The shim maps the target directory to
-`${target}` before anything else, so an action keys the same wherever its
-outputs land -- turning this on does not cold-start a warm cache.
-
-mbx declines rather than guessing when placement would overrule someone:
-
-- a target directory named by `--target-dir`, `CARGO_TARGET_DIR`, or
-  `build.target-dir` stays where it was asked for;
-- a real `target/` directory is somebody's build outputs, so it is left alone.
-  Remove it first if you want a managed one.
-
-## Remote caching
-
-Point mbx at a server and it reads from it; whether it *writes* depends on
-where it is running. Outside a trusted CI context — a push to a protected
-branch on GitHub Actions or GitLab CI — `read-write` degrades to `read-only`,
-and `write-only` disables the remote entirely. Pull requests never write, so a
-fork cannot poison the cache. Tag and release builds do not use the cache at
-all.
-
-In GitHub Actions, `MBX_REMOTE_OIDC_AUDIENCE` authorizes writes through the
-runner's OIDC token, so there is no long-lived secret to store:
-
-```yaml
-permissions:
-  contents: read
-  id-token: write
-env:
-  MBX_REMOTE_URL: https://cache.example.com
-  MBX_REMOTE_NAMESPACE: acme/backend
-  MBX_REMOTE_OIDC_AUDIENCE: mbx-cache
+```sh
+mbx build
 ```
+
+mbx places the target directory under its cache root and leaves `target` as a
+symlink, so familiar paths still work. Once the checkout is gone, `mbx gc` can
+remove its target directory too.
+
+For an existing real `target/`, an interactive `mbx` asks before removing the
+old outputs and replacing the directory with a managed link. The safe default
+is to keep it. Non-interactive runs never remove it. Set `MBX_TARGET_VIEWS=0`
+to disable managed placement and the prompt.
+
+[Learn about managed targets →](https://mr-boxington.jdx.dev/managed-targets)
+
+## Worktree and CI warming
+
+An equivalent rustc action keys the same across checkout paths. One worktree's
+dependency build can therefore warm another while every checkout keeps its own
+target directory.
+
+For GitHub-hosted CI, save `~/.cache/mbx` from `main` with `actions/cache`, then
+restore it read-only in pull requests. This works for forks without exposing a
+private cache host. Trusted environments can instead use a compatible remote
+such as [`jdx/mbx-cache`](https://github.com/jdx/mbx-cache).
+
+[Configure GitHub Actions →](https://mr-boxington.jdx.dev/github-actions)
 
 ## How it works
 
-`mbx build` starts a session that installs a rustc shim, runs an in-process
-cache agent behind a unix socket (a current-user-only named pipe on Windows),
-and points cargo at the shim through `RUSTC_WRAPPER`. Cargo then invokes the
-shim for every compilation; the shim analyses the invocation, looks up the
-action, and either restores its outputs or compiles and publishes them. The
-agent exits with the build — there is no daemon.
+An `mbx` Cargo command starts an in-process cache agent, points Cargo at a rustc shim with
+`RUSTC_WRAPPER`, and exits the agent with the build—there is no daemon. The shim
+derives an action key, restores cached outputs when possible, or runs the real
+compiler and publishes a successful result.
 
-Anything the analysis does not model exactly — an unrecognised flag, a path
-that maps to no known root, incremental compilation, linking — bypasses the
-cache and runs the real compiler. Correctness comes before hit rate, always.
+Anything mbx cannot model exactly bypasses the cache. Linking is not cached,
+incremental compilation is off by default, and plain `cargo build` does not use
+mbx. Correctness comes before hit rate.
 
-Set `MBX_VERIFY=1` to compile *and* consult the cache, comparing the two. It is
-slower than either, and it is how the cache is qualified.
+[Read the architecture and limits →](https://mr-boxington.jdx.dev/how-it-works)
 
-## Status and limits
+## Documentation
 
-Working today: local caching, cross-checkout reuse, remote push and pull,
-automatic garbage collection, managed target directories.
-
-Not yet:
-
-- **Plain `cargo build` gets nothing.** A shim outside `mbx build` has no
-  session to talk to, and per-process prefetch manifests cannot be shared
-  across the many rustc processes cargo spawns, so `build.rustc-wrapper` and an
-  `mbx setup` command are waiting on that. Use `mbx build`.
-- **A crate whose compilation consumes `OUT_DIR` does not share across
-  checkouts by default.** That covers any crate with a build script that
-  generates code included via `include!(concat!(env!("OUT_DIR"), …))`. `OUT_DIR`
-  is an absolute path and an input to the compilation, so two checkouts produce
-  different keys. Crates whose build scripts only emit cfgs or link directives
-  share normally.
-
-  `MBX_SHARE_OUT_DIR=1` lifts this. It does two things, and needs both:
-  it passes `--remap-path-prefix` so rustc records the cache placeholder rather
-  than the real path — which covers debug info, spans, and diagnostics — and
-  then, before publishing, it reads the outputs and only uses the shared key if
-  none of them carries the value anyway. The second half is not redundant: a
-  crate that keeps `env!("OUT_DIR")` in a string constant puts the real path in
-  its artifact, where no remapping reaches it, and such a compilation stays
-  keyed to its own checkout.
-
-  The cost is that generated sources appear in debug info as
-  `${target}/debug/build/…` instead of a path a debugger can open, which is why
-  this is opt-in. The residual gap is a value a crate *derives* from `OUT_DIR`
-  rather than embedding — its length, say, or a hash of it. Reading the outputs
-  cannot see that, so it is not covered.
-
-  On this repository's own dependency graph (285 crates), a second checkout hit
-  139 of the 147 compilations it looked up by default, and all 147 with the
-  option on.
-- **Linking is not cached**, so binaries and dylibs always link.
-- **Incremental compilation is off by default** inside `mbx build`. Cargo builds
-  dependencies non-incrementally anyway, which is where the cache earns its
-  keep, and an incremental compilation is never cacheable.
-
-  `MBX_INCREMENTAL=1` stops forcing it off and hands the decision back to cargo,
-  which trades cache reuse for a faster edit-rebuild loop. Members you just
-  edited were going to miss regardless, so incremental recompiles them faster
-  than the cache can — but a member built incrementally emits a different rlib
-  than a cached one, and extern rlibs enter the action key by content, so every
-  crate above it in the graph misses too. Worth it when you rebuild one leaf
-  crate repeatedly; not worth it when a second worktree of the same workspace is
-  what you want warm. CI ignores the setting: a fresh runner has no earlier
-  build to build on, so there is nothing to gain and reuse to lose. Since the
-  setting stops overriding `CARGO_INCREMENTAL` rather than setting it, a `0`
-  already in your environment still wins, and `mbx` says so rather than leaving
-  you to wonder.
-- **Eviction order is an approximation.** Within what a sweep is willing to
-  evict, the oldest goes first by access time -- which `relatime` coarsens to
-  roughly a day and `noatime` suppresses altogether, leaving the order to fall
-  back on when an object was stored. Recording which checkouts are still here
-  is what keeps that from mattering much: a wrong order inside the set nothing
-  has abandoned costs a recompile.
-- **The budget covers cached objects and their results**, not the whole cache
-  directory. Prediction manifests, checkout records, managed target
-  directories, and remote download staging sit outside it, so the directory is
-  always somewhat larger than the number you set. Target directories are
-  collected when their checkout is gone rather than against a budget.
-- **Managed target directories need a symlink**, which Windows only lets a
-  privileged or developer-mode process create. Where the link cannot be made,
-  mbx says so and leaves the target directory where cargo put it. A directory
-  junction would work without privileges and is not implemented yet.
+- [Get started](https://mr-boxington.jdx.dev/getting-started)
+- [Configuration](https://mr-boxington.jdx.dev/configuration)
+- [GitHub Actions](https://mr-boxington.jdx.dev/github-actions)
+- [Remote cache](https://mr-boxington.jdx.dev/remote-cache)
+- [Cache results](https://mr-boxington.jdx.dev/cache-results)
+- [CLI reference](https://mr-boxington.jdx.dev/cli)
+- [Current limits](https://mr-boxington.jdx.dev/limits)
 
 ## License
 
-MIT
+[MIT](LICENSE)

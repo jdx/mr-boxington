@@ -52,12 +52,127 @@ pub struct PruneOutcome {
     pub removed_bytes: u64,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct MigrationOutcome {
+    pub managed: Option<PathBuf>,
+    /// Present only when the old directory was actually removed.
+    pub removed_bytes: Option<u64>,
+}
+
+/// Whether an interactive caller may offer to remove this target directory.
+///
+/// Match placement's eligibility rules exactly, then require a real directory.
+/// The latter uses symlink metadata so a link to a directory is never offered
+/// for recursive deletion.
+pub fn can_remove_existing(
+    config: &Config,
+    workspace_root: &Path,
+    target_dir: &Path,
+    requested: bool,
+) -> bool {
+    config.target.views
+        && !requested
+        && target_dir == workspace_root.join("target")
+        && std::fs::symlink_metadata(target_dir).is_ok_and(|metadata| metadata.is_dir())
+}
+
+/// Replace a confirmed existing target directory without risking its outputs.
+///
+/// The old directory is first renamed into a temporary sibling on the same
+/// filesystem. It is removed only after the managed link and record both
+/// succeed; otherwise it is restored to its original path.
+pub fn migrate_existing(
+    config: &Config,
+    workspace_root: &Path,
+    target_dir: &Path,
+    requested: bool,
+) -> Result<MigrationOutcome> {
+    migrate_existing_with(config, workspace_root, target_dir, requested, || {
+        place(config, workspace_root, target_dir, requested)
+    })
+}
+
+fn migrate_existing_with(
+    config: &Config,
+    workspace_root: &Path,
+    target_dir: &Path,
+    requested: bool,
+    place_target: impl FnOnce() -> Option<PathBuf>,
+) -> Result<MigrationOutcome> {
+    if !std::fs::symlink_metadata(target_dir).is_ok_and(|metadata| metadata.is_dir()) {
+        eyre::bail!(
+            "{} is no longer a real target directory, so it was not migrated",
+            target_dir.display()
+        );
+    }
+    if !can_remove_existing(config, workspace_root, target_dir, requested) {
+        eyre::bail!("{} is not eligible for migration", target_dir.display());
+    }
+
+    let backup_root = tempfile::Builder::new()
+        .prefix(".mbx-target-backup-")
+        .tempdir_in(workspace_root)
+        .wrap_err("could not create a temporary target backup")?;
+    let backup = backup_root.path().join("target");
+    std::fs::rename(target_dir, &backup)
+        .wrap_err_with(|| format!("could not temporarily move {}", target_dir.display()))?;
+    let old_bytes = tree_bytes(&backup);
+
+    if let Some(managed) = place_target() {
+        if let Err(error) = std::fs::remove_dir_all(&backup) {
+            let retained = backup_root.keep().join("target");
+            log::warn!(
+                "the old target directory was retained at {}: {error}",
+                retained.display()
+            );
+            return Ok(MigrationOutcome {
+                managed: Some(managed),
+                removed_bytes: None,
+            });
+        }
+        return Ok(MigrationOutcome {
+            managed: Some(managed),
+            removed_bytes: Some(old_bytes),
+        });
+    }
+
+    let managed = view_dir(&config.target.root, workspace_root);
+    let restore = (|| -> Result<()> {
+        match std::fs::symlink_metadata(target_dir) {
+            Ok(metadata)
+                if metadata.file_type().is_symlink()
+                    && std::fs::read_link(target_dir).is_ok_and(|link| link == managed) =>
+            {
+                remove_link(target_dir).wrap_err("could not remove the failed managed link")?;
+            }
+            Ok(_) => eyre::bail!(
+                "{} was occupied while restoring the old target directory",
+                target_dir.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).wrap_err("could not inspect the failed migration"),
+        }
+        std::fs::rename(&backup, target_dir)
+            .wrap_err_with(|| format!("could not restore {}", target_dir.display()))
+    })();
+    if let Err(error) = restore {
+        let retained = backup_root.keep().join("target");
+        return Err(error).wrap_err_with(|| {
+            format!(
+                "the old target directory was retained at {}",
+                retained.display()
+            )
+        });
+    }
+    Ok(MigrationOutcome::default())
+}
+
 /// Where this checkout's outputs should be written, if mbx is placing them.
 ///
 /// `None` leaves cargo's own answer alone, and every reason for that is a
 /// reason not to be clever:
 ///
-/// - the feature is off, which is the default;
+/// - the feature was explicitly turned off;
 /// - a flag or the environment named the target directory, so moving it would
 ///   be overriding the person who said where it goes. This is asked separately
 ///   from where the directory actually is, because `--target-dir target` names
@@ -113,7 +228,26 @@ pub fn place(
     let link = match link_view(target_dir, &managed, workspace_root) {
         Ok(link) => link,
         Err(error) => {
-            log::warn!("{error}");
+            // Placement is best-effort: existing build outputs, a custom
+            // link, or a platform that cannot create the link are all normal
+            // reasons to let cargo keep its own target directory. This was a
+            // warning while managed targets were opt-in, but would become
+            // noise on every existing checkout now that they are the default.
+            log::debug!("{error}");
+            return None;
+        }
+    };
+    let record_path = view_record_path(&config.target.root, workspace_root);
+    let previous_record = match read_record_state(&record_path) {
+        Ok(record) => record,
+        Err(error) => {
+            log::warn!("the existing target record could not be preserved: {error}");
+            if let Err(error) = rollback_link(target_dir, &link) {
+                log::warn!(
+                    "the unused link {} was not rolled back: {error}",
+                    target_dir.display()
+                );
+            }
             return None;
         }
     };
@@ -140,6 +274,25 @@ pub fn place(
             "the managed target directory {} was not prepared: {error}",
             managed.display()
         );
+        // A newly created link is the migration path: nothing used it before
+        // this attempt, so both the link and record can be rolled back and an
+        // existing target backup can be restored. Replacing an older managed
+        // view may already have moved its directory, so keep the established
+        // link and record in that recovery case.
+        if matches!(&link, Link::Created) {
+            match rollback_link(target_dir, &link) {
+                Ok(()) => {
+                    if let Err(error) = restore_record_state(&record_path, previous_record) {
+                        log::warn!("the target record was not rolled back: {error}");
+                    }
+                }
+                Err(error) => log::warn!(
+                    "the unused link {} was not rolled back: {error}",
+                    target_dir.display()
+                ),
+            }
+            return None;
+        }
     }
     Some(managed)
 }
@@ -404,6 +557,25 @@ fn record_view(root: &Path, workspace_root: &Path) -> Result<()> {
     crate::util::write_atomic(&view_record_path(root, workspace_root), &contents)
 }
 
+fn read_record_state(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).wrap_err_with(|| format!("could not read {}", path.display())),
+    }
+}
+
+fn restore_record_state(path: &Path, previous: Option<Vec<u8>>) -> Result<()> {
+    if let Some(contents) = previous {
+        return crate::util::write_atomic(path, &contents);
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).wrap_err_with(|| format!("could not remove {}", path.display())),
+    }
+}
+
 fn read_view_record(path: &Path) -> Option<ViewRecord> {
     let bytes = std::fs::read(path).ok()?;
     let record = serde_json::from_slice::<ViewRecord>(&bytes).ok()?;
@@ -449,12 +621,14 @@ fn tree_bytes(directory: &Path) -> u64 {
         for entry in listing.flatten() {
             // Symlinks are not followed: a link's target is either inside this
             // tree and already counted, or outside it and not ours to count.
-            let Ok(metadata) = entry.metadata() else {
+            let Ok(file_type) = entry.file_type() else {
                 continue;
             };
-            if metadata.is_dir() {
+            if file_type.is_dir() {
                 pending.push(entry.path());
-            } else if metadata.is_file() {
+            } else if file_type.is_file()
+                && let Ok(metadata) = entry.metadata()
+            {
                 total += metadata.len();
             }
         }
@@ -573,13 +747,118 @@ mod tests {
     }
 
     #[test]
-    fn leaves_the_target_directory_alone_unless_asked() {
+    fn leaves_the_target_directory_alone_when_disabled() {
         let directory = tempfile::tempdir().unwrap();
         let config = test_config(directory.path(), false);
         let workspace = checkout(directory.path(), "project");
 
         assert!(place(&config, &workspace, &workspace.join("target"), false).is_none());
         assert!(!workspace.join("target").exists());
+    }
+
+    #[test]
+    fn only_an_unrequested_real_default_target_can_be_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = test_config(directory.path(), true);
+        let workspace = checkout(directory.path(), "project");
+        let target = workspace.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+
+        assert!(can_remove_existing(&config, &workspace, &target, false));
+        assert!(!can_remove_existing(&config, &workspace, &target, true));
+        assert!(!can_remove_existing(
+            &config,
+            &workspace,
+            &workspace.join("somewhere-else"),
+            false
+        ));
+        assert!(!can_remove_existing(
+            &test_config(directory.path(), false),
+            &workspace,
+            &target,
+            false
+        ));
+    }
+
+    #[test]
+    fn a_failed_migration_restores_existing_outputs() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = test_config(directory.path(), true);
+        let workspace = checkout(directory.path(), "project");
+        let target = workspace.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("artifact"), b"old output").unwrap();
+
+        let outcome = migrate_existing_with(&config, &workspace, &target, false, || None).unwrap();
+
+        assert_eq!(outcome, MigrationOutcome::default());
+        assert_eq!(
+            std::fs::read(target.join("artifact")).unwrap(),
+            b"old output"
+        );
+    }
+
+    #[test]
+    fn a_preparation_failure_restores_existing_outputs_and_record_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = test_config(directory.path(), true);
+        let workspace = checkout(directory.path(), "project");
+        let target = workspace.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("artifact"), b"old output").unwrap();
+        let managed = view_dir(&config.target.root, &workspace);
+        std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+        std::fs::write(&managed, b"not a directory").unwrap();
+
+        let outcome = migrate_existing(&config, &workspace, &target, false).unwrap();
+
+        assert_eq!(outcome, MigrationOutcome::default());
+        assert_eq!(
+            std::fs::read(target.join("artifact")).unwrap(),
+            b"old output"
+        );
+        assert_eq!(std::fs::read(&managed).unwrap(), b"not a directory");
+        assert!(!view_record_path(&config.target.root, &workspace).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_successful_migration_removes_old_outputs_after_placement() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = test_config(directory.path(), true);
+        let workspace = checkout(directory.path(), "project");
+        let target = workspace.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("artifact"), b"old output").unwrap();
+        let elsewhere = directory.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("not-cleaned"), vec![0; 1024]).unwrap();
+        symlink_dir(&elsewhere, &target.join("external-link")).unwrap();
+
+        let outcome = migrate_existing(&config, &workspace, &target, false).unwrap();
+        let managed = outcome.managed.unwrap();
+
+        assert_eq!(std::fs::read_link(&target).unwrap(), managed);
+        assert!(!target.join("artifact").exists());
+        assert_eq!(outcome.removed_bytes, Some(10));
+        assert!(elsewhere.join("not-cleaned").is_file());
+        assert_eq!(stats(&config.target.root).unwrap().views, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migrating_an_existing_target_never_follows_a_replacement_link() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = test_config(directory.path(), true);
+        let workspace = checkout(directory.path(), "project");
+        let target = workspace.join("target");
+        let elsewhere = directory.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("keep"), b"not a build output").unwrap();
+        symlink_dir(&elsewhere, &target).unwrap();
+
+        assert!(migrate_existing(&config, &workspace, &target, false).is_err());
+        assert!(elsewhere.join("keep").is_file());
     }
 
     #[test]

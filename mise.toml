@@ -22,4 +22,18 @@ run = [
 ]
 
 [tasks.ci]
-depends = ["lint", "build", "test"]
+depends = ["lint", "build", "build:docs", "test"]
+
+[tasks.docs]
+description = "Start the documentation development server"
+dir = "docs"
+run = "aube install && exec aube run docs:dev"
+
+[tasks."build:docs"]
+description = "Build the documentation website"
+dir = "docs"
+run = "aube install && exec aube run docs:build"
+
+[tools]
+aube = "latest"
+node = "24"

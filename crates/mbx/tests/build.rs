@@ -1,4 +1,4 @@
-//! End-to-end coverage for `mbx build`.
+//! End-to-end coverage for cached cargo commands.
 //!
 //! Each test drives the real binary over a throwaway project with no
 //! dependencies, so nothing here needs the network.
@@ -93,7 +93,7 @@ fn build_with(
     let mut command = Command::new(env!("CARGO_BIN_EXE_mbx"));
     command
         .current_dir(project)
-        .args(["build", "build", "--offline"])
+        .args(["build", "--offline"])
         .env("MBX_CACHE_DIR", store)
         .env("MBX_STATS_REPORT", report)
         // Cargo's own environment for this test would otherwise redirect the
@@ -172,6 +172,13 @@ fn count(stats: &serde_json::Value, field: &str) -> u64 {
         .unwrap_or_else(|| panic!("{field} should be a number"))
 }
 
+/// Remove the outputs behind a target link so the next build must restore.
+fn wipe_target(project: &Path) {
+    let target = project.join("target");
+    let outputs = std::fs::read_link(&target).unwrap_or(target);
+    std::fs::remove_dir_all(outputs).unwrap();
+}
+
 #[test]
 fn incremental_is_opt_in_and_reaches_cargo() {
     let store = tempfile::tempdir().unwrap();
@@ -245,7 +252,7 @@ fn restores_a_wiped_target_directory_from_the_store() {
     // Load-bearing, not cleanup: the wipe is what forces the warm build to
     // restore from the store. Left in place, cargo would find the cold build's
     // outputs and the test would pass without exercising the cache at all.
-    std::fs::remove_dir_all(project.path().join("target")).unwrap();
+    wipe_target(project.path());
 
     let warm = build(
         project.path(),
@@ -445,7 +452,7 @@ fn a_failed_build_records_the_compilations_it_completed() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
         .current_dir(project.path())
-        .args(["build", "build", "--workspace", "--offline"])
+        .args(["build", "--workspace", "--offline"])
         .env("MBX_CACHE_DIR", store.path())
         .env("MBX_GC_AUTO", "0")
         .env_remove("CARGO_TARGET_DIR")
@@ -549,7 +556,7 @@ fn deleting_a_checkout_releases_what_only_it_used() {
 
     // Load-bearing, not cleanup: the wipe is what forces the next build to go
     // to the store, which is the only way to see what survived the sweep.
-    std::fs::remove_dir_all(surviving.path().join("target")).unwrap();
+    wipe_target(surviving.path());
     let warm = build(
         surviving.path(),
         store.path(),
@@ -581,11 +588,10 @@ mod target_views {
         let reports = tempfile::tempdir().unwrap();
         write_project(project.path());
 
-        build_with(
+        build(
             project.path(),
             store.path(),
             &reports.path().join("cold.json"),
-            &[("MBX_TARGET_VIEWS", "1")],
         );
 
         let directory = managed(project.path());
@@ -739,24 +745,25 @@ mod target_views {
     }
 
     #[test]
-    fn a_real_target_directory_is_never_displaced() {
+    fn a_noninteractive_build_never_removes_a_real_target_directory() {
         let store = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let reports = tempfile::tempdir().unwrap();
         write_project(project.path());
-        // A build that ran before the feature was turned on.
-        build(
-            project.path(),
-            store.path(),
-            &reports.path().join("cold.json"),
-        );
-        assert!(project.path().join("target").is_dir());
-
+        // Establish real outputs without a prompt. The next command captures
+        // its stdio, so it is non-interactive and must preserve them too.
         build_with(
             project.path(),
             store.path(),
+            &reports.path().join("cold.json"),
+            &[("MBX_TARGET_VIEWS", "0")],
+        );
+        assert!(project.path().join("target").is_dir());
+
+        build(
+            project.path(),
+            store.path(),
             &reports.path().join("warm.json"),
-            &[("MBX_TARGET_VIEWS", "1")],
         );
 
         assert!(

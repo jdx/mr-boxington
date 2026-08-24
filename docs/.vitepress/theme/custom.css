@@ -1,0 +1,85 @@
+:root {
+  --vp-c-brand-1: #bd7d23;
+  --vp-c-brand-2: #9f6518;
+  --vp-c-brand-3: #7e4c0d;
+  --vp-c-brand-soft: rgba(189, 125, 35, 0.16);
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(120deg, #eab864 20%, #bd7d23 68%, #6f8e93);
+  --vp-home-hero-image-background-image: radial-gradient(circle, rgba(234, 184, 100, 0.34), rgba(74, 111, 118, 0.16) 52%, transparent 72%);
+  --vp-home-hero-image-filter: blur(44px);
+}
+
+.dark {
+  --vp-c-brand-1: #e6ad54;
+  --vp-c-brand-2: #cf8f35;
+  --vp-c-brand-3: #b9761c;
+  --vp-c-brand-soft: rgba(230, 173, 84, 0.16);
+}
+
+.VPHero .name {
+  letter-spacing: -0.04em;
+}
+
+.VPHero .image-src {
+  filter: drop-shadow(0 22px 30px rgba(0, 0, 0, 0.28));
+}
+
+.VPFeature {
+  border: 1px solid var(--vp-c-divider);
+  transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+.VPFeature:hover {
+  border-color: var(--vp-c-brand-1);
+  transform: translateY(-2px);
+}
+
+.VPFeature .icon {
+  background: var(--vp-c-brand-soft);
+}
+
+.jdx-banner {
+  align-items: center;
+  background: var(--vp-c-brand-1);
+  color: #1c160d;
+  display: flex;
+  font-size: 0.9rem;
+  gap: 0.75rem;
+  justify-content: center;
+  line-height: 1.4;
+  min-height: 2.75rem;
+  padding: 0.5rem 3.25rem 0.5rem 2.75rem;
+  position: fixed;
+  inset: 0 0 auto;
+  text-align: center;
+  z-index: 1001;
+}
+
+.jdx-banner a {
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+}
+
+.jdx-banner button {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font-size: 1.25rem;
+  height: 44px;
+  position: absolute;
+  right: 0.25rem;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 44px;
+}
+
+@media (max-width: 640px) {
+  .jdx-banner {
+    flex-direction: column;
+    font-size: 0.8rem;
+    gap: 0.125rem;
+    padding: 0.5rem 3rem;
+  }
+}

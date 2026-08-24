@@ -16,6 +16,7 @@ const DEFAULT_HTTP_RETRIES: i64 = 3;
 /// Stated in IEC units so the budget reads the way `mbx gc` reports it back.
 const DEFAULT_GC_MAX_SIZE: u64 = 20 * 1024 * 1024 * 1024;
 const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const DEFAULT_TARGET_VIEWS: bool = true;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -190,7 +191,7 @@ impl Config {
         };
         let target = TargetSettings {
             views: optional_bool("MBX_TARGET_VIEWS", &get_env, file.target.views)?
-                .unwrap_or_default(),
+                .unwrap_or(DEFAULT_TARGET_VIEWS),
             root: match get_env("MBX_TARGET_ROOT")
                 .map(PathBuf::from)
                 .or(file.target.root)
@@ -392,10 +393,23 @@ mod tests {
         assert_eq!(config.gc.max_bytes, DEFAULT_GC_MAX_SIZE);
         assert_eq!(config.gc.interval, DEFAULT_GC_INTERVAL);
         assert!(
-            !config.target.views,
-            "moving where a build writes is opted into, never assumed"
+            config.target.views,
+            "eligible target directories are managed"
         );
         assert_eq!(config.target.root, config.cache_dir.join("targets"));
+    }
+
+    #[test]
+    fn managed_targets_can_be_turned_off() {
+        for value in ["0", "false", "no", "off", ""] {
+            let config =
+                Config::from_parts(ConfigFile::default(), env(&[("MBX_TARGET_VIEWS", value)]))
+                    .unwrap();
+            assert!(
+                !config.target.views,
+                "MBX_TARGET_VIEWS={value:?} should disable managed targets"
+            );
+        }
     }
 
     #[test]
