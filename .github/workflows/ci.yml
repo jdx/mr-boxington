@@ -115,11 +115,29 @@ jobs:
           baseline-rev: origin/${{ github.base_ref }}
           feature-group: all-features
 
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install pinned nightly
+        run: rustup toolchain install nightly-2026-08-02 --profile minimal
+      - name: Install pinned cargo-fuzz
+        run: cargo +nightly-2026-08-02 install cargo-fuzz --version 0.13.2 --locked
+      - name: Compile fuzz targets
+        run: cargo +nightly-2026-08-02 fuzz build
+      - name: Smoke-test fuzz targets
+        run: |
+          cargo +nightly-2026-08-02 fuzz run blob_pack -- -runs=1000
+          cargo +nightly-2026-08-02 fuzz run dep_info -- -runs=1000
+          cargo +nightly-2026-08-02 fuzz run rustc_paths -- -runs=1000
+
   final:
     permissions: {}
     needs:
       - compatibility
       - docs
+      - fuzz
       - lint
       - supply-chain
       - public-api
@@ -133,6 +151,7 @@ jobs:
       - name: Check job results
         if: |
           needs.docs.result != 'success' ||
+          needs.fuzz.result != 'success' ||
           needs.lint.result != 'success' ||
           needs.compatibility.result != 'success' ||
           needs.supply-chain.result != 'success' ||
