@@ -1,10 +1,23 @@
+[env]
+_.path = ["test/bats/bin", "{{ env.CARGO_TARGET_DIR | default(value='target') }}/debug"]
+
 [tasks.build]
 alias = "b"
 run = "cargo build --workspace --all-targets"
 
 [tasks.test]
 alias = "t"
+description = "Run cargo and Bats tests"
+depends = ["test:cargo", "test:bats"]
+
+[tasks."test:cargo"]
+description = "Run Rust tests"
 run = "cargo test --workspace"
+
+[tasks."test:bats"]
+description = "Run behavioral tests"
+depends = ["build"]
+run = "bats test"
 
 [tasks.format]
 run = "cargo fmt --all"
