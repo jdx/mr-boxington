@@ -354,18 +354,29 @@ impl TaskActionManifest {
 
     /// Digest selecting this task identity's action manifest.
     pub fn selector_digest(&self) -> Digest {
+        Self::selector(&self.task)
+            .expect("manifest task identity must be valid")
+            .1
+    }
+
+    /// Canonical selector bytes and digest for a task identity.
+    pub fn selector(task: &str) -> eyre::Result<(Vec<u8>, Digest)> {
+        if !valid_task_identity(task) {
+            eyre::bail!("invalid task action manifest identity");
+        }
         let selector = canonical_json(&TaskActionManifestSelector {
             kind: "task_action_manifest",
-            task: &self.task,
+            task,
             version: 1,
-        })
-        .expect("manifest selector must serialize");
-        Digest::blake3(&selector)
+        })?;
+        let digest = Digest::blake3(&selector);
+        Ok((selector, digest))
     }
 }
 
 impl ActionPrediction {
-    fn validate(&self) -> bool {
+    /// Whether the prediction satisfies the version-one wire invariants.
+    pub fn validate(&self) -> bool {
         self.action.algorithm == DigestAlgorithm::Blake3.as_str()
             && self.action.validate().is_ok()
             && self.invocation.algorithm == DigestAlgorithm::Blake3.as_str()
@@ -497,11 +508,21 @@ mod tests {
 
     #[test]
     fn canonical_json_is_independent_of_map_insertion_order() {
-        let left = serde_json::json!({"z": 1, "a": true});
-        let right = serde_json::json!({"a": true, "z": 1});
+        #[derive(Serialize)]
+        struct ZThenA {
+            z: u8,
+            a: bool,
+        }
+
+        #[derive(Serialize)]
+        struct AThenZ {
+            a: bool,
+            z: u8,
+        }
+
         assert_eq!(
-            canonical_json(&left).unwrap(),
-            canonical_json(&right).unwrap()
+            canonical_json(&ZThenA { z: 1, a: true }).unwrap(),
+            canonical_json(&AThenZ { a: true, z: 1 }).unwrap()
         );
     }
 }
