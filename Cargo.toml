@@ -5,6 +5,7 @@ members = ["crates/mbx", "crates/mbx-cache-core", "crates/mbx-cache-rustc"]
 [workspace.package]
 version = "0.3.0"
 edition = "2024"
+rust-version = "1.91"
 license = "MIT"
 homepage = "https://github.com/jdx/mr-boxington"
 repository = "https://github.com/jdx/mr-boxington"
