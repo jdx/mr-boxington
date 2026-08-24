@@ -303,6 +303,11 @@ fn setup_at_action(
             return Ok(ExitCode::FAILURE);
         }
         SetupAction::Update if !owns_configuration => {
+            if let Some(configured) = configured {
+                eyre::bail!(
+                    "mbx setup is not active because build.rustc-wrapper is {configured}; refusing to replace another wrapper"
+                );
+            }
             eyre::bail!("mbx setup is not installed; run `mbx setup` first");
         }
         SetupAction::Uninstall => {

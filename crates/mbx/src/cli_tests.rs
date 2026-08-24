@@ -649,4 +649,20 @@ fn setup_update_requires_an_existing_installation() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("not installed"));
+
+    let config = directory.path().join("cargo/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "[build]\nrustc-wrapper = \"sccache\"\n").unwrap();
+    let error = setup_at_action(
+        &executable,
+        &directory.path().join("data/bin"),
+        &config,
+        SetupAction::Update,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("refusing to replace another wrapper")
+    );
 }
