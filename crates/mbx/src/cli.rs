@@ -2,6 +2,7 @@
 
 use crate::config::Config;
 use crate::session::CacheSession;
+use crate::util::workspace_root;
 use crate::{policy, store, target};
 use bytesize::ByteSize;
 use eyre::{Context, Result};
@@ -481,25 +482,6 @@ fn cache_stats(config: &Config) -> Result<()> {
         ByteSize::b(views.bytes).display().iec()
     );
     Ok(())
-}
-
-/// Find the workspace root above `start`.
-///
-/// The outermost directory holding a `Cargo.lock` is preferred, since that is
-/// the one cargo resolves against; a directory holding only a `Cargo.toml`
-/// stands in when there is no lockfile yet.
-fn workspace_root(start: &Path) -> PathBuf {
-    let mut lockfile = None;
-    let mut manifest = None;
-    for directory in start.ancestors() {
-        if directory.join("Cargo.lock").is_file() {
-            lockfile = Some(directory.to_path_buf());
-        }
-        if directory.join("Cargo.toml").is_file() {
-            manifest = Some(directory.to_path_buf());
-        }
-    }
-    lockfile.or(manifest).unwrap_or_else(|| start.to_path_buf())
 }
 
 /// Settings the shim maps out of its cache keys.

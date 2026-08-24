@@ -1,4 +1,4 @@
-use crate::session;
+use crate::{session, util::workspace_root};
 use eyre::{Context, Result, bail};
 use mbx_cache_core::{
     ActionPrediction, AgentRequest, AgentResponse, CacheDigest, CacheDirectory, CacheFileNode,
@@ -997,8 +997,8 @@ fn path_mappings_with_env(
             add_mapping(&mut mappings, &mut roots, root, placeholder);
         }
     }
-    // Without a session there is no workspace root to trust, so fall back to
-    // the working directory rather than bypassing every action.
+    // Without a session, recover Cargo's workspace root from the outermost
+    // lockfile so member crates use the same placeholder as session mode.
     if !mappings
         .iter()
         .any(|mapping| mapping.placeholder == "workspace")
@@ -1007,7 +1007,7 @@ fn path_mappings_with_env(
         add_mapping(
             &mut mappings,
             &mut roots,
-            working_dir.to_path_buf(),
+            workspace_root(working_dir),
             "workspace",
         );
     }

@@ -3,6 +3,25 @@ use std::io::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
+/// Find the workspace root above `start`.
+///
+/// The outermost directory holding a `Cargo.lock` is preferred, since that is
+/// the one Cargo resolves against; a directory holding only a `Cargo.toml`
+/// stands in when there is no lockfile yet.
+pub fn workspace_root(start: &Path) -> std::path::PathBuf {
+    let mut lockfile = None;
+    let mut manifest = None;
+    for directory in start.ancestors() {
+        if directory.join("Cargo.lock").is_file() {
+            lockfile = Some(directory.to_path_buf());
+        }
+        if directory.join("Cargo.toml").is_file() {
+            manifest = Some(directory.to_path_buf());
+        }
+    }
+    lockfile.or(manifest).unwrap_or_else(|| start.to_path_buf())
+}
+
 /// Write `contents` to `path` so readers never observe a partial file.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     let parent = path

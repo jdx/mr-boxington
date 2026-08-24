@@ -157,6 +157,24 @@ fn standalone_workspace_mapping_wins_beneath_home() {
 }
 
 #[test]
+fn standalone_workspace_mapping_uses_the_outer_workspace_for_members() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    let member = workspace.join("crates/widget");
+    std::fs::create_dir_all(&member).unwrap();
+    std::fs::write(workspace.join("Cargo.lock"), "").unwrap();
+    std::fs::write(member.join("Cargo.toml"), "[package]\nname = \"widget\"\n").unwrap();
+
+    let mappings = path_mappings_with_env(&member, None, None, |_| None);
+
+    assert!(
+        mappings
+            .iter()
+            .any(|mapping| { mapping.placeholder == "workspace" && mapping.root == workspace })
+    );
+}
+
+#[test]
 fn standalone_target_mapping_covers_the_profile_tree() {
     assert_eq!(
         standalone_target_root(Path::new("/tmp/target/debug/deps"), None),
