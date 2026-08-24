@@ -254,6 +254,11 @@ pub(crate) fn cargo_with_bypass_log(
         let session = CacheSession::start(session_dir.path(), config).await?;
         let mut environment = inherited_environment(|name| std::env::var(name).ok(), &working_dir);
         if let Some(path) = bypass_log {
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                working_dir.join(path)
+            };
             environment.insert(
                 crate::session::BYPASS_LOG_ENV.into(),
                 path.display().to_string(),
