@@ -171,8 +171,6 @@ pub struct HttpSettings {
 pub struct TargetSettings {
     pub views: bool,
     pub root: PathBuf,
-    pub max_bytes: Option<u64>,
-    pub max_age: Option<Duration>,
 }
 
 /// How the store is kept inside its budget.
@@ -180,8 +178,14 @@ pub struct TargetSettings {
 pub struct GcSettings {
     pub auto: bool,
     pub max_bytes: u64,
-    pub max_total_bytes: Option<u64>,
     pub interval: Duration,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RetentionSettings {
+    pub target_max_bytes: Option<u64>,
+    pub target_max_age: Option<Duration>,
+    pub max_total_bytes: Option<u64>,
 }
 
 impl Default for GcSettings {
@@ -189,7 +193,6 @@ impl Default for GcSettings {
         Self {
             auto: true,
             max_bytes: DEFAULT_GC_MAX_SIZE,
-            max_total_bytes: None,
             interval: DEFAULT_GC_INTERVAL,
         }
     }
@@ -208,12 +211,19 @@ impl Default for HttpSettings {
 impl Config {
     /// Load configuration for this machine.
     pub fn load() -> Result<Self> {
-        let env = EnvLayer::from_process();
-        let file = config_file_path().map(|path| FileLayer::at(path, FileScope::Global));
-        Self::from_layers(&env, file.as_ref())
+        Self::load_with_retention().map(|(config, _)| config)
     }
 
-    fn from_layers(env: &EnvLayer, file: Option<&FileLayer>) -> Result<Self> {
+    pub(crate) fn load_with_retention() -> Result<(Self, RetentionSettings)> {
+        let env = EnvLayer::from_process();
+        let file = config_file_path().map(|path| FileLayer::at(path, FileScope::Global));
+        Self::from_layers_with_retention(&env, file.as_ref())
+    }
+
+    fn from_layers_with_retention(
+        env: &EnvLayer,
+        file: Option<&FileLayer>,
+    ) -> Result<(Self, RetentionSettings)> {
         let mut layers = Layers::new().then(env);
         if let Some(file) = file {
             layers = layers.then(file);
@@ -232,10 +242,33 @@ impl Config {
             bail!("invalid configuration:\n{problems}");
         }
         let raw = RawConfig::read(&resolved)?;
-        Self::from_raw(raw)
+        Self::from_raw_with_retention(raw)
     }
 
-    fn from_raw(raw: RawConfig) -> Result<Self> {
+    fn from_raw_with_retention(raw: RawConfig) -> Result<(Self, RetentionSettings)> {
+        let retention = RetentionSettings {
+            target_max_bytes: raw
+                .target
+                .max_size
+                .as_deref()
+                .map(parse_byte_size)
+                .transpose()
+                .wrap_err("invalid target.max_size")?,
+            target_max_age: raw
+                .target
+                .max_age
+                .as_deref()
+                .map(parse_duration)
+                .transpose()
+                .wrap_err("invalid target.max_age")?,
+            max_total_bytes: raw
+                .gc
+                .max_total_size
+                .as_deref()
+                .map(parse_byte_size)
+                .transpose()
+                .wrap_err("invalid gc.max_total_size")?,
+        };
         let cache_dir = raw.cache_dir.or_else(default_cache_dir).ok_or_else(|| {
             eyre::eyre!("could not determine a cache directory; set MBX_CACHE_DIR")
         })?;
@@ -249,13 +282,6 @@ impl Config {
         let gc = GcSettings {
             auto: raw.gc.auto,
             max_bytes: parse_byte_size(&raw.gc.max_size).wrap_err("invalid gc.max_size")?,
-            max_total_bytes: raw
-                .gc
-                .max_total_size
-                .as_deref()
-                .map(parse_byte_size)
-                .transpose()
-                .wrap_err("invalid gc.max_total_size")?,
             interval: parse_duration(&raw.gc.interval).wrap_err("invalid gc.interval")?,
         };
         let target = TargetSettings {
@@ -265,22 +291,8 @@ impl Config {
                 Some(root) => cache_dir.join(root),
                 None => cache_dir.join("targets"),
             },
-            max_bytes: raw
-                .target
-                .max_size
-                .as_deref()
-                .map(parse_byte_size)
-                .transpose()
-                .wrap_err("invalid target.max_size")?,
-            max_age: raw
-                .target
-                .max_age
-                .as_deref()
-                .map(parse_duration)
-                .transpose()
-                .wrap_err("invalid target.max_age")?,
         };
-        Ok(Self {
+        let config = Self {
             cache_dir,
             gc,
             target,
@@ -297,7 +309,8 @@ impl Config {
                 mode,
             },
             http,
-        })
+        };
+        Ok((config, retention))
     }
 
     /// Apply the deliberately small, safe policy surface from `.mbx.toml` at
@@ -379,6 +392,13 @@ mod tests {
     use super::*;
 
     fn configured(file: Option<&str>, values: &[(&str, &str)]) -> Result<Config> {
+        configured_with_retention(file, values).map(|(config, _)| config)
+    }
+
+    fn configured_with_retention(
+        file: Option<&str>,
+        values: &[(&str, &str)],
+    ) -> Result<(Config, RetentionSettings)> {
         let env = EnvLayer::new(
             values
                 .iter()
@@ -390,7 +410,7 @@ mod tests {
             std::fs::write(&path, contents).unwrap();
             FileLayer::at(path, FileScope::Global)
         });
-        Config::from_layers(&env, file.as_ref())
+        Config::from_layers_with_retention(&env, file.as_ref())
     }
 
     #[test]
@@ -452,20 +472,17 @@ mod tests {
         assert!(config.store_dir().ends_with("actions"));
         assert!(config.gc.auto, "collection runs until it is turned off");
         assert_eq!(config.gc.max_bytes, DEFAULT_GC_MAX_SIZE);
-        assert_eq!(config.gc.max_total_bytes, None);
         assert_eq!(config.gc.interval, DEFAULT_GC_INTERVAL);
         assert!(
             config.target.views,
             "eligible target directories are managed"
         );
         assert_eq!(config.target.root, config.cache_dir.join("targets"));
-        assert_eq!(config.target.max_bytes, None);
-        assert_eq!(config.target.max_age, None);
     }
 
     #[test]
     fn reads_target_and_whole_cache_retention_limits() {
-        let config = configured(
+        let (_, retention) = configured_with_retention(
             None,
             &[
                 ("MBX_TARGET_MAX_SIZE", "8GiB"),
@@ -475,12 +492,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(config.target.max_bytes, Some(8 * 1024 * 1024 * 1024));
+        assert_eq!(retention.target_max_bytes, Some(8 * 1024 * 1024 * 1024));
         assert_eq!(
-            config.target.max_age,
+            retention.target_max_age,
             Some(Duration::from_secs(14 * 86_400))
         );
-        assert_eq!(config.gc.max_total_bytes, Some(12 * 1024 * 1024 * 1024));
+        assert_eq!(retention.max_total_bytes, Some(12 * 1024 * 1024 * 1024));
     }
 
     #[test]

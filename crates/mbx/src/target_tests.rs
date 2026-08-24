@@ -14,8 +14,6 @@ fn test_config(root: &Path, views: bool) -> Config {
         target: TargetSettings {
             views,
             root: root.join("targets"),
-            max_bytes: None,
-            max_age: None,
         },
     }
 }
@@ -323,9 +321,6 @@ fn frees_the_target_directory_of_a_checkout_that_is_gone() {
         PruneOutcome {
             removed_views: 1,
             removed_bytes: 512,
-            removed_stale_views: 1,
-            remaining_bytes: 256,
-            ..PruneOutcome::default()
         }
     );
     assert!(!removed.exists());
@@ -343,7 +338,6 @@ fn keeps_the_target_directory_of_an_idle_checkout() {
 
     let outcome = prune(&config.target.root).unwrap();
 
-    assert_eq!(outcome.remaining_bytes, 7);
     assert_eq!(outcome.removed_views, 0);
     assert!(managed.join("artifact").exists());
 }

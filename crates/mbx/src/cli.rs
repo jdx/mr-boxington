@@ -1,6 +1,6 @@
 //! The mbx command line.
 
-use crate::config::Config;
+use crate::config::{Config, RetentionSettings};
 use crate::session::CacheSession;
 use crate::util::workspace_root;
 use crate::{policy, store, target};
@@ -156,10 +156,12 @@ pub fn run() -> Result<ExitCode> {
     if let Commands::Doctor(args) = &cli.command {
         return crate::doctor::run_loaded(Config::load(), args.json);
     }
-    let config = Config::load()?;
+    let (config, retention) = Config::load_with_retention()?;
     match cli.command {
         Commands::Doctor(_) => unreachable!("doctor was handled before configuration loading"),
-        Commands::Explain(args) => crate::explain::run(&config, &args.arguments()),
+        Commands::Explain(args) => {
+            crate::explain::run_with_retention(&config, &retention, &args.arguments())
+        }
         Commands::Setup(args) => setup(args.action()?),
         Commands::Gc(args) => gc(
             &config,
@@ -167,6 +169,7 @@ pub fn run() -> Result<ExitCode> {
                 .map_or(config.gc.max_bytes, |requested| requested.as_u64()),
             args.dry_run,
             args.json,
+            &retention,
         )
         .map(|()| ExitCode::SUCCESS),
         Commands::Cache(args) => match args.command {
@@ -186,7 +189,7 @@ pub fn run() -> Result<ExitCode> {
             }
         },
         Commands::Prefetch(args) => prefetch(&config, &args.cargo_args),
-        Commands::Cargo(arguments) => cargo(&config, &arguments),
+        Commands::Cargo(arguments) => cargo(&config, &retention, &arguments),
     }
 }
 
@@ -418,12 +421,26 @@ fn same_file_contents(left: &Path, right: &Path) -> Result<bool> {
         == mbx_cache_core::CacheDigest::blake3_file(right)?)
 }
 
-fn cargo(config: &Config, arguments: &[String]) -> Result<ExitCode> {
-    cargo_with_bypass_log(config, arguments, None)
+fn cargo(config: &Config, retention: &RetentionSettings, arguments: &[String]) -> Result<ExitCode> {
+    cargo_with_retention_and_bypass_log(config, retention, arguments, None)
 }
 
 pub(crate) fn cargo_with_bypass_log(
     config: &Config,
+    arguments: &[String],
+    bypass_log: Option<&Path>,
+) -> Result<ExitCode> {
+    cargo_with_retention_and_bypass_log(
+        config,
+        &RetentionSettings::default(),
+        arguments,
+        bypass_log,
+    )
+}
+
+pub(crate) fn cargo_with_retention_and_bypass_log(
+    config: &Config,
+    retention: &RetentionSettings,
     arguments: &[String],
     bypass_log: Option<&Path>,
 ) -> Result<ExitCode> {
@@ -544,7 +561,7 @@ pub(crate) fn cargo_with_bypass_log(
     // Outside the runtime, so a walk of the whole store cannot occupy a worker
     // thread, and after cargo has exited, so it adds nothing to the build the
     // user is waiting on.
-    sweep_store(config);
+    sweep_store(config, retention);
     status
 }
 
@@ -639,7 +656,13 @@ fn exit_code(status: std::process::ExitStatus) -> ExitCode {
     }
 }
 
-fn gc(config: &Config, max_bytes: u64, dry_run: bool, json: bool) -> Result<()> {
+fn gc(
+    config: &Config,
+    max_bytes: u64,
+    dry_run: bool,
+    json: bool,
+    retention: &RetentionSettings,
+) -> Result<()> {
     let store = config.store_dir();
     // The collector below remains the authority for store errors. Estimating
     // a combined budget must not prevent independent target collection when
@@ -648,28 +671,26 @@ fn gc(config: &Config, max_bytes: u64, dry_run: bool, json: bool) -> Result<()> 
         .map(|stats| stats.total_bytes())
         .unwrap_or(max_bytes);
     let target_bytes = target::stats(&config.target.root)?.bytes;
-    let target_budget = config
-        .gc
+    let target_budget = retention
         .max_total_bytes
-        .map_or(config.target.max_bytes, |total| {
+        .map_or(retention.target_max_bytes, |total| {
             let budget = total.saturating_sub(store_bytes.min(max_bytes));
             Some(
-                config
-                    .target
-                    .max_bytes
+                retention
+                    .target_max_bytes
                     .map_or(budget, |target| target.min(budget)),
             )
         });
     let pruned = target::collect(
         &config.target.root,
         target_budget,
-        config.target.max_age,
+        retention.target_max_age,
         dry_run,
     );
     let projected_target_bytes = pruned
         .as_ref()
         .map_or(target_bytes, |outcome| outcome.remaining_bytes);
-    let store_budget = config.gc.max_total_bytes.map_or(max_bytes, |total| {
+    let store_budget = retention.max_total_bytes.map_or(max_bytes, |total| {
         max_bytes.min(total.saturating_sub(projected_target_bytes))
     });
     let outcome = if dry_run {
@@ -734,7 +755,7 @@ fn print_gc_store_outcome(outcome: &store::GcOutcome, dry_run: bool) {
 }
 
 /// One line describing the target directories a sweep freed.
-fn target_removals(outcome: &target::PruneOutcome, dry_run: bool) -> String {
+fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool) -> String {
     let verb = if dry_run { "would free" } else { "freed" };
     format!(
         "{verb} {} target directories ({}, {} abandoned and {} live); {} remain",
@@ -765,7 +786,7 @@ fn evictions(outcome: &store::GcOutcome) -> String {
 /// Reported like the cache summary beside it: a sweep that evicted nothing says
 /// nothing. A sweep that fails is logged and forgotten -- the build is already
 /// over, and its exit status is the build's answer, not the collector's.
-fn sweep_store(config: &Config) {
+fn sweep_store(config: &Config, retention: &RetentionSettings) {
     if !config.gc.auto {
         return;
     }
@@ -774,7 +795,7 @@ fn sweep_store(config: &Config) {
             if outcome.removed_bytes > 0 {
                 crate::session::note(&format!("gc: {}", evictions(&outcome)));
             }
-            prune_targets(config);
+            prune_targets(config, retention);
         }
         Ok(None) => {}
         Err(error) => {
@@ -782,22 +803,22 @@ fn sweep_store(config: &Config) {
             // `sweep_if_due` stamps before collecting. If collection fails,
             // target views are still due now and will otherwise wait through
             // the full interval before getting another chance.
-            prune_targets(config);
+            prune_targets(config, retention);
         }
     }
 }
 
 /// Collect target views as the other half of a due automatic sweep.
-fn prune_targets(config: &Config) {
+fn prune_targets(config: &Config, retention: &RetentionSettings) {
     // A target directory whose checkout is gone is the largest thing
     // collection ever frees, and walking for it on every build would be the
     // slowest, so callers keep this inside the store sweep's throttle.
-    let target_budget = config.gc.max_total_bytes.and_then(|total| {
+    let target_budget = retention.max_total_bytes.and_then(|total| {
         store::stats(&config.store_dir())
             .ok()
             .map(|stats| total.saturating_sub(stats.total_bytes()))
     });
-    let target_budget = match (config.target.max_bytes, target_budget) {
+    let target_budget = match (retention.target_max_bytes, target_budget) {
         (Some(configured), Some(total)) => Some(configured.min(total)),
         (configured, None) => configured,
         (None, total) => total,
@@ -805,7 +826,7 @@ fn prune_targets(config: &Config) {
     match target::collect(
         &config.target.root,
         target_budget,
-        config.target.max_age,
+        retention.target_max_age,
         false,
     ) {
         Ok(pruned) if pruned.removed_views > 0 => {

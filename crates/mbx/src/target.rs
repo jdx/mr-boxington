@@ -51,6 +51,12 @@ pub struct ViewStats {
 pub struct PruneOutcome {
     pub removed_views: u64,
     pub removed_bytes: u64,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct CollectionOutcome {
+    pub removed_views: u64,
+    pub removed_bytes: u64,
     pub removed_stale_views: u64,
     pub removed_live_views: u64,
     pub remaining_bytes: u64,
@@ -483,20 +489,24 @@ pub fn stats(root: &Path) -> Result<ViewStats> {
 /// usually serve, but it would also delete something the person who owns that
 /// directory can still see, which is a different kind of surprise.
 pub fn prune(root: &Path) -> Result<PruneOutcome> {
-    collect(root, None, None, false)
+    let outcome = collect(root, None, None, false)?;
+    Ok(PruneOutcome {
+        removed_views: outcome.removed_views,
+        removed_bytes: outcome.removed_bytes,
+    })
 }
 
 /// Collect abandoned, expired, and over-budget managed target directories.
 ///
 /// Limits are opt-in. Abandoned checkouts are always collected; live views
 /// are considered oldest-first only when an age or size policy requests it.
-pub fn collect(
+pub(crate) fn collect(
     root: &Path,
     max_bytes: Option<u64>,
     max_age: Option<Duration>,
     dry_run: bool,
-) -> Result<PruneOutcome> {
-    let mut outcome = PruneOutcome::default();
+) -> Result<CollectionOutcome> {
+    let mut outcome = CollectionOutcome::default();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
