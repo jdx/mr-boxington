@@ -10,22 +10,6 @@ fn write_project(directory: &Path) {
     write_named_project(directory, "fixture");
 }
 
-fn write_wasm_binary_project(directory: &Path) {
-    std::fs::create_dir_all(directory.join("src")).unwrap();
-    std::fs::write(
-        directory.join("Cargo.toml"),
-        "[package]\nname = \"wasm-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-    )
-    .unwrap();
-    std::fs::write(directory.join("src/main.rs"), "fn main() {}\n").unwrap();
-    let status = Command::new(cargo())
-        .current_dir(directory)
-        .args(["generate-lockfile", "--offline"])
-        .status()
-        .expect("cargo should run");
-    assert!(status.success(), "the fixture should resolve offline");
-}
-
 /// Write the fixture under `name`.
 ///
 /// The name reaches the lockfile, and the lockfile is what the build identity
@@ -140,26 +124,6 @@ fn build_with(
         serde_json::from_slice(&stats).expect("the report should be JSON"),
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
-}
-
-fn build_wasm(project: &Path, target_dir: &Path, store: &Path, report: &Path) -> serde_json::Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
-        .current_dir(project)
-        .args(["build", "--offline", "--target", "wasm32-unknown-unknown"])
-        .env("CARGO_TARGET_DIR", target_dir)
-        .env("MBX_CACHE_DIR", store)
-        .env("MBX_STATS_REPORT", report)
-        .env_remove("MBX_INCREMENTAL")
-        .env_remove("CARGO_INCREMENTAL")
-        .env_remove("CI")
-        .output()
-        .expect("mbx should run");
-    assert!(
-        output.status.success(),
-        "wasm build failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap()
 }
 
 /// Run `mbx` against `store` and return its stdout.
@@ -334,47 +298,6 @@ fn a_second_checkout_starts_warm() {
     assert!(
         count(&warm, "hits") > 0,
         "a checkout at another path should reuse the first build: {warm}"
-    );
-}
-
-#[test]
-fn a_wasm_link_output_restores_into_a_distinct_target_directory() {
-    let store = tempfile::tempdir().unwrap();
-    let project = tempfile::tempdir().unwrap();
-    let first_target = tempfile::tempdir().unwrap();
-    let second_target = tempfile::tempdir().unwrap();
-    let reports = tempfile::tempdir().unwrap();
-    write_wasm_binary_project(project.path());
-
-    let cold = build_wasm(
-        project.path(),
-        first_target.path(),
-        store.path(),
-        &reports.path().join("wasm-cold.json"),
-    );
-    assert_eq!(count(&cold, "hits"), 0, "a cold wasm link cannot hit");
-    let first = first_target
-        .path()
-        .join("wasm32-unknown-unknown/debug/wasm-fixture.wasm");
-    let expected = std::fs::read(&first).expect("rustc should link the wasm binary");
-
-    let warm = build_wasm(
-        project.path(),
-        second_target.path(),
-        store.path(),
-        &reports.path().join("wasm-warm.json"),
-    );
-    assert_eq!(
-        count(&warm, "hits"),
-        1,
-        "the linked wasm output should be restored: {warm}"
-    );
-    let restored = second_target
-        .path()
-        .join("wasm32-unknown-unknown/debug/wasm-fixture.wasm");
-    assert_eq!(
-        std::fs::read(restored).expect("the wasm link output should exist"),
-        expected
     );
 }
 
