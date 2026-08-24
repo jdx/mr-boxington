@@ -89,6 +89,38 @@ async fn counts_compilations_it_could_not_look_up() {
 }
 
 #[tokio::test]
+async fn records_compiler_time_by_outcome_and_crate() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    for (outcome, crate_name, duration_ns) in [
+        ("miss", Some("slow_crate"), 17),
+        ("miss", Some("slow_crate"), 5),
+        ("bypass", Some("linked_bin"), 11),
+        ("verification", Some("not_uncached"), 7),
+    ] {
+        let response = agent
+            .respond(AgentRequest::RecordCompilerInvocation {
+                outcome: outcome.into(),
+                crate_name: crate_name.map(str::to_string),
+                duration_ns,
+            })
+            .await;
+        assert!(matches!(
+            response,
+            AgentResponse::CompilerInvocationRecorded
+        ));
+    }
+
+    let stats = agent.stats();
+    assert_eq!(stats.compiler["miss"].invocations, 2);
+    assert_eq!(stats.compiler["miss"].duration_ns, 22);
+    assert_eq!(stats.compiler["bypass"].duration_ns, 11);
+    assert_eq!(stats.slow_compilations["slow_crate"], 22);
+    assert_eq!(stats.slow_compilations["linked_bin"], 11);
+    assert!(!stats.slow_compilations.contains_key("not_uncached"));
+}
+
+#[tokio::test]
 async fn counts_bypasses_by_reason() {
     let directory = tempfile::tempdir().unwrap();
     let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
@@ -207,6 +239,7 @@ async fn publishes_a_complete_action_result() {
                 action: action.clone(),
                 restore: RestoreStats {
                     duration_ns: 7,
+                    avoided_compiler_duration_ns: 13,
                     output_files: 2,
                     output_bytes: 11,
                     reflinked_output_files: 1,
@@ -230,6 +263,7 @@ async fn publishes_a_complete_action_result() {
             reflinked_output_bytes: 7,
             copied_output_files: 1,
             copied_output_bytes: 4,
+            avoided_compiler_duration_ns: 13,
             ..AgentStats::default()
         }
     );

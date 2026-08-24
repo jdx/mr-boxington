@@ -42,6 +42,12 @@ enum Materialization {
     Copy,
 }
 
+#[derive(Clone, Debug, Default)]
+struct CompileTiming {
+    crate_name: String,
+    duration_ns: u64,
+}
+
 pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode> {
     let working_dir = std::env::current_dir()?;
     // The orchestrated session supplies the target root. A persistent wrapper
@@ -72,7 +78,11 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     {
         action_lookup_attempted = true;
         match restore_candidates(&candidates, &outputs, &discovered, !verify) {
-            Ok(Some((action, cached))) => {
+            Ok(Some((action, mut cached))) => {
+                let timing =
+                    prediction_timing(rustc, &invocation, &action, &working_dir, &portable)
+                        .unwrap_or_default();
+                cached.restore.avoided_compiler_duration_ns = timing.duration_ns;
                 record_prediction(
                     rustc,
                     &invocation,
@@ -80,10 +90,12 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                     &discovered,
                     &working_dir,
                     &portable,
+                    &timing,
                 );
                 if verify {
                     verification = Some(cached);
                 } else {
+                    record_action_hit(&action, cached.restore);
                     let _ = replay_bytes(&cached.stdout, &cached.stderr);
                     return Ok(ExitCode::SUCCESS);
                 }
@@ -103,7 +115,8 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             &portable,
             !verify,
         ) {
-            Ok(Some(cached)) => {
+            Ok((Some(cached), attempted)) => {
+                action_lookup_attempted = attempted;
                 if verify {
                     verification = Some(cached);
                 } else {
@@ -111,7 +124,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                     return Ok(ExitCode::SUCCESS);
                 }
             }
-            Ok(None) => {}
+            Ok((None, attempted)) => action_lookup_attempted = attempted,
             Err(error) => {
                 eprintln!("mbx warning: prediction was not restored: {error:#}");
             }
@@ -119,11 +132,31 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     }
 
     let compilation_started = SystemTime::now();
+    let compiler_timer = Instant::now();
     let output = Command::new(rustc)
         .args(&arguments)
         .current_dir(&working_dir)
         .output()
         .wrap_err("failed to execute rustc")?;
+    let timing = CompileTiming {
+        crate_name: invocation.crate_name().to_string(),
+        duration_ns: compiler_timer
+            .elapsed()
+            .as_nanos()
+            .try_into()
+            .unwrap_or(u64::MAX),
+    };
+    session::record_compiler_invocation(
+        if verification.is_some() {
+            "verification"
+        } else if action_lookup_attempted {
+            "miss"
+        } else {
+            "unconsulted"
+        },
+        Some(&timing.crate_name),
+        timing.duration_ns,
+    );
     let _ = replay_output(&output);
     if let Some(cached) = verification {
         let matched = cached_matches(&cached, &output);
@@ -153,6 +186,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                 &discovered,
                 &working_dir,
                 &portable,
+                &timing,
             );
             Ok(())
         })();
@@ -170,7 +204,7 @@ fn restore_predicted_result(
     working_dir: &Path,
     portable: &Portable,
     restore_outputs: bool,
-) -> Result<Option<CachedCompilation>> {
+) -> Result<(Option<CachedCompilation>, bool)> {
     let mut context = base_action_context(rustc, working_dir, portable)?;
     let invocation_digest = invocation.invocation_digest(&context)?;
     let task = prediction_task(&invocation_digest);
@@ -193,7 +227,7 @@ fn restore_predicted_result(
             // or the summary reads as though a lookup happened and found
             // nothing.
             session::record_unconsulted();
-            return Ok(None);
+            return Ok((None, false));
         }
         AgentResponse::Error { message } => bail!(message),
         _ => bail!("cache agent returned an unexpected action prediction response"),
@@ -210,11 +244,15 @@ fn restore_predicted_result(
     let candidates = ActionCandidates::build(invocation, context)?;
     let restored = restore_candidates(&candidates, outputs, &discovered, restore_outputs)?;
     match restored {
-        Some((action, cached)) => {
+        Some((action, mut cached)) => {
+            cached.restore.avoided_compiler_duration_ns = input_prediction.compiler_duration_ns;
+            if restore_outputs {
+                record_action_hit(&action, cached.restore);
+            }
             record_prediction_value(invocation_digest, action, prediction.payload);
-            Ok(Some(cached))
+            Ok((Some(cached), true))
         }
-        None => Ok(None),
+        None => Ok((None, true)),
     }
 }
 
@@ -348,11 +386,15 @@ fn record_prediction(
     discovered: &DiscoveredInputs,
     working_dir: &Path,
     portable: &Portable,
+    timing: &CompileTiming,
 ) {
     let result = (|| {
         let context = base_action_context(rustc, working_dir, portable)?;
         let invocation_digest = invocation.invocation_digest(&context)?;
-        let prediction = invocation.prediction(&context, discovered)?;
+        let mut prediction = invocation.prediction(&context, discovered)?;
+        prediction.version = 2;
+        prediction.compiler_duration_ns = timing.duration_ns;
+        prediction.crate_name.clone_from(&timing.crate_name);
         let payload = String::from_utf8(canonical_json(&prediction)?)?;
         record_prediction_value(invocation_digest, action.clone(), payload);
         Result::<()>::Ok(())
@@ -360,6 +402,43 @@ fn record_prediction(
     if let Err(error) = result {
         eprintln!("mbx warning: action prediction was not recorded: {error:#}");
     }
+}
+
+fn prediction_timing(
+    rustc: &OsStr,
+    invocation: &RustcInvocation,
+    action: &CacheDigest,
+    working_dir: &Path,
+    portable: &Portable,
+) -> Result<CompileTiming> {
+    let context = base_action_context(rustc, working_dir, portable)?;
+    let invocation_digest = invocation.invocation_digest(&context)?;
+    let task = prediction_task(&invocation_digest);
+    let responses = session::request_agent(&[AgentRequest::FindActionPrediction {
+        task,
+        invocation: invocation_digest,
+    }])?;
+    let Some(AgentResponse::ActionPrediction {
+        prediction: Some(prediction),
+    }) = responses.into_iter().next()
+    else {
+        return Ok(CompileTiming::default());
+    };
+    if prediction.adapter != "rustc" || prediction.action != *action {
+        return Ok(CompileTiming::default());
+    }
+    let timing: RustcInputPrediction = serde_json::from_str(&prediction.payload)?;
+    if !matches!(timing.version, 1 | 2)
+        || timing.crate_name.len() > 256
+        || timing.crate_name.contains(['\0', '\n', '\r'])
+        || String::from_utf8(canonical_json(&timing)?)? != prediction.payload
+    {
+        return Ok(CompileTiming::default());
+    }
+    Ok(CompileTiming {
+        crate_name: timing.crate_name,
+        duration_ns: timing.compiler_duration_ns,
+    })
 }
 
 fn record_prediction_value(invocation: CacheDigest, action: CacheDigest, payload: String) {
@@ -519,9 +598,6 @@ fn restore_result(
         .as_nanos()
         .try_into()
         .unwrap_or(u64::MAX);
-    if restore_outputs {
-        record_action_hit(&action.digest, restore);
-    }
     Ok(Some(CachedCompilation {
         stdout,
         stderr,

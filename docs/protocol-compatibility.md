@@ -14,9 +14,13 @@ the handshake and do not exchange cache requests. Adding, removing, or changing
 a request or response therefore requires incrementing `AGENT_PROTOCOL_VERSION`.
 
 `crates/mbx-cache-core/tests/agent_protocol.rs` exercises every request and
-response variant against `tests/fixtures/agent-protocol-v1.jsonl`. Its exhaustive
+response variant against `tests/fixtures/agent-protocol-v2.jsonl`. Its exhaustive
 matches make a newly added variant fail to compile until the fixture and the
 protocol-version decision are reviewed together.
+
+Agent protocol v2 adds compiler-duration accounting to hits and real compiler
+invocations. Because shim and agent are always installed from the same binary,
+they still require exact protocol and package-version equality.
 
 ## Remote cache protocol
 

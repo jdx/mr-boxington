@@ -38,7 +38,7 @@ pub struct AgentRemoteCache {
 }
 
 /// Wire protocol version used between an in-process cache agent and its shims.
-pub const AGENT_PROTOCOL_VERSION: u8 = 1;
+pub const AGENT_PROTOCOL_VERSION: u8 = 2;
 /// Largest single protocol request the agent will read.
 ///
 /// Requests are small JSON objects; the largest legitimate ones carry an output
@@ -93,6 +93,15 @@ pub enum AgentRequest {
     /// A compilation the adapter could not look up, having no key to look up
     /// with. Distinct from a bypass: these are cached once compiled.
     RecordUnconsulted,
+    /// Account for one real compiler invocation performed by the adapter.
+    RecordCompilerInvocation {
+        /// Stable outcome category such as `miss`, `unconsulted`, or `bypass`.
+        outcome: String,
+        /// Compiler crate name, when the invocation supplied one.
+        crate_name: Option<String>,
+        /// Wall time spent running the compiler.
+        duration_ns: u64,
+    },
     /// Account for a cache hit that was rebuilt for correctness verification.
     RecordActionVerification {
         /// Whether rebuilt and cached outputs matched.
@@ -143,6 +152,9 @@ pub enum AgentRequest {
 pub struct RestoreStats {
     /// Cumulative time spent materializing and validating output files.
     pub duration_ns: u64,
+    /// Compiler wall time recorded when this action was originally produced.
+    /// Zero means no timing hint was available.
+    pub avoided_compiler_duration_ns: u64,
     /// Number of compiler output files restored.
     pub output_files: u64,
     /// Declared size of compiler output files restored.
@@ -196,6 +208,8 @@ pub enum AgentResponse {
     BypassRecorded,
     /// Unconsulted-compilation statistics were updated.
     UnconsultedRecorded,
+    /// Compiler invocation accounting was recorded.
+    CompilerInvocationRecorded,
     /// An action result was stored.
     ActionStored {
         /// Path of the stored local action-result record.
@@ -251,6 +265,12 @@ pub struct AgentStats {
     pub prefetched_actions: u64,
     /// Compilations that were not cacheable, counted by reason.
     pub bypasses: BTreeMap<String, u64>,
+    /// Estimated compiler time avoided by restored action hits.
+    pub avoided_compiler_duration_ns: u64,
+    /// Real compiler work performed in this session, grouped by outcome.
+    pub compiler: BTreeMap<String, CompilerStats>,
+    /// Cumulative real compiler time by crate name.
+    pub slow_compilations: BTreeMap<String, u64>,
     /// Number of task manifest requests made to the remote cache.
     pub remote_manifest_lookups: u64,
     /// Cumulative time spent requesting remote task manifests.
@@ -289,6 +309,14 @@ pub struct AgentStats {
     pub copied_output_bytes: u64,
 }
 
+/// Count and cumulative wall time for one compiler-invocation outcome.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompilerStats {
+    /// Number of compiler invocations observed.
+    pub invocations: u64,
+    /// Cumulative wall time spent in those invocations.
+    pub duration_ns: u64,
+}
 #[derive(Default)]
 struct AtomicAgentStats {
     lookups: AtomicU64,
@@ -314,6 +342,9 @@ struct AtomicAgentStats {
     prefetch_duration_ns: AtomicU64,
     materialization_duration_ns: AtomicU64,
     bypasses: Mutex<BTreeMap<String, u64>>,
+    avoided_compiler_duration_ns: AtomicU64,
+    compiler: Mutex<BTreeMap<String, CompilerStats>>,
+    slow_compilations: Mutex<BTreeMap<String, u64>>,
     restored_output_files: AtomicU64,
     restored_output_bytes: AtomicU64,
     reflinked_output_files: AtomicU64,
@@ -776,6 +807,12 @@ impl CacheAgent {
             uploaded_bytes: self.stats.uploaded_bytes.load(Ordering::Relaxed),
             prefetched_actions: self.stats.prefetched_actions.load(Ordering::Relaxed),
             bypasses: self.stats.bypasses.lock().unwrap().clone(),
+            avoided_compiler_duration_ns: self
+                .stats
+                .avoided_compiler_duration_ns
+                .load(Ordering::Relaxed),
+            compiler: self.stats.compiler.lock().unwrap().clone(),
+            slow_compilations: self.stats.slow_compilations.lock().unwrap().clone(),
             remote_manifest_lookups: self.stats.remote_manifest_lookups.load(Ordering::Relaxed),
             remote_manifest_lookup_duration_ns: self
                 .stats
@@ -1491,6 +1528,11 @@ impl CacheAgent {
                 self.stats.unconsulted.fetch_add(1, Ordering::Relaxed);
                 Ok(AgentResponse::UnconsultedRecorded)
             }
+            AgentRequest::RecordCompilerInvocation {
+                outcome,
+                crate_name,
+                duration_ns,
+            } => self.record_compiler_invocation(&outcome, crate_name.as_deref(), duration_ns),
             AgentRequest::RecordActionVerification { matched, restore } => {
                 self.record_materialization(restore);
                 self.stats.verifications.fetch_add(1, Ordering::Relaxed);
@@ -1740,6 +1782,10 @@ impl CacheAgent {
 
     fn record_restore(&self, restore: RestoreStats) {
         self.record_materialization(restore);
+        atomic_saturating_add(
+            &self.stats.avoided_compiler_duration_ns,
+            restore.avoided_compiler_duration_ns,
+        );
         atomic_saturating_add(&self.stats.restored_output_files, restore.output_files);
         atomic_saturating_add(&self.stats.restored_output_bytes, restore.output_bytes);
         atomic_saturating_add(
@@ -1752,6 +1798,35 @@ impl CacheAgent {
         );
         atomic_saturating_add(&self.stats.copied_output_files, restore.copied_output_files);
         atomic_saturating_add(&self.stats.copied_output_bytes, restore.copied_output_bytes);
+    }
+
+    fn record_compiler_invocation(
+        &self,
+        outcome: &str,
+        crate_name: Option<&str>,
+        duration_ns: u64,
+    ) -> Result<AgentResponse> {
+        if !matches!(outcome, "miss" | "unconsulted" | "bypass" | "verification") {
+            bail!("invalid compiler invocation outcome");
+        }
+        if let Some(crate_name) = crate_name
+            && (crate_name.len() > 256 || crate_name.contains(['\0', '\n', '\r']))
+        {
+            bail!("invalid compiler crate name");
+        }
+        let mut compiler = self.stats.compiler.lock().unwrap();
+        let stats = compiler.entry(outcome.to_string()).or_default();
+        stats.invocations = stats.invocations.saturating_add(1);
+        stats.duration_ns = stats.duration_ns.saturating_add(duration_ns);
+        drop(compiler);
+        if outcome != "verification"
+            && let Some(crate_name) = crate_name.filter(|name| !name.is_empty())
+        {
+            let mut slow = self.stats.slow_compilations.lock().unwrap();
+            let duration = slow.entry(crate_name.to_string()).or_default();
+            *duration = duration.saturating_add(duration_ns);
+        }
+        Ok(AgentResponse::CompilerInvocationRecorded)
     }
 
     fn record_materialization(&self, restore: RestoreStats) {

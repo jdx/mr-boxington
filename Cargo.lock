@@ -1207,6 +1207,7 @@ dependencies = [
  "mbx-cache-core",
  "serde",
  "shlex",
+ "serde_json",
  "strum",
  "tempfile",
  "thiserror",

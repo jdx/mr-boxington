@@ -178,6 +178,15 @@ fn writes_versioned_stats_report() {
         reflinked_output_bytes: 1536,
         copied_output_files: 2,
         copied_output_bytes: 512,
+        avoided_compiler_duration_ns: 2_000,
+        compiler: BTreeMap::from([(
+            "miss".into(),
+            mbx_cache_core::CompilerStats {
+                invocations: 3,
+                duration_ns: 4_000,
+            },
+        )]),
+        slow_compilations: BTreeMap::from([("slow_crate".into(), 3_000)]),
         remote_blob_requests: 4,
         remote_blob_pack_requests: 2,
         remote_blob_pack_blobs: 100,
@@ -188,11 +197,16 @@ fn writes_versioned_stats_report() {
     write_stats_report(&path, &stats).unwrap();
     let report: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
 
-    assert_eq!(report["version"], 1);
+    assert_eq!(report["version"], 2);
     assert_eq!(report["session_duration_ns"], 42);
     assert_eq!(report["hits"], 2);
     assert_eq!(report["misses"], 2);
     assert_eq!(report["compiler_invocations_avoided"], 2);
+    assert_eq!(report["estimated_compiler_duration_avoided_ns"], 2_000);
+    assert_eq!(report["compiler"]["miss"]["invocations"], 3);
+    assert_eq!(report["compiler"]["miss"]["duration_ns"], 4_000);
+    assert_eq!(report["slow_compilations"][0]["crate_name"], "slow_crate");
+    assert_eq!(report["slow_compilations"][0]["duration_ns"], 3_000);
     assert_eq!(report["prefetched_actions"], 3);
     assert_eq!(report["downloaded_bytes"], 1024);
     assert_eq!(report["restored_output_files"], 7);
@@ -205,4 +219,17 @@ fn writes_versioned_stats_report() {
     assert_eq!(report["remote_blob_pack_requests"], 2);
     assert_eq!(report["remote_blob_pack_blobs"], 100);
     assert_eq!(report["materialization_duration_ns"], 9);
+}
+
+#[test]
+fn finds_crate_names_in_transparent_invocations() {
+    assert_eq!(
+        crate_name_argument(&["--crate-name".into(), "fixture".into()]),
+        Some("fixture".into())
+    );
+    assert_eq!(
+        crate_name_argument(&["--crate-name=attached".into()]),
+        Some("attached".into())
+    );
+    assert_eq!(crate_name_argument(&["--version".into()]), None);
 }

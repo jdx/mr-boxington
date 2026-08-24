@@ -315,6 +315,11 @@ impl RustcInvocation {
         self.target.as_deref()
     }
 
+    /// Return the crate name rustc will assign to this compilation.
+    pub fn crate_name(&self) -> &str {
+        &self.crate_name
+    }
+
     /// Resolve the files produced by this invocation.
     ///
     /// The initial cache tier requires one output directory so its artifact can
@@ -444,6 +449,8 @@ impl RustcInvocation {
             version: 1,
             inputs,
             environment: discovered.environment.keys().cloned().collect(),
+            compiler_duration_ns: 0,
+            crate_name: String::new(),
         })
     }
 }
@@ -641,6 +648,13 @@ pub struct RustcInputPrediction {
     pub inputs: Vec<String>,
     /// Names of environment variables read by the compilation.
     pub environment: Vec<String>,
+    /// Compiler wall time from the successful invocation that produced this
+    /// prediction. Zero means no timing hint was recorded.
+    #[serde(default)]
+    pub compiler_duration_ns: u64,
+    /// Crate name associated with the timing hint.
+    #[serde(default)]
+    pub crate_name: String,
 }
 
 impl RustcInputPrediction {
@@ -651,7 +665,7 @@ impl RustcInputPrediction {
         working_dir: &Path,
         path_mappings: &[PathMapping],
     ) -> Result<DiscoveredInputs, BypassReason> {
-        if self.version != 1 {
+        if !matches!(self.version, 1 | 2) {
             return Err(BypassReason::UnsupportedPrediction);
         }
         if self.inputs.len() > 16 * 1024 || self.environment.len() > 4 * 1024 {

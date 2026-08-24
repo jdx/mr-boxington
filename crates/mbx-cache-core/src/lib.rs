@@ -53,7 +53,7 @@ mod local;
 
 pub use agent::{
     AGENT_PROTOCOL_VERSION, AgentRemoteCache, AgentRequest, AgentResponse, AgentStats, CacheAgent,
-    RestoreStats, is_task_identity, task_manifest_actions,
+    CompilerStats, RestoreStats, is_task_identity, task_manifest_actions,
 };
 pub use local::{LocalActionCache, LocalCas};
 pub use mbx_cache_protocol::{

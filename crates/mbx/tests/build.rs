@@ -250,6 +250,18 @@ fn restores_a_wiped_target_directory_from_the_store() {
         store.path(),
         &reports.path().join("cold.json"),
     );
+    assert!(
+        cold["compiler"]["unconsulted"]["duration_ns"]
+            .as_u64()
+            .is_some_and(|duration| duration > 0),
+        "the cold build should report time spent compiling: {cold}"
+    );
+    assert!(
+        cold["slow_compilations"]
+            .as_array()
+            .is_some_and(|crates| !crates.is_empty()),
+        "the cold build should identify its slowest uncached crates: {cold}"
+    );
     assert_eq!(count(&cold, "hits"), 0, "a cold build cannot hit");
     assert!(
         count(&cold, "stored_bytes") > 0,
@@ -292,6 +304,10 @@ fn restores_a_wiped_target_directory_from_the_store() {
     assert_eq!(
         count(&warm, "compiler_invocations_avoided"),
         count(&warm, "hits")
+    );
+    assert!(
+        count(&warm, "estimated_compiler_duration_avoided_ns") > 0,
+        "a warm build should report the compiler time recorded by its cold build: {warm}"
     );
 }
 
