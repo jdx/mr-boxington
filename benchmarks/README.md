@@ -13,4 +13,6 @@ is intentional: rustc embeds paths in artifacts, so changing the path would
 test the separately documented cross-checkout limitation instead.
 
 Both scripts write versioned JSON, Markdown summaries, mbx statistics reports,
-and build logs. CI uploads the directory as an artifact for trend analysis.
+and build logs. The large target and cache working trees are temporary and are
+not retained. CI uploads the measurement directory as an artifact for trend
+analysis.

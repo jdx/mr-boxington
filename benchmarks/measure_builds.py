@@ -10,6 +10,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -29,8 +30,8 @@ def run_phase(
 ) -> dict[str, object]:
     # The target has a fixed name so compiler paths stay byte-for-byte stable.
     # It is underneath our output directory and is recreated for every phase.
-    if target.parent != output:
-        raise RuntimeError("refusing to remove a target outside the benchmark output")
+    if target.parent != store.parent:
+        raise RuntimeError("refusing to remove a target outside the benchmark work directory")
     shutil.rmtree(target, ignore_errors=True)
     report = output / f"{phase}-stats.json"
     stdout = output / f"{phase}.stdout.log"
@@ -74,19 +75,20 @@ def main() -> int:
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     workspace = args.workspace.resolve()
-    target = output / "build-target"
-    store = output / "cache"
-    # Reusing an output path must still mean a genuinely cold first phase.
-    shutil.rmtree(store, ignore_errors=True)
-    shutil.rmtree(target, ignore_errors=True)
-    phases = [
-        run_phase("cold", args.mbx.resolve(), workspace, output, target, store, False),
-        run_phase("warm", args.mbx.resolve(), workspace, output, target, store, False),
-    ]
-    if args.verify:
-        phases.append(
-            run_phase("verify", args.mbx.resolve(), workspace, output, target, store, True)
-        )
+    # Keep the large Cargo target and cache trees out of the retained artifact.
+    # TemporaryDirectory also guarantees every invocation begins cold.
+    with tempfile.TemporaryDirectory(prefix="mbx-build-measurement-") as temporary:
+        work = Path(temporary)
+        target = work / "build-target"
+        store = work / "cache"
+        phases = [
+            run_phase("cold", args.mbx.resolve(), workspace, output, target, store, False),
+            run_phase("warm", args.mbx.resolve(), workspace, output, target, store, False),
+        ]
+        if args.verify:
+            phases.append(
+                run_phase("verify", args.mbx.resolve(), workspace, output, target, store, True)
+            )
 
     warm_stats = phases[1]["stats"]
     assert isinstance(warm_stats, dict)
