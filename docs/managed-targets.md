@@ -15,7 +15,7 @@ mbx places the target directory under its cache root and leaves a symlink at
 `target`, so familiar paths continue to work:
 
 ```text
-target -> ~/.cache/mbx/targets/v1/<checkout digest>
+target -> <cache root>/targets/v1/<checkout digest>
 ```
 
 ## Collection
@@ -49,6 +49,10 @@ mbx can remove /path/to/project/target and replace it with a managed target that
 “Keep it” is selected by default. Declining leaves every output untouched and
 the Cargo command continues normally. Non-interactive runs never prompt or
 remove the directory.
+
+After acceptance, mbx temporarily moves the old directory aside. It removes
+those outputs only after the managed link and its collection record both
+succeed; if placement fails, mbx restores the original directory.
 
 mbx does not offer removal for an explicitly configured target directory or a
 symlink it does not own.

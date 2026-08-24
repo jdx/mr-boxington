@@ -108,16 +108,25 @@ fn cargo(config: &Config, arguments: &[String]) -> Result<ExitCode> {
 
     let working_dir = std::env::current_dir()?;
     let mut roots = resolve_roots(&cargo, arguments, &working_dir);
-    prompt_to_manage_existing_target(config, &roots, arguments)?;
+    let migrate_existing = prompt_to_manage_existing_target(config, &roots, arguments)?;
     // Placed before the session starts, because the target directory is what
     // the shim maps out of its cache keys and it has to be the one cargo will
     // actually write to.
-    let placed = target::place(
-        config,
-        &roots.workspace_root,
-        &roots.target_dir,
-        roots.target_dir_requested,
-    );
+    let placed = if migrate_existing {
+        target::migrate_existing(
+            config,
+            &roots.workspace_root,
+            &roots.target_dir,
+            roots.target_dir_requested,
+        )?
+    } else {
+        target::place(
+            config,
+            &roots.workspace_root,
+            &roots.target_dir,
+            roots.target_dir_requested,
+        )
+    };
     if let Some(directory) = &placed {
         roots.target_dir = directory.clone();
     }
@@ -177,12 +186,12 @@ fn prompt_to_manage_existing_target(
     config: &Config,
     roots: &Roots,
     arguments: &[String],
-) -> Result<()> {
+) -> Result<bool> {
     if cargo_help_requested(arguments)
         || !std::io::stdin().is_terminal()
         || !std::io::stderr().is_terminal()
     {
-        return Ok(());
+        return Ok(false);
     }
     prompt_to_manage_existing_target_with(config, roots, |directory| {
         let description = format!(
@@ -214,17 +223,16 @@ fn prompt_to_manage_existing_target_with(
     config: &Config,
     roots: &Roots,
     prompt: impl FnOnce(&Path) -> Result<bool>,
-) -> Result<()> {
+) -> Result<bool> {
     if !target::can_remove_existing(
         config,
         &roots.workspace_root,
         &roots.target_dir,
         roots.target_dir_requested,
-    ) || !prompt(&roots.target_dir)?
-    {
-        return Ok(());
+    ) {
+        return Ok(false);
     }
-    target::remove_existing(&roots.target_dir)
+    prompt(&roots.target_dir)
 }
 
 fn run_cargo(
@@ -986,7 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn accepting_the_target_prompt_removes_only_the_default_real_directory() {
+    fn accepting_the_target_prompt_requests_migration_without_removing_outputs() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = directory.path().join("project");
         let target_dir = workspace.join("target");
@@ -999,9 +1007,11 @@ mod tests {
             target_dir_requested: false,
         };
 
-        prompt_to_manage_existing_target_with(&config, &roots, |_| Ok(true)).unwrap();
+        let accepted =
+            prompt_to_manage_existing_target_with(&config, &roots, |_| Ok(true)).unwrap();
 
-        assert!(!target_dir.exists());
+        assert!(accepted);
+        assert!(target_dir.join("artifact").is_file());
     }
 
     #[test]
@@ -1018,8 +1028,10 @@ mod tests {
             target_dir_requested: false,
         };
 
-        prompt_to_manage_existing_target_with(&config, &roots, |_| Ok(false)).unwrap();
+        let accepted =
+            prompt_to_manage_existing_target_with(&config, &roots, |_| Ok(false)).unwrap();
 
+        assert!(!accepted);
         assert!(target_dir.join("artifact").is_file());
     }
 }

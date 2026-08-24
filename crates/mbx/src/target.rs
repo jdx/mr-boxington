@@ -69,19 +69,87 @@ pub fn can_remove_existing(
         && std::fs::symlink_metadata(target_dir).is_ok_and(|metadata| metadata.is_dir())
 }
 
-/// Remove a target directory after an interactive confirmation.
+/// Replace a confirmed existing target directory without risking its outputs.
 ///
-/// Revalidate immediately before deletion so a directory replaced with a link
-/// between the prompt and the answer cannot redirect or broaden the removal.
-pub fn remove_existing(target_dir: &Path) -> Result<()> {
+/// The old directory is first renamed into a temporary sibling on the same
+/// filesystem. It is removed only after the managed link and record both
+/// succeed; otherwise it is restored to its original path.
+pub fn migrate_existing(
+    config: &Config,
+    workspace_root: &Path,
+    target_dir: &Path,
+    requested: bool,
+) -> Result<Option<PathBuf>> {
+    migrate_existing_with(config, workspace_root, target_dir, requested, || {
+        place(config, workspace_root, target_dir, requested)
+    })
+}
+
+fn migrate_existing_with(
+    config: &Config,
+    workspace_root: &Path,
+    target_dir: &Path,
+    requested: bool,
+    place_target: impl FnOnce() -> Option<PathBuf>,
+) -> Result<Option<PathBuf>> {
     if !std::fs::symlink_metadata(target_dir).is_ok_and(|metadata| metadata.is_dir()) {
         eyre::bail!(
-            "{} is no longer a real target directory, so it was not removed",
+            "{} is no longer a real target directory, so it was not migrated",
             target_dir.display()
         );
     }
-    std::fs::remove_dir_all(target_dir)
-        .wrap_err_with(|| format!("could not remove {}", target_dir.display()))
+    if !can_remove_existing(config, workspace_root, target_dir, requested) {
+        eyre::bail!("{} is not eligible for migration", target_dir.display());
+    }
+
+    let backup_root = tempfile::Builder::new()
+        .prefix(".mbx-target-backup-")
+        .tempdir_in(workspace_root)
+        .wrap_err("could not create a temporary target backup")?;
+    let backup = backup_root.path().join("target");
+    std::fs::rename(target_dir, &backup)
+        .wrap_err_with(|| format!("could not temporarily move {}", target_dir.display()))?;
+
+    if let Some(managed) = place_target() {
+        if let Err(error) = std::fs::remove_dir_all(&backup) {
+            let retained = backup_root.keep().join("target");
+            log::warn!(
+                "the old target directory was retained at {}: {error}",
+                retained.display()
+            );
+        }
+        return Ok(Some(managed));
+    }
+
+    let managed = view_dir(&config.target.root, workspace_root);
+    let restore = (|| -> Result<()> {
+        match std::fs::symlink_metadata(target_dir) {
+            Ok(metadata)
+                if metadata.file_type().is_symlink()
+                    && std::fs::read_link(target_dir).is_ok_and(|link| link == managed) =>
+            {
+                remove_link(target_dir).wrap_err("could not remove the failed managed link")?;
+            }
+            Ok(_) => eyre::bail!(
+                "{} was occupied while restoring the old target directory",
+                target_dir.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).wrap_err("could not inspect the failed migration"),
+        }
+        std::fs::rename(&backup, target_dir)
+            .wrap_err_with(|| format!("could not restore {}", target_dir.display()))
+    })();
+    if let Err(error) = restore {
+        let retained = backup_root.keep().join("target");
+        return Err(error).wrap_err_with(|| {
+            format!(
+                "the old target directory was retained at {}",
+                retained.display()
+            )
+        });
+    }
+    Ok(None)
 }
 
 /// Where this checkout's outputs should be written, if mbx is placing them.
@@ -643,10 +711,48 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn a_failed_migration_restores_existing_outputs() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = test_config(directory.path(), true);
+        let workspace = checkout(directory.path(), "project");
+        let target = workspace.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("artifact"), b"old output").unwrap();
+
+        let placed = migrate_existing_with(&config, &workspace, &target, false, || None).unwrap();
+
+        assert!(placed.is_none());
+        assert_eq!(
+            std::fs::read(target.join("artifact")).unwrap(),
+            b"old output"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
-    fn removing_an_existing_target_never_follows_a_replacement_link() {
+    fn a_successful_migration_removes_old_outputs_after_placement() {
         let directory = tempfile::tempdir().unwrap();
+        let config = test_config(directory.path(), true);
+        let workspace = checkout(directory.path(), "project");
+        let target = workspace.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("artifact"), b"old output").unwrap();
+
+        let managed = migrate_existing(&config, &workspace, &target, false)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(std::fs::read_link(&target).unwrap(), managed);
+        assert!(!target.join("artifact").exists());
+        assert_eq!(stats(&config.target.root).unwrap().views, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migrating_an_existing_target_never_follows_a_replacement_link() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = test_config(directory.path(), true);
         let workspace = checkout(directory.path(), "project");
         let target = workspace.join("target");
         let elsewhere = directory.path().join("elsewhere");
@@ -654,7 +760,7 @@ mod tests {
         std::fs::write(elsewhere.join("keep"), b"not a build output").unwrap();
         symlink_dir(&elsewhere, &target).unwrap();
 
-        assert!(remove_existing(&target).is_err());
+        assert!(migrate_existing(&config, &workspace, &target, false).is_err());
         assert!(elsewhere.join("keep").is_file());
     }
 
