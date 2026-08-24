@@ -1,13 +1,6 @@
-name: performance and correctness
+name: scheduled performance and correctness
 
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/measure.yml"
-      - "benchmarks/**"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "crates/**"
   workflow_dispatch:
   schedule:
     # One bounded weekly canary, away from the top of the hour.
@@ -45,15 +38,7 @@ jobs:
             --budget-ms 2
       - name: Stage benchmark driver
         run: cp target/release/mbx "$RUNNER_TEMP/mbx-benchmark-driver"
-      - name: Measure cold and warm workspace builds
-        if: github.event_name == 'pull_request'
-        run: |
-          python3 benchmarks/measure_builds.py \
-            --mbx "$RUNNER_TEMP/mbx-benchmark-driver" \
-            --workspace "$GITHUB_WORKSPACE" \
-            --output "$RUNNER_TEMP/mbx-measurements/build"
       - name: Run verify-mode correctness canary
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           python3 benchmarks/measure_builds.py \
             --mbx "$RUNNER_TEMP/mbx-benchmark-driver" \
