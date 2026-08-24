@@ -139,6 +139,103 @@ fn parses_a_cargo_library_invocation() {
 }
 
 #[test]
+fn expands_utf8_response_files_one_argument_per_line() {
+    let directory = tempfile::tempdir().unwrap();
+    let response = directory.path().join("rustc.args");
+    std::fs::write(
+        &response,
+        "--crate-name\r\nwidget\r\n--crate-type=lib\r\n--emit=metadata,link\r\nsrc/lib.rs\r\n",
+    )
+    .unwrap();
+
+    let invocation = RustcInvocation::parse(&[format!("@{}", response.display()).into()]).unwrap();
+
+    assert_eq!(invocation.source(), Path::new("src/lib.rs"));
+    assert!(invocation.required_inputs.contains(&response));
+}
+
+#[test]
+fn response_file_arguments_are_not_recursively_expanded() {
+    let directory = tempfile::tempdir().unwrap();
+    let outer = directory.path().join("outer.args");
+    let nested = directory.path().join("nested.args");
+    std::fs::write(&nested, "src/wrong.rs\n").unwrap();
+    std::fs::write(&outer, format!("@{}\n", nested.display())).unwrap();
+
+    let expanded = expand_response_files(&[format!("@{}", outer.display()).into()]).unwrap();
+
+    assert_eq!(
+        expanded.arguments,
+        [OsString::from(format!("@{}", nested.display()))]
+    );
+    assert_eq!(expanded.files, [outer]);
+}
+
+#[test]
+fn shell_response_files_follow_the_rustc_unstable_switch() {
+    let directory = tempfile::tempdir().unwrap();
+    let response = directory.path().join("shell.args");
+    std::fs::write(
+        &response,
+        "--crate-name 'shell widget' --crate-type=lib --emit=metadata,link src/lib.rs",
+    )
+    .unwrap();
+
+    let invocation = RustcInvocation::parse(&[
+        "-Zshell-argfiles".into(),
+        format!("@shell:{}", response.display()).into(),
+    ])
+    .unwrap();
+
+    assert_eq!(invocation.crate_name, "shell widget");
+    assert!(invocation.required_inputs.contains(&response));
+}
+
+#[test]
+fn unreadable_response_files_bypass_with_the_stable_reason_kind() {
+    let error = RustcInvocation::parse(&["@does-not-exist.args".into()]).unwrap_err();
+
+    assert_eq!(error.kind(), "response-file");
+    assert!(error.to_string().contains("does-not-exist.args"));
+}
+
+#[test]
+fn response_file_bytes_are_part_of_the_action_key() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("lib.rs");
+    let response = directory.path().join("rustc.args");
+    std::fs::write(&source, "pub fn fixture() {}\n").unwrap();
+    let lines = [
+        "--crate-name=fixture",
+        "--crate-type=lib",
+        "--emit=metadata,link",
+        source.to_str().unwrap(),
+    ];
+    let keyed = |separator: &str| {
+        let contents = format!("{}{}", lines.join(separator), separator);
+        std::fs::write(&response, &contents).unwrap();
+        let invocation =
+            RustcInvocation::parse(&[format!("@{}", response.display()).into()]).unwrap();
+        let mut action_context = context(&[]);
+        action_context.working_dir = directory.path().to_path_buf();
+        action_context.path_mappings = vec![PathMapping::new(directory.path(), "workspace")];
+        action_context.inputs = vec![
+            ActionInput {
+                path: source.clone(),
+                digest: CacheDigest::blake3_file(&source).unwrap(),
+            },
+            ActionInput {
+                path: response.clone(),
+                digest: CacheDigest::blake3(contents.as_bytes()),
+            },
+        ];
+        invocation.action(action_context).unwrap().digest
+    };
+
+    assert_ne!(keyed("\n"), keyed("\r\n"));
+}
+
+#[test]
 fn resolves_cargo_library_outputs() {
     let working_dir = absolute(&["workspace"]);
     let invocation = RustcInvocation::parse(&args(&[
