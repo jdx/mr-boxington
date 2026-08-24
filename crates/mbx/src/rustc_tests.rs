@@ -175,6 +175,33 @@ fn standalone_workspace_mapping_uses_the_outer_workspace_for_members() {
 }
 
 #[test]
+fn standalone_registry_mapping_uses_the_default_cargo_home() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
+    let dependency = home.join(".cargo/registry/src/index/widget-1.0.0");
+    std::fs::create_dir_all(&dependency).unwrap();
+    std::fs::write(
+        dependency.join("Cargo.toml"),
+        "[package]\nname = \"widget\"\n",
+    )
+    .unwrap();
+
+    let mappings = path_mappings_with_env(&dependency, None, None, |name| match name {
+        "HOME" => Some(home.as_os_str().to_owned()),
+        _ => None,
+    });
+
+    assert!(mappings.iter().any(|mapping| {
+        mapping.placeholder == "cargo_home" && mapping.root == home.join(".cargo")
+    }));
+    assert!(
+        !mappings
+            .iter()
+            .any(|mapping| mapping.placeholder == "workspace")
+    );
+}
+
+#[test]
 fn standalone_target_mapping_covers_the_profile_tree() {
     assert_eq!(
         standalone_target_root(Path::new("/tmp/target/debug/deps"), None),

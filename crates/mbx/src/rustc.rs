@@ -968,6 +968,11 @@ fn path_mappings_with_env(
 ) -> Vec<PathMapping> {
     let mut mappings = Vec::new();
     let mut roots = BTreeSet::new();
+    let home_roots = ["HOME", "USERPROFILE"]
+        .into_iter()
+        .filter_map(|name| environment(name).map(PathBuf::from))
+        .filter(|root| root.is_absolute())
+        .collect::<Vec<_>>();
     // The target directory comes first, and before the workspace that usually
     // contains it: output paths are the ones that differ between checkouts, and
     // mapping them explicitly also keeps keys stable when the target directory
@@ -997,6 +1002,16 @@ fn path_mappings_with_env(
             add_mapping(&mut mappings, &mut roots, root, placeholder);
         }
     }
+    if let Some(home) = home_roots.first() {
+        for (directory, placeholder) in [(".cargo", "cargo_home"), (".rustup", "rustup_home")] {
+            if !mappings
+                .iter()
+                .any(|mapping| mapping.placeholder == placeholder)
+            {
+                add_mapping(&mut mappings, &mut roots, home.join(directory), placeholder);
+            }
+        }
+    }
     // Without a session, recover Cargo's workspace root from the outermost
     // lockfile so member crates use the same placeholder as session mode.
     if !mappings
@@ -1015,12 +1030,8 @@ fn path_mappings_with_env(
     // checkout-specific prefix must be `${workspace}` so equivalent worktrees
     // agree on their source paths. Cargo and rustup roots come first because a
     // registry compilation uses one of those as its working directory.
-    for name in ["HOME", "USERPROFILE"] {
-        if let Some(root) = environment(name).map(PathBuf::from)
-            && root.is_absolute()
-        {
-            add_mapping(&mut mappings, &mut roots, root, "home");
-        }
+    for root in home_roots {
+        add_mapping(&mut mappings, &mut roots, root, "home");
     }
     mappings
 }
