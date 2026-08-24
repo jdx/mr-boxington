@@ -395,6 +395,34 @@ fn explain_forwards_cargo_flags_and_the_rustc_separator() {
 }
 
 #[test]
+fn prefetch_preserves_cargo_flags_and_the_rustc_separator() {
+    let argv = [
+        "mbx",
+        "prefetch",
+        "test",
+        "--workspace",
+        "--",
+        "--nocapture",
+    ]
+    .map(std::ffi::OsStr::new);
+
+    let cli = Cli::try_parse_from(&argv).unwrap();
+
+    let Commands::Prefetch(args) = cli.command else {
+        panic!("prefetch should remain an mbx command");
+    };
+    assert_eq!(args.cargo_args, ["test", "--workspace", "--nocapture"]);
+    let original = argv
+        .iter()
+        .map(|argument| argument.to_os_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        original_prefetch_arguments(&original).unwrap(),
+        ["test", "--workspace", "--", "--nocapture"]
+    );
+}
+
+#[test]
 fn cli_exposes_its_usage_spec() {
     let spec = Cli::to_kdl();
     assert!(spec.contains("external_subcommand #true"));
