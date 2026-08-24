@@ -113,6 +113,14 @@ pub struct RestoreStats {
     pub output_files: u64,
     /// Declared size of compiler output files restored.
     pub output_bytes: u64,
+    /// Number of restored output files that share data blocks with the CAS.
+    pub reflinked_output_files: u64,
+    /// Declared size of restored outputs that share data blocks with the CAS.
+    pub reflinked_output_bytes: u64,
+    /// Number of restored output files that required a byte-for-byte copy.
+    pub copied_output_files: u64,
+    /// Declared size of restored outputs that required a byte-for-byte copy.
+    pub copied_output_bytes: u64,
 }
 
 /// A response returned by the task-scoped cache agent.
@@ -215,6 +223,14 @@ pub struct AgentStats {
     pub restored_output_files: u64,
     /// Declared size of compiler output files restored from action hits.
     pub restored_output_bytes: u64,
+    /// Number of restored output files materialized with filesystem reflinks.
+    pub reflinked_output_files: u64,
+    /// Declared size of outputs materialized with filesystem reflinks.
+    pub reflinked_output_bytes: u64,
+    /// Number of restored output files materialized by copying their bytes.
+    pub copied_output_files: u64,
+    /// Declared size of outputs materialized by copying their bytes.
+    pub copied_output_bytes: u64,
 }
 
 /// Adapter-owned data needed to reconstruct an action before fresh dependency
@@ -255,6 +271,10 @@ struct AtomicAgentStats {
     bypasses: Mutex<BTreeMap<String, u64>>,
     restored_output_files: AtomicU64,
     restored_output_bytes: AtomicU64,
+    reflinked_output_files: AtomicU64,
+    reflinked_output_bytes: AtomicU64,
+    copied_output_files: AtomicU64,
+    copied_output_bytes: AtomicU64,
 }
 
 struct AtomicDurationTimer<'a> {
@@ -740,6 +760,10 @@ impl CacheAgent {
                 .load(Ordering::Relaxed),
             restored_output_files: self.stats.restored_output_files.load(Ordering::Relaxed),
             restored_output_bytes: self.stats.restored_output_bytes.load(Ordering::Relaxed),
+            reflinked_output_files: self.stats.reflinked_output_files.load(Ordering::Relaxed),
+            reflinked_output_bytes: self.stats.reflinked_output_bytes.load(Ordering::Relaxed),
+            copied_output_files: self.stats.copied_output_files.load(Ordering::Relaxed),
+            copied_output_bytes: self.stats.copied_output_bytes.load(Ordering::Relaxed),
         }
     }
 
@@ -1656,6 +1680,16 @@ impl CacheAgent {
         self.record_materialization(restore);
         atomic_saturating_add(&self.stats.restored_output_files, restore.output_files);
         atomic_saturating_add(&self.stats.restored_output_bytes, restore.output_bytes);
+        atomic_saturating_add(
+            &self.stats.reflinked_output_files,
+            restore.reflinked_output_files,
+        );
+        atomic_saturating_add(
+            &self.stats.reflinked_output_bytes,
+            restore.reflinked_output_bytes,
+        );
+        atomic_saturating_add(&self.stats.copied_output_files, restore.copied_output_files);
+        atomic_saturating_add(&self.stats.copied_output_bytes, restore.copied_output_bytes);
     }
 
     fn record_materialization(&self, restore: RestoreStats) {
@@ -2215,6 +2249,10 @@ mod tests {
                         duration_ns: 7,
                         output_files: 2,
                         output_bytes: 11,
+                        reflinked_output_files: 1,
+                        reflinked_output_bytes: 7,
+                        copied_output_files: 1,
+                        copied_output_bytes: 4,
                     },
                 })
                 .await,
@@ -2228,6 +2266,10 @@ mod tests {
                 materialization_duration_ns: 7,
                 restored_output_files: 2,
                 restored_output_bytes: 11,
+                reflinked_output_files: 1,
+                reflinked_output_bytes: 7,
+                copied_output_files: 1,
+                copied_output_bytes: 4,
                 ..AgentStats::default()
             }
         );
@@ -2273,6 +2315,7 @@ mod tests {
                         duration_ns: 7,
                         output_files: 2,
                         output_bytes: 11,
+                        ..RestoreStats::default()
                     },
                 })
                 .await,

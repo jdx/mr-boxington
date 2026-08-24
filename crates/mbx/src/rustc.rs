@@ -35,6 +35,12 @@ struct StagedOutputs {
     files: Vec<(tempfile::TempPath, PathBuf)>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Materialization {
+    Reflink,
+    Copy,
+}
+
 pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode> {
     let working_dir = std::env::current_dir()?;
     let portable = Portable::detect(&working_dir);
@@ -458,8 +464,27 @@ fn restore_result(
     std::fs::create_dir_all(&outputs.directory)?;
     let staging = tempfile::tempdir_in(&outputs.directory)?;
     let mut staged = Vec::with_capacity(files.len());
+    let mut restore = RestoreStats {
+        output_files: restored_output_files,
+        output_bytes: restored_output_bytes,
+        ..RestoreStats::default()
+    };
     for (index, ((node, destination), source)) in files.into_iter().zip(&blobs[2..]).enumerate() {
-        let temporary = stage_cached_output(staging.path(), index, source, &node)?;
+        let (temporary, materialization) =
+            stage_verified_cached_output(staging.path(), index, source, &node)?;
+        match materialization {
+            Materialization::Reflink => {
+                restore.reflinked_output_files = restore.reflinked_output_files.saturating_add(1);
+                restore.reflinked_output_bytes = restore
+                    .reflinked_output_bytes
+                    .saturating_add(node.digest.size);
+            }
+            Materialization::Copy => {
+                restore.copied_output_files = restore.copied_output_files.saturating_add(1);
+                restore.copied_output_bytes =
+                    restore.copied_output_bytes.saturating_add(node.digest.size);
+            }
+        }
         staged.push((temporary, destination));
     }
     let staged = StagedOutputs {
@@ -470,15 +495,11 @@ fn restore_result(
     discovered.verify()?;
     verify_environment(&discovered.environment)?;
     finalize_restored_outputs(staged, restore_outputs)?;
-    let restore = RestoreStats {
-        duration_ns: materialization_started
-            .elapsed()
-            .as_nanos()
-            .try_into()
-            .unwrap_or(u64::MAX),
-        output_files: restored_output_files,
-        output_bytes: restored_output_bytes,
-    };
+    restore.duration_ns = materialization_started
+        .elapsed()
+        .as_nanos()
+        .try_into()
+        .unwrap_or(u64::MAX);
     if restore_outputs {
         record_action_hit(&action.digest, restore);
     }
@@ -497,29 +518,43 @@ fn finalize_restored_outputs(staged: StagedOutputs, restore_outputs: bool) -> Re
     Ok(())
 }
 
-fn stage_cached_output(
+fn stage_verified_cached_output(
     directory: &Path,
     index: usize,
     source: &Path,
     node: &CacheFileNode,
-) -> Result<tempfile::TempPath> {
+) -> Result<(tempfile::TempPath, Materialization)> {
     let temporary = directory.join(format!("output-{index}"));
-    reflink_copy::reflink_or_copy(source, &temporary)
+    let copied_bytes = reflink_copy::reflink_or_copy(source, &temporary)
         .wrap_err_with(|| format!("failed to materialize cached rustc output {}", node.name))?;
+    let materialization = match copied_bytes {
+        None => Materialization::Reflink,
+        Some(written) if written == node.digest.size => Materialization::Copy,
+        Some(_) => bail!(
+            "materialized cached rustc output has the wrong size: {}",
+            node.name
+        ),
+    };
     let temporary = tempfile::TempPath::try_from_path(temporary)?;
     make_owner_writable(&temporary)?;
     // Deliberately not fsynced. These are build artifacts in a target
     // directory, and cargo does not sync its own outputs either, so syncing
     // here buys no durability the build relies on -- it only costs one fsync
     // per restored file, which on a large workspace is most of the restore.
-    if !node.digest.matches_file(&temporary)? {
+    // `source` is a session-verified CAS path returned by `FindBlobs`. Hashing
+    // the result again would read every output a second time and, for a
+    // reflink, eagerly fault the shared data blocks that cloning was intended
+    // to leave deferred. A reflink is a CoW snapshot and the copy fallback
+    // reports the number of bytes it wrote, so checking the staged length is
+    // sufficient after the agent's content verification.
+    if std::fs::metadata(&temporary)?.len() != node.digest.size {
         bail!(
-            "cached rustc output failed digest verification: {}",
+            "materialized cached rustc output has the wrong size: {}",
             node.name
         );
     }
     apply_file_mode(&temporary, node.mode)?;
-    Ok(temporary)
+    Ok((temporary, materialization))
 }
 
 fn cached_matches(cached: &CachedCompilation, output: &Output) -> bool {
@@ -1376,7 +1411,7 @@ mod tests {
         let staging = tempfile::tempdir_in(root.path()).unwrap();
         let node = test_file("artifact.rlib");
 
-        let output = stage_cached_output(staging.path(), 0, &source, &node).unwrap();
+        let (output, _) = stage_verified_cached_output(staging.path(), 0, &source, &node).unwrap();
         std::fs::write(&output, b"modified").unwrap();
 
         assert_eq!(std::fs::read(source).unwrap(), b"artifact");
@@ -1384,14 +1419,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_same_size_corrupt_cached_outputs() {
+    fn rejects_cached_outputs_with_the_wrong_size() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("cas-blob");
-        std::fs::write(&source, b"corrupt!").unwrap();
+        std::fs::write(&source, b"short").unwrap();
         let staging = tempfile::tempdir_in(root.path()).unwrap();
         let node = test_file("artifact.rlib");
 
-        assert!(stage_cached_output(staging.path(), 0, &source, &node).is_err());
+        assert!(stage_verified_cached_output(staging.path(), 0, &source, &node).is_err());
     }
 
     #[test]
@@ -1405,7 +1440,7 @@ mod tests {
         let staging = tempfile::tempdir_in(root.path()).unwrap();
         let node = test_file("artifact.rlib");
 
-        let output = stage_cached_output(staging.path(), 0, &source, &node).unwrap();
+        let (output, _) = stage_verified_cached_output(staging.path(), 0, &source, &node).unwrap();
 
         assert_eq!(std::fs::read(output).unwrap(), b"artifact");
         assert!(std::fs::metadata(&source).unwrap().permissions().readonly());
@@ -1450,28 +1485,31 @@ mod tests {
             name: "artifact.rlib".into(),
         };
 
-        let started = std::time::Instant::now();
-        for _ in 0..iterations {
-            let mut temporary = tempfile::NamedTempFile::new_in(root.path()).unwrap();
-            let mut input = std::fs::File::open(&source).unwrap();
-            std::io::copy(&mut input, temporary.as_file_mut()).unwrap();
-            temporary.flush().unwrap();
-            temporary.as_file().sync_all().unwrap();
-            assert!(digest.matches_file(temporary.path()).unwrap());
-            apply_file_mode(temporary.path(), node.mode).unwrap();
-        }
-        let copied = started.elapsed();
-
         let staging = tempfile::tempdir_in(root.path()).unwrap();
         let started = std::time::Instant::now();
         for _ in 0..iterations {
-            stage_cached_output(staging.path(), 0, &source, &node).unwrap();
+            let temporary = staging.path().join("legacy-output");
+            reflink_copy::reflink_or_copy(&source, &temporary).unwrap();
+            let temporary = tempfile::TempPath::try_from_path(temporary).unwrap();
+            make_owner_writable(&temporary).unwrap();
+            assert!(digest.matches_file(&temporary).unwrap());
+            apply_file_mode(&temporary, node.mode).unwrap();
+        }
+        let legacy = started.elapsed();
+
+        let staging = tempfile::tempdir_in(root.path()).unwrap();
+        let started = std::time::Instant::now();
+        let mut method = None;
+        for _ in 0..iterations {
+            let (_, observed) =
+                stage_verified_cached_output(staging.path(), 0, &source, &node).unwrap();
+            method = Some(observed);
         }
         let materialized = started.elapsed();
 
         println!(
-            "materialized {iterations} x {size_mib} MiB: copied={copied:.2?}, reflink_or_copy={materialized:.2?}, speedup={:.2}x",
-            copied.as_secs_f64() / materialized.as_secs_f64()
+            "materialized {iterations} x {size_mib} MiB with {method:?}: legacy_reverify={legacy:.2?}, verified_cas={materialized:.2?}, speedup={:.2}x",
+            legacy.as_secs_f64() / materialized.as_secs_f64()
         );
     }
 }

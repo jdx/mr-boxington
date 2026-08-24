@@ -28,6 +28,28 @@ prediction for later invocations. A genuinely cold compilation may therefore
 have no key to look up yet. It still gets stored after compiling and can warm
 the next build.
 
+## Copy-on-write output restoration
+
+The cache agent verifies each local CAS blob against its digest before returning
+it to the rustc wrapper. The wrapper first tries to reflink that verified blob
+into a staging directory beside Cargo's destination, applies the expected file
+mode, and atomically renames it into place. A reflink is an ordinary file that
+shares its data blocks with the CAS until either copy is written, so Cargo sees
+the complete output immediately without the wrapper re-reading or allocating
+all of its data after verification. Writes to a restored output cannot change
+the CAS object.
+
+Reflinks require support from the filesystem and generally require the cache
+and target directory to be on the same filesystem. When cloning is unavailable,
+mbx transparently copies the bytes instead. The session summary reports the
+file count and logical size handled by each path; `MBX_STATS_REPORT` includes
+the same values as `reflinked_output_files`, `reflinked_output_bytes`,
+`copied_output_files`, and `copied_output_bytes`.
+
+This is filesystem copy-on-write, not a placeholder or userspace on-demand
+filesystem. Restored paths retain normal file semantics on every supported
+platform, including when mbx has to use the copy fallback.
+
 ## Correctness first
 
 Unsupported crate types, unmodeled search paths, linking, and incremental
