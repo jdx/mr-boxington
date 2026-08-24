@@ -115,10 +115,11 @@ An equivalent rustc action keys the same across checkout paths. One worktree's
 dependency build can therefore warm another while every checkout keeps its own
 target directory.
 
-For GitHub-hosted CI, save `~/.cache/mbx` from `main` with `actions/cache`, then
-restore it read-only in pull requests. This works for forks without exposing a
-private cache host. Trusted environments can instead use a compatible remote
-such as [`jdx/mbx-cache`](https://github.com/jdx/mbx-cache).
+For GitHub-hosted CI, [`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action)
+can install mbx and use GitHub Actions cache, saving only from the default
+branch and restoring in pull requests. Trusted environments can switch the
+same action to a compatible remote such as
+[`jdx/mbx-cache`](https://github.com/jdx/mbx-cache).
 
 [Configure GitHub Actions →](https://mr-boxington.jdx.dev/github-actions)
 
