@@ -23,6 +23,25 @@ fn bypass_kinds_are_stable_and_field_independent() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn path_mappings_resolve_symlinked_roots_for_missing_outputs() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let physical = directory.path().join("physical");
+    let alias = directory.path().join("alias");
+    std::fs::create_dir(&physical).unwrap();
+    symlink(&physical, &alias).unwrap();
+
+    let mappings = vec![PathMapping::new(alias, "target")];
+    let output = physical.join("debug/deps/not-created.wasm");
+    assert_eq!(
+        normalize_mapped_path(&output, directory.path(), &mappings).unwrap(),
+        "${target}/debug/deps/not-created.wasm"
+    );
+}
+
 use super::*;
 
 fn args(values: &[&str]) -> Vec<OsString> {
