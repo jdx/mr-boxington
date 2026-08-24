@@ -1,0 +1,76 @@
+name: performance and correctness
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/measure.yml"
+      - "benchmarks/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**"
+  workflow_dispatch:
+  schedule:
+    # One bounded weekly canary, away from the top of the hour.
+    - cron: "17 6 * * 1"
+
+concurrency:
+  group: measure-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build benchmark driver
+        run: cargo build --release --locked -p mbx
+      - name: Measure warm shim overhead
+        run: |
+          python3 benchmarks/measure_shim.py \
+            --mbx target/release/mbx \
+            --output "$RUNNER_TEMP/mbx-measurements/shim" \
+            --budget-ms 2
+      - name: Stage benchmark driver
+        run: cp target/release/mbx "$RUNNER_TEMP/mbx-benchmark-driver"
+      - name: Measure cold and warm workspace builds
+        if: github.event_name == 'pull_request'
+        run: |
+          python3 benchmarks/measure_builds.py \
+            --mbx "$RUNNER_TEMP/mbx-benchmark-driver" \
+            --workspace "$GITHUB_WORKSPACE" \
+            --output "$RUNNER_TEMP/mbx-measurements/build"
+      - name: Run verify-mode correctness canary
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          python3 benchmarks/measure_builds.py \
+            --mbx "$RUNNER_TEMP/mbx-benchmark-driver" \
+            --workspace "$GITHUB_WORKSPACE" \
+            --output "$RUNNER_TEMP/mbx-measurements/build" \
+            --verify
+      - name: Publish job summary
+        if: always()
+        run: |
+          find "$RUNNER_TEMP/mbx-measurements" -name '*.md' -type f -print0 \
+            | sort -z \
+            | xargs -0 -r cat >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mbx-measurements-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mbx-measurements
+          if-no-files-found: error
+          retention-days: 90
