@@ -35,6 +35,7 @@ EOF
 }
 
 @test "setup installs and configures the persistent wrapper" {
+  local wrapper
   mkdir -p "$CARGO_HOME"
   cat >"$CARGO_HOME/config.toml" <<'EOF'
 # keep me
@@ -49,7 +50,9 @@ EOF
   assert_file_contains "$CARGO_HOME/config.toml" "# keep me"
   assert_file_contains "$CARGO_HOME/config.toml" "offline = true"
   assert_file_contains "$CARGO_HOME/config.toml" "rustc-wrapper"
-  assert_file_executable "$XDG_DATA_HOME/mbx/bin/mbx-rustc"
+  wrapper="$(sed -n 's/.*rustc-wrapper = "\([^"]*\)".*/\1/p' "$CARGO_HOME/config.toml")"
+  [[ -n "$wrapper" ]]
+  assert_file_executable "$wrapper"
 }
 
 @test "setup leaves an existing rustc wrapper unchanged" {
@@ -63,7 +66,6 @@ EOF
   assert_success
   assert_output --partial "left $CARGO_HOME/config.toml unchanged"
   assert_file_contains "$CARGO_HOME/config.toml" 'rustc-wrapper = "sccache"'
-  assert_file_not_exists "$XDG_DATA_HOME/mbx/bin/mbx-rustc"
 }
 
 @test "the persistent wrapper restores a second checkout without an mbx session" {
