@@ -662,7 +662,7 @@ fn cargo_config_may_set_target_dir(arguments: &[String], invocation_dir: &Path) 
     if config_arguments(arguments).any(|value| {
         value
             .split_once('=')
-            .is_none_or(|(key, _)| key.trim() == "build.target-dir")
+            .is_none_or(|(key, _)| matches!(key.trim(), "build.target-dir" | "include"))
     }) {
         return true;
     }
@@ -1061,6 +1061,20 @@ mod tests {
 
         assert_eq!(roots.target_dir, root.join("target"));
         assert!(roots.target_dir_requested);
+    }
+
+    #[test]
+    fn a_command_line_config_include_may_set_the_target_dir() {
+        let arguments = [
+            "build".to_string(),
+            "--config".to_string(),
+            "include='target-config.toml'".to_string(),
+        ];
+
+        assert!(cargo_config_may_set_target_dir(
+            &arguments,
+            Path::new("/workspace")
+        ));
     }
 
     #[test]
