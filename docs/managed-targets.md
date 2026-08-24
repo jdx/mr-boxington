@@ -52,7 +52,8 @@ remove the directory.
 
 After acceptance, mbx temporarily moves the old directory aside. It removes
 those outputs only after the managed link and its collection record both
-succeed; if placement fails, mbx restores the original directory.
+succeed, then reports how much space the old outputs occupied. If placement
+fails, mbx restores the original directory.
 
 mbx does not offer removal for an explicitly configured target directory or a
 symlink it does not own.

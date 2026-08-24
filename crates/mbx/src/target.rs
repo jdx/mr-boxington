@@ -52,6 +52,13 @@ pub struct PruneOutcome {
     pub removed_bytes: u64,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct MigrationOutcome {
+    pub managed: Option<PathBuf>,
+    /// Present only when the old directory was actually removed.
+    pub removed_bytes: Option<u64>,
+}
+
 /// Whether an interactive caller may offer to remove this target directory.
 ///
 /// Match placement's eligibility rules exactly, then require a real directory.
@@ -79,7 +86,7 @@ pub fn migrate_existing(
     workspace_root: &Path,
     target_dir: &Path,
     requested: bool,
-) -> Result<Option<PathBuf>> {
+) -> Result<MigrationOutcome> {
     migrate_existing_with(config, workspace_root, target_dir, requested, || {
         place(config, workspace_root, target_dir, requested)
     })
@@ -91,7 +98,7 @@ fn migrate_existing_with(
     target_dir: &Path,
     requested: bool,
     place_target: impl FnOnce() -> Option<PathBuf>,
-) -> Result<Option<PathBuf>> {
+) -> Result<MigrationOutcome> {
     if !std::fs::symlink_metadata(target_dir).is_ok_and(|metadata| metadata.is_dir()) {
         eyre::bail!(
             "{} is no longer a real target directory, so it was not migrated",
@@ -109,6 +116,7 @@ fn migrate_existing_with(
     let backup = backup_root.path().join("target");
     std::fs::rename(target_dir, &backup)
         .wrap_err_with(|| format!("could not temporarily move {}", target_dir.display()))?;
+    let old_bytes = tree_bytes(&backup);
 
     if let Some(managed) = place_target() {
         if let Err(error) = std::fs::remove_dir_all(&backup) {
@@ -117,8 +125,15 @@ fn migrate_existing_with(
                 "the old target directory was retained at {}: {error}",
                 retained.display()
             );
+            return Ok(MigrationOutcome {
+                managed: Some(managed),
+                removed_bytes: None,
+            });
         }
-        return Ok(Some(managed));
+        return Ok(MigrationOutcome {
+            managed: Some(managed),
+            removed_bytes: Some(old_bytes),
+        });
     }
 
     let managed = view_dir(&config.target.root, workspace_root);
@@ -149,7 +164,7 @@ fn migrate_existing_with(
             )
         });
     }
-    Ok(None)
+    Ok(MigrationOutcome::default())
 }
 
 /// Where this checkout's outputs should be written, if mbx is placing them.
@@ -554,12 +569,14 @@ fn tree_bytes(directory: &Path) -> u64 {
         for entry in listing.flatten() {
             // Symlinks are not followed: a link's target is either inside this
             // tree and already counted, or outside it and not ours to count.
-            let Ok(metadata) = entry.metadata() else {
+            let Ok(file_type) = entry.file_type() else {
                 continue;
             };
-            if metadata.is_dir() {
+            if file_type.is_dir() {
                 pending.push(entry.path());
-            } else if metadata.is_file() {
+            } else if file_type.is_file()
+                && let Ok(metadata) = entry.metadata()
+            {
                 total += metadata.len();
             }
         }
@@ -720,9 +737,9 @@ mod tests {
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("artifact"), b"old output").unwrap();
 
-        let placed = migrate_existing_with(&config, &workspace, &target, false, || None).unwrap();
+        let outcome = migrate_existing_with(&config, &workspace, &target, false, || None).unwrap();
 
-        assert!(placed.is_none());
+        assert_eq!(outcome, MigrationOutcome::default());
         assert_eq!(
             std::fs::read(target.join("artifact")).unwrap(),
             b"old output"
@@ -738,13 +755,18 @@ mod tests {
         let target = workspace.join("target");
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("artifact"), b"old output").unwrap();
+        let elsewhere = directory.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("not-cleaned"), vec![0; 1024]).unwrap();
+        symlink_dir(&elsewhere, &target.join("external-link")).unwrap();
 
-        let managed = migrate_existing(&config, &workspace, &target, false)
-            .unwrap()
-            .unwrap();
+        let outcome = migrate_existing(&config, &workspace, &target, false).unwrap();
+        let managed = outcome.managed.unwrap();
 
         assert_eq!(std::fs::read_link(&target).unwrap(), managed);
         assert!(!target.join("artifact").exists());
+        assert_eq!(outcome.removed_bytes, Some(10));
+        assert!(elsewhere.join("not-cleaned").is_file());
         assert_eq!(stats(&config.target.root).unwrap().views, 1);
     }
 

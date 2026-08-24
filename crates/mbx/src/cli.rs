@@ -112,21 +112,31 @@ fn cargo(config: &Config, arguments: &[String]) -> Result<ExitCode> {
     // Placed before the session starts, because the target directory is what
     // the shim maps out of its cache keys and it has to be the one cargo will
     // actually write to.
-    let placed = if migrate_existing {
-        target::migrate_existing(
+    let (placed, removed_target_bytes) = if migrate_existing {
+        let outcome = target::migrate_existing(
             config,
             &roots.workspace_root,
             &roots.target_dir,
             roots.target_dir_requested,
-        )?
+        )?;
+        (outcome.managed, outcome.removed_bytes)
     } else {
-        target::place(
-            config,
-            &roots.workspace_root,
-            &roots.target_dir,
-            roots.target_dir_requested,
+        (
+            target::place(
+                config,
+                &roots.workspace_root,
+                &roots.target_dir,
+                roots.target_dir_requested,
+            ),
+            None,
         )
     };
+    if let Some(bytes) = removed_target_bytes {
+        crate::session::note(&format!(
+            "freed {} by removing the existing target/ directory",
+            ByteSize::b(bytes).display().iec()
+        ));
+    }
     if let Some(directory) = &placed {
         roots.target_dir = directory.clone();
     }
