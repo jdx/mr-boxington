@@ -26,6 +26,7 @@ _common_setup() {
   export XDG_CACHE_HOME="$BATS_TEST_TMPDIR/cache"
   export XDG_CONFIG_HOME="$BATS_TEST_TMPDIR/config"
   export XDG_DATA_HOME="$BATS_TEST_TMPDIR/data"
+  export MBX_CACHE_DIR="$BATS_TEST_TMPDIR/cache/mbx"
   mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
   cd "$BATS_TEST_TMPDIR" || return 1
 }
