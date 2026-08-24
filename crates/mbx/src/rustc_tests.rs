@@ -135,6 +135,25 @@ fn mappings_do_not_duplicate_home_placeholders() {
 }
 
 #[test]
+fn standalone_workspace_mapping_wins_beneath_home() {
+    let home = Path::new("/tmp/example-home");
+    let workspace = home.join("src/project");
+    let mappings = path_mappings_with_env(&workspace, None, None, |name| match name {
+        "HOME" => Some(home.as_os_str().to_owned()),
+        _ => None,
+    });
+
+    assert!(mappings.iter().any(|mapping| {
+        mapping.placeholder == "workspace" && mapping.root == workspace
+    }));
+    assert!(
+        mappings
+            .iter()
+            .any(|mapping| mapping.placeholder == "home" && mapping.root == home)
+    );
+}
+
+#[test]
 fn standalone_target_mapping_covers_the_profile_tree() {
     assert_eq!(
         standalone_target_root(Path::new("/tmp/target/debug/deps"), None),

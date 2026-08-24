@@ -955,6 +955,17 @@ fn path_mappings(
     target_output: Option<&Path>,
     target: Option<&str>,
 ) -> Vec<PathMapping> {
+    path_mappings_with_env(working_dir, target_output, target, |name| {
+        std::env::var_os(name)
+    })
+}
+
+fn path_mappings_with_env(
+    working_dir: &Path,
+    target_output: Option<&Path>,
+    target: Option<&str>,
+    environment: impl Fn(&str) -> Option<OsString>,
+) -> Vec<PathMapping> {
     let mut mappings = Vec::new();
     let mut roots = BTreeSet::new();
     // The target directory comes first, and before the workspace that usually
@@ -965,7 +976,7 @@ fn path_mappings(
     // Cargo compiles a dependency with its working directory inside the
     // registry, not in the workspace, so neither root can be inferred from the
     // working directory -- the session passes both in.
-    let configured_target = std::env::var_os(session::TARGET_DIR_ENV)
+    let configured_target = environment(session::TARGET_DIR_ENV)
         .map(PathBuf::from)
         .filter(|root| root.is_absolute());
     if let Some(root) = configured_target.or_else(|| {
@@ -979,10 +990,8 @@ fn path_mappings(
         (session::WORKSPACE_ROOT_ENV, "workspace"),
         ("CARGO_HOME", "cargo_home"),
         ("RUSTUP_HOME", "rustup_home"),
-        ("HOME", "home"),
-        ("USERPROFILE", "home"),
     ] {
-        if let Some(root) = std::env::var_os(name).map(PathBuf::from)
+        if let Some(root) = environment(name).map(PathBuf::from)
             && root.is_absolute()
         {
             add_mapping(&mut mappings, &mut roots, root, placeholder);
@@ -990,13 +999,28 @@ fn path_mappings(
     }
     // Without a session there is no workspace root to trust, so fall back to
     // the working directory rather than bypassing every action.
-    if !roots.iter().any(|root| working_dir.starts_with(root)) {
+    if !mappings
+        .iter()
+        .any(|mapping| mapping.placeholder == "workspace")
+        && !roots.iter().any(|root| working_dir.starts_with(root))
+    {
         add_mapping(
             &mut mappings,
             &mut roots,
             working_dir.to_path_buf(),
             "workspace",
         );
+    }
+    // Home is deliberately last. Most real checkouts live under it, but a
+    // checkout-specific prefix must be `${workspace}` so equivalent worktrees
+    // agree on their source paths. Cargo and rustup roots come first because a
+    // registry compilation uses one of those as its working directory.
+    for name in ["HOME", "USERPROFILE"] {
+        if let Some(root) = environment(name).map(PathBuf::from)
+            && root.is_absolute()
+        {
+            add_mapping(&mut mappings, &mut roots, root, "home");
+        }
     }
     mappings
 }
