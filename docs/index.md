@@ -17,21 +17,21 @@ hero:
       link: /github-actions
 
 features:
-  - icon: "⚡"
-    title: Cache rustc actions
-    details: Restore individual compilations instead of rebuilding an entire dependency graph.
-    link: /how-it-works
+  - icon: "⚙️"
+    title: Wrap normal Cargo commands
+    details: Put mbx before build, test, or clippy. Cargo still plans the build; mbx restores the rustc work it has seen before.
+    link: /getting-started
   - icon: "🌳"
-    title: Share across worktrees
-    details: Cache keys contain no checkout-specific absolute paths, so one checkout can warm another.
+    title: Warm every worktree
+    details: Cache keys contain no checkout-specific absolute paths, so building one checkout warms its siblings automatically.
     link: /cache-results
   - icon: "☁️"
     title: Warm CI runners
     details: Use a remote cache or GitHub Actions cache while untrusted pull requests remain read-only.
     link: /github-actions
-  - icon: "📦"
-    title: Reclaim build storage
-    details: Sweep cached objects to a budget and optionally collect target directories after their checkout disappears.
+  - icon: "🧹"
+    title: Prune automatically
+    details: Keep the cache inside a size budget and reclaim managed target directories after their checkout disappears.
     link: /managed-targets
 ---
 
