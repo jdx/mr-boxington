@@ -423,6 +423,19 @@ fn prefetch_preserves_cargo_flags_and_the_rustc_separator() {
 }
 
 #[test]
+fn prefetch_rejects_release_contexts_instead_of_succeeding_without_remote_work() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = managed_target_config(directory.path());
+    config.remote.url = Some("https://cache.example.test".into());
+    config.remote.mode = mbx_cache_core::RemoteCacheMode::ReadOnly;
+
+    let error = validate_prefetch_config(&config, true).unwrap_err();
+
+    assert!(error.to_string().contains("disabled in release contexts"));
+    assert!(validate_prefetch_config(&config, false).is_ok());
+}
+
+#[test]
 fn cli_exposes_its_usage_spec() {
     let spec = Cli::to_kdl();
     assert!(spec.contains("external_subcommand #true"));

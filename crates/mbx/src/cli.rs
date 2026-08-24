@@ -140,12 +140,7 @@ fn original_prefetch_arguments(arguments: &[std::ffi::OsString]) -> Result<Vec<S
 }
 
 fn prefetch(config: &Config, arguments: &[String]) -> Result<ExitCode> {
-    if config.remote.url.is_none() {
-        eyre::bail!("remote prefetch requires remote.url or MBX_REMOTE_URL");
-    }
-    if !config.remote.mode.reads() {
-        eyre::bail!("remote prefetch requires a read-capable remote.mode");
-    }
+    validate_prefetch_config(config, policy::release_context())?;
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let working_dir = std::env::current_dir()?;
     let roots = resolve_roots(&cargo, arguments, &working_dir);
@@ -169,6 +164,19 @@ fn prefetch(config: &Config, arguments: &[String]) -> Result<ExitCode> {
         );
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn validate_prefetch_config(config: &Config, release_context: bool) -> Result<()> {
+    if config.remote.url.is_none() {
+        eyre::bail!("remote prefetch requires remote.url or MBX_REMOTE_URL");
+    }
+    if !config.remote.mode.reads() {
+        eyre::bail!("remote prefetch requires a read-capable remote.mode");
+    }
+    if release_context {
+        eyre::bail!("remote prefetch is disabled in release contexts");
+    }
+    Ok(())
 }
 
 fn setup() -> Result<()> {
