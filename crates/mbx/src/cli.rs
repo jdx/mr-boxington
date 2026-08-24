@@ -4,51 +4,50 @@ use crate::config::Config;
 use crate::session::CacheSession;
 use crate::{policy, store, target};
 use bytesize::ByteSize;
-use clap::{Args, Parser, Subcommand};
 use eyre::{Context, Result};
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-#[derive(Parser)]
-#[command(
-    name = "mbx",
+#[derive(usage::Cli)]
+#[usage(
+    bin = "mbx",
     version,
     about = "A build cache for Rust projects",
-    after_help = "Cargo subcommands are forwarded directly.\n\nExamples:\n  mbx build --release\n  mbx test --workspace\n  mbx clippy --all-targets"
+    long_about = "A build cache for Rust projects\n\nCargo subcommands are forwarded directly.\n\nExamples:\n  mbx build --release\n  mbx test --workspace\n  mbx clippy --all-targets",
+    unknown_flags = "error"
 )]
 struct Cli {
-    #[command(subcommand)]
+    #[usage(subcommand)]
     command: Commands,
 }
 
-#[derive(Subcommand)]
+#[derive(usage::Subcommands)]
 enum Commands {
     /// Evict cached objects until the store fits a size budget.
     Gc(GcArgs),
     /// Inspect the local store.
     Cache(CacheArgs),
-    /// Run a cargo subcommand with the build cache enabled.
-    #[command(external_subcommand)]
+    #[usage(external_subcommand)]
     Cargo(Vec<String>),
 }
 
-#[derive(Args)]
+#[derive(usage::Args)]
 struct GcArgs {
     /// Size the store may occupy afterwards, for example 20GiB. Defaults to the
     /// configured budget.
-    #[arg(long, value_name = "SIZE")]
+    #[usage(long, value_name = "SIZE")]
     max_size: Option<ByteSize>,
 }
 
-#[derive(Args)]
+#[derive(usage::Args)]
 struct CacheArgs {
-    #[command(subcommand)]
+    #[usage(subcommand)]
     command: CacheCommands,
 }
 
-#[derive(Subcommand)]
+#[derive(usage::Subcommands)]
 enum CacheCommands {
     /// Print the store directory.
     Dir,
@@ -966,7 +965,8 @@ mod tests {
 
     #[test]
     fn cargo_subcommands_are_forwarded_directly() {
-        let cli = Cli::try_parse_from(["mbx", "clippy", "--workspace"]).unwrap();
+        let argv = ["mbx", "clippy", "--workspace"].map(std::ffi::OsStr::new);
+        let cli = Cli::try_parse_from(&argv).unwrap();
         let Commands::Cargo(arguments) = cli.command else {
             panic!("clippy should be treated as a cargo subcommand");
         };
@@ -975,8 +975,17 @@ mod tests {
 
     #[test]
     fn mbx_commands_still_take_precedence() {
-        let cli = Cli::try_parse_from(["mbx", "gc", "--max-size", "1GiB"]).unwrap();
+        let argv = ["mbx", "gc", "--max-size", "1GiB"].map(std::ffi::OsStr::new);
+        let cli = Cli::try_parse_from(&argv).unwrap();
         assert!(matches!(cli.command, Commands::Gc(_)));
+    }
+
+    #[test]
+    fn cli_exposes_its_usage_spec() {
+        let spec = Cli::to_kdl();
+        assert!(spec.contains("external_subcommand #true"));
+        assert!(spec.contains("cmd gc"));
+        assert!(spec.contains("cmd cache"));
     }
 
     #[test]
