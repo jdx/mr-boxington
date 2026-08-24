@@ -440,6 +440,9 @@ fn forgets_a_claim_no_build_has_renewed() {
         &serde_json::to_vec(&stale).unwrap(),
     )
     .unwrap();
+    // Filesystems with coarse timestamps can otherwise tie this object with
+    // the action descriptor and output tree created immediately afterward.
+    age(&store, &orphan, Duration::from_secs(1));
 
     assert_eq!(stats(&store).unwrap().stale_checkouts, 1);
     gc(&store, stats(&store).unwrap().total_bytes() - 1).unwrap();

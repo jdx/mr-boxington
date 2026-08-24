@@ -41,6 +41,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+          persist-credentials: false
       - if: matrix.os != 'windows-latest'
         uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1.6.1
         with:
@@ -51,6 +54,9 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
+      - name: Run behavioral tests
+        if: runner.os != 'Windows'
+        run: test/bats/bin/bats test
 
   compatibility:
     runs-on: namespace-profile-endev-linux-amd64
