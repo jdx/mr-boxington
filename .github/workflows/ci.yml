@@ -133,7 +133,7 @@ jobs:
           cargo +nightly-2026-08-02 fuzz run rustc_paths -- -runs=1000
 
   performance:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       CARGO_INCREMENTAL: 0
