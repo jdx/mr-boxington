@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Build it once.</strong><br>
-  A Cargo wrapper that warms worktrees and keeps Rust build storage under control.
+  A Cargo wrapper that shares compiled work across worktrees and CI—and prunes build storage automatically.
 </p>
 
 <p align="center">
