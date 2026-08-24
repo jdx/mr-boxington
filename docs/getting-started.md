@@ -13,6 +13,8 @@ mise use -g github:jdx/mr-boxington
 Linux x86-64:
 
 ```sh
+(
+set -e
 mkdir -p ~/.local/bin
 archive=mbx-x86_64-unknown-linux-musl.tar.gz
 release=https://github.com/jdx/mr-boxington/releases/latest/download
@@ -20,6 +22,7 @@ curl -fsSLO "$release/$archive"
 curl -fsSLO "$release/SHA256SUMS"
 grep "  $archive$" SHA256SUMS | sha256sum --check --strict -
 tar -xzf "$archive" -C ~/.local/bin
+)
 ```
 
 Release archives are also available for Linux ARM64, Apple Silicon, Intel macOS,
