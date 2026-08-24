@@ -303,6 +303,10 @@ struct StatsReport {
     stored_bytes: u64,
     restored_output_files: u64,
     restored_output_bytes: u64,
+    reflinked_output_files: u64,
+    reflinked_output_bytes: u64,
+    copied_output_files: u64,
+    copied_output_bytes: u64,
     remote_manifest_lookups: u64,
     remote_action_lookups: u64,
     remote_blob_requests: u64,
@@ -336,6 +340,10 @@ impl From<&AgentStats> for StatsReport {
             stored_bytes: stats.stored_bytes,
             restored_output_files: stats.restored_output_files,
             restored_output_bytes: stats.restored_output_bytes,
+            reflinked_output_files: stats.reflinked_output_files,
+            reflinked_output_bytes: stats.reflinked_output_bytes,
+            copied_output_files: stats.copied_output_files,
+            copied_output_bytes: stats.copied_output_bytes,
             remote_manifest_lookups: stats.remote_manifest_lookups,
             remote_action_lookups: stats.remote_action_lookups,
             remote_blob_requests: stats.remote_blob_requests,
@@ -414,6 +422,15 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
         format_nanos(stats.local_cas_write_duration_ns),
         format_nanos(stats.materialization_duration_ns),
     ));
+    if stats.restored_output_files > 0 {
+        note(&format!(
+            "cache materialization: {} outputs ({}) reflinked, {} outputs ({}) copied",
+            stats.reflinked_output_files,
+            ByteSize::b(stats.reflinked_output_bytes).display().iec(),
+            stats.copied_output_files,
+            ByteSize::b(stats.copied_output_bytes).display().iec(),
+        ));
+    }
     if stats.verifications > 0 {
         note(&format!(
             "cache qualification: {} verified, {} diverged",
@@ -1180,6 +1197,10 @@ mod tests {
             downloaded_bytes: 1024,
             restored_output_files: 7,
             restored_output_bytes: 2048,
+            reflinked_output_files: 5,
+            reflinked_output_bytes: 1536,
+            copied_output_files: 2,
+            copied_output_bytes: 512,
             remote_blob_requests: 4,
             remote_blob_pack_requests: 2,
             remote_blob_pack_blobs: 100,
@@ -1200,6 +1221,10 @@ mod tests {
         assert_eq!(report["downloaded_bytes"], 1024);
         assert_eq!(report["restored_output_files"], 7);
         assert_eq!(report["restored_output_bytes"], 2048);
+        assert_eq!(report["reflinked_output_files"], 5);
+        assert_eq!(report["reflinked_output_bytes"], 1536);
+        assert_eq!(report["copied_output_files"], 2);
+        assert_eq!(report["copied_output_bytes"], 512);
         assert_eq!(report["remote_blob_requests"], 4);
         assert_eq!(report["remote_blob_pack_requests"], 2);
         assert_eq!(report["remote_blob_pack_blobs"], 100);
