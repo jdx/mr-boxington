@@ -30,8 +30,11 @@ const MAX_PREFETCH_OBJECTS_PER_WAVE: usize = 100_000;
 
 /// Remote action-cache access owned by one task session.
 pub struct AgentRemoteCache {
+    /// Remote protocol client used by the agent.
     pub client: RemoteCacheClient,
+    /// Permitted remote read/write operations.
     pub mode: RemoteCacheMode,
+    /// Directory used for verified downloads before CAS ingestion.
     pub staging_dir: PathBuf,
 }
 
@@ -47,58 +50,90 @@ const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentRequest {
+    /// Negotiate protocol and application versions.
     Hello {
+        /// Agent protocol version understood by the caller.
         protocol: u8,
+        /// Human-readable mbx client version.
         client_version: String,
     },
     /// Resolve a blob to a session-verified local CAS path.
     FindBlob {
+        /// Blob to resolve.
         digest: CacheDigest,
     },
     /// Resolve blobs to session-verified local CAS paths.
     FindBlobs {
+        /// Blobs to resolve, preserving request order in the response.
         digests: Vec<CacheDigest>,
     },
+    /// Import a file into the local content-addressed store.
     StoreBlob {
+        /// Digest the source must match.
         digest: CacheDigest,
+        /// File to verify and import.
         source: PathBuf,
     },
+    /// Look up an action-result record.
     FindActionResult {
+        /// Action digest to resolve.
         action: CacheDigest,
     },
+    /// Account for a successfully restored cache hit.
     RecordActionHit {
+        /// Action that supplied the outputs.
         action: CacheDigest,
+        /// Restoration work performed by the adapter.
         restore: RestoreStats,
     },
     /// A compilation the adapter declined to cache, grouped by reason.
     RecordBypass {
+        /// Stable, low-cardinality bypass-reason name.
         kind: String,
     },
     /// A compilation the adapter could not look up, having no key to look up
     /// with. Distinct from a bypass: these are cached once compiled.
     RecordUnconsulted,
+    /// Account for a cache hit that was rebuilt for correctness verification.
     RecordActionVerification {
+        /// Whether rebuilt and cached outputs matched.
         matched: bool,
+        /// Restoration work performed before rebuilding.
         restore: RestoreStats,
     },
+    /// Store an action-result record locally and enqueue remote publication.
     StoreActionResult {
+        /// Action-result record to store.
         result: RemoteActionResult,
     },
+    /// Find an earlier input prediction for a task and invocation.
     FindActionPrediction {
+        /// Stable task identity.
         task: String,
+        /// Digest of the compiler invocation without discovered inputs.
         invocation: CacheDigest,
     },
+    /// Record an input prediction after a successful compilation.
     RecordActionPrediction {
+        /// Stable task identity.
         task: String,
+        /// Adapter-owned prediction record.
         prediction: ActionPrediction,
     },
+    /// Find cached identity output for an executable and environment.
     FindExecutableIdentity {
+        /// Executable whose identity command would run.
         executable: PathBuf,
+        /// Environment variables affecting identity output.
         environment: BTreeMap<String, Option<String>>,
     },
+    /// Cache identity output for an executable and environment.
     StoreExecutableIdentity {
+        /// Executable whose identity command ran.
         executable: PathBuf,
+        /// Environment variables affecting identity output.
         environment: BTreeMap<String, Option<String>>,
+        /// Captured identity-command standard output.
         stdout: Vec<u8>,
     },
 }
@@ -127,39 +162,61 @@ pub struct RestoreStats {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentResponse {
+    /// Successful protocol negotiation.
     Hello {
+        /// Agent protocol version.
         protocol: u8,
+        /// Human-readable agent version.
         agent_version: String,
     },
     /// A local CAS path already verified against the requested digest.
     Blob {
+        /// Verified local path, or `None` on a cache miss.
         path: Option<PathBuf>,
     },
     /// Local CAS paths already verified against the requested digests.
     Blobs {
+        /// Verified local paths or misses, in request order.
         paths: Vec<Option<PathBuf>>,
     },
+    /// A blob was stored locally.
     Stored {
+        /// Path of the stored object in the local CAS.
         path: PathBuf,
     },
+    /// Result of an action lookup.
     ActionResult {
+        /// Validated action result, or `None` on a cache miss.
         result: Option<RemoteActionResult>,
     },
+    /// Hit statistics were updated.
     ActionHitRecorded,
+    /// Verification statistics were updated.
     ActionVerificationRecorded,
+    /// Bypass statistics were updated.
     BypassRecorded,
+    /// Unconsulted-compilation statistics were updated.
     UnconsultedRecorded,
+    /// An action result was stored.
     ActionStored {
+        /// Path of the stored local action-result record.
         path: PathBuf,
     },
+    /// Result of an input-prediction lookup.
     ActionPrediction {
+        /// Matching prediction, or `None` when none is known.
         prediction: Option<ActionPrediction>,
     },
+    /// An input prediction was recorded.
     ActionPredictionRecorded,
+    /// Result of an executable-identity lookup.
     ExecutableIdentity {
+        /// Captured output, or `None` when no identity is cached.
         stdout: Option<Vec<u8>>,
     },
+    /// The request failed without terminating the agent connection.
     Error {
+        /// Human-readable failure description.
         message: String,
     },
 }
@@ -238,9 +295,13 @@ pub struct AgentStats {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionPrediction {
+    /// Invocation digest used to locate this prediction.
     pub invocation: CacheDigest,
+    /// Full action digest produced when the prediction was recorded.
     pub action: CacheDigest,
+    /// Adapter name that owns and understands `payload`.
     pub adapter: String,
+    /// Adapter-defined serialized input prediction.
     pub payload: String,
 }
 
