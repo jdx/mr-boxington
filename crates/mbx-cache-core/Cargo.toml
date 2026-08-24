@@ -3,6 +3,7 @@ name = "mbx-cache-core"
 version.workspace = true
 description = "Action cache protocol, CAS, authentication, and transport primitives for mbx"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true

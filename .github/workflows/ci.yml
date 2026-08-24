@@ -41,10 +41,40 @@ jobs:
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
 
+  compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # master
+        with:
+          toolchain: "1.91"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: msrv
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check MSRV
+        run: cargo check --locked --workspace --all-targets
+      - name: Check without a TLS backend
+        run: cargo check --locked --workspace --all-targets --no-default-features
+      - name: Check native TLS
+        run: cargo check --locked --workspace --all-targets --no-default-features --features native-tls
+      - name: Check rustls with native roots
+        run: cargo check --locked --workspace --all-targets --no-default-features --features rustls-native-roots
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: EmbarkStudios/cargo-deny-action@c3bbe7e4e3f7baeee1a3dd9aec0a3b2aded580fb # v2.1.1
+        with:
+          command: check
+
   final:
     permissions: {}
     needs:
+      - compatibility
       - lint
+      - supply-chain
       - test
     runs-on: ubuntu-latest
     timeout-minutes: 1
@@ -55,6 +85,8 @@ jobs:
       - name: Check job results
         if: |
           needs.lint.result != 'success' ||
+          needs.compatibility.result != 'success' ||
+          needs.supply-chain.result != 'success' ||
           needs.test.result != 'success'
         run: exit 1
       - run: echo "All CI jobs completed successfully"
