@@ -1,47 +1,293 @@
+/* mr boxington — warm cardboard-dark theme */
+
 :root {
-  --vp-c-brand-1: #bd7d23;
+  --mbx-display: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
+
+  /*
+   * The two hues that carry alpha variants are stored as channel triples, so
+   * every translucent use composes from one value: rgb(var(--mbx-amber-rgb) / 0.16).
+   * The rest are opaque one-offs and stay plain hex.
+   */
+  --mbx-amber-rgb: 230 173 84;
+  --mbx-teal-rgb: 111 142 147;
+  --mbx-amber-shade-rgb: 189 125 35;
+
+  --mbx-amber: rgb(var(--mbx-amber-rgb));
+  --mbx-amber-bright: #f2c479;
+  --mbx-amber-deep: #cf8f35;
+  --mbx-amber-shade: rgb(var(--mbx-amber-shade-rgb));
+  --mbx-teal-light: #7fa6ad;
+  --mbx-ink: #1c160d;
+  --mbx-paper: #f5ead6;
+  --mbx-cargo-green: #86c07e;
+
+  --vp-font-family-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --vp-c-brand-1: var(--mbx-amber-shade);
   --vp-c-brand-2: #9f6518;
   --vp-c-brand-3: #7e4c0d;
-  --vp-c-brand-soft: rgba(189, 125, 35, 0.16);
+  --vp-c-brand-soft: rgb(var(--mbx-amber-shade-rgb) / 0.16);
   --vp-home-hero-name-color: transparent;
-  --vp-home-hero-name-background: linear-gradient(120deg, #eab864 20%, #bd7d23 68%, #6f8e93);
-  --vp-home-hero-image-background-image: radial-gradient(circle, rgba(234, 184, 100, 0.34), rgba(74, 111, 118, 0.16) 52%, transparent 72%);
-  --vp-home-hero-image-filter: blur(44px);
+  --vp-home-hero-name-background: linear-gradient(
+    120deg,
+    var(--mbx-amber-bright) 15%,
+    var(--mbx-amber) 55%,
+    var(--mbx-teal-light)
+  );
+  --vp-home-hero-image-background-image: radial-gradient(
+    circle,
+    rgb(var(--mbx-amber-rgb) / 0.4),
+    rgb(var(--mbx-teal-rgb) / 0.18) 52%,
+    transparent 72%
+  );
+  --vp-home-hero-image-filter: blur(48px);
 }
 
 .dark {
-  --vp-c-brand-1: #e6ad54;
-  --vp-c-brand-2: #cf8f35;
+  --vp-c-brand-1: var(--mbx-amber);
+  --vp-c-brand-2: var(--mbx-amber-deep);
   --vp-c-brand-3: #b9761c;
-  --vp-c-brand-soft: rgba(230, 173, 84, 0.16);
+  --vp-c-brand-soft: rgb(var(--mbx-amber-rgb) / 0.16);
+
+  /* warm the neutral greys toward cardboard */
+  --vp-c-bg: #161209;
+  --vp-c-bg-alt: #100d07;
+  --vp-c-bg-elv: #1e1810;
+  --vp-c-bg-soft: #1e1810;
+  --vp-c-divider: rgb(var(--mbx-amber-rgb) / 0.15);
+  --vp-c-gutter: #0c0a05;
+  --vp-code-block-bg: #100d07;
+  --vp-c-text-1: #f1e9da;
+  --vp-c-text-2: #b3a891;
+  --vp-c-text-3: #837a66;
 }
 
-.VPHero .name {
-  letter-spacing: -0.04em;
+::selection {
+  background: rgb(var(--mbx-amber-rgb) / 0.35);
+}
+
+::-webkit-scrollbar {
+  height: 10px;
+  width: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--mbx-amber-rgb) / 0.22);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 6px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--mbx-amber-rgb) / 0.38);
+  background-clip: padding-box;
+}
+
+/* subtle paper grain over everything */
+body::after {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  content: "";
+  inset: 0;
+  opacity: 0.035;
+  pointer-events: none;
+  position: fixed;
+  z-index: 999;
+}
+
+/* ---------- navbar ---------- */
+
+.VPNavBarTitle .title {
+  font-family: var(--mbx-display);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+/* ---------- home ---------- */
+
+.VPHome {
+  background:
+    radial-gradient(64rem 36rem at 85% -8%, rgb(var(--mbx-amber-rgb) / 0.12), transparent 60%),
+    radial-gradient(52rem 32rem at 0% 18%, rgb(var(--mbx-teal-rgb) / 0.12), transparent 60%);
+}
+
+.VPHero .name,
+.VPHero .text {
+  font-family: var(--mbx-display);
+  letter-spacing: -0.03em;
+}
+
+.VPHero .name .clip {
+  position: relative;
+  z-index: 0;
+}
+
+/* a strip of packing tape behind the name */
+.VPHero .name .clip::after {
+  background: repeating-linear-gradient(
+    -45deg,
+    rgb(var(--mbx-amber-rgb) / 0.18) 0 12px,
+    rgb(var(--mbx-amber-rgb) / 0.09) 12px 24px
+  );
+  border-radius: 3px;
+  bottom: 0.04em;
+  content: "";
+  height: 0.42em;
+  left: -0.25em;
+  position: absolute;
+  right: -0.25em;
+  transform: rotate(-1.2deg);
+  z-index: -1;
+}
+
+.VPHero .tagline {
+  max-width: 34rem;
+}
+
+@media (min-width: 960px) {
+  .VPHero .name {
+    font-size: 64px;
+    line-height: 72px;
+  }
 }
 
 .VPHero .image-src {
-  filter: drop-shadow(0 22px 30px rgba(0, 0, 0, 0.28));
+  animation: mbx-float 7s ease-in-out infinite;
+  filter: drop-shadow(0 26px 38px rgba(0, 0, 0, 0.38));
+}
+
+@keyframes mbx-float {
+  0%,
+  100% {
+    transform: translate(-50%, -50%);
+  }
+  50% {
+    transform: translate(-50%, calc(-50% - 12px));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .VPHero .image-src {
+    animation: none;
+  }
+}
+
+.VPButton.brand {
+  background: linear-gradient(135deg, var(--mbx-amber-bright), var(--mbx-amber-deep));
+  border-color: transparent;
+  box-shadow: 0 10px 28px -10px rgb(var(--mbx-amber-rgb) / 0.55);
+  color: var(--mbx-ink);
+  font-weight: 700;
+  transition: box-shadow 0.25s ease, filter 0.25s ease, transform 0.25s ease;
+}
+
+.VPButton.brand:hover {
+  background: linear-gradient(135deg, var(--mbx-amber-bright), var(--mbx-amber-deep));
+  box-shadow: 0 14px 34px -10px rgb(var(--mbx-amber-rgb) / 0.7);
+  color: var(--mbx-ink);
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
+.VPButton.alt {
+  border: 1px solid var(--vp-c-divider);
+  transition: border-color 0.25s ease, transform 0.25s ease;
+}
+
+.VPButton.alt:hover {
+  border-color: var(--vp-c-brand-1);
+  transform: translateY(-1px);
 }
 
 .VPFeature {
+  background: linear-gradient(180deg, rgb(var(--mbx-amber-rgb) / 0.06), rgb(var(--mbx-amber-rgb) / 0) 45%), var(--vp-c-bg-soft);
   border: 1px solid var(--vp-c-divider);
-  transition: border-color 0.2s ease, transform 0.2s ease;
+  border-radius: 14px;
+  transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease;
 }
 
 .VPFeature:hover {
-  border-color: var(--vp-c-brand-1);
-  transform: translateY(-2px);
+  border-color: rgb(var(--mbx-amber-rgb) / 0.55);
+  box-shadow:
+    0 18px 40px -18px rgb(var(--mbx-amber-rgb) / 0.3),
+    0 12px 32px -12px rgba(0, 0, 0, 0.5);
+  transform: translateY(-4px);
 }
 
 .VPFeature .icon {
-  background: var(--vp-c-brand-soft);
+  background: linear-gradient(160deg, rgb(var(--mbx-amber-rgb) / 0.22), rgb(var(--mbx-teal-rgb) / 0.16));
+  border: 1px solid rgb(var(--mbx-amber-rgb) / 0.25);
+  border-radius: 10px;
+  font-size: 26px;
+  height: 52px;
+  width: 52px;
 }
+
+.VPFeature .title {
+  font-family: var(--mbx-display);
+  font-size: 17px;
+  letter-spacing: -0.01em;
+}
+
+/* ---------- doc pages ---------- */
+
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3 {
+  font-family: var(--mbx-display);
+  letter-spacing: -0.02em;
+}
+
+.vp-doc h2 {
+  border-top: none;
+  margin: 56px 0 20px;
+  padding-top: 0;
+}
+
+.vp-doc h2::before {
+  background: linear-gradient(90deg, var(--mbx-amber), transparent);
+  border-radius: 2px;
+  content: "";
+  display: block;
+  height: 3px;
+  margin-bottom: 0.8rem;
+  width: 2.25rem;
+}
+
+.vp-doc div[class*="language-"] {
+  border: 1px solid var(--vp-c-divider);
+}
+
+.vp-doc [class*="language-"] > span.lang {
+  color: var(--vp-c-brand-1);
+  font-weight: 600;
+}
+
+.vp-doc .custom-block {
+  border-radius: 12px;
+}
+
+.vp-doc .custom-block.tip {
+  border-left: 3px solid var(--vp-c-tip-1);
+}
+
+.vp-doc .custom-block.warning {
+  border-left: 3px solid var(--vp-c-warning-1);
+}
+
+.vp-doc .custom-block.danger {
+  border-left: 3px solid var(--vp-c-danger-1);
+}
+
+/* ---------- announcement banner ---------- */
 
 .jdx-banner {
   align-items: center;
   background: var(--vp-c-brand-1);
-  color: #1c160d;
+  color: var(--mbx-ink);
   display: flex;
   font-size: 0.9rem;
   gap: 0.75rem;

@@ -13,6 +13,9 @@ hero:
       text: Get started
       link: /getting-started
     - theme: alt
+      text: How it works
+      link: /how-it-works
+    - theme: alt
       text: GitHub Actions
       link: /github-actions
 
