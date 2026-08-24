@@ -76,6 +76,7 @@ export default defineConfig({
   },
   head: [
     ["link", { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" }],
+    ["link", { rel: "alternate icon", href: "/favicon.png", type: "image/png" }],
     ["meta", { name: "theme-color", content: "#d69b42" }],
     ["meta", { property: "og:type", content: "website" }],
     ["meta", { property: "og:site_name", content: "mr boxington" }],
@@ -88,9 +89,11 @@ export default defineConfig({
       "meta",
       {
         property: "og:image",
-        content: "https://mr-boxington.jdx.dev/logo.svg",
+        content: "https://mr-boxington.jdx.dev/og.png",
       },
     ],
-    ["meta", { name: "twitter:card", content: "summary" }],
+    ["meta", { property: "og:image:width", content: "1200" }],
+    ["meta", { property: "og:image:height", content: "630" }],
+    ["meta", { name: "twitter:card", content: "summary_large_image" }],
   ],
 });
