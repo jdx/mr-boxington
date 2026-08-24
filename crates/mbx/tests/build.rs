@@ -209,6 +209,26 @@ fn incremental_is_opt_in_and_reaches_cargo() {
     );
 }
 
+#[test]
+fn workspace_policy_reaches_cargo() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    std::fs::write(project.path().join(".mbx.toml"), "incremental = true\n").unwrap();
+
+    let stats = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("workspace-policy.json"),
+    );
+
+    assert!(
+        incremental_sessions(project.path()) > 0,
+        "the checked-in workspace policy should reach cargo: {stats}"
+    );
+}
+
 /// How many incremental sessions rustc left behind. Cargo creates the directory
 /// either way, so its contents are the only evidence that anything used it.
 fn incremental_sessions(project: &Path) -> usize {
