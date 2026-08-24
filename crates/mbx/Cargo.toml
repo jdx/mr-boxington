@@ -23,7 +23,8 @@ serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 toml = "0.9"
-usage = { package = "usage-rs", version = "6" }
+usage = { package = "usage-rs", version = "6", features = ["config"] }
+usage-config = { version = "6", features = ["toml"] }
 which = "8"
 
 [dev-dependencies]

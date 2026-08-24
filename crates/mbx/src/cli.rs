@@ -14,8 +14,9 @@ use std::process::{Command, ExitCode};
 #[usage(
     bin = "mbx",
     version,
+    config = crate::config::RawConfig,
     about = "A build cache for Rust projects",
-    long_about = "A build cache for Rust projects\n\nCargo subcommands are forwarded directly.\n\nExamples:\n  mbx build --release\n  mbx test --workspace\n  mbx clippy --all-targets",
+    long_about = "Run any Cargo subcommand with the build cache enabled. The subcommand and all of its arguments are passed through unchanged, including Cargo aliases and installed subcommands. `cache` and `gc` are reserved for mbx's own store-management commands.\n\nExamples:\n  mbx build --release\n  mbx test --workspace\n  mbx clippy --all-targets -- -D warnings",
     unknown_flags = "error"
 )]
 struct Cli {
@@ -25,7 +26,9 @@ struct Cli {
 
 #[derive(usage::Subcommands)]
 enum Commands {
-    /// Evict cached objects until the store fits a size budget.
+    /// Collect stale managed targets and evict cached objects until the store fits a size budget.
+    ///
+    /// A missing cached object is rebuilt when it is needed again.
     Gc(GcArgs),
     /// Inspect the local store.
     Cache(CacheArgs),
@@ -1100,6 +1103,9 @@ mod tests {
         assert!(spec.contains("external_subcommand #true"));
         assert!(spec.contains("cmd gc"));
         assert!(spec.contains("cmd cache"));
+        assert!(spec.contains("config {"));
+        assert!(spec.contains(r#"prop "gc.max_size""#));
+        assert!(spec.contains(r#"env "MBX_GC_MAX_SIZE""#));
     }
 
     #[test]

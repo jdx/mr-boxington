@@ -59,7 +59,7 @@ export default defineConfig({
       },
       {
         text: "Reference",
-        items: [{ text: "CLI", link: "/cli" }],
+        items: [{ text: "CLI and configuration", link: "/cli" }],
       },
     ],
     outline: { level: [2, 3] },
