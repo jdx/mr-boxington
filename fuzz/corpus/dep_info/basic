@@ -1,0 +1,3 @@
+target/output: src/lib.rs src/path\ with\ spaces.rs
+# env-dep:PROFILE=debug
+# env-dep:OPTIONAL

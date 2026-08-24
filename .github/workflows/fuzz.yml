@@ -1,0 +1,31 @@
+name: fuzz
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install pinned nightly
+        run: rustup toolchain install nightly-2026-08-02 --profile minimal
+      - name: Install pinned cargo-fuzz
+        run: cargo +nightly-2026-08-02 install cargo-fuzz --version 0.13.2 --locked
+      - name: Compile fuzz targets
+        run: cargo +nightly-2026-08-02 fuzz build
+      - name: Smoke-test fuzz targets
+        run: |
+          cargo +nightly-2026-08-02 fuzz run blob_pack -- -runs=1000
+          cargo +nightly-2026-08-02 fuzz run dep_info -- -runs=1000
+          cargo +nightly-2026-08-02 fuzz run rustc_paths -- -runs=1000

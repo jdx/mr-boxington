@@ -1,1 +1,7 @@
 /target
+fuzz/artifacts
+fuzz/coverage
+fuzz/corpus/*/*
+!fuzz/corpus/*/basic
+!fuzz/corpus/*/empty
+fuzz/target
