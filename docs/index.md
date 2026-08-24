@@ -3,7 +3,7 @@ layout: home
 
 hero:
   name: "mr boxington"
-  text: "Build it once."
+  text: "target/, fixed: shared and self-pruning."
   tagline: A Cargo wrapper that shares compiled work across worktrees and CI—and prunes build storage automatically.
   image:
     src: /logo.svg
