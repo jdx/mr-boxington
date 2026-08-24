@@ -32,25 +32,26 @@
   </g>
 
   <!-- face on the left panel: full iso shear so features lie on the plane;
-       eyes and monocle are counter-sheared to stay round -->
+       only the eyeballs are counter-sheared to stay round -->
   <g transform="translate(108,182) matrix(1 .5 0 1 0 0)">
     <!-- eyebrows -->
-    <path d="M-38 -48q11 -8 21 -3" fill="none" stroke="#2a3f44" stroke-width="5.5" stroke-linecap="round"/>
+    <path d="M-38 -52q11 -7 21 -2" fill="none" stroke="#2a3f44" stroke-width="5.5" stroke-linecap="round"/>
     <path d="M6 -52q11 -7 21 -2" fill="none" stroke="#2a3f44" stroke-width="5.5" stroke-linecap="round"/>
     <!-- left eye -->
     <g transform="translate(-26,-28) matrix(1 -.5 0 1 0 0)">
       <circle r="8" fill="#2a3f44"/>
       <circle cx="-2.5" cy="-2.5" r="2.6" fill="#f6ecd2"/>
     </g>
-    <!-- right eye and monocle -->
+    <!-- right eye -->
     <g transform="translate(18,-28) matrix(1 -.5 0 1 0 0)">
       <circle r="8" fill="#2a3f44"/>
       <circle cx="-2.5" cy="-2.5" r="2.6" fill="#f6ecd2"/>
-      <circle r="16.5" fill="none" stroke="#2a3f44" stroke-width="5"/>
-      <path d="M-10 -9a13 13 0 0 1 7 -3.5" fill="none" stroke="#f6ecd2" stroke-width="3" stroke-linecap="round" opacity=".7"/>
     </g>
-    <path d="M30 -21Q34.5 -12 33.5 -4" fill="none" stroke="#2a3f44" stroke-width="3.5" stroke-linecap="round"/>
-    <circle cx="33.3" cy="-1.5" r="3" fill="#2a3f44"/>
+    <!-- monocle: rigid ring pressed against the panel, so it shears with the plane -->
+    <circle cx="18" cy="-28" r="16.5" fill="none" stroke="#2a3f44" stroke-width="5"/>
+    <path d="M7.1 -33.1A12 12 0 0 1 12 -38.4" fill="none" stroke="#f6ecd2" stroke-width="3" stroke-linecap="round" opacity=".7"/>
+    <path d="M33 -16.5Q35.5 -9 34 -3" fill="none" stroke="#2a3f44" stroke-width="3.5" stroke-linecap="round"/>
+    <circle cx="33.8" cy="-.5" r="3" fill="#2a3f44"/>
     <!-- handlebar mustache -->
     <g fill="#2a3f44">
       <path d="M-4 2 C0 -4 8 -6 14 -3 C20 -.5 23 -2.5 24.5 -7 C28 -2 27 5 21 7.5 C13 11 1 11 -4 8 Z"/>
