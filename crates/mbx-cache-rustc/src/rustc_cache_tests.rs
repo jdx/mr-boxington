@@ -23,6 +23,25 @@ fn bypass_kinds_are_stable_and_field_independent() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn path_mappings_resolve_symlinked_roots_for_missing_outputs() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let physical = directory.path().join("physical");
+    let alias = directory.path().join("alias");
+    std::fs::create_dir(&physical).unwrap();
+    symlink(&physical, &alias).unwrap();
+
+    let mappings = vec![PathMapping::new(alias, "target")];
+    let output = physical.join("debug/deps/not-created.wasm");
+    assert_eq!(
+        normalize_mapped_path(&output, directory.path(), &mappings).unwrap(),
+        "${target}/debug/deps/not-created.wasm"
+    );
+}
+
 use super::*;
 
 fn args(values: &[&str]) -> Vec<OsString> {
@@ -141,6 +160,88 @@ fn resolves_cargo_library_outputs() {
             ],
             dep_info: working_dir.join("target/debug/deps/widget-abc123.d"),
         }
+    );
+}
+
+#[test]
+fn resolves_a_compiler_linked_wasm_binary() {
+    let working_dir = absolute(&["workspace"]);
+    let invocation = RustcInvocation::parse(&args(&[
+        "--crate-name=widget",
+        "--crate-type=bin",
+        "--emit=dep-info,link",
+        "--out-dir=target/wasm32-unknown-unknown/debug/deps",
+        "--target=wasm32-unknown-unknown",
+        "-Cextra-filename=-abc123",
+        "src/main.rs",
+    ]))
+    .unwrap();
+    let executable =
+        working_dir.join("target/wasm32-unknown-unknown/debug/deps/widget-abc123.wasm");
+
+    assert_eq!(
+        invocation.outputs(&working_dir).unwrap(),
+        RustcOutputs {
+            directory: working_dir.join("target/wasm32-unknown-unknown/debug/deps"),
+            files: vec![executable],
+            dep_info: working_dir.join("target/wasm32-unknown-unknown/debug/deps/widget-abc123.d"),
+        }
+    );
+}
+
+#[test]
+fn accepts_wasm_tests_but_not_native_tests() {
+    let wasm = args(&[
+        "--test",
+        "--emit=dep-info,link",
+        "--target=wasm32-unknown-unknown",
+        "src/lib.rs",
+    ]);
+    assert!(RustcInvocation::parse(&wasm).is_ok());
+
+    let implicit_binary = args(&[
+        "--emit=dep-info,link",
+        "--target=wasm32-unknown-unknown",
+        "src/main.rs",
+    ]);
+    assert_eq!(
+        RustcInvocation::parse(&implicit_binary),
+        Err(BypassReason::UnsupportedCrateType("bin".into()))
+    );
+
+    let native = args(&["--test", "--emit=dep-info,link", "src/lib.rs"]);
+    assert_eq!(
+        RustcInvocation::parse(&native),
+        Err(BypassReason::UnsupportedCrateType("test".into()))
+    );
+}
+
+#[test]
+fn custom_wasm_linker_modes_still_bypass() {
+    let arguments = args(&[
+        "--crate-type=bin",
+        "--emit=dep-info,link",
+        "--target=wasm32-unknown-unknown",
+        "-Clink-self-contained=no",
+        "src/main.rs",
+    ]);
+    assert_eq!(
+        RustcInvocation::parse(&arguments),
+        Err(BypassReason::UnknownCodegenOption(
+            "link-self-contained".into()
+        ))
+    );
+
+    let arguments = args(&[
+        "--crate-type=bin",
+        "--emit=dep-info,link",
+        "--target=wasm32-unknown-unknown",
+        "-Clinker=/tmp/custom-linker",
+        "src/main.rs",
+    ]);
+    assert_eq!(
+        RustcInvocation::parse(&arguments),
+        Err(BypassReason::UnknownCodegenOption("linker".into()))
     );
 }
 
@@ -551,6 +652,7 @@ fn custom_targets_are_required_inputs() {
         "src/lib.rs",
     ]))
     .unwrap();
+    assert_eq!(invocation.target(), Some("targets/custom.json"));
     let error = invocation
         .action(context(&[("src/lib.rs", "source")]))
         .unwrap_err();

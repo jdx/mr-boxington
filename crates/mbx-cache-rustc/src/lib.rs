@@ -134,8 +134,8 @@ pub enum BypassReason {
     /// The requested emit kind is outside the supported cacheability tier.
     #[error("rustc output type is not cacheable yet: {0}")]
     UnsupportedEmit(String),
-    /// The invocation emits neither an rlib nor metadata artifact.
-    #[error("rustc invocation does not emit an rlib or metadata artifact")]
+    /// The invocation emits no artifact in the supported cacheability tier.
+    #[error("rustc invocation does not emit a cacheable artifact")]
     NoCacheableOutput,
     /// The invocation does not emit the dep-info needed for input discovery.
     #[error("rustc invocation does not emit dependency information")]
@@ -261,6 +261,13 @@ pub struct RustcInvocation {
     explicit_output: Option<PathBuf>,
     emits: Vec<Emit>,
     target: Option<String>,
+    link_output: LinkOutput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkOutput {
+    Library,
+    WasmExecutable,
 }
 
 /// The cacheable files and dependency manifest produced by a rustc invocation.
@@ -268,7 +275,7 @@ pub struct RustcInvocation {
 pub struct RustcOutputs {
     /// Common directory containing all modeled outputs.
     pub directory: PathBuf,
-    /// Cacheable rlib and/or metadata files.
+    /// Cacheable library, metadata, and/or compiler-linked wasm files.
     pub files: Vec<PathBuf>,
     /// Dep-info file used for precise input discovery.
     pub dep_info: PathBuf,
@@ -280,7 +287,7 @@ impl RustcInvocation {
     ///
     /// Any flag whose cache semantics are not modeled returns a bypass reason
     /// instead of guessing. A successful parse only admits the initial
-    /// rlib/rmeta cacheability tier.
+    /// rlib/rmeta tier plus compiler-linked `wasm32-unknown-unknown` binaries.
     pub fn parse(arguments: &[OsString]) -> Result<Self, BypassReason> {
         Parser::new(arguments).parse()
     }
@@ -295,7 +302,7 @@ impl RustcInvocation {
         self.target.as_deref()
     }
 
-    /// Resolve the rlib/rmeta files produced by this invocation.
+    /// Resolve the files produced by this invocation.
     ///
     /// The initial cache tier requires one output directory so its artifact can
     /// be represented by one protocol directory and restored atomically later.
@@ -352,16 +359,19 @@ impl RustcInvocation {
                 dep_info = Some(path);
                 continue;
             }
-            let extension = match emit.kind.as_str() {
-                "link" => "rlib",
-                "metadata" => "rmeta",
+            let (prefix, extension) = match emit.kind.as_str() {
+                "link" => match self.link_output {
+                    LinkOutput::Library => ("lib", "rlib"),
+                    LinkOutput::WasmExecutable => ("", "wasm"),
+                },
+                "metadata" => ("lib", "rmeta"),
                 _ => continue,
             };
             let path = if let Some(path) = &emit.path {
                 absolute_path(path, working_dir)
             } else {
                 output_directory.join(format!(
-                    "lib{}{}.{}",
+                    "{prefix}{}{}.{}",
                     self.crate_name, self.extra_filename, extension
                 ))
             };
@@ -425,6 +435,17 @@ impl RustcInvocation {
     }
 }
 
+impl RustcOutputs {
+    /// Whether `path` is a linked program whose executable permission is part
+    /// of the declared output contract.
+    pub fn is_executable(&self, path: &Path) -> bool {
+        self.files.iter().any(|output| output == path)
+            && path
+                .extension()
+                .is_some_and(|extension| extension == "wasm")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Mapping from a host-specific absolute root to a stable key placeholder.
 pub struct PathMapping {
@@ -463,14 +484,33 @@ pub fn normalize_mapped_path(
     working_dir: &Path,
     mappings: &[PathMapping],
 ) -> Result<String, BypassReason> {
+    let mappings = mappings
+        .iter()
+        .map(|mapping| PathMapping {
+            root: resolve_mapping_root(&mapping.root),
+            placeholder: mapping.placeholder.clone(),
+        })
+        .collect::<Vec<_>>();
+    normalize_resolved_mapped_path(path, working_dir, &mappings)
+}
+
+fn normalize_resolved_mapped_path(
+    path: &Path,
+    working_dir: &Path,
+    mappings: &[PathMapping],
+) -> Result<String, BypassReason> {
     let absolute = if path.is_absolute() {
         normalize_components(path)
     } else {
         normalize_components(&working_dir.join(path))
     };
+    let resolved = if absolute.is_absolute() {
+        resolve_path_aliases(&absolute)
+    } else {
+        absolute.clone()
+    };
     for mapping in mappings {
-        let root = normalize_components(&mapping.root);
-        if let Ok(relative) = absolute.strip_prefix(&root) {
+        if let Ok(relative) = resolved.strip_prefix(&mapping.root) {
             let suffix = slash_path(relative)?;
             return Ok(if suffix.is_empty() {
                 format!("${{{}}}", mapping.placeholder)
@@ -480,6 +520,50 @@ pub fn normalize_mapped_path(
         }
     }
     Err(BypassReason::UnmappedAbsolutePath(absolute))
+}
+
+/// Resolve aliases in the existing prefix while preserving a not-yet-created
+/// output suffix. Cargo and rustc may spell the same macOS temporary directory
+/// as `/var/...` and `/private/var/...`; comparing only lexical paths makes a
+/// target mapping miss even though both names identify the same directory.
+#[cfg(unix)]
+fn resolve_path_aliases(path: &Path) -> PathBuf {
+    let mut existing = path;
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::canonicalize(existing) {
+            Ok(mut resolved) => {
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                return normalize_components(&resolved);
+            }
+            Err(_) => {
+                let Some(name) = existing.file_name() else {
+                    return path.to_path_buf();
+                };
+                missing.push(name.to_os_string());
+                let Some(parent) = existing.parent() else {
+                    return path.to_path_buf();
+                };
+                existing = parent;
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn resolve_path_aliases(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+fn resolve_mapping_root(root: &Path) -> PathBuf {
+    let root = normalize_components(root);
+    if root.is_absolute() {
+        resolve_path_aliases(&root)
+    } else {
+        root
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -672,7 +756,7 @@ impl<'a> Parser<'a> {
         }
 
         let source = self.source.clone().ok_or(BypassReason::MissingInput)?;
-        self.classify()?;
+        let link_output = self.classify()?;
         let crate_name = self.crate_name.clone().map_or_else(
             || {
                 source
@@ -694,6 +778,7 @@ impl<'a> Parser<'a> {
             explicit_output: self.explicit_output,
             emits: self.emits,
             target: self.target,
+            link_output,
         })
     }
 
@@ -760,6 +845,7 @@ impl<'a> Parser<'a> {
                         path,
                     });
                 } else {
+                    self.target = Some(value.clone());
                     self.parsed
                         .push(Argument::Plain(format!("{rendered_flag}={value}")));
                 }
@@ -916,20 +1002,41 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn classify(&self) -> Result<(), BypassReason> {
-        if self.crate_types.is_empty() {
-            return Err(BypassReason::UnsupportedCrateType("bin".into()));
-        }
-        if let Some(crate_type) = self
-            .crate_types
-            .iter()
-            .find(|crate_type| !matches!(crate_type.as_str(), "lib" | "rlib"))
+    fn classify(&self) -> Result<LinkOutput, BypassReason> {
+        let link_output = if !self.test
+            && !self.crate_types.is_empty()
+            && self
+                .crate_types
+                .iter()
+                .all(|crate_type| matches!(crate_type.as_str(), "lib" | "rlib"))
         {
-            return Err(BypassReason::UnsupportedCrateType(crate_type.clone()));
-        }
-        if self.test {
+            LinkOutput::Library
+        } else if self.target.as_deref() == Some("wasm32-unknown-unknown")
+            && ((self.test && self.crate_types.is_empty())
+                || self.crate_types.as_slice() == ["bin"])
+        {
+            if self.parsed.iter().any(|argument| {
+                matches!(argument, Argument::Plain(value) if value == "--codegen=link-self-contained" || value.starts_with("--codegen=link-self-contained="))
+            }) {
+                return Err(BypassReason::UnknownCodegenOption(
+                    "link-self-contained".into(),
+                ));
+            }
+            // This target's built-in linker is rust-lld from the Rust
+            // toolchain. Unlike a native link, it has no implicit host CRT or
+            // system-library inputs outside the compiler identity.
+            LinkOutput::WasmExecutable
+        } else if self.test {
             return Err(BypassReason::UnsupportedCrateType("test".into()));
-        }
+        } else {
+            return Err(BypassReason::UnsupportedCrateType(
+                self.crate_types
+                    .iter()
+                    .find(|crate_type| !matches!(crate_type.as_str(), "lib" | "rlib"))
+                    .cloned()
+                    .unwrap_or_else(|| "bin".into()),
+            ));
+        };
         if let Some(name) = self.parsed.iter().find_map(|argument| match argument {
             Argument::Extern { name, path: None } if name != "proc_macro" => Some(name),
             _ => None,
@@ -950,7 +1057,7 @@ impl<'a> Parser<'a> {
         {
             return Err(BypassReason::NoCacheableOutput);
         }
-        Ok(())
+        Ok(link_output)
     }
 }
 
@@ -978,9 +1085,17 @@ struct ActionBuilder<'a> {
 impl<'a> ActionBuilder<'a> {
     fn new(invocation: &'a RustcInvocation, mut context: ActionContext) -> Self {
         context.path_mappings = PathMapping::ordered(&context.path_mappings);
+        let mappings = context
+            .path_mappings
+            .iter()
+            .map(|mapping| PathMapping {
+                root: resolve_mapping_root(&mapping.root),
+                placeholder: mapping.placeholder.clone(),
+            })
+            .collect();
         Self {
             invocation,
-            mappings: context.path_mappings.clone(),
+            mappings,
             context,
         }
     }
@@ -1145,7 +1260,7 @@ impl<'a> ActionBuilder<'a> {
     }
 
     fn normalize_path(&self, path: &Path) -> Result<String, BypassReason> {
-        normalize_mapped_path(path, &self.context.working_dir, &self.mappings)
+        normalize_resolved_mapped_path(path, &self.context.working_dir, &self.mappings)
     }
 }
 

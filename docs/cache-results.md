@@ -30,4 +30,6 @@ A build can report a high hit rate among attempted lookups while spending most
 of its time on actions that were not looked up or were bypassed. Read all three
 summary lines together, and compare wall-clock time when evaluating the cache.
 
-Link steps always run, so an otherwise warm binary build still has work to do.
+Native link steps always run, so an otherwise warm native binary build still
+has work to do. Default-linked `wasm32-unknown-unknown` binaries and tests are
+the exception and may be restored as hits.

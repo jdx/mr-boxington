@@ -11,10 +11,17 @@ pattern for another Cargo subcommand. Cargo's normal incremental workspace
 compilations continue to bypass the action cache; dependencies, which Cargo
 normally builds non-incrementally, remain cacheable.
 
-## Linking is not cached
+## Native linking is not cached
 
-Binaries and dynamic libraries always link. mbx caches supported rustc
-compilations, not the final link action.
+Native binaries and dynamic libraries always link. Their results can depend on
+an external linker, startup objects, and system libraries that rustc dep-info
+does not enumerate, so mbx bypasses them.
+
+The narrow exception is a binary or test for `wasm32-unknown-unknown` using its
+default compiler-bundled linker. mbx caches that link because all explicit
+artifacts are modeled inputs and the linker is covered by the Rust toolchain
+identity. Native targets, custom target specifications, native libraries,
+custom linkers, and custom `link-self-contained` modes remain uncached.
 
 ## `OUT_DIR` sharing is opt-in
 

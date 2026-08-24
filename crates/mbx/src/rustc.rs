@@ -27,6 +27,7 @@ struct CachedCompilation {
 struct CachedOutput {
     path: PathBuf,
     digest: CacheDigest,
+    executable: bool,
     mode: u32,
 }
 
@@ -143,10 +144,8 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             )?;
             discovered.verify_not_modified_since(compilation_started)?;
             discovered.verify()?;
-            let mut cacheable_outputs = outputs.files.clone();
-            cacheable_outputs.push(outputs.dep_info.clone());
             let action = candidates.publishable(&portable, &outputs.files)?;
-            publish_result(&action.digest, &action.bytes, &cacheable_outputs, &output)?;
+            publish_result(&action.digest, &action.bytes, &outputs, &output)?;
             record_prediction(
                 rustc,
                 &invocation,
@@ -465,6 +464,7 @@ fn restore_result(
         .map(|(node, destination)| CachedOutput {
             path: destination.clone(),
             digest: node.digest.clone(),
+            executable: node.executable,
             mode: node.mode,
         })
         .collect();
@@ -572,7 +572,7 @@ fn stage_verified_cached_output(
             node.name
         );
     }
-    apply_file_mode(&temporary, node.mode)?;
+    apply_file_mode(&temporary, node.mode, node.executable)?;
     Ok((temporary, materialization))
 }
 
@@ -583,6 +583,7 @@ fn cached_matches(cached: &CachedCompilation, output: &Output) -> bool {
         && cached.outputs.iter().all(|expected| {
             std::fs::metadata(&expected.path).is_ok_and(|metadata| {
                 file_mode(&metadata) == expected.mode
+                    && executable_mode_matches(&metadata, expected.executable)
                     && expected
                         .digest
                         .matches_file(&expected.path)
@@ -725,7 +726,10 @@ fn validated_outputs(
             if path.parent() != Some(outputs.directory.as_path()) {
                 bail!("expected rustc output escapes its output directory");
             }
-            Ok((name.to_string(), path.clone()))
+            Ok((
+                name.to_string(),
+                (path.clone(), outputs.is_executable(path)),
+            ))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
     if directory.files.len() != expected.len() {
@@ -733,10 +737,10 @@ fn validated_outputs(
     }
     let mut files = Vec::with_capacity(directory.files.len());
     for node in directory.files {
-        validate_file_mode(&node)?;
-        let destination = expected
+        let (destination, executable) = expected
             .remove(&node.name)
             .ok_or_else(|| eyre::eyre!("cached rustc output is unexpected: {}", node.name))?;
+        validate_file_mode(&node, executable)?;
         files.push((node, destination));
     }
     if !expected.is_empty() {
@@ -1112,10 +1116,10 @@ fn resolve_executable(executable: &OsStr) -> Result<PathBuf> {
 fn publish_result(
     action: &CacheDigest,
     action_bytes: &[u8],
-    outputs: &[PathBuf],
+    outputs: &RustcOutputs,
     output: &Output,
 ) -> Result<()> {
-    if outputs.is_empty() {
+    if outputs.files.is_empty() {
         bail!("rustc produced no cacheable outputs");
     }
     let staging = staging_directory()?;
@@ -1124,8 +1128,12 @@ fn publish_result(
     let stderr = staged_bytes(staging.path(), "stderr", &output.stderr)?;
     blobs.extend([stdout.clone(), stderr.clone()]);
 
-    let mut files = Vec::with_capacity(outputs.len());
-    for path in outputs {
+    let output_paths = outputs
+        .files
+        .iter()
+        .chain(std::iter::once(&outputs.dep_info));
+    let mut files = Vec::with_capacity(outputs.files.len() + 1);
+    for path in output_paths {
         let metadata = std::fs::metadata(path)
             .wrap_err_with(|| format!("failed to inspect rustc output {}", path.display()))?;
         if !metadata.is_file() {
@@ -1135,7 +1143,7 @@ fn publish_result(
         blobs.push((digest.clone(), path.clone()));
         files.push(CacheFileNode {
             digest,
-            executable: false,
+            executable: outputs.is_executable(path),
             mode: file_mode(&metadata),
             name: path
                 .file_name()
@@ -1206,8 +1214,8 @@ fn file_mode(_metadata: &std::fs::Metadata) -> u32 {
 }
 
 #[cfg(unix)]
-fn validate_file_mode(node: &CacheFileNode) -> Result<()> {
-    if node.executable
+fn validate_file_mode(node: &CacheFileNode, executable: bool) -> Result<()> {
+    if node.executable != executable
         || node.mode & !0o777 != 0
         || node.mode & 0o111 != 0
         || node.mode & 0o022 != 0
@@ -1218,23 +1226,38 @@ fn validate_file_mode(node: &CacheFileNode) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn validate_file_mode(node: &CacheFileNode) -> Result<()> {
-    if node.executable || node.mode != 0 {
+fn validate_file_mode(node: &CacheFileNode, executable: bool) -> Result<()> {
+    if node.executable != executable || node.mode != 0 {
         bail!("cached rustc output has an unsafe file mode: {}", node.name);
     }
     Ok(())
 }
 
 #[cfg(unix)]
-fn apply_file_mode(temporary: &Path, mode: u32) -> Result<()> {
+fn apply_file_mode(temporary: &Path, mode: u32, executable: bool) -> Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
-    std::fs::set_permissions(temporary, std::fs::Permissions::from_mode(mode))?;
+    let executable_mode = if executable { 0o111 } else { 0 };
+    std::fs::set_permissions(
+        temporary,
+        std::fs::Permissions::from_mode(mode | executable_mode),
+    )?;
     Ok(())
 }
 
 #[cfg(windows)]
-fn apply_file_mode(_temporary: &Path, _mode: u32) -> Result<()> {
+fn apply_file_mode(_temporary: &Path, _mode: u32, _executable: bool) -> Result<()> {
     Ok(())
+}
+
+#[cfg(unix)]
+fn executable_mode_matches(metadata: &std::fs::Metadata, executable: bool) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    (metadata.permissions().mode() & 0o111 != 0) == executable
+}
+
+#[cfg(windows)]
+fn executable_mode_matches(_metadata: &std::fs::Metadata, _executable: bool) -> bool {
+    true
 }
 
 #[cfg(unix)]
