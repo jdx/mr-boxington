@@ -1,0 +1,23 @@
+{
+  "name": "mr-boxington-docs",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "docs:dev": "vitepress dev",
+    "docs:build": "vitepress build",
+    "docs:preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.3"
+  },
+  "pnpm": {
+    "supportedArchitectures": {
+      "os": ["linux", "darwin"],
+      "cpu": ["x64", "arm64"],
+      "libc": ["glibc"]
+    },
+    "allowBuilds": {
+      "esbuild": true
+    }
+  }
+}

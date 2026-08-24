@@ -1,5 +1,7 @@
 # mr boxington
 
+[Documentation](https://mr-boxington.jdx.dev) · [Releases](https://github.com/jdx/mr-boxington/releases)
+
 > **Please ignore this project.** It is an experiment and is not intended for
 > others to use yet. Nothing here is stable or supported, and the protocol may
 > change without notice. Releases exist so CI can install a binary, not as a
