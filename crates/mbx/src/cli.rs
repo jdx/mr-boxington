@@ -140,9 +140,12 @@ pub fn run() -> Result<ExitCode> {
     if let Commands::Prefetch(args) = &mut cli.command {
         args.cargo_args = original_prefetch_arguments(&original)?;
     }
+    if matches!(&cli.command, Commands::Doctor) {
+        return crate::doctor::run_loaded(Config::load());
+    }
     let config = Config::load()?;
     match cli.command {
-        Commands::Doctor => crate::doctor::run(&config),
+        Commands::Doctor => unreachable!("doctor was handled before configuration loading"),
         Commands::Explain(args) => crate::explain::run(&config, &args.arguments()),
         Commands::Setup(args) => setup(args.action()?),
         Commands::Gc(args) => gc(

@@ -78,6 +78,17 @@ pub fn run(config: &Config) -> Result<ExitCode> {
     })
 }
 
+pub(crate) fn run_loaded(config: Result<Config>) -> Result<ExitCode> {
+    match config {
+        Ok(config) => run(&config),
+        Err(error) => {
+            println!("FAIL  {:<12} {error:#}", "config");
+            println!("\n1 failures, 0 warnings");
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
 async fn check(config: &Config) -> Vec<Check> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
@@ -219,6 +230,28 @@ async fn remote_checks(config: &Config) -> Vec<Check> {
             "not configured; using the local cache",
         )];
     };
+    let (effective, effective_mode) = if policy::release_context() {
+        ("disabled in this release context".to_string(), None)
+    } else {
+        let mode = policy::effective_remote_cache_mode(config.remote.mode);
+        (
+            mode.map_or_else(
+                || "disabled by CI policy".to_string(),
+                |mode| mode.to_string(),
+            ),
+            mode,
+        )
+    };
+    let policy = Check::pass(
+        "policy",
+        format!("configured {}, effective {effective}", config.remote.mode),
+    );
+    if effective_mode.is_none() {
+        return vec![
+            policy,
+            Check::pass("remote", "probe skipped because remote caching is disabled"),
+        ];
+    }
     let Some(namespace) = config
         .remote
         .namespace
@@ -226,23 +259,14 @@ async fn remote_checks(config: &Config) -> Vec<Check> {
         .map(str::trim)
         .filter(|namespace| !namespace.is_empty())
     else {
-        return vec![Check::fail(
-            "remote",
-            "remote.namespace is required when remote.url is set",
-        )];
+        return vec![
+            policy,
+            Check::fail(
+                "remote",
+                "remote.namespace is required when remote.url is set",
+            ),
+        ];
     };
-    let effective = if policy::release_context() {
-        "disabled in this release context".to_string()
-    } else {
-        policy::effective_remote_cache_mode(config.remote.mode).map_or_else(
-            || "disabled by CI policy".to_string(),
-            |mode| mode.to_string(),
-        )
-    };
-    let policy = Check::pass(
-        "policy",
-        format!("configured {}, effective {effective}", config.remote.mode),
-    );
     let parsed = match base_url.parse() {
         Ok(url) => url,
         Err(error) => {
@@ -311,7 +335,10 @@ mod tests {
             .build()
             .unwrap();
         let checks = runtime.block_on(remote_checks(&config));
-        assert_eq!(checks[0].severity, Severity::Fail);
-        assert!(checks[0].detail.contains("namespace"));
+        let failure = checks
+            .iter()
+            .find(|check| check.severity == Severity::Fail)
+            .expect("the missing namespace should fail");
+        assert!(failure.detail.contains("namespace"));
     }
 }
