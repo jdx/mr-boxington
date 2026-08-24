@@ -186,8 +186,7 @@ fn resolves_a_compiler_linked_wasm_binary() {
             directory: working_dir.join("target/wasm32-unknown-unknown/debug/deps"),
             files: vec![executable.clone()],
             executable_files: BTreeSet::from([executable]),
-            dep_info: working_dir
-                .join("target/wasm32-unknown-unknown/debug/deps/widget-abc123.d"),
+            dep_info: working_dir.join("target/wasm32-unknown-unknown/debug/deps/widget-abc123.d"),
         }
     );
 }
