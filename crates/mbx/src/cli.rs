@@ -670,7 +670,9 @@ fn gc(
     let store_bytes = store::stats(&store)
         .map(|stats| stats.total_bytes())
         .unwrap_or(max_bytes);
-    let target_bytes = target::stats(&config.target.root)?.bytes;
+    let target_bytes = target::stats(&config.target.root)
+        .map(|stats| stats.bytes)
+        .unwrap_or_default();
     let target_budget = retention
         .max_total_bytes
         .map_or(retention.target_max_bytes, |total| {
@@ -790,7 +792,15 @@ fn sweep_store(config: &Config, retention: &RetentionSettings) {
     if !config.gc.auto {
         return;
     }
-    match store::sweep_if_due(&config.store_dir(), config.gc.max_bytes, config.gc.interval) {
+    let target_bytes = target::stats(&config.target.root)
+        .map(|stats| stats.bytes)
+        .unwrap_or_default();
+    let store_budget = retention
+        .max_total_bytes
+        .map_or(config.gc.max_bytes, |total| {
+            config.gc.max_bytes.min(total.saturating_sub(target_bytes))
+        });
+    match store::sweep_if_due(&config.store_dir(), store_budget, config.gc.interval) {
         Ok(Some(outcome)) => {
             if outcome.removed_bytes > 0 {
                 crate::session::note(&format!("gc: {}", evictions(&outcome)));

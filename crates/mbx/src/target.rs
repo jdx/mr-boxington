@@ -573,7 +573,7 @@ pub(crate) fn collect(
                 outcome.removed_views += 1;
             }
             Err(error) => {
-                outcome.remaining_bytes = outcome.remaining_bytes.saturating_add(bytes);
+                remaining = remaining.saturating_add(bytes);
                 log::warn!(
                     "could not remove the target directory {}: {error}",
                     directory.display()
