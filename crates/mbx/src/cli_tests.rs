@@ -455,6 +455,15 @@ fn setup_preserves_cargo_configuration_and_installs_the_wrapper() {
     assert_eq!(document["net"]["offline"].as_bool(), Some(true));
     let wrapper = document["build"]["rustc-wrapper"].as_str().unwrap();
     assert!(Path::new(wrapper).is_file());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        assert_ne!(
+            std::fs::metadata(wrapper).unwrap().permissions().mode() & 0o100,
+            0
+        );
+    }
 }
 
 #[test]

@@ -485,6 +485,17 @@ pub fn install_shim(executable: &Path, directory: &Path) -> Result<PathBuf> {
             format!("failed to install the rustc shim by hard link ({link_error}) or copy")
         })?;
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Some filesystems do not retain executable permissions when the
+        // cross-device fallback copies the running binary. Cargo must be able
+        // to invoke the installed wrapper directly.
+        let mut permissions = std::fs::metadata(&shim)?.permissions();
+        permissions.set_mode(permissions.mode() | 0o100);
+        std::fs::set_permissions(&shim, permissions)?;
+    }
     Ok(shim)
 }
 
