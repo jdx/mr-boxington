@@ -27,6 +27,17 @@ setup() {
   assert_output --partial "0 B"
 }
 
+@test "explain reports why compilations bypass the cache" {
+  cargo init --lib --vcs none explained-project
+  cd explained-project
+
+  run "$MBX_BIN" explain check
+
+  assert_success
+  assert_output --partial "cache explanation:"
+  assert_output --partial "compiler-query"
+}
+
 @test "cargo new is forwarded" {
   run "$MBX_BIN" new --vcs none new-project
 

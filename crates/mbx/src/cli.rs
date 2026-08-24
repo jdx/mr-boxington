@@ -27,6 +27,8 @@ struct Cli {
 
 #[derive(usage::Subcommands)]
 enum Commands {
+    /// Run a Cargo command and explain every compilation mbx cannot cache.
+    Explain(ExplainArgs),
     /// Install a persistent rustc wrapper for plain Cargo commands.
     Setup,
     /// Collect stale managed targets and evict cached objects until the store fits a size budget.
@@ -48,6 +50,25 @@ struct GcArgs {
 }
 
 #[derive(usage::Args)]
+#[usage(unknown_flags = "value")]
+struct ExplainArgs {
+    /// Cargo subcommand to run under diagnostics.
+    #[usage(value_name = "CARGO_COMMAND")]
+    cargo_command: String,
+    /// Arguments to pass to the Cargo subcommand.
+    #[usage(double_dash = "preserve", value_name = "CARGO_ARGS")]
+    cargo_args: Vec<String>,
+}
+
+impl ExplainArgs {
+    fn arguments(self) -> Vec<String> {
+        std::iter::once(self.cargo_command)
+            .chain(self.cargo_args)
+            .collect()
+    }
+}
+
+#[derive(usage::Args)]
 struct CacheArgs {
     #[usage(subcommand)]
     command: CacheCommands,
@@ -66,6 +87,7 @@ pub fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     let config = Config::load()?;
     match cli.command {
+        Commands::Explain(args) => crate::explain::run(&config, &args.arguments()),
         Commands::Setup => setup().map(|()| ExitCode::SUCCESS),
         Commands::Gc(args) => gc(
             &config,
@@ -154,6 +176,14 @@ fn setup_at(executable: &Path, install_dir: &Path, config_path: &Path) -> Result
 }
 
 fn cargo(config: &Config, arguments: &[String]) -> Result<ExitCode> {
+    cargo_with_bypass_log(config, arguments, None)
+}
+
+pub(crate) fn cargo_with_bypass_log(
+    config: &Config,
+    arguments: &[String],
+    bypass_log: Option<&Path>,
+) -> Result<ExitCode> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     // Release builds publish artifacts that must not depend on a cache, and a
     // tag build has no later build to share with anyway.
@@ -223,6 +253,12 @@ fn cargo(config: &Config, arguments: &[String]) -> Result<ExitCode> {
     let status = runtime.block_on(async {
         let session = CacheSession::start(session_dir.path(), config).await?;
         let mut environment = inherited_environment(|name| std::env::var(name).ok(), &working_dir);
+        if let Some(path) = bypass_log {
+            environment.insert(
+                crate::session::BYPASS_LOG_ENV.into(),
+                path.display().to_string(),
+            );
+        }
         if let Some(directory) = &placed {
             environment.insert(
                 CARGO_TARGET_DIR_ENV.into(),
