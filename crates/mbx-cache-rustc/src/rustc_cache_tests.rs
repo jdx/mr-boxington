@@ -139,8 +139,83 @@ fn resolves_cargo_library_outputs() {
                 working_dir.join("target/debug/deps/libwidget-abc123.rlib"),
                 working_dir.join("target/debug/deps/libwidget-abc123.rmeta"),
             ],
+            executable_files: BTreeSet::new(),
             dep_info: working_dir.join("target/debug/deps/widget-abc123.d"),
         }
+    );
+}
+
+#[test]
+fn resolves_a_compiler_linked_wasm_binary() {
+    let working_dir = absolute(&["workspace"]);
+    let invocation = RustcInvocation::parse(&args(&[
+        "--crate-name=widget",
+        "--crate-type=bin",
+        "--emit=dep-info,link",
+        "--out-dir=target/wasm32-unknown-unknown/debug/deps",
+        "--target=wasm32-unknown-unknown",
+        "-Cextra-filename=-abc123",
+        "src/main.rs",
+    ]))
+    .unwrap();
+    let executable =
+        working_dir.join("target/wasm32-unknown-unknown/debug/deps/widget-abc123.wasm");
+
+    assert_eq!(
+        invocation.outputs(&working_dir).unwrap(),
+        RustcOutputs {
+            directory: working_dir.join("target/wasm32-unknown-unknown/debug/deps"),
+            files: vec![executable.clone()],
+            executable_files: BTreeSet::from([executable]),
+            dep_info: working_dir
+                .join("target/wasm32-unknown-unknown/debug/deps/widget-abc123.d"),
+        }
+    );
+}
+
+#[test]
+fn accepts_wasm_tests_but_not_native_tests() {
+    let wasm = args(&[
+        "--test",
+        "--emit=dep-info,link",
+        "--target=wasm32-unknown-unknown",
+        "src/lib.rs",
+    ]);
+    assert!(RustcInvocation::parse(&wasm).is_ok());
+
+    let native = args(&["--test", "--emit=dep-info,link", "src/lib.rs"]);
+    assert_eq!(
+        RustcInvocation::parse(&native),
+        Err(BypassReason::UnsupportedCrateType("test".into()))
+    );
+}
+
+#[test]
+fn custom_wasm_linker_modes_still_bypass() {
+    let arguments = args(&[
+        "--crate-type=bin",
+        "--emit=dep-info,link",
+        "--target=wasm32-unknown-unknown",
+        "-Clink-self-contained=no",
+        "src/main.rs",
+    ]);
+    assert_eq!(
+        RustcInvocation::parse(&arguments),
+        Err(BypassReason::UnsupportedLinkerConfiguration(
+            "link-self-contained".into()
+        ))
+    );
+
+    let arguments = args(&[
+        "--crate-type=bin",
+        "--emit=dep-info,link",
+        "--target=wasm32-unknown-unknown",
+        "-Clinker=/tmp/custom-linker",
+        "src/main.rs",
+    ]);
+    assert_eq!(
+        RustcInvocation::parse(&arguments),
+        Err(BypassReason::UnknownCodegenOption("linker".into()))
     );
 }
 
@@ -202,6 +277,7 @@ fn resolves_an_output_file_when_every_emit_names_its_path() {
                 working_dir.join("target/widget.rlib"),
                 working_dir.join("target/widget.rmeta"),
             ],
+            executable_files: BTreeSet::new(),
             dep_info: working_dir.join("target/widget.d"),
         }
     );

@@ -67,6 +67,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: rustup target add wasm32-unknown-unknown
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
       - name: Run behavioral tests

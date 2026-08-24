@@ -80,6 +80,7 @@ fn test_outputs(root: &Path) -> RustcOutputs {
     let directory = root.join("out");
     RustcOutputs {
         files: vec![directory.join("libdemo.rlib")],
+        executable_files: BTreeSet::new(),
         dep_info: directory.join("demo.d"),
         directory,
     }
@@ -258,6 +259,39 @@ fn rejects_executable_rustc_outputs() {
 }
 
 #[test]
+fn accepts_only_declared_executable_rustc_outputs() {
+    let root = tempfile::tempdir().unwrap();
+    let mut outputs = test_outputs(root.path());
+    outputs.executable_files.insert(outputs.files[0].clone());
+    let mut file = test_file("libdemo.rlib");
+    file.executable = true;
+
+    assert!(validated_outputs(test_output_directory(file), &outputs).is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn restores_declared_executable_permissions() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    std::fs::write(&source, b"wasm").unwrap();
+    let node = CacheFileNode {
+        digest: CacheDigest::blake3(b"wasm"),
+        executable: true,
+        mode: 0o644,
+        name: "fixture.wasm".into(),
+    };
+
+    let staged = stage_cached_output(root.path(), 0, &source, &node).unwrap();
+    assert_eq!(
+        std::fs::metadata(staged).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+}
+
+#[test]
 fn rejects_group_or_world_writable_rustc_outputs() {
     let root = tempfile::tempdir().unwrap();
     let outputs = test_outputs(root.path());
@@ -398,7 +432,7 @@ fn benchmark_cached_output_materialization() {
         let temporary = tempfile::TempPath::try_from_path(temporary).unwrap();
         make_owner_writable(&temporary).unwrap();
         assert!(digest.matches_file(&temporary).unwrap());
-        apply_file_mode(&temporary, node.mode).unwrap();
+        apply_file_mode(&temporary, node.mode, node.executable).unwrap();
     }
     let legacy = started.elapsed();
 

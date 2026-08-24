@@ -134,8 +134,8 @@ pub enum BypassReason {
     /// The requested emit kind is outside the supported cacheability tier.
     #[error("rustc output type is not cacheable yet: {0}")]
     UnsupportedEmit(String),
-    /// The invocation emits neither an rlib nor metadata artifact.
-    #[error("rustc invocation does not emit an rlib or metadata artifact")]
+    /// The invocation emits no artifact in the supported cacheability tier.
+    #[error("rustc invocation does not emit a cacheable artifact")]
     NoCacheableOutput,
     /// The invocation does not emit the dep-info needed for input discovery.
     #[error("rustc invocation does not emit dependency information")]
@@ -152,6 +152,9 @@ pub enum BypassReason {
     /// Native-library lookup is not modeled as a precise input.
     #[error("native library lookup is not cacheable yet")]
     NativeLibrary,
+    /// A linker-affecting compiler configuration is not modeled.
+    #[error("rustc linker configuration is not cacheable yet: {0}")]
+    UnsupportedLinkerConfiguration(String),
     /// A library search-path kind is not modeled.
     #[error("rustc search path kind is not cacheable yet: {0}")]
     UnsupportedSearchPath(String),
@@ -261,6 +264,13 @@ pub struct RustcInvocation {
     explicit_output: Option<PathBuf>,
     emits: Vec<Emit>,
     target: Option<String>,
+    link_output: LinkOutput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkOutput {
+    Library,
+    WasmExecutable,
 }
 
 /// The cacheable files and dependency manifest produced by a rustc invocation.
@@ -268,8 +278,10 @@ pub struct RustcInvocation {
 pub struct RustcOutputs {
     /// Common directory containing all modeled outputs.
     pub directory: PathBuf,
-    /// Cacheable rlib and/or metadata files.
+    /// Cacheable library, metadata, and/or compiler-linked wasm files.
     pub files: Vec<PathBuf>,
+    /// Outputs that must retain executable permissions when restored.
+    pub executable_files: BTreeSet<PathBuf>,
     /// Dep-info file used for precise input discovery.
     pub dep_info: PathBuf,
 }
@@ -280,7 +292,7 @@ impl RustcInvocation {
     ///
     /// Any flag whose cache semantics are not modeled returns a bypass reason
     /// instead of guessing. A successful parse only admits the initial
-    /// rlib/rmeta cacheability tier.
+    /// rlib/rmeta tier plus compiler-linked `wasm32-unknown-unknown` binaries.
     pub fn parse(arguments: &[OsString]) -> Result<Self, BypassReason> {
         Parser::new(arguments).parse()
     }
@@ -295,7 +307,7 @@ impl RustcInvocation {
         self.target.as_deref()
     }
 
-    /// Resolve the rlib/rmeta files produced by this invocation.
+    /// Resolve the files produced by this invocation.
     ///
     /// The initial cache tier requires one output directory so its artifact can
     /// be represented by one protocol directory and restored atomically later.
@@ -331,6 +343,7 @@ impl RustcInvocation {
             return Err(BypassReason::ImplicitEmitWithOutputFile(output.clone()));
         }
         let mut files = BTreeSet::new();
+        let mut executable_files = BTreeSet::new();
         let mut dep_info = None;
         for emit in &self.emits {
             if emit.kind == "dep-info" {
@@ -352,16 +365,19 @@ impl RustcInvocation {
                 dep_info = Some(path);
                 continue;
             }
-            let extension = match emit.kind.as_str() {
-                "link" => "rlib",
-                "metadata" => "rmeta",
+            let (prefix, extension, executable) = match emit.kind.as_str() {
+                "link" => match self.link_output {
+                    LinkOutput::Library => ("lib", "rlib", false),
+                    LinkOutput::WasmExecutable => ("", "wasm", true),
+                },
+                "metadata" => ("lib", "rmeta", false),
                 _ => continue,
             };
             let path = if let Some(path) = &emit.path {
                 absolute_path(path, working_dir)
             } else {
                 output_directory.join(format!(
-                    "lib{}{}.{}",
+                    "{prefix}{}{}.{}",
                     self.crate_name, self.extra_filename, extension
                 ))
             };
@@ -370,6 +386,9 @@ impl RustcInvocation {
             }
             if path.parent() != Some(output_directory.as_path()) {
                 return Err(BypassReason::SplitOutputDirectories);
+            }
+            if executable {
+                executable_files.insert(path.clone());
             }
             files.insert(path);
         }
@@ -380,6 +399,7 @@ impl RustcInvocation {
         Ok(RustcOutputs {
             directory: output_directory,
             files: files.into_iter().collect(),
+            executable_files,
             dep_info,
         })
     }
@@ -422,6 +442,14 @@ impl RustcInvocation {
             inputs,
             environment: discovered.environment.keys().cloned().collect(),
         })
+    }
+}
+
+impl RustcOutputs {
+    /// Whether `path` is a linked program whose executable permission is part
+    /// of the declared output contract.
+    pub fn is_executable(&self, path: &Path) -> bool {
+        self.executable_files.contains(path)
     }
 }
 
@@ -672,7 +700,7 @@ impl<'a> Parser<'a> {
         }
 
         let source = self.source.clone().ok_or(BypassReason::MissingInput)?;
-        self.classify()?;
+        let link_output = self.classify()?;
         let crate_name = self.crate_name.clone().map_or_else(
             || {
                 source
@@ -694,6 +722,7 @@ impl<'a> Parser<'a> {
             explicit_output: self.explicit_output,
             emits: self.emits,
             target: self.target,
+            link_output,
         })
     }
 
@@ -753,6 +782,7 @@ impl<'a> Parser<'a> {
                 let value = self.take_value(&rendered_flag, inline)?;
                 self.target = Some(value.clone());
                 if value.ends_with(".json") || value.contains(['/', '\\']) {
+                    self.target = None;
                     let path = PathBuf::from(value);
                     self.required_inputs.push(path.clone());
                     self.parsed.push(Argument::Path {
@@ -760,6 +790,7 @@ impl<'a> Parser<'a> {
                         path,
                     });
                 } else {
+                    self.target = Some(value.clone());
                     self.parsed
                         .push(Argument::Plain(format!("{rendered_flag}={value}")));
                 }
@@ -916,20 +947,43 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn classify(&self) -> Result<(), BypassReason> {
-        if self.crate_types.is_empty() {
-            return Err(BypassReason::UnsupportedCrateType("bin".into()));
-        }
-        if let Some(crate_type) = self
-            .crate_types
-            .iter()
-            .find(|crate_type| !matches!(crate_type.as_str(), "lib" | "rlib"))
+    fn classify(&self) -> Result<LinkOutput, BypassReason> {
+        let link_output = if !self.test
+            && !self.crate_types.is_empty()
+            && self
+                .crate_types
+                .iter()
+                .all(|crate_type| matches!(crate_type.as_str(), "lib" | "rlib"))
         {
-            return Err(BypassReason::UnsupportedCrateType(crate_type.clone()));
-        }
-        if self.test {
+            LinkOutput::Library
+        } else if self.target.as_deref() == Some("wasm32-unknown-unknown")
+            && self
+                .crate_types
+                .iter()
+                .all(|crate_type| crate_type == "bin")
+        {
+            if self.parsed.iter().any(|argument| {
+                matches!(argument, Argument::Plain(value) if value == "--codegen=link-self-contained" || value.starts_with("--codegen=link-self-contained="))
+            }) {
+                return Err(BypassReason::UnsupportedLinkerConfiguration(
+                    "link-self-contained".into(),
+                ));
+            }
+            // This target's built-in linker is rust-lld from the Rust
+            // toolchain. Unlike a native link, it has no implicit host CRT or
+            // system-library inputs outside the compiler identity.
+            LinkOutput::WasmExecutable
+        } else if self.test {
             return Err(BypassReason::UnsupportedCrateType("test".into()));
-        }
+        } else {
+            return Err(BypassReason::UnsupportedCrateType(
+                self.crate_types
+                    .iter()
+                    .find(|crate_type| !matches!(crate_type.as_str(), "lib" | "rlib"))
+                    .cloned()
+                    .unwrap_or_else(|| "bin".into()),
+            ));
+        };
         if let Some(name) = self.parsed.iter().find_map(|argument| match argument {
             Argument::Extern { name, path: None } if name != "proc_macro" => Some(name),
             _ => None,
@@ -950,7 +1004,7 @@ impl<'a> Parser<'a> {
         {
             return Err(BypassReason::NoCacheableOutput);
         }
-        Ok(())
+        Ok(link_output)
     }
 }
 

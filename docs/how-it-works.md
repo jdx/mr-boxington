@@ -58,7 +58,9 @@ platform, including when mbx has to use the copy fallback.
 
 ## Correctness first
 
-Unsupported crate types, unmodeled search paths, linking, and incremental
-compilations bypass the shared action cache. `MBX_VERIFY=1` compiles while also
-consulting the cache and compares the result, providing a deliberately expensive
-qualification mode.
+Unsupported crate types, unmodeled search paths, native linking, and
+incremental compilations bypass the shared action cache. The only linked
+programs admitted today are `wasm32-unknown-unknown` binaries and tests using
+the compiler-bundled default linker. `MBX_VERIFY=1` compiles while also
+consulting the cache and compares the result, providing a deliberately
+expensive qualification mode.
