@@ -957,10 +957,8 @@ impl<'a> Parser<'a> {
         {
             LinkOutput::Library
         } else if self.target.as_deref() == Some("wasm32-unknown-unknown")
-            && self
-                .crate_types
-                .iter()
-                .all(|crate_type| crate_type == "bin")
+            && ((self.test && self.crate_types.is_empty())
+                || self.crate_types.as_slice() == ["bin"])
         {
             if self.parsed.iter().any(|argument| {
                 matches!(argument, Argument::Plain(value) if value == "--codegen=link-self-contained" || value.starts_with("--codegen=link-self-contained="))

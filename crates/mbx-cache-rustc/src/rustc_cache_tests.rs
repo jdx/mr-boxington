@@ -183,6 +183,16 @@ fn accepts_wasm_tests_but_not_native_tests() {
     ]);
     assert!(RustcInvocation::parse(&wasm).is_ok());
 
+    let implicit_binary = args(&[
+        "--emit=dep-info,link",
+        "--target=wasm32-unknown-unknown",
+        "src/main.rs",
+    ]);
+    assert_eq!(
+        RustcInvocation::parse(&implicit_binary),
+        Err(BypassReason::UnsupportedCrateType("bin".into()))
+    );
+
     let native = args(&["--test", "--emit=dep-info,link", "src/lib.rs"]);
     assert_eq!(
         RustcInvocation::parse(&native),

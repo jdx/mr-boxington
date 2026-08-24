@@ -284,7 +284,7 @@ fn restores_declared_executable_permissions() {
         name: "fixture.wasm".into(),
     };
 
-    let staged = stage_cached_output(root.path(), 0, &source, &node).unwrap();
+    let (staged, _) = stage_verified_cached_output(root.path(), 0, &source, &node).unwrap();
     assert_eq!(
         std::fs::metadata(staged).unwrap().permissions().mode() & 0o777,
         0o755
