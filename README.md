@@ -5,7 +5,7 @@
 <h1 align="center">mr boxington</h1>
 
 <p align="center">
-  <strong>Build it once.</strong><br>
+  <strong><code>target/</code>, fixed: shared and self-pruning.</strong><br>
   A Cargo wrapper that shares compiled work across worktrees and CI—and prunes build storage automatically.
 </p>
 
