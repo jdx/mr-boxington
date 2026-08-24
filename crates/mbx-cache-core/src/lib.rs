@@ -345,6 +345,16 @@ impl RemoteCacheClient {
         })
     }
 
+    /// Connect to the server, authenticate, and negotiate protocol capabilities.
+    ///
+    /// This performs no cache reads or writes. It is intended for diagnostics
+    /// that need to distinguish a valid client configuration from a reachable,
+    /// compatible remote cache.
+    pub async fn check_connection(&self) -> Result<()> {
+        self.negotiated_capabilities().await?;
+        Ok(())
+    }
+
     fn action_result_endpoint(&self, action: &CacheDigest) -> Result<Url> {
         action.validate()?;
         if action.algorithm != "blake3" {

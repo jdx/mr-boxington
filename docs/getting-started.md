@@ -77,6 +77,17 @@ The persistent wrapper uses the local action store. Continue to run commands
 through `mbx` when you need a remote cache, build statistics, managed target
 directories, or automatic collection.
 
+## Diagnose the installation
+
+```sh
+mbx doctor
+```
+
+Doctor checks the Cargo and rustc executables, cache write access, filesystem
+reflink support, plain Cargo wrapper installation, effective remote policy,
+and remote protocol connectivity. Warnings describe optional features or
+fallbacks; failures make the command exit unsuccessfully.
+
 ## Read the result
 
 After a build that used the cache, mbx prints a summary to stderr:
