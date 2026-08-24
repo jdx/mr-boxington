@@ -31,22 +31,16 @@
     <path d="M35 50h26M35 58h32M35 66h20" fill="none" stroke="#b08d4d" stroke-width="3.5" stroke-linecap="round"/>
   </g>
 
-  <!-- face on the left panel: full iso shear so features lie on the plane;
-       only the eyeballs are counter-sheared to stay round -->
+  <!-- face on the left panel: full iso shear so everything lies on the plane -->
   <g transform="translate(108,182) matrix(1 .5 0 1 0 0)">
     <!-- eyebrows -->
     <path d="M-38 -52q11 -7 21 -2" fill="none" stroke="#2a3f44" stroke-width="5.5" stroke-linecap="round"/>
     <path d="M6 -52q11 -7 21 -2" fill="none" stroke="#2a3f44" stroke-width="5.5" stroke-linecap="round"/>
-    <!-- left eye -->
-    <g transform="translate(-26,-28) matrix(1 -.5 0 1 0 0)">
-      <circle r="8" fill="#2a3f44"/>
-      <circle cx="-2.5" cy="-2.5" r="2.6" fill="#f6ecd2"/>
-    </g>
-    <!-- right eye -->
-    <g transform="translate(18,-28) matrix(1 -.5 0 1 0 0)">
-      <circle r="8" fill="#2a3f44"/>
-      <circle cx="-2.5" cy="-2.5" r="2.6" fill="#f6ecd2"/>
-    </g>
+    <!-- eyes -->
+    <circle cx="-26" cy="-28" r="8" fill="#2a3f44"/>
+    <circle cx="-28.5" cy="-30.5" r="2.6" fill="#f6ecd2"/>
+    <circle cx="18" cy="-28" r="8" fill="#2a3f44"/>
+    <circle cx="15.5" cy="-30.5" r="2.6" fill="#f6ecd2"/>
     <!-- monocle: rigid ring pressed against the panel, so it shears with the plane -->
     <circle cx="18" cy="-28" r="16.5" fill="none" stroke="#2a3f44" stroke-width="5"/>
     <path d="M7.1 -33.1A12 12 0 0 1 12 -38.4" fill="none" stroke="#f6ecd2" stroke-width="3" stroke-linecap="round" opacity=".7"/>
