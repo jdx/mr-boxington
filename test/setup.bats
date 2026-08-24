@@ -68,6 +68,50 @@ EOF
   assert_file_contains "$CARGO_HOME/config.toml" 'rustc-wrapper = "sccache"'
 }
 
+@test "setup status update and uninstall cover the full lifecycle" {
+  local wrapper
+  cat >"$CARGO_HOME/config.toml" <<'EOF'
+# keep me
+[net]
+offline = true
+EOF
+
+  run "$MBX_BIN" setup --status
+  assert_failure
+  assert_output --partial "not installed"
+
+  run "$MBX_BIN" setup
+  assert_success
+  wrapper="$(sed -n 's/.*rustc-wrapper = "\([^"]*\)".*/\1/p' "$CARGO_HOME/config.toml")"
+  [[ -n "$wrapper" ]]
+
+  run "$MBX_BIN" setup --status
+  assert_success
+  assert_output --partial "installed and current"
+
+  rm "$wrapper"
+  printf 'stale wrapper\n' >"$wrapper"
+  chmod +x "$wrapper"
+  run "$MBX_BIN" setup --status
+  assert_failure
+  assert_output --partial "outdated"
+
+  run "$MBX_BIN" setup --update
+  assert_success
+  assert_output --partial "updated"
+
+  run "$MBX_BIN" setup --uninstall
+  assert_success
+  assert_file_not_exist "$wrapper"
+  assert_file_contains "$CARGO_HOME/config.toml" "# keep me"
+  assert_file_contains "$CARGO_HOME/config.toml" "offline = true"
+  refute_file_contains "$CARGO_HOME/config.toml" "rustc-wrapper"
+
+  run "$MBX_BIN" setup --uninstall
+  assert_success
+  assert_output --partial "was not installed"
+}
+
 @test "the persistent wrapper restores a second checkout without an mbx session" {
   local first="$BATS_TEST_TMPDIR/first-checkout"
   local second="$BATS_TEST_TMPDIR/second-checkout"
