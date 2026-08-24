@@ -246,12 +246,6 @@ async fn remote_checks(config: &Config) -> Vec<Check> {
         "policy",
         format!("configured {}, effective {effective}", config.remote.mode),
     );
-    if effective_mode.is_none() {
-        return vec![
-            policy,
-            Check::pass("remote", "probe skipped because remote caching is disabled"),
-        ];
-    }
     let Some(namespace) = config
         .remote
         .namespace
@@ -290,6 +284,12 @@ async fn remote_checks(config: &Config) -> Vec<Check> {
         Ok(client) => client,
         Err(error) => return vec![policy, Check::fail("remote", format!("{error:#}"))],
     };
+    if effective_mode.is_none() {
+        return vec![
+            policy,
+            Check::pass("remote", "probe skipped because remote caching is disabled"),
+        ];
+    }
     let remote = match client
         .check_connection()
         .await
@@ -330,6 +330,7 @@ mod tests {
             },
         };
         config.remote.url = Some("https://cache.example".into());
+        config.remote.mode = mbx_cache_core::RemoteCacheMode::WriteOnly;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
