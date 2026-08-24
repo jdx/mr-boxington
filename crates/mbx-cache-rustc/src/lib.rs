@@ -1,3 +1,33 @@
+//! Conservative parsing and action-key construction for `rustc` invocations.
+//!
+//! The adapter deliberately rejects any compiler option whose effect on the
+//! action key is unknown. Callers should treat [`BypassReason`] as a safe cache
+//! bypass, run the real compiler, and avoid publishing an action result.
+//!
+//! A typical integration parses an invocation, discovers precise inputs from
+//! rustc dep-info with [`RustcInvocation::discover_inputs`], adds them to an
+//! [`ActionContext`], and finally calls [`RustcInvocation::action`]. Path
+//! mappings make workspace-local absolute paths stable across machines.
+//!
+//! ```
+//! use mbx_cache_rustc::{PathMapping, normalize_mapped_path};
+//! use std::path::Path;
+//!
+//! let mappings = PathMapping::ordered(&[
+//!     PathMapping::new("/work/project", "workspace"),
+//! ]);
+//! assert_eq!(
+//!     normalize_mapped_path(
+//!         Path::new("src/lib.rs"),
+//!         Path::new("/work/project"),
+//!         &mappings,
+//!     )?,
+//!     "${workspace}/src/lib.rs",
+//! );
+//! # Ok::<(), mbx_cache_rustc::BypassReason>(())
+//! ```
+#![deny(missing_docs)]
+
 use mbx_cache_core::{CacheDigest, canonical_json};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -9,7 +39,9 @@ mod dep_info;
 
 pub use dep_info::{DepInfoCommand, DiscoveredInputs, RustcDepInfo};
 
+/// Schema version embedded in canonical rustc action descriptors.
 pub const ACTION_SCHEMA_VERSION: u8 = 1;
+/// Version of the rustc argument and input model used to construct keys.
 pub const ADAPTER_VERSION: u8 = 1;
 
 impl BypassReason {
@@ -57,85 +89,143 @@ const SUPPORTED_CODEGEN_OPTIONS: &[&str] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq, Error, strum::IntoStaticStr)]
 #[strum(serialize_all = "kebab-case")]
+/// Reason an invocation cannot safely use the action cache.
+///
+/// A bypass is an expected conservative outcome, not necessarily a compiler
+/// error. Variants carry diagnostic context while [`BypassReason::kind`]
+/// provides a stable aggregation key.
 pub enum BypassReason {
+    /// An argument cannot be represented in the canonical UTF-8 key.
     #[error("rustc argument {index} is not valid UTF-8")]
-    NonUtf8Argument { index: usize },
+    NonUtf8Argument {
+        /// Zero-based index in the argument slice.
+        index: usize,
+    },
+    /// The invocation uses a response file, whose contents are not modeled.
     #[error("rustc response files are not supported: {0}")]
     ResponseFile(String),
+    /// A compiler flag is not modeled by this adapter version.
     #[error("rustc flag is not modeled by the cache adapter: {0}")]
     UnknownFlag(String),
+    /// A `-C` option is not modeled by this adapter version.
     #[error("rustc codegen option is not modeled by the cache adapter: {0}")]
     UnknownCodegenOption(String),
+    /// A recognized flag was not followed by its required value.
     #[error("rustc flag requires a value: {0}")]
     MissingValue(String),
+    /// The invocation queries compiler information instead of compiling.
     #[error("rustc invocation is a compiler query, not a compilation")]
     CompilerQuery,
+    /// Source would be read from standard input and cannot be rediscovered.
     #[error("rustc invocation reads source from standard input")]
     StandardInput,
+    /// No Rust source input was supplied.
     #[error("rustc invocation has no source input")]
     MissingInput,
+    /// More than one source input was supplied.
     #[error("rustc invocation has multiple source inputs")]
     MultipleInputs,
+    /// Incremental state makes the outputs unsuitable for action caching.
     #[error("incremental compilation cannot be combined with action caching")]
     Incremental,
+    /// The requested crate type is outside the supported cacheability tier.
     #[error("rustc crate type is not cacheable yet: {0}")]
     UnsupportedCrateType(String),
+    /// The requested emit kind is outside the supported cacheability tier.
     #[error("rustc output type is not cacheable yet: {0}")]
     UnsupportedEmit(String),
+    /// The invocation emits neither an rlib nor metadata artifact.
     #[error("rustc invocation does not emit an rlib or metadata artifact")]
     NoCacheableOutput,
+    /// The invocation does not emit the dep-info needed for input discovery.
     #[error("rustc invocation does not emit dependency information")]
     NoDepInfo,
+    /// Outputs cannot be represented as one cache directory.
     #[error("rustc output paths do not share one directory")]
     SplitOutputDirectories,
+    /// An output path does not name a file.
     #[error("rustc output path has no file name: {0}")]
     InvalidOutputPath(PathBuf),
+    /// `-o` leaves the name of an implicit emit ambiguous.
     #[error("rustc -o with an emit that has no explicit path is not modeled: {0}")]
     ImplicitEmitWithOutputFile(PathBuf),
+    /// Native-library lookup is not modeled as a precise input.
     #[error("native library lookup is not cacheable yet")]
     NativeLibrary,
+    /// A library search-path kind is not modeled.
     #[error("rustc search path kind is not cacheable yet: {0}")]
     UnsupportedSearchPath(String),
+    /// An extern name does not resolve to a concrete input artifact.
     #[error("rustc extern does not identify an input artifact: {0}")]
     UnresolvedExtern(String),
+    /// An absolute path has no stable placeholder mapping.
     #[error("absolute path has no stable cache mapping: {0}")]
     UnmappedAbsolutePath(PathBuf),
+    /// A path cannot be represented in a canonical UTF-8 action key.
     #[error("cache key paths must be valid UTF-8: {0}")]
     NonUtf8Path(PathBuf),
+    /// The action working directory is not absolute.
     #[error("cache action working directory must be absolute: {0}")]
     RelativeWorkingDirectory(PathBuf),
+    /// A path-mapping root is not absolute.
     #[error("cache path mapping must use an absolute root: {0}")]
     RelativePathMapping(PathBuf),
+    /// A mapping placeholder is empty or contains unsafe characters.
     #[error("cache path mapping placeholder is invalid: {0}")]
     InvalidPathPlaceholder(String),
+    /// An input referenced by compiler arguments is missing from the context.
     #[error("required compiler input was not provided: {0}")]
     MissingRequiredInput(String),
+    /// A supplied compiler-input digest is malformed.
     #[error("compiler input has an invalid digest: {0}")]
     InvalidInputDigest(String),
+    /// One normalized input path has multiple distinct digests.
     #[error("compiler input appears more than once with different content: {0}")]
     ConflictingInput(String),
+    /// rustc dep-info does not follow the supported format.
     #[error("rustc dep-info is malformed: {0}")]
     MalformedDepInfo(String),
+    /// A dep-info file could not be read as UTF-8 text.
     #[error("failed to read rustc dep-info {path}: {message}")]
-    DepInfoRead { path: PathBuf, message: String },
+    DepInfoRead {
+        /// Dep-info file path.
+        path: PathBuf,
+        /// Underlying I/O or decoding error.
+        message: String,
+    },
+    /// The requested dep-info output path is not absolute.
     #[error("rustc dep-info output path must be absolute: {0}")]
     RelativeDepInfoPath(PathBuf),
+    /// A dep-info output path contains a comma and cannot be safely rendered.
     #[error("rustc dep-info output path cannot contain a comma: {0}")]
     UnsafeDepInfoPath(PathBuf),
+    /// A discovered compiler input could not be read or was not a file.
     #[error("failed to read compiler input {path}: {message}")]
-    InputRead { path: PathBuf, message: String },
+    InputRead {
+        /// Compiler-input path.
+        path: PathBuf,
+        /// Underlying filesystem error.
+        message: String,
+    },
+    /// Input contents changed after they were hashed.
     #[error("compiler input changed after discovery: {0}")]
     InputChanged(PathBuf),
+    /// An input's modification time overlaps the compiler execution.
     #[error("compiler input was modified during compilation: {0}")]
     InputModifiedDuringCompilation(PathBuf),
+    /// Discovered inputs and the action use different working directories.
     #[error("discovered inputs were collected from a different working directory")]
     DiscoveryWorkingDirectory,
+    /// One observed environment input has conflicting values.
     #[error("compiler environment input has conflicting values: {0}")]
     ConflictingEnvironment(String),
+    /// Canonical action serialization failed.
     #[error("failed to serialize the rustc action: {0}")]
     Serialization(String),
+    /// The stored prediction uses an unsupported version or exceeds limits.
     #[error("rustc action prediction is unsupported")]
     UnsupportedPrediction,
+    /// A normalized predicted path cannot be mapped back to the host.
     #[error("rustc action prediction contains an invalid input path: {0}")]
     InvalidPredictedInput(String),
 }
@@ -157,6 +247,10 @@ struct Emit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Parsed, cache-safe model of one `rustc` command line.
+///
+/// Fields are intentionally private so new modeled flags can be added without
+/// exposing the adapter's internal representation.
 pub struct RustcInvocation {
     arguments: Vec<Argument>,
     source: PathBuf,
@@ -171,8 +265,11 @@ pub struct RustcInvocation {
 /// The cacheable files and dependency manifest produced by a rustc invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RustcOutputs {
+    /// Common directory containing all modeled outputs.
     pub directory: PathBuf,
+    /// Cacheable rlib and/or metadata files.
     pub files: Vec<PathBuf>,
+    /// Dep-info file used for precise input discovery.
     pub dep_info: PathBuf,
 }
 
@@ -323,8 +420,11 @@ impl RustcInvocation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Mapping from a host-specific absolute root to a stable key placeholder.
 pub struct PathMapping {
+    /// Absolute host path to replace.
     pub root: PathBuf,
+    /// Placeholder name without the surrounding `${...}` syntax.
     pub placeholder: String,
 }
 
@@ -377,23 +477,35 @@ pub fn normalize_mapped_path(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Compiler properties that distinguish incompatible action outputs.
 pub struct CompilerIdentity {
+    /// Toolchain selector or installation identity.
     pub toolchain: String,
+    /// Complete verbose rustc version string.
     pub rustc_version: String,
+    /// Compiler host target triple.
     pub host: String,
 }
 
+/// One file input paired with the digest used in the action key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionInput {
+    /// Absolute host path used to read and verify the input.
     pub path: PathBuf,
+    /// Digest of the input contents.
     pub digest: CacheDigest,
 }
 
+/// External information needed to construct a canonical rustc action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionContext {
+    /// Identity of the compiler that produces the outputs.
     pub compiler: CompilerIdentity,
+    /// Absolute directory in which rustc runs.
     pub working_dir: PathBuf,
+    /// Host roots replaced with stable placeholders in the key.
     pub path_mappings: Vec<PathMapping>,
+    /// Environment inputs and their observed values.
     pub environment: BTreeMap<String, Option<String>>,
     /// Environment inputs whose absolute values the compilation has been made
     /// independent of, and whose values the key therefore normalizes.
@@ -402,12 +514,16 @@ pub struct ActionContext {
     /// caller must both neutralize the value inside it (with
     /// `--remap-path-prefix`) and confirm no output carries the value anyway.
     pub portable_environment: BTreeSet<String>,
+    /// Complete set of direct and discovered file inputs.
     pub inputs: Vec<ActionInput>,
 }
 
+/// Canonical action descriptor and its content digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RustcAction {
+    /// Digest of `bytes`, used as the action-cache key.
     pub digest: CacheDigest,
+    /// Canonical serialized action descriptor.
     pub bytes: Vec<u8>,
 }
 
@@ -416,8 +532,11 @@ pub struct RustcAction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RustcInputPrediction {
+    /// Prediction schema version.
     pub version: u8,
+    /// Normalized input paths observed during the successful invocation.
     pub inputs: Vec<String>,
+    /// Names of environment variables read by the compilation.
     pub environment: Vec<String>,
 }
 

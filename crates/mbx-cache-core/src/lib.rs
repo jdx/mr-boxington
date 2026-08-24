@@ -1,3 +1,33 @@
+//! Protocol and storage primitives for mbx build caches.
+//!
+//! This crate contains the types shared by cache clients, the task-scoped
+//! cache agent, and remote cache implementations. Protocol records are
+//! serialized with [`canonical_json`] before hashing; changing their shape is
+//! therefore a wire-format change, not merely an implementation detail.
+//!
+//! Most consumers start with [`CacheDigest`] and the local stores
+//! [`LocalCas`] and [`LocalActionCache`]. Remote clients use
+//! [`RemoteCacheClient`], while mbx's compiler shim communicates with a
+//! [`CacheAgent`] using [`AgentRequest`] and [`AgentResponse`].
+//!
+//! ```
+//! use mbx_cache_core::{CacheDigest, canonical_json};
+//! use serde::Serialize;
+//!
+//! #[derive(Serialize)]
+//! struct Key<'a> {
+//!     compiler: &'a str,
+//!     source: CacheDigest,
+//! }
+//!
+//! let source = CacheDigest::blake3(b"fn main() {}\n");
+//! let bytes = canonical_json(&Key { compiler: "rustc", source })?;
+//! let action = CacheDigest::blake3(&bytes);
+//! assert_eq!(action.algorithm, "blake3");
+//! # Ok::<(), eyre::Report>(())
+//! ```
+#![deny(missing_docs)]
+
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use eyre::{Result, bail, eyre};
 use futures_util::TryStreamExt as _;
@@ -28,15 +58,22 @@ pub use agent::{
 };
 pub use local::{LocalActionCache, LocalCas};
 
+/// Major version of the HTTP cache protocol implemented by this crate.
 pub const PROTOCOL_VERSION: u8 = 1;
 const PROTOCOL_HEADER: &str = "mbx-cache-protocol";
 const NAMESPACE_HEADER: &str = "mbx-cache-namespace";
+/// Media type for canonical [`RemoteActionResult`] JSON records.
 pub const ACTION_RESULT_MEDIA_TYPE: &str = "application/vnd.mbx.cache-action-result.v1+json";
+/// Media type for canonical [`CacheDirectory`] JSON records.
 pub const DIRECTORY_MEDIA_TYPE: &str = "application/vnd.mbx.cache-directory.v1+json";
+/// Media type for adapter-specific action metadata blobs.
 pub const CLIENT_METADATA_MEDIA_TYPE: &str = "application/vnd.mbx.cache-client-metadata.v1+json";
+/// Media type for task-to-action prediction manifests.
 pub const TASK_ACTION_MANIFEST_MEDIA_TYPE: &str =
     "application/vnd.mbx.cache-task-action-manifest.v1+json";
+/// Media type for opaque content-addressed blobs.
 pub const BLOB_MEDIA_TYPE: &str = "application/octet-stream";
+/// Media type for framed batches of content-addressed blobs.
 pub const BLOB_PACK_MEDIA_TYPE: &str = "application/vnd.mbx.cache-blob-pack.v1";
 const DIGEST_LIST_MEDIA_TYPE: &str = "application/vnd.mbx.cache-digests.v1+json";
 const BLOB_PACK_BLOBS_HEADER: &str = "mbx-cache-pack-blobs";
@@ -77,43 +114,67 @@ pub fn canonical_json(value: &impl Serialize) -> Result<Vec<u8>> {
 )]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
+/// Operations permitted against a configured remote cache.
 pub enum RemoteCacheMode {
+    /// Permit reads from and writes to the remote cache.
     #[default]
     ReadWrite,
+    /// Permit reads but never publish new objects.
     ReadOnly,
+    /// Publish objects but never satisfy lookups from the remote cache.
     WriteOnly,
 }
 
 impl RemoteCacheMode {
+    /// Whether this mode permits remote cache reads.
     pub fn reads(self) -> bool {
         matches!(self, Self::ReadWrite | Self::ReadOnly)
     }
 
+    /// Whether this mode permits remote cache writes.
     pub fn writes(self) -> bool {
         matches!(self, Self::ReadWrite | Self::WriteOnly)
     }
 }
 
+/// Connection, authentication, and retry settings for [`RemoteCacheClient`].
 pub struct RemoteCacheConfig {
+    /// Base URL of the remote cache service.
     pub base_url: Url,
+    /// Server-side namespace used to isolate cache objects.
     pub namespace: String,
+    /// Static bearer token, if configured directly.
     pub token: Option<String>,
+    /// File containing a bearer token that may be refreshed externally.
     pub token_file: Option<PathBuf>,
+    /// Audience used when obtaining an OIDC token from the CI environment.
     pub oidc_audience: Option<String>,
+    /// Maximum time allowed to establish a connection.
     pub connect_timeout: Duration,
+    /// Maximum time without response progress for ordinary requests.
     pub read_timeout: Duration,
+    /// Overall deadline for an individual blob download attempt.
     pub download_timeout: Duration,
+    /// Number of attempts after the initial request for retryable failures.
     pub retries: i64,
 }
 
+/// Algorithm-tagged digest and byte length of a cache object.
+///
+/// Digests received from an external source should be checked with
+/// [`CacheDigest::validate`] before they are used to construct paths.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CacheDigest {
+    /// Hash algorithm name (`blake3` or `sha256`).
     pub algorithm: String,
+    /// Lowercase hexadecimal hash value.
     pub hash: String,
+    /// Exact uncompressed object length in bytes.
     pub size: u64,
 }
 
 impl CacheDigest {
+    /// Compute a BLAKE3 digest for an in-memory object.
     pub fn blake3(bytes: &[u8]) -> Self {
         Self {
             algorithm: "blake3".into(),
@@ -132,6 +193,7 @@ impl CacheDigest {
         })
     }
 
+    /// Validate the algorithm name and hexadecimal hash representation.
     pub fn validate(&self) -> Result<()> {
         if self.algorithm != "blake3" && self.algorithm != "sha256" {
             bail!("unsupported remote cache digest algorithm");
@@ -147,6 +209,7 @@ impl CacheDigest {
         Ok(())
     }
 
+    /// Return whether `bytes` have this digest and declared length.
     pub fn matches_bytes(&self, bytes: &[u8]) -> Result<bool> {
         self.validate()?;
         if self.size != bytes.len() as u64 {
@@ -160,6 +223,7 @@ impl CacheDigest {
         Ok(self.hash == hash)
     }
 
+    /// Stream a file and return whether it has this digest and length.
     pub fn matches_file(&self, path: &Path) -> Result<bool> {
         self.validate()?;
         let (hash, size) = match self.algorithm.as_str() {
@@ -207,11 +271,15 @@ fn hash_file_sha256(path: &Path) -> Result<(String, u64)> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteActionResult {
+    /// Digest of the canonical action descriptor this record satisfies.
     pub action: CacheDigest,
+    /// Optional adapter metadata blob, such as [`RustcMetadata`].
     #[serde(default)]
     pub metadata: Option<CacheDigest>,
+    /// Optional digest of the root [`CacheDirectory`] containing outputs.
     #[serde(default)]
     pub output_root: Option<CacheDigest>,
+    /// Action-result schema version.
     pub version: u8,
 }
 
@@ -219,9 +287,13 @@ pub struct RemoteActionResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheDirectory {
+    /// Child directory entries, sorted canonically by name.
     pub directories: Vec<CacheDirectoryNode>,
+    /// Child file entries, sorted canonically by name.
     pub files: Vec<CacheFileNode>,
+    /// Child symbolic-link entries, sorted canonically by name.
     pub symlinks: Vec<CacheSymlinkNode>,
+    /// Directory-object schema version.
     pub version: u8,
 }
 
@@ -229,8 +301,11 @@ pub struct CacheDirectory {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheDirectoryNode {
+    /// Digest of the child [`CacheDirectory`].
     pub digest: CacheDigest,
+    /// Platform mode bits recorded for the directory.
     pub mode: u32,
+    /// Single path-component name within the parent directory.
     pub name: String,
 }
 
@@ -238,9 +313,13 @@ pub struct CacheDirectoryNode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheFileNode {
+    /// Digest of the file contents.
     pub digest: CacheDigest,
+    /// Whether the file should be restored as executable.
     pub executable: bool,
+    /// Platform mode bits recorded for the file.
     pub mode: u32,
+    /// Single path-component name within the parent directory.
     pub name: String,
 }
 
@@ -248,8 +327,11 @@ pub struct CacheFileNode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheSymlinkNode {
+    /// Platform mode bits recorded for the symbolic link.
     pub mode: u32,
+    /// Single path-component name within the parent directory.
     pub name: String,
+    /// Link target text exactly as recorded by the producer.
     pub target: String,
 }
 
@@ -257,36 +339,56 @@ pub struct CacheSymlinkNode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RustcMetadata {
+    /// Metadata schema version.
     pub version: u8,
+    /// Adapter-defined output kind.
     pub kind: String,
+    /// Digest of captured compiler standard output.
     pub stdout: CacheDigest,
+    /// Digest of captured compiler standard error.
     pub stderr: CacheDigest,
 }
 
+/// Backing data for a blob upload.
 pub enum BlobSource {
+    /// Bytes held in memory.
     Bytes(Vec<u8>),
+    /// A temporary file whose lifetime is owned by the upload.
     File(tempfile::NamedTempFile),
+    /// A persistent file at the given path.
     Path(PathBuf),
 }
 
+/// A digest paired with the data to upload under that digest.
 pub struct BlobUpload {
+    /// Expected digest and length of the source data.
     pub digest: CacheDigest,
+    /// Data source read by [`RemoteCacheClient::put_blob`].
     pub source: BlobSource,
 }
 
+/// Task action-manifest bytes returned with their concurrency token.
 pub struct RemoteActionManifest {
+    /// Raw canonical manifest JSON.
     pub bytes: Vec<u8>,
+    /// Entity tag used for conditional manifest replacement.
     pub etag: String,
 }
 
 /// A verified set of remote CAS objects downloaded through blob-pack streams.
 pub struct RemoteBlobPack {
     _directory: tempfile::TempDir,
+    /// Verified blobs paired with paths in this pack's temporary directory.
     pub blobs: Vec<(CacheDigest, PathBuf)>,
+    /// Number of HTTP pack requests needed to retrieve the requested set.
     pub requests: u64,
+    /// Unique digests requested from the remote service.
     pub requested: Vec<CacheDigest>,
+    /// Number of verified blob frames received.
     pub blob_count: u64,
+    /// Total unframed blob payload bytes received.
     pub payload_bytes: u64,
+    /// Total bytes received including framing.
     pub framed_bytes: u64,
 }
 
@@ -423,11 +525,18 @@ struct DigestList<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result of a conditional task-manifest write.
 pub enum ManifestPutOutcome {
+    /// The manifest was stored.
     Stored,
+    /// The supplied entity-tag precondition did not match.
     PreconditionFailed,
 }
 
+/// HTTP client for the mbx remote cache protocol.
+///
+/// The client validates digests, response sizes, media types, and redirects at
+/// the protocol boundary. It is safe to share between asynchronous tasks.
 pub struct RemoteCacheClient {
     base_url: Url,
     namespace: String,
@@ -440,6 +549,7 @@ pub struct RemoteCacheClient {
 }
 
 impl RemoteCacheClient {
+    /// Construct a client and validate its URL and authentication settings.
     pub fn new(config: RemoteCacheConfig) -> Result<Self> {
         let authenticated = config
             .token
@@ -687,6 +797,7 @@ impl RemoteCacheClient {
             .map_err(|_| eyre!("remote cache blob pack download timed out for {url}"))?
     }
 
+    /// Fetch and validate an action-result record, returning `None` on a miss.
     pub async fn get_action_result(
         &self,
         action: &CacheDigest,
@@ -713,6 +824,7 @@ impl RemoteCacheClient {
         Ok(result)
     }
 
+    /// Canonically serialize and store an action-result record.
     pub async fn put_action_result(&self, result: &RemoteActionResult) -> Result<()> {
         let url = self.action_result_endpoint(&result.action)?;
         let body = serde_json::to_vec(result)?;
@@ -733,6 +845,7 @@ impl RemoteCacheClient {
         .await
     }
 
+    /// Fetch a task action manifest and the entity tag needed to update it.
     pub async fn get_action_manifest(
         &self,
         key: &CacheDigest,
@@ -762,6 +875,7 @@ impl RemoteCacheClient {
         .await
     }
 
+    /// Store a task action manifest, optionally requiring an entity-tag match.
     pub async fn put_action_manifest(
         &self,
         key: &CacheDigest,
@@ -796,6 +910,7 @@ impl RemoteCacheClient {
         .await
     }
 
+    /// Download a small blob into memory and verify its digest.
     pub async fn get_blob(
         &self,
         digest: &CacheDigest,
@@ -828,6 +943,7 @@ impl RemoteCacheClient {
         .await
     }
 
+    /// Download a blob to a temporary file and verify its digest.
     pub async fn get_blob_file(
         &self,
         digest: &CacheDigest,
@@ -866,6 +982,7 @@ impl RemoteCacheClient {
             .map_err(|_| eyre!("remote cache blob download timed out for {url}"))?
     }
 
+    /// Verify and upload a content-addressed blob.
     pub async fn put_blob(&self, upload: &BlobUpload) -> Result<()> {
         let url = self.blob_endpoint(&upload.digest)?;
         // A failed negotiation downgrades to identity rather than failing the

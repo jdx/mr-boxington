@@ -7,6 +7,9 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
 mbx-cache-core = { path = "../mbx-cache-core", version = "0.3.0", default-features = false }
 serde = { version = "1", features = ["derive"] }

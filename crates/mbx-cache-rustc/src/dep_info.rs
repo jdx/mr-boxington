@@ -29,7 +29,9 @@ impl DepInfoCommand {
 /// The source and environment inputs reported by rustc's dep-info output.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RustcDepInfo {
+    /// Source paths listed in the first dep-info dependency rule.
     pub files: Vec<PathBuf>,
+    /// Environment inputs recorded by rustc `# env-dep:` lines.
     pub environment: BTreeMap<String, Option<String>>,
 }
 
@@ -127,7 +129,9 @@ impl RustcDepInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredInputs {
     working_dir: PathBuf,
+    /// Content-addressed compiler input files.
     pub inputs: Vec<ActionInput>,
+    /// Environment inputs captured from dep-info.
     pub environment: BTreeMap<String, Option<String>>,
 }
 
