@@ -5,13 +5,19 @@ use crate::session::CacheSession;
 use crate::{policy, store, target};
 use bytesize::ByteSize;
 use clap::{Args, Parser, Subcommand};
-use eyre::{Context, Result, bail};
+use eyre::{Context, Result};
 use std::collections::BTreeMap;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 #[derive(Parser)]
-#[command(name = "mbx", version, about = "A build cache for Rust projects")]
+#[command(
+    name = "mbx",
+    version,
+    about = "A build cache for Rust projects",
+    after_help = "Cargo subcommands are forwarded directly.\n\nExamples:\n  mbx build --release\n  mbx test --workspace\n  mbx clippy --all-targets"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -19,19 +25,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run cargo with the build cache enabled.
-    Build(BuildArgs),
     /// Evict cached objects until the store fits a size budget.
     Gc(GcArgs),
     /// Inspect the local store.
     Cache(CacheArgs),
-}
-
-#[derive(Args)]
-struct BuildArgs {
-    /// Arguments passed to cargo, starting with the subcommand.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    arguments: Vec<String>,
+    /// Run a cargo subcommand with the build cache enabled.
+    #[command(external_subcommand)]
+    Cargo(Vec<String>),
 }
 
 #[derive(Args)]
@@ -61,7 +61,6 @@ pub fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     let config = Config::load()?;
     match cli.command {
-        Commands::Build(args) => build(&config, &args.arguments),
         Commands::Gc(args) => gc(
             &config,
             args.max_size
@@ -75,11 +74,11 @@ pub fn run() -> Result<ExitCode> {
             }
             CacheCommands::Stats => cache_stats(&config).map(|()| ExitCode::SUCCESS),
         },
+        Commands::Cargo(arguments) => cargo(&config, &arguments),
     }
 }
 
-fn build(config: &Config, arguments: &[String]) -> Result<ExitCode> {
-    validate_build_arguments(arguments)?;
+fn cargo(config: &Config, arguments: &[String]) -> Result<ExitCode> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     // Release builds publish artifacts that must not depend on a cache, and a
     // tag build has no later build to share with anyway.
@@ -109,6 +108,7 @@ fn build(config: &Config, arguments: &[String]) -> Result<ExitCode> {
 
     let working_dir = std::env::current_dir()?;
     let mut roots = resolve_roots(&cargo, arguments, &working_dir);
+    prompt_to_manage_existing_target(config, &roots, arguments)?;
     // Placed before the session starts, because the target directory is what
     // the shim maps out of its cache keys and it has to be the one cargo will
     // actually write to.
@@ -167,6 +167,64 @@ fn build(config: &Config, arguments: &[String]) -> Result<ExitCode> {
     // user is waiting on.
     sweep_store(config);
     status
+}
+
+/// Offer to replace an existing default target directory with a managed one.
+///
+/// A non-interactive run must never wait for input. Refusing or cancelling the
+/// prompt leaves cargo's directory alone and the build continues normally.
+fn prompt_to_manage_existing_target(
+    config: &Config,
+    roots: &Roots,
+    arguments: &[String],
+) -> Result<()> {
+    if cargo_help_requested(arguments)
+        || !std::io::stdin().is_terminal()
+        || !std::io::stderr().is_terminal()
+    {
+        return Ok(());
+    }
+    prompt_to_manage_existing_target_with(config, roots, |directory| {
+        let description = format!(
+            "mbx can remove {} and replace it with a managed target that is pruned after this checkout is deleted.",
+            directory.display()
+        );
+        match demand::Confirm::new("Use a managed target directory?")
+            .description(&description)
+            .affirmative("Remove target/")
+            .negative("Keep it")
+            .selected(false)
+            .run()
+        {
+            Ok(answer) => Ok(answer),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    })
+}
+
+fn cargo_help_requested(arguments: &[String]) -> bool {
+    arguments.first().is_some_and(|argument| argument == "help")
+        || arguments
+            .iter()
+            .any(|argument| argument == "--help" || argument == "-h")
+}
+
+fn prompt_to_manage_existing_target_with(
+    config: &Config,
+    roots: &Roots,
+    prompt: impl FnOnce(&Path) -> Result<bool>,
+) -> Result<()> {
+    if !target::can_remove_existing(
+        config,
+        &roots.workspace_root,
+        &roots.target_dir,
+        roots.target_dir_requested,
+    ) || !prompt(&roots.target_dir)?
+    {
+        return Ok(());
+    }
+    target::remove_existing(&roots.target_dir)
 }
 
 fn run_cargo(
@@ -586,14 +644,6 @@ fn flag_value<'a>(arguments: &'a [String], flag: &str) -> Option<&'a str> {
     None
 }
 
-/// Reject a build invocation that cargo would not accept anyway.
-pub fn validate_build_arguments(arguments: &[String]) -> Result<()> {
-    if arguments.is_empty() {
-        bail!("mbx build expects a cargo subcommand, for example: mbx build build --release");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -897,8 +947,79 @@ mod tests {
     }
 
     #[test]
-    fn build_requires_a_cargo_subcommand() {
-        assert!(validate_build_arguments(&[]).is_err());
-        assert!(validate_build_arguments(&["build".to_string()]).is_ok());
+    fn cargo_subcommands_are_forwarded_directly() {
+        let cli = Cli::try_parse_from(["mbx", "clippy", "--workspace"]).unwrap();
+        let Commands::Cargo(arguments) = cli.command else {
+            panic!("clippy should be treated as a cargo subcommand");
+        };
+        assert_eq!(arguments, ["clippy", "--workspace"]);
+    }
+
+    #[test]
+    fn mbx_commands_still_take_precedence() {
+        let cli = Cli::try_parse_from(["mbx", "gc", "--max-size", "1GiB"]).unwrap();
+        assert!(matches!(cli.command, Commands::Gc(_)));
+    }
+
+    #[test]
+    fn cargo_help_does_not_trigger_target_migration() {
+        assert!(cargo_help_requested(&["build".into(), "--help".into()]));
+        assert!(cargo_help_requested(&["help".into(), "build".into()]));
+        assert!(!cargo_help_requested(&["build".into(), "--release".into()]));
+    }
+
+    fn managed_target_config(root: &Path) -> Config {
+        Config {
+            cache_dir: root.join("cache"),
+            stats_report: None,
+            verify: false,
+            incremental: false,
+            share_out_dir: false,
+            remote: Default::default(),
+            http: Default::default(),
+            gc: Default::default(),
+            target: crate::config::TargetSettings {
+                views: true,
+                root: root.join("targets"),
+            },
+        }
+    }
+
+    #[test]
+    fn accepting_the_target_prompt_removes_only_the_default_real_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("project");
+        let target_dir = workspace.join("target");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(target_dir.join("artifact"), b"old output").unwrap();
+        let config = managed_target_config(directory.path());
+        let roots = Roots {
+            workspace_root: workspace,
+            target_dir: target_dir.clone(),
+            target_dir_requested: false,
+        };
+
+        prompt_to_manage_existing_target_with(&config, &roots, |_| Ok(true)).unwrap();
+
+        assert!(!target_dir.exists());
+    }
+
+    #[test]
+    fn declining_the_target_prompt_preserves_outputs() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("project");
+        let target_dir = workspace.join("target");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(target_dir.join("artifact"), b"old output").unwrap();
+        let config = managed_target_config(directory.path());
+        let roots = Roots {
+            workspace_root: workspace,
+            target_dir: target_dir.clone(),
+            target_dir_requested: false,
+        };
+
+        prompt_to_manage_existing_target_with(&config, &roots, |_| Ok(false)).unwrap();
+
+        assert!(target_dir.join("artifact").is_file());
     }
 }

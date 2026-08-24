@@ -41,12 +41,12 @@ a standalone home. mise will eventually consume mbx and drop its embedded copy.
   dependencies non-incrementally by default; mbx caches those. Incremental
   compilations bypass the cache by design, and `MBX_INCREMENTAL=1` opts into
   that trade rather than trying to cache them.
-- A daemon. The agent lives for the duration of one `mbx build`.
+- A daemon. The agent lives for the duration of one cached Cargo command.
 
 ## Architecture
 
 ```text
-mbx build [-- <cargo args>]
+mbx <cargo subcommand> [cargo args]
   └─ session (tempdir)
      ├─ shim install: hardlink/copy of the mbx binary named `mbx-rustc`
      ├─ agent: in-process, serves a unix socket / windows named pipe
@@ -85,7 +85,7 @@ the same binary, the agent handshake can require strict version equality.
 
 Two modes:
 
-- **Session mode** (under `mbx build`): talks to the agent over the socket;
+- **Session mode** (under an mbx-wrapped Cargo command): talks to the agent over the socket;
   gets prefetch, batched uploads, and staged blob packs. This is the only mode
   today.
 - **Standalone mode** (no `MBX_SOCKET`): would read and write the local store
@@ -164,9 +164,9 @@ Protocol version stays 1; nothing in the wild speaks the old names.
 
 ## Command surface (v1)
 
-- `mbx build [-- <cargo args>]` — run cargo under a cache session.
+- `mbx <cargo subcommand> [cargo args]` — run Cargo under a cache session.
 - `mbx gc [--max-size <bytes|human>]` — LRU-evict the store to a byte budget,
-  defaulting to the configured one. `mbx build` does the same when a sweep is
+  defaulting to the configured one. A cached Cargo command does the same when a sweep is
   due.
 - `mbx cache dir` / `mbx cache stats` — store location and contents summary,
   including the managed target directories.
@@ -230,7 +230,7 @@ overrule a flag, the environment, a cargo configuration, or an existing real
 
 ### Concurrency
 
-Sessions do not coordinate. Several `mbx build` runs and an `mbx gc` can share
+Sessions do not coordinate. Several cached Cargo commands and an `mbx gc` can share
 one store: manifest updates take a file lock, CAS writes are content-addressed
 and idempotent, and an eviction racing a restore turns that action into a miss.
 The automatic sweep is throttled by a stamp file rather than coordinated, so two

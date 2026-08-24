@@ -38,7 +38,7 @@ jobs:
         with:
           cache: false
           install_args: github:jdx/mr-boxington
-      - run: mbx build build --workspace --all-features
+      - run: mbx build --workspace --all-features
       - run: mbx gc --max-size 3GB
         if: always()
 ```
@@ -66,7 +66,7 @@ Use the restore-only action so pull requests never create a cache entry:
   with:
     cache: false
     install_args: github:jdx/mr-boxington
-- run: mbx build test --workspace
+- run: mbx test --workspace
 ```
 
 The operating system, architecture, and an explicit cache generation belong in

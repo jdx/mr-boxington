@@ -1,23 +1,24 @@
 # CLI reference
 
-## `mbx build`
+## Cargo subcommands
 
-Run Cargo with the build cache enabled.
+Run any Cargo subcommand with the build cache enabled.
 
 ```text
-mbx build <CARGO_SUBCOMMAND> [ARGS]...
+mbx <CARGO_SUBCOMMAND> [ARGS]...
 ```
 
 Examples:
 
 ```sh
-mbx build build --release
-mbx build test --workspace
-mbx build clippy --all-targets -- -D warnings
+mbx build --release
+mbx test --workspace
+mbx clippy --all-targets -- -D warnings
 ```
 
-At least one Cargo subcommand is required. All arguments after `build` are
-passed through unchanged.
+The Cargo subcommand and all of its arguments are passed through unchanged.
+Cargo aliases and installed subcommands work too. `cache` and `gc` are reserved
+for mbx's own store-management commands.
 
 ## `mbx cache dir`
 

@@ -8,7 +8,7 @@ Managed targets are enabled by default. For a checkout without an existing
 `target/`, the first build is enough:
 
 ```sh
-mbx build build
+mbx build
 ```
 
 mbx places the target directory under its cache root and leaves a symlink at
@@ -20,7 +20,7 @@ target -> ~/.cache/mbx/targets/v1/<checkout digest>
 
 ## Collection
 
-`mbx build` records the checkout associated with each target view. Once that
+mbx records the checkout associated with each target view. Once that
 checkout no longer exists, `mbx gc` can remove its target directory. Cached
 compilations shared with a live checkout remain protected.
 
@@ -36,8 +36,22 @@ mbx does not override an explicit target directory supplied by:
 - `CARGO_TARGET_DIR`
 - Cargo's `build.target-dir` configuration
 
-It also leaves an existing real `target/` directory alone. Remove that directory
-if you want the next build to replace it with a managed link.
+## Existing target directories
+
+When an interactive mbx command finds an existing real `target/`, it offers to
+remove the old outputs and replace the directory with a managed link:
+
+```text
+Use a managed target directory?
+mbx can remove /path/to/project/target and replace it with a managed target that is pruned after this checkout is deleted.
+```
+
+“Keep it” is selected by default. Declining leaves every output untouched and
+the Cargo command continues normally. Non-interactive runs never prompt or
+remove the directory.
+
+mbx does not offer removal for an explicitly configured target directory or a
+symlink it does not own.
 
 ## Disable managed targets
 

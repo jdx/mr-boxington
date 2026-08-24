@@ -33,13 +33,14 @@ cargo install mbx
 Put `mbx` before cargo's subcommand:
 
 ```sh
-mbx build build
-mbx build test --workspace --all-features
-mbx build clippy --workspace --all-targets
+mbx build
+mbx test --workspace --all-features
+mbx clippy --workspace --all-targets
 ```
 
-Everything after `mbx build` is passed to cargo unchanged. Cargo still owns
-dependency resolution, feature unification, build planning, and linking.
+The command and its arguments are passed to Cargo unchanged. Cargo still owns
+dependency resolution, feature unification, build planning, and linking. mbx
+also forwards Cargo aliases and installed subcommands.
 
 ## Read the result
 

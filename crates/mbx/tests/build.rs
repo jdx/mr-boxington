@@ -1,4 +1,4 @@
-//! End-to-end coverage for `mbx build`.
+//! End-to-end coverage for cached cargo commands.
 //!
 //! Each test drives the real binary over a throwaway project with no
 //! dependencies, so nothing here needs the network.
@@ -93,7 +93,7 @@ fn build_with(
     let mut command = Command::new(env!("CARGO_BIN_EXE_mbx"));
     command
         .current_dir(project)
-        .args(["build", "build", "--offline"])
+        .args(["build", "--offline"])
         .env("MBX_CACHE_DIR", store)
         .env("MBX_STATS_REPORT", report)
         // Cargo's own environment for this test would otherwise redirect the
@@ -452,7 +452,7 @@ fn a_failed_build_records_the_compilations_it_completed() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
         .current_dir(project.path())
-        .args(["build", "build", "--workspace", "--offline"])
+        .args(["build", "--workspace", "--offline"])
         .env("MBX_CACHE_DIR", store.path())
         .env("MBX_GC_AUTO", "0")
         .env_remove("CARGO_TARGET_DIR")
@@ -745,12 +745,13 @@ mod target_views {
     }
 
     #[test]
-    fn a_real_target_directory_is_never_displaced() {
+    fn a_noninteractive_build_never_removes_a_real_target_directory() {
         let store = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let reports = tempfile::tempdir().unwrap();
         write_project(project.path());
-        // A build that opted out before the default changed.
+        // Establish real outputs without a prompt. The next command captures
+        // its stdio, so it is non-interactive and must preserve them too.
         build_with(
             project.path(),
             store.path(),

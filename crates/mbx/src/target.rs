@@ -52,6 +52,38 @@ pub struct PruneOutcome {
     pub removed_bytes: u64,
 }
 
+/// Whether an interactive caller may offer to remove this target directory.
+///
+/// Match placement's eligibility rules exactly, then require a real directory.
+/// The latter uses symlink metadata so a link to a directory is never offered
+/// for recursive deletion.
+pub fn can_remove_existing(
+    config: &Config,
+    workspace_root: &Path,
+    target_dir: &Path,
+    requested: bool,
+) -> bool {
+    config.target.views
+        && !requested
+        && target_dir == workspace_root.join("target")
+        && std::fs::symlink_metadata(target_dir).is_ok_and(|metadata| metadata.is_dir())
+}
+
+/// Remove a target directory after an interactive confirmation.
+///
+/// Revalidate immediately before deletion so a directory replaced with a link
+/// between the prompt and the answer cannot redirect or broaden the removal.
+pub fn remove_existing(target_dir: &Path) -> Result<()> {
+    if !std::fs::symlink_metadata(target_dir).is_ok_and(|metadata| metadata.is_dir()) {
+        eyre::bail!(
+            "{} is no longer a real target directory, so it was not removed",
+            target_dir.display()
+        );
+    }
+    std::fs::remove_dir_all(target_dir)
+        .wrap_err_with(|| format!("could not remove {}", target_dir.display()))
+}
+
 /// Where this checkout's outputs should be written, if mbx is placing them.
 ///
 /// `None` leaves cargo's own answer alone, and every reason for that is a
@@ -585,6 +617,45 @@ mod tests {
 
         assert!(place(&config, &workspace, &workspace.join("target"), false).is_none());
         assert!(!workspace.join("target").exists());
+    }
+
+    #[test]
+    fn only_an_unrequested_real_default_target_can_be_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = test_config(directory.path(), true);
+        let workspace = checkout(directory.path(), "project");
+        let target = workspace.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+
+        assert!(can_remove_existing(&config, &workspace, &target, false));
+        assert!(!can_remove_existing(&config, &workspace, &target, true));
+        assert!(!can_remove_existing(
+            &config,
+            &workspace,
+            &workspace.join("somewhere-else"),
+            false
+        ));
+        assert!(!can_remove_existing(
+            &test_config(directory.path(), false),
+            &workspace,
+            &target,
+            false
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removing_an_existing_target_never_follows_a_replacement_link() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = checkout(directory.path(), "project");
+        let target = workspace.join("target");
+        let elsewhere = directory.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("keep"), b"not a build output").unwrap();
+        symlink_dir(&elsewhere, &target).unwrap();
+
+        assert!(remove_existing(&target).is_err());
+        assert!(elsewhere.join("keep").is_file());
     }
 
     #[test]

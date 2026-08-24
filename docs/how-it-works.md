@@ -1,6 +1,8 @@
 # How it works
 
-`mbx build` is a cargo wrapper, not a cargo replacement.
+mbx is a Cargo wrapper, not a Cargo replacement. Run Cargo subcommands directly
+through it: `mbx build`, `mbx test`, `mbx clippy`, or any installed Cargo
+subcommand.
 
 1. mbx resolves the workspace and target roots through Cargo metadata.
 2. It starts an in-process cache agent and creates a rustc shim for the build.

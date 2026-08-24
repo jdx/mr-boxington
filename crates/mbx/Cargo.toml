@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 bytesize = "2"
 clap = { version = "4", features = ["derive"] }
+demand = "2"
 env_logger = "0.11"
 dirs = "6"
 eyre = "0.6"

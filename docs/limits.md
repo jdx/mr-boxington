@@ -2,10 +2,10 @@
 
 mr boxington favors correct uncached work over risky cache reuse.
 
-## Use `mbx build`
+## Run Cargo through mbx
 
-Plain `cargo build` does not start the session agent, so it gets no mbx cache.
-Use `mbx build build`, `mbx build test`, and the same pattern for other cargo
+Plain Cargo commands do not start the session agent, so they get no mbx cache.
+Use `mbx build`, `mbx test`, `mbx clippy`, and the same pattern for other Cargo
 subcommands.
 
 ## Linking is not cached

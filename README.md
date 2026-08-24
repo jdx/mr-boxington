@@ -26,9 +26,9 @@ still resolves dependencies, plans builds, and links outputs; mbx restores
 supported compilations it has seen before.
 
 ```sh
-mbx build build                  # cargo build, with caching
-mbx build test --all-features    # cargo test --all-features, with caching
-mbx build clippy --workspace     # cargo clippy --workspace, with caching
+mbx build                  # cargo build, with caching
+mbx test --all-features    # cargo test --all-features, with caching
+mbx clippy --workspace     # cargo clippy --workspace, with caching
 ```
 
 ## Why mbx?
@@ -88,15 +88,17 @@ For a checkout without an existing `target/`, managed target directories are
 enabled automatically:
 
 ```sh
-mbx build build
+mbx build
 ```
 
 mbx places the target directory under its cache root and leaves `target` as a
 symlink, so familiar paths still work. Once the checkout is gone, `mbx gc` can
 remove its target directory too.
 
-An existing real `target/` is never replaced. Remove it to opt that checkout
-into managed targets, or set `MBX_TARGET_VIEWS=0` to disable placement.
+For an existing real `target/`, an interactive `mbx` asks before removing the
+old outputs and replacing the directory with a managed link. The safe default
+is to keep it. Non-interactive runs never remove it. Set `MBX_TARGET_VIEWS=0`
+to disable managed placement and the prompt.
 
 [Learn about managed targets →](https://mr-boxington.jdx.dev/managed-targets)
 
@@ -115,7 +117,7 @@ such as [`jdx/mbx-cache`](https://github.com/jdx/mbx-cache).
 
 ## How it works
 
-`mbx build` starts an in-process cache agent, points Cargo at a rustc shim with
+An `mbx` Cargo command starts an in-process cache agent, points Cargo at a rustc shim with
 `RUSTC_WRAPPER`, and exits the agent with the build—there is no daemon. The shim
 derives an action key, restores cached outputs when possible, or runs the real
 compiler and publishes a successful result.
