@@ -1,13 +1,15 @@
 # Configuration
 
-mbx loads environment variables over `~/.config/mbx/config.toml`, then falls
-back to defaults. Unknown TOML keys are rejected so misspelled settings do not
-silently do nothing.
+mbx loads environment variables over `mbx/config.toml` in the platform
+configuration directory, then falls back to defaults. This honors platform and
+XDG overrides through the operating system's configuration-directory lookup.
+Unknown TOML keys are rejected so misspelled settings do not silently do
+nothing.
 
 ## Example
 
 ```toml
-# ~/.config/mbx/config.toml
+# <config directory>/mbx/config.toml
 cache_dir = "/var/cache/mbx"
 incremental = false
 share_out_dir = false

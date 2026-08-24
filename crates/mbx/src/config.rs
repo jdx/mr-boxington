@@ -1,6 +1,6 @@
 //! Configuration, resolved from environment variables over an optional file.
 //!
-//! Precedence is environment, then `~/.config/mbx/config.toml`, then defaults.
+//! Precedence is environment, then the platform configuration file, then defaults.
 
 use crate::util::parse_duration;
 use bytesize::ByteSize;
@@ -19,7 +19,11 @@ const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// The single declaration used to resolve and document mbx configuration.
 #[derive(Debug, usage::Config)]
-#[usage(file(path = "~/.config/mbx/config.toml", scope = "global", format = "toml"))]
+#[usage(file(
+    path = "<config directory>/mbx/config.toml",
+    scope = "global",
+    format = "toml"
+))]
 pub(crate) struct RawConfig {
     /// Cache root.
     #[usage(env = "MBX_CACHE_DIR", default_note = "platform cache directory")]
@@ -467,7 +471,7 @@ mod tests {
     #[test]
     fn the_usage_spec_declares_files_environment_and_defaults() {
         let spec = RawConfig::spec_kdl();
-        assert!(spec.contains(r#"file "~/.config/mbx/config.toml""#));
+        assert!(spec.contains(r#"file "<config directory>/mbx/config.toml""#));
         assert!(spec.contains(r#"env "MBX_GC_MAX_SIZE""#));
         assert!(spec.contains(r#"prop "gc.max_size""#));
         assert!(spec.contains(r#"default="20GiB""#));

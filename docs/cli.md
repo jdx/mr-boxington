@@ -59,7 +59,7 @@ Summarize what the store holds.
 
 Read from, in ascending precedence — the last one that names a setting wins:
 
-- `~/.config/mbx/config.toml` (global), toml
+- `<config directory>/mbx/config.toml` (global), toml
 
 
 ### `bypass_log`
