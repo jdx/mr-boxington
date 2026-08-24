@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-endev-linux-amd64
     permissions:
       contents: read
       pages: write
@@ -37,6 +37,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1.6.1
+        with:
+          cache: rust
       - uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
         if: github.ref == 'refs/heads/main'
@@ -61,7 +64,7 @@ jobs:
       pages: write
       id-token: write
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-endev-linux-amd64
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
