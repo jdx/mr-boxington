@@ -90,6 +90,68 @@ fn reports_an_empty_store() {
 }
 
 #[test]
+fn lists_largest_entries_in_descending_order() {
+    let directory = tempfile::tempdir().unwrap();
+    store_object(directory.path(), b"small");
+    store_object(directory.path(), b"a much larger object");
+
+    let entries = largest(directory.path(), 1).unwrap();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].kind, "object");
+    assert_eq!(entries[0].bytes, 20);
+}
+
+#[test]
+fn verification_reports_a_corrupt_object() {
+    let directory = tempfile::tempdir().unwrap();
+    let digest = store_object(directory.path(), b"original");
+    let path = LocalCas::new(directory.path()).path_for(&digest).unwrap();
+    std::fs::write(&path, b"corrupt!").unwrap();
+
+    let outcome = verify(directory.path()).unwrap();
+
+    assert_eq!(outcome.checked_objects, 1);
+    assert_eq!(outcome.problems, vec![path]);
+}
+
+#[test]
+fn attributes_reachable_cache_bytes_to_a_workspace() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let output = store_object(directory.path(), b"artifact");
+    let action = store_result(directory.path(), "compile", &[output]);
+    record_build(directory.path(), &"a".repeat(64), &workspace, &[action]);
+
+    let projects = projects(directory.path()).unwrap();
+
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].workspace_root, workspace);
+    assert_eq!(projects[0].identities, 1);
+    assert!(projects[0].action_bytes > 0);
+    assert!(projects[0].live);
+}
+
+#[test]
+fn removes_only_the_requested_workspaces_checkout_claims() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = directory.path().join("first");
+    let second = directory.path().join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    record_build(directory.path(), &"a".repeat(64), &first, &[]);
+    record_build(directory.path(), &"b".repeat(64), &second, &[]);
+
+    let outcome = remove_project(directory.path(), &first).unwrap();
+
+    assert_eq!(outcome.removed_checkout_records, 1);
+    let remaining = projects(directory.path()).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].workspace_root, second);
+}
+
+#[test]
 fn counts_objects_and_results() {
     let directory = tempfile::tempdir().unwrap();
     let store = directory.path();

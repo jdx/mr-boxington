@@ -329,6 +329,22 @@ fn frees_the_target_directory_of_a_checkout_that_is_gone() {
 }
 
 #[test]
+fn explicitly_removes_one_workspaces_managed_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    let managed = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    std::fs::write(managed.join("artifact"), b"outputs").unwrap();
+
+    let bytes = remove_workspace(&config.target.root, &workspace).unwrap();
+
+    assert_eq!(bytes, Some(7));
+    assert!(!managed.exists());
+    assert!(!workspace.join("target").exists());
+    assert_eq!(stats(&config.target.root).unwrap(), ViewStats::default());
+}
+
+#[test]
 fn keeps_the_target_directory_of_an_idle_checkout() {
     let directory = tempfile::tempdir().unwrap();
     let config = test_config(directory.path(), true);

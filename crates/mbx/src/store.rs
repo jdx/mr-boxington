@@ -13,7 +13,7 @@ use mbx_cache_core::{
     task_manifest_actions,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -63,6 +63,34 @@ pub struct GcOutcome {
     pub remaining_bytes: u64,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct ProjectUsage {
+    pub workspace_root: PathBuf,
+    pub identities: u64,
+    pub action_bytes: u64,
+    pub target_bytes: u64,
+    pub live: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct LargestEntry {
+    pub kind: &'static str,
+    pub path: PathBuf,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct VerifyOutcome {
+    pub checked_objects: u64,
+    pub checked_action_results: u64,
+    pub problems: Vec<PathBuf>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RemoveProjectOutcome {
+    pub removed_checkout_records: u64,
+}
+
 /// One checkout's claim on the actions a build identity recorded.
 ///
 /// The target directory is not read back by anything yet; it is recorded
@@ -91,6 +119,134 @@ pub fn stats(store: &Path) -> Result<StoreStats> {
         live_checkouts: checkouts.live_records,
         stale_checkouts: checkouts.stale_records.len() as u64,
     })
+}
+
+/// Attribute cache and target bytes to each recorded workspace.
+///
+/// Shared objects are counted for every workspace that can reach them. That
+/// makes each row answer "how much keeps this workspace warm" without
+/// pretending shared storage can be divided exactly between projects.
+pub fn projects(store: &Path) -> Result<Vec<ProjectUsage>> {
+    let mut projects: BTreeMap<PathBuf, (BTreeSet<String>, bool, u64)> = BTreeMap::new();
+    let root = store.join(CHECKOUTS_DIR);
+    for identity_entry in read_dir_or_empty(&root)? {
+        let identity = identity_entry.file_name().to_string_lossy().into_owned();
+        if !is_task_identity(&identity) || !identity_entry.file_type()?.is_dir() {
+            continue;
+        }
+        for entry in walk_files(&identity_entry.path())? {
+            let Some(record) = read_checkout_record(&entry.path) else {
+                continue;
+            };
+            let project = projects.entry(record.workspace_root.clone()).or_default();
+            project.0.insert(identity.clone());
+            project.1 |= checkout_is_live(&record.workspace_root);
+            project.2 = project.2.max(tree_bytes(&record.target_dir));
+        }
+    }
+    let action_cache = mbx_cache_core::LocalActionCache::new(store);
+    let mut usages = Vec::new();
+    for (workspace_root, (identities, live, target_bytes)) in projects {
+        let mut paths = rooted_objects(store, &identities)?;
+        for identity in &identities {
+            for action in task_manifest_actions(store, identity).unwrap_or_default() {
+                if let Ok(path) = action_cache.path_for(&action) {
+                    paths.insert(path);
+                }
+            }
+        }
+        let action_bytes = paths
+            .iter()
+            .filter_map(|path| std::fs::metadata(path).ok())
+            .map(|metadata| metadata.len())
+            .sum();
+        usages.push(ProjectUsage {
+            workspace_root,
+            identities: identities.len() as u64,
+            action_bytes,
+            target_bytes,
+            live,
+        });
+    }
+    usages.sort_by(|left, right| {
+        right
+            .action_bytes
+            .saturating_add(right.target_bytes)
+            .cmp(&left.action_bytes.saturating_add(left.target_bytes))
+            .then_with(|| left.workspace_root.cmp(&right.workspace_root))
+    });
+    Ok(usages)
+}
+
+/// Return the largest blobs and action-result records in descending order.
+pub fn largest(store: &Path, limit: usize) -> Result<Vec<LargestEntry>> {
+    let mut entries = Vec::new();
+    for (kind, root) in [
+        ("object", store.join(CAS_DIR)),
+        ("action result", store.join(ACTION_RESULTS_DIR)),
+    ] {
+        entries.extend(walk_files(&root)?.into_iter().map(|entry| LargestEntry {
+            kind,
+            path: entry.path,
+            bytes: entry.size,
+        }));
+    }
+    entries.sort_by(|left, right| {
+        right
+            .bytes
+            .cmp(&left.bytes)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    entries.truncate(limit);
+    Ok(entries)
+}
+
+/// Verify every addressable CAS object and action-result record.
+pub fn verify(store: &Path) -> Result<VerifyOutcome> {
+    let cas = LocalCas::new(store);
+    let action_cache = mbx_cache_core::LocalActionCache::new(store);
+    let mut outcome = VerifyOutcome::default();
+    for entry in walk_files(&store.join(CAS_DIR))? {
+        outcome.checked_objects += 1;
+        let Some(digest) = digest_from_path(&entry.path, false) else {
+            outcome.problems.push(entry.path);
+            continue;
+        };
+        if !matches!(cas.find(&digest), Ok(Some(_))) {
+            outcome.problems.push(entry.path);
+        }
+    }
+    for entry in walk_files(&store.join(ACTION_RESULTS_DIR))? {
+        outcome.checked_action_results += 1;
+        let Some(digest) = digest_from_path(&entry.path, true) else {
+            outcome.problems.push(entry.path);
+            continue;
+        };
+        if !matches!(action_cache.find(&digest), Ok(Some(_)))
+            || action_result_is_dangling(&cas, &entry.path)?
+        {
+            outcome.problems.push(entry.path);
+        }
+    }
+    outcome.problems.sort();
+    Ok(outcome)
+}
+
+/// Remove checkout claims belonging to exactly one workspace.
+pub fn remove_project(store: &Path, workspace_root: &Path) -> Result<RemoveProjectOutcome> {
+    let mut outcome = RemoveProjectOutcome::default();
+    for entry in walk_files(&store.join(CHECKOUTS_DIR))? {
+        if read_checkout_record(&entry.path)
+            .is_some_and(|record| record.workspace_root == workspace_root)
+        {
+            std::fs::remove_file(&entry.path)?;
+            outcome.removed_checkout_records += 1;
+            if let Some(parent) = entry.path.parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
+        }
+    }
+    Ok(outcome)
 }
 
 /// Record that `workspace_root` built `identity`.
@@ -574,6 +730,56 @@ fn walk_files(root: &Path) -> Result<Vec<Entry>> {
         }
     }
     Ok(entries)
+}
+
+fn read_dir_or_empty(root: &Path) -> Result<Vec<std::fs::DirEntry>> {
+    match std::fs::read_dir(root) {
+        Ok(entries) => entries
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(Into::into),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error).wrap_err_with(|| format!("failed to read {}", root.display())),
+    }
+}
+
+fn digest_from_path(path: &Path, action_result: bool) -> Option<CacheDigest> {
+    let name = path.file_name()?.to_str()?;
+    let name = if action_result {
+        name.strip_suffix(".json")?
+    } else {
+        name
+    };
+    let (hash, size) = name.rsplit_once('-')?;
+    let algorithm = path.parent()?.parent()?.file_name()?.to_str()?.to_string();
+    let digest = CacheDigest {
+        algorithm,
+        hash: hash.to_string(),
+        size: size.parse().ok()?,
+    };
+    digest.validate().ok()?;
+    Some(digest)
+}
+
+fn tree_bytes(root: &Path) -> u64 {
+    let mut bytes = 0_u64;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.is_file() {
+            bytes = bytes.saturating_add(metadata.len());
+        } else if metadata.is_dir()
+            && let Ok(entries) = std::fs::read_dir(path)
+        {
+            pending.extend(
+                entries
+                    .filter_map(std::result::Result::ok)
+                    .map(|entry| entry.path()),
+            );
+        }
+    }
+    bytes
 }
 
 #[cfg(test)]

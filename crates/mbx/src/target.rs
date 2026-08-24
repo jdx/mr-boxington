@@ -59,6 +59,34 @@ pub struct MigrationOutcome {
     pub removed_bytes: Option<u64>,
 }
 
+/// Remove the managed target view owned by exactly one workspace.
+pub fn remove_workspace(root: &Path, workspace_root: &Path) -> Result<Option<u64>> {
+    let record_path = view_record_path(root, workspace_root);
+    let Some(record) = read_view_record(&record_path) else {
+        return Ok(None);
+    };
+    if record.workspace_root != workspace_root {
+        return Ok(None);
+    }
+    let directory = record_path.with_extension("");
+    let bytes = tree_bytes(&directory);
+    match std::fs::remove_dir_all(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    std::fs::remove_file(&record_path).or_else(|error| {
+        (error.kind() == std::io::ErrorKind::NotFound)
+            .then_some(())
+            .ok_or(error)
+    })?;
+    let link = workspace_root.join("target");
+    if std::fs::read_link(&link).is_ok_and(|destination| destination == directory) {
+        remove_link(&link)?;
+    }
+    Ok(Some(bytes))
+}
+
 /// Whether an interactive caller may offer to remove this target directory.
 ///
 /// Match placement's eligibility rules exactly, then require a real directory.

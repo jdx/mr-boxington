@@ -141,6 +141,27 @@ enum CacheCommands {
     Dir(JsonArgs),
     /// Summarize what the store holds.
     Stats(JsonArgs),
+    /// Show cache use attributed to recorded workspaces.
+    Projects,
+    /// List the largest objects and action-result records.
+    Largest(LargestArgs),
+    /// Verify local objects and action results.
+    Verify,
+    /// Remove one workspace's managed target and cache claims.
+    Remove(RemoveCacheArgs),
+}
+
+#[derive(usage::Args)]
+struct LargestArgs {
+    /// Maximum entries to print.
+    #[usage(long, default = "20")]
+    limit: usize,
+}
+
+#[derive(usage::Args)]
+struct RemoveCacheArgs {
+    /// Workspace root to forget.
+    workspace: PathBuf,
 }
 
 /// Parse the command line and run it.
@@ -179,6 +200,14 @@ pub fn run() -> Result<ExitCode> {
             }
             CacheCommands::Stats(args) => {
                 cache_stats(&config, args.json).map(|()| ExitCode::SUCCESS)
+            }
+            CacheCommands::Projects => cache_projects(&config).map(|()| ExitCode::SUCCESS),
+            CacheCommands::Largest(args) => {
+                cache_largest(&config, args.limit).map(|()| ExitCode::SUCCESS)
+            }
+            CacheCommands::Verify => cache_verify(&config),
+            CacheCommands::Remove(args) => {
+                cache_remove(&config, &args.workspace).map(|()| ExitCode::SUCCESS)
             }
         },
         Commands::Prefetch(args) => prefetch(&config, &args.cargo_args),
@@ -850,6 +879,78 @@ struct GcTargetReport {
 
 fn print_json(value: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+fn cache_projects(config: &Config) -> Result<()> {
+    let projects = store::projects(&config.store_dir())?;
+    if projects.is_empty() {
+        println!("no recorded workspaces");
+        return Ok(());
+    }
+    for project in projects {
+        let state = if project.live { "live" } else { "stale" };
+        println!(
+            "{}\t{} actions\t{} targets\t{} identities\t{state}",
+            project.workspace_root.display(),
+            ByteSize::b(project.action_bytes).display().iec(),
+            ByteSize::b(project.target_bytes).display().iec(),
+            project.identities,
+        );
+    }
+    Ok(())
+}
+
+fn cache_largest(config: &Config, limit: usize) -> Result<()> {
+    for entry in store::largest(&config.store_dir(), limit)? {
+        let path = entry
+            .path
+            .strip_prefix(config.store_dir())
+            .unwrap_or(&entry.path);
+        println!(
+            "{}\t{}\t{}",
+            ByteSize::b(entry.bytes).display().iec(),
+            entry.kind,
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn cache_verify(config: &Config) -> Result<ExitCode> {
+    let outcome = store::verify(&config.store_dir())?;
+    println!(
+        "verified {} objects and {} action results",
+        outcome.checked_objects, outcome.checked_action_results
+    );
+    for path in &outcome.problems {
+        println!("invalid: {}", path.display());
+    }
+    Ok(if outcome.problems.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+fn cache_remove(config: &Config, workspace: &Path) -> Result<()> {
+    let working_dir = std::env::current_dir()?;
+    let requested = absolute(&working_dir, &workspace.to_string_lossy());
+    let workspace = std::fs::canonicalize(&requested).unwrap_or(requested);
+    let target_bytes = target::remove_workspace(&config.target.root, &workspace)?;
+    let removed = store::remove_project(&config.store_dir(), &workspace)?;
+    println!(
+        "removed {} checkout records for {}",
+        removed.removed_checkout_records,
+        workspace.display()
+    );
+    if let Some(bytes) = target_bytes {
+        println!(
+            "freed managed target directory ({})",
+            ByteSize::b(bytes).display().iec()
+        );
+    }
+    println!("shared cache objects remain available to other workspaces and normal GC");
     Ok(())
 }
 
