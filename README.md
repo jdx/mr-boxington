@@ -141,6 +141,7 @@ mbx. Correctness comes before hit rate.
 - [Configuration](https://mr-boxington.jdx.dev/configuration)
 - [GitHub Actions](https://mr-boxington.jdx.dev/github-actions)
 - [Remote cache](https://mr-boxington.jdx.dev/remote-cache)
+- [Protocol compatibility](https://mr-boxington.jdx.dev/protocol-compatibility)
 - [Cache results](https://mr-boxington.jdx.dev/cache-results)
 - [CLI reference](https://mr-boxington.jdx.dev/cli)
 - [Current limits](https://mr-boxington.jdx.dev/limits)
