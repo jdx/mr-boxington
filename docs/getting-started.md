@@ -113,6 +113,16 @@ mbx gc --max-size 20GiB
 
 Automatic collection is enabled by default with a 20 GiB budget.
 
+Every inspection command also supports stable, versioned JSON for scripts and
+CI integrations:
+
+```sh
+mbx doctor --json
+mbx cache dir --json
+mbx cache stats --json
+mbx gc --json
+```
+
 ## Next steps
 
 - Tune local behavior in [Configuration](/configuration).

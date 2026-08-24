@@ -49,6 +49,28 @@ setup() {
   assert_output --partial "compiler-query"
 }
 
+@test "inspection commands offer versioned JSON" {
+  run "$MBX_BIN" cache dir --json
+  assert_success
+  assert_output --partial '"version": 1'
+  assert_output --partial '"store"'
+
+  run "$MBX_BIN" cache stats --json
+  assert_success
+  assert_output --partial '"objects": 0'
+  assert_output --partial '"target_directories": 0'
+
+  run "$MBX_BIN" gc --json
+  assert_success
+  assert_output --partial '"action_store"'
+  assert_output --partial '"targets"'
+
+  run "$MBX_BIN" doctor --json
+  assert_success
+  assert_output --partial '"checks"'
+  assert_output --partial '"failures": 0'
+}
+
 @test "cargo new is forwarded" {
   run "$MBX_BIN" new --vcs none new-project
 

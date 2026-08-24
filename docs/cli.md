@@ -19,11 +19,12 @@ Examples:
 
 ## `mbx doctor`
 
-- **Usage:** `mbx doctor`
+- **Usage:** `mbx doctor [--json]`
 
 Check the local installation, cache, toolchain, and remote connection.
 
 ### Flags
+- **`--json`** — Print a stable machine-readable report.
 - **`-h --help`** — Print help
 
 ## `mbx explain`
@@ -53,7 +54,7 @@ Install a persistent rustc wrapper for plain Cargo commands.
 
 ## `mbx gc`
 
-- **Usage:** `mbx gc [--max-size <SIZE>]`
+- **Usage:** `mbx gc [--max-size <SIZE>] [--json]`
 
 Collect stale managed targets and evict cached objects until the store fits a size budget.
 
@@ -61,6 +62,7 @@ A missing cached object is rebuilt when it is needed again.
 
 ### Flags
 - **`--max-size <SIZE>`** — Size the store may occupy afterwards, for example 20GiB. Defaults to the configured budget.
+- **`--json`** — Print a stable machine-readable report.
 - **`-h --help`** — Print help
 
 ## `mbx cache`
@@ -74,20 +76,22 @@ Inspect the local store.
 
 ## `mbx cache dir`
 
-- **Usage:** `mbx cache dir`
+- **Usage:** `mbx cache dir [--json]`
 
 Print the store directory.
 
 ### Flags
+- **`--json`** — Print a stable machine-readable report.
 - **`-h --help`** — Print help
 
 ## `mbx cache stats`
 
-- **Usage:** `mbx cache stats`
+- **Usage:** `mbx cache stats [--json]`
 
 Summarize what the store holds.
 
 ### Flags
+- **`--json`** — Print a stable machine-readable report.
 - **`-h --help`** — Print help
 
 ## `mbx prefetch`
