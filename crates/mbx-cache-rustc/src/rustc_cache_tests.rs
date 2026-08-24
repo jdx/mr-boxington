@@ -191,13 +191,25 @@ fn resolves_a_compiler_linked_wasm_binary() {
 
 #[test]
 fn accepts_wasm_tests_but_not_native_tests() {
-    let wasm = args(&[
-        "--test",
-        "--emit=dep-info,link",
-        "--target=wasm32-unknown-unknown",
-        "src/lib.rs",
-    ]);
-    assert!(RustcInvocation::parse(&wasm).is_ok());
+    for target in COMPILER_BUNDLED_WASM_TARGETS {
+        let wasm = args(&[
+            "--test",
+            "--emit=dep-info,link",
+            &format!("--target={target}"),
+            "src/lib.rs",
+        ]);
+        assert!(
+            RustcInvocation::parse(&wasm).is_ok(),
+            "{target} should use its compiler-bundled linker"
+        );
+        let cdylib = args(&[
+            "--crate-type=cdylib",
+            "--emit=dep-info,link",
+            &format!("--target={target}"),
+            "src/lib.rs",
+        ]);
+        assert!(RustcInvocation::parse(&cdylib).is_ok());
+    }
 
     let implicit_binary = args(&[
         "--emit=dep-info,link",
@@ -214,6 +226,22 @@ fn accepts_wasm_tests_but_not_native_tests() {
         RustcInvocation::parse(&native),
         Err(BypassReason::UnsupportedCrateType("test".into()))
     );
+}
+
+#[test]
+fn rejects_webassembly_targets_that_require_external_toolchains() {
+    for target in ["wasm32-unknown-emscripten", "wasm32-wali-linux-musl"] {
+        let arguments = args(&[
+            "--crate-type=bin",
+            "--emit=dep-info,link",
+            &format!("--target={target}"),
+            "src/main.rs",
+        ]);
+        assert_eq!(
+            RustcInvocation::parse(&arguments),
+            Err(BypassReason::UnsupportedCrateType("bin".into()))
+        );
+    }
 }
 
 #[test]
@@ -243,6 +271,29 @@ fn custom_wasm_linker_modes_still_bypass() {
         RustcInvocation::parse(&arguments),
         Err(BypassReason::UnknownCodegenOption("linker".into()))
     );
+
+    let arguments = args(&[
+        "--crate-type=bin",
+        "--emit=dep-info,link",
+        "--target=wasm32-wasip1",
+        "-Ctarget-feature=-crt-static",
+        "src/main.rs",
+    ]);
+    assert_eq!(
+        RustcInvocation::parse(&arguments),
+        Err(BypassReason::UnknownCodegenOption(
+            "target-feature=-crt-static".into()
+        ))
+    );
+
+    let self_contained = args(&[
+        "--crate-type=bin",
+        "--emit=dep-info,link",
+        "--target=wasm32-wasip1",
+        "-Clink-self-contained=yes",
+        "src/main.rs",
+    ]);
+    assert!(RustcInvocation::parse(&self_contained).is_ok());
 }
 
 #[test]
