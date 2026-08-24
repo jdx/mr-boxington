@@ -838,7 +838,6 @@ impl<'a> Parser<'a> {
                 let value = self.take_value(&rendered_flag, inline)?;
                 self.target = Some(value.clone());
                 if value.ends_with(".json") || value.contains(['/', '\\']) {
-                    self.target = None;
                     let path = PathBuf::from(value);
                     self.required_inputs.push(path.clone());
                     self.parsed.push(Argument::Path {

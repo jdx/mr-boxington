@@ -652,6 +652,7 @@ fn custom_targets_are_required_inputs() {
         "src/lib.rs",
     ]))
     .unwrap();
+    assert_eq!(invocation.target(), Some("targets/custom.json"));
     let error = invocation
         .action(context(&[("src/lib.rs", "source")]))
         .unwrap_err();
