@@ -160,12 +160,19 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/mbx-measurements/tak"
           tak run --record
+          tak history | tee "$RUNNER_TEMP/mbx-measurements/tak/history.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Compare instruction counts with the PR base
+        id: tak_compare
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: |
           if git ls-remote --exit-code origin refs/notes/tak >/dev/null 2>&1; then
-            tak compare "origin/${GITHUB_BASE_REF}"
+            tak compare "origin/${GITHUB_BASE_REF}" \
+              | tee "$RUNNER_TEMP/mbx-measurements/tak/comparison.md" \
+              >> "$GITHUB_STEP_SUMMARY"
           else
             echo "No shared tak history yet; this PR will seed it after merge." >> "$GITHUB_STEP_SUMMARY"
           fi
-          tak history | tee "$RUNNER_TEMP/mbx-measurements/tak/history.md" >> "$GITHUB_STEP_SUMMARY"
       - name: Stage benchmark driver
         run: cp target/release/mbx "$RUNNER_TEMP/mbx-benchmark-driver"
       - name: Measure cold and warm workspace builds
@@ -188,6 +195,9 @@ jobs:
           path: ${{ runner.temp }}/mbx-measurements
           if-no-files-found: error
           retention-days: 90
+      - name: Enforce instruction-count regression gate
+        if: steps.tak_compare.outcome == 'failure'
+        run: exit 1
 
   final:
     permissions: {}
