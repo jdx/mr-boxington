@@ -4,10 +4,11 @@ Cargo normally writes build outputs to `<workspace>/target`. Deleting a
 worktree deletes useful outputs, while abandoning a checkout leaves gigabytes
 behind indefinitely.
 
-Enable managed targets:
+Managed targets are enabled by default. For a checkout without an existing
+`target/`, the first build is enough:
 
 ```sh
-MBX_TARGET_VIEWS=1 mbx build build
+mbx build build
 ```
 
 mbx places the target directory under its cache root and leaves a symlink at
@@ -36,10 +37,22 @@ mbx does not override an explicit target directory supplied by:
 - Cargo's `build.target-dir` configuration
 
 It also leaves an existing real `target/` directory alone. Remove that directory
-before enabling managed targets if you want mbx to replace it with a link.
+if you want the next build to replace it with a managed link.
+
+## Disable managed targets
+
+Set `MBX_TARGET_VIEWS=0`, or configure:
+
+```toml
+[target]
+views = false
+```
+
+Turning placement off does not delete a target directory mbx already manages.
+The existing `target` link continues to work, and collection can still reclaim
+the directory after its checkout disappears.
 
 ::: warning Windows
 Creating the link requires Developer Mode or a privileged process on Windows.
-If Windows cannot create it, mbx reports the problem and lets Cargo use its
-ordinary target directory.
+If Windows cannot create it, mbx lets Cargo use its ordinary target directory.
 :::

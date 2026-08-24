@@ -42,7 +42,7 @@ retries = 3
 | `MBX_GC_AUTO` | `gc.auto` | `true` | Sweep after a build when due |
 | `MBX_GC_MAX_SIZE` | `gc.max_size` | `20GiB` | Action-store budget |
 | `MBX_GC_INTERVAL` | `gc.interval` | `1h` | Minimum interval between automatic sweeps |
-| `MBX_TARGET_VIEWS` | `target.views` | `false` | Let mbx place target directories |
+| `MBX_TARGET_VIEWS` | `target.views` | `true` | Let mbx place eligible target directories |
 | `MBX_TARGET_ROOT` | `target.root` | `<cache>/targets` | Managed target root |
 | `MBX_REMOTE_URL` | `remote.url` | unset | Remote cache URL |
 | `MBX_REMOTE_NAMESPACE` | `remote.namespace` | unset | Remote namespace; required with a URL |

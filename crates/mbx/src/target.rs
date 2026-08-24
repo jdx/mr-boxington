@@ -57,7 +57,7 @@ pub struct PruneOutcome {
 /// `None` leaves cargo's own answer alone, and every reason for that is a
 /// reason not to be clever:
 ///
-/// - the feature is off, which is the default;
+/// - the feature was explicitly turned off;
 /// - a flag or the environment named the target directory, so moving it would
 ///   be overriding the person who said where it goes. This is asked separately
 ///   from where the directory actually is, because `--target-dir target` names
@@ -113,7 +113,12 @@ pub fn place(
     let link = match link_view(target_dir, &managed, workspace_root) {
         Ok(link) => link,
         Err(error) => {
-            log::warn!("{error}");
+            // Placement is best-effort: existing build outputs, a custom
+            // link, or a platform that cannot create the link are all normal
+            // reasons to let cargo keep its own target directory. This was a
+            // warning while managed targets were opt-in, but would become
+            // noise on every existing checkout now that they are the default.
+            log::debug!("{error}");
             return None;
         }
     };
@@ -573,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn leaves_the_target_directory_alone_unless_asked() {
+    fn leaves_the_target_directory_alone_when_disabled() {
         let directory = tempfile::tempdir().unwrap();
         let config = test_config(directory.path(), false);
         let workspace = checkout(directory.path(), "project");

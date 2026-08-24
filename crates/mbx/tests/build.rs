@@ -172,6 +172,13 @@ fn count(stats: &serde_json::Value, field: &str) -> u64 {
         .unwrap_or_else(|| panic!("{field} should be a number"))
 }
 
+/// Remove the outputs behind a target link so the next build must restore.
+fn wipe_target(project: &Path) {
+    let target = project.join("target");
+    let outputs = std::fs::read_link(&target).unwrap_or(target);
+    std::fs::remove_dir_all(outputs).unwrap();
+}
+
 #[test]
 fn incremental_is_opt_in_and_reaches_cargo() {
     let store = tempfile::tempdir().unwrap();
@@ -245,7 +252,7 @@ fn restores_a_wiped_target_directory_from_the_store() {
     // Load-bearing, not cleanup: the wipe is what forces the warm build to
     // restore from the store. Left in place, cargo would find the cold build's
     // outputs and the test would pass without exercising the cache at all.
-    std::fs::remove_dir_all(project.path().join("target")).unwrap();
+    wipe_target(project.path());
 
     let warm = build(
         project.path(),
@@ -549,7 +556,7 @@ fn deleting_a_checkout_releases_what_only_it_used() {
 
     // Load-bearing, not cleanup: the wipe is what forces the next build to go
     // to the store, which is the only way to see what survived the sweep.
-    std::fs::remove_dir_all(surviving.path().join("target")).unwrap();
+    wipe_target(surviving.path());
     let warm = build(
         surviving.path(),
         store.path(),
@@ -581,11 +588,10 @@ mod target_views {
         let reports = tempfile::tempdir().unwrap();
         write_project(project.path());
 
-        build_with(
+        build(
             project.path(),
             store.path(),
             &reports.path().join("cold.json"),
-            &[("MBX_TARGET_VIEWS", "1")],
         );
 
         let directory = managed(project.path());
@@ -744,19 +750,19 @@ mod target_views {
         let project = tempfile::tempdir().unwrap();
         let reports = tempfile::tempdir().unwrap();
         write_project(project.path());
-        // A build that ran before the feature was turned on.
-        build(
-            project.path(),
-            store.path(),
-            &reports.path().join("cold.json"),
-        );
-        assert!(project.path().join("target").is_dir());
-
+        // A build that opted out before the default changed.
         build_with(
             project.path(),
             store.path(),
+            &reports.path().join("cold.json"),
+            &[("MBX_TARGET_VIEWS", "0")],
+        );
+        assert!(project.path().join("target").is_dir());
+
+        build(
+            project.path(),
+            store.path(),
             &reports.path().join("warm.json"),
-            &[("MBX_TARGET_VIEWS", "1")],
         );
 
         assert!(

@@ -36,9 +36,9 @@ mbx build clippy --workspace     # cargo clippy --workspace, with caching
 - **Warm every worktree.** Cache keys contain no checkout-specific absolute
   paths, so building one checkout warms its siblings automatically without
   sharing a Cargo target lock.
-- **Prune automatically.** mbx sweeps its action store back to a size budget.
-  With managed targets enabled, it also removes target directories after their
-  checkout disappears.
+- **Prune automatically.** mbx sweeps its action store back to a size budget
+  and, by default, removes managed target directories after their checkout
+  disappears.
 - **Warm CI safely.** GitHub Actions cache can warm fork pull requests from a
   cache built on `main`, while a self-hosted remote can serve trusted runners
   and teammates. Pull requests never publish remote objects.
@@ -84,16 +84,19 @@ mbx gc
 mbx gc --max-size 3GB
 ```
 
-Enable managed target directories to reclaim the larger build outputs left by
-deleted checkouts:
+For a checkout without an existing `target/`, managed target directories are
+enabled automatically:
 
 ```sh
-MBX_TARGET_VIEWS=1 mbx build build
+mbx build build
 ```
 
 mbx places the target directory under its cache root and leaves `target` as a
 symlink, so familiar paths still work. Once the checkout is gone, `mbx gc` can
 remove its target directory too.
+
+An existing real `target/` is never replaced. Remove it to opt that checkout
+into managed targets, or set `MBX_TARGET_VIEWS=0` to disable placement.
 
 [Learn about managed targets →](https://mr-boxington.jdx.dev/managed-targets)
 
