@@ -574,10 +574,15 @@ fn predicts_inputs_without_reusing_stale_contents() {
 
 #[test]
 fn reads_prediction_v1_without_timing_hints() {
-    let prediction: RustcInputPrediction =
-        serde_json::from_str(r#"{"version":1,"inputs":[],"environment":[]}"#).unwrap();
+    let payload = r#"{"environment":[],"inputs":[],"version":1}"#;
+    let prediction: RustcInputPrediction = serde_json::from_str(payload).unwrap();
     assert_eq!(prediction.compiler_duration_ns, 0);
     assert!(prediction.crate_name.is_empty());
+    assert_eq!(
+        String::from_utf8(canonical_json(&prediction).unwrap()).unwrap(),
+        payload,
+        "pre-timing canonical predictions must remain canonical"
+    );
 }
 
 #[test]

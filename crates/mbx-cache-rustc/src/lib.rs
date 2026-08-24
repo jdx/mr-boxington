@@ -650,11 +650,15 @@ pub struct RustcInputPrediction {
     pub environment: Vec<String>,
     /// Compiler wall time from the successful invocation that produced this
     /// prediction. Zero means no timing hint was recorded.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub compiler_duration_ns: u64,
     /// Crate name associated with the timing hint.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub crate_name: String,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl RustcInputPrediction {
