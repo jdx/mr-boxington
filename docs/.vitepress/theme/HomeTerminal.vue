@@ -50,25 +50,25 @@
 
 .window {
   background: #100c07;
-  border: 1px solid rgba(230, 173, 84, 0.22);
+  border: 1px solid rgb(var(--mbx-amber-rgb) / 0.22);
   border-radius: 14px;
   box-shadow:
     0 30px 70px -30px rgba(0, 0, 0, 0.75),
-    0 20px 60px -30px rgba(230, 173, 84, 0.2);
+    0 20px 60px -30px rgb(var(--mbx-amber-rgb) / 0.2);
   overflow: hidden;
 }
 
 .titlebar {
   align-items: center;
-  background: rgba(230, 173, 84, 0.07);
-  border-bottom: 1px solid rgba(230, 173, 84, 0.14);
+  background: rgb(var(--mbx-amber-rgb) / 0.07);
+  border-bottom: 1px solid rgb(var(--mbx-amber-rgb) / 0.14);
   display: flex;
   gap: 8px;
   padding: 10px 14px;
 }
 
 .dot {
-  background: rgba(230, 173, 84, 0.35);
+  background: rgb(var(--mbx-amber-rgb) / 0.35);
   border-radius: 50%;
   height: 11px;
   width: 11px;
@@ -112,7 +112,7 @@
 }
 
 .path {
-  color: #7fa6ad;
+  color: var(--mbx-teal-light);
 }
 
 .prompt {
@@ -120,12 +120,12 @@
 }
 
 .cmd {
-  color: #f5ead6;
+  color: var(--mbx-paper);
   font-weight: 600;
 }
 
 .verb {
-  color: #86c07e;
+  color: var(--mbx-cargo-green);
   font-weight: 600;
 }
 
@@ -134,12 +134,12 @@
 }
 
 .time {
-  color: #f5ead6;
+  color: var(--mbx-paper);
   font-weight: 600;
 }
 
 .time.fast {
-  background: rgba(230, 173, 84, 0.18);
+  background: rgb(var(--mbx-amber-rgb) / 0.18);
   border-radius: 4px;
   color: var(--vp-c-brand-1);
   padding: 1px 5px;
