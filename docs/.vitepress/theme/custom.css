@@ -284,6 +284,10 @@ body::after {
 
 /* ---------- announcement banner ---------- */
 
+.VPSocialLinks {
+  align-items: center !important;
+}
+
 .VPSocialLinks a[href*="github.com/jdx/mr-boxington"] {
   display: inline-flex !important;
   flex-direction: column;

@@ -49,10 +49,9 @@ export default {
         );
       };
 
-      if (addStarCount()) return;
-
+      addStarCount();
       observer = new MutationObserver(() => {
-        if (addStarCount()) observer?.disconnect();
+        addStarCount();
       });
       observer.observe(document.querySelector(".VPNav") || document.body, {
         childList: true,
