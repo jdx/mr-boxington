@@ -40,5 +40,8 @@ fuzz_target!(|data: &[u8]| {
             .build()
             .unwrap()
     });
+    // Keep the successful empty-pack path in every campaign even as the
+    // on-disk corpus evolves.
+    let _ = runtime.block_on(fuzz_decode_blob_pack(b"MBXPACK1", &[], staging.path()));
     let _ = runtime.block_on(fuzz_decode_blob_pack(data, &requested, staging.path()));
 });
