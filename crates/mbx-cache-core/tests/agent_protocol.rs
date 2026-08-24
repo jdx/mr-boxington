@@ -20,9 +20,13 @@ fn digest() -> CacheDigest {
 
 fn restore() -> RestoreStats {
     RestoreStats {
+        copied_output_bytes: 17,
+        copied_output_files: 16,
         duration_ns: 11,
         output_files: 12,
         output_bytes: 13,
+        reflinked_output_bytes: 15,
+        reflinked_output_files: 14,
     }
 }
 
