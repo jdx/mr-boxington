@@ -136,7 +136,8 @@ fn mappings_do_not_duplicate_home_placeholders() {
 
 #[test]
 fn standalone_workspace_mapping_wins_beneath_home() {
-    let home = Path::new("/tmp/example-home");
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
     let workspace = home.join("src/project");
     let mappings = path_mappings_with_env(&workspace, None, None, |name| match name {
         "HOME" => Some(home.as_os_str().to_owned()),
