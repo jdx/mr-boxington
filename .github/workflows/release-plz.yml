@@ -15,7 +15,7 @@ on:
 jobs:
   release-plz-release:
     name: Release
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-endev-linux-amd64
     # Forks should never attempt to publish.
     if: ${{ github.repository_owner == 'jdx' }}
     permissions:
@@ -32,8 +32,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # Exchanges the OIDC token for a short-lived crates.io token. Each crate
       # needs a Trusted Publisher naming this repository and this workflow
@@ -100,7 +98,7 @@ jobs:
     name: Publish release
     needs: [release-plz-release, upload-assets]
     if: ${{ needs.release-plz-release.outputs.tag != '' }}
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-endev-linux-amd64
     permissions:
       contents: write
     steps:
@@ -112,7 +110,7 @@ jobs:
 
   release-plz-pr:
     name: Release PR
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-endev-linux-amd64
     if: ${{ github.repository_owner == 'jdx' }}
     permissions:
       contents: write
@@ -126,8 +124,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Run release-plz
         uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
