@@ -936,7 +936,8 @@ fn cache_verify(config: &Config) -> Result<ExitCode> {
 fn cache_remove(config: &Config, workspace: &Path) -> Result<()> {
     let working_dir = std::env::current_dir()?;
     let requested = absolute(&working_dir, &workspace.to_string_lossy());
-    let workspace = std::fs::canonicalize(&requested).unwrap_or(requested);
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let workspace = cache_workspace_root(&cargo, &requested);
     let target_bytes = target::remove_workspace(&config.target.root, &workspace)?;
     let removed = store::remove_project(&config.store_dir(), &workspace)?;
     println!(
@@ -952,6 +953,23 @@ fn cache_remove(config: &Config, workspace: &Path) -> Result<()> {
     }
     println!("shared cache objects remain available to other workspaces and normal GC");
     Ok(())
+}
+
+/// Resolve the workspace exactly as Cargo does when recording cache ownership.
+///
+/// Filesystem canonicalization is not interchangeable with Cargo's reported
+/// root: on Windows it can introduce a `\\?\` prefix, and symlink spellings can
+/// differ too. Both checkout records and managed-target keys use the metadata
+/// spelling, so removal must obtain that same identity or it can silently miss
+/// the workspace it was asked to forget.
+fn cache_workspace_root(cargo: &std::ffi::OsStr, requested: &Path) -> PathBuf {
+    let arguments = vec![
+        "--manifest-path".to_string(),
+        requested.join("Cargo.toml").to_string_lossy().into_owned(),
+    ];
+    cargo_roots(cargo, &arguments, None)
+        .map(|roots| roots.workspace_root)
+        .unwrap_or_else(|| requested.to_path_buf())
 }
 
 /// Settings the shim maps out of its cache keys.
