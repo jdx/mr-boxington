@@ -343,13 +343,26 @@ fn a_command_line_config_include_may_set_the_target_dir() {
 }
 
 #[test]
-fn cargo_subcommands_are_forwarded_directly() {
-    let argv = ["mbx", "clippy", "--workspace"].map(std::ffi::OsStr::new);
-    let cli = Cli::try_parse_from(&argv).unwrap();
-    let Commands::Cargo(arguments) = cli.command else {
-        panic!("clippy should be treated as a cargo subcommand");
-    };
-    assert_eq!(arguments, ["clippy", "--workspace"]);
+fn all_non_reserved_subcommands_are_forwarded_directly() {
+    for argv in [
+        ["mbx", "new", "--vcs", "none"],
+        ["mbx", "init", "--lib", "fixture"],
+        ["mbx", "command-added-later", "--future-flag", "value"],
+    ] {
+        let argv = argv.map(std::ffi::OsStr::new);
+        let cli = Cli::try_parse_from(&argv).unwrap();
+        let Commands::Cargo(arguments) = cli.command else {
+            panic!(
+                "{} should be treated as a cargo subcommand",
+                argv[1].to_string_lossy()
+            );
+        };
+        let expected = argv[1..]
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(arguments, expected);
+    }
 }
 
 #[test]

@@ -422,6 +422,44 @@ fn an_empty_store_reports_nothing() {
 }
 
 #[test]
+fn forwards_non_build_cargo_subcommands() {
+    let root = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        .current_dir(root.path())
+        .args(["new", "--vcs", "none", "new-project"])
+        .env("MBX_CACHE_DIR", store.path())
+        .env("MBX_GC_AUTO", "0")
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .expect("mbx new should run");
+    assert!(
+        output.status.success(),
+        "mbx new failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(root.path().join("new-project/Cargo.toml").is_file());
+
+    let initialized = root.path().join("initialized-project");
+    std::fs::create_dir(&initialized).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        .current_dir(&initialized)
+        .args(["init", "--vcs", "none"])
+        .env("MBX_CACHE_DIR", store.path())
+        .env("MBX_GC_AUTO", "0")
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .expect("mbx init should run");
+    assert!(
+        output.status.success(),
+        "mbx init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(initialized.join("Cargo.toml").is_file());
+}
+
+#[test]
 fn a_build_records_the_checkout_it_ran_in() {
     let store = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();

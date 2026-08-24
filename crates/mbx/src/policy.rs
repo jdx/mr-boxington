@@ -62,9 +62,10 @@ fn trusted_cache_writer(get_env: &impl Fn(&str) -> Option<String>) -> bool {
 }
 
 fn release_context_with(get_env: impl Fn(&str) -> Option<String>) -> bool {
-    (env_truthy(get_env("GITHUB_ACTIONS"))
-        && (get_env("GITHUB_REF_TYPE").as_deref() == Some("tag")
-            || get_env("GITHUB_EVENT_NAME").as_deref() == Some("release")))
+    env_truthy(get_env("MBX_RELEASE"))
+        || (env_truthy(get_env("GITHUB_ACTIONS"))
+            && (get_env("GITHUB_REF_TYPE").as_deref() == Some("tag")
+                || get_env("GITHUB_EVENT_NAME").as_deref() == Some("release")))
         || (env_truthy(get_env("GITLAB_CI")) && get_env("CI_COMMIT_TAG").is_some())
 }
 
@@ -149,6 +150,7 @@ mod tests {
 
     #[test]
     fn tags_and_releases_are_release_contexts() {
+        assert!(release_context_with(env(&[("MBX_RELEASE", "1")])));
         assert!(release_context_with(env(&[
             ("GITHUB_ACTIONS", "1"),
             ("GITHUB_REF_TYPE", "tag"),

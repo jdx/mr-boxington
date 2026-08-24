@@ -22,6 +22,9 @@ _common_setup() {
     return 1
   fi
 
+  # Keep the installed toolchain reachable after HOME is isolated below.
+  export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+  export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
   export HOME="$BATS_TEST_TMPDIR/home"
   export XDG_CACHE_HOME="$BATS_TEST_TMPDIR/cache"
   export XDG_CONFIG_HOME="$BATS_TEST_TMPDIR/config"
