@@ -144,9 +144,11 @@ fn standalone_workspace_mapping_wins_beneath_home() {
         _ => None,
     });
 
-    assert!(mappings.iter().any(|mapping| {
-        mapping.placeholder == "workspace" && mapping.root == workspace
-    }));
+    assert!(
+        mappings
+            .iter()
+            .any(|mapping| { mapping.placeholder == "workspace" && mapping.root == workspace })
+    );
     assert!(
         mappings
             .iter()
