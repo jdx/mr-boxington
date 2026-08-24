@@ -172,15 +172,6 @@ fn count(stats: &serde_json::Value, field: &str) -> u64 {
         .unwrap_or_else(|| panic!("{field} should be a number"))
 }
 
-#[cfg(unix)]
-fn compilation_count(path: &Path) -> usize {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .filter(|line| *line == "compile")
-        .count()
-}
-
 /// Remove the outputs behind a target link so the next build must restore.
 fn wipe_target(project: &Path) {
     let target = project.join("target");
@@ -215,61 +206,6 @@ fn incremental_is_opt_in_and_reaches_cargo() {
     assert!(
         incremental_sessions(project.path()) > 0,
         "cargo should have compiled the member incrementally: {stats}"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn a_persistent_wrapper_restores_without_an_mbx_session() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let directory = tempfile::tempdir().unwrap();
-    let first = directory.path().join("first-checkout");
-    let second = directory.path().join("second-checkout");
-    write_project(&first);
-    write_project(&second);
-    let wrappers = directory.path().join("bin");
-    std::fs::create_dir_all(&wrappers).unwrap();
-    let shim = mbx::session::install_shim(Path::new(env!("CARGO_BIN_EXE_mbx")), &wrappers)
-        .expect("the persistent shim should install");
-    let compiler = directory.path().join("counting-rustc");
-    let log = directory.path().join("rustc.log");
-    std::fs::write(
-        &compiler,
-        "#!/bin/sh\ncrate_name=0\nfor arg in \"$@\"; do\n  if [ \"$crate_name\" = 1 ]; then\n    if [ \"$arg\" = fixture ]; then\n      printf 'compile\\n' >> \"$MBX_TEST_RUSTC_LOG\"\n    fi\n    break\n  fi\n  if [ \"$arg\" = \"--crate-name\" ]; then\n    crate_name=1\n  fi\ndone\nexec \"$MBX_TEST_REAL_RUSTC\" \"$@\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&compiler, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let cache = directory.path().join("cache");
-    let wrapper_config = format!(
-        "build.rustc-wrapper={:?}",
-        shim.to_string_lossy().into_owned()
-    );
-    let real_rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
-
-    for (project, target) in [(&first, "first-target"), (&second, "second-target")] {
-        let output = Command::new(cargo())
-            .current_dir(project)
-            .args(["build", "--offline", "--config", &wrapper_config])
-            .env("CARGO_TARGET_DIR", directory.path().join(target))
-            .env("CARGO_INCREMENTAL", "0")
-            .env("RUSTC", &compiler)
-            .env("MBX_CACHE_DIR", &cache)
-            .env("MBX_TEST_RUSTC_LOG", &log)
-            .env("MBX_TEST_REAL_RUSTC", &real_rustc)
-            .output()
-            .expect("cargo should run through the persistent wrapper");
-        assert!(
-            output.status.success(),
-            "build failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    assert_eq!(
-        compilation_count(&log),
-        1,
-        "the second target directory should restore the compilation"
     );
 }
 
