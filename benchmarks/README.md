@@ -1,9 +1,13 @@
 # Performance and correctness measurements
 
-`measure_shim.py` compares a warmed release `mbx-rustc` invocation with the
-same trivial compiler invoked directly. It alternates order and gates the
-median paired overhead at 2 ms; raw samples and p95 are retained for diagnosing
-runner noise.
+[`tak.toml`](../tak.toml) measures a no-op process-startup control and the
+hermetic `mbx --help` startup path. `tak` gates deterministic instruction counts
+and reports wall time without using noisy shared-runner timing as a hard gate.
+The pinned `mise run perf` task builds the subject and runs both benchmarks;
+`mise run perf:record` appends the result to the local `refs/notes/tak` history.
+PR CI compares against its base once shared history exists. The first merged
+main run seeds that history, so the adoption PR reports measurements without a
+fabricated regression baseline.
 
 `measure_builds.py` runs this repository's multi-crate workspace with a cold
 target, then recreates that same target and runs from the warmed local cache.
@@ -12,7 +16,8 @@ at least one result was qualified with zero divergences. The fixed target path
 is intentional: rustc embeds paths in artifacts, so changing the path would
 test the separately documented cross-checkout limitation instead.
 
-Both scripts write versioned JSON and Markdown summaries. `measure_builds.py`
-also writes mbx statistics reports and build logs. The large target and cache
-working trees are temporary and are not retained. CI uploads the measurement
-directory as an artifact for trend analysis.
+`measure_builds.py` writes versioned JSON and Markdown summaries plus mbx
+statistics reports and build logs. The large target and cache working trees
+are temporary and are not retained. CI uploads the correctness measurements
+and a `tak history` snapshot as artifacts; trusted main-branch runs publish the
+shared performance series to `refs/notes/tak`.
