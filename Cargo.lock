@@ -1161,7 +1161,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-compression",
  "base64 0.23.1",
@@ -1171,13 +1171,13 @@ dependencies = [
  "futures-util",
  "hex",
  "log",
+ "mbx-cache-protocol",
  "mockito",
  "rand 0.10.2",
  "reflink-copy",
  "reqwest",
  "serde",
  "serde_json",
- "serde_json_canonicalizer",
  "sha2",
  "strum",
  "tempfile",
@@ -1185,6 +1185,19 @@ dependencies = [
  "tokio-util",
  "url",
  "zstd",
+]
+
+[[package]]
+name = "mbx-cache-protocol"
+version = "0.3.0"
+dependencies = [
+ "blake3",
+ "eyre",
+ "hex",
+ "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
+ "sha2",
 ]
 
 [[package]]

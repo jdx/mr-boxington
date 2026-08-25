@@ -1,7 +1,7 @@
 use crate::{
-    BlobSource, BlobUpload, CacheDigest, CacheDirectory, LocalActionCache, LocalCas,
-    ManifestPutOutcome, RemoteActionResult, RemoteCacheClient, RemoteCacheMode, RustcMetadata,
-    canonical_json,
+    ActionPrediction, BlobSource, BlobUpload, CacheDigest, CacheDirectory, LocalActionCache,
+    LocalCas, ManifestPutOutcome, RemoteActionResult, RemoteCacheClient, RemoteCacheMode,
+    RustcMetadata, TaskActionManifest, canonical_json,
 };
 use eyre::{Context, Result, bail};
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream};
@@ -20,7 +20,6 @@ const MAX_EXECUTABLE_IDENTITY_SIZE: usize = 64 * 1024;
 const MAX_EXECUTABLE_IDENTITY_BYTES: usize = 256 * 1024;
 const TASK_ACTION_MANIFEST_VERSION: u8 = 1;
 const MAX_TASK_ACTION_PREDICTIONS: usize = 16 * 1024;
-const MAX_ACTION_PREDICTION_PAYLOAD: usize = 256 * 1024;
 const MAX_REMOTE_TRANSFERS: usize = 64;
 const MAX_PREFETCH_TRANSFERS: usize = 48;
 const MAX_PREFETCH_ACTION_BATCH: usize = 256;
@@ -290,21 +289,6 @@ pub struct AgentStats {
     pub copied_output_bytes: u64,
 }
 
-/// Adapter-owned data needed to reconstruct an action before fresh dependency
-/// discovery is available.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ActionPrediction {
-    /// Invocation digest used to locate this prediction.
-    pub invocation: CacheDigest,
-    /// Full action digest produced when the prediction was recorded.
-    pub action: CacheDigest,
-    /// Adapter name that owns and understands `payload`.
-    pub adapter: String,
-    /// Adapter-defined serialized input prediction.
-    pub payload: String,
-}
-
 #[derive(Default)]
 struct AtomicAgentStats {
     lookups: AtomicU64,
@@ -421,21 +405,6 @@ pub struct CacheAgent {
     remote_transfers: Arc<tokio::sync::Semaphore>,
     prefetch_transfers: Arc<tokio::sync::Semaphore>,
     prefetch_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TaskActionManifest {
-    version: u8,
-    task: String,
-    predictions: Vec<ActionPrediction>,
-}
-
-#[derive(Serialize)]
-struct TaskActionManifestSelector<'a> {
-    version: u8,
-    kind: &'static str,
-    task: &'a str,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -708,13 +677,7 @@ impl CacheAgent {
     }
 
     fn task_manifest_selector(task: &str) -> Result<(Vec<u8>, CacheDigest)> {
-        let bytes = canonical_json(&TaskActionManifestSelector {
-            version: 1,
-            kind: "task_action_manifest",
-            task,
-        })?;
-        let digest = CacheDigest::blake3(&bytes);
-        Ok((bytes, digest))
+        TaskActionManifest::selector(task)
     }
 
     fn persist_task_manifest(&self, manifest: &TaskActionManifest) -> Result<()> {
@@ -2034,38 +1997,19 @@ pub fn task_manifest_actions(store: &Path, task: &str) -> Result<Vec<CacheDigest
 }
 
 fn validate_action_prediction(prediction: &ActionPrediction) -> Result<()> {
-    prediction.invocation.validate()?;
-    prediction.action.validate()?;
-    if prediction.adapter.is_empty()
-        || !prediction
-            .adapter
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        bail!("invalid action prediction adapter");
+    if prediction.validate() {
+        Ok(())
+    } else {
+        bail!("invalid action prediction")
     }
-    if prediction.payload.len() > MAX_ACTION_PREDICTION_PAYLOAD {
-        bail!("action prediction payload is too large");
-    }
-    serde_json::from_str::<serde_json::Value>(&prediction.payload)?;
-    Ok(())
 }
 
 fn validate_task_manifest(manifest: &TaskActionManifest, task: &str) -> Result<()> {
-    if manifest.version != TASK_ACTION_MANIFEST_VERSION || manifest.task != task {
-        bail!("task action manifest has an invalid identity");
+    if manifest.task == task && manifest.validate() {
+        Ok(())
+    } else {
+        bail!("invalid task action manifest")
     }
-    if manifest.predictions.len() > MAX_TASK_ACTION_PREDICTIONS {
-        bail!("task action manifest contains too many predictions");
-    }
-    let mut invocations = BTreeMap::new();
-    for prediction in &manifest.predictions {
-        validate_action_prediction(prediction)?;
-        if invocations.insert(&prediction.invocation, ()).is_some() {
-            bail!("task action manifest contains duplicate predictions");
-        }
-    }
-    Ok(())
 }
 
 fn merge_task_manifests(

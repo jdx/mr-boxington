@@ -128,12 +128,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+      - name: Find packages present in both revisions
+        id: semver-packages
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          baseline_dir="$(mktemp -d)"
+          git worktree add --detach "$baseline_dir" "origin/$BASE_REF"
+          packages="$({
+            comm -12 \
+              <(cargo metadata --no-deps --format-version 1 | jq -r '.workspace_members as $members | [.packages[] | select(.id as $id | $members | index($id)) | .name] | sort | .[]') \
+              <(cargo metadata --manifest-path "$baseline_dir/Cargo.toml" --no-deps --format-version 1 | jq -r '.workspace_members as $members | [.packages[] | select(.id as $id | $members | index($id)) | .name] | sort | .[]')
+          } | paste -sd, -)"
+          echo "packages=$packages" >> "$GITHUB_OUTPUT"
       - name: Check workspace API against the PR base
         if: github.event_name == 'pull_request'
         uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
         with:
           baseline-rev: origin/${{ github.base_ref }}
           feature-group: all-features
+          package: ${{ steps.semver-packages.outputs.packages }}
 
   fuzz:
     runs-on: ubuntu-latest

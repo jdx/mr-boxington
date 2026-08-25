@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(protocol)* consume remote wire types and constants from `mbx-cache-protocol`
+
 ## [0.3.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.2.0...mbx-cache-core-v0.3.0) - 2026-08-23
 
 ### Added
