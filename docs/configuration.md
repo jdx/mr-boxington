@@ -70,7 +70,7 @@ an unsafe or misspelled workspace setting.
 The complete settings reference—including TOML keys, environment variables,
 types, defaults, choices, and environment-only diagnostics—is generated from
 the same usage-rs declaration mbx uses at runtime. See
-[CLI and configuration reference](/cli#configuration).
+[CLI configuration reference](/cli/configuration).
 
 `MBX_VERIFY=1` is deliberately slower. It qualifies correctness; it is not a
 normal build mode.
