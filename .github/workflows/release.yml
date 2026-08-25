@@ -21,6 +21,18 @@ on:
         required: true
         type: string
 
+# One asset upload per tag. `release-plz.yml` already serializes the runs it
+# starts itself, so this is about the dispatch entry point: re-running a failed
+# build by hand while the automated release is still uploading would have two
+# runs writing the same asset names. `--clobber` keeps that from erroring, but
+# the release would briefly carry a mix of two builds' files.
+#
+# Keyed by tag so re-running v0.1.0 never waits on v0.2.0, and not cancelling,
+# because a half-uploaded set of assets is the thing being avoided.
+concurrency:
+  group: release-assets-${{ inputs.tag }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
