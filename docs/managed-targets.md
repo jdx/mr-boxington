@@ -85,6 +85,10 @@ Turning placement off does not delete a target directory mbx already manages.
 The existing `target` link continues to work, and collection can still reclaim
 the directory after its checkout disappears.
 
+To remove one workspace's managed target immediately and forget its cache
+claims, run `mbx cache remove /path/to/workspace`. Shared objects stay available
+to other workspaces and are reclaimed by normal garbage collection.
+
 ::: warning Windows
 Creating the link requires Developer Mode or a privileged process on Windows.
 If Windows cannot create it, mbx lets Cargo use its ordinary target directory.

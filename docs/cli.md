@@ -95,6 +95,48 @@ Summarize what the store holds.
 - **`--json`** — Print a stable machine-readable report.
 - **`-h --help`** — Print help
 
+## `mbx cache projects`
+
+- **Usage:** `mbx cache projects`
+
+Show cache use attributed to recorded workspaces.
+
+### Flags
+- **`-h --help`** — Print help
+
+## `mbx cache largest`
+
+- **Usage:** `mbx cache largest [--limit <LIMIT>]`
+
+List the largest objects and action-result records.
+
+### Flags
+- **`--limit <LIMIT>`** — Maximum entries to print.
+
+  **Default:** `20`
+- **`-h --help`** — Print help
+
+## `mbx cache verify`
+
+- **Usage:** `mbx cache verify`
+
+Verify local objects and action results.
+
+### Flags
+- **`-h --help`** — Print help
+
+## `mbx cache remove`
+
+- **Usage:** `mbx cache remove <WORKSPACE>`
+
+Remove one workspace's managed target and cache claims.
+
+### Arguments
+- **`<WORKSPACE>`** — Workspace root to forget.
+
+### Flags
+- **`-h --help`** — Print help
+
 ## `mbx prefetch`
 
 - **Usage:** `mbx prefetch <CARGO_ARGS>…`

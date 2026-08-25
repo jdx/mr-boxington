@@ -90,6 +90,170 @@ fn reports_an_empty_store() {
 }
 
 #[test]
+fn lists_largest_entries_in_descending_order() {
+    let directory = tempfile::tempdir().unwrap();
+    store_object(directory.path(), b"small");
+    store_object(directory.path(), b"a much larger object");
+
+    let entries = largest(directory.path(), 1).unwrap();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].kind, "object");
+    assert_eq!(entries[0].bytes, 20);
+}
+
+#[test]
+fn verification_reports_a_corrupt_object() {
+    let directory = tempfile::tempdir().unwrap();
+    let digest = store_object(directory.path(), b"original");
+    let path = LocalCas::new(directory.path()).path_for(&digest).unwrap();
+    std::fs::write(&path, b"corrupt!").unwrap();
+
+    let outcome = verify(directory.path()).unwrap();
+
+    assert_eq!(outcome.checked_objects, 1);
+    assert_eq!(outcome.problems, vec![path]);
+}
+
+#[test]
+fn inspection_ignores_in_progress_staging_paths() {
+    let directory = tempfile::tempdir().unwrap();
+    let action = store_result(directory.path(), "compile", &[]);
+    let cas_path = LocalCas::new(directory.path()).path_for(&action).unwrap();
+    let result_path = LocalActionCache::new(directory.path())
+        .path_for(&action)
+        .unwrap();
+    let staging_file = tempfile::NamedTempFile::new_in(cas_path.parent().unwrap()).unwrap();
+    std::fs::write(staging_file.path(), vec![b'x'; 1_024]).unwrap();
+    let staging_directory = tempfile::tempdir_in(result_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        staging_directory.path().join("result.json"),
+        vec![b'x'; 2_048],
+    )
+    .unwrap();
+
+    let entries = largest(directory.path(), 10).unwrap();
+    let outcome = verify(directory.path()).unwrap();
+
+    assert_eq!(entries.len(), 3);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.path != staging_file.path())
+    );
+    assert!(
+        entries
+            .iter()
+            .all(|entry| !entry.path.starts_with(staging_directory.path()))
+    );
+    assert_eq!(outcome.checked_objects, 2);
+    assert_eq!(outcome.checked_action_results, 1);
+    assert!(outcome.problems.is_empty());
+}
+
+#[test]
+fn attributes_reachable_cache_bytes_to_a_workspace() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let output = store_object(directory.path(), b"artifact");
+    let action = store_result(directory.path(), "compile", &[output]);
+    record_build(directory.path(), &"a".repeat(64), &workspace, &[action]);
+
+    let projects = projects(directory.path()).unwrap();
+
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].workspace_root, workspace);
+    assert_eq!(projects[0].identities, 1);
+    assert!(projects[0].action_bytes > 0);
+    assert!(projects[0].live);
+}
+
+#[test]
+fn project_usage_excludes_expired_claims() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let action = store_result(directory.path(), "compile", &[]);
+    let identity = "a".repeat(64);
+    record_build(directory.path(), &identity, &workspace, &[action]);
+    let stale = CheckoutRecord {
+        version: CHECKOUT_RECORD_VERSION,
+        workspace_root: workspace.clone(),
+        target_dir: workspace.join("target"),
+        updated_secs: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - CHECKOUT_RETENTION.as_secs()
+            - 1,
+    };
+    crate::util::write_atomic(
+        &checkout_record_path(directory.path(), &identity, &workspace),
+        &serde_json::to_vec(&stale).unwrap(),
+    )
+    .unwrap();
+
+    let projects = projects(directory.path()).unwrap();
+
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].workspace_root, workspace);
+    assert_eq!(projects[0].identities, 0);
+    assert_eq!(projects[0].action_bytes, 0);
+    assert!(!projects[0].live);
+}
+
+#[cfg(unix)]
+#[test]
+fn project_usage_follows_a_recorded_target_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    let actual_target = directory.path().join("managed-target");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&actual_target).unwrap();
+    std::fs::write(actual_target.join("artifact"), b"compiled").unwrap();
+    symlink(&actual_target, workspace.join("target")).unwrap();
+    record_build(directory.path(), &"a".repeat(64), &workspace, &[]);
+
+    let projects = projects(directory.path()).unwrap();
+
+    assert_eq!(projects[0].target_bytes, 8);
+}
+
+#[test]
+fn target_sizes_are_cached_by_recorded_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("artifact"), b"first").unwrap();
+    let mut cache = BTreeMap::new();
+
+    assert_eq!(cached_tree_bytes(&mut cache, &target), 5);
+    std::fs::write(target.join("artifact"), b"changed after the walk").unwrap();
+    assert_eq!(cached_tree_bytes(&mut cache, &target), 5);
+}
+
+#[test]
+fn removes_only_the_requested_workspaces_checkout_claims() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = directory.path().join("first");
+    let second = directory.path().join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    record_build(directory.path(), &"a".repeat(64), &first, &[]);
+    record_build(directory.path(), &"b".repeat(64), &second, &[]);
+
+    let outcome = remove_project(directory.path(), &first).unwrap();
+
+    assert_eq!(outcome.removed_checkout_records, 1);
+    let remaining = projects(directory.path()).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].workspace_root, second);
+}
+
+#[test]
 fn counts_objects_and_results() {
     let directory = tempfile::tempdir().unwrap();
     let store = directory.path();
