@@ -133,6 +133,38 @@ fn attributes_reachable_cache_bytes_to_a_workspace() {
     assert!(projects[0].live);
 }
 
+#[cfg(unix)]
+#[test]
+fn project_usage_follows_a_recorded_target_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    let actual_target = directory.path().join("managed-target");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&actual_target).unwrap();
+    std::fs::write(actual_target.join("artifact"), b"compiled").unwrap();
+    symlink(&actual_target, workspace.join("target")).unwrap();
+    record_build(directory.path(), &"a".repeat(64), &workspace, &[]);
+
+    let projects = projects(directory.path()).unwrap();
+
+    assert_eq!(projects[0].target_bytes, 8);
+}
+
+#[test]
+fn target_sizes_are_cached_by_recorded_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("artifact"), b"first").unwrap();
+    let mut cache = BTreeMap::new();
+
+    assert_eq!(cached_tree_bytes(&mut cache, &target), 5);
+    std::fs::write(target.join("artifact"), b"changed after the walk").unwrap();
+    assert_eq!(cached_tree_bytes(&mut cache, &target), 5);
+}
+
 #[test]
 fn removes_only_the_requested_workspaces_checkout_claims() {
     let directory = tempfile::tempdir().unwrap();

@@ -128,6 +128,7 @@ pub fn stats(store: &Path) -> Result<StoreStats> {
 /// pretending shared storage can be divided exactly between projects.
 pub fn projects(store: &Path) -> Result<Vec<ProjectUsage>> {
     let mut projects: BTreeMap<PathBuf, (BTreeSet<String>, bool, u64)> = BTreeMap::new();
+    let mut target_sizes = BTreeMap::new();
     let root = store.join(CHECKOUTS_DIR);
     for identity_entry in read_dir_or_empty(&root)? {
         let identity = identity_entry.file_name().to_string_lossy().into_owned();
@@ -141,7 +142,9 @@ pub fn projects(store: &Path) -> Result<Vec<ProjectUsage>> {
             let project = projects.entry(record.workspace_root.clone()).or_default();
             project.0.insert(identity.clone());
             project.1 |= checkout_is_live(&record.workspace_root);
-            project.2 = project.2.max(tree_bytes(&record.target_dir));
+            project.2 = project
+                .2
+                .max(cached_tree_bytes(&mut target_sizes, &record.target_dir));
         }
     }
     let action_cache = mbx_cache_core::LocalActionCache::new(store);
@@ -760,9 +763,27 @@ fn digest_from_path(path: &Path, action_result: bool) -> Option<CacheDigest> {
     Some(digest)
 }
 
+fn cached_tree_bytes(cache: &mut BTreeMap<PathBuf, u64>, root: &Path) -> u64 {
+    *cache
+        .entry(root.to_path_buf())
+        .or_insert_with(|| tree_bytes(root))
+}
+
 fn tree_bytes(root: &Path) -> u64 {
+    let Ok(root_metadata) = std::fs::metadata(root) else {
+        return 0;
+    };
+    if root_metadata.is_file() {
+        return root_metadata.len();
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
     let mut bytes = 0_u64;
-    let mut pending = vec![root.to_path_buf()];
+    let mut pending = entries
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
     while let Some(path) = pending.pop() {
         let Ok(metadata) = std::fs::symlink_metadata(&path) else {
             continue;
