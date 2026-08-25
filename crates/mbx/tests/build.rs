@@ -83,12 +83,29 @@ fn transparent_rustc_replaces_the_shim_process() {
         mbx::session::install_shim(Path::new(env!("CARGO_BIN_EXE_mbx")), directory.path()).unwrap();
     let pid_file = directory.path().join("compiler.pid");
 
-    let mut child = Command::new(shim)
-        .arg("/bin/sh")
-        .args(["-c", "printf '%s' \"$$\" > \"$1\"", "sh"])
-        .arg(&pid_file)
-        .spawn()
-        .unwrap();
+    // Retried because exec of a just-written executable can transiently fail
+    // with ETXTBSY: a sibling test may fork while its own shim copy is still
+    // open for write, and until that child reaches its exec, the inherited
+    // descriptor (cloexec or not) counts as a writer of this file too.
+    let mut child = {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let attempt = Command::new(&shim)
+                .arg("/bin/sh")
+                .args(["-c", "printf '%s' \"$$\" > \"$1\"", "sh"])
+                .arg(&pid_file)
+                .spawn();
+            match attempt {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                other => break other.unwrap(),
+            }
+        }
+    };
     let shim_pid = child.id();
     let status = child.wait().unwrap();
 
