@@ -151,7 +151,7 @@ fn expands_utf8_response_files_one_argument_per_line() {
     let invocation = RustcInvocation::parse(&[format!("@{}", response.display()).into()]).unwrap();
 
     assert_eq!(invocation.source(), Path::new("src/lib.rs"));
-    assert!(invocation.required_inputs.contains(&response));
+    assert!(!invocation.required_inputs.contains(&response));
 }
 
 #[test]
@@ -168,7 +168,6 @@ fn response_file_arguments_are_not_recursively_expanded() {
         expanded.arguments,
         [OsString::from(format!("@{}", nested.display()))]
     );
-    assert_eq!(expanded.files, [outer]);
 }
 
 #[test]
@@ -188,7 +187,7 @@ fn shell_response_files_follow_the_rustc_unstable_switch() {
     .unwrap();
 
     assert_eq!(invocation.crate_name, "shell widget");
-    assert!(invocation.required_inputs.contains(&response));
+    assert!(!invocation.required_inputs.contains(&response));
 }
 
 #[test]
@@ -200,10 +199,11 @@ fn unreadable_response_files_bypass_with_the_stable_reason_kind() {
 }
 
 #[test]
-fn response_file_bytes_are_part_of_the_action_key() {
+fn equivalent_response_file_paths_share_an_action_key() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("lib.rs");
-    let response = directory.path().join("rustc.args");
+    let first_response = directory.path().join("rustc-123.args");
+    let second_response = directory.path().join("rustc-456.args");
     std::fs::write(&source, "pub fn fixture() {}\n").unwrap();
     let lines = [
         "--crate-name=fixture",
@@ -211,28 +211,25 @@ fn response_file_bytes_are_part_of_the_action_key() {
         "--emit=metadata,link",
         source.to_str().unwrap(),
     ];
-    let keyed = |separator: &str| {
+    let keyed = |response: &Path, separator: &str| {
         let contents = format!("{}{}", lines.join(separator), separator);
-        std::fs::write(&response, &contents).unwrap();
+        std::fs::write(response, &contents).unwrap();
         let invocation =
             RustcInvocation::parse(&[format!("@{}", response.display()).into()]).unwrap();
         let mut action_context = context(&[]);
         action_context.working_dir = directory.path().to_path_buf();
         action_context.path_mappings = vec![PathMapping::new(directory.path(), "workspace")];
-        action_context.inputs = vec![
-            ActionInput {
-                path: source.clone(),
-                digest: CacheDigest::blake3_file(&source).unwrap(),
-            },
-            ActionInput {
-                path: response.clone(),
-                digest: CacheDigest::blake3(contents.as_bytes()),
-            },
-        ];
+        action_context.inputs = vec![ActionInput {
+            path: source.clone(),
+            digest: CacheDigest::blake3_file(&source).unwrap(),
+        }];
         invocation.action(action_context).unwrap().digest
     };
 
-    assert_ne!(keyed("\n"), keyed("\r\n"));
+    assert_eq!(
+        keyed(&first_response, "\n"),
+        keyed(&second_response, "\r\n")
+    );
 }
 
 #[test]

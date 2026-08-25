@@ -302,9 +302,7 @@ impl RustcInvocation {
     /// toolchains.
     pub fn parse(arguments: &[OsString]) -> Result<Self, BypassReason> {
         let expanded = expand_response_files(arguments)?;
-        let mut invocation = Parser::new(&expanded.arguments).parse()?;
-        invocation.required_inputs.extend(expanded.files);
-        Ok(invocation)
+        Parser::new(&expanded.arguments).parse()
     }
 
     /// Return the source input passed to rustc.
@@ -737,7 +735,6 @@ struct Parser<'a> {
 
 struct ExpandedArguments {
     arguments: Vec<OsString>,
-    files: Vec<PathBuf>,
 }
 
 #[derive(Default)]
@@ -745,7 +742,6 @@ struct ResponseExpander {
     shell_argfiles: bool,
     next_is_unstable_option: bool,
     arguments: Vec<OsString>,
-    files: Vec<PathBuf>,
 }
 
 impl ResponseExpander {
@@ -783,7 +779,6 @@ fn expand_response_files(arguments: &[OsString]) -> Result<ExpandedArguments, By
         let contents = std::fs::read_to_string(path).map_err(|error| {
             BypassReason::ResponseFile(format!("{}: {error}", Path::new(path).display()))
         })?;
-        expanded.files.push(PathBuf::from(path));
         if shell {
             let arguments = shlex::split(&contents).ok_or_else(|| {
                 BypassReason::ResponseFile(format!(
@@ -802,7 +797,6 @@ fn expand_response_files(arguments: &[OsString]) -> Result<ExpandedArguments, By
     }
     Ok(ExpandedArguments {
         arguments: expanded.arguments,
-        files: expanded.files,
     })
 }
 
