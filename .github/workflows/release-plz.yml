@@ -12,6 +12,24 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# One run at a time. Two runs would both publish: the release job creates tags
+# and pushes crates to crates.io, and a second run reaching that step while the
+# first is mid-publish either duplicates a version or fails half-way through a
+# workspace, leaving some crates released and some not. A queued run is also
+# correct on its own terms -- it re-reads main and finds the work already done.
+#
+# `cancel-in-progress: false` is the whole point: cancelling a publish is worse
+# than waiting for one. Merges to main are rare enough that the queue is short.
+#
+# Deliberately at workflow level rather than per job, so it also covers the
+# release job racing the *next* run's release-pr job, which rewrites the very
+# branch the release reads. One group here replaces the job-level guard the
+# release-pr job used to carry; repeating the same group name on a job inside a
+# run that already holds it risks the job waiting on its own run's lock.
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release-plz-release:
     name: Release
@@ -191,10 +209,6 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    # Never run two of these at once: they would race the same branch.
-    concurrency:
-      group: release-plz-${{ github.ref }}
-      cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
