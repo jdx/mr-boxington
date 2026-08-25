@@ -133,6 +133,40 @@ fn attributes_reachable_cache_bytes_to_a_workspace() {
     assert!(projects[0].live);
 }
 
+#[test]
+fn project_usage_excludes_expired_claims() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let action = store_result(directory.path(), "compile", &[]);
+    let identity = "a".repeat(64);
+    record_build(directory.path(), &identity, &workspace, &[action]);
+    let stale = CheckoutRecord {
+        version: CHECKOUT_RECORD_VERSION,
+        workspace_root: workspace.clone(),
+        target_dir: workspace.join("target"),
+        updated_secs: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - CHECKOUT_RETENTION.as_secs()
+            - 1,
+    };
+    crate::util::write_atomic(
+        &checkout_record_path(directory.path(), &identity, &workspace),
+        &serde_json::to_vec(&stale).unwrap(),
+    )
+    .unwrap();
+
+    let projects = projects(directory.path()).unwrap();
+
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].workspace_root, workspace);
+    assert_eq!(projects[0].identities, 0);
+    assert_eq!(projects[0].action_bytes, 0);
+    assert!(!projects[0].live);
+}
+
 #[cfg(unix)]
 #[test]
 fn project_usage_follows_a_recorded_target_symlink() {

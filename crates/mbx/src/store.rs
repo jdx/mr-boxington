@@ -140,8 +140,10 @@ pub fn projects(store: &Path) -> Result<Vec<ProjectUsage>> {
                 continue;
             };
             let project = projects.entry(record.workspace_root.clone()).or_default();
-            project.0.insert(identity.clone());
-            project.1 |= checkout_is_live(&record.workspace_root);
+            if claim_is_live(&record) {
+                project.0.insert(identity.clone());
+                project.1 = true;
+            }
             project.2 = project
                 .2
                 .max(cached_tree_bytes(&mut target_sizes, &record.target_dir));
