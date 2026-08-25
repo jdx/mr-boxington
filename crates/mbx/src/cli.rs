@@ -735,7 +735,7 @@ fn gc(
 
 fn print_gc_store_outcome(outcome: &store::GcOutcome, dry_run: bool) {
     let prefix = if dry_run { "would have " } else { "" };
-    println!("{prefix}{}", evictions(&outcome));
+    println!("{prefix}{}", evictions(outcome));
     if outcome.removed_checkout_records > 0 {
         println!(
             "{prefix}dropped {} stale checkout records",

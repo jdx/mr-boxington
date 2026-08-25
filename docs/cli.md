@@ -54,7 +54,7 @@ Install a persistent rustc wrapper for plain Cargo commands.
 
 ## `mbx gc`
 
-- **Usage:** `mbx gc [--max-size <SIZE>] [--json] [--dry-run]`
+- **Usage:** `mbx gc [FLAGS]`
 
 Collect stale managed targets and evict cached objects until the store fits a size budget.
 
