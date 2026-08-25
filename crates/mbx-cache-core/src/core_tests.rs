@@ -268,6 +268,23 @@ async fn falls_back_when_blob_packs_are_not_advertised() {
 }
 
 #[tokio::test]
+async fn connection_check_requires_a_capabilities_endpoint() {
+    let mut server = mockito::Server::new_async().await;
+    let capabilities = server
+        .mock("GET", "/v1/capabilities")
+        .with_status(404)
+        .expect(1)
+        .create_async()
+        .await;
+    let client = test_client(&server);
+
+    let error = client.check_connection().await.unwrap_err();
+
+    assert!(error.to_string().contains("404"));
+    capabilities.assert_async().await;
+}
+
+#[tokio::test]
 async fn disables_blob_packs_when_the_advertised_endpoint_is_unavailable() {
     let mut server = mockito::Server::new_async().await;
     let capabilities = server

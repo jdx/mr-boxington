@@ -351,7 +351,7 @@ impl RemoteCacheClient {
     /// that need to distinguish a valid client configuration from a reachable,
     /// compatible remote cache.
     pub async fn check_connection(&self) -> Result<()> {
-        self.negotiated_capabilities().await?;
+        self.fetch_capabilities(false).await?;
         Ok(())
     }
 
@@ -422,66 +422,67 @@ impl RemoteCacheClient {
 
     async fn negotiated_capabilities(&self) -> Result<NegotiatedCapabilities> {
         self.capabilities
-            .get_or_try_init(|| async {
-                let url = self.capabilities_endpoint()?;
-                let response = self
-                    .request(reqwest::Method::GET, url, "application/json")
-                    .await?
-                    .send()
-                    .await?;
-                if matches!(
-                    response.status(),
-                    StatusCode::NOT_FOUND
-                        | StatusCode::METHOD_NOT_ALLOWED
-                        | StatusCode::NOT_IMPLEMENTED
-                ) {
-                    return Ok(NegotiatedCapabilities::default());
-                }
-                let bytes =
-                    read_bounded_json(response.error_for_status()?, "capabilities").await?;
-                let capabilities: RemoteCacheCapabilities = serde_json::from_slice(&bytes)?;
-                if capabilities.protocol.major != PROTOCOL_VERSION {
-                    bail!(
-                        "remote cache capability protocol {} is incompatible with client protocol {PROTOCOL_VERSION}",
-                        capabilities.protocol.major
-                    );
-                }
-                // Compression is negotiated, never assumed: a body sent with a
-                // coding the server did not offer would be stored corrupt or
-                // rejected, so absence of the advertisement means identity.
-                let zstd_uploads = capabilities
-                    .compressors
-                    .iter()
-                    .any(|compressor| compressor == "zstd");
-                let blob_packs = if capabilities.features.blob_packs {
-                    let max_items = usize::try_from(capabilities.limits.max_batch_items)
-                        .ok()
-                        .filter(|limit| *limit > 0)
-                        .ok_or_else(|| {
-                            eyre!(
-                                "remote cache blob packs require a positive max_batch_items limit"
-                            )
-                        })?;
-                    if capabilities.limits.max_pack_bytes == 0 {
-                        bail!("remote cache blob packs require a positive max_pack_bytes limit");
-                    }
-                    Some(BlobPackLimits {
-                        max_items: max_items.min(MAX_STAGED_BLOB_PACK_ITEMS),
-                        max_bytes: capabilities
-                            .limits
-                            .max_pack_bytes
-                            .min(MAX_STAGED_BLOB_PACK_BYTES),
-                    })
-                } else {
-                    None
-                };
-                Ok(NegotiatedCapabilities {
-                    blob_packs,
-                    zstd_uploads,
-                })
-            })
+            .get_or_try_init(|| self.fetch_capabilities(true))
             .await
             .copied()
+    }
+
+    async fn fetch_capabilities(&self, allow_missing: bool) -> Result<NegotiatedCapabilities> {
+        let url = self.capabilities_endpoint()?;
+        let response = self
+            .request(reqwest::Method::GET, url, "application/json")
+            .await?
+            .send()
+            .await?;
+        if allow_missing
+            && matches!(
+                response.status(),
+                StatusCode::NOT_FOUND
+                    | StatusCode::METHOD_NOT_ALLOWED
+                    | StatusCode::NOT_IMPLEMENTED
+            )
+        {
+            return Ok(NegotiatedCapabilities::default());
+        }
+        let bytes = read_bounded_json(response.error_for_status()?, "capabilities").await?;
+        let capabilities: RemoteCacheCapabilities = serde_json::from_slice(&bytes)?;
+        if capabilities.protocol.major != PROTOCOL_VERSION {
+            bail!(
+                "remote cache capability protocol {} is incompatible with client protocol {PROTOCOL_VERSION}",
+                capabilities.protocol.major
+            );
+        }
+        // Compression is negotiated, never assumed: a body sent with a
+        // coding the server did not offer would be stored corrupt or
+        // rejected, so absence of the advertisement means identity.
+        let zstd_uploads = capabilities
+            .compressors
+            .iter()
+            .any(|compressor| compressor == "zstd");
+        let blob_packs = if capabilities.features.blob_packs {
+            let max_items = usize::try_from(capabilities.limits.max_batch_items)
+                .ok()
+                .filter(|limit| *limit > 0)
+                .ok_or_else(|| {
+                    eyre!("remote cache blob packs require a positive max_batch_items limit")
+                })?;
+            if capabilities.limits.max_pack_bytes == 0 {
+                bail!("remote cache blob packs require a positive max_pack_bytes limit");
+            }
+            Some(BlobPackLimits {
+                max_items: max_items.min(MAX_STAGED_BLOB_PACK_ITEMS),
+                max_bytes: capabilities
+                    .limits
+                    .max_pack_bytes
+                    .min(MAX_STAGED_BLOB_PACK_BYTES),
+            })
+        } else {
+            None
+        };
+        Ok(NegotiatedCapabilities {
+            blob_packs,
+            zstd_uploads,
+        })
     }
 
     /// Download verified CAS objects using the server's negotiated blob-pack extension.
