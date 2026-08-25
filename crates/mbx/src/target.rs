@@ -500,6 +500,40 @@ fn symlink_dir(source: &Path, link: &Path) -> std::io::Result<()> {
     std::os::windows::fs::symlink_dir(source, link)
 }
 
+/// Mark an existing managed view as used when this build wrote into it.
+///
+/// Placement records a view every time it happens, but a build can write into a
+/// managed directory without placing it: turning `target.views` off, or naming a
+/// target directory explicitly, leaves the symlink an earlier build created and
+/// cargo keeps writing through it. The record would then stop being refreshed
+/// while the directory stayed in daily use, and age-based collection would
+/// eventually delete outputs somebody was still building against.
+///
+/// Only an existing record is refreshed. A directory that is not the managed
+/// view for this workspace gets nothing, so a checkout that has genuinely gone
+/// back to its own `target/` still expires on schedule.
+pub fn touch_managed(config: &Config, workspace_root: &Path, target_dir: &Path) {
+    let record_path = view_record_path(&config.target.root, workspace_root);
+    if !record_path.exists() {
+        return;
+    }
+    let managed = view_dir(&config.target.root, workspace_root);
+    // Resolved on both sides: `target_dir` is typically the symlink, and the
+    // managed root itself may sit behind one.
+    let (Ok(written), Ok(expected)) = (
+        std::fs::canonicalize(target_dir),
+        std::fs::canonicalize(&managed),
+    ) else {
+        return;
+    };
+    if written != expected {
+        return;
+    }
+    if let Err(error) = record_view(&config.target.root, workspace_root) {
+        log::debug!("the managed target record was not refreshed: {error}");
+    }
+}
+
 /// Summarize the managed target directories under `root`.
 pub fn stats(root: &Path) -> Result<ViewStats> {
     let mut stats = ViewStats::default();
@@ -573,13 +607,37 @@ pub(crate) fn collect(
         && remaining > max_bytes
     {
         entries.sort_by_key(|entry| entry.2);
-        for (record_path, _, _, bytes, _) in &entries {
+        // Only the views the passes above left alone. An abandoned or expired
+        // one is going regardless, so letting it hold the protected place below
+        // would spend that protection on a directory already being deleted.
+        let mut candidates: Vec<&(PathBuf, PathBuf, u64, u64, bool)> = entries
+            .iter()
+            .filter(|entry| !selected.contains(&entry.0))
+            .collect();
+        // Spare the most recently used of them: that is the checkout somebody
+        // is almost certainly working in, very likely the one whose build just
+        // called this. Deleting it cannot hold the total down anyway, because
+        // the next build recreates it, so a budget smaller than one working
+        // target directory would otherwise delete those outputs after every
+        // build forever.
+        candidates.pop();
+        for entry in candidates {
             if remaining <= max_bytes {
                 break;
             }
-            if selected.insert(record_path.clone()) {
-                remaining = remaining.saturating_sub(*bytes);
+            if selected.insert(entry.0.clone()) {
+                remaining = remaining.saturating_sub(entry.3);
             }
+        }
+        if remaining > max_bytes {
+            // Say so rather than delete the last directory standing: the
+            // budget cannot be met, and the user is the only one who can
+            // decide whether to raise it or keep fewer checkouts.
+            log::warn!(
+                "managed target directories still hold {} after collection, over the {} budget; the most recently used one is kept",
+                bytesize::ByteSize::b(remaining).display().iec(),
+                bytesize::ByteSize::b(max_bytes).display().iec(),
+            );
         }
     }
 

@@ -14,9 +14,68 @@ use usage_config::{EnvLayer, FileLayer, FileScope, Layers};
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_HTTP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_HTTP_RETRIES: i64 = 3;
-/// Stated in IEC units so the budget reads the way `mbx gc` reports it back.
-const DEFAULT_GC_MAX_SIZE: u64 = 20 * 1024 * 1024 * 1024;
 const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// How long a managed target directory may sit unused before collection.
+const DEFAULT_TARGET_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+const GIB: u64 = 1024 * 1024 * 1024;
+
+/// The largest a budget nobody configured will grow to.
+///
+/// Scaling without a ceiling would hand a 4TB workstation hundreds of
+/// gigabytes it never asked to give up.
+const MAX_SCALED_BUDGET: u64 = 100 * GIB;
+
+/// Scaled budgets are rounded down to a multiple of this.
+///
+/// 5% of a disk is a number like 16.65GiB, which reads like a measurement
+/// rather than a decision. Rounding down to whole increments makes the budget
+/// mbx reports back look like something chosen on purpose, and never rounds a
+/// budget up past the share it was allowed.
+const BUDGET_INCREMENT: u64 = 5 * GIB;
+
+/// A default budget as a share of the disk, bounded at both ends.
+///
+/// A budget nobody configured should be generous on a large disk and modest on
+/// a small one, but neither unbounded nor uselessly tiny: the floor keeps a
+/// small disk from a cache too small to hit in. Sizes are stated in IEC units
+/// so they read the way `mbx gc` reports them back.
+#[derive(Debug, Clone, Copy)]
+struct ScaledBudget {
+    /// Percent of the whole disk.
+    percent: u64,
+    floor: u64,
+    /// Used when the disk cannot be measured. Guessing a disk size would be
+    /// worse: this is the budget mbx shipped with before it scaled them.
+    fallback: u64,
+}
+
+const STORE_BUDGET: ScaledBudget = ScaledBudget {
+    percent: 5,
+    floor: 5 * GIB,
+    fallback: 20 * GIB,
+};
+
+/// Twice the store's share: target directories hold the linked outputs of every
+/// live checkout, and they are what fills a disk in practice.
+const TARGET_BUDGET: ScaledBudget = ScaledBudget {
+    percent: 10,
+    floor: 10 * GIB,
+    fallback: 30 * GIB,
+};
+
+impl ScaledBudget {
+    fn resolve(self, disk_total_bytes: Option<u64>) -> u64 {
+        let Some(total) = disk_total_bytes.filter(|total| *total > 0) else {
+            return self.fallback;
+        };
+        let share = (total / 100).saturating_mul(self.percent);
+        // Floors and the ceiling are whole increments themselves, so clamping
+        // cannot reintroduce a ragged number.
+        let whole = share - (share % BUDGET_INCREMENT);
+        whole.clamp(self.floor, MAX_SCALED_BUDGET)
+    }
+}
 
 /// The single declaration used to resolve and document mbx configuration.
 #[derive(Debug, usage::Config)]
@@ -90,12 +149,15 @@ struct RawTarget {
     /// Managed target root.
     #[usage(env = "MBX_TARGET_ROOT", default_note = "<cache_dir>/targets")]
     root: Option<PathBuf>,
-    /// Managed-target budget. Live views are collected oldest-first when set.
-    #[usage(env = "MBX_TARGET_MAX_SIZE")]
+    /// Managed-target budget, or "none". Live views are collected oldest-first.
+    #[usage(
+        env = "MBX_TARGET_MAX_SIZE",
+        default_note = "10% of the cache disk, from 10GiB to 100GiB"
+    )]
     max_size: Option<String>,
-    /// Collect live managed targets that have not been used this long.
-    #[usage(env = "MBX_TARGET_MAX_AGE", ty = "duration")]
-    max_age: Option<String>,
+    /// Collect live managed targets unused this long, or "none".
+    #[usage(env = "MBX_TARGET_MAX_AGE", default = "30d", ty = "duration")]
+    max_age: String,
 }
 
 #[derive(Debug, usage::Config)]
@@ -105,9 +167,12 @@ struct RawGc {
     #[usage(env = "MBX_GC_AUTO", default = true)]
     auto: bool,
     /// Action-store budget.
-    #[usage(env = "MBX_GC_MAX_SIZE", default = "20GiB")]
-    max_size: String,
-    /// Combined action-store and managed-target budget.
+    #[usage(
+        env = "MBX_GC_MAX_SIZE",
+        default_note = "5% of the cache disk, from 5GiB to 100GiB"
+    )]
+    max_size: Option<String>,
+    /// Combined action-store and managed-target budget, or "none".
     #[usage(env = "MBX_GC_MAX_TOTAL_SIZE")]
     max_total_size: Option<String>,
     /// Minimum interval between automatic sweeps.
@@ -181,18 +246,34 @@ pub struct GcSettings {
     pub interval: Duration,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct RetentionSettings {
     pub target_max_bytes: Option<u64>,
     pub target_max_age: Option<Duration>,
     pub max_total_bytes: Option<u64>,
 }
 
+/// The retention a run gets when nobody resolved configuration for it.
+///
+/// These are the unmeasured fallbacks rather than the disk-scaled budgets: a
+/// `Default` cannot probe a disk it has not been told about. Collection still
+/// happens, which is the property that matters -- a default that pruned nothing
+/// would make every unconfigured path a leak.
+impl Default for RetentionSettings {
+    fn default() -> Self {
+        Self {
+            target_max_bytes: Some(TARGET_BUDGET.fallback),
+            target_max_age: Some(DEFAULT_TARGET_MAX_AGE),
+            max_total_bytes: None,
+        }
+    }
+}
+
 impl Default for GcSettings {
     fn default() -> Self {
         Self {
             auto: true,
-            max_bytes: DEFAULT_GC_MAX_SIZE,
+            max_bytes: STORE_BUDGET.fallback,
             interval: DEFAULT_GC_INTERVAL,
         }
     }
@@ -224,6 +305,14 @@ impl Config {
         env: &EnvLayer,
         file: Option<&FileLayer>,
     ) -> Result<(Self, RetentionSettings)> {
+        Self::from_layers_measuring(env, file, crate::util::disk_total_bytes)
+    }
+
+    fn from_layers_measuring(
+        env: &EnvLayer,
+        file: Option<&FileLayer>,
+        measure_disk: impl Fn(&Path) -> Option<u64>,
+    ) -> Result<(Self, RetentionSettings)> {
         let mut layers = Layers::new().then(env);
         if let Some(file) = file {
             layers = layers.then(file);
@@ -242,36 +331,66 @@ impl Config {
             bail!("invalid configuration:\n{problems}");
         }
         let raw = RawConfig::read(&resolved)?;
-        Self::from_raw_with_retention(raw)
+        Self::from_raw_measuring(raw, measure_disk)
     }
 
-    fn from_raw_with_retention(raw: RawConfig) -> Result<(Self, RetentionSettings)> {
+    /// Resolve settings, measuring the cache disk with `measure_disk`.
+    ///
+    /// The probe is a parameter so tests can state a disk size rather than
+    /// asserting against whatever disk happens to run them.
+    fn from_raw_measuring(
+        raw: RawConfig,
+        measure_disk: impl Fn(&Path) -> Option<u64>,
+    ) -> Result<(Self, RetentionSettings)> {
+        let cache_dir = raw.cache_dir.or_else(default_cache_dir).ok_or_else(|| {
+            eyre::eyre!("could not determine a cache directory; set MBX_CACHE_DIR")
+        })?;
+        let target_root = match raw.target.root {
+            Some(root) if root.is_absolute() => root,
+            Some(root) => cache_dir.join(root),
+            None => cache_dir.join("targets"),
+        };
+        let store_budget = raw
+            .gc
+            .max_size
+            .as_deref()
+            .map(parse_store_budget)
+            .transpose()
+            .wrap_err("invalid gc.max_size")?;
+        let target_budget = raw
+            .target
+            .max_size
+            .as_deref()
+            .map(parse_optional_byte_size)
+            .transpose()
+            .wrap_err("invalid target.max_size")?;
+        // Measured only where a budget actually needs scaling, so a fully
+        // configured machine pays for no syscall at all. The two budgets are
+        // measured separately because `target.root` can be on another volume,
+        // and sizing a 4TB scratch disk from a 128GB home directory would prune
+        // it to the floor.
+        let store_disk = store_budget
+            .is_none()
+            .then(|| measure_disk(&cache_dir))
+            .flatten();
+        let target_disk = target_budget
+            .is_none()
+            .then(|| measure_disk(&target_root))
+            .flatten();
         let retention = RetentionSettings {
-            target_max_bytes: raw
-                .target
-                .max_size
-                .as_deref()
-                .map(parse_byte_size)
-                .transpose()
-                .wrap_err("invalid target.max_size")?,
-            target_max_age: raw
-                .target
-                .max_age
-                .as_deref()
-                .map(parse_duration)
-                .transpose()
+            target_max_bytes: target_budget
+                .unwrap_or_else(|| Some(TARGET_BUDGET.resolve(target_disk))),
+            target_max_age: parse_optional_duration(&raw.target.max_age)
                 .wrap_err("invalid target.max_age")?,
             max_total_bytes: raw
                 .gc
                 .max_total_size
                 .as_deref()
-                .map(parse_byte_size)
+                .map(parse_optional_byte_size)
                 .transpose()
-                .wrap_err("invalid gc.max_total_size")?,
+                .wrap_err("invalid gc.max_total_size")?
+                .flatten(),
         };
-        let cache_dir = raw.cache_dir.or_else(default_cache_dir).ok_or_else(|| {
-            eyre::eyre!("could not determine a cache directory; set MBX_CACHE_DIR")
-        })?;
         let mode = raw.remote.mode.parse().wrap_err("invalid remote.mode")?;
         let http = HttpSettings {
             timeout: parse_duration(&raw.http.timeout).wrap_err("invalid http.timeout")?,
@@ -281,16 +400,12 @@ impl Config {
         };
         let gc = GcSettings {
             auto: raw.gc.auto,
-            max_bytes: parse_byte_size(&raw.gc.max_size).wrap_err("invalid gc.max_size")?,
+            max_bytes: store_budget.unwrap_or_else(|| STORE_BUDGET.resolve(store_disk)),
             interval: parse_duration(&raw.gc.interval).wrap_err("invalid gc.interval")?,
         };
         let target = TargetSettings {
             views: raw.target.views,
-            root: match raw.target.root {
-                Some(root) if root.is_absolute() => root,
-                Some(root) => cache_dir.join(root),
-                None => cache_dir.join("targets"),
-            },
+            root: target_root,
         };
         let config = Self {
             cache_dir,
@@ -379,6 +494,43 @@ fn parse_byte_size(value: &str) -> Result<u64> {
         .map_err(|error| eyre::eyre!(error))
 }
 
+/// The spelling that turns a limit off outright.
+///
+/// A limit needs an off switch that is not "unset", because unset now means the
+/// scaled default. Only this exact word does it: anything else that fails to
+/// parse is still an error, so a typo cannot quietly disable collection.
+const NO_LIMIT: &str = "none";
+
+fn is_no_limit(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case(NO_LIMIT)
+}
+
+/// Parse the store budget, which alone has no off switch.
+///
+/// An unbounded action store is the problem collection exists to prevent, so
+/// `"none"` is refused -- but it has to be refused in words, since the sibling
+/// size settings accept it and `bytesize` would otherwise blame a float.
+fn parse_store_budget(value: &str) -> Result<u64> {
+    if is_no_limit(value) {
+        eyre::bail!("the action store budget cannot be disabled; set a size such as 20GiB");
+    }
+    parse_byte_size(value)
+}
+
+fn parse_optional_byte_size(value: &str) -> Result<Option<u64>> {
+    if is_no_limit(value) {
+        return Ok(None);
+    }
+    parse_byte_size(value).map(Some)
+}
+
+fn parse_optional_duration(value: &str) -> Result<Option<Duration>> {
+    if is_no_limit(value) {
+        return Ok(None);
+    }
+    parse_duration(value).map(Some)
+}
+
 fn config_file_path() -> Option<PathBuf> {
     dirs::config_dir().map(|dir| dir.join("mbx").join("config.toml"))
 }
@@ -391,6 +543,10 @@ fn default_cache_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// The disk size the tests below resolve scaled budgets against, so an
+    /// assertion describes the scaling rule rather than the disk running it.
+    const TEST_DISK: u64 = 400 * GIB;
+
     fn configured(file: Option<&str>, values: &[(&str, &str)]) -> Result<Config> {
         configured_with_retention(file, values).map(|(config, _)| config)
     }
@@ -398,6 +554,24 @@ mod tests {
     fn configured_with_retention(
         file: Option<&str>,
         values: &[(&str, &str)],
+    ) -> Result<(Config, RetentionSettings)> {
+        configured_on_disk(file, values, Some(TEST_DISK))
+    }
+
+    fn configured_on_disk(
+        file: Option<&str>,
+        values: &[(&str, &str)],
+        disk_total_bytes: Option<u64>,
+    ) -> Result<(Config, RetentionSettings)> {
+        configured_measuring(file, values, move |_| disk_total_bytes)
+    }
+
+    /// Resolve with a stated size per path, for the budgets that are measured
+    /// against different disks.
+    fn configured_measuring(
+        file: Option<&str>,
+        values: &[(&str, &str)],
+        measure_disk: impl Fn(&Path) -> Option<u64>,
     ) -> Result<(Config, RetentionSettings)> {
         let env = EnvLayer::new(
             values
@@ -410,7 +584,7 @@ mod tests {
             std::fs::write(&path, contents).unwrap();
             FileLayer::at(path, FileScope::Global)
         });
-        Config::from_layers_with_retention(&env, file.as_ref())
+        Config::from_layers_measuring(&env, file.as_ref(), measure_disk)
     }
 
     #[test]
@@ -461,7 +635,7 @@ mod tests {
 
     #[test]
     fn defaults_apply_without_configuration() {
-        let config = configured(None, &[]).unwrap();
+        let (config, retention) = configured_with_retention(None, &[]).unwrap();
         assert_eq!(config.http.timeout, DEFAULT_HTTP_TIMEOUT);
         assert_eq!(config.http.download_timeout, DEFAULT_HTTP_DOWNLOAD_TIMEOUT);
         assert_eq!(config.http.retries, DEFAULT_HTTP_RETRIES);
@@ -471,13 +645,159 @@ mod tests {
         assert!(!config.incremental);
         assert!(config.store_dir().ends_with("actions"));
         assert!(config.gc.auto, "collection runs until it is turned off");
-        assert_eq!(config.gc.max_bytes, DEFAULT_GC_MAX_SIZE);
+        assert_eq!(config.gc.max_bytes, 20 * GIB, "5% of a 400GiB disk");
         assert_eq!(config.gc.interval, DEFAULT_GC_INTERVAL);
         assert!(
             config.target.views,
             "eligible target directories are managed"
         );
         assert_eq!(config.target.root, config.cache_dir.join("targets"));
+        // Collection of live target directories is on by default; leaving these
+        // unset is what used to let a disk fill up indefinitely.
+        assert_eq!(
+            retention.target_max_bytes,
+            Some(40 * GIB),
+            "10% of a 400GiB disk"
+        );
+        assert_eq!(retention.target_max_age, Some(DEFAULT_TARGET_MAX_AGE));
+        assert_eq!(
+            retention.max_total_bytes, None,
+            "a combined budget stays opt-in"
+        );
+    }
+
+    #[test]
+    fn budgets_scale_with_the_disk_within_bounds() {
+        let cases = [
+            // A small disk lands on the floors rather than a cache too small
+            // to ever hit in.
+            (Some(32 * GIB), STORE_BUDGET.floor, TARGET_BUDGET.floor),
+            (Some(400 * GIB), 20 * GIB, 40 * GIB),
+            // 5% and 10% of 1TiB are 51.2 and 102.4 GiB: the first rounds down
+            // to a whole increment, the second meets the ceiling.
+            (Some(1_024 * GIB), 50 * GIB, MAX_SCALED_BUDGET),
+            // A large disk stops at the ceiling on both counts.
+            (Some(8_000 * GIB), MAX_SCALED_BUDGET, MAX_SCALED_BUDGET),
+            // An unmeasurable disk uses the fixed fallbacks.
+            (None, STORE_BUDGET.fallback, TARGET_BUDGET.fallback),
+        ];
+        for (disk, store, target) in cases {
+            let (config, retention) = configured_on_disk(None, &[], disk).unwrap();
+            assert_eq!(config.gc.max_bytes, store, "store budget for {disk:?}");
+            assert_eq!(
+                retention.target_max_bytes,
+                Some(target),
+                "target budget for {disk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scaled_budget_is_always_a_whole_increment() {
+        // Awkward disk sizes are the point: 5% of 333GiB is 16.65GiB, which
+        // should be reported as a number somebody could have chosen.
+        for disk_gib in [17_u64, 63, 333, 500, 999, 1_500, 4_000] {
+            for budget in [STORE_BUDGET, TARGET_BUDGET] {
+                let resolved = budget.resolve(Some(disk_gib * GIB));
+                assert_eq!(
+                    resolved % BUDGET_INCREMENT,
+                    0,
+                    "{resolved} is not a whole increment for a {disk_gib}GiB disk"
+                );
+                assert!(resolved >= budget.floor);
+                assert!(resolved <= MAX_SCALED_BUDGET);
+            }
+        }
+    }
+
+    #[test]
+    fn rounding_never_hands_out_more_than_the_share() {
+        // Rounded down, never to nearest: a budget must not exceed the share of
+        // the disk it was allowed, floors aside.
+        for disk_gib in [200_u64, 333, 617, 1_000] {
+            let total = disk_gib * GIB;
+            let resolved = STORE_BUDGET.resolve(Some(total));
+            let share = (total / 100) * STORE_BUDGET.percent;
+            assert!(
+                resolved <= share.max(STORE_BUDGET.floor),
+                "{resolved} exceeds the {share} share of a {disk_gib}GiB disk"
+            );
+        }
+    }
+
+    #[test]
+    fn configured_budgets_outrank_the_disk() {
+        let (config, retention) = configured_on_disk(
+            None,
+            &[("MBX_GC_MAX_SIZE", "3GiB"), ("MBX_TARGET_MAX_SIZE", "7GiB")],
+            Some(8_000 * GIB),
+        )
+        .unwrap();
+
+        assert_eq!(config.gc.max_bytes, 3 * GIB);
+        assert_eq!(retention.target_max_bytes, Some(7 * GIB));
+    }
+
+    #[test]
+    fn each_budget_is_sized_from_the_disk_that_holds_it() {
+        // A scratch volume for targets is exactly why these are measured apart:
+        // sizing a 4TiB disk from a 64GiB home directory would prune it to the
+        // floor.
+        let (config, retention) = configured_measuring(
+            None,
+            &[("MBX_CACHE_DIR", "/cache"), ("MBX_TARGET_ROOT", "/scratch")],
+            |path| {
+                Some(if path.starts_with("/scratch") {
+                    4_000 * GIB
+                } else {
+                    64 * GIB
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(config.gc.max_bytes, STORE_BUDGET.floor, "5% of 64GiB");
+        assert_eq!(
+            retention.target_max_bytes,
+            Some(MAX_SCALED_BUDGET),
+            "10% of 4TiB, at the ceiling"
+        );
+    }
+
+    #[test]
+    fn the_store_budget_cannot_be_disabled() {
+        let error = configured(None, &[("MBX_GC_MAX_SIZE", "none")])
+            .expect_err("an unbounded store is what collection exists to prevent");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("cannot be disabled"),
+            "the error should say why rather than blame a float: {message}"
+        );
+    }
+
+    #[test]
+    fn none_turns_a_retention_limit_off() {
+        let (_, retention) = configured_with_retention(
+            None,
+            &[
+                ("MBX_TARGET_MAX_SIZE", "none"),
+                ("MBX_TARGET_MAX_AGE", "NONE"),
+                ("MBX_GC_MAX_TOTAL_SIZE", "None"),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(retention.target_max_bytes, None);
+        assert_eq!(retention.target_max_age, None);
+        assert_eq!(retention.max_total_bytes, None);
+    }
+
+    #[test]
+    fn the_unconfigured_retention_default_still_collects() {
+        // Paths that resolve no configuration must not silently stop pruning.
+        let retention = RetentionSettings::default();
+        assert_eq!(retention.target_max_bytes, Some(TARGET_BUDGET.fallback));
+        assert_eq!(retention.target_max_age, Some(DEFAULT_TARGET_MAX_AGE));
     }
 
     #[test]
@@ -667,6 +987,12 @@ mod tests {
         assert!(spec.contains(r#"file "<config directory>/mbx/config.toml""#));
         assert!(spec.contains(r#"env "MBX_GC_MAX_SIZE""#));
         assert!(spec.contains(r#"prop "gc.max_size""#));
-        assert!(spec.contains(r#"default="20GiB""#));
+        assert!(spec.contains(r#"prop "target.max_size""#));
+        assert!(spec.contains(r#"env "MBX_TARGET_MAX_AGE""#));
+        assert!(spec.contains(r#"default="30d""#));
+        // The scaled budgets have no literal default to declare, so the
+        // generated reference has to describe them instead.
+        assert!(spec.contains("5% of the cache disk"));
+        assert!(spec.contains("10% of the cache disk"));
     }
 }

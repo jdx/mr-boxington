@@ -192,8 +192,9 @@ Minimum interval between automatic sweeps.
 
 ### `gc.max_size`
 
-- **Type:** `string`
-- **Default:** `20GiB`
+- **Type:** `option<string>`
+- **Optional:** true
+- **Default:** 5% of the cache disk, from 5GiB to 100GiB
 - **Set with:** `MBX_GC_MAX_SIZE`
 
 Action-store budget.
@@ -204,7 +205,7 @@ Action-store budget.
 - **Optional:** true
 - **Set with:** `MBX_GC_MAX_TOTAL_SIZE`
 
-Combined action-store and managed-target budget.
+Combined action-store and managed-target budget, or "none".
 
 ### `http.download_timeout`
 
@@ -310,19 +311,20 @@ Write a JSON build report to this path.
 
 ### `target.max_age`
 
-- **Type:** `option<duration>`
-- **Optional:** true
+- **Type:** `duration`
+- **Default:** `30d`
 - **Set with:** `MBX_TARGET_MAX_AGE`
 
-Collect live managed targets that have not been used this long.
+Collect live managed targets unused this long, or "none".
 
 ### `target.max_size`
 
 - **Type:** `option<string>`
 - **Optional:** true
+- **Default:** 10% of the cache disk, from 10GiB to 100GiB
 - **Set with:** `MBX_TARGET_MAX_SIZE`
 
-Managed-target budget. Live views are collected oldest-first when set.
+Managed-target budget, or "none". Live views are collected oldest-first.
 
 ### `target.root`
 

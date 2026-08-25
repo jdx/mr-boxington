@@ -1143,6 +1143,7 @@ dependencies = [
  "eyre",
  "filetime",
  "fslock",
+ "libc",
  "log",
  "mbx-cache-core",
  "mbx-cache-rustc",

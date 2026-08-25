@@ -534,6 +534,11 @@ pub(crate) fn cargo_with_retention_and_bypass_log(
     }
     if let Some(directory) = &placed {
         roots.target_dir = directory.clone();
+    } else {
+        // Placement declined, but an earlier one may have left a link this
+        // build is about to write through. Keep that directory's record fresh
+        // so collection does not treat it as idle.
+        target::touch_managed(config, &roots.workspace_root, &roots.target_dir);
     }
     let session_dir = tempfile::Builder::new().prefix("mbx-session-").tempdir()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()

@@ -20,27 +20,63 @@ target -> <cache root>/targets/v1/<checkout digest>
 
 ## Collection
 
-mbx records the checkout associated with each target view. Once that
-checkout no longer exists, `mbx gc` can remove its target directory. Cached
-compilations shared with a live checkout remain protected.
+mbx records the checkout associated with each target view. Collection runs
+after a build, at most once an hour, and needs no configuration. A target
+directory is removed when any of these is true:
 
-Managed target directories are collected when their checkout disappears. By
-default, live checkouts keep their outputs indefinitely. Optional retention
-limits can collect the least-recently-used live views as well:
+- **Its checkout is gone.** Nothing can ask for those outputs again, so this
+  happens regardless of the limits below.
+- **It has gone unused for `target.max_age`** — 30 days by default. The next
+  build in that checkout starts warm from the shared store rather than from
+  scratch, so this costs a re-link rather than a rebuild.
+- **The managed directories together exceed `target.max_size`**, in which case
+  the least recently used go first. The most recently used directory is never
+  collected for being over budget — it is the checkout you are working in, and
+  deleting it would only make the next build recreate it. If the budget cannot
+  be met without it, mbx says so and keeps it.
+
+Cached compilations shared with a live checkout remain protected throughout.
+
+### Budgets scale with the disk
+
+Both budgets default to a share of the disk holding the cache, so a laptop and
+a build server do not need the same configuration:
+
+| Budget | Default | Bounds |
+| --- | --- | --- |
+| `gc.max_size` (action store) | 5% of the disk | 5GiB to 100GiB |
+| `target.max_size` (managed targets) | 10% of the disk | 10GiB to 100GiB |
+
+Scaled budgets are rounded down to a whole 5GiB, so the cap reads like a
+number somebody chose rather than a measurement. When the disk cannot be
+measured, mbx uses 20GiB and 30GiB respectively. Any value you set outright
+wins, and `mbx gc --dry-run` previews the effect of a policy without deleting
+anything.
+
+### Changing or disabling the limits
 
 ```toml
 [target]
-max_size = "30GiB"
-max_age = "30d"
+max_size = "60GiB"
+max_age = "none"   # keep live checkouts' outputs indefinitely
 
 [gc]
-# Covers both managed targets and the action store.
+# Optional: one budget covering managed targets and the action store together.
 max_total_size = "50GiB"
 ```
 
-`target.max_size` and `target.max_age` are deliberately unset by default.
-`gc.max_size` continues to cover cached objects and action results only. Use
-`mbx gc --dry-run` to inspect the effect of any policy without deleting files.
+`"none"` turns off `target.max_size`, `target.max_age`, or
+`gc.max_total_size`. A value that is neither a size nor `"none"` is an error
+rather than a silently ignored setting, so a typo cannot disable collection.
+`gc.max_size` has no `"none"`: an unbounded action store is the problem
+collection exists to prevent. `MBX_TARGET_VIEWS=0` opts out of managed target
+directories altogether, and a directory that is still reached through an
+existing `target` symlink keeps counting as in use, so turning placement off
+does not put existing outputs on a clock.
+
+Each budget is measured against the disk that actually holds it, so putting
+`target.root` on a large scratch volume sizes the target budget from that
+volume rather than from the cache disk.
 
 ## When mbx leaves a target alone
 
