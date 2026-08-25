@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-const V1_FIXTURE: &str = include_str!("fixtures/agent-protocol-v1.jsonl");
+const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v2.jsonl");
 
 fn digest() -> CacheDigest {
     CacheDigest {
@@ -23,6 +23,7 @@ fn restore() -> RestoreStats {
         copied_output_bytes: 17,
         copied_output_files: 16,
         duration_ns: 11,
+        avoided_compiler_duration_ns: 10,
         output_files: 12,
         output_bytes: 13,
         reflinked_output_bytes: 15,
@@ -82,7 +83,7 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
         (
             "request.hello",
             AgentRequest::Hello {
-                protocol: 1,
+                protocol: 2,
                 client_version: "0.3.0".into(),
             },
         ),
@@ -123,6 +124,14 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
         (
             "request.record_unconsulted",
             AgentRequest::RecordUnconsulted,
+        ),
+        (
+            "request.record_compiler_invocation",
+            AgentRequest::RecordCompilerInvocation {
+                outcome: "miss".into(),
+                crate_name: Some("fixture".into()),
+                duration_ns: 19,
+            },
         ),
         (
             "request.record_action_verification",
@@ -172,7 +181,7 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
         (
             "response.hello",
             AgentResponse::Hello {
-                protocol: 1,
+                protocol: 2,
                 agent_version: "0.3.0".into(),
             },
         ),
@@ -219,6 +228,10 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
             AgentResponse::UnconsultedRecorded,
         ),
         (
+            "response.compiler_invocation_recorded",
+            AgentResponse::CompilerInvocationRecorded,
+        ),
+        (
             "response.action_stored",
             AgentResponse::ActionStored {
                 path: PathBuf::from("cache/action"),
@@ -258,7 +271,7 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
 }
 
 fn fixture() -> BTreeMap<&'static str, &'static str> {
-    V1_FIXTURE
+    AGENT_FIXTURE
         .lines()
         .map(|line| {
             line.split_once('\t')
@@ -277,9 +290,9 @@ fn assert_fixture<T: Serialize>(expected: &mut BTreeMap<&str, &str>, name: &str,
 }
 
 #[test]
-fn v1_protocol_shapes_match_the_conformance_fixture() {
+fn agent_protocol_v2_shapes_match_the_conformance_fixture() {
     let mut expected = fixture();
-    for line in V1_FIXTURE.lines() {
+    for line in AGENT_FIXTURE.lines() {
         let (name, json) = line
             .split_once('\t')
             .expect("fixture line must contain a tab");
@@ -344,8 +357,8 @@ fn v1_protocol_shapes_match_the_conformance_fixture() {
 }
 
 #[test]
-fn v1_protocol_constants_match_the_contract() {
-    assert_eq!(AGENT_PROTOCOL_VERSION, 1);
+fn protocol_constants_match_the_contract() {
+    assert_eq!(AGENT_PROTOCOL_VERSION, 2);
     assert_eq!(PROTOCOL_VERSION, 1);
     assert_eq!(
         ACTION_RESULT_MEDIA_TYPE,
@@ -379,6 +392,7 @@ define_variant_coverage!(request_variant_name, EXPECTED_REQUEST_VARIANTS, AgentR
     AgentRequest::RecordActionHit { .. } => "record_action_hit",
     AgentRequest::RecordBypass { .. } => "record_bypass",
     AgentRequest::RecordUnconsulted => "record_unconsulted",
+    AgentRequest::RecordCompilerInvocation { .. } => "record_compiler_invocation",
     AgentRequest::RecordActionVerification { .. } => "record_action_verification",
     AgentRequest::StoreActionResult { .. } => "store_action_result",
     AgentRequest::FindActionPrediction { .. } => "find_action_prediction",
@@ -397,6 +411,7 @@ define_variant_coverage!(response_variant_name, EXPECTED_RESPONSE_VARIANTS, Agen
     AgentResponse::ActionVerificationRecorded => "action_verification_recorded",
     AgentResponse::BypassRecorded => "bypass_recorded",
     AgentResponse::UnconsultedRecorded => "unconsulted_recorded",
+    AgentResponse::CompilerInvocationRecorded => "compiler_invocation_recorded",
     AgentResponse::ActionStored { .. } => "action_stored",
     AgentResponse::ActionPrediction { .. } => "action_prediction",
     AgentResponse::ActionPredictionRecorded => "action_prediction_recorded",

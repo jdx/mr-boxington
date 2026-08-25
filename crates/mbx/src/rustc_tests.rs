@@ -9,6 +9,28 @@ fn portable_for(values: &[&str]) -> Portable {
     }
 }
 
+#[test]
+fn compiler_timing_survives_a_changed_action_key() {
+    let invocation = CacheDigest::blake3(b"invocation");
+    let timing = RustcInputPrediction {
+        version: 2,
+        inputs: Vec::new(),
+        environment: Vec::new(),
+        compiler_duration_ns: 42,
+        crate_name: "demo".into(),
+    };
+    let prediction = ActionPrediction {
+        invocation: invocation.clone(),
+        action: CacheDigest::blake3(b"old action"),
+        adapter: "rustc".into(),
+        payload: String::from_utf8(canonical_json(&timing).unwrap()).unwrap(),
+    };
+
+    let decoded = decode_prediction_timing(&prediction, &invocation).unwrap();
+    assert_eq!(decoded.crate_name, "demo");
+    assert_eq!(decoded.duration_ns, 42);
+}
+
 /// `--remap-path-prefix` covers the paths rustc writes itself, so most
 /// artifacts come out clean. A crate that keeps the value as a string does
 /// not, and that is the case the outputs are read to catch.

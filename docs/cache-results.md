@@ -42,3 +42,16 @@ summary lines together, and compare wall-clock time when evaluating the cache.
 Native link steps always run, so an otherwise warm native binary build still
 has work to do. Binaries, tests, and `cdylib`s for supported self-contained
 WebAssembly targets are the exception and may be restored as hits.
+
+## Compiler time
+
+The session summary reports real compiler time by outcome and an estimate of
+the compiler time avoided by cache hits. The estimate comes from the duration
+recorded with the successful compilation that populated the action prediction;
+older predictions without a timing hint contribute zero rather than being
+guessed. The five crates with the largest cumulative uncached compiler time are
+listed so optimization work can target wall-clock cost instead of action count.
+
+The version 2 JSON statistics report exposes the same data in
+`estimated_compiler_duration_avoided_ns`, `compiler`, and
+`slow_compilations`.

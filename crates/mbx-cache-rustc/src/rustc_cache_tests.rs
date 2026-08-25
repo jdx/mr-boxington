@@ -550,6 +550,8 @@ fn predicts_inputs_without_reusing_stale_contents() {
     let initial = invocation.action(initial_context).unwrap();
     let prediction = invocation.prediction(&context, &discovered).unwrap();
     assert_eq!(prediction.inputs, ["${workspace}/src/lib.rs"]);
+    assert_eq!(prediction.compiler_duration_ns, 0);
+    assert!(prediction.crate_name.is_empty());
 
     let predicted = prediction
         .discover(&workspace, &context.path_mappings)
@@ -567,6 +569,19 @@ fn predicts_inputs_without_reusing_stale_contents() {
     assert_ne!(
         invocation.action(changed_context).unwrap().digest,
         initial.digest
+    );
+}
+
+#[test]
+fn reads_prediction_v1_without_timing_hints() {
+    let payload = r#"{"environment":[],"inputs":[],"version":1}"#;
+    let prediction: RustcInputPrediction = serde_json::from_str(payload).unwrap();
+    assert_eq!(prediction.compiler_duration_ns, 0);
+    assert!(prediction.crate_name.is_empty());
+    assert_eq!(
+        String::from_utf8(canonical_json(&prediction).unwrap()).unwrap(),
+        payload,
+        "pre-timing canonical predictions must remain canonical"
     );
 }
 

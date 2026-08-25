@@ -301,6 +301,9 @@ struct StatsReport {
     misses: u64,
     unconsulted: u64,
     compiler_invocations_avoided: u64,
+    estimated_compiler_duration_avoided_ns: u64,
+    compiler: BTreeMap<String, CompilerStatsReport>,
+    slow_compilations: Vec<SlowCompilationReport>,
     verifications: u64,
     divergences: u64,
     prefetched_actions: u64,
@@ -328,16 +331,49 @@ struct StatsReport {
     materialization_duration_ns: u64,
 }
 
+#[derive(Serialize)]
+struct CompilerStatsReport {
+    invocations: u64,
+    duration_ns: u64,
+}
+
+#[derive(Serialize)]
+struct SlowCompilationReport {
+    crate_name: String,
+    duration_ns: u64,
+}
+
 impl From<&AgentStats> for StatsReport {
     fn from(stats: &AgentStats) -> Self {
         Self {
-            version: 1,
+            version: 2,
             session_duration_ns: stats.session_duration_ns,
             lookups: stats.lookups,
             hits: stats.hits,
             misses: cache_misses(stats),
             unconsulted: stats.unconsulted,
             compiler_invocations_avoided: stats.hits,
+            estimated_compiler_duration_avoided_ns: stats.avoided_compiler_duration_ns,
+            compiler: stats
+                .compiler
+                .iter()
+                .map(|(outcome, stats)| {
+                    (
+                        outcome.clone(),
+                        CompilerStatsReport {
+                            invocations: stats.invocations,
+                            duration_ns: stats.duration_ns,
+                        },
+                    )
+                })
+                .collect(),
+            slow_compilations: slow_compilations(stats)
+                .into_iter()
+                .map(|(crate_name, duration_ns)| SlowCompilationReport {
+                    crate_name: crate_name.clone(),
+                    duration_ns: *duration_ns,
+                })
+                .collect(),
             verifications: stats.verifications,
             divergences: stats.divergences,
             prefetched_actions: stats.prefetched_actions,
@@ -377,14 +413,7 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
             path.display()
         );
     }
-    if stats.lookups == 0
-        && stats.unconsulted == 0
-        && stats.stores == 0
-        && stats.verifications == 0
-        && stats.downloaded_bytes == 0
-        && stats.uploaded_bytes == 0
-        && stats.bypasses.is_empty()
-    {
+    if !should_display_stats(stats) {
         return;
     }
     note(&format!(
@@ -418,6 +447,39 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
             .join(", ");
         note(&format!("cache bypassed {total} compilations: {detail}"));
     }
+    if !stats.compiler.is_empty() || stats.avoided_compiler_duration_ns > 0 {
+        let spent = stats.compiler.values().fold(0_u64, |total, compiler| {
+            total.saturating_add(compiler.duration_ns)
+        });
+        let detail = stats
+            .compiler
+            .iter()
+            .map(|(outcome, compiler)| {
+                format!(
+                    "{} {} in {}",
+                    compiler.invocations,
+                    outcome,
+                    format_nanos(compiler.duration_ns)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        note(&format!(
+            "compiler time: {} estimated avoided; {} spent ({detail})",
+            format_nanos(stats.avoided_compiler_duration_ns),
+            format_nanos(spent),
+        ));
+        let slow = slow_compilations(stats);
+        if !slow.is_empty() {
+            note(&format!(
+                "slowest uncached crates: {}",
+                slow.into_iter()
+                    .map(|(name, duration)| format!("{name} {}", format_nanos(*duration)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
     let remote_lookup_duration_ns = stats
         .remote_manifest_lookup_duration_ns
         .saturating_add(stats.remote_action_lookup_duration_ns);
@@ -447,6 +509,18 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
     }
 }
 
+fn should_display_stats(stats: &AgentStats) -> bool {
+    stats.lookups > 0
+        || stats.unconsulted > 0
+        || stats.stores > 0
+        || stats.verifications > 0
+        || stats.downloaded_bytes > 0
+        || stats.uploaded_bytes > 0
+        || !stats.bypasses.is_empty()
+        || !stats.compiler.is_empty()
+        || stats.avoided_compiler_duration_ns > 0
+}
+
 /// Write to stderr without failing the build when the pipe is closed.
 pub(crate) fn note(message: &str) {
     use std::io::Write as _;
@@ -461,6 +535,13 @@ fn write_stats_report(path: &Path, stats: &AgentStats) -> Result<()> {
 
 fn format_nanos(nanoseconds: u64) -> String {
     format_duration(std::time::Duration::from_nanos(nanoseconds))
+}
+
+fn slow_compilations(stats: &AgentStats) -> Vec<(&String, &u64)> {
+    let mut slow = stats.slow_compilations.iter().collect::<Vec<_>>();
+    slow.sort_by(|left, right| right.1.cmp(left.1).then(left.0.cmp(right.0)));
+    slow.truncate(5);
+    slow
 }
 
 fn cache_misses(stats: &AgentStats) -> u64 {
@@ -796,6 +877,10 @@ pub fn run_rustc_shim() -> ExitCode {
 }
 
 fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode {
+    #[cfg(windows)]
+    let crate_name = crate_name_argument(&arguments);
+    #[cfg(windows)]
+    let started = Instant::now();
     let mut command = if let Some(wrapper) = std::env::var_os(PREVIOUS_RUSTC_WRAPPER_ENV) {
         let mut command = Command::new(wrapper);
         command.arg(&rustc);
@@ -803,12 +888,13 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
     } else {
         Command::new(&rustc)
     };
-    command.args(arguments);
+    command.args(&arguments);
     command.env_remove(PREVIOUS_RUSTC_WRAPPER_ENV);
 
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
+
         let error = command.exec();
         eprintln!("mbx: the rustc shim failed to execute rustc: {error}");
         ExitCode::from(1)
@@ -831,6 +917,11 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
             }
         }) {
             Ok(exit_code) => {
+                record_compiler_invocation(
+                    "bypass",
+                    crate_name.as_deref(),
+                    duration_ns(started.elapsed()),
+                );
                 // SAFETY: This process is only a transparent compiler wrapper.
                 // ExitProcess is required to preserve Windows exception codes,
                 // which cannot be represented by stable Rust's ExitCode API.
@@ -842,6 +933,25 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
             }
         }
     }
+}
+
+#[cfg(any(windows, test))]
+fn crate_name_argument(arguments: &[OsString]) -> Option<String> {
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        if argument == "--crate-name" {
+            return arguments
+                .next()
+                .and_then(|name| name.to_str())
+                .map(str::to_string);
+        }
+        if let Some(argument) = argument.to_str()
+            && let Some(name) = argument.strip_prefix("--crate-name=")
+        {
+            return Some(name.to_string());
+        }
+    }
+    None
 }
 
 /// Whether the shim should verify cached results against a real compilation.
@@ -876,6 +986,18 @@ fn record_bypass(error: &eyre::Report) {
 pub(crate) fn record_unconsulted() {
     // A shim running outside a session has nowhere to report, which is fine.
     let _ = request_agent(&[AgentRequest::RecordUnconsulted]);
+}
+
+pub(crate) fn record_compiler_invocation(
+    outcome: &str,
+    crate_name: Option<&str>,
+    duration_ns: u64,
+) {
+    let _ = request_agent(&[AgentRequest::RecordCompilerInvocation {
+        outcome: outcome.into(),
+        crate_name: crate_name.map(str::to_string),
+        duration_ns,
+    }]);
 }
 
 /// Append the full reason to `MBX_BYPASS_LOG`, when one is configured.

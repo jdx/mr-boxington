@@ -75,6 +75,30 @@ fn cargo() -> std::ffi::OsString {
     std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into())
 }
 
+#[cfg(unix)]
+#[test]
+fn transparent_rustc_replaces_the_shim_process() {
+    let directory = tempfile::tempdir().unwrap();
+    let shim =
+        mbx::session::install_shim(Path::new(env!("CARGO_BIN_EXE_mbx")), directory.path()).unwrap();
+    let pid_file = directory.path().join("compiler.pid");
+
+    let mut child = Command::new(shim)
+        .arg("/bin/sh")
+        .args(["-c", "printf '%s' \"$$\" > \"$1\"", "sh"])
+        .arg(&pid_file)
+        .spawn()
+        .unwrap();
+    let shim_pid = child.id();
+    let status = child.wait().unwrap();
+
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read_to_string(pid_file).unwrap(),
+        shim_pid.to_string()
+    );
+}
+
 /// Build `project` against `store`, returning the run's statistics.
 fn build(project: &Path, store: &Path, report: &Path) -> serde_json::Value {
     build_with(project, store, report, &[]).0
@@ -179,6 +203,24 @@ fn wipe_target(project: &Path) {
     std::fs::remove_dir_all(outputs).unwrap();
 }
 
+fn corrupt_action_results(store: &Path) -> usize {
+    let mut corrupted = 0;
+    let mut pending = vec![store.join("actions/action-results")];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                pending.push(entry.path());
+            } else if std::fs::write(entry.path(), b"not json").is_ok() {
+                corrupted += 1;
+            }
+        }
+    }
+    corrupted
+}
+
 #[test]
 fn incremental_is_opt_in_and_reaches_cargo() {
     let store = tempfile::tempdir().unwrap();
@@ -250,6 +292,18 @@ fn restores_a_wiped_target_directory_from_the_store() {
         store.path(),
         &reports.path().join("cold.json"),
     );
+    assert!(
+        cold["compiler"]["unconsulted"]["duration_ns"]
+            .as_u64()
+            .is_some_and(|duration| duration > 0),
+        "the cold build should report time spent compiling: {cold}"
+    );
+    assert!(
+        cold["slow_compilations"]
+            .as_array()
+            .is_some_and(|crates| !crates.is_empty()),
+        "the cold build should identify its slowest uncached crates: {cold}"
+    );
     assert_eq!(count(&cold, "hits"), 0, "a cold build cannot hit");
     assert!(
         count(&cold, "stored_bytes") > 0,
@@ -293,6 +347,40 @@ fn restores_a_wiped_target_directory_from_the_store() {
         count(&warm, "compiler_invocations_avoided"),
         count(&warm, "hits")
     );
+    assert!(
+        count(&warm, "estimated_compiler_duration_avoided_ns") > 0,
+        "a warm build should report the compiler time recorded by its cold build: {warm}"
+    );
+}
+
+#[test]
+fn failed_prediction_lookups_are_timed_as_misses() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+    );
+    assert!(corrupt_action_results(store.path()) > 0);
+    wipe_target(project.path());
+
+    let rebuilt = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("rebuilt.json"),
+    );
+
+    assert!(count(&rebuilt, "lookups") > 0, "{rebuilt}");
+    assert!(
+        rebuilt["compiler"]["miss"]["invocations"]
+            .as_u64()
+            .is_some_and(|invocations| invocations > 0),
+        "{rebuilt}"
+    );
+    assert_eq!(count(&rebuilt, "unconsulted"), 0, "{rebuilt}");
 }
 
 #[test]
