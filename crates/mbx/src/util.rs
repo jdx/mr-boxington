@@ -195,22 +195,31 @@ fn disk_total_bytes_at(path: &Path) -> Option<u64> {
     }
 }
 
-/// Whether the filesystem holding `dir` can reflink.
+/// Whether a reflink from inside `source_dir` can land inside
+/// `destination_dir`.
 ///
 /// Answered by doing one, not by guessing from the platform: reflink support
-/// is a property of the mounted filesystem, and XFS on one machine has it
-/// where ext4 on the next does not. Any failure -- including `dir` not being
-/// creatable -- answers no, because every caller is deciding whether to
-/// promise sharing, and a promise needs more than a maybe.
-pub fn reflinks_work(dir: &Path) -> bool {
-    fn probe(dir: &Path) -> Option<()> {
-        std::fs::create_dir_all(dir).ok()?;
-        let directory = tempfile::tempdir_in(dir).ok()?;
-        let source = directory.path().join("source");
+/// is a property of the mounted filesystem, and it takes both ends -- a store
+/// on btrfs cannot reflink into a target directory on ext4, so probing one
+/// side alone proves nothing about the copy that actually happens. The
+/// destination is anchored at its nearest existing ancestor rather than
+/// created, because the real directory may be one cargo has not made yet and
+/// making it here would change what target placement later sees. Any failure
+/// answers no: every caller is deciding whether to promise sharing, and a
+/// promise needs more than a maybe.
+pub fn reflinks_work(source_dir: &Path, destination_dir: &Path) -> bool {
+    fn probe(source_dir: &Path, destination_dir: &Path) -> Option<()> {
+        std::fs::create_dir_all(source_dir).ok()?;
+        let anchor = destination_dir
+            .ancestors()
+            .find(|ancestor| ancestor.exists())?;
+        let source_temp = tempfile::tempdir_in(source_dir).ok()?;
+        let destination_temp = tempfile::tempdir_in(anchor).ok()?;
+        let source = source_temp.path().join("source");
         std::fs::write(&source, b"mbx reflink probe").ok()?;
-        reflink_copy::reflink(&source, directory.path().join("destination")).ok()
+        reflink_copy::reflink(&source, destination_temp.path().join("destination")).ok()
     }
-    probe(dir).is_some()
+    probe(source_dir, destination_dir).is_some()
 }
 
 /// Generate an unpredictable alphanumeric string.
@@ -261,6 +270,22 @@ mod tests {
         // directory is created.
         let missing = directory.path().join("not").join("created").join("yet");
         assert_eq!(disk_total_bytes(&missing), Some(total));
+    }
+
+    #[test]
+    fn the_reflink_probe_anchors_a_destination_nobody_created_yet() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path().join("cache");
+        // The target directory does not exist before the first build; the
+        // probe must answer for the filesystem it will be created on, without
+        // creating it.
+        let unmade = directory.path().join("checkout").join("target");
+        assert_eq!(
+            reflinks_work(&store, &unmade),
+            reflinks_work(&store, directory.path()),
+            "a missing destination answers as its filesystem, not as a failure"
+        );
+        assert!(!unmade.exists(), "the probe must not create the directory");
     }
 
     #[test]
