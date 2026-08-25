@@ -17,6 +17,19 @@ Examples:
 - **`-h --help`** — Print help
 - **`-V --version`** — Print version
 
+## `mbx explain`
+
+- **Usage:** `mbx explain <CARGO_COMMAND> [CARGO_ARGS]…`
+
+Run a Cargo command and explain every compilation mbx cannot cache.
+
+### Arguments
+- **`<CARGO_COMMAND>`** — Cargo subcommand to run under diagnostics.
+- **`[CARGO_ARGS]…`** — Arguments to pass to the Cargo subcommand.
+
+### Flags
+- **`-h --help`** — Print help
+
 ## `mbx setup`
 
 - **Usage:** `mbx setup`

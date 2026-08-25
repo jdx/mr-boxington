@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(cli)* run a Cargo command with actionable cache-bypass diagnostics using `mbx explain`
+
 ### Changed
 
 - *(cache)* restore verified outputs with observable copy-on-write materialization

@@ -373,10 +373,33 @@ fn mbx_commands_still_take_precedence() {
 }
 
 #[test]
+fn explain_forwards_cargo_flags_and_the_rustc_separator() {
+    let argv = [
+        "mbx",
+        "explain",
+        "clippy",
+        "--workspace",
+        "--",
+        "-D",
+        "warnings",
+    ]
+    .map(std::ffi::OsStr::new);
+    let cli = Cli::try_parse_from(&argv).unwrap();
+    let Commands::Explain(arguments) = cli.command else {
+        panic!("explain should be reserved by mbx");
+    };
+    assert_eq!(
+        arguments.arguments(),
+        ["clippy", "--workspace", "--", "-D", "warnings"]
+    );
+}
+
+#[test]
 fn cli_exposes_its_usage_spec() {
     let spec = Cli::to_kdl();
     assert!(spec.contains("external_subcommand #true"));
     assert!(spec.contains("cmd setup"));
+    assert!(spec.contains("cmd explain"));
     assert!(spec.contains("cmd gc"));
     assert!(spec.contains("cmd cache"));
     assert!(spec.contains("config {"));

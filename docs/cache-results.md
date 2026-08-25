@@ -24,6 +24,15 @@ mbx recognized that it could not model the action exactly and ran the real
 compiler without caching it. Reasons are grouped in the summary; set
 `MBX_BYPASS_LOG` to a file path for the full per-action record.
 
+Run a Cargo command through `mbx explain` to collect those records temporarily,
+group identical causes, and print guidance for every bypass category:
+
+```sh
+mbx explain build --workspace
+```
+
+The command preserves Cargo's exit status after printing the explanation.
+
 ## Why hit rate is not the whole story
 
 A build can report a high hit rate among attempted lookups while spending most

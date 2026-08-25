@@ -10,6 +10,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod explain;
 pub mod policy;
 pub mod session;
 pub mod store;
