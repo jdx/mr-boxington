@@ -60,6 +60,19 @@ Setup installs a persistent `mbx-rustc` wrapper and adds it as Cargo's global
 Rerun setup after upgrading mbx so the installed wrapper matches the new
 version.
 
+Inspect, refresh, or remove the integration explicitly with:
+
+```sh
+mbx setup --status
+mbx setup --update
+mbx setup --uninstall
+```
+
+Status exits unsuccessfully when the integration is missing, stale, or points
+at another wrapper. Update only refreshes an existing mbx installation;
+uninstall removes mbx's `rustc-wrapper` entry without disturbing the rest of
+Cargo's configuration.
+
 The persistent wrapper uses the local action store. Continue to run commands
 through `mbx` when you need a remote cache, build statistics, managed target
 directories, or automatic collection.

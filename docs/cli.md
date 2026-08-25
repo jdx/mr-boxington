@@ -32,11 +32,14 @@ Run a Cargo command and explain every compilation mbx cannot cache.
 
 ## `mbx setup`
 
-- **Usage:** `mbx setup`
+- **Usage:** `mbx setup [FLAGS]`
 
 Install a persistent rustc wrapper for plain Cargo commands.
 
 ### Flags
+- **`--status`** — Report whether plain Cargo integration is installed and current.
+- **`--update`** — Refresh an existing mbx wrapper without installing a missing one.
+- **`--uninstall`** — Remove mbx's Cargo configuration and installed wrapper.
 - **`-h --help`** — Print help
 
 ## `mbx gc`
