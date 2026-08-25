@@ -2,14 +2,13 @@
 
 mr boxington favors correct uncached work over risky cache reuse.
 
-## Plain Cargo has local-only caching
+## Incremental compilations are not cached
 
-After `mbx setup`, plain Cargo commands use the local action store. They do not
-start a session agent, so remote transfers, build statistics, managed targets,
-and automatic collection still require `mbx build`, `mbx test`, or the same
-pattern for another Cargo subcommand. Cargo's normal incremental workspace
-compilations continue to bypass the action cache; dependencies, which Cargo
-normally builds non-incrementally, remain cacheable.
+Cargo's normal incremental workspace compilations bypass the action cache.
+Dependencies, which Cargo builds non-incrementally, remain cacheable — and they
+are the bulk of a cold build. See [incremental
+builds](/configuration#incremental-builds) for the trade `MBX_INCREMENTAL=1`
+makes.
 
 ## Native linking is not cached
 

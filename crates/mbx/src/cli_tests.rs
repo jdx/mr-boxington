@@ -494,7 +494,13 @@ fn prefetch_rejects_release_contexts_instead_of_succeeding_without_remote_work()
 fn cli_exposes_its_usage_spec() {
     let spec = Cli::to_kdl();
     assert!(spec.contains("external_subcommand #true"));
+    // Still declared, so it keeps working and stays out of help and
+    // completions rather than being removed from under anyone using it.
     assert!(spec.contains("cmd setup"));
+    assert!(
+        spec.contains("hide=#true"),
+        "setup should be hidden from help: {spec}"
+    );
     assert!(spec.contains("cmd explain"));
     assert!(spec.contains("cmd doctor"));
     assert!(spec.contains("cmd gc"));

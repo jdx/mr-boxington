@@ -15,7 +15,6 @@
 
 - [`mbx doctor [--json]`](/cli/doctor.md)
 - [`mbx explain <CARGO_COMMAND> [CARGO_ARGS]…`](/cli/explain.md)
-- [`mbx setup [FLAGS]`](/cli/setup.md)
 - [`mbx gc [FLAGS]`](/cli/gc.md)
 - [`mbx cache <SUBCOMMAND>`](/cli/cache.md)
 - [`mbx cache dir [--json]`](/cli/cache/dir.md)

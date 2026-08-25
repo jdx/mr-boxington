@@ -187,6 +187,12 @@ fn reflink_check(cache_dir: &Path) -> Check {
     }
 }
 
+/// Report the optional plain-cargo wrapper.
+///
+/// Its absence is not a problem to fix: `mbx <cargo command>` is how mbx is
+/// meant to be used, and it does strictly more. Only a half-installed or
+/// displaced wrapper warns, because that is a state somebody meant to be in
+/// and is not.
 fn setup_check() -> Check {
     let Some((config_path, expected_shim)) = setup_paths() else {
         return Check::warn("setup", "platform Cargo paths could not be determined");
@@ -194,7 +200,7 @@ fn setup_check() -> Check {
     let contents = match std::fs::read_to_string(&config_path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Check::warn("setup", "plain cargo integration is not installed");
+            return Check::pass("setup", NO_PLAIN_CARGO_WRAPPER);
         }
         Err(error) => {
             return Check::warn(
@@ -226,9 +232,12 @@ fn setup_check() -> Check {
             format!("configured wrapper is missing: {}", expected_shim.display()),
         ),
         Some(wrapper) => Check::warn("setup", format!("Cargo uses another wrapper: {wrapper}")),
-        None => Check::warn("setup", "plain cargo integration is not installed"),
+        None => Check::pass("setup", NO_PLAIN_CARGO_WRAPPER),
     }
 }
+
+/// Said when nothing is installed, which is the ordinary case.
+const NO_PLAIN_CARGO_WRAPPER: &str = "no plain-cargo wrapper installed; mbx wraps cargo directly";
 
 fn setup_paths() -> Option<(PathBuf, PathBuf)> {
     let data = dirs::data_local_dir()?;

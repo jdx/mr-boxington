@@ -17,7 +17,7 @@ use std::process::{Command, ExitCode};
     version,
     config = crate::config::RawConfig,
     about = "A build cache for Rust projects",
-    long_about = "Run any Cargo subcommand with the build cache enabled. The subcommand and all of its arguments are passed through unchanged, including Cargo aliases and installed subcommands. `cache`, `gc`, and `setup` are reserved for mbx's own commands.\n\nExamples:\n  mbx build --release\n  mbx test --workspace\n  mbx clippy --all-targets -- -D warnings\n  mbx setup",
+    long_about = "Put mbx in front of any Cargo command. The subcommand and all of its arguments are passed through unchanged, including Cargo aliases and installed subcommands, while compiled work is shared across every checkout and build storage prunes itself. mbx's own subcommands, such as `cache` and `gc`, are reserved.\n\nExamples:\n  mbx build --release\n  mbx test --workspace\n  mbx clippy --all-targets -- -D warnings\n  mbx gc --dry-run",
     unknown_flags = "error"
 )]
 struct Cli {
@@ -31,7 +31,13 @@ enum Commands {
     Doctor(JsonArgs),
     /// Run a Cargo command and explain every compilation mbx cannot cache.
     Explain(ExplainArgs),
+    // Hidden, not removed: `mbx <cargo command>` is the supported path and gets
+    // the remote cache, statistics, managed targets, and collection that the
+    // standalone wrapper cannot, but setups already relying on this keep
+    // working. A plain comment rather than a doc comment, because the generated
+    // CLI reference renders those and this is a note to the next reader here.
     /// Install a persistent rustc wrapper for plain Cargo commands.
+    #[usage(hide)]
     Setup(SetupArgs),
     /// Collect stale managed targets and evict cached objects until the store fits a size budget.
     ///
