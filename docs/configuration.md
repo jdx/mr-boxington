@@ -1,10 +1,10 @@
 # Configuration
 
-mbx loads environment variables over `mbx/config.toml` in the platform
-configuration directory, then falls back to defaults. This honors platform and
-XDG overrides through the operating system's configuration-directory lookup.
-Unknown TOML keys are rejected so misspelled settings do not silently do
-nothing.
+mbx loads environment variables over `.mbx.toml` at the resolved Cargo
+workspace root, then `mbx/config.toml` in the platform configuration directory,
+then defaults. This honors platform and XDG overrides through the operating
+system's configuration-directory lookup. Unknown TOML keys are rejected so
+misspelled settings do not silently do nothing.
 
 ## Example
 
@@ -32,6 +32,21 @@ timeout = "30s"
 download_timeout = "10m"
 retries = 3
 ```
+
+## Workspace policy
+
+A repository may check in a `.mbx.toml` containing only the two build-policy
+switches below:
+
+```toml
+incremental = false
+share_out_dir = false
+```
+
+Environment variables still win. Machine paths, remote-cache configuration,
+credentials, diagnostics, target placement, and garbage collection are not
+accepted from a repository-owned file. mbx reports an error instead of applying
+an unsafe or misspelled workspace setting.
 
 ## Settings
 

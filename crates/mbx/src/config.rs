@@ -1,12 +1,13 @@
-//! Configuration, resolved from environment variables over an optional file.
+//! Configuration, resolved from environment variables over optional files.
 //!
-//! Precedence is environment, then the platform configuration file, then defaults.
+//! Precedence is environment, then the workspace policy, then the platform
+//! configuration file, then defaults.
 
 use crate::util::parse_duration;
 use bytesize::ByteSize;
 use eyre::{Context, Result, bail};
 use mbx_cache_core::RemoteCacheMode;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use usage_config::{EnvLayer, FileLayer, FileScope, Layers};
 
@@ -265,6 +266,53 @@ impl Config {
         })
     }
 
+    /// Apply the deliberately small, safe policy surface from `.mbx.toml` at
+    /// the resolved Cargo workspace root.
+    pub fn apply_workspace_policy(&mut self, workspace_root: &Path) -> Result<()> {
+        self.apply_workspace_policy_with(workspace_root, |name| std::env::var_os(name).is_some())
+    }
+
+    fn apply_workspace_policy_with(
+        &mut self,
+        workspace_root: &Path,
+        environment_contains: impl Fn(&str) -> bool,
+    ) -> Result<()> {
+        let path = workspace_root.join(".mbx.toml");
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).wrap_err_with(|| format!("failed to read {}", path.display()));
+            }
+        };
+        let document = contents
+            .parse::<toml_edit::DocumentMut>()
+            .wrap_err_with(|| format!("failed to parse {}", path.display()))?;
+
+        for (key, value) in document.iter() {
+            if !matches!(key, "incremental" | "share_out_dir") {
+                bail!(
+                    "{} contains unsupported workspace setting {key:?}; only incremental and share_out_dir are allowed",
+                    path.display()
+                );
+            }
+            let value = value
+                .as_bool()
+                .ok_or_else(|| eyre::eyre!("{}.{} must be a boolean", path.display(), key))?;
+            match key {
+                "incremental" if !environment_contains("MBX_INCREMENTAL") => {
+                    self.incremental = value;
+                }
+                "share_out_dir" if !environment_contains("MBX_SHARE_OUT_DIR") => {
+                    self.share_out_dir = value;
+                }
+                "incremental" | "share_out_dir" => {}
+                _ => unreachable!("workspace policy keys were validated above"),
+            }
+        }
+        Ok(())
+    }
+
     /// Where cached actions and blobs live.
     pub fn store_dir(&self) -> PathBuf {
         self.cache_dir.join("actions")
@@ -450,6 +498,74 @@ mod tests {
         assert!(config.incremental);
         let config = configured(Some(file), &[("MBX_INCREMENTAL", "0")]).unwrap();
         assert!(!config.incremental);
+    }
+
+    #[test]
+    fn workspace_policy_overrides_global_safe_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join(".mbx.toml"),
+            "incremental = true\nshare_out_dir = true\n",
+        )
+        .unwrap();
+        let mut config =
+            configured(Some("incremental = false\nshare_out_dir = false"), &[]).unwrap();
+
+        config
+            .apply_workspace_policy_with(directory.path(), |_| false)
+            .unwrap();
+
+        assert!(config.incremental);
+        assert!(config.share_out_dir);
+    }
+
+    #[test]
+    fn environment_overrides_workspace_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join(".mbx.toml"),
+            "incremental = true\nshare_out_dir = true\n",
+        )
+        .unwrap();
+        let mut config = configured(None, &[]).unwrap();
+
+        config
+            .apply_workspace_policy_with(directory.path(), |_| true)
+            .unwrap();
+
+        assert!(!config.incremental);
+        assert!(!config.share_out_dir);
+    }
+
+    #[test]
+    fn workspace_policy_rejects_every_setting_outside_the_allowlist() {
+        for setting in [
+            "cache_dir = \"elsewhere\"",
+            "verify = true",
+            "[remote]\nurl = \"https://example.com\"",
+            "[gc]\nauto = false",
+            "[target]\nviews = false",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::write(directory.path().join(".mbx.toml"), setting).unwrap();
+            let mut config = configured(None, &[]).unwrap();
+            let error = config
+                .apply_workspace_policy_with(directory.path(), |_| false)
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("unsupported workspace setting"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_workspace_policy_is_ignored() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = configured(None, &[]).unwrap();
+        config
+            .apply_workspace_policy_with(directory.path(), |_| false)
+            .unwrap();
     }
 
     #[test]

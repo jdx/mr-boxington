@@ -192,7 +192,10 @@ pub(crate) fn cargo_with_bypass_log(
         return run_cargo(&cargo, arguments, BTreeMap::new());
     }
 
+    let working_dir = std::env::current_dir()?;
+    let mut roots = resolve_roots(&cargo, arguments, &working_dir);
     let mut config = config.clone();
+    config.apply_workspace_policy(&roots.workspace_root)?;
     let incremental = policy::incremental_allowed(config.incremental);
     if config.incremental && !incremental {
         log::warn!(
@@ -211,8 +214,6 @@ pub(crate) fn cargo_with_bypass_log(
     config.incremental = incremental;
     let config = &config;
 
-    let working_dir = std::env::current_dir()?;
-    let mut roots = resolve_roots(&cargo, arguments, &working_dir);
     let migrate_existing = prompt_to_manage_existing_target(config, &roots, arguments)?;
     // Placed before the session starts, because the target directory is what
     // the shim maps out of its cache keys and it has to be the one cargo will
