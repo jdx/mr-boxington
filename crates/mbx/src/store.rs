@@ -216,6 +216,9 @@ pub fn largest(store: &Path, limit: usize) -> Result<Vec<LargestEntry>> {
 pub fn verify(store: &Path) -> Result<VerifyOutcome> {
     let cas = LocalCas::new(store);
     let action_cache = mbx_cache_core::LocalActionCache::new(store);
+    // Verification reports the store as it is on disk and removes nothing, so
+    // no object is pending removal the way one is mid-sweep.
+    let virtually_removed = HashSet::new();
     let mut outcome = VerifyOutcome::default();
     for entry in walk_files(&store.join(CAS_DIR))? {
         let Some(digest) = addressed_digest(store, &entry.path, false) else {
@@ -232,7 +235,7 @@ pub fn verify(store: &Path) -> Result<VerifyOutcome> {
         };
         outcome.checked_action_results += 1;
         if !matches!(action_cache.find(&digest), Ok(Some(_)))
-            || action_result_is_dangling(&cas, &entry.path)?
+            || action_result_is_dangling(&cas, &entry.path, &virtually_removed)?
         {
             outcome.problems.push(entry.path);
         }
