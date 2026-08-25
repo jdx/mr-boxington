@@ -26,7 +26,7 @@ export default defineConfig({
       { text: "Get Started", link: "/getting-started" },
       { text: "Configuration", link: "/configuration" },
       { text: "GitHub Actions", link: "/github-actions" },
-      { text: "CLI", link: "/cli" },
+      { text: "CLI", link: "/cli/" },
       {
         text: `v${latestVersion}`,
         link: "https://github.com/jdx/mr-boxington/releases",
@@ -60,7 +60,28 @@ export default defineConfig({
       },
       {
         text: "Reference",
-        items: [{ text: "CLI and configuration", link: "/cli" }],
+        items: [
+          { text: "CLI overview", link: "/cli/" },
+          { text: "doctor", link: "/cli/doctor" },
+          { text: "explain", link: "/cli/explain" },
+          { text: "setup", link: "/cli/setup" },
+          { text: "gc", link: "/cli/gc" },
+          {
+            text: "cache",
+            link: "/cli/cache",
+            collapsed: true,
+            items: [
+              { text: "dir", link: "/cli/cache/dir" },
+              { text: "stats", link: "/cli/cache/stats" },
+              { text: "projects", link: "/cli/cache/projects" },
+              { text: "largest", link: "/cli/cache/largest" },
+              { text: "verify", link: "/cli/cache/verify" },
+              { text: "remove", link: "/cli/cache/remove" },
+            ],
+          },
+          { text: "prefetch", link: "/cli/prefetch" },
+          { text: "CLI configuration", link: "/cli/configuration" },
+        ],
       },
     ],
     outline: { level: [2, 3] },

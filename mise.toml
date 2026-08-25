@@ -87,13 +87,14 @@ run = "aube install && exec aube run docs:build"
 [tasks."render:docs"]
 description = "Generate reference documentation from the usage spec"
 depends = ["bootstrap"]
-run = "./target/mbx-bootstrap/mbx __usage_spec__ | usage generate markdown --file - --replace-pre-with-code-fences --out-file docs/cli.md"
-run_windows = "./target/mbx-bootstrap/mbx.exe __usage_spec__ | usage generate markdown --file - --replace-pre-with-code-fences --out-file docs/cli.md"
+run = "rm -rf docs/cli && ./target/mbx-bootstrap/mbx __usage_spec__ | usage generate markdown --file - --multi --replace-pre-with-code-fences --url-prefix /cli --out-dir docs/cli"
+run_windows = "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue docs/cli; ./target/mbx-bootstrap/mbx.exe __usage_spec__ | usage generate markdown --file - --multi --replace-pre-with-code-fences --url-prefix /cli --out-dir docs/cli"
 
 [tasks."check:docs"]
 description = "Check that generated documentation is current"
 depends = ["render:docs"]
-run = "git diff --exit-code -- docs/cli.md"
+run = "git diff --exit-code -- docs/cli && test -z \"$(git status --porcelain --untracked-files=all -- docs/cli)\""
+run_windows = "git diff --exit-code -- docs/cli; if (git status --porcelain --untracked-files=all -- docs/cli) { exit 1 }"
 
 [tasks."perf:prepare"]
 description = "Build the fixed benchmark subject"
