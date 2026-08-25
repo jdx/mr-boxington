@@ -56,13 +56,14 @@ jobs:
           crate=mbx-cache-protocol
           version=$(cargo metadata --no-deps --format-version 1 |
             jq -r --arg crate "$crate" '.packages[] | select(.name == $crate).version')
-          endpoint="https://crates.io/api/v1/crates/$crate/$version"
+          crate_endpoint="https://crates.io/api/v1/crates/$crate"
+          version_endpoint="$crate_endpoint/$version"
           user_agent="mr-boxington release workflow (https://github.com/${{ github.repository }})"
           status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-            --user-agent "$user_agent" "$endpoint")
+            --user-agent "$user_agent" "$crate_endpoint")
 
           if [ "$status" = 200 ]; then
-            echo "$crate $version is already published"
+            echo "$crate already exists; release-plz will publish version $version with OIDC"
             exit 0
           fi
           if [ "$status" != 404 ]; then
@@ -80,7 +81,7 @@ jobs:
           # The publish endpoint can return before the new version is visible
           # to release-plz through the crates.io API.
           for _ in $(seq 1 12); do
-            if curl --fail --silent --show-error --user-agent "$user_agent" "$endpoint" >/dev/null; then
+            if curl --fail --silent --show-error --user-agent "$user_agent" "$version_endpoint" >/dev/null; then
               exit 0
             fi
             sleep 5
@@ -121,16 +122,41 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "mbx tag: ${tag:-<none released>}"
 
-      # Merging a release PR and getting nothing back means the release did not
-      # happen. Without this the run goes green and the omission is only
-      # noticed when someone looks for the release.
-      - name: Reject an empty release result for a merged release PR
+      # An empty result is expected when re-running a completed release, or
+      # when bootstrapping the protocol crate was the only work. Verify the
+      # desired end state instead of rejecting those idempotent cases.
+      - name: Verify an empty release result for a merged release PR
         if: steps.mbx-tag.outputs.tag == '' && steps.release-pr.outputs.number != ''
         env:
-          RELEASE_PR: ${{ steps.release-pr.outputs.number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "::error::release-plz returned no release after merging release PR #$RELEASE_PR"
-          exit 1
+          user_agent="mr-boxington release workflow (https://github.com/${{ github.repository }})"
+          failed=false
+
+          while read -r crate version; do
+            endpoint="https://crates.io/api/v1/crates/$crate/$version"
+            if ! curl --fail --silent --show-error --user-agent "$user_agent" "$endpoint" >/dev/null; then
+              echo "::error::$crate $version is not published on crates.io"
+              failed=true
+            fi
+          done < <(cargo metadata --no-deps --format-version 1 | jq -r '
+            .workspace_members as $members
+            | .packages[]
+            | select(.id as $id | $members | index($id))
+            | select(.publish == null or (.publish | length > 0))
+            | [.name, .version]
+            | @tsv')
+
+          mbx_version=$(cargo metadata --no-deps --format-version 1 |
+            jq -r '.packages[] | select(.name == "mbx").version')
+          if ! gh release view "v$mbx_version" --repo "${{ github.repository }}" >/dev/null; then
+            echo "::error::GitHub release v$mbx_version does not exist"
+            failed=true
+          fi
+
+          if [ "$failed" = true ]; then
+            exit 1
+          fi
 
   # Binaries are attached to the draft, then the draft is published — so a
   # release is never visible without its assets.
