@@ -224,28 +224,44 @@ fn setup_paths() -> Option<(PathBuf, PathBuf)> {
 }
 
 async fn remote_checks(config: &Config) -> Vec<Check> {
+    let release_context = policy::release_context();
+    let effective_mode = if release_context {
+        None
+    } else {
+        policy::effective_remote_cache_mode(config.remote.mode)
+    };
+    remote_checks_with_policy(config, release_context, effective_mode).await
+}
+
+async fn remote_checks_with_policy(
+    config: &Config,
+    release_context: bool,
+    effective_mode: Option<mbx_cache_core::RemoteCacheMode>,
+) -> Vec<Check> {
     let Some(base_url) = &config.remote.url else {
         return vec![Check::pass(
             "remote",
             "not configured; using the local cache",
         )];
     };
-    let (effective, effective_mode) = if policy::release_context() {
-        ("disabled in this release context".to_string(), None)
+    let effective = if release_context {
+        "disabled in this release context".to_string()
     } else {
-        let mode = policy::effective_remote_cache_mode(config.remote.mode);
-        (
-            mode.map_or_else(
-                || "disabled by CI policy".to_string(),
-                |mode| mode.to_string(),
-            ),
-            mode,
+        effective_mode.map_or_else(
+            || "disabled by cache write policy".to_string(),
+            |mode| mode.to_string(),
         )
     };
     let policy = Check::pass(
         "policy",
         format!("configured {}, effective {effective}", config.remote.mode),
     );
+    if effective_mode.is_none() {
+        return vec![
+            policy,
+            Check::pass("remote", "probe skipped because remote caching is disabled"),
+        ];
+    }
     let Some(namespace) = config
         .remote
         .namespace
@@ -284,12 +300,6 @@ async fn remote_checks(config: &Config) -> Vec<Check> {
         Ok(client) => client,
         Err(error) => return vec![policy, Check::fail("remote", format!("{error:#}"))],
     };
-    if effective_mode.is_none() {
-        return vec![
-            policy,
-            Check::pass("remote", "probe skipped because remote caching is disabled"),
-        ];
-    }
     let remote = match client
         .check_connection()
         .await
@@ -330,16 +340,55 @@ mod tests {
             },
         };
         config.remote.url = Some("https://cache.example".into());
-        config.remote.mode = mbx_cache_core::RemoteCacheMode::WriteOnly;
+        config.remote.mode = mbx_cache_core::RemoteCacheMode::ReadWrite;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let checks = runtime.block_on(remote_checks(&config));
+        let checks = runtime.block_on(remote_checks_with_policy(
+            &config,
+            false,
+            Some(mbx_cache_core::RemoteCacheMode::ReadOnly),
+        ));
         let failure = checks
             .iter()
             .find(|check| check.severity == Severity::Fail)
             .expect("the missing namespace should fail");
         assert!(failure.detail.contains("namespace"));
+    }
+
+    #[test]
+    fn disabled_remote_does_not_require_a_namespace_or_client() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            cache_dir: directory.path().to_path_buf(),
+            stats_report: None,
+            verify: false,
+            incremental: false,
+            share_out_dir: false,
+            remote: Default::default(),
+            http: Default::default(),
+            gc: Default::default(),
+            target: crate::config::TargetSettings {
+                views: true,
+                root: directory.path().join("targets"),
+            },
+        };
+        config.remote.url = Some("not a URL".into());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let checks = runtime.block_on(remote_checks_with_policy(&config, false, None));
+
+        assert!(checks.iter().all(|check| check.severity == Severity::Pass));
+        assert!(checks.iter().any(|check| {
+            check.name == "policy" && check.detail.contains("disabled by cache write policy")
+        }));
+        assert!(
+            checks
+                .iter()
+                .any(|check| { check.name == "remote" && check.detail.contains("probe skipped") })
+        );
     }
 }
