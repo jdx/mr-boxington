@@ -5,8 +5,8 @@
 <h1 align="center">mr boxington</h1>
 
 <p align="center">
-  <strong><code>target/</code>, fixed: shared and self-pruning.</strong><br>
-  A Cargo wrapper that shares compiled work across worktrees and CI—and prunes build storage automatically.
+  <strong><code>target/</code>, fixed: shared, self-pruning, drop-in.</strong><br>
+  Put mbx in front of any Cargo command. Compiled work is shared across worktrees and CI, build storage keeps itself inside a budget, and mbx tells you what it saved.
 </p>
 
 <p align="center">
@@ -23,24 +23,30 @@
 
 `mbx` wraps ordinary Cargo commands with a content-addressed rustc cache. Cargo
 still resolves dependencies, plans builds, and links outputs; mbx restores
-supported compilations it has seen before.
+supported compilations it has seen before. There is nothing to configure and
+nothing to install into Cargo: put `mbx` in front of the command you already
+run.
 
 ```sh
 mbx build                  # cargo build, with caching
 mbx test --all-features    # cargo test --all-features, with caching
 mbx clippy --workspace     # cargo clippy --workspace, with caching
-mbx prefetch build         # warm a recorded build from the remote cache
-mbx setup                  # cache future plain cargo commands locally
+mbx gc --dry-run           # preview what cleanup would reclaim
 ```
+
+The first build explains what it set up — where the cache lives, the budget it
+sweeps itself back to, and when a `target/` directory becomes collectable.
 
 ## Why mbx?
 
 - **Warm every worktree.** Cache keys contain no checkout-specific absolute
   paths, so building one checkout warms its siblings automatically without
   sharing a Cargo target lock.
-- **Prune automatically.** mbx sweeps its action store back to a size budget
-  and, by default, removes managed target directories after their checkout
-  disappears.
+- **Bounded disk, without a chore.** The action store sweeps itself back to a
+  budget, and managed `target/` directories go when their checkout disappears,
+  when they sit unused for 30 days, or when they outgrow their share of the
+  disk. Both budgets scale with the disk rather than assuming every machine is
+  the same size.
 - **Warm CI safely.** GitHub Actions cache can warm fork pull requests from a
   cache built on `main`, while a self-hosted remote can serve trusted runners
   and teammates. Pull requests never publish remote objects.
@@ -84,8 +90,24 @@ Windows x86-64. Every release includes `SHA256SUMS`.
 
 ## Automatic pruning
 
-The action store is swept automatically to a 20 GiB budget by default. Inspect
-or collect it explicitly with:
+Collection runs after a build, at most once an hour, and needs no
+configuration. Both size budgets default to a share of the disk holding the
+cache — 5% for the action store and 10% for managed `target/` directories,
+each from its floor (5 GiB and 10 GiB) up to 100 GiB and rounded down to a
+whole 5 GiB — and a managed directory is also collected once its checkout is
+gone or it has sat unused for 30 days.
+
+mbx keeps a running total of what that has been worth and reports one line of
+it after a build:
+
+```text
+mbx: 41.7 GiB of target/ had outlived its checkouts. it has been dealt with.
+```
+
+The line is drawn from a pool, so it does not repeat itself. Prefer a build
+log with a straight face? `savings = "plain"` states the same facts dryly, and
+`savings = "off"` keeps the totals without printing anything (`MBX_SAVINGS`
+from the environment). Inspect or collect the store explicitly with:
 
 ```sh
 mbx cache stats
@@ -106,8 +128,8 @@ mbx build
 ```
 
 mbx places the target directory under its cache root and leaves `target` as a
-symlink, so familiar paths still work. Once the checkout is gone, `mbx gc` can
-remove its target directory too.
+symlink, so familiar paths still work — and the outputs of a checkout that is
+deleted get collected rather than stranded.
 
 For an existing real `target/`, an interactive `mbx` asks before removing the
 old outputs and replacing the directory with a managed link. The safe default
@@ -115,19 +137,6 @@ is to keep it. Non-interactive runs never remove it. Set `MBX_TARGET_VIEWS=0`
 to disable managed placement and the prompt.
 
 [Learn about managed targets →](https://mr-boxington.jdx.dev/managed-targets)
-
-## Plain Cargo commands
-
-Run `mbx setup` once to install a persistent rustc wrapper and configure it in
-Cargo's global configuration. Afterwards, ordinary `cargo build`, `cargo test`,
-and other Cargo commands use the local action store without a daemon. Setup
-leaves the configuration untouched when `build.rustc-wrapper` already names
-another tool, such as sccache.
-
-The persistent wrapper deliberately stays local-only: use `mbx <subcommand>`
-when a build needs remote prefetch, session statistics, managed targets, or
-automatic collection. Rerun `mbx setup` after upgrading mbx to refresh the
-installed wrapper binary.
 
 ## Worktree and CI warming
 

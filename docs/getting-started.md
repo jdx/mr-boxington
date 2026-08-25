@@ -49,33 +49,26 @@ The command and its arguments are passed to Cargo unchanged. Cargo still owns
 dependency resolution, feature unification, build planning, and linking. mbx
 also forwards Cargo aliases and installed subcommands.
 
-## Enable plain Cargo commands
+That is the whole setup. There is nothing to install into Cargo's
+configuration and nothing to tune before the first build.
 
-```sh
-mbx setup
+## The first build
+
+The first build on a machine says what it arranged:
+
+```text
+mbx: first build on this machine -- here is the arrangement:
+mbx:   compiled work is cached once in /home/you/.cache/mbx and shared with every checkout and worktree; the store sweeps itself back to 50.0 GiB
+mbx:   this filesystem can reflink, so outputs land in target/ without copying -- many checkouts, one copy on disk
+mbx:   target/ directories are managed and collected when their checkout disappears, they sit unused for 30 days, or they together outgrow 100.0 GiB
+mbx:   nothing else to run; `mbx gc --dry-run` previews a cleanup and every cap is configurable
 ```
 
-Setup installs a persistent `mbx-rustc` wrapper and adds it as Cargo's global
-`build.rustc-wrapper`. It never replaces a wrapper that is already configured.
-Rerun setup after upgrading mbx so the installed wrapper matches the new
-version.
-
-Inspect, refresh, or remove the integration explicitly with:
-
-```sh
-mbx setup --status
-mbx setup --update
-mbx setup --uninstall
-```
-
-Status exits unsuccessfully when the integration is missing, stale, or points
-at another wrapper. Update only refreshes an existing mbx installation;
-uninstall removes mbx's `rustc-wrapper` entry without disturbing the rest of
-Cargo's configuration.
-
-The persistent wrapper uses the local action store. Continue to run commands
-through `mbx` when you need a remote cache, build statistics, managed target
-directories, or automatic collection.
+The budgets are a share of the disk holding the cache, so the numbers above
+depend on the machine, and the reflink line appears only where a probe just
+proved the filesystem supports it. See [managed target
+directories](/managed-targets) for what collection removes and how to change
+or disable each limit.
 
 ## Diagnose the installation
 
@@ -84,9 +77,9 @@ mbx doctor
 ```
 
 Doctor checks the Cargo and rustc executables, cache write access, filesystem
-reflink support, plain Cargo wrapper installation, effective remote policy,
-and remote protocol connectivity. Warnings describe optional features or
-fallbacks; failures make the command exit unsuccessfully.
+reflink support, effective remote policy, and remote protocol connectivity.
+Warnings describe optional features or fallbacks; failures make the command
+exit unsuccessfully.
 
 ## Read the result
 
@@ -108,10 +101,12 @@ mbx deliberately declined to cache the action. See [Cache results](/cache-result
 mbx cache dir
 mbx cache stats
 mbx gc
+mbx gc --dry-run
 mbx gc --max-size 20GiB
 ```
 
-Automatic collection is enabled by default with a 20 GiB budget.
+Automatic collection is on by default and scales its budgets to the disk; see
+[managed target directories](/managed-targets).
 
 Every inspection command also supports stable, versioned JSON for scripts and
 CI integrations:

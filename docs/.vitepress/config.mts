@@ -12,7 +12,7 @@ const latestVersion = versionMatch?.[1] ?? "0.0.0";
 
 export default defineConfig({
   title: "mr boxington",
-  description: "A build cache for Rust projects",
+  description: "A drop-in Cargo wrapper that shares compiled work and prunes target/ automatically",
   lang: "en-US",
   lastUpdated: true,
   appearance: "force-dark",
@@ -67,7 +67,6 @@ export default defineConfig({
           { text: "CLI overview", link: "/cli/" },
           { text: "doctor", link: "/cli/doctor" },
           { text: "explain", link: "/cli/explain" },
-          { text: "setup", link: "/cli/setup" },
           { text: "gc", link: "/cli/gc" },
           {
             text: "cache",
@@ -121,7 +120,7 @@ export default defineConfig({
     ["meta", { property: "og:title", content: "mr boxington" }],
     [
       "meta",
-      { property: "og:description", content: "A build cache for Rust projects" },
+      { property: "og:description", content: "A drop-in Cargo wrapper that shares compiled work and prunes target/ automatically" },
     ],
     [
       "meta",

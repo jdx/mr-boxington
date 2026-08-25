@@ -11,11 +11,8 @@ subcommand.
 5. A hit restores the action's outputs; a miss runs the real compiler and publishes the result.
 6. The agent exits with the build. There is no persistent daemon.
 
-`mbx setup` also supports plain Cargo commands. Its persistent rustc wrapper
-opens the same local CAS directly and commits prediction shards after every
-successful compilation. This lets Cargo's parallel wrapper processes and later
-builds share predictions without a daemon. Remote transfers remain in session
-mode, where the agent can enforce policy and batch them efficiently.
+Every mbx command works this way; there is no separate mode to install or keep
+current.
 
 ## Portable keys
 

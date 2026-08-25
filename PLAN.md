@@ -175,6 +175,8 @@ Protocol version stays 1; nothing in the wild speaks the old names.
   `build.rustc-wrapper` in `~/.cargo/config.toml`. If that key already names
   another wrapper, such as sccache, setup reports it and changes nothing:
   silently displacing a wrapper the user chose is worse than doing nothing.
+  Hidden from help and the docs: `mbx <cargo command>` is the supported path
+  and does strictly more, but this keeps working for setups relying on it.
 - `mbx-rustc` (argv0) — the shim; not invoked by humans.
 
 ## Configuration

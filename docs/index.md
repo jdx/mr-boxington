@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: "mr boxington"
-  text: "target/, fixed: shared and self-pruning."
-  tagline: A Cargo wrapper that shares compiled work across worktrees and CI—and prunes build storage automatically.
+  text: "target/, fixed: shared, self-pruning, drop-in."
+  tagline: Put mbx in front of any Cargo command. Compiled work is shared across worktrees and CI, build storage keeps itself inside a budget, and mbx tells you what it saved.
   image:
     src: /logo.svg
     alt: Mr Boxington, a friendly cache box
@@ -21,8 +21,8 @@ hero:
 
 features:
   - icon: "⚙️"
-    title: Wrap normal Cargo commands
-    details: Put mbx before build, test, or clippy. Cargo still plans the build; mbx restores the rustc work it has seen before.
+    title: Drop it in front of cargo
+    details: Put mbx before build, test, or clippy. Nothing to configure and nothing to install into Cargo; the first build explains what it set up.
     link: /getting-started
   - icon: "🌳"
     title: Warm every worktree
@@ -34,7 +34,7 @@ features:
     link: /github-actions
   - icon: "🧹"
     title: Prune automatically
-    details: Keep the cache inside a size budget and reclaim managed target directories after their checkout disappears.
+    details: Budgets scale with the disk. Managed target directories go when their checkout disappears, when they sit unused for 30 days, or when they outgrow their share — and mbx tells you what that saved.
     link: /managed-targets
 ---
 
