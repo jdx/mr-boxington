@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/jdx/mr-boxington/compare/v0.3.0...v0.4.0) - 2026-08-25
+
+### Added
+
+- report compiler time saved and spent ([#59](https://github.com/jdx/mr-boxington/pull/59))
+- complete setup lifecycle ([#61](https://github.com/jdx/mr-boxington/pull/61))
+- add explicit remote prefetch ([#64](https://github.com/jdx/mr-boxington/pull/64))
+- *(config)* add safe workspace policy ([#67](https://github.com/jdx/mr-boxington/pull/67))
+- *(protocol)* share remote cache contract ([#68](https://github.com/jdx/mr-boxington/pull/68))
+- explain cache bypasses ([#58](https://github.com/jdx/mr-boxington/pull/58))
+- cache compiler-linked wasm outputs ([#45](https://github.com/jdx/mr-boxington/pull/45))
+- cache plain cargo commands after setup ([#40](https://github.com/jdx/mr-boxington/pull/40))
+- add direct cargo wrapper and docs website ([#28](https://github.com/jdx/mr-boxington/pull/28))
+
+### Other
+
+- wrap project cargo commands with mbx ([#34](https://github.com/jdx/mr-boxington/pull/34))
+- *(deps)* bump the cargo-dependencies group across 1 directory with 2 updates ([#55](https://github.com/jdx/mr-boxington/pull/55))
+- add Bats end-to-end harness ([#46](https://github.com/jdx/mr-boxington/pull/46))
+- establish compatibility and security policy ([#37](https://github.com/jdx/mr-boxington/pull/37))
+- move inline tests into focused modules ([#42](https://github.com/jdx/mr-boxington/pull/42))
+- define published Rust API surface ([#41](https://github.com/jdx/mr-boxington/pull/41))
+- *(cache)* avoid rereading reflinked outputs ([#44](https://github.com/jdx/mr-boxington/pull/44))
+- *(config)* generate settings docs with usage-rs ([#30](https://github.com/jdx/mr-boxington/pull/30))
+
 ### Added
 
 - *(cli)* run a Cargo command with actionable cache-bypass diagnostics using `mbx explain`
