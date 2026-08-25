@@ -25,6 +25,11 @@ publish = true
 git_release_enable = false
 
 [[package]]
+name = "mbx-cache-protocol"
+publish = true
+git_release_enable = false
+
+[[package]]
 name = "mbx-cache-rustc"
 publish = true
 git_release_enable = false

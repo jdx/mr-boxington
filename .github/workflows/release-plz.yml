@@ -33,6 +33,62 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Find the merged release PR
+        id: release-pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          number=$(gh api \
+            "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
+            --jq '[.[] | select(.merged_at != null) | select(.head.ref | startswith("release-plz-"))][0].number // ""')
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      # Trusted publishing cannot create a crate. Bootstrap the protocol crate
+      # with a token restricted to `publish-new`, then wait until crates.io can
+      # see that exact version so release-plz recognizes it as already
+      # published. Once the crate exists this step never reads or uses the
+      # token; later versions use OIDC with the rest of the workspace.
+      - name: Bootstrap mbx-cache-protocol on crates.io
+        if: steps.release-pr.outputs.number != ''
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_PUBLISH_NEW_TOKEN }}
+        run: |
+          crate=mbx-cache-protocol
+          version=$(cargo metadata --no-deps --format-version 1 |
+            jq -r --arg crate "$crate" '.packages[] | select(.name == $crate).version')
+          crate_endpoint="https://crates.io/api/v1/crates/$crate"
+          version_endpoint="$crate_endpoint/$version"
+          user_agent="mr-boxington release workflow (https://github.com/${{ github.repository }})"
+          status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --user-agent "$user_agent" "$crate_endpoint")
+
+          if [ "$status" = 200 ]; then
+            echo "$crate already exists; release-plz will publish version $version with OIDC"
+            exit 0
+          fi
+          if [ "$status" != 404 ]; then
+            echo "::error::crates.io returned HTTP $status while checking $crate $version"
+            exit 1
+          fi
+
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::CRATES_IO_PUBLISH_NEW_TOKEN is required to publish the first $crate release"
+            exit 1
+          fi
+
+          cargo publish --locked --package "$crate"
+
+          # The publish endpoint can return before the new version is visible
+          # to release-plz through the crates.io API.
+          for _ in $(seq 1 12); do
+            if curl --fail --silent --show-error --user-agent "$user_agent" "$version_endpoint" >/dev/null; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::$crate $version did not become visible on crates.io"
+          exit 1
+
       # Exchanges the OIDC token for a short-lived crates.io token. Each crate
       # needs a Trusted Publisher naming this repository and this workflow
       # file, so renaming this file breaks publishing.
@@ -49,7 +105,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
 
-      # This is a workspace: a run can release `mbx`, either library, or all of
+      # This is a workspace: a run can release `mbx`, any library, or all of
       # them, in whatever order release-plz reports. Taking `releases[0]` would
       # sometimes hand the binary-upload job a library's tag — attaching `mbx`
       # binaries to the wrong release and leaving the real one drafted forever.
@@ -66,19 +122,39 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "mbx tag: ${tag:-<none released>}"
 
-      # Merging a release PR and getting nothing back means the release did not
-      # happen. Without this the run goes green and the omission is only
-      # noticed when someone looks for the release.
-      - name: Reject an empty release result for a merged release PR
-        if: steps.mbx-tag.outputs.tag == ''
+      # An empty result is expected when re-running a completed release, or
+      # when bootstrapping the protocol crate was the only work. Verify the
+      # desired end state instead of rejecting those idempotent cases.
+      - name: Verify an empty release result for a merged release PR
+        if: steps.mbx-tag.outputs.tag == '' && steps.release-pr.outputs.number != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          release_pr=$(gh api \
-            "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
-            --jq '[.[] | select(.merged_at != null) | select(.head.ref | startswith("release-plz-"))][0].number // ""')
-          if [ -n "$release_pr" ]; then
-            echo "::error::release-plz returned no release after merging release PR #$release_pr"
+          user_agent="mr-boxington release workflow (https://github.com/${{ github.repository }})"
+          failed=false
+
+          while read -r crate version; do
+            endpoint="https://crates.io/api/v1/crates/$crate/$version"
+            if ! curl --fail --silent --show-error --user-agent "$user_agent" "$endpoint" >/dev/null; then
+              echo "::error::$crate $version is not published on crates.io"
+              failed=true
+            fi
+          done < <(cargo metadata --no-deps --format-version 1 | jq -r '
+            .workspace_members as $members
+            | .packages[]
+            | select(.id as $id | $members | index($id))
+            | select(.publish == null or (.publish | length > 0))
+            | [.name, .version]
+            | @tsv')
+
+          mbx_version=$(cargo metadata --no-deps --format-version 1 |
+            jq -r '.packages[] | select(.name == "mbx").version')
+          if ! gh release view "v$mbx_version" --repo "${{ github.repository }}" >/dev/null; then
+            echo "::error::GitHub release v$mbx_version does not exist"
+            failed=true
+          fi
+
+          if [ "$failed" = true ]; then
             exit 1
           fi
 
