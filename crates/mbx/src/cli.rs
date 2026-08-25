@@ -509,9 +509,17 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
     // arrives after the explanation of what a managed one is for. One existence
     // check, and only on the cargo path.
     if !cargo_help_requested(arguments) && !was_explained(&config.store_dir()) {
-        // Probed rather than assumed, and probed only on the one run that
-        // will say something about it.
-        let reflinks = crate::util::reflinks_work(&config.cache_dir);
+        // Probed rather than assumed, probed only on the one run that will
+        // say something about it, and probed between the two places the real
+        // copy spans: the store, and wherever this build's outputs will land
+        // -- the managed root normally, cargo's own directory when placement
+        // is off or the location was asked for.
+        let outputs_root = if config.target.views && !roots.target_dir_requested {
+            &config.target.root
+        } else {
+            &roots.target_dir
+        };
+        let reflinks = crate::util::reflinks_work(&config.cache_dir, outputs_root);
         crate::session::note(&first_run_notice(config, retention, reflinks));
         mark_explained(&config.store_dir());
     }
