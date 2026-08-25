@@ -21,6 +21,7 @@ const CAS_DIR: &str = "cas/v1";
 const ACTION_RESULTS_DIR: &str = "action-results/v1";
 const CHECKOUTS_DIR: &str = "checkouts/v1";
 const SWEEP_STAMP: &str = "gc/v1/last-sweep";
+const SWEEP_LOCK: &str = "gc/v1/sweep.lock";
 const CHECKOUT_RECORD_VERSION: u8 = 1;
 
 /// How long a checkout's claim outlives the last build that renewed it.
@@ -242,6 +243,11 @@ pub fn sweep_if_due(store: &Path, max_bytes: u64, interval: Duration) -> Result<
 
 /// Atomically stamp a due sweep before its callers perform coordinated GC.
 pub(crate) fn claim_sweep(store: &Path, interval: Duration) -> Result<bool> {
+    let lock_path = store.join(SWEEP_LOCK);
+    std::fs::create_dir_all(lock_path.parent().expect("sweep lock has a parent"))?;
+    let mut lock = fslock::LockFile::open(&lock_path)?;
+    lock.lock()?;
+
     let stamp = store.join(SWEEP_STAMP);
     if let Ok(metadata) = std::fs::metadata(&stamp)
         && let Ok(modified) = metadata.modified()

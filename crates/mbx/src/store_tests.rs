@@ -531,6 +531,31 @@ fn sweeps_only_once_within_the_interval() {
 }
 
 #[test]
+fn concurrent_callers_claim_only_one_sweep() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(directory.path().to_path_buf());
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let callers = (0..8)
+        .map(|_| {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                claim_sweep(&store, Duration::from_secs(3600)).unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let claimed = callers
+        .into_iter()
+        .map(|caller| caller.join().unwrap())
+        .filter(|claimed| *claimed)
+        .count();
+
+    assert_eq!(claimed, 1);
+}
+
+#[test]
 fn does_not_count_its_own_bookkeeping_against_the_budget() {
     let directory = tempfile::tempdir().unwrap();
     let store = directory.path().join("store");
