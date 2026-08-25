@@ -143,6 +143,20 @@ File containing a bearer token.
 
 Remote cache URL.
 
+## `savings`
+
+- **Type:** `string`
+- **Default:** `quips`
+- **Set with:** `MBX_SAVINGS`
+
+How the savings line after a build reads.
+
+**Choices:**
+- `quips`
+- `plain`
+- `off`
+
+
 ## `share_out_dir`
 
 - **Type:** `bool`

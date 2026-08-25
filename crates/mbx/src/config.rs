@@ -100,6 +100,13 @@ pub(crate) struct RawConfig {
     /// Share eligible compilations that read `OUT_DIR`.
     #[usage(env = "MBX_SHARE_OUT_DIR", default = false)]
     share_out_dir: bool,
+    /// How the savings line after a build reads.
+    #[usage(
+        env = "MBX_SAVINGS",
+        default = "quips",
+        choices("quips", "plain", "off")
+    )]
+    savings: String,
     /// Append the full reason for every bypassed compilation to this path.
     #[usage(key = "bypass_log", env = "MBX_BYPASS_LOG", scope = "env")]
     _bypass_log: Option<PathBuf>,
@@ -253,6 +260,58 @@ pub(crate) struct RetentionSettings {
     pub max_total_bytes: Option<u64>,
 }
 
+/// Settings only the command line consumes.
+///
+/// The library target is semver-checked, and `Config` is a public struct
+/// callers can construct, so a knob the binary alone reads does not belong on
+/// it: adding a field there is a breaking change to an API this crate does not
+/// mean to offer.
+#[derive(Debug, Clone)]
+pub(crate) struct CliSettings {
+    pub retention: RetentionSettings,
+    pub savings: SavingsStyle,
+}
+
+/// Matches the declared defaults: a derived `Default` would silence the savings
+/// line, which is the opposite of what an unconfigured machine should get.
+impl Default for CliSettings {
+    fn default() -> Self {
+        Self {
+            retention: RetentionSettings::default(),
+            savings: SavingsStyle::default(),
+        }
+    }
+}
+
+/// How the line about accumulated savings reads.
+///
+/// The quips are the product's voice and the default; `plain` is the same
+/// facts in the register of the `cache:` and `gc:` lines beside them, for
+/// people who want their build logs to keep a straight face; `off` keeps the
+/// totals without printing anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SavingsStyle {
+    #[default]
+    Quips,
+    Plain,
+    Off,
+}
+
+impl std::str::FromStr for SavingsStyle {
+    type Err = eyre::Report;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "quips" => Ok(Self::Quips),
+            "plain" => Ok(Self::Plain),
+            "off" => Ok(Self::Off),
+            other => Err(eyre::eyre!(
+                "savings must be quips, plain, or off, not {other:?}"
+            )),
+        }
+    }
+}
+
 /// The retention a run gets when nobody resolved configuration for it.
 ///
 /// These are the unmeasured fallbacks rather than the disk-scaled budgets: a
@@ -292,19 +351,19 @@ impl Default for HttpSettings {
 impl Config {
     /// Load configuration for this machine.
     pub fn load() -> Result<Self> {
-        Self::load_with_retention().map(|(config, _)| config)
+        Self::load_for_cli().map(|(config, _)| config)
     }
 
-    pub(crate) fn load_with_retention() -> Result<(Self, RetentionSettings)> {
+    pub(crate) fn load_for_cli() -> Result<(Self, CliSettings)> {
         let env = EnvLayer::from_process();
         let file = config_file_path().map(|path| FileLayer::at(path, FileScope::Global));
-        Self::from_layers_with_retention(&env, file.as_ref())
+        Self::from_layers_for_cli(&env, file.as_ref())
     }
 
-    fn from_layers_with_retention(
+    fn from_layers_for_cli(
         env: &EnvLayer,
         file: Option<&FileLayer>,
-    ) -> Result<(Self, RetentionSettings)> {
+    ) -> Result<(Self, CliSettings)> {
         Self::from_layers_measuring(env, file, crate::util::disk_total_bytes)
     }
 
@@ -312,7 +371,7 @@ impl Config {
         env: &EnvLayer,
         file: Option<&FileLayer>,
         measure_disk: impl Fn(&Path) -> Option<u64>,
-    ) -> Result<(Self, RetentionSettings)> {
+    ) -> Result<(Self, CliSettings)> {
         let mut layers = Layers::new().then(env);
         if let Some(file) = file {
             layers = layers.then(file);
@@ -341,7 +400,7 @@ impl Config {
     fn from_raw_measuring(
         raw: RawConfig,
         measure_disk: impl Fn(&Path) -> Option<u64>,
-    ) -> Result<(Self, RetentionSettings)> {
+    ) -> Result<(Self, CliSettings)> {
         let cache_dir = raw.cache_dir.or_else(default_cache_dir).ok_or_else(|| {
             eyre::eyre!("could not determine a cache directory; set MBX_CACHE_DIR")
         })?;
@@ -425,7 +484,13 @@ impl Config {
             },
             http,
         };
-        Ok((config, retention))
+        Ok((
+            config,
+            CliSettings {
+                retention,
+                savings: raw.savings.parse().wrap_err("invalid savings")?,
+            },
+        ))
     }
 
     /// Apply the deliberately small, safe policy surface from `.mbx.toml` at
@@ -548,21 +613,28 @@ mod tests {
     const TEST_DISK: u64 = 400 * GIB;
 
     fn configured(file: Option<&str>, values: &[(&str, &str)]) -> Result<Config> {
-        configured_with_retention(file, values).map(|(config, _)| config)
+        configured_for_cli(file, values).map(|(config, _)| config)
     }
 
-    fn configured_with_retention(
+    fn configured_for_cli(
+        file: Option<&str>,
+        values: &[(&str, &str)],
+    ) -> Result<(Config, CliSettings)> {
+        configured_on_disk(file, values, Some(TEST_DISK))
+    }
+
+    fn configured_retention(
         file: Option<&str>,
         values: &[(&str, &str)],
     ) -> Result<(Config, RetentionSettings)> {
-        configured_on_disk(file, values, Some(TEST_DISK))
+        configured_for_cli(file, values).map(|(config, settings)| (config, settings.retention))
     }
 
     fn configured_on_disk(
         file: Option<&str>,
         values: &[(&str, &str)],
         disk_total_bytes: Option<u64>,
-    ) -> Result<(Config, RetentionSettings)> {
+    ) -> Result<(Config, CliSettings)> {
         configured_measuring(file, values, move |_| disk_total_bytes)
     }
 
@@ -572,7 +644,7 @@ mod tests {
         file: Option<&str>,
         values: &[(&str, &str)],
         measure_disk: impl Fn(&Path) -> Option<u64>,
-    ) -> Result<(Config, RetentionSettings)> {
+    ) -> Result<(Config, CliSettings)> {
         let env = EnvLayer::new(
             values
                 .iter()
@@ -635,7 +707,7 @@ mod tests {
 
     #[test]
     fn defaults_apply_without_configuration() {
-        let (config, retention) = configured_with_retention(None, &[]).unwrap();
+        let (config, retention) = configured_retention(None, &[]).unwrap();
         assert_eq!(config.http.timeout, DEFAULT_HTTP_TIMEOUT);
         assert_eq!(config.http.download_timeout, DEFAULT_HTTP_DOWNLOAD_TIMEOUT);
         assert_eq!(config.http.retries, DEFAULT_HTTP_RETRIES);
@@ -682,7 +754,8 @@ mod tests {
             (None, STORE_BUDGET.fallback, TARGET_BUDGET.fallback),
         ];
         for (disk, store, target) in cases {
-            let (config, retention) = configured_on_disk(None, &[], disk).unwrap();
+            let (config, settings) = configured_on_disk(None, &[], disk).unwrap();
+            let retention = settings.retention;
             assert_eq!(config.gc.max_bytes, store, "store budget for {disk:?}");
             assert_eq!(
                 retention.target_max_bytes,
@@ -727,12 +800,13 @@ mod tests {
 
     #[test]
     fn configured_budgets_outrank_the_disk() {
-        let (config, retention) = configured_on_disk(
+        let (config, settings) = configured_on_disk(
             None,
             &[("MBX_GC_MAX_SIZE", "3GiB"), ("MBX_TARGET_MAX_SIZE", "7GiB")],
             Some(8_000 * GIB),
         )
         .unwrap();
+        let retention = settings.retention;
 
         assert_eq!(config.gc.max_bytes, 3 * GIB);
         assert_eq!(retention.target_max_bytes, Some(7 * GIB));
@@ -743,7 +817,7 @@ mod tests {
         // A scratch volume for targets is exactly why these are measured apart:
         // sizing a 4TiB disk from a 64GiB home directory would prune it to the
         // floor.
-        let (config, retention) = configured_measuring(
+        let (config, settings) = configured_measuring(
             None,
             &[("MBX_CACHE_DIR", "/cache"), ("MBX_TARGET_ROOT", "/scratch")],
             |path| {
@@ -758,7 +832,7 @@ mod tests {
 
         assert_eq!(config.gc.max_bytes, STORE_BUDGET.floor, "5% of 64GiB");
         assert_eq!(
-            retention.target_max_bytes,
+            settings.retention.target_max_bytes,
             Some(MAX_SCALED_BUDGET),
             "10% of 4TiB, at the ceiling"
         );
@@ -777,7 +851,7 @@ mod tests {
 
     #[test]
     fn none_turns_a_retention_limit_off() {
-        let (_, retention) = configured_with_retention(
+        let (_, retention) = configured_retention(
             None,
             &[
                 ("MBX_TARGET_MAX_SIZE", "none"),
@@ -802,7 +876,7 @@ mod tests {
 
     #[test]
     fn reads_target_and_whole_cache_retention_limits() {
-        let (_, retention) = configured_with_retention(
+        let (_, retention) = configured_retention(
             None,
             &[
                 ("MBX_TARGET_MAX_SIZE", "8GiB"),
@@ -982,6 +1056,24 @@ mod tests {
     }
 
     #[test]
+    fn savings_default_to_quips_with_plain_and_off_as_choices() {
+        let (_, settings) = configured_for_cli(None, &[]).unwrap();
+        assert_eq!(
+            settings.savings,
+            SavingsStyle::Quips,
+            "an unconfigured machine gets the voice"
+        );
+        let (_, settings) = configured_for_cli(None, &[("MBX_SAVINGS", "plain")]).unwrap();
+        assert_eq!(settings.savings, SavingsStyle::Plain);
+        let (_, settings) = configured_for_cli(None, &[("MBX_SAVINGS", "off")]).unwrap();
+        assert_eq!(settings.savings, SavingsStyle::Off);
+        assert!(
+            configured_for_cli(None, &[("MBX_SAVINGS", "sarcastic")]).is_err(),
+            "an unknown style is an error, not a silent default"
+        );
+    }
+
+    #[test]
     fn the_usage_spec_declares_files_environment_and_defaults() {
         let spec = RawConfig::spec_kdl();
         assert!(spec.contains(r#"file "<config directory>/mbx/config.toml""#));
@@ -994,5 +1086,7 @@ mod tests {
         // generated reference has to describe them instead.
         assert!(spec.contains("5% of the cache disk"));
         assert!(spec.contains("10% of the cache disk"));
+        assert!(spec.contains(r#"env "MBX_SAVINGS""#));
+        assert!(spec.contains(r#"default="quips""#));
     }
 }

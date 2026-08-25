@@ -509,6 +509,15 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
     }
 }
 
+/// Whether the cache took part in this build at all.
+///
+/// A run that never consulted or stored anything -- `cargo --help`, a build
+/// cargo declined -- has nothing to report and should not be counted as a
+/// build in the lifetime totals.
+pub(crate) fn session_was_active(stats: &AgentStats) -> bool {
+    should_display_stats(stats)
+}
+
 fn should_display_stats(stats: &AgentStats) -> bool {
     stats.lookups > 0
         || stats.unconsulted > 0

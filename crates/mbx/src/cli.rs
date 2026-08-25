@@ -1,6 +1,6 @@
 //! The mbx command line.
 
-use crate::config::{Config, RetentionSettings};
+use crate::config::{CliSettings, Config, RetentionSettings};
 use crate::session::CacheSession;
 use crate::util::workspace_root;
 use crate::{policy, store, target};
@@ -177,11 +177,11 @@ pub fn run() -> Result<ExitCode> {
     if let Commands::Doctor(args) = &cli.command {
         return crate::doctor::run_loaded(Config::load(), args.json);
     }
-    let (config, retention) = Config::load_with_retention()?;
+    let (config, settings) = Config::load_for_cli()?;
     match cli.command {
         Commands::Doctor(_) => unreachable!("doctor was handled before configuration loading"),
         Commands::Explain(args) => {
-            crate::explain::run_with_retention(&config, &retention, &args.arguments())
+            crate::explain::run_with_settings(&config, &settings, &args.arguments())
         }
         Commands::Setup(args) => setup(args.action()?),
         Commands::Gc(args) => gc(
@@ -190,7 +190,7 @@ pub fn run() -> Result<ExitCode> {
                 .map_or(config.gc.max_bytes, |requested| requested.as_u64()),
             args.dry_run,
             args.json,
-            &retention,
+            &settings.retention,
         )
         .map(|()| ExitCode::SUCCESS),
         Commands::Cache(args) => match args.command {
@@ -218,7 +218,7 @@ pub fn run() -> Result<ExitCode> {
             }
         },
         Commands::Prefetch(args) => prefetch(&config, &args.cargo_args),
-        Commands::Cargo(arguments) => cargo(&config, &retention, &arguments),
+        Commands::Cargo(arguments) => cargo(&config, &settings, &arguments),
     }
 }
 
@@ -450,8 +450,8 @@ fn same_file_contents(left: &Path, right: &Path) -> Result<bool> {
         == mbx_cache_core::CacheDigest::blake3_file(right)?)
 }
 
-fn cargo(config: &Config, retention: &RetentionSettings, arguments: &[String]) -> Result<ExitCode> {
-    cargo_with_retention_and_bypass_log(config, retention, arguments, None)
+fn cargo(config: &Config, settings: &CliSettings, arguments: &[String]) -> Result<ExitCode> {
+    cargo_with_settings_and_bypass_log(config, settings, arguments, None)
 }
 
 pub(crate) fn cargo_with_bypass_log(
@@ -459,20 +459,16 @@ pub(crate) fn cargo_with_bypass_log(
     arguments: &[String],
     bypass_log: Option<&Path>,
 ) -> Result<ExitCode> {
-    cargo_with_retention_and_bypass_log(
-        config,
-        &RetentionSettings::default(),
-        arguments,
-        bypass_log,
-    )
+    cargo_with_settings_and_bypass_log(config, &CliSettings::default(), arguments, bypass_log)
 }
 
-pub(crate) fn cargo_with_retention_and_bypass_log(
+pub(crate) fn cargo_with_settings_and_bypass_log(
     config: &Config,
-    retention: &RetentionSettings,
+    settings: &CliSettings,
     arguments: &[String],
     bypass_log: Option<&Path>,
 ) -> Result<ExitCode> {
+    let retention = &settings.retention;
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     // Release builds publish artifacts that must not depend on a cache, and a
     // tag build has no later build to share with anyway.
@@ -545,7 +541,7 @@ pub(crate) fn cargo_with_retention_and_bypass_log(
         .enable_all()
         .build()?;
 
-    let status = runtime.block_on(async {
+    let session_outcome = runtime.block_on(async {
         let session = CacheSession::start(session_dir.path(), config).await?;
         let mut environment = inherited_environment(|name| std::env::var(name).ok(), &working_dir);
         if let Some(path) = bypass_log {
@@ -586,16 +582,59 @@ pub(crate) fn cargo_with_retention_and_bypass_log(
             log::warn!("the build manifest was not committed: {error}");
         }
 
-        match session.finish().await {
-            Ok(stats) => crate::session::display_stats(&stats, config),
-            Err(error) => log::warn!("the cache session did not shut down cleanly: {error}"),
-        }
-        status
+        let stats = match session.finish().await {
+            Ok(stats) => {
+                crate::session::display_stats(&stats, config);
+                Some(stats)
+            }
+            Err(error) => {
+                log::warn!("the cache session did not shut down cleanly: {error}");
+                None
+            }
+        };
+        Ok((status, stats))
     });
+    // A session that never started still leaves collection to do, so the error
+    // travels as the build's result rather than short-circuiting past the sweep.
+    let (status, stats) = match session_outcome {
+        Ok((status, stats)) => (status, stats),
+        Err(error) => (Err(error), None),
+    };
     // Outside the runtime, so a walk of the whole store cannot occupy a worker
     // thread, and after cargo has exited, so it adds nothing to the build the
     // user is waiting on.
-    sweep_store(config, retention);
+    let mut delta = sweep_store(config, retention);
+    // Removing the checkout's own `target/` on the way in freed disk too, and
+    // it is the largest single reclaim a first build ever reports -- but the
+    // user confirmed it, so it must not feed the counters the collection
+    // brags read: that directory had not outlived anything.
+    delta.freed_requested_bytes = removed_target_bytes.unwrap_or_default();
+    let facts = stats
+        .as_ref()
+        .map_or_else(crate::savings::SessionFacts::default, |stats| {
+            crate::savings::SessionFacts {
+                hits: stats.hits,
+                avoided_compiler_ns: stats.avoided_compiler_duration_ns,
+            }
+        });
+    if let Some(stats) = &stats {
+        // A session that was never consulted did not build anything worth
+        // counting as a build; storing its zeroes would dilute every average.
+        if crate::session::session_was_active(stats) {
+            delta.builds = 1;
+        }
+        delta.cached_compilations = stats.hits;
+        delta.avoided_compiler_ns = stats.avoided_compiler_duration_ns;
+        delta.reflinked_bytes = stats.reflinked_output_bytes;
+    }
+    // Unconditional, including on a run that built nothing: a sweep that came
+    // due during `cargo build --help` really did reclaim those bytes, and the
+    // lifetime total is wrong if they go unrecorded.
+    if let Some(line) =
+        crate::savings::record_and_describe(&config.store_dir(), &delta, &facts, settings.savings)
+    {
+        crate::session::note(&line);
+    }
     status
 }
 
@@ -729,10 +768,14 @@ fn gc(
         Ok(outcome) => outcome,
         Err(error) => {
             match pruned {
-                Ok(pruned) if !json && pruned.removed_views > 0 => {
-                    println!("{}", target_removals(&pruned, dry_run));
+                Ok(pruned) => {
+                    // Credit what the targets gave back even though the store
+                    // sweep failed: those bytes are gone from the disk either way.
+                    record_collection(&store, 0, pruned.removed_bytes, dry_run);
+                    if !json && pruned.removed_views > 0 {
+                        println!("{}", target_removals(&pruned, dry_run));
+                    }
                 }
-                Ok(_) => {}
                 Err(prune_error) => {
                     log::warn!("target directories were not collected: {prune_error}");
                 }
@@ -740,6 +783,12 @@ fn gc(
             return Err(error);
         }
     };
+    record_collection(
+        &store,
+        outcome.removed_bytes,
+        pruned.as_ref().map_or(0, |pruned| pruned.removed_bytes),
+        dry_run,
+    );
     if json {
         let pruned = pruned?;
         print_json(&GcReport {
@@ -766,6 +815,23 @@ fn gc(
         }
     }
     Ok(())
+}
+
+/// Add what a collection reclaimed to this machine's lifetime totals.
+///
+/// A dry run reclaimed nothing, so it contributes nothing.
+fn record_collection(store: &Path, store_bytes: u64, target_bytes: u64, dry_run: bool) {
+    if dry_run || (store_bytes == 0 && target_bytes == 0) {
+        return;
+    }
+    crate::savings::record_quietly(
+        store,
+        &crate::savings::Delta {
+            freed_store_bytes: store_bytes,
+            freed_target_bytes: target_bytes,
+            ..crate::savings::Delta::default()
+        },
+    );
 }
 
 fn print_gc_store_outcome(outcome: &store::GcOutcome, dry_run: bool) {
@@ -810,19 +876,22 @@ fn evictions(outcome: &store::GcOutcome) -> String {
 ///
 /// Reported like the cache summary beside it: a sweep that evicted nothing says
 /// nothing. A sweep that fails is logged and forgotten -- the build is already
-/// over, and its exit status is the build's answer, not the collector's.
-fn sweep_store(config: &Config, retention: &RetentionSettings) {
+/// over, and its exit status is the build's answer, not the collector's. What it
+/// freed is returned so the lifetime totals can count it.
+fn sweep_store(config: &Config, retention: &RetentionSettings) -> crate::savings::Delta {
+    let mut delta = crate::savings::Delta::default();
     if !config.gc.auto {
-        return;
+        return delta;
     }
     match store::claim_sweep(&config.store_dir(), config.gc.interval) {
         Ok(false) => {}
         Ok(true) => {
-            let collected_target_bytes = prune_targets(config, retention, config.gc.max_bytes);
+            let pruned = prune_targets(config, retention, config.gc.max_bytes);
+            delta.freed_target_bytes = pruned.freed_bytes;
             let store_budget = retention
                 .max_total_bytes
                 .map_or(config.gc.max_bytes, |total| {
-                    let target_bytes = collected_target_bytes.unwrap_or_else(|| {
+                    let target_bytes = pruned.remaining_bytes.unwrap_or_else(|| {
                         target::stats(&config.target.root)
                             .map(|stats| stats.bytes)
                             .unwrap_or_default()
@@ -833,18 +902,29 @@ fn sweep_store(config: &Config, retention: &RetentionSettings) {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     log::warn!("the store was not swept: {error}");
-                    return;
+                    return delta;
                 }
             };
+            delta.freed_store_bytes = outcome.removed_bytes;
             if outcome.removed_bytes > 0 {
                 crate::session::note(&format!("gc: {}", evictions(&outcome)));
             }
         }
         Err(error) => {
             log::warn!("the store was not swept: {error}");
-            let _ = prune_targets(config, retention, config.gc.max_bytes);
+            delta.freed_target_bytes =
+                prune_targets(config, retention, config.gc.max_bytes).freed_bytes;
         }
     }
+    delta
+}
+
+/// What one target collection left behind, and what it reclaimed.
+struct PruneReport {
+    /// `None` when collection failed, so a caller sizing a combined budget
+    /// knows to measure rather than assume.
+    remaining_bytes: Option<u64>,
+    freed_bytes: u64,
 }
 
 /// Collect target views as the other half of a due automatic sweep.
@@ -852,7 +932,7 @@ fn prune_targets(
     config: &Config,
     retention: &RetentionSettings,
     store_reserve: u64,
-) -> Option<u64> {
+) -> PruneReport {
     // A target directory whose checkout is gone is the largest thing
     // collection ever frees, and walking for it on every build would be the
     // slowest, so callers keep this inside the store sweep's throttle.
@@ -867,11 +947,17 @@ fn prune_targets(
             if pruned.removed_views > 0 {
                 crate::session::note(&format!("gc: {}", target_removals(&pruned, false)));
             }
-            Some(pruned.remaining_bytes)
+            PruneReport {
+                remaining_bytes: Some(pruned.remaining_bytes),
+                freed_bytes: pruned.removed_bytes,
+            }
         }
         Err(error) => {
             log::warn!("target directories were not collected: {error}");
-            None
+            PruneReport {
+                remaining_bytes: None,
+                freed_bytes: 0,
+            }
         }
     }
 }
@@ -1050,6 +1136,13 @@ fn cache_remove(config: &Config, workspace: &Path) -> Result<()> {
         workspace.display()
     );
     if let Some(bytes) = target_bytes {
+        crate::savings::record_quietly(
+            &config.store_dir(),
+            &crate::savings::Delta {
+                freed_requested_bytes: bytes,
+                ..crate::savings::Delta::default()
+            },
+        );
         println!(
             "freed managed target directory ({})",
             ByteSize::b(bytes).display().iec()

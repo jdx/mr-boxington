@@ -13,6 +13,7 @@ pub mod config;
 pub mod doctor;
 pub mod explain;
 pub mod policy;
+pub(crate) mod savings;
 pub mod session;
 pub mod store;
 pub mod target;
