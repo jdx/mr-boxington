@@ -17,6 +17,9 @@ export default defineConfig({
   lastUpdated: true,
   appearance: "force-dark",
   cleanUrls: true,
+  rewrites: {
+    "cli/cache.md": "cli/cache/index.md",
+  },
   sitemap: {
     hostname: "https://mr-boxington.jdx.dev",
   },
