@@ -18,6 +18,17 @@ setup() {
   assert_success
   assert_output --partial "cache"
   assert_output --partial "gc"
+  assert_output --partial "doctor"
+}
+
+@test "doctor validates an isolated local installation" {
+  run "$MBX_BIN" doctor
+
+  assert_success
+  assert_output --partial "cargo"
+  assert_output --partial "cache"
+  assert_output --partial "remote"
+  assert_output --partial "0 failures"
 }
 
 @test "an isolated store starts empty" {

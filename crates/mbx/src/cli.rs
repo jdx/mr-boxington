@@ -27,6 +27,8 @@ struct Cli {
 
 #[derive(usage::Subcommands)]
 enum Commands {
+    /// Check the local installation, cache, toolchain, and remote connection.
+    Doctor,
     /// Run a Cargo command and explain every compilation mbx cannot cache.
     Explain(ExplainArgs),
     /// Install a persistent rustc wrapper for plain Cargo commands.
@@ -138,8 +140,12 @@ pub fn run() -> Result<ExitCode> {
     if let Commands::Prefetch(args) = &mut cli.command {
         args.cargo_args = original_prefetch_arguments(&original)?;
     }
+    if matches!(&cli.command, Commands::Doctor) {
+        return crate::doctor::run_loaded(Config::load());
+    }
     let config = Config::load()?;
     match cli.command {
+        Commands::Doctor => unreachable!("doctor was handled before configuration loading"),
         Commands::Explain(args) => crate::explain::run(&config, &args.arguments()),
         Commands::Setup(args) => setup(args.action()?),
         Commands::Gc(args) => gc(

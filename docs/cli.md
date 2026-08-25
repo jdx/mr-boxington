@@ -17,6 +17,15 @@ Examples:
 - **`-h --help`** — Print help
 - **`-V --version`** — Print version
 
+## `mbx doctor`
+
+- **Usage:** `mbx doctor`
+
+Check the local installation, cache, toolchain, and remote connection.
+
+### Flags
+- **`-h --help`** — Print help
+
 ## `mbx explain`
 
 - **Usage:** `mbx explain <CARGO_COMMAND> [CARGO_ARGS]…`

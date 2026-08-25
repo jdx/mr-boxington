@@ -441,6 +441,7 @@ fn cli_exposes_its_usage_spec() {
     assert!(spec.contains("external_subcommand #true"));
     assert!(spec.contains("cmd setup"));
     assert!(spec.contains("cmd explain"));
+    assert!(spec.contains("cmd doctor"));
     assert!(spec.contains("cmd gc"));
     assert!(spec.contains("cmd cache"));
     assert!(spec.contains("config {"));
