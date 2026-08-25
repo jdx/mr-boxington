@@ -476,12 +476,28 @@ impl CacheAgent {
 
     /// Load the last committed action manifest for a task into this session.
     pub async fn begin_task(&self, task: &str) -> Result<String> {
+        self.begin_task_with_remote_errors(task, false).await
+    }
+
+    /// Load a task and finish its prefetch, surfacing remote lookup failures.
+    pub async fn prefetch_task(&self, task: &str) -> Result<String> {
+        let run = self.begin_task_with_remote_errors(task, true).await?;
+        self.wait_for_prefetches().await;
+        Ok(run)
+    }
+
+    async fn begin_task_with_remote_errors(&self, task: &str, strict: bool) -> Result<String> {
         validate_task_identity(task)?;
         let (remote_manifest, mut remote_etag) = if self.remote_mode.reads() {
             match self.get_remote_task_manifest(task).await {
                 Ok(Some((manifest, etag))) => (Some(manifest), Some(etag)),
                 Ok(None) => (None, None),
                 Err(error) => {
+                    if strict {
+                        return Err(error).wrap_err_with(|| {
+                            format!("remote task action manifest lookup failed for {task}")
+                        });
+                    }
                     warn!("remote task action manifest lookup failed for {task}: {error}");
                     (None, None)
                 }
@@ -554,7 +570,6 @@ impl CacheAgent {
         }
     }
 
-    #[cfg(test)]
     async fn wait_for_prefetches(&self) {
         let tasks = std::mem::take(&mut *self.prefetch_tasks.lock().unwrap());
         for task in tasks {

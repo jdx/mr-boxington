@@ -58,6 +58,20 @@ the same usage-rs declaration mbx uses at runtime. See
 `MBX_VERIFY=1` is deliberately slower. It qualifies correctness; it is not a
 normal build mode.
 
+## Explicit remote prefetch
+
+After a command has published its action manifest, another machine can warm
+the same build without running Cargo:
+
+```sh
+mbx prefetch build --workspace --release
+```
+
+The workspace's `Cargo.lock` and complete Cargo argument list select the same
+manifest as a normal mbx build. Prefetch requires a configured remote in
+`read-only` or `read-write` mode, waits for every predicted action, and returns
+an error when the manifest lookup fails.
+
 ## Incremental builds
 
 `MBX_INCREMENTAL=1` stops mbx from forcing `CARGO_INCREMENTAL=0` locally. This

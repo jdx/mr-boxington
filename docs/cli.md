@@ -78,6 +78,18 @@ Summarize what the store holds.
 ### Flags
 - **`-h --help`** — Print help
 
+## `mbx prefetch`
+
+- **Usage:** `mbx prefetch <CARGO_ARGS>…`
+
+Download predicted remote artifacts without running Cargo.
+
+### Arguments
+- **`<CARGO_ARGS>…`** — Cargo subcommand and arguments whose previous manifest should be warmed.
+
+### Flags
+- **`-h --help`** — Print help
+
 ## Configuration
 
 Read from, in ascending precedence — the last one that names a setting wins:

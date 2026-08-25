@@ -29,6 +29,7 @@ supported compilations it has seen before.
 mbx build                  # cargo build, with caching
 mbx test --all-features    # cargo test --all-features, with caching
 mbx clippy --workspace     # cargo clippy --workspace, with caching
+mbx prefetch build         # warm a recorded build from the remote cache
 mbx setup                  # cache future plain cargo commands locally
 ```
 

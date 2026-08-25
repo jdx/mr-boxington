@@ -37,8 +37,18 @@ enum Commands {
     Gc(GcArgs),
     /// Inspect the local store.
     Cache(CacheArgs),
+    /// Download predicted remote artifacts without running Cargo.
+    Prefetch(PrefetchArgs),
     #[usage(external_subcommand)]
     Cargo(Vec<String>),
+}
+
+#[derive(usage::Args)]
+#[usage(unknown_flags = "value", dont_delimit_trailing_values = true)]
+struct PrefetchArgs {
+    /// Cargo subcommand and arguments whose previous manifest should be warmed.
+    #[usage(value_name = "CARGO_ARGS", required = true)]
+    cargo_args: Vec<String>,
 }
 
 #[derive(usage::Args)]
@@ -84,7 +94,11 @@ enum CacheCommands {
 
 /// Parse the command line and run it.
 pub fn run() -> Result<ExitCode> {
-    let cli = Cli::parse();
+    let original = std::env::args_os().collect::<Vec<_>>();
+    let mut cli = Cli::parse();
+    if let Commands::Prefetch(args) = &mut cli.command {
+        args.cargo_args = original_prefetch_arguments(&original)?;
+    }
     let config = Config::load()?;
     match cli.command {
         Commands::Explain(args) => crate::explain::run(&config, &args.arguments()),
@@ -102,8 +116,67 @@ pub fn run() -> Result<ExitCode> {
             }
             CacheCommands::Stats => cache_stats(&config).map(|()| ExitCode::SUCCESS),
         },
+        Commands::Prefetch(args) => prefetch(&config, &args.cargo_args),
         Commands::Cargo(arguments) => cargo(&config, &arguments),
     }
+}
+
+fn original_prefetch_arguments(arguments: &[std::ffi::OsString]) -> Result<Vec<String>> {
+    let Some(index) = arguments
+        .iter()
+        .position(|argument| argument == std::ffi::OsStr::new("prefetch"))
+    else {
+        eyre::bail!("could not recover prefetch arguments");
+    };
+    arguments[index + 1..]
+        .iter()
+        .map(|argument| {
+            argument
+                .to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| eyre::eyre!("Cargo arguments must be valid UTF-8"))
+        })
+        .collect()
+}
+
+fn prefetch(config: &Config, arguments: &[String]) -> Result<ExitCode> {
+    validate_prefetch_config(config, policy::release_context())?;
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let working_dir = std::env::current_dir()?;
+    let roots = resolve_roots(&cargo, arguments, &working_dir);
+    let session_dir = tempfile::Builder::new().prefix("mbx-prefetch-").tempdir()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let stats = runtime.block_on(async {
+        let session = CacheSession::start(session_dir.path(), config).await?;
+        session.prefetch(&roots.workspace_root, arguments).await?;
+        session.finish().await
+    })?;
+    if stats.prefetch_runs == 0 {
+        println!("no recorded actions for this workspace and Cargo command");
+    } else {
+        println!(
+            "prefetched {} actions; {} downloaded and {} stored locally",
+            stats.prefetched_actions,
+            ByteSize::b(stats.downloaded_bytes).display().iec(),
+            ByteSize::b(stats.stored_bytes).display().iec()
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn validate_prefetch_config(config: &Config, release_context: bool) -> Result<()> {
+    if config.remote.url.is_none() {
+        eyre::bail!("remote prefetch requires remote.url or MBX_REMOTE_URL");
+    }
+    if !config.remote.mode.reads() {
+        eyre::bail!("remote prefetch requires a read-capable remote.mode");
+    }
+    if release_context {
+        eyre::bail!("remote prefetch is disabled in release contexts");
+    }
+    Ok(())
 }
 
 fn setup() -> Result<()> {

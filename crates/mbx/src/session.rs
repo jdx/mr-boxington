@@ -171,6 +171,13 @@ impl CacheSession {
         action_run
     }
 
+    /// Warm the recorded actions for a Cargo command without running Cargo.
+    pub async fn prefetch(&self, workspace_root: &Path, command: &[String]) -> Result<()> {
+        let identity = build_identity(workspace_root, command);
+        self.agent.prefetch_task(&identity).await?;
+        Ok(())
+    }
+
     /// Stop the agent and collect this session's statistics.
     pub async fn finish(&self) -> Result<AgentStats> {
         if let Some(shutdown) = self.shutdown.lock().unwrap().take() {
