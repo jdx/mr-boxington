@@ -8,7 +8,10 @@ use std::process::ExitCode;
 
 /// Run Cargo with a private bypass trace and explain its contents afterwards.
 pub fn run(config: &Config, arguments: &[String]) -> Result<ExitCode> {
-    run_with_retention(config, &RetentionSettings::default(), arguments)
+    let directory = tempfile::Builder::new().prefix("mbx-explain-").tempdir()?;
+    let log = directory.path().join("bypasses.tsv");
+    let status = crate::cli::cargo_with_bypass_log(config, arguments, Some(&log))?;
+    finish(&log, status)
 }
 
 pub(crate) fn run_with_retention(
@@ -24,6 +27,10 @@ pub(crate) fn run_with_retention(
         arguments,
         Some(&log),
     )?;
+    finish(&log, status)
+}
+
+fn finish(log: &Path, status: ExitCode) -> Result<ExitCode> {
     let records = read_records(&log)?;
     display(&records);
     Ok(status)
