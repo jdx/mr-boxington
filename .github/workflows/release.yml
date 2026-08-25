@@ -14,6 +14,11 @@ on:
       tag:
         required: true
         type: string
+    secrets:
+      CERTIFICATES_P12:
+        required: true
+      CERTIFICATES_P12_PASS:
+        required: true
   workflow_dispatch:
     inputs:
       tag:
@@ -65,6 +70,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Import macOS signing certificate
+        if: runner.os == 'macOS'
+        uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466 # v7
+        with:
+          p12-file-base64: ${{ secrets.CERTIFICATES_P12 }}
+          p12-password: ${{ secrets.CERTIFICATES_P12_PASS }}
+
       - name: Bootstrap mbx
         shell: bash
         run: |
@@ -95,6 +107,17 @@ jobs:
           CC_x86_64_unknown_linux_musl: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
         run: ./target/mbx-bootstrap/mbx${{ runner.os == 'Windows' && '.exe' || '' }} build --release --locked --package mbx --target ${{ matrix.target }}
+
+      - name: Sign macOS binary
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          IDENTITY: "Developer ID Application: Jeffrey Dickey (4993Y37DX6)"
+          BINARY: target/${{ matrix.target }}/release/${{ matrix.bin }}
+        run: |
+          codesign --force --sign "$IDENTITY" --options runtime --timestamp \
+            --prefix dev.jdx. "$BINARY"
+          codesign --verify --verbose=2 "$BINARY"
 
       - name: Check the binary runs
         # Every target but this one is native to its runner.
