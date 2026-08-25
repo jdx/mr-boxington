@@ -112,8 +112,8 @@ pub enum BypassReason {
         /// Zero-based index in the argument slice.
         index: usize,
     },
-    /// The invocation uses a response file, whose contents are not modeled.
-    #[error("rustc response files are not supported: {0}")]
+    /// A rustc response file could not be read or parsed exactly.
+    #[error("could not model rustc response file: {0}")]
     ResponseFile(String),
     /// A compiler flag is not modeled by this adapter version.
     #[error("rustc flag is not modeled by the cache adapter: {0}")]
@@ -301,7 +301,8 @@ impl RustcInvocation {
     /// rlib/rmeta tier plus binaries linked by compiler-bundled WebAssembly
     /// toolchains.
     pub fn parse(arguments: &[OsString]) -> Result<Self, BypassReason> {
-        Parser::new(arguments).parse()
+        let expanded = expand_response_files(arguments)?;
+        Parser::new(&expanded.arguments).parse()
     }
 
     /// Return the source input passed to rustc.
@@ -732,6 +733,73 @@ struct Parser<'a> {
     target: Option<String>,
 }
 
+struct ExpandedArguments {
+    arguments: Vec<OsString>,
+}
+
+#[derive(Default)]
+struct ResponseExpander {
+    shell_argfiles: bool,
+    next_is_unstable_option: bool,
+    arguments: Vec<OsString>,
+}
+
+impl ResponseExpander {
+    fn push(&mut self, argument: String) {
+        if self.next_is_unstable_option {
+            self.shell_argfiles |= argument == "shell-argfiles";
+            self.next_is_unstable_option = false;
+        } else if let Some(option) = argument.strip_prefix("-Z") {
+            if option.is_empty() {
+                self.next_is_unstable_option = true;
+            } else {
+                self.shell_argfiles |= option == "shell-argfiles";
+            }
+        }
+        self.arguments.push(argument.into());
+    }
+}
+
+/// Match rustc's argfile expansion: UTF-8, one option per line, no recursive
+/// expansion, with the nightly shell form enabled only after its `-Z` flag.
+fn expand_response_files(arguments: &[OsString]) -> Result<ExpandedArguments, BypassReason> {
+    let mut expanded = ResponseExpander::default();
+    for (index, argument) in arguments.iter().enumerate() {
+        let argument = argument
+            .to_str()
+            .ok_or(BypassReason::NonUtf8Argument { index })?;
+        let Some(argfile) = argument.strip_prefix('@') else {
+            expanded.push(argument.to_string());
+            continue;
+        };
+        let (path, shell) = match argfile.split_once(':') {
+            Some(("shell", path)) if expanded.shell_argfiles => (path, true),
+            _ => (argfile, false),
+        };
+        let contents = std::fs::read_to_string(path).map_err(|error| {
+            BypassReason::ResponseFile(format!("{}: {error}", Path::new(path).display()))
+        })?;
+        if shell {
+            let arguments = shlex::split(&contents).ok_or_else(|| {
+                BypassReason::ResponseFile(format!(
+                    "invalid shell-style arguments in {}",
+                    Path::new(path).display()
+                ))
+            })?;
+            for argument in arguments {
+                expanded.push(argument);
+            }
+        } else {
+            for argument in contents.lines() {
+                expanded.push(argument.to_string());
+            }
+        }
+    }
+    Ok(ExpandedArguments {
+        arguments: expanded.arguments,
+    })
+}
+
 impl<'a> Parser<'a> {
     fn new(arguments: &'a [OsString]) -> Self {
         Self {
@@ -755,9 +823,6 @@ impl<'a> Parser<'a> {
         while self.index < self.arguments.len() {
             let value = self.current()?.to_string();
             self.index += 1;
-            if value.starts_with('@') {
-                return Err(BypassReason::ResponseFile(value));
-            }
             if let Some(long) = value.strip_prefix("--") {
                 self.parse_long(long)?;
             } else if value.starts_with('-') && value != "-" {
@@ -931,6 +996,14 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_short(&mut self, value: &str) -> Result<(), BypassReason> {
+        if let Some(attached) = value.strip_prefix("-Z") {
+            let option = self.take_value("-Z", (!attached.is_empty()).then_some(attached))?;
+            if option == "shell-argfiles" {
+                self.parsed.push(Argument::Plain("-Zshell-argfiles".into()));
+                return Ok(());
+            }
+            return Err(BypassReason::UnknownFlag(format!("-Z{option}")));
+        }
         match value {
             // `-vV` is how cargo and build scripts ask for the verbose
             // version, so it is a query rather than a flag left unmodeled.
