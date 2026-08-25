@@ -5,6 +5,13 @@ on:
 
 permissions: {}
 
+# Superseded pushes to a pull request have nothing to say: this only reads the
+# workflow files, so cancelling an in-flight run costs a result nobody wanted
+# and saves the runner. Same pattern as ci.yml.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   zizmor:
     runs-on: ubuntu-latest
