@@ -8,8 +8,11 @@ git_release_enable = true
 # later. release-plz.yml undrafts it once the upload succeeds.
 git_release_draft = true
 
+# Every crate shares one version: a single group is what makes release-plz
+# bump them together instead of computing a separate number for each.
 [[package]]
 name = "mbx"
+version_group = "mbx"
 publish = true
 # release-plz would otherwise tag the binary crate `mbx-vX.Y.Z`. The README's
 # install URLs are written against `v{version}`, and this is the tag people
@@ -19,6 +22,7 @@ git_release_enable = true
 
 [[package]]
 name = "mbx-cache-core"
+version_group = "mbx"
 publish = true
 # A library: crates.io is its distribution. A GitHub release for it would carry
 # no assets and would sit drafted forever, since only the `mbx` tag is undrafted.
@@ -26,10 +30,12 @@ git_release_enable = false
 
 [[package]]
 name = "mbx-cache-protocol"
+version_group = "mbx"
 publish = true
 git_release_enable = false
 
 [[package]]
 name = "mbx-cache-rustc"
+version_group = "mbx"
 publish = true
 git_release_enable = false
