@@ -1,3 +1,38 @@
+<script setup>
+import { onMounted, onUnmounted, ref } from "vue";
+
+// A sample of the savings pool, with numbers consistent with the transcript
+// below (191 hits; the cold build took 3m 41s, the warm one 4.9s). The real
+// line is drawn at random per build; rotating here is how a static page shows
+// that it does not repeat itself.
+const quips = [
+  "mbx: served 191 compilations from cache; rustc showed up ready to do 3m 36s of work and was sent home",
+  "mbx: 6h 14m of compiling skipped across 87 builds. rustc suspects nothing.",
+  "mbx: 47.0 GiB of build debris binned so far. cargo clean remains unemployed.",
+  "mbx: your deleted worktrees left 41.0 GiB behind. left. past tense.",
+  "mbx: every checkout believes it owns 22.0 GiB of outputs. the disk keeps one copy and says nothing.",
+  "mbx: 4312 compilations on file. the box remembers.",
+  "mbx: rustc believes it compiled everything. it is down 6h 14m across 87 builds. let it believe.",
+  "mbx: 22.0 GiB in every checkout, 22.0 GiB on disk. arithmetic declined to comment.",
+];
+// Server and first client render must agree, so rotation starts on mount --
+// and not at all for someone who asked for reduced motion, matching the
+// entrance animations this component already suppresses for them.
+const quip = ref(quips[0]);
+let at = 0;
+let timer;
+onMounted(() => {
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    return;
+  }
+  timer = setInterval(() => {
+    at = (at + 1) % quips.length;
+    quip.value = quips[at];
+  }, 4000);
+});
+onUnmounted(() => clearInterval(timer));
+</script>
+
 <template>
   <section class="MbxDemo" aria-label="mbx across two checkouts">
     <div class="window">
@@ -8,7 +43,7 @@
         <span class="label">two checkouts · one cache</span>
       </div>
       <div
-        aria-label="Terminal transcript: the first checkout compiles every crate in 3 minutes 41 seconds; a fresh worktree finishes in 4.9 seconds with 191 cache hits"
+        aria-label="Terminal transcript: the first checkout compiles every crate in 3 minutes 41 seconds; a fresh worktree finishes in 4.9 seconds with 191 cache hits, and mbx adds one deadpan line about what the cache has saved over time"
         class="screen"
         role="img"
       >
@@ -22,6 +57,7 @@
         <div class="line"><span class="path">~/review</span> <span class="prompt">$</span> <span class="cmd">mbx build</span></div>
         <div class="line"><span class="verb">    Finished</span> `dev` profile [unoptimized + debuginfo] target(s) in <span class="time fast">4.9s</span></div>
         <div class="line cache">cache: 191 hits, 3 misses, 187 prefetched; 0 B downloaded, 0 B uploaded, 412.6 MiB stored locally</div>
+        <div class="line quip">{{ quip }}</div>
         <div class="line"><span class="path">~/review</span> <span class="prompt">$</span> <span aria-hidden="true" class="cursor"></span></div>
       </div>
     </div>
@@ -106,6 +142,7 @@
 .line:nth-child(9) { animation-delay: 2.15s; }
 .line:nth-child(10) { animation-delay: 2.35s; }
 .line:nth-child(11) { animation-delay: 2.6s; }
+.line:nth-child(12) { animation-delay: 2.85s; }
 
 .gap {
   height: 0.9em;
@@ -149,8 +186,12 @@
   color: var(--vp-c-brand-1);
 }
 
+.quip {
+  color: rgb(var(--mbx-amber-rgb) / 0.9);
+}
+
 .cursor {
-  animation: mbx-line-in 0.35s ease 2.6s both, mbx-blink 1.1s steps(1) 2.95s infinite;
+  animation: mbx-line-in 0.35s ease 2.85s both, mbx-blink 1.1s steps(1) 3.2s infinite;
   background: var(--vp-c-brand-1);
   display: inline-block;
   height: 1.1em;

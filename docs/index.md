@@ -34,8 +34,16 @@ features:
     link: /github-actions
   - icon: "🧹"
     title: Prune automatically
-    details: Budgets scale with the disk. Managed target directories go when their checkout disappears, when they sit unused for 30 days, or when they outgrow their share — and mbx tells you what that saved.
+    details: Budgets scale with the disk. Managed target directories go when their checkout disappears, when they sit unused for 30 days, or when they outgrow their share.
     link: /managed-targets
+  - icon: "🧾"
+    title: Keeps receipts
+    details: One line after a build says what the cache was worth — compilations skipped, hours refunded, gigabytes binned. Deadpan included; savings = "plain" if your logs must keep a straight face.
+    link: /getting-started#read-the-result
+  - icon: "🔍"
+    title: Never lies about a hit
+    details: mbx reports hits, misses, what it could not look up, and what it deliberately bypassed. A high hit rate cannot hide work that never entered the cache.
+    link: /cache-results
 ---
 
 ::: warning Experimental
