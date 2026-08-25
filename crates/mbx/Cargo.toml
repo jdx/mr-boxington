@@ -45,6 +45,9 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Threading",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 default = ["rustls"]
 native-tls = ["mbx-cache-core/native-tls", "mbx-cache-rustc/native-tls"]

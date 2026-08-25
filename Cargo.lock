@@ -1142,6 +1142,7 @@ dependencies = [
  "env_logger",
  "eyre",
  "filetime",
+ "libc",
  "log",
  "mbx-cache-core",
  "mbx-cache-rustc",

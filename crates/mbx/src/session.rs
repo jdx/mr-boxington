@@ -897,7 +897,7 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
                 );
                 match (status.code(), status.signal()) {
                     (Some(code), _) => ExitCode::from(code as u8),
-                    (None, Some(signal)) => ExitCode::from(128_u8.saturating_add(signal as u8)),
+                    (None, Some(signal)) => propagate_signal(signal),
                     (None, None) => ExitCode::FAILURE,
                 }
             }
@@ -941,6 +941,19 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
             }
         }
     }
+}
+
+#[cfg(unix)]
+fn propagate_signal(signal: i32) -> ! {
+    // Match the old `CommandExt::exec` path: supervisors must observe signal
+    // termination, not a conventional 128 + signal exit code.
+    // SAFETY: `signal` came from `ExitStatusExt::signal`, and these libc calls
+    // accept any signal number while touching no Rust-managed memory.
+    unsafe {
+        libc::signal(signal, libc::SIG_DFL);
+        libc::raise(signal);
+    }
+    std::process::abort()
 }
 
 fn crate_name_argument(arguments: &[OsString]) -> Option<String> {

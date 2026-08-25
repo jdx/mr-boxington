@@ -75,6 +75,24 @@ fn cargo() -> std::ffi::OsString {
     std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into())
 }
 
+#[cfg(unix)]
+#[test]
+fn transparent_rustc_preserves_signal_termination() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let shim =
+        mbx::session::install_shim(Path::new(env!("CARGO_BIN_EXE_mbx")), directory.path()).unwrap();
+
+    let status = Command::new(shim)
+        .arg("/bin/sh")
+        .args(["-c", "kill -TERM $$"])
+        .status()
+        .unwrap();
+
+    assert_eq!(status.signal(), Some(libc::SIGTERM));
+}
+
 /// Build `project` against `store`, returning the run's statistics.
 fn build(project: &Path, store: &Path, report: &Path) -> serde_json::Value {
     build_with(project, store, report, &[]).0

@@ -79,19 +79,23 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
         action_lookup_attempted = true;
         match restore_candidates(&candidates, &outputs, &discovered, !verify) {
             Ok(Some((action, mut cached))) => {
-                let timing =
-                    prediction_timing(rustc, &invocation, &action, &working_dir, &portable)
-                        .unwrap_or_default();
-                cached.restore.avoided_compiler_duration_ns = timing.duration_ns;
-                record_prediction(
-                    rustc,
-                    &invocation,
-                    &action,
-                    &discovered,
-                    &working_dir,
-                    &portable,
-                    &timing,
-                );
+                match prediction_timing(rustc, &invocation, &working_dir, &portable) {
+                    Ok(timing) => {
+                        cached.restore.avoided_compiler_duration_ns = timing.duration_ns;
+                        record_prediction(
+                            rustc,
+                            &invocation,
+                            &action,
+                            &discovered,
+                            &working_dir,
+                            &portable,
+                            &timing,
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("mbx warning: compiler timing was not refreshed: {error:#}");
+                    }
+                }
                 if verify {
                     verification = Some(cached);
                 } else {
@@ -407,7 +411,6 @@ fn record_prediction(
 fn prediction_timing(
     rustc: &OsStr,
     invocation: &RustcInvocation,
-    action: &CacheDigest,
     working_dir: &Path,
     portable: &Portable,
 ) -> Result<CompileTiming> {
@@ -416,16 +419,30 @@ fn prediction_timing(
     let task = prediction_task(&invocation_digest);
     let responses = session::request_agent(&[AgentRequest::FindActionPrediction {
         task,
-        invocation: invocation_digest,
+        invocation: invocation_digest.clone(),
     }])?;
-    let Some(AgentResponse::ActionPrediction {
-        prediction: Some(prediction),
-    }) = responses.into_iter().next()
-    else {
-        return Ok(CompileTiming::default());
+    let Some(response) = responses.into_iter().next() else {
+        bail!("cache agent did not return an action prediction response");
     };
-    if prediction.adapter != "rustc" || prediction.action != *action {
-        return Ok(CompileTiming::default());
+    let prediction = match response {
+        AgentResponse::ActionPrediction {
+            prediction: Some(prediction),
+        } => prediction,
+        AgentResponse::ActionPrediction { prediction: None } => {
+            return Ok(CompileTiming::default());
+        }
+        AgentResponse::Error { message } => bail!(message),
+        _ => bail!("cache agent returned an unexpected action prediction response"),
+    };
+    decode_prediction_timing(&prediction, &invocation_digest)
+}
+
+fn decode_prediction_timing(
+    prediction: &ActionPrediction,
+    invocation: &CacheDigest,
+) -> Result<CompileTiming> {
+    if prediction.adapter != "rustc" || prediction.invocation != *invocation {
+        bail!("cache agent returned an incompatible rustc timing prediction");
     }
     let timing: RustcInputPrediction = serde_json::from_str(&prediction.payload)?;
     if !matches!(timing.version, 1 | 2)
@@ -433,7 +450,7 @@ fn prediction_timing(
         || timing.crate_name.contains(['\0', '\n', '\r'])
         || String::from_utf8(canonical_json(&timing)?)? != prediction.payload
     {
-        return Ok(CompileTiming::default());
+        bail!("cache agent returned an invalid rustc timing prediction");
     }
     Ok(CompileTiming {
         crate_name: timing.crate_name,
