@@ -116,6 +116,42 @@ fn verification_reports_a_corrupt_object() {
 }
 
 #[test]
+fn inspection_ignores_in_progress_staging_paths() {
+    let directory = tempfile::tempdir().unwrap();
+    let action = store_result(directory.path(), "compile", &[]);
+    let cas_path = LocalCas::new(directory.path()).path_for(&action).unwrap();
+    let result_path = LocalActionCache::new(directory.path())
+        .path_for(&action)
+        .unwrap();
+    let staging_file = tempfile::NamedTempFile::new_in(cas_path.parent().unwrap()).unwrap();
+    std::fs::write(staging_file.path(), vec![b'x'; 1_024]).unwrap();
+    let staging_directory = tempfile::tempdir_in(result_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        staging_directory.path().join("result.json"),
+        vec![b'x'; 2_048],
+    )
+    .unwrap();
+
+    let entries = largest(directory.path(), 10).unwrap();
+    let outcome = verify(directory.path()).unwrap();
+
+    assert_eq!(entries.len(), 3);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.path != staging_file.path())
+    );
+    assert!(
+        entries
+            .iter()
+            .all(|entry| !entry.path.starts_with(staging_directory.path()))
+    );
+    assert_eq!(outcome.checked_objects, 2);
+    assert_eq!(outcome.checked_action_results, 1);
+    assert!(outcome.problems.is_empty());
+}
+
+#[test]
 fn attributes_reachable_cache_bytes_to_a_workspace() {
     let directory = tempfile::tempdir().unwrap();
     let workspace = directory.path().join("workspace");

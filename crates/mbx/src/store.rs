@@ -186,15 +186,20 @@ pub fn projects(store: &Path) -> Result<Vec<ProjectUsage>> {
 /// Return the largest blobs and action-result records in descending order.
 pub fn largest(store: &Path, limit: usize) -> Result<Vec<LargestEntry>> {
     let mut entries = Vec::new();
-    for (kind, root) in [
-        ("object", store.join(CAS_DIR)),
-        ("action result", store.join(ACTION_RESULTS_DIR)),
+    for (kind, root, action_result) in [
+        ("object", store.join(CAS_DIR), false),
+        ("action result", store.join(ACTION_RESULTS_DIR), true),
     ] {
-        entries.extend(walk_files(&root)?.into_iter().map(|entry| LargestEntry {
-            kind,
-            path: entry.path,
-            bytes: entry.size,
-        }));
+        entries.extend(
+            walk_files(&root)?
+                .into_iter()
+                .filter(|entry| addressed_digest(store, &entry.path, action_result).is_some())
+                .map(|entry| LargestEntry {
+                    kind,
+                    path: entry.path,
+                    bytes: entry.size,
+                }),
+        );
     }
     entries.sort_by(|left, right| {
         right
@@ -212,21 +217,19 @@ pub fn verify(store: &Path) -> Result<VerifyOutcome> {
     let action_cache = mbx_cache_core::LocalActionCache::new(store);
     let mut outcome = VerifyOutcome::default();
     for entry in walk_files(&store.join(CAS_DIR))? {
-        outcome.checked_objects += 1;
-        let Some(digest) = digest_from_path(&entry.path, false) else {
-            outcome.problems.push(entry.path);
+        let Some(digest) = addressed_digest(store, &entry.path, false) else {
             continue;
         };
+        outcome.checked_objects += 1;
         if !matches!(cas.find(&digest), Ok(Some(_))) {
             outcome.problems.push(entry.path);
         }
     }
     for entry in walk_files(&store.join(ACTION_RESULTS_DIR))? {
-        outcome.checked_action_results += 1;
-        let Some(digest) = digest_from_path(&entry.path, true) else {
-            outcome.problems.push(entry.path);
+        let Some(digest) = addressed_digest(store, &entry.path, true) else {
             continue;
         };
+        outcome.checked_action_results += 1;
         if !matches!(action_cache.find(&digest), Ok(Some(_)))
             || action_result_is_dangling(&cas, &entry.path)?
         {
@@ -763,6 +766,18 @@ fn digest_from_path(path: &Path, action_result: bool) -> Option<CacheDigest> {
     };
     digest.validate().ok()?;
     Some(digest)
+}
+
+fn addressed_digest(store: &Path, path: &Path, action_result: bool) -> Option<CacheDigest> {
+    let digest = digest_from_path(path, action_result)?;
+    let canonical = if action_result {
+        mbx_cache_core::LocalActionCache::new(store)
+            .path_for(&digest)
+            .ok()?
+    } else {
+        LocalCas::new(store).path_for(&digest).ok()?
+    };
+    (canonical == path).then_some(digest)
 }
 
 fn cached_tree_bytes(cache: &mut BTreeMap<PathBuf, u64>, root: &Path) -> u64 {
