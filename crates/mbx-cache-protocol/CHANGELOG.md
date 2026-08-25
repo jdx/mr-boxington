@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/jdx/mr-boxington/releases/tag/mbx-cache-protocol-v0.4.0) - 2026-08-25
+
+### Added
+
+- *(protocol)* share remote cache contract ([#68](https://github.com/jdx/mr-boxington/pull/68))
+
 ### Added
 
 - Publish the versioned remote-cache wire types, capability schema, media types,

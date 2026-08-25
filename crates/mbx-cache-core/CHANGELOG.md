@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.3.0...mbx-cache-core-v0.4.0) - 2026-08-25
+
+### Added
+
+- add installation doctor ([#57](https://github.com/jdx/mr-boxington/pull/57))
+- report compiler time saved and spent ([#59](https://github.com/jdx/mr-boxington/pull/59))
+- add explicit remote prefetch ([#64](https://github.com/jdx/mr-boxington/pull/64))
+- *(protocol)* share remote cache contract ([#68](https://github.com/jdx/mr-boxington/pull/68))
+- cache plain cargo commands after setup ([#40](https://github.com/jdx/mr-boxington/pull/40))
+
+### Other
+
+- give every crate one synchronized version ([#86](https://github.com/jdx/mr-boxington/pull/86))
+- fuzz untrusted parser inputs ([#38](https://github.com/jdx/mr-boxington/pull/38))
+- enforce protocol and API compatibility ([#43](https://github.com/jdx/mr-boxington/pull/43))
+- establish compatibility and security policy ([#37](https://github.com/jdx/mr-boxington/pull/37))
+- move inline tests into focused modules ([#42](https://github.com/jdx/mr-boxington/pull/42))
+- define published Rust API surface ([#41](https://github.com/jdx/mr-boxington/pull/41))
+- *(cache)* avoid rereading reflinked outputs ([#44](https://github.com/jdx/mr-boxington/pull/44))
+
 ### Changed
 
 - *(protocol)* consume remote wire types and constants from `mbx-cache-protocol`

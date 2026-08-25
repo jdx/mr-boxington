@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.3.0...mbx-cache-rustc-v0.4.0) - 2026-08-25
+
+### Added
+
+- report compiler time saved and spent ([#59](https://github.com/jdx/mr-boxington/pull/59))
+- support rustc response files ([#65](https://github.com/jdx/mr-boxington/pull/65))
+- cache compiler-bundled WebAssembly links ([#66](https://github.com/jdx/mr-boxington/pull/66))
+- *(protocol)* share remote cache contract ([#68](https://github.com/jdx/mr-boxington/pull/68))
+- cache compiler-linked wasm outputs ([#45](https://github.com/jdx/mr-boxington/pull/45))
+- cache plain cargo commands after setup ([#40](https://github.com/jdx/mr-boxington/pull/40))
+
+### Other
+
+- give every crate one synchronized version ([#86](https://github.com/jdx/mr-boxington/pull/86))
+- establish compatibility and security policy ([#37](https://github.com/jdx/mr-boxington/pull/37))
+- move inline tests into focused modules ([#42](https://github.com/jdx/mr-boxington/pull/42))
+- define published Rust API surface ([#41](https://github.com/jdx/mr-boxington/pull/41))
+
 ## [0.2.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.1.0...mbx-cache-rustc-v0.2.0) - 2026-08-22
 
 ### Added
