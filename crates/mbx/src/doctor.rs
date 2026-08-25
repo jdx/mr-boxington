@@ -8,14 +8,15 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 enum Severity {
     Pass,
     Warn,
     Fail,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
 struct Check {
     severity: Severity,
     name: &'static str,
@@ -50,10 +51,18 @@ impl Check {
 
 /// Run all diagnostics and fail only when mbx cannot operate as configured.
 pub fn run(config: &Config) -> Result<ExitCode> {
+    run_formatted(config, false)
+}
+
+pub(crate) fn run_formatted(config: &Config, json: bool) -> Result<ExitCode> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     let checks = runtime.block_on(check(config));
+    render(&checks, json)
+}
+
+fn render(checks: &[Check], json: bool) -> Result<ExitCode> {
     let failures = checks
         .iter()
         .filter(|check| check.severity == Severity::Fail)
@@ -62,15 +71,27 @@ pub fn run(config: &Config) -> Result<ExitCode> {
         .iter()
         .filter(|check| check.severity == Severity::Warn)
         .count();
-    for check in &checks {
-        let marker = match check.severity {
-            Severity::Pass => "ok",
-            Severity::Warn => "warn",
-            Severity::Fail => "FAIL",
-        };
-        println!("{marker:>4}  {:<12} {}", check.name, check.detail);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&DoctorReport {
+                version: 1,
+                checks,
+                failures,
+                warnings,
+            })?
+        );
+    } else {
+        for check in checks {
+            let marker = match check.severity {
+                Severity::Pass => "ok",
+                Severity::Warn => "warn",
+                Severity::Fail => "FAIL",
+            };
+            println!("{marker:>4}  {:<12} {}", check.name, check.detail);
+        }
+        println!("\n{failures} failures, {warnings} warnings");
     }
-    println!("\n{failures} failures, {warnings} warnings");
     Ok(if failures == 0 {
         ExitCode::SUCCESS
     } else {
@@ -78,15 +99,19 @@ pub fn run(config: &Config) -> Result<ExitCode> {
     })
 }
 
-pub(crate) fn run_loaded(config: Result<Config>) -> Result<ExitCode> {
+pub(crate) fn run_loaded(config: Result<Config>, json: bool) -> Result<ExitCode> {
     match config {
-        Ok(config) => run(&config),
-        Err(error) => {
-            println!("FAIL  {:<12} {error:#}", "config");
-            println!("\n1 failures, 0 warnings");
-            Ok(ExitCode::FAILURE)
-        }
+        Ok(config) => run_formatted(&config, json),
+        Err(error) => render(&[Check::fail("config", format!("{error:#}"))], json),
     }
+}
+
+#[derive(serde::Serialize)]
+struct DoctorReport<'a> {
+    version: u8,
+    checks: &'a [Check],
+    failures: usize,
+    warnings: usize,
 }
 
 async fn check(config: &Config) -> Vec<Check> {

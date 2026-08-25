@@ -28,7 +28,7 @@ struct Cli {
 #[derive(usage::Subcommands)]
 enum Commands {
     /// Check the local installation, cache, toolchain, and remote connection.
-    Doctor,
+    Doctor(JsonArgs),
     /// Run a Cargo command and explain every compilation mbx cannot cache.
     Explain(ExplainArgs),
     /// Install a persistent rustc wrapper for plain Cargo commands.
@@ -98,6 +98,16 @@ struct GcArgs {
     /// configured budget.
     #[usage(long, value_name = "SIZE")]
     max_size: Option<ByteSize>,
+    /// Print a stable machine-readable report.
+    #[usage(long)]
+    json: bool,
+}
+
+#[derive(usage::Args)]
+struct JsonArgs {
+    /// Print a stable machine-readable report.
+    #[usage(long)]
+    json: bool,
 }
 
 #[derive(usage::Args)]
@@ -128,9 +138,9 @@ struct CacheArgs {
 #[derive(usage::Subcommands)]
 enum CacheCommands {
     /// Print the store directory.
-    Dir,
+    Dir(JsonArgs),
     /// Summarize what the store holds.
-    Stats,
+    Stats(JsonArgs),
 }
 
 /// Parse the command line and run it.
@@ -140,26 +150,36 @@ pub fn run() -> Result<ExitCode> {
     if let Commands::Prefetch(args) = &mut cli.command {
         args.cargo_args = original_prefetch_arguments(&original)?;
     }
-    if matches!(&cli.command, Commands::Doctor) {
-        return crate::doctor::run_loaded(Config::load());
+    if let Commands::Doctor(args) = &cli.command {
+        return crate::doctor::run_loaded(Config::load(), args.json);
     }
     let config = Config::load()?;
     match cli.command {
-        Commands::Doctor => unreachable!("doctor was handled before configuration loading"),
+        Commands::Doctor(_) => unreachable!("doctor was handled before configuration loading"),
         Commands::Explain(args) => crate::explain::run(&config, &args.arguments()),
         Commands::Setup(args) => setup(args.action()?),
         Commands::Gc(args) => gc(
             &config,
             args.max_size
                 .map_or(config.gc.max_bytes, |requested| requested.as_u64()),
+            args.json,
         )
         .map(|()| ExitCode::SUCCESS),
         Commands::Cache(args) => match args.command {
-            CacheCommands::Dir => {
-                println!("{}", config.store_dir().display());
+            CacheCommands::Dir(args) => {
+                if args.json {
+                    print_json(&CacheDirReport {
+                        version: 1,
+                        store: config.store_dir().display().to_string(),
+                    })?;
+                } else {
+                    println!("{}", config.store_dir().display());
+                }
                 Ok(ExitCode::SUCCESS)
             }
-            CacheCommands::Stats => cache_stats(&config).map(|()| ExitCode::SUCCESS),
+            CacheCommands::Stats(args) => {
+                cache_stats(&config, args.json).map(|()| ExitCode::SUCCESS)
+            }
         },
         Commands::Prefetch(args) => prefetch(&config, &args.cargo_args),
         Commands::Cargo(arguments) => cargo(&config, &arguments),
@@ -615,7 +635,7 @@ fn exit_code(status: std::process::ExitStatus) -> ExitCode {
     }
 }
 
-fn gc(config: &Config, max_bytes: u64) -> Result<()> {
+fn gc(config: &Config, max_bytes: u64, json: bool) -> Result<()> {
     let store = config.store_dir();
     let outcome = store::gc(&store, max_bytes);
     // Independent collections: a broken action store must not prevent the
@@ -625,7 +645,7 @@ fn gc(config: &Config, max_bytes: u64) -> Result<()> {
         Ok(outcome) => outcome,
         Err(error) => {
             match pruned {
-                Ok(pruned) if pruned.removed_views > 0 => {
+                Ok(pruned) if !json && pruned.removed_views > 0 => {
                     println!("{}", target_removals(&pruned));
                 }
                 Ok(_) => {}
@@ -636,18 +656,41 @@ fn gc(config: &Config, max_bytes: u64) -> Result<()> {
             return Err(error);
         }
     };
-    println!("{}", evictions(&outcome));
+    if json {
+        let pruned = pruned?;
+        print_json(&GcReport {
+            version: 1,
+            max_bytes,
+            action_store: GcActionStoreReport {
+                removed_objects: outcome.removed_objects,
+                removed_action_results: outcome.removed_action_results,
+                removed_checkout_records: outcome.removed_checkout_records,
+                removed_bytes: outcome.removed_bytes,
+                remaining_bytes: outcome.remaining_bytes,
+            },
+            targets: GcTargetReport {
+                removed_directories: pruned.removed_views,
+                removed_bytes: pruned.removed_bytes,
+            },
+        })?;
+    } else {
+        print_gc_store_outcome(&outcome);
+        let pruned = pruned?;
+        if pruned.removed_views > 0 {
+            println!("{}", target_removals(&pruned));
+        }
+    }
+    Ok(())
+}
+
+fn print_gc_store_outcome(outcome: &store::GcOutcome) {
+    println!("{}", evictions(outcome));
     if outcome.removed_checkout_records > 0 {
         println!(
             "dropped {} stale checkout records",
             outcome.removed_checkout_records
         );
     }
-    let pruned = pruned?;
-    if pruned.removed_views > 0 {
-        println!("{}", target_removals(&pruned));
-    }
-    Ok(())
 }
 
 /// One line describing the target directories a sweep freed.
@@ -714,9 +757,25 @@ fn prune_targets(config: &Config) {
     }
 }
 
-fn cache_stats(config: &Config) -> Result<()> {
+fn cache_stats(config: &Config, json: bool) -> Result<()> {
     let store = config.store_dir();
     let stats = store::stats(&store)?;
+    if json {
+        let views = target::stats(&config.target.root)?;
+        return print_json(&CacheStatsReport {
+            version: 1,
+            store: store.display().to_string(),
+            objects: stats.objects,
+            object_bytes: stats.object_bytes,
+            action_results: stats.action_results,
+            action_result_bytes: stats.action_result_bytes,
+            total_bytes: stats.total_bytes(),
+            live_checkouts: stats.live_checkouts,
+            stale_checkouts: stats.stale_checkouts,
+            target_directories: views.views,
+            target_bytes: views.bytes,
+        });
+    }
     println!("store: {}", store.display());
     println!(
         "objects: {} ({})",
@@ -742,6 +801,55 @@ fn cache_stats(config: &Config) -> Result<()> {
         views.views,
         ByteSize::b(views.bytes).display().iec()
     );
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct CacheDirReport {
+    version: u8,
+    store: String,
+}
+
+#[derive(serde::Serialize)]
+struct CacheStatsReport {
+    version: u8,
+    store: String,
+    objects: u64,
+    object_bytes: u64,
+    action_results: u64,
+    action_result_bytes: u64,
+    total_bytes: u64,
+    live_checkouts: u64,
+    stale_checkouts: u64,
+    target_directories: u64,
+    target_bytes: u64,
+}
+
+#[derive(serde::Serialize)]
+struct GcReport {
+    version: u8,
+    max_bytes: u64,
+    action_store: GcActionStoreReport,
+    targets: GcTargetReport,
+}
+
+#[derive(serde::Serialize)]
+struct GcActionStoreReport {
+    removed_objects: u64,
+    removed_action_results: u64,
+    removed_checkout_records: u64,
+    removed_bytes: u64,
+    remaining_bytes: u64,
+}
+
+#[derive(serde::Serialize)]
+struct GcTargetReport {
+    removed_directories: u64,
+    removed_bytes: u64,
+}
+
+fn print_json(value: &impl serde::Serialize) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }
 
