@@ -499,6 +499,17 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
     config.incremental = incremental;
     let config = &config;
 
+    // Before the prompt below, so the offer to replace an existing `target/`
+    // arrives after the explanation of what a managed one is for. One existence
+    // check, and only on the cargo path.
+    if !cargo_help_requested(arguments) && !was_explained(&config.store_dir()) {
+        // Probed rather than assumed, and probed only on the one run that
+        // will say something about it.
+        let reflinks = crate::util::reflinks_work(&config.cache_dir);
+        crate::session::note(&first_run_notice(config, retention, reflinks));
+        mark_explained(&config.store_dir());
+    }
+
     let migrate_existing = prompt_to_manage_existing_target(config, &roots, arguments)?;
     // Placed before the session starts, because the target directory is what
     // the shim maps out of its cache keys and it has to be the one cargo will
@@ -636,6 +647,97 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
         crate::session::note(&line);
     }
     status
+}
+
+/// Marks that this machine has been told what mbx set up.
+///
+/// A stamp of its own rather than a side effect of some other file: whether to
+/// explain mbx and whether to count a run's savings are unrelated questions,
+/// and answering both from one file forces every change to one to reason about
+/// the other.
+const NOTICE_STAMP: &str = "notice/v1/explained";
+
+fn was_explained(store: &Path) -> bool {
+    store.join(NOTICE_STAMP).exists()
+}
+
+/// Written immediately after the notice prints, so a build that fails later
+/// does not explain itself again.
+fn mark_explained(store: &Path) {
+    if let Err(error) = crate::util::write_atomic(&store.join(NOTICE_STAMP), b"") {
+        // Worth one line at debug: the cost is a repeated notice, and a store
+        // this cannot write to has larger problems than that.
+        log::debug!("the first-run notice was not recorded: {error}");
+    }
+}
+
+/// What mbx has arranged on this machine, said once.
+///
+/// A cache that manages its own disk should say so before it starts deleting
+/// things, and the numbers it prints are the resolved ones rather than the
+/// documented ones: budgets scale with the disk, so a fixed sentence here would
+/// be wrong on most machines. A limit somebody turned off is left unmentioned
+/// rather than described.
+fn first_run_notice(config: &Config, retention: &RetentionSettings, reflinks: bool) -> String {
+    let mut lines =
+        vec!["mbx: first build on this machine -- here is the arrangement:".to_string()];
+    // Collection is what the rest of this describes, so a machine that turned
+    // it off is told what it has instead of what it does not.
+    if config.gc.auto {
+        lines.push(format!(
+            "mbx:   compiled work is cached once in {} and shared with every checkout and worktree; the store sweeps itself back to {}",
+            config.cache_dir.display(),
+            ByteSize::b(config.gc.max_bytes).display().iec(),
+        ));
+    } else {
+        lines.push(format!(
+            "mbx:   compiled work is cached once in {} and shared with every checkout and worktree; automatic collection is off, so `mbx gc` is the only thing that reclaims it",
+            config.cache_dir.display(),
+        ));
+    }
+    // Only when a probe just proved it: this is a promise about what the
+    // user's disk will do, and a machine on ext4 must not be promised
+    // sharing that every restore will quietly turn into a copy.
+    if reflinks {
+        lines.push(
+            "mbx:   this filesystem can reflink, so outputs land in target/ without copying -- many checkouts, one copy on disk"
+                .to_string(),
+        );
+    }
+    if config.target.views && config.gc.auto {
+        let mut reasons = vec!["their checkout disappears".to_string()];
+        if let Some(age) = retention.target_max_age {
+            reasons.push(format!(
+                "they sit unused for {}",
+                crate::util::format_span(age)
+            ));
+        }
+        if let Some(bytes) = retention.target_max_bytes {
+            reasons.push(format!(
+                "they together outgrow {}",
+                ByteSize::b(bytes).display().iec()
+            ));
+        }
+        lines.push(format!(
+            "mbx:   target/ directories are managed and collected when {}",
+            join_clauses(&reasons),
+        ));
+    }
+    lines.push(
+        "mbx:   nothing else to run; `mbx gc --dry-run` previews a cleanup and every cap is configurable".to_string(),
+    );
+
+    lines.join("\n")
+}
+
+/// Join reasons as prose: "a", "a or b", "a, b, or c".
+fn join_clauses(clauses: &[String]) -> String {
+    match clauses {
+        [] => String::new(),
+        [only] => only.clone(),
+        [first, second] => format!("{first} or {second}"),
+        [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
+    }
 }
 
 /// Offer to replace an existing default target directory with a managed one.
