@@ -141,6 +141,18 @@ fn leaves_a_store_within_budget_alone() {
 }
 
 #[test]
+fn dry_run_reports_evictions_without_removing_objects() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    let digest = store_object(store, b"kept for now");
+
+    let outcome = gc_dry_run(store, 0).unwrap();
+
+    assert_eq!(outcome.removed_objects, 1);
+    assert!(LocalCas::new(store).find(&digest).unwrap().is_some());
+}
+
+#[test]
 fn a_blocked_unrooted_object_does_not_cost_a_rooted_one() {
     let locked = PathBuf::from("locked-unrooted");
     let removable = PathBuf::from("removable-unrooted");
@@ -516,6 +528,31 @@ fn sweeps_only_once_within_the_interval() {
             .is_some(),
         "a zero interval always sweeps"
     );
+}
+
+#[test]
+fn concurrent_callers_claim_only_one_sweep() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(directory.path().to_path_buf());
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let callers = (0..8)
+        .map(|_| {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                claim_sweep(&store, Duration::from_secs(3600)).unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let claimed = callers
+        .into_iter()
+        .map(|caller| caller.join().unwrap())
+        .filter(|claimed| *claimed)
+        .count();
+
+    assert_eq!(claimed, 1);
 }
 
 #[test]

@@ -90,6 +90,12 @@ struct RawTarget {
     /// Managed target root.
     #[usage(env = "MBX_TARGET_ROOT", default_note = "<cache_dir>/targets")]
     root: Option<PathBuf>,
+    /// Managed-target budget. Live views are collected oldest-first when set.
+    #[usage(env = "MBX_TARGET_MAX_SIZE")]
+    max_size: Option<String>,
+    /// Collect live managed targets that have not been used this long.
+    #[usage(env = "MBX_TARGET_MAX_AGE", ty = "duration")]
+    max_age: Option<String>,
 }
 
 #[derive(Debug, usage::Config)]
@@ -101,6 +107,9 @@ struct RawGc {
     /// Action-store budget.
     #[usage(env = "MBX_GC_MAX_SIZE", default = "20GiB")]
     max_size: String,
+    /// Combined action-store and managed-target budget.
+    #[usage(env = "MBX_GC_MAX_TOTAL_SIZE")]
+    max_total_size: Option<String>,
     /// Minimum interval between automatic sweeps.
     #[usage(env = "MBX_GC_INTERVAL", default = "1h", ty = "duration")]
     interval: String,
@@ -172,6 +181,13 @@ pub struct GcSettings {
     pub interval: Duration,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RetentionSettings {
+    pub target_max_bytes: Option<u64>,
+    pub target_max_age: Option<Duration>,
+    pub max_total_bytes: Option<u64>,
+}
+
 impl Default for GcSettings {
     fn default() -> Self {
         Self {
@@ -195,12 +211,19 @@ impl Default for HttpSettings {
 impl Config {
     /// Load configuration for this machine.
     pub fn load() -> Result<Self> {
-        let env = EnvLayer::from_process();
-        let file = config_file_path().map(|path| FileLayer::at(path, FileScope::Global));
-        Self::from_layers(&env, file.as_ref())
+        Self::load_with_retention().map(|(config, _)| config)
     }
 
-    fn from_layers(env: &EnvLayer, file: Option<&FileLayer>) -> Result<Self> {
+    pub(crate) fn load_with_retention() -> Result<(Self, RetentionSettings)> {
+        let env = EnvLayer::from_process();
+        let file = config_file_path().map(|path| FileLayer::at(path, FileScope::Global));
+        Self::from_layers_with_retention(&env, file.as_ref())
+    }
+
+    fn from_layers_with_retention(
+        env: &EnvLayer,
+        file: Option<&FileLayer>,
+    ) -> Result<(Self, RetentionSettings)> {
         let mut layers = Layers::new().then(env);
         if let Some(file) = file {
             layers = layers.then(file);
@@ -219,10 +242,33 @@ impl Config {
             bail!("invalid configuration:\n{problems}");
         }
         let raw = RawConfig::read(&resolved)?;
-        Self::from_raw(raw)
+        Self::from_raw_with_retention(raw)
     }
 
-    fn from_raw(raw: RawConfig) -> Result<Self> {
+    fn from_raw_with_retention(raw: RawConfig) -> Result<(Self, RetentionSettings)> {
+        let retention = RetentionSettings {
+            target_max_bytes: raw
+                .target
+                .max_size
+                .as_deref()
+                .map(parse_byte_size)
+                .transpose()
+                .wrap_err("invalid target.max_size")?,
+            target_max_age: raw
+                .target
+                .max_age
+                .as_deref()
+                .map(parse_duration)
+                .transpose()
+                .wrap_err("invalid target.max_age")?,
+            max_total_bytes: raw
+                .gc
+                .max_total_size
+                .as_deref()
+                .map(parse_byte_size)
+                .transpose()
+                .wrap_err("invalid gc.max_total_size")?,
+        };
         let cache_dir = raw.cache_dir.or_else(default_cache_dir).ok_or_else(|| {
             eyre::eyre!("could not determine a cache directory; set MBX_CACHE_DIR")
         })?;
@@ -246,7 +292,7 @@ impl Config {
                 None => cache_dir.join("targets"),
             },
         };
-        Ok(Self {
+        let config = Self {
             cache_dir,
             gc,
             target,
@@ -263,7 +309,8 @@ impl Config {
                 mode,
             },
             http,
-        })
+        };
+        Ok((config, retention))
     }
 
     /// Apply the deliberately small, safe policy surface from `.mbx.toml` at
@@ -345,6 +392,13 @@ mod tests {
     use super::*;
 
     fn configured(file: Option<&str>, values: &[(&str, &str)]) -> Result<Config> {
+        configured_with_retention(file, values).map(|(config, _)| config)
+    }
+
+    fn configured_with_retention(
+        file: Option<&str>,
+        values: &[(&str, &str)],
+    ) -> Result<(Config, RetentionSettings)> {
         let env = EnvLayer::new(
             values
                 .iter()
@@ -356,7 +410,7 @@ mod tests {
             std::fs::write(&path, contents).unwrap();
             FileLayer::at(path, FileScope::Global)
         });
-        Config::from_layers(&env, file.as_ref())
+        Config::from_layers_with_retention(&env, file.as_ref())
     }
 
     #[test]
@@ -427,6 +481,26 @@ mod tests {
     }
 
     #[test]
+    fn reads_target_and_whole_cache_retention_limits() {
+        let (_, retention) = configured_with_retention(
+            None,
+            &[
+                ("MBX_TARGET_MAX_SIZE", "8GiB"),
+                ("MBX_TARGET_MAX_AGE", "14d"),
+                ("MBX_GC_MAX_TOTAL_SIZE", "12GiB"),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(retention.target_max_bytes, Some(8 * 1024 * 1024 * 1024));
+        assert_eq!(
+            retention.target_max_age,
+            Some(Duration::from_secs(14 * 86_400))
+        );
+        assert_eq!(retention.max_total_bytes, Some(12 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
     fn managed_targets_can_be_turned_off() {
         for value in ["0", "false", "no", "off", ""] {
             let config = configured(None, &[("MBX_TARGET_VIEWS", value)]).unwrap();
@@ -457,7 +531,10 @@ mod tests {
         assert!(configured(None, &[("MBX_HTTP_TIMEOUT", "later")]).is_err());
         assert!(configured(None, &[("MBX_HTTP_RETRIES", "many")]).is_err());
         assert!(configured(None, &[("MBX_GC_MAX_SIZE", "lots")]).is_err());
+        assert!(configured(None, &[("MBX_GC_MAX_TOTAL_SIZE", "lots")]).is_err());
         assert!(configured(None, &[("MBX_GC_INTERVAL", "later")]).is_err());
+        assert!(configured(None, &[("MBX_TARGET_MAX_SIZE", "lots")]).is_err());
+        assert!(configured(None, &[("MBX_TARGET_MAX_AGE", "later")]).is_err());
         // A budget that cannot be read must not be guessed at, and neither must
         // a switch: silently collecting to the wrong number, or not at all, is
         // worse than saying so.

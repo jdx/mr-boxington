@@ -1,6 +1,6 @@
 //! The mbx command line.
 
-use crate::config::Config;
+use crate::config::{Config, RetentionSettings};
 use crate::session::CacheSession;
 use crate::util::workspace_root;
 use crate::{policy, store, target};
@@ -101,6 +101,9 @@ struct GcArgs {
     /// Print a stable machine-readable report.
     #[usage(long)]
     json: bool,
+    /// Show what collection would remove without changing any files.
+    #[usage(long)]
+    dry_run: bool,
 }
 
 #[derive(usage::Args)]
@@ -153,16 +156,20 @@ pub fn run() -> Result<ExitCode> {
     if let Commands::Doctor(args) = &cli.command {
         return crate::doctor::run_loaded(Config::load(), args.json);
     }
-    let config = Config::load()?;
+    let (config, retention) = Config::load_with_retention()?;
     match cli.command {
         Commands::Doctor(_) => unreachable!("doctor was handled before configuration loading"),
-        Commands::Explain(args) => crate::explain::run(&config, &args.arguments()),
+        Commands::Explain(args) => {
+            crate::explain::run_with_retention(&config, &retention, &args.arguments())
+        }
         Commands::Setup(args) => setup(args.action()?),
         Commands::Gc(args) => gc(
             &config,
             args.max_size
                 .map_or(config.gc.max_bytes, |requested| requested.as_u64()),
+            args.dry_run,
             args.json,
+            &retention,
         )
         .map(|()| ExitCode::SUCCESS),
         Commands::Cache(args) => match args.command {
@@ -182,7 +189,7 @@ pub fn run() -> Result<ExitCode> {
             }
         },
         Commands::Prefetch(args) => prefetch(&config, &args.cargo_args),
-        Commands::Cargo(arguments) => cargo(&config, &arguments),
+        Commands::Cargo(arguments) => cargo(&config, &retention, &arguments),
     }
 }
 
@@ -414,12 +421,26 @@ fn same_file_contents(left: &Path, right: &Path) -> Result<bool> {
         == mbx_cache_core::CacheDigest::blake3_file(right)?)
 }
 
-fn cargo(config: &Config, arguments: &[String]) -> Result<ExitCode> {
-    cargo_with_bypass_log(config, arguments, None)
+fn cargo(config: &Config, retention: &RetentionSettings, arguments: &[String]) -> Result<ExitCode> {
+    cargo_with_retention_and_bypass_log(config, retention, arguments, None)
 }
 
 pub(crate) fn cargo_with_bypass_log(
     config: &Config,
+    arguments: &[String],
+    bypass_log: Option<&Path>,
+) -> Result<ExitCode> {
+    cargo_with_retention_and_bypass_log(
+        config,
+        &RetentionSettings::default(),
+        arguments,
+        bypass_log,
+    )
+}
+
+pub(crate) fn cargo_with_retention_and_bypass_log(
+    config: &Config,
+    retention: &RetentionSettings,
     arguments: &[String],
     bypass_log: Option<&Path>,
 ) -> Result<ExitCode> {
@@ -540,7 +561,7 @@ pub(crate) fn cargo_with_bypass_log(
     // Outside the runtime, so a walk of the whole store cannot occupy a worker
     // thread, and after cargo has exited, so it adds nothing to the build the
     // user is waiting on.
-    sweep_store(config);
+    sweep_store(config, retention);
     status
 }
 
@@ -635,18 +656,47 @@ fn exit_code(status: std::process::ExitStatus) -> ExitCode {
     }
 }
 
-fn gc(config: &Config, max_bytes: u64, json: bool) -> Result<()> {
+fn gc(
+    config: &Config,
+    max_bytes: u64,
+    dry_run: bool,
+    json: bool,
+    retention: &RetentionSettings,
+) -> Result<()> {
     let store = config.store_dir();
-    let outcome = store::gc(&store, max_bytes);
+    // The collector below remains the authority for store errors. Estimating
+    // a combined budget must not prevent independent target collection when
+    // the action store is damaged.
+    let target_budget = target_budget(retention, max_bytes);
+    let pruned = target::collect(
+        &config.target.root,
+        target_budget,
+        retention.target_max_age,
+        dry_run,
+    );
+    let projected_target_bytes = match &pruned {
+        Ok(outcome) => outcome.remaining_bytes,
+        Err(_) if retention.max_total_bytes.is_some() => target::stats(&config.target.root)
+            .map(|stats| stats.bytes)
+            .unwrap_or_default(),
+        Err(_) => 0,
+    };
+    let store_budget = retention.max_total_bytes.map_or(max_bytes, |total| {
+        max_bytes.min(total.saturating_sub(projected_target_bytes))
+    });
+    let outcome = if dry_run {
+        store::gc_dry_run(&store, store_budget)
+    } else {
+        store::gc(&store, store_budget)
+    };
     // Independent collections: a broken action store must not prevent the
     // command from freeing the usually much larger target directories.
-    let pruned = target::prune(&config.target.root);
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
             match pruned {
                 Ok(pruned) if !json && pruned.removed_views > 0 => {
-                    println!("{}", target_removals(&pruned));
+                    println!("{}", target_removals(&pruned, dry_run));
                 }
                 Ok(_) => {}
                 Err(prune_error) => {
@@ -661,6 +711,7 @@ fn gc(config: &Config, max_bytes: u64, json: bool) -> Result<()> {
         print_json(&GcReport {
             version: 1,
             max_bytes,
+            dry_run,
             action_store: GcActionStoreReport {
                 removed_objects: outcome.removed_objects,
                 removed_action_results: outcome.removed_action_results,
@@ -674,31 +725,36 @@ fn gc(config: &Config, max_bytes: u64, json: bool) -> Result<()> {
             },
         })?;
     } else {
-        print_gc_store_outcome(&outcome);
+        print_gc_store_outcome(&outcome, dry_run);
         let pruned = pruned?;
         if pruned.removed_views > 0 {
-            println!("{}", target_removals(&pruned));
+            println!("{}", target_removals(&pruned, dry_run));
         }
     }
     Ok(())
 }
 
-fn print_gc_store_outcome(outcome: &store::GcOutcome) {
-    println!("{}", evictions(outcome));
+fn print_gc_store_outcome(outcome: &store::GcOutcome, dry_run: bool) {
+    let prefix = if dry_run { "would have " } else { "" };
+    println!("{prefix}{}", evictions(outcome));
     if outcome.removed_checkout_records > 0 {
         println!(
-            "dropped {} stale checkout records",
+            "{prefix}dropped {} stale checkout records",
             outcome.removed_checkout_records
         );
     }
 }
 
 /// One line describing the target directories a sweep freed.
-fn target_removals(outcome: &target::PruneOutcome) -> String {
+fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool) -> String {
+    let verb = if dry_run { "would free" } else { "freed" };
     format!(
-        "freed {} target directories of checkouts that are gone ({})",
+        "{verb} {} target directories ({}, {} abandoned and {} live); {} remain",
         outcome.removed_views,
         ByteSize::b(outcome.removed_bytes).display().iec(),
+        outcome.removed_stale_views,
+        outcome.removed_live_views,
+        ByteSize::b(outcome.remaining_bytes).display().iec(),
     )
 }
 
@@ -721,40 +777,82 @@ fn evictions(outcome: &store::GcOutcome) -> String {
 /// Reported like the cache summary beside it: a sweep that evicted nothing says
 /// nothing. A sweep that fails is logged and forgotten -- the build is already
 /// over, and its exit status is the build's answer, not the collector's.
-fn sweep_store(config: &Config) {
+fn sweep_store(config: &Config, retention: &RetentionSettings) {
     if !config.gc.auto {
         return;
     }
-    match store::sweep_if_due(&config.store_dir(), config.gc.max_bytes, config.gc.interval) {
-        Ok(Some(outcome)) => {
+    match store::claim_sweep(&config.store_dir(), config.gc.interval) {
+        Ok(false) => {}
+        Ok(true) => {
+            let collected_target_bytes = prune_targets(config, retention, config.gc.max_bytes);
+            let store_budget = retention
+                .max_total_bytes
+                .map_or(config.gc.max_bytes, |total| {
+                    let target_bytes = collected_target_bytes.unwrap_or_else(|| {
+                        target::stats(&config.target.root)
+                            .map(|stats| stats.bytes)
+                            .unwrap_or_default()
+                    });
+                    config.gc.max_bytes.min(total.saturating_sub(target_bytes))
+                });
+            let outcome = match store::gc(&config.store_dir(), store_budget) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    log::warn!("the store was not swept: {error}");
+                    return;
+                }
+            };
             if outcome.removed_bytes > 0 {
                 crate::session::note(&format!("gc: {}", evictions(&outcome)));
             }
-            prune_targets(config);
         }
-        Ok(None) => {}
         Err(error) => {
             log::warn!("the store was not swept: {error}");
-            // `sweep_if_due` stamps before collecting. If collection fails,
-            // target views are still due now and will otherwise wait through
-            // the full interval before getting another chance.
-            prune_targets(config);
+            let _ = prune_targets(config, retention, config.gc.max_bytes);
         }
     }
 }
 
 /// Collect target views as the other half of a due automatic sweep.
-fn prune_targets(config: &Config) {
+fn prune_targets(
+    config: &Config,
+    retention: &RetentionSettings,
+    store_reserve: u64,
+) -> Option<u64> {
     // A target directory whose checkout is gone is the largest thing
     // collection ever frees, and walking for it on every build would be the
     // slowest, so callers keep this inside the store sweep's throttle.
-    match target::prune(&config.target.root) {
-        Ok(pruned) if pruned.removed_views > 0 => {
-            crate::session::note(&format!("gc: {}", target_removals(&pruned)));
+    let target_budget = target_budget(retention, store_reserve);
+    match target::collect(
+        &config.target.root,
+        target_budget,
+        retention.target_max_age,
+        false,
+    ) {
+        Ok(pruned) => {
+            if pruned.removed_views > 0 {
+                crate::session::note(&format!("gc: {}", target_removals(&pruned, false)));
+            }
+            Some(pruned.remaining_bytes)
         }
-        Ok(_) => {}
-        Err(error) => log::warn!("target directories were not collected: {error}"),
+        Err(error) => {
+            log::warn!("target directories were not collected: {error}");
+            None
+        }
     }
+}
+
+fn target_budget(retention: &RetentionSettings, store_reserve: u64) -> Option<u64> {
+    retention
+        .max_total_bytes
+        .map_or(retention.target_max_bytes, |total| {
+            let combined = total.saturating_sub(store_reserve);
+            Some(
+                retention
+                    .target_max_bytes
+                    .map_or(combined, |target| target.min(combined)),
+            )
+        })
 }
 
 fn cache_stats(config: &Config, json: bool) -> Result<()> {
@@ -829,6 +927,7 @@ struct CacheStatsReport {
 struct GcReport {
     version: u8,
     max_bytes: u64,
+    dry_run: bool,
     action_store: GcActionStoreReport,
     targets: GcTargetReport,
 }

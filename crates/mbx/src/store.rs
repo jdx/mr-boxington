@@ -21,6 +21,7 @@ const CAS_DIR: &str = "cas/v1";
 const ACTION_RESULTS_DIR: &str = "action-results/v1";
 const CHECKOUTS_DIR: &str = "checkouts/v1";
 const SWEEP_STAMP: &str = "gc/v1/last-sweep";
+const SWEEP_LOCK: &str = "gc/v1/sweep.lock";
 const CHECKOUT_RECORD_VERSION: u8 = 1;
 
 /// How long a checkout's claim outlives the last build that renewed it.
@@ -145,6 +146,15 @@ fn checkout_record_path(store: &Path, identity: &str, workspace_root: &Path) -> 
 /// the mount records one, so the ordering is an approximation either way.
 /// Evicting a live object costs a recompile, never correctness.
 pub fn gc(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
+    gc_with_mode(store, max_bytes, false)
+}
+
+/// Describe the collection `gc` would perform without changing the store.
+pub fn gc_dry_run(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
+    gc_with_mode(store, max_bytes, true)
+}
+
+fn gc_with_mode(store: &Path, max_bytes: u64, dry_run: bool) -> Result<GcOutcome> {
     let mut objects = walk_files(&store.join(CAS_DIR))?;
     let results = walk_files(&store.join(ACTION_RESULTS_DIR))?;
     let mut live_bytes = objects
@@ -159,16 +169,17 @@ pub fn gc(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
     // last sweep stops protecting its artifacts during this one.
     let checkouts = scan_checkouts(store)?;
     for path in &checkouts.stale_records {
-        if matches!(remove(path)?, Removal::Removed) {
+        if dry_run || matches!(remove(path)?, Removal::Removed) {
             outcome.removed_checkout_records += 1;
         }
         // The identity directory is left behind empty otherwise. It may hold
         // other checkouts, in which case this fails and that is the answer.
-        if let Some(parent) = path.parent() {
+        if !dry_run && let Some(parent) = path.parent() {
             let _ = std::fs::remove_dir(parent);
         }
     }
 
+    let mut virtually_removed = HashSet::new();
     if live_bytes > max_bytes {
         // Reachability costs a read per action result and per output tree, so
         // it is computed only when something is actually about to be evicted.
@@ -178,7 +189,14 @@ pub fn gc(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
         // each class goes oldest-first. A store with no records at all roots
         // nothing and this is exactly the LRU it was before.
         objects.sort_by_cached_key(|entry| (rooted.contains(&entry.path), entry.used));
-        let evicted = evict_objects(&objects, &rooted, live_bytes, max_bytes, remove)?;
+        let evicted = evict_objects(&objects, &rooted, live_bytes, max_bytes, |path| {
+            if dry_run {
+                virtually_removed.insert(path.to_path_buf());
+                Ok(Removal::Removed)
+            } else {
+                remove(path)
+            }
+        })?;
         live_bytes = evicted.remaining_bytes;
         outcome.removed_objects += evicted.removed_objects;
         outcome.removed_bytes += evicted.removed_bytes;
@@ -190,8 +208,12 @@ pub fn gc(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
     // store that is over budget on results alone still needs the sweep.
     let cas = LocalCas::new(store);
     for entry in &results {
-        if action_result_is_dangling(&cas, &entry.path)? {
-            match remove(&entry.path)? {
+        if action_result_is_dangling(&cas, &entry.path, &virtually_removed)? {
+            match if dry_run {
+                Removal::Removed
+            } else {
+                remove(&entry.path)?
+            } {
                 Removal::Removed => {
                     live_bytes = live_bytes.saturating_sub(entry.size);
                     outcome.removed_action_results += 1;
@@ -213,16 +235,29 @@ pub fn gc(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
 /// together should cost one sweep between them, and a sweep that dies partway
 /// should wait its turn like any other rather than retry on every build.
 pub fn sweep_if_due(store: &Path, max_bytes: u64, interval: Duration) -> Result<Option<GcOutcome>> {
+    if !claim_sweep(store, interval)? {
+        return Ok(None);
+    }
+    gc(store, max_bytes).map(Some)
+}
+
+/// Atomically stamp a due sweep before its callers perform coordinated GC.
+pub(crate) fn claim_sweep(store: &Path, interval: Duration) -> Result<bool> {
+    let lock_path = store.join(SWEEP_LOCK);
+    std::fs::create_dir_all(lock_path.parent().expect("sweep lock has a parent"))?;
+    let mut lock = fslock::LockFile::open(&lock_path)?;
+    lock.lock()?;
+
     let stamp = store.join(SWEEP_STAMP);
     if let Ok(metadata) = std::fs::metadata(&stamp)
         && let Ok(modified) = metadata.modified()
         && let Ok(since) = modified.elapsed()
         && since < interval
     {
-        return Ok(None);
+        return Ok(false);
     }
     crate::util::write_atomic(&stamp, b"")?;
-    gc(store, max_bytes).map(Some)
+    Ok(true)
 }
 
 /// What the checkout registry says about the identities in this store.
@@ -499,7 +534,11 @@ fn evict_objects(
 ///
 /// Only the top-level objects are checked; a result whose output tree lost a
 /// nested object still restores as a miss, which is safe.
-fn action_result_is_dangling(cas: &LocalCas, path: &Path) -> Result<bool> {
+fn action_result_is_dangling(
+    cas: &LocalCas,
+    path: &Path,
+    virtually_removed: &HashSet<PathBuf>,
+) -> Result<bool> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -521,7 +560,7 @@ fn action_result_is_dangling(cas: &LocalCas, path: &Path) -> Result<bool> {
     {
         match cas.path_for(digest) {
             Ok(path) => {
-                if !path.exists() {
+                if virtually_removed.contains(&path) || !path.exists() {
                     return Ok(true);
                 }
             }

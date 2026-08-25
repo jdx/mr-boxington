@@ -17,10 +17,13 @@ share_out_dir = false
 [gc]
 auto = true
 max_size = "20GiB"
+max_total_size = "50GiB"
 interval = "1h"
 
 [target]
 views = true
+max_size = "30GiB"
+max_age = "30d"
 
 [remote]
 url = "https://cache.example.com"

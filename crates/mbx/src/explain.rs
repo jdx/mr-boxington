@@ -1,6 +1,6 @@
 //! Actionable explanations for conservative cache bypasses.
 
-use crate::config::Config;
+use crate::config::{Config, RetentionSettings};
 use eyre::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -11,7 +11,23 @@ pub fn run(config: &Config, arguments: &[String]) -> Result<ExitCode> {
     let directory = tempfile::Builder::new().prefix("mbx-explain-").tempdir()?;
     let log = directory.path().join("bypasses.tsv");
     let status = crate::cli::cargo_with_bypass_log(config, arguments, Some(&log))?;
-    let records = read_records(&log)?;
+    finish(&log, status)
+}
+
+pub(crate) fn run_with_retention(
+    config: &Config,
+    retention: &RetentionSettings,
+    arguments: &[String],
+) -> Result<ExitCode> {
+    let directory = tempfile::Builder::new().prefix("mbx-explain-").tempdir()?;
+    let log = directory.path().join("bypasses.tsv");
+    let status =
+        crate::cli::cargo_with_retention_and_bypass_log(config, retention, arguments, Some(&log))?;
+    finish(&log, status)
+}
+
+fn finish(log: &Path, status: ExitCode) -> Result<ExitCode> {
+    let records = read_records(log)?;
     display(&records);
     Ok(status)
 }
