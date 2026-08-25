@@ -77,20 +77,26 @@ fn cargo() -> std::ffi::OsString {
 
 #[cfg(unix)]
 #[test]
-fn transparent_rustc_preserves_signal_termination() {
-    use std::os::unix::process::ExitStatusExt as _;
-
+fn transparent_rustc_replaces_the_shim_process() {
     let directory = tempfile::tempdir().unwrap();
     let shim =
         mbx::session::install_shim(Path::new(env!("CARGO_BIN_EXE_mbx")), directory.path()).unwrap();
+    let pid_file = directory.path().join("compiler.pid");
 
-    let status = Command::new(shim)
+    let mut child = Command::new(shim)
         .arg("/bin/sh")
-        .args(["-c", "kill -TERM $$"])
-        .status()
+        .args(["-c", "printf '%s' \"$$\" > \"$1\"", "sh"])
+        .arg(&pid_file)
+        .spawn()
         .unwrap();
+    let shim_pid = child.id();
+    let status = child.wait().unwrap();
 
-    assert_eq!(status.signal(), Some(libc::SIGTERM));
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read_to_string(pid_file).unwrap(),
+        shim_pid.to_string()
+    );
 }
 
 /// Build `project` against `store`, returning the run's statistics.
@@ -195,6 +201,24 @@ fn wipe_target(project: &Path) {
     let target = project.join("target");
     let outputs = std::fs::read_link(&target).unwrap_or(target);
     std::fs::remove_dir_all(outputs).unwrap();
+}
+
+fn corrupt_action_results(store: &Path) -> usize {
+    let mut corrupted = 0;
+    let mut pending = vec![store.join("actions/action-results")];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                pending.push(entry.path());
+            } else if std::fs::write(entry.path(), b"not json").is_ok() {
+                corrupted += 1;
+            }
+        }
+    }
+    corrupted
 }
 
 #[test]
@@ -327,6 +351,36 @@ fn restores_a_wiped_target_directory_from_the_store() {
         count(&warm, "estimated_compiler_duration_avoided_ns") > 0,
         "a warm build should report the compiler time recorded by its cold build: {warm}"
     );
+}
+
+#[test]
+fn failed_prediction_lookups_are_timed_as_misses() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+    );
+    assert!(corrupt_action_results(store.path()) > 0);
+    wipe_target(project.path());
+
+    let rebuilt = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("rebuilt.json"),
+    );
+
+    assert!(count(&rebuilt, "lookups") > 0, "{rebuilt}");
+    assert!(
+        rebuilt["compiler"]["miss"]["invocations"]
+            .as_u64()
+            .is_some_and(|invocations| invocations > 0),
+        "{rebuilt}"
+    );
+    assert_eq!(count(&rebuilt, "unconsulted"), 0, "{rebuilt}");
 }
 
 #[test]

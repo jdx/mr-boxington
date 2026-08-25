@@ -162,6 +162,22 @@ fn qualification_results_are_not_reported_as_misses() {
 }
 
 #[test]
+fn compiler_only_sessions_are_reportable() {
+    let stats = AgentStats {
+        compiler: BTreeMap::from([(
+            "bypass".into(),
+            mbx_cache_core::CompilerStats {
+                invocations: 1,
+                duration_ns: 42,
+            },
+        )]),
+        ..AgentStats::default()
+    };
+
+    assert!(should_display_stats(&stats));
+}
+
+#[test]
 fn writes_versioned_stats_report() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("nested").join("stats.json");

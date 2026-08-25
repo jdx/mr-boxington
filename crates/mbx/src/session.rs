@@ -413,14 +413,7 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
             path.display()
         );
     }
-    if stats.lookups == 0
-        && stats.unconsulted == 0
-        && stats.stores == 0
-        && stats.verifications == 0
-        && stats.downloaded_bytes == 0
-        && stats.uploaded_bytes == 0
-        && stats.bypasses.is_empty()
-    {
+    if !should_display_stats(stats) {
         return;
     }
     note(&format!(
@@ -514,6 +507,18 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
             stats.verifications, stats.divergences,
         ));
     }
+}
+
+fn should_display_stats(stats: &AgentStats) -> bool {
+    stats.lookups > 0
+        || stats.unconsulted > 0
+        || stats.stores > 0
+        || stats.verifications > 0
+        || stats.downloaded_bytes > 0
+        || stats.uploaded_bytes > 0
+        || !stats.bypasses.is_empty()
+        || !stats.compiler.is_empty()
+        || stats.avoided_compiler_duration_ns > 0
 }
 
 /// Write to stderr without failing the build when the pipe is closed.
@@ -872,7 +877,9 @@ pub fn run_rustc_shim() -> ExitCode {
 }
 
 fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode {
+    #[cfg(windows)]
     let crate_name = crate_name_argument(&arguments);
+    #[cfg(windows)]
     let started = Instant::now();
     let mut command = if let Some(wrapper) = std::env::var_os(PREVIOUS_RUSTC_WRAPPER_ENV) {
         let mut command = Command::new(wrapper);
@@ -886,26 +893,11 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
 
     #[cfg(unix)]
     {
-        use std::os::unix::process::ExitStatusExt as _;
+        use std::os::unix::process::CommandExt as _;
 
-        match command.status() {
-            Ok(status) => {
-                record_compiler_invocation(
-                    "bypass",
-                    crate_name.as_deref(),
-                    duration_ns(started.elapsed()),
-                );
-                match (status.code(), status.signal()) {
-                    (Some(code), _) => ExitCode::from(code as u8),
-                    (None, Some(signal)) => propagate_signal(signal),
-                    (None, None) => ExitCode::FAILURE,
-                }
-            }
-            Err(error) => {
-                eprintln!("mbx: the rustc shim failed to execute rustc: {error}");
-                ExitCode::from(1)
-            }
-        }
+        let error = command.exec();
+        eprintln!("mbx: the rustc shim failed to execute rustc: {error}");
+        ExitCode::from(1)
     }
     #[cfg(windows)]
     {
@@ -943,19 +935,7 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
     }
 }
 
-#[cfg(unix)]
-fn propagate_signal(signal: i32) -> ! {
-    // Match the old `CommandExt::exec` path: supervisors must observe signal
-    // termination, not a conventional 128 + signal exit code.
-    // SAFETY: `signal` came from `ExitStatusExt::signal`, and these libc calls
-    // accept any signal number while touching no Rust-managed memory.
-    unsafe {
-        libc::signal(signal, libc::SIG_DFL);
-        libc::raise(signal);
-    }
-    std::process::abort()
-}
-
+#[cfg(any(windows, test))]
 fn crate_name_argument(arguments: &[OsString]) -> Option<String> {
     let mut arguments = arguments.iter();
     while let Some(argument) = arguments.next() {

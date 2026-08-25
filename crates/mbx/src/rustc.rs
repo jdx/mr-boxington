@@ -118,9 +118,9 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             &working_dir,
             &portable,
             !verify,
+            &mut action_lookup_attempted,
         ) {
-            Ok((Some(cached), attempted)) => {
-                action_lookup_attempted = attempted;
+            Ok(Some(cached)) => {
                 if verify {
                     verification = Some(cached);
                 } else {
@@ -128,7 +128,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                     return Ok(ExitCode::SUCCESS);
                 }
             }
-            Ok((None, attempted)) => action_lookup_attempted = attempted,
+            Ok(None) => {}
             Err(error) => {
                 eprintln!("mbx warning: prediction was not restored: {error:#}");
             }
@@ -208,7 +208,8 @@ fn restore_predicted_result(
     working_dir: &Path,
     portable: &Portable,
     restore_outputs: bool,
-) -> Result<(Option<CachedCompilation>, bool)> {
+    action_lookup_attempted: &mut bool,
+) -> Result<Option<CachedCompilation>> {
     let mut context = base_action_context(rustc, working_dir, portable)?;
     let invocation_digest = invocation.invocation_digest(&context)?;
     let task = prediction_task(&invocation_digest);
@@ -231,7 +232,7 @@ fn restore_predicted_result(
             // or the summary reads as though a lookup happened and found
             // nothing.
             session::record_unconsulted();
-            return Ok((None, false));
+            return Ok(None);
         }
         AgentResponse::Error { message } => bail!(message),
         _ => bail!("cache agent returned an unexpected action prediction response"),
@@ -246,6 +247,9 @@ fn restore_predicted_result(
     let discovered = input_prediction.discover(working_dir, &context.path_mappings)?;
     discovered.clone().apply_to(&mut context)?;
     let candidates = ActionCandidates::build(invocation, context)?;
+    // From this point onward, every return follows at least one action-result
+    // request, including error responses from a corrupt local record.
+    *action_lookup_attempted = true;
     let restored = restore_candidates(&candidates, outputs, &discovered, restore_outputs)?;
     match restored {
         Some((action, mut cached)) => {
@@ -254,9 +258,9 @@ fn restore_predicted_result(
                 record_action_hit(&action, cached.restore);
             }
             record_prediction_value(invocation_digest, action, prediction.payload);
-            Ok((Some(cached), true))
+            Ok(Some(cached))
         }
-        None => Ok((None, true)),
+        None => Ok(None),
     }
 }
 
