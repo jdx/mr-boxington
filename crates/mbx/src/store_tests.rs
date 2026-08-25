@@ -116,6 +116,27 @@ fn verification_reports_a_corrupt_object() {
 }
 
 #[test]
+fn verification_reports_a_result_whose_objects_are_gone() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = store_object(directory.path(), b"output");
+    let action = store_result(directory.path(), "compile", std::slice::from_ref(&output));
+    let result_path = LocalActionCache::new(directory.path())
+        .path_for(&action)
+        .unwrap();
+    let cas = LocalCas::new(directory.path());
+    std::fs::remove_file(cas.path_for(&action).unwrap()).unwrap();
+
+    let outcome = verify(directory.path()).unwrap();
+
+    assert_eq!(outcome.checked_action_results, 1);
+    assert!(
+        outcome.problems.contains(&result_path),
+        "a result pointing at a missing object is a problem: {:?}",
+        outcome.problems
+    );
+}
+
+#[test]
 fn inspection_ignores_in_progress_staging_paths() {
     let directory = tempfile::tempdir().unwrap();
     let action = store_result(directory.path(), "compile", &[]);
