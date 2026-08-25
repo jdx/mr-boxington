@@ -410,6 +410,22 @@ fn leaves_a_target_directory_it_cannot_trace() {
 }
 
 #[test]
+fn missing_selected_directory_counts_as_stale_removal() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    let managed = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    std::fs::remove_dir_all(&workspace).unwrap();
+    std::fs::remove_dir_all(&managed).unwrap();
+
+    let outcome = collect(&config.target.root, None, None, false).unwrap();
+
+    assert_eq!(outcome.removed_views, 1);
+    assert_eq!(outcome.removed_stale_views, 1);
+    assert_eq!(outcome.removed_live_views, 0);
+}
+
+#[test]
 fn counts_a_target_directory_it_cannot_trace() {
     let directory = tempfile::tempdir().unwrap();
     let config = test_config(directory.path(), true);

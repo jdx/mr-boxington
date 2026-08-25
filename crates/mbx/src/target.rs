@@ -576,6 +576,11 @@ pub(crate) fn collect(
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 outcome.removed_views += 1;
+                if live {
+                    outcome.removed_live_views += 1;
+                } else {
+                    outcome.removed_stale_views += 1;
+                }
             }
             Err(error) => {
                 remaining = remaining.saturating_add(bytes);

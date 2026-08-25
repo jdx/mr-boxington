@@ -667,9 +667,6 @@ fn gc(
     // The collector below remains the authority for store errors. Estimating
     // a combined budget must not prevent independent target collection when
     // the action store is damaged.
-    let target_bytes = target::stats(&config.target.root)
-        .map(|stats| stats.bytes)
-        .unwrap_or_default();
     let target_budget = target_budget(retention, max_bytes);
     let pruned = target::collect(
         &config.target.root,
@@ -677,9 +674,13 @@ fn gc(
         retention.target_max_age,
         dry_run,
     );
-    let projected_target_bytes = pruned
-        .as_ref()
-        .map_or(target_bytes, |outcome| outcome.remaining_bytes);
+    let projected_target_bytes = match &pruned {
+        Ok(outcome) => outcome.remaining_bytes,
+        Err(_) if retention.max_total_bytes.is_some() => target::stats(&config.target.root)
+            .map(|stats| stats.bytes)
+            .unwrap_or_default(),
+        Err(_) => 0,
+    };
     let store_budget = retention.max_total_bytes.map_or(max_bytes, |total| {
         max_bytes.min(total.saturating_sub(projected_target_bytes))
     });
@@ -783,13 +784,15 @@ fn sweep_store(config: &Config, retention: &RetentionSettings) {
     match store::claim_sweep(&config.store_dir(), config.gc.interval) {
         Ok(false) => {}
         Ok(true) => {
-            prune_targets(config, retention, config.gc.max_bytes);
-            let target_bytes = target::stats(&config.target.root)
-                .map(|stats| stats.bytes)
-                .unwrap_or_default();
+            let collected_target_bytes = prune_targets(config, retention, config.gc.max_bytes);
             let store_budget = retention
                 .max_total_bytes
                 .map_or(config.gc.max_bytes, |total| {
+                    let target_bytes = collected_target_bytes.unwrap_or_else(|| {
+                        target::stats(&config.target.root)
+                            .map(|stats| stats.bytes)
+                            .unwrap_or_default()
+                    });
                     config.gc.max_bytes.min(total.saturating_sub(target_bytes))
                 });
             let outcome = match store::gc(&config.store_dir(), store_budget) {
@@ -805,13 +808,17 @@ fn sweep_store(config: &Config, retention: &RetentionSettings) {
         }
         Err(error) => {
             log::warn!("the store was not swept: {error}");
-            prune_targets(config, retention, config.gc.max_bytes);
+            let _ = prune_targets(config, retention, config.gc.max_bytes);
         }
     }
 }
 
 /// Collect target views as the other half of a due automatic sweep.
-fn prune_targets(config: &Config, retention: &RetentionSettings, store_reserve: u64) {
+fn prune_targets(
+    config: &Config,
+    retention: &RetentionSettings,
+    store_reserve: u64,
+) -> Option<u64> {
     // A target directory whose checkout is gone is the largest thing
     // collection ever frees, and walking for it on every build would be the
     // slowest, so callers keep this inside the store sweep's throttle.
@@ -822,11 +829,16 @@ fn prune_targets(config: &Config, retention: &RetentionSettings, store_reserve: 
         retention.target_max_age,
         false,
     ) {
-        Ok(pruned) if pruned.removed_views > 0 => {
-            crate::session::note(&format!("gc: {}", target_removals(&pruned, false)));
+        Ok(pruned) => {
+            if pruned.removed_views > 0 {
+                crate::session::note(&format!("gc: {}", target_removals(&pruned, false)));
+            }
+            Some(pruned.remaining_bytes)
         }
-        Ok(_) => {}
-        Err(error) => log::warn!("target directories were not collected: {error}"),
+        Err(error) => {
+            log::warn!("target directories were not collected: {error}");
+            None
+        }
     }
 }
 
