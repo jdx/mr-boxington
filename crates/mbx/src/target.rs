@@ -512,10 +512,12 @@ pub(crate) fn collect(
         .map(|duration| duration.as_secs())
         .unwrap_or_default();
     let mut entries = Vec::new();
+    let mut uncollectable_bytes = 0_u64;
     for (record_path, directory) in views(root)? {
         let Some(record) = read_view_record(&record_path) else {
             // A record this build cannot read names no checkout, and a target
             // directory nobody can trace is not one to delete on a guess.
+            uncollectable_bytes = uncollectable_bytes.saturating_add(tree_bytes(&directory));
             continue;
         };
         let bytes = tree_bytes(&directory);
@@ -527,7 +529,10 @@ pub(crate) fn collect(
             crate::store::checkout_is_live(&record.workspace_root),
         ));
     }
-    let mut remaining = entries.iter().map(|entry| entry.3).sum::<u64>();
+    let mut remaining = entries
+        .iter()
+        .map(|entry| entry.3)
+        .fold(uncollectable_bytes, u64::saturating_add);
     let mut selected = HashSet::new();
     for (record_path, _, updated, bytes, live) in &entries {
         let expired = max_age.is_some_and(|age| now.saturating_sub(*updated) > age.as_secs());

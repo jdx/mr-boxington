@@ -410,6 +410,21 @@ fn leaves_a_target_directory_it_cannot_trace() {
 }
 
 #[test]
+fn counts_a_target_directory_it_cannot_trace() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    let managed = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    std::fs::write(managed.join("artifact"), vec![0_u8; 7]).unwrap();
+    std::fs::write(view_record_path(&config.target.root, &workspace), b"{").unwrap();
+
+    let outcome = collect(&config.target.root, Some(0), None, false).unwrap();
+
+    assert_eq!(outcome.remaining_bytes, 7);
+    assert!(managed.exists());
+}
+
+#[test]
 fn counts_nothing_before_anything_is_placed() {
     let directory = tempfile::tempdir().unwrap();
     assert_eq!(
