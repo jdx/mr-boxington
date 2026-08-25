@@ -187,6 +187,9 @@ jobs:
     uses: ./.github/workflows/release.yml
     with:
       tag: ${{ needs.release-plz-release.outputs.tag }}
+    secrets:
+      CERTIFICATES_P12: ${{ secrets.CERTIFICATES_P12 }}
+      CERTIFICATES_P12_PASS: ${{ secrets.CERTIFICATES_P12_PASS }}
 
   publish-release:
     name: Publish release

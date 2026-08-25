@@ -34,6 +34,11 @@ These settings live outside the repository, and releases fail without them:
 - **`CRATES_IO_PUBLISH_NEW_TOKEN`** — a crates.io token restricted to the
   `publish-new` endpoint. It bootstraps `mbx-cache-protocol`, because trusted
   publishing cannot create a crate. Delete the secret after its first release.
+- **`CERTIFICATES_P12`** and **`CERTIFICATES_P12_PASS`** — the base64-encoded
+  Developer ID Application certificate and its password used by the other
+  jdx.dev CLI release workflows. The macOS jobs import the certificate and sign
+  `mbx` as `Developer ID Application: Jeffrey Dickey (4993Y37DX6)` before
+  creating the release archives.
 - **A crates.io Trusted Publisher for each of `mbx`, `mbx-cache-core`,
   `mbx-cache-protocol`, and `mbx-cache-rustc`**, naming this repository and the
   workflow file `release-plz.yml`. Configure the protocol publisher after its
