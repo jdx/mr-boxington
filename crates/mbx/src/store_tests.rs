@@ -637,9 +637,14 @@ fn forgets_a_claim_no_build_has_renewed() {
         &serde_json::to_vec(&stale).unwrap(),
     )
     .unwrap();
-    // Filesystems with coarse timestamps can otherwise tie this object with
-    // the action descriptor and output tree created immediately afterward.
-    age(&store, &orphan, Duration::from_secs(1));
+    // The orphan must sort strictly oldest. One second was enough to beat
+    // coarse filesystem timestamps, but it also raced the wall clock: the
+    // descriptor and output tree above were written before `age` reads "now",
+    // so a runner that stalls past the margin between those two moments makes
+    // them the oldest objects instead, and collection under a barely-reduced
+    // budget evicts one of them and leaves the orphan alone. An hour outruns
+    // any plausible stall.
+    age(&store, &orphan, Duration::from_secs(60 * 60));
 
     assert_eq!(stats(&store).unwrap().stale_checkouts, 1);
     gc(&store, stats(&store).unwrap().total_bytes() - 1).unwrap();
