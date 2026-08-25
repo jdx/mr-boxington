@@ -83,8 +83,8 @@ tar -xzf "$archive" -C ~/.local/bin
 )
 ```
 
-Release archives also cover Linux ARM64, Apple Silicon, Intel macOS, and
-Windows x86-64. Every release includes `SHA256SUMS`.
+Release archives also cover Linux ARM64, Apple Silicon, and Windows x86-64.
+Every release includes `SHA256SUMS`.
 
 [See all installation options →](https://mr-boxington.jdx.dev/getting-started)
 

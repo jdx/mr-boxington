@@ -64,10 +64,6 @@ jobs:
             os: macos-latest
             runner: namespace-profile-endev-macos-arm64
             bin: mbx
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            runner: namespace-profile-endev-macos-arm64
-            bin: mbx
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             runner: windows-latest
@@ -132,8 +128,6 @@ jobs:
           codesign --verify --verbose=2 "$BINARY"
 
       - name: Check the binary runs
-        # Every target but this one is native to its runner.
-        if: matrix.target != 'x86_64-apple-darwin'
         shell: bash
         run: ./target/${{ matrix.target }}/release/${{ matrix.bin }} --version
 
@@ -161,7 +155,7 @@ jobs:
 
   attach:
     name: Attach to release
-    # Needs every target: a release carrying four of five archives is worse
+    # Needs every target: a release carrying three of four archives is worse
     # than one that arrives late, and the draft stays unpublished either way.
     needs: build
     runs-on: namespace-profile-endev-linux-amd64

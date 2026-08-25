@@ -25,8 +25,8 @@ tar -xzf "$archive" -C ~/.local/bin
 )
 ```
 
-Release archives are also available for Linux ARM64, Apple Silicon, Intel macOS,
-and Windows x86-64. See [GitHub Releases](https://github.com/jdx/mr-boxington/releases)
+Release archives are also available for Linux ARM64, Apple Silicon, and Windows
+x86-64. See [GitHub Releases](https://github.com/jdx/mr-boxington/releases)
 for downloads and `SHA256SUMS`.
 
 ### Cargo
