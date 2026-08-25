@@ -511,6 +511,102 @@ fn cargo_help_does_not_trigger_target_migration() {
     assert!(!cargo_help_requested(&["build".into(), "--release".into()]));
 }
 
+#[test]
+fn the_first_run_notice_states_the_resolved_caps() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = managed_target_config(directory.path());
+    config.gc.max_bytes = 12 * 1024 * 1024 * 1024;
+    let retention = RetentionSettings {
+        target_max_bytes: Some(25 * 1024 * 1024 * 1024),
+        target_max_age: Some(std::time::Duration::from_secs(30 * 86_400)),
+        max_total_bytes: None,
+    };
+
+    let notice = first_run_notice(&config, &retention, false);
+
+    assert!(notice.contains("first build on this machine"));
+    assert!(notice.contains(&config.cache_dir.display().to_string()));
+    // The budgets scale with the disk, so the notice has to report what was
+    // resolved rather than a number written into the sentence.
+    assert!(notice.contains("12.0 GiB"), "{notice}");
+    assert!(notice.contains("25.0 GiB"), "{notice}");
+    assert!(notice.contains("30 days"), "{notice}");
+    assert!(notice.contains("their checkout disappears"), "{notice}");
+}
+
+#[test]
+fn the_first_run_notice_omits_limits_that_are_off() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = managed_target_config(directory.path());
+    let retention = RetentionSettings {
+        target_max_bytes: None,
+        target_max_age: None,
+        max_total_bytes: None,
+    };
+
+    let notice = first_run_notice(&config, &retention, false);
+
+    assert!(notice.contains("their checkout disappears"), "{notice}");
+    assert!(!notice.contains("sit unused"), "{notice}");
+    assert!(!notice.contains("outgrow"), "{notice}");
+}
+
+#[test]
+fn the_first_run_notice_does_not_promise_collection_that_is_off() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = managed_target_config(directory.path());
+    config.gc.auto = false;
+
+    let notice = first_run_notice(&config, &RetentionSettings::default(), false);
+
+    assert!(notice.contains("automatic collection is off"), "{notice}");
+    assert!(!notice.contains("sweeps itself back to"), "{notice}");
+    assert!(
+        !notice.contains("target/ directories are managed"),
+        "{notice}"
+    );
+}
+
+#[test]
+fn the_first_run_notice_skips_targets_it_does_not_manage() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = managed_target_config(directory.path());
+    config.target.views = false;
+
+    let notice = first_run_notice(&config, &RetentionSettings::default(), false);
+
+    assert!(!notice.contains("target/ directories"), "{notice}");
+    assert!(notice.contains("sweeps itself back to"), "{notice}");
+}
+
+#[test]
+fn the_first_run_notice_promises_reflinks_only_when_proven() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = managed_target_config(directory.path());
+
+    let with = first_run_notice(&config, &RetentionSettings::default(), true);
+    let without = first_run_notice(&config, &RetentionSettings::default(), false);
+
+    assert!(with.contains("can reflink"), "{with}");
+    assert!(with.contains("one copy on disk"), "{with}");
+    // A machine whose filesystem copies must not be told its restores are
+    // free; silence beats a promise the disk will break.
+    assert!(!without.contains("reflink"), "{without}");
+}
+
+#[test]
+fn reasons_read_as_prose() {
+    assert_eq!(join_clauses(&["one".to_string()]), "one");
+    assert_eq!(
+        join_clauses(&["one".to_string(), "two".to_string()]),
+        "one or two"
+    );
+    assert_eq!(
+        join_clauses(&["one".to_string(), "two".to_string(), "three".to_string()]),
+        "one, two, or three"
+    );
+}
+
 fn managed_target_config(root: &Path) -> Config {
     Config {
         cache_dir: root.join("cache"),

@@ -104,3 +104,36 @@ setup() {
   assert_failure
   assert_output --regexp 'no such command: .*command-added-after-mbx'
 }
+
+@test "the first build explains what mbx set up, once" {
+  local project="$BATS_TEST_TMPDIR/first-run"
+  mkdir -p "$project/src"
+  cat >"$project/Cargo.toml" <<'EOF'
+[package]
+name = "first-run-fixture"
+version = "0.1.0"
+edition = "2021"
+EOF
+  echo 'fn main() {}' >"$project/src/main.rs"
+  run cargo generate-lockfile --offline --manifest-path "$project/Cargo.toml"
+  assert_success
+
+  # A help run does its own bookkeeping but must not consume the explanation:
+  # nothing was built and nothing was said.
+  run "$MBX_BIN" build --help --manifest-path "$project/Cargo.toml"
+  assert_success
+  refute_output --partial "first build on this machine"
+
+  run "$MBX_BIN" build --offline --manifest-path "$project/Cargo.toml"
+  assert_success
+  assert_output --partial "first build on this machine"
+  # The caps are resolved from this machine's disk, so assert the shape of the
+  # explanation rather than the numbers in it.
+  assert_output --partial "sweeps itself back to"
+  assert_output --partial "their checkout disappears"
+
+  # A machine that has been told does not need telling again.
+  run "$MBX_BIN" build --offline --manifest-path "$project/Cargo.toml"
+  assert_success
+  refute_output --partial "first build on this machine"
+}

@@ -53,6 +53,31 @@ pub fn format_duration(duration: Duration) -> String {
     }
 }
 
+/// Format a long span the way a retention policy is written.
+///
+/// [`format_duration`] measures what a build spent and would render a month as
+/// `2592000.00s`. A policy is stated in coarse units, so this says "30 days".
+///
+/// The largest unit that divides evenly, never one that would round: this
+/// describes when files get deleted, and calling 36 hours "1 day" would
+/// understate that by a third.
+pub fn format_span(duration: Duration) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+
+    let seconds = duration.as_secs();
+    let (amount, unit) = [(DAY, "day"), (HOUR, "hour"), (MINUTE, "minute")]
+        .into_iter()
+        .find(|(size, _)| seconds >= *size && seconds.is_multiple_of(*size))
+        .map_or((seconds, "second"), |(size, unit)| (seconds / size, unit));
+    if amount == 1 {
+        format!("1 {unit}")
+    } else {
+        format!("{amount} {unit}s")
+    }
+}
+
 /// Parse a duration written as a bare number of seconds or with a unit suffix.
 pub fn parse_duration(value: &str) -> Result<Duration> {
     let value = value.trim();
@@ -170,6 +195,24 @@ fn disk_total_bytes_at(path: &Path) -> Option<u64> {
     }
 }
 
+/// Whether the filesystem holding `dir` can reflink.
+///
+/// Answered by doing one, not by guessing from the platform: reflink support
+/// is a property of the mounted filesystem, and XFS on one machine has it
+/// where ext4 on the next does not. Any failure -- including `dir` not being
+/// creatable -- answers no, because every caller is deciding whether to
+/// promise sharing, and a promise needs more than a maybe.
+pub fn reflinks_work(dir: &Path) -> bool {
+    fn probe(dir: &Path) -> Option<()> {
+        std::fs::create_dir_all(dir).ok()?;
+        let directory = tempfile::tempdir_in(dir).ok()?;
+        let source = directory.path().join("source");
+        std::fs::write(&source, b"mbx reflink probe").ok()?;
+        reflink_copy::reflink(&source, directory.path().join("destination")).ok()
+    }
+    probe(dir).is_some()
+}
+
 /// Generate an unpredictable alphanumeric string.
 ///
 /// Only the Windows named-pipe endpoint needs this, but it is compiled
@@ -218,6 +261,20 @@ mod tests {
         // directory is created.
         let missing = directory.path().join("not").join("created").join("yet");
         assert_eq!(disk_total_bytes(&missing), Some(total));
+    }
+
+    #[test]
+    fn formats_spans_in_the_units_a_policy_is_written_in() {
+        assert_eq!(format_span(Duration::from_secs(30 * 86_400)), "30 days");
+        assert_eq!(format_span(Duration::from_secs(86_400)), "1 day");
+        // A policy of 36 hours is not "1 day": this text says when files go.
+        assert_eq!(format_span(Duration::from_secs(36 * 3_600)), "36 hours");
+        assert_eq!(format_span(Duration::from_secs(90 * 60)), "90 minutes");
+        assert_eq!(format_span(Duration::from_secs(45)), "45 seconds");
+        assert_eq!(format_span(Duration::from_secs(7_200)), "2 hours");
+        assert_eq!(format_span(Duration::from_secs(60)), "1 minute");
+        assert_eq!(format_span(Duration::from_secs(90)), "90 seconds");
+        assert_eq!(format_span(Duration::from_secs(5)), "5 seconds");
     }
 
     #[test]
