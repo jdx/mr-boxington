@@ -234,16 +234,24 @@ fn gc_with_mode(store: &Path, max_bytes: u64, dry_run: bool) -> Result<GcOutcome
 /// together should cost one sweep between them, and a sweep that dies partway
 /// should wait its turn like any other rather than retry on every build.
 pub fn sweep_if_due(store: &Path, max_bytes: u64, interval: Duration) -> Result<Option<GcOutcome>> {
+    if !claim_sweep(store, interval)? {
+        return Ok(None);
+    }
+    gc(store, max_bytes).map(Some)
+}
+
+/// Atomically stamp a due sweep before its callers perform coordinated GC.
+pub(crate) fn claim_sweep(store: &Path, interval: Duration) -> Result<bool> {
     let stamp = store.join(SWEEP_STAMP);
     if let Ok(metadata) = std::fs::metadata(&stamp)
         && let Ok(modified) = metadata.modified()
         && let Ok(since) = modified.elapsed()
         && since < interval
     {
-        return Ok(None);
+        return Ok(false);
     }
     crate::util::write_atomic(&stamp, b"")?;
-    gc(store, max_bytes).map(Some)
+    Ok(true)
 }
 
 /// What the checkout registry says about the identities in this store.
