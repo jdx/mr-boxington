@@ -19,7 +19,7 @@ fslock = "0.2"
 futures-util = "0.3"
 hex = "0.4"
 log = "0.4"
-mbx-cache-protocol = { path = "../mbx-cache-protocol", version = "0.3.0" }
+mbx-cache-protocol = { path = "../mbx-cache-protocol", version = "0.4.0" }
 rand = "0.10"
 reflink-copy = "0.1"
 async-compression = { version = "0.4", default-features = false, features = [
