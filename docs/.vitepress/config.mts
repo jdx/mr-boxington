@@ -93,7 +93,8 @@ export default defineConfig({
       { icon: "discord", link: "https://discord.gg/UBa7pJUN7Z" },
     ],
     editLink: {
-      pattern: "https://github.com/jdx/mr-boxington/edit/main/docs/:path",
+      pattern: ({ filePath }) =>
+        `https://github.com/jdx/mr-boxington/edit/main/docs/${filePath}`,
       text: "Edit this page on GitHub",
     },
     search: { provider: "local" },
