@@ -399,15 +399,182 @@ fn target_budget_collects_oldest_live_view_first() {
 fn dry_run_leaves_selected_target_views_in_place() {
     let directory = tempfile::tempdir().unwrap();
     let config = test_config(directory.path(), true);
-    let workspace = checkout(directory.path(), "project");
-    let managed = place(&config, &workspace, &workspace.join("target"), false).unwrap();
-    std::fs::write(managed.join("artifact"), b"outputs").unwrap();
+    // Two views, because the most recently used one is never evicted for
+    // being over budget; the older one is what a dry run must report and keep.
+    let old_workspace = checkout(directory.path(), "old");
+    let new_workspace = checkout(directory.path(), "new");
+    let old = place(
+        &config,
+        &old_workspace,
+        &old_workspace.join("target"),
+        false,
+    )
+    .unwrap();
+    place(
+        &config,
+        &new_workspace,
+        &new_workspace.join("target"),
+        false,
+    )
+    .unwrap();
+    std::fs::write(old.join("artifact"), b"outputs").unwrap();
+    age_view(&config.target.root, &old_workspace, 1);
 
     let outcome = collect(&config.target.root, Some(0), None, true).unwrap();
 
     assert_eq!(outcome.removed_live_views, 1);
+    assert!(old.join("artifact").exists());
+    assert!(view_record_path(&config.target.root, &old_workspace).exists());
+}
+
+/// Backdate a view's record so collection sees it as the older one.
+fn age_view(root: &Path, workspace_root: &Path, updated_secs: u64) {
+    let path = view_record_path(root, workspace_root);
+    let mut record: ViewRecord = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record.updated_secs = updated_secs;
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+}
+
+#[test]
+fn a_budget_smaller_than_one_target_directory_keeps_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    let managed = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    std::fs::write(managed.join("artifact"), vec![0_u8; 4_096]).unwrap();
+
+    // Deleting it could not hold the total down: the next build recreates it.
+    // Collecting it anyway would delete the working checkout's outputs after
+    // every single build.
+    let outcome = collect(&config.target.root, Some(16), None, false).unwrap();
+
+    assert_eq!(outcome.removed_views, 0);
+    assert_eq!(outcome.remaining_bytes, 4_096);
     assert!(managed.join("artifact").exists());
-    assert!(view_record_path(&config.target.root, &workspace).exists());
+}
+
+#[test]
+fn an_over_budget_sweep_keeps_the_most_recently_used_view() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let old_workspace = checkout(directory.path(), "old");
+    let new_workspace = checkout(directory.path(), "new");
+    let old = place(
+        &config,
+        &old_workspace,
+        &old_workspace.join("target"),
+        false,
+    )
+    .unwrap();
+    let new = place(
+        &config,
+        &new_workspace,
+        &new_workspace.join("target"),
+        false,
+    )
+    .unwrap();
+    std::fs::write(old.join("artifact"), vec![0_u8; 100]).unwrap();
+    std::fs::write(new.join("artifact"), vec![0_u8; 100]).unwrap();
+    age_view(&config.target.root, &old_workspace, 1);
+
+    // A budget neither view alone fits under: the older one still goes, and
+    // the one in use survives.
+    let outcome = collect(&config.target.root, Some(10), None, false).unwrap();
+
+    assert_eq!(outcome.removed_live_views, 1);
+    assert!(!old.exists(), "the idle view is collected");
+    assert!(new.exists(), "the view in use is kept");
+}
+
+#[test]
+fn a_newer_abandoned_view_does_not_spend_the_live_view_s_protection() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let working = checkout(directory.path(), "working");
+    let abandoned = checkout(directory.path(), "abandoned");
+    let working_view = place(&config, &working, &working.join("target"), false).unwrap();
+    let abandoned_view = place(&config, &abandoned, &abandoned.join("target"), false).unwrap();
+    std::fs::write(working_view.join("artifact"), vec![0_u8; 100]).unwrap();
+    std::fs::write(abandoned_view.join("artifact"), vec![0_u8; 100]).unwrap();
+    // The abandoned checkout was built more recently than the one still in
+    // use, so it sorts last -- it must not take the protected place, because
+    // it is being deleted either way.
+    age_view(&config.target.root, &working, 1);
+    age_view(&config.target.root, &abandoned, 2);
+    std::fs::remove_dir_all(&abandoned).unwrap();
+
+    let outcome = collect(&config.target.root, Some(10), None, false).unwrap();
+
+    assert!(!abandoned_view.exists(), "the abandoned view is collected");
+    assert!(
+        working_view.join("artifact").exists(),
+        "the checkout in use keeps its outputs"
+    );
+    assert_eq!(outcome.removed_stale_views, 1);
+    assert_eq!(outcome.removed_live_views, 0);
+}
+
+#[test]
+fn an_abandoned_checkout_is_collected_even_as_the_newest_view() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    let managed = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    std::fs::write(managed.join("artifact"), vec![0_u8; 100]).unwrap();
+    std::fs::remove_dir_all(&workspace).unwrap();
+
+    // Protecting the newest view is about budgets, not about outputs nothing
+    // can ask for again.
+    let outcome = collect(&config.target.root, Some(10), None, false).unwrap();
+
+    assert_eq!(outcome.removed_stale_views, 1);
+    assert!(!managed.exists());
+}
+
+#[test]
+fn a_build_writing_through_an_existing_link_keeps_its_view_alive() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    let managed = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    std::fs::write(managed.join("artifact"), b"outputs").unwrap();
+    age_view(&config.target.root, &workspace, 1);
+
+    // Placement is off now, but cargo still writes through the link an earlier
+    // build left behind, so the directory is anything but idle.
+    config.target.views = false;
+    assert!(place(&config, &workspace, &workspace.join("target"), false).is_none());
+    touch_managed(&config, &workspace, &workspace.join("target"));
+
+    let outcome = collect(
+        &config.target.root,
+        None,
+        Some(std::time::Duration::from_secs(60)),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(outcome.removed_views, 0, "a view in use is not expired");
+    assert!(managed.join("artifact").exists());
+}
+
+#[test]
+fn a_target_directory_outside_the_managed_root_is_not_touched() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    age_view(&config.target.root, &workspace, 1);
+    let elsewhere = directory.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+
+    // A checkout that went back to its own directory leaves the managed view
+    // genuinely idle, and it should expire on schedule.
+    touch_managed(&config, &workspace, &elsewhere);
+
+    let record = view_record_path(&config.target.root, &workspace);
+    let record: ViewRecord = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    assert_eq!(record.updated_secs, 1, "the record was not refreshed");
 }
 
 #[test]

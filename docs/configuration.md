@@ -6,7 +6,21 @@ then defaults. This honors platform and XDG overrides through the operating
 system's configuration-directory lookup. Unknown TOML keys are rejected so
 misspelled settings do not silently do nothing.
 
+## Disk-scaled defaults
+
+mbx bounds its own disk use without being configured. The two size budgets
+default to a share of the disk holding the cache — 5% for the action store and
+10% for managed target directories — each from its floor (5GiB and 10GiB) up to
+100GiB, rounded down to a whole 5GiB. Managed targets are also collected after
+30 days unused.
+
+Setting any of them outright overrides the scaling; `"none"` disables
+`target.max_size`, `target.max_age`, and `gc.max_total_size`. See
+[managed target directories](/managed-targets) for what collection removes.
+
 ## Example
+
+Every value below is optional; these are shown set explicitly.
 
 ```toml
 # <config directory>/mbx/config.toml
@@ -16,14 +30,14 @@ share_out_dir = false
 
 [gc]
 auto = true
-max_size = "20GiB"
-max_total_size = "50GiB"
+max_size = "20GiB"       # default: 5% of the cache disk
+max_total_size = "50GiB" # optional combined budget
 interval = "1h"
 
 [target]
 views = true
-max_size = "30GiB"
-max_age = "30d"
+max_size = "30GiB"       # default: 10% of the cache disk
+max_age = "30d"          # default
 
 [remote]
 url = "https://cache.example.com"

@@ -80,6 +80,96 @@ pub fn duration_ns(duration: Duration) -> u64 {
     duration.as_nanos().try_into().unwrap_or(u64::MAX)
 }
 
+/// The size of the filesystem holding `path`, or the nearest existing ancestor.
+///
+/// Budgets scale with the disk, so this answers "how big is the disk mbx is
+/// about to fill". The nearest existing ancestor is what gets measured because
+/// the cache directory usually does not exist yet the first time this is asked.
+/// `None` means the question could not be answered, and every caller has a
+/// fixed budget to fall back on: guessing a disk size would be worse than
+/// admitting the probe failed.
+pub fn disk_total_bytes(path: &Path) -> Option<u64> {
+    let existing = path.ancestors().find(|ancestor| ancestor.exists())?;
+    disk_total_bytes_at(existing)
+}
+
+/// Apple's `statvfs` counts blocks in a 32-bit field, which wraps somewhere
+/// above 16TiB and would answer with a smaller disk than the one it measured --
+/// quietly sizing a budget from a fraction of a large volume. `statfs` is the
+/// native call there and counts in 64 bits.
+#[cfg(all(unix, target_vendor = "apple"))]
+fn disk_total_bytes_at(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `path` is a valid NUL-terminated C string that outlives the call,
+    // and `statfs` only writes into the buffer it is given.
+    let stats = unsafe {
+        let mut stats = std::mem::zeroed::<libc::statfs>();
+        if libc::statfs(path.as_ptr(), &mut stats) != 0 {
+            return None;
+        }
+        stats
+    };
+    // A zero product falls back rather than claiming an empty disk.
+    u64::from(stats.f_bsize)
+        .checked_mul(stats.f_blocks)
+        .filter(|total| *total > 0)
+}
+
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn disk_total_bytes_at(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `path` is a valid NUL-terminated C string that outlives the call,
+    // and `statvfs` only writes into the buffer it is given.
+    let stats = unsafe {
+        let mut stats = std::mem::zeroed::<libc::statvfs>();
+        if libc::statvfs(path.as_ptr(), &mut stats) != 0 {
+            return None;
+        }
+        stats
+    };
+    // `f_frsize` is the fundamental block size `f_blocks` counts in. It is
+    // reported as 0 by some filesystems, which would silently answer "0 bytes",
+    // so a zero product falls back rather than claiming an empty disk.
+    //
+    // Both fields are already `u64` on 64-bit glibc, where these conversions do
+    // nothing, but they narrow on 32-bit targets -- the conversions are what let
+    // one body compile everywhere CI builds it.
+    #[allow(clippy::useless_conversion)]
+    let block_size = u64::try_from(stats.f_frsize).ok()?;
+    #[allow(clippy::useless_conversion)]
+    let blocks = u64::try_from(stats.f_blocks).ok()?;
+    block_size.checked_mul(blocks).filter(|total| *total > 0)
+}
+
+#[cfg(windows)]
+fn disk_total_bytes_at(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    let mut total = 0_u64;
+    // SAFETY: `wide` is NUL-terminated and outlives the call, and the out
+    // parameters are either null (ignored by the API) or a valid `u64`.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            std::ptr::null_mut(),
+            &mut total,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        None
+    } else {
+        Some(total).filter(|total| *total > 0)
+    }
+}
+
 /// Generate an unpredictable alphanumeric string.
 ///
 /// Only the Windows named-pipe endpoint needs this, but it is compiled
@@ -117,6 +207,17 @@ mod tests {
         assert!(first.chars().all(|character| character.is_alphanumeric()));
         assert_ne!(first, random_string(12));
         assert!(random_string(0).is_empty());
+    }
+
+    #[test]
+    fn measures_the_disk_holding_a_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let total = disk_total_bytes(directory.path()).expect("the test disk has a size");
+        assert!(total > 0);
+        // The directory need not exist: budgets are resolved before the cache
+        // directory is created.
+        let missing = directory.path().join("not").join("created").join("yet");
+        assert_eq!(disk_total_bytes(&missing), Some(total));
     }
 
     #[test]
