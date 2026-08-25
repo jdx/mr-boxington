@@ -87,6 +87,17 @@ const SUPPORTED_CODEGEN_OPTIONS: &[&str] = &[
     "tls-model",
 ];
 
+/// Built-in WebAssembly targets whose default linkers and CRT inputs ship in
+/// the Rust toolchain. Custom target specs never enter this list.
+const COMPILER_BUNDLED_WASM_TARGETS: &[&str] = &[
+    "wasm32-unknown-unknown",
+    "wasm32-wasip1",
+    "wasm32-wasip1-threads",
+    "wasm32-wasip2",
+    "wasm32v1-none",
+    "wasm64-unknown-unknown",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Error, strum::IntoStaticStr)]
 #[strum(serialize_all = "kebab-case")]
 /// Reason an invocation cannot safely use the action cache.
@@ -287,7 +298,8 @@ impl RustcInvocation {
     ///
     /// Any flag whose cache semantics are not modeled returns a bypass reason
     /// instead of guessing. A successful parse only admits the initial
-    /// rlib/rmeta tier plus compiler-linked `wasm32-unknown-unknown` binaries.
+    /// rlib/rmeta tier plus binaries linked by compiler-bundled WebAssembly
+    /// toolchains.
     pub fn parse(arguments: &[OsString]) -> Result<Self, BypassReason> {
         Parser::new(arguments).parse()
     }
@@ -1011,20 +1023,39 @@ impl<'a> Parser<'a> {
                 .all(|crate_type| matches!(crate_type.as_str(), "lib" | "rlib"))
         {
             LinkOutput::Library
-        } else if self.target.as_deref() == Some("wasm32-unknown-unknown")
+        } else if self
+            .target
+            .as_deref()
+            .is_some_and(compiler_bundled_wasm_target)
             && ((self.test && self.crate_types.is_empty())
-                || self.crate_types.as_slice() == ["bin"])
+                || matches!(self.crate_types.as_slice(), [kind] if kind == "bin" || kind == "cdylib"))
         {
-            if self.parsed.iter().any(|argument| {
-                matches!(argument, Argument::Plain(value) if value == "--codegen=link-self-contained" || value.starts_with("--codegen=link-self-contained="))
+            if self.parsed.iter().any(|argument| match argument {
+                Argument::Plain(value) if value == "--codegen=link-self-contained" => false,
+                Argument::Plain(value) if value.starts_with("--codegen=link-self-contained=") => {
+                    !matches!(
+                        value.rsplit_once('=').map(|(_, value)| value),
+                        Some("y" | "yes" | "on" | "true")
+                    )
+                }
+                _ => false,
             }) {
                 return Err(BypassReason::UnknownCodegenOption(
                     "link-self-contained".into(),
                 ));
             }
-            // This target's built-in linker is rust-lld from the Rust
-            // toolchain. Unlike a native link, it has no implicit host CRT or
-            // system-library inputs outside the compiler identity.
+            if self.target.as_deref().is_some_and(|target| target.contains("wasi"))
+                && self.parsed.iter().any(|argument| {
+                    matches!(argument, Argument::Plain(value) if value.strip_prefix("--codegen=target-feature=").is_some_and(|features| features.split(',').any(|feature| feature == "-crt-static")))
+                })
+            {
+                return Err(BypassReason::UnknownCodegenOption(
+                    "target-feature=-crt-static".into(),
+                ));
+            }
+            // These targets use a linker and, where applicable, CRT objects
+            // and libc shipped in the Rust toolchain. Unlike native linking,
+            // there are no implicit host inputs outside compiler identity.
             LinkOutput::WasmExecutable
         } else if self.test {
             return Err(BypassReason::UnsupportedCrateType("test".into()));
@@ -1059,6 +1090,10 @@ impl<'a> Parser<'a> {
         }
         Ok(link_output)
     }
+}
+
+fn compiler_bundled_wasm_target(target: &str) -> bool {
+    COMPILER_BUNDLED_WASM_TARGETS.binary_search(&target).is_ok()
 }
 
 fn parse_emits(value: &str) -> Vec<Emit> {

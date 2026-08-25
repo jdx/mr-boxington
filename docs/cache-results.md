@@ -40,5 +40,5 @@ of its time on actions that were not looked up or were bypassed. Read all three
 summary lines together, and compare wall-clock time when evaluating the cache.
 
 Native link steps always run, so an otherwise warm native binary build still
-has work to do. Default-linked `wasm32-unknown-unknown` binaries and tests are
-the exception and may be restored as hits.
+has work to do. Binaries, tests, and `cdylib`s for supported self-contained
+WebAssembly targets are the exception and may be restored as hits.

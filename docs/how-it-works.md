@@ -59,8 +59,8 @@ platform, including when mbx has to use the copy fallback.
 ## Correctness first
 
 Unsupported crate types, unmodeled search paths, native linking, and
-incremental compilations bypass the shared action cache. The only linked
-programs admitted today are `wasm32-unknown-unknown` binaries and tests using
-the compiler-bundled default linker. `MBX_VERIFY=1` compiles while also
-consulting the cache and compares the result, providing a deliberately
-expensive qualification mode.
+incremental compilations bypass the shared action cache. Linked WebAssembly
+binaries, tests, and `cdylib`s are admitted only for a fixed allowlist of
+built-in targets whose default linker and system inputs ship with rustc.
+`MBX_VERIFY=1` compiles while also consulting the cache and compares the result,
+providing a deliberately expensive qualification mode.

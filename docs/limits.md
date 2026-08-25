@@ -17,11 +17,20 @@ Native binaries and dynamic libraries always link. Their results can depend on
 an external linker, startup objects, and system libraries that rustc dep-info
 does not enumerate, so mbx bypasses them.
 
-The narrow exception is a binary or test for `wasm32-unknown-unknown` using its
-default compiler-bundled linker. mbx caches that link because all explicit
-artifacts are modeled inputs and the linker is covered by the Rust toolchain
-identity. Native targets, custom target specifications, native libraries,
-custom linkers, and custom `link-self-contained` modes remain uncached.
+The narrow exception is a binary, test, or `cdylib` for one of these built-in
+targets using its compiler-bundled self-contained linker:
+
+- `wasm32-unknown-unknown`
+- `wasm32-wasip1` and `wasm32-wasip1-threads`
+- `wasm32-wasip2`
+- `wasm32v1-none`
+- `wasm64-unknown-unknown`
+
+mbx caches those links because all explicit artifacts are modeled inputs and
+the linker, CRT objects, and bundled libc are covered by the Rust toolchain
+identity. Native targets, custom target specifications, external WebAssembly
+toolchains, native libraries, custom linkers, disabled WASI CRT bundling, and
+non-affirmative `link-self-contained` modes remain uncached.
 
 ## `OUT_DIR` sharing is opt-in
 

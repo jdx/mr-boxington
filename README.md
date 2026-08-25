@@ -146,9 +146,9 @@ derives an action key, restores cached outputs when possible, or runs the real
 compiler and publishes a successful result.
 
 Anything mbx cannot model exactly bypasses the cache. Native linking is not
-cached; the intentionally narrow exception is `wasm32-unknown-unknown`, whose
-default linker ships inside the Rust toolchain. Incremental compilations bypass
-the cache. Correctness comes before hit rate.
+cached; built-in WebAssembly targets with self-contained linkers are the narrow
+exception because their linker, CRT, and libc inputs ship in the Rust toolchain.
+Incremental compilations bypass the cache. Correctness comes before hit rate.
 
 [Read the architecture and limits →](https://mr-boxington.jdx.dev/how-it-works)
 
