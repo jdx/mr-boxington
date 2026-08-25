@@ -505,25 +505,6 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
     config.incremental = incremental;
     let config = &config;
 
-    // Before the prompt below, so the offer to replace an existing `target/`
-    // arrives after the explanation of what a managed one is for. One existence
-    // check, and only on the cargo path.
-    if !cargo_help_requested(arguments) && !was_explained(&config.store_dir()) {
-        // Probed rather than assumed, probed only on the one run that will
-        // say something about it, and probed between the two places the real
-        // copy spans: the store, and wherever this build's outputs will land
-        // -- the managed root normally, cargo's own directory when placement
-        // is off or the location was asked for.
-        let outputs_root = if config.target.views && !roots.target_dir_requested {
-            &config.target.root
-        } else {
-            &roots.target_dir
-        };
-        let reflinks = crate::util::reflinks_work(&config.cache_dir, outputs_root);
-        crate::session::note(&first_run_notice(config, retention, reflinks));
-        mark_explained(&config.store_dir());
-    }
-
     let migrate_existing = prompt_to_manage_existing_target(config, &roots, arguments)?;
     // Placed before the session starts, because the target directory is what
     // the shim maps out of its cache keys and it has to be the one cargo will
@@ -561,6 +542,17 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
         // so collection does not treat it as idle.
         target::touch_managed(config, &roots.workspace_root, &roots.target_dir);
     }
+
+    // Probed rather than assumed, and only on the one run that will say
+    // something about it. Placement is best-effort, so wait until it has
+    // finished and probe the directory cargo will actually use rather than
+    // predicting that a managed target will win.
+    if !cargo_help_requested(arguments) && !was_explained(&config.store_dir()) {
+        let reflinks = crate::util::reflinks_work(&config.cache_dir, &roots.target_dir);
+        crate::session::note(&first_run_notice(config, retention, reflinks));
+        mark_explained(&config.store_dir());
+    }
+
     let session_dir = tempfile::Builder::new().prefix("mbx-session-").tempdir()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
