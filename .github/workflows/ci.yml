@@ -134,6 +134,14 @@ jobs:
         shell: bash
         env:
           BASE_REF: ${{ github.base_ref }}
+          # The CLI crate's library target exists so the binary and its
+          # integration tests can share application code; it is not an API
+          # anything outside this workspace is meant to build against, which
+          # `crates/mbx/src/lib.rs` says outright. Checking it would mean a
+          # major bump every time the CLI gains a setting, or contorting
+          # internal types to avoid one. The published API lives in
+          # mbx-cache-core and mbx-cache-rustc, which stay checked.
+          UNCHECKED_PACKAGES: mbx
         run: |
           baseline_dir="$(mktemp -d)"
           git worktree add --detach "$baseline_dir" "origin/$BASE_REF"
@@ -141,7 +149,14 @@ jobs:
             comm -12 \
               <(cargo metadata --no-deps --format-version 1 | jq -r '.workspace_members as $members | [.packages[] | select(.id as $id | $members | index($id)) | .name] | sort | .[]') \
               <(cargo metadata --manifest-path "$baseline_dir/Cargo.toml" --no-deps --format-version 1 | jq -r '.workspace_members as $members | [.packages[] | select(.id as $id | $members | index($id)) | .name] | sort | .[]')
-          } | paste -sd, -)"
+          } | { grep -vxF "$UNCHECKED_PACKAGES" || true; } | paste -sd, -)"
+          # An empty list would make the action check every package rather than
+          # nothing, so say what happened instead. `|| true` above keeps grep's
+          # no-match exit out of pipefail's way so this message is reachable.
+          if [ -z "$packages" ]; then
+            echo "no shared packages left to check" >&2
+            exit 1
+          fi
           echo "packages=$packages" >> "$GITHUB_OUTPUT"
       - name: Check workspace API against the PR base
         if: github.event_name == 'pull_request'
