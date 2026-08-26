@@ -72,7 +72,7 @@ onMounted(() => {
         <span class="progress">build {{ buildsRun + 1 }} of 2</span>
       </div>
     </div>
-    <p class="caption">The second checkout never compiles what the first already did — locally or in CI.</p>
+    <p class="caption">Whatever one checkout compiles, the next one reuses — locally or in CI.</p>
   </section>
 </template>
 

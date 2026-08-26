@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="A tree growing small cache boxes">
+  <defs>
+    <linearGradient id="leaf" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9db95c"/>
+      <stop offset="1" stop-color="#5d7f3a"/>
+    </linearGradient>
+    <linearGradient id="fruit" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f6d693"/>
+      <stop offset="1" stop-color="#c4862c"/>
+    </linearGradient>
+  </defs>
+  <!-- trunk -->
+  <path d="M57 118V76q0-8-8-14M71 118V80q0-10 10-18" fill="none" stroke="#53350f" stroke-width="21" stroke-linecap="round"/>
+  <path d="M57 118V76q0-8-8-14M71 118V80q0-10 10-18" fill="none" stroke="#a5772b" stroke-width="9" stroke-linecap="round"/>
+  <!-- canopy: outlined circles, then fill-only copies to hide the seams -->
+  <g stroke="#53350f" stroke-width="7">
+    <circle cx="42" cy="46" r="25" fill="url(#leaf)"/>
+    <circle cx="86" cy="48" r="23" fill="url(#leaf)"/>
+    <circle cx="64" cy="32" r="24" fill="url(#leaf)"/>
+  </g>
+  <g fill="url(#leaf)">
+    <circle cx="42" cy="46" r="21.5"/>
+    <circle cx="86" cy="48" r="19.5"/>
+    <circle cx="64" cy="32" r="20.5"/>
+  </g>
+  <path d="M46 24a22 22 0 0 1 12-8" fill="none" stroke="#f6ecd2" stroke-width="5" stroke-linecap="round" opacity=".55"/>
+  <!-- cache boxes as fruit -->
+  <g stroke="#53350f" stroke-width="5" stroke-linejoin="round" fill="url(#fruit)">
+    <rect x="26" y="48" width="16" height="16" rx="3"/>
+    <rect x="82" y="52" width="15" height="15" rx="3"/>
+    <rect x="58" y="28" width="15" height="15" rx="3"/>
+  </g>
+  <path d="M28 54h12M84 58h11M60 34h11" fill="none" stroke="#53350f" stroke-width="2.5"/>
+</svg>

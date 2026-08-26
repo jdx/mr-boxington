@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="A golden gear">
+  <defs>
+    <linearGradient id="gear" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f6d693"/>
+      <stop offset="1" stop-color="#c4862c"/>
+    </linearGradient>
+  </defs>
+  <g stroke="#53350f" stroke-width="7" stroke-linejoin="round">
+    <g fill="url(#gear)">
+      <rect x="54" y="10" width="20" height="108" rx="6"/>
+      <rect x="54" y="10" width="20" height="108" rx="6" transform="rotate(45 64 64)"/>
+      <rect x="54" y="10" width="20" height="108" rx="6" transform="rotate(90 64 64)"/>
+      <rect x="54" y="10" width="20" height="108" rx="6" transform="rotate(135 64 64)"/>
+      <circle cx="64" cy="64" r="36"/>
+    </g>
+    <circle cx="64" cy="64" r="14" fill="#f6ecd2"/>
+  </g>
+  <path d="M41 48a29 29 0 0 1 11-11" fill="none" stroke="#f6ecd2" stroke-width="5" stroke-linecap="round" opacity=".7"/>
+</svg>

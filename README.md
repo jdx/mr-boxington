@@ -17,10 +17,6 @@
   <a href="PLAN.md">Road to v1</a>
 </p>
 
-> [!WARNING]
-> mr boxington is pre-1.0. The cache format and behavior may change without
-> notice, and releases are not a stability promise.
-
 `mbx` wraps ordinary Cargo commands with a content-addressed rustc cache. Cargo
 still resolves dependencies, plans builds, and links outputs; mbx restores
 supported compilations it has seen before. There is nothing to configure and
