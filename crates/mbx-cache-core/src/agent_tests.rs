@@ -1353,7 +1353,14 @@ async fn foreground_action_lookup_does_not_wait_for_prefetch_output() {
             .prefetch_action(prefetch_action, "rustc".into())
             .await
     });
-    tokio::time::timeout(Duration::from_secs(1), async {
+    // The prefetch reaches the output blob only after three round trips
+    // against the mock server, and the foreground lookup below makes three of
+    // its own. Both budgets are only ever spent when something hangs, so they
+    // are generous: what this test proves is that the foreground lookup does
+    // not block on the held-open artifact response, not that either side is
+    // fast. A tight bound instead measures the runner, and a contended
+    // windows-latest agent loses that race while behaving correctly.
+    tokio::time::timeout(Duration::from_secs(30), async {
         while !started.load(Ordering::Acquire) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -1361,11 +1368,8 @@ async fn foreground_action_lookup_does_not_wait_for_prefetch_output() {
     .await
     .expect("prefetch did not request the output blob");
 
-    let foreground = tokio::time::timeout(
-        Duration::from_millis(250),
-        agent.find_action_result(&action),
-    )
-    .await;
+    let foreground =
+        tokio::time::timeout(Duration::from_secs(30), agent.find_action_result(&action)).await;
     release.store(true, Ordering::Release);
     prefetch.await.unwrap().unwrap();
     let foreground = foreground.expect("foreground action lookup waited for output prefetch");
