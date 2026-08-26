@@ -70,15 +70,6 @@ These settings live outside the repository, and releases fail without them:
   crates.io yet cannot be created this way — publish its first version by hand
   with a `publish-new` token, then configure its trusted publisher.
 
-## When a release goes wrong
-
-If the tag was created but the binaries failed to build, fix the problem and
-run the `release` workflow manually with that tag. It rebuilds, re-attaches
-with `--clobber`, and undrafts the release itself — dispatching by hand is the
-one path where nothing else would. If the tag exists but its release does not,
-because release-plz failed after tagging or the draft was deleted, that run
-recreates it rather than failing.
-
 ## Notarization
 
 Signing proves who built the binary; notarization is what Gatekeeper asks for
@@ -105,3 +96,12 @@ The build's `spctl` output is informational. Tickets take a moment to propagate
 after a submission is accepted, so a negative assessment in a release log is not
 by itself evidence of a bad build — the accepted submission status is the gate,
 and the job fails when it is anything else.
+
+## When a release goes wrong
+
+If the tag was created but the binaries failed to build, fix the problem and
+run the `release` workflow manually with that tag. It rebuilds, re-attaches
+with `--clobber`, and undrafts the release itself — dispatching by hand is the
+one path where nothing else would. If the tag exists but its release does not,
+because release-plz failed after tagging or the draft was deleted, that run
+recreates it rather than failing.
