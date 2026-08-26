@@ -5,8 +5,8 @@
 <h1 align="center">mr boxington</h1>
 
 <p align="center">
-  <strong><code>target/</code>, fixed: shared, self-pruning, drop-in.</strong><br>
-  Put mbx in front of any Cargo command. Compiled work is shared across worktrees and CI, build storage keeps itself inside a budget, and mbx tells you what it saved.
+  <strong>fix <code>target/</code></strong><br>
+  Put mbx in front of any cargo command. One cache warms every worktree and CI run, and prunes itself to a size budget.
 </p>
 
 <p align="center">
@@ -55,7 +55,7 @@ sweeps itself back to, and when a `target/` directory becomes collectable.
 With [mise](https://mise.jdx.dev):
 
 ```sh
-mise use -g github:jdx/mr-boxington
+mise use -g mr-boxington
 ```
 
 With Cargo:
@@ -100,10 +100,9 @@ it after a build:
 mbx[savings]: 41.7 GiB of target/ had outlived its checkouts. it has been dealt with.
 ```
 
-The line is drawn from a pool, so it does not repeat itself. Prefer a build
-log with a straight face? `savings = "plain"` states the same facts dryly, and
-`savings = "off"` keeps the totals without printing anything (`MBX_SAVINGS`
-from the environment). Inspect or collect the store explicitly with:
+The line is drawn from a pool, so it does not repeat itself. `savings =
+"plain"` states the same facts without the joke, and `savings = "off"` keeps
+the totals without printing anything (`MBX_SAVINGS` from the environment). Inspect or collect the store explicitly with:
 
 ```sh
 mbx cache stats

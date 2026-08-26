@@ -33,7 +33,7 @@ mbx explain build --workspace
 
 The command preserves Cargo's exit status after printing the explanation.
 
-## Why hit rate is not the whole story
+## Reading the hit rate
 
 A build can report a high hit rate among attempted lookups while spending most
 of its time on actions that were not looked up or were bypassed. Read all three

@@ -3,8 +3,8 @@
 mbx loads environment variables over `.mbx.toml` at the resolved Cargo
 workspace root, then `mbx/config.toml` in the platform configuration directory,
 then defaults. This honors platform and XDG overrides through the operating
-system's configuration-directory lookup. Unknown TOML keys are rejected so
-misspelled settings do not silently do nothing.
+system's configuration-directory lookup. Unknown TOML keys are rejected, so a
+misspelled setting is an error rather than a silent no-op.
 
 ## Disk-scaled defaults
 
@@ -72,8 +72,9 @@ types, defaults, choices, and environment-only diagnostics—is generated from
 the same usage-rs declaration mbx uses at runtime. See
 [CLI configuration reference](/cli/configuration).
 
-`MBX_VERIFY=1` is deliberately slower. It qualifies correctness; it is not a
-normal build mode.
+`MBX_VERIFY=1` compiles and consults the cache side by side and compares the
+results. It is deliberately expensive — use it to qualify correctness, not for
+everyday builds.
 
 ## Explicit remote prefetch
 

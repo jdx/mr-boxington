@@ -54,7 +54,7 @@ custom save policies need to share the same entry:
 - uses: jdx/mise-action@v4
   with:
     cache: false
-    install_args: github:jdx/mr-boxington
+    install_args: mr-boxington
 - run: mbx test --workspace
 - run: mbx gc --max-size 3GB
   if: always()

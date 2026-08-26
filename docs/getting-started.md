@@ -5,7 +5,7 @@
 ### mise
 
 ```sh
-mise use -g github:jdx/mr-boxington
+mise use -g mr-boxington
 ```
 
 ### Release archive
@@ -47,14 +47,12 @@ mbx clippy --workspace --all-targets
 
 The command and its arguments are passed to Cargo unchanged. Cargo still owns
 dependency resolution, feature unification, build planning, and linking. mbx
-also forwards Cargo aliases and installed subcommands.
-
-That is the whole setup. There is nothing to install into Cargo's
-configuration and nothing to tune before the first build.
+also forwards Cargo aliases and installed subcommands. Nothing goes into
+Cargo's configuration, and there is nothing to tune before the first build.
 
 ## The first build
 
-The first build on a machine says what it arranged:
+The first build on a machine prints what it set up:
 
 ```text
 mbx[setup]: first build on this machine -- here is the arrangement:
