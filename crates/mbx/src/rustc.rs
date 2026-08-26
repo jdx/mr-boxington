@@ -365,7 +365,8 @@ fn action_from_parsed_dep_info(
     working_dir: &Path,
     portable: &Portable,
 ) -> Result<(ActionCandidates, DiscoveredInputs)> {
-    let discovered = invocation.discover_inputs(dep_info, working_dir)?;
+    let discovered =
+        invocation.discover_inputs_with_mappings(dep_info, working_dir, &portable.mappings)?;
     let mut context = base_action_context(rustc, working_dir, portable)?;
     discovered.clone().apply_to(&mut context)?;
     let candidates = ActionCandidates::build(invocation, context)?;
@@ -449,7 +450,7 @@ fn decode_prediction_timing(
         bail!("cache agent returned an incompatible rustc timing prediction");
     }
     let timing: RustcInputPrediction = serde_json::from_str(&prediction.payload)?;
-    if !matches!(timing.version, 1 | 2)
+    if !matches!(timing.version, 1..=3)
         || timing.crate_name.len() > 256
         || timing.crate_name.contains(['\0', '\n', '\r'])
         || String::from_utf8(canonical_json(&timing)?)? != prediction.payload

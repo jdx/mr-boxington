@@ -141,22 +141,29 @@ fn parses_a_cargo_library_invocation() {
 #[test]
 fn tracks_native_search_path_contents_but_still_rejects_native_libraries() {
     let directory = tempfile::tempdir().unwrap();
+    let working_dir = directory.path().join("registry/widget");
     let native = directory.path().join("target/native");
+    std::fs::create_dir_all(&working_dir).unwrap();
     std::fs::create_dir_all(&native).unwrap();
-    std::fs::write(directory.path().join("src.rs"), "pub fn value() {}\n").unwrap();
+    std::fs::write(working_dir.join("src.rs"), "pub fn value() {}\n").unwrap();
     std::fs::write(native.join("fixture.lib"), "first").unwrap();
+    let native_argument = format!("-Lnative={}", native.display());
     let invocation = RustcInvocation::parse(&args(&[
         "--crate-name=widget",
         "--crate-type=lib",
         "--emit=dep-info,metadata,link",
         "--out-dir=target/debug/deps",
-        "-Lnative=target/native",
+        &native_argument,
         "src.rs",
     ]))
     .unwrap();
     let dep_info = RustcDepInfo::parse("target/debug/deps/widget.d: src.rs\n").unwrap();
     let discovered = invocation
-        .discover_inputs(&dep_info, directory.path())
+        .discover_inputs_with_mappings(
+            &dep_info,
+            &working_dir,
+            &[PathMapping::new(directory.path().join("target"), "target")],
+        )
         .unwrap();
     assert!(
         discovered
@@ -166,8 +173,11 @@ fn tracks_native_search_path_contents_but_still_rejects_native_libraries() {
     );
 
     let action_context = ActionContext {
-        working_dir: directory.path().to_path_buf(),
-        path_mappings: vec![PathMapping::new(directory.path(), "workspace")],
+        working_dir: working_dir.clone(),
+        path_mappings: vec![
+            PathMapping::new(&working_dir, "workspace"),
+            PathMapping::new(directory.path().join("target"), "target"),
+        ],
         inputs: discovered.inputs.clone(),
         ..context(&[])
     };
@@ -175,7 +185,7 @@ fn tracks_native_search_path_contents_but_still_rejects_native_libraries() {
     assert_eq!(prediction.version, 3);
     std::fs::write(native.join("added.lib"), "second").unwrap();
     let predicted = prediction
-        .discover(directory.path(), &action_context.path_mappings)
+        .discover(&working_dir, &action_context.path_mappings)
         .unwrap();
     assert!(
         predicted

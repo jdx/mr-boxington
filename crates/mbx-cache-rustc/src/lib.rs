@@ -695,12 +695,19 @@ impl RustcInputPrediction {
             return Err(BypassReason::UnsupportedPrediction);
         }
         let mut paths = BTreeSet::new();
+        let admitted_roots = dep_info::native_input_roots(working_dir, path_mappings);
+        let mut native_bytes = 0_u64;
         for path in &self.inputs {
             if self.version >= 3
                 && let Some(path) = path.strip_prefix(NATIVE_DIRECTORY_PREDICTION_PREFIX)
             {
                 let directory = denormalize_path(path, path_mappings)?;
-                dep_info::collect_native_directory(&directory, working_dir, &mut paths)?;
+                dep_info::collect_native_directory(
+                    &directory,
+                    &admitted_roots,
+                    &mut paths,
+                    &mut native_bytes,
+                )?;
             } else {
                 paths.insert(denormalize_path(path, path_mappings)?);
             }
