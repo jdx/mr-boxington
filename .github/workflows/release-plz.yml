@@ -200,5 +200,11 @@ jobs:
           fi
 
           git add docs/cli
-          git commit -m "docs: update generated CLI reference"
+          # release-plz preserves maintainer commits by closing and recreating
+          # its PR instead of force-pushing over them. Mark this generated
+          # commit as automation so the next run can update the existing PR.
+          git \
+            -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -m "docs: update generated CLI reference"
           git push origin "HEAD:$branch"
