@@ -73,6 +73,11 @@ pub use mbx_cache_protocol::{
 /// `validate_task_manifest` ever sees the payload. The bound matches the agent's
 /// own request ceiling so both ends of the protocol refuse the same magnitude.
 const MAX_REMOTE_JSON_BYTES: u64 = 16 * 1024 * 1024;
+/// Ceiling on the opaque part of an entity tag this client will carry back.
+///
+/// A tag is only ever echoed into `If-Match`, so its length is bounded to keep
+/// a server from choosing how large a request header this client sends.
+const MAX_ETAG_BYTES: usize = 256;
 const MAX_STAGED_BLOB_PACK_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_STAGED_BLOB_PACK_ITEMS: usize = 2 * 1024;
 const BLOB_PACK_TIMEOUT_BYTES_PER_UNIT: u64 = MAX_STAGED_BLOB_PACK_BYTES / 4;
@@ -644,9 +649,6 @@ impl RemoteCacheClient {
             let response = response.error_for_status()?;
             let etag = parse_strong_etag(response.headers().get(ETAG))?;
             let bytes = read_bounded_json(response, "action manifest").await?;
-            if blake3::hash(&bytes).to_hex().as_str() != etag {
-                bail!("remote action manifest ETag does not match its body");
-            }
             Ok(Some(RemoteActionManifest { bytes, etag }))
         })
         .await
@@ -1024,30 +1026,46 @@ impl BlobPackHasher {
     }
 }
 
+/// Read the entity tag that a later conditional update has to send back.
+///
+/// The tag is carried through opaquely, and nothing may infer content from it.
+/// RFC 9110 section 8.8.3.3 requires an intermediary that re-encodes a response
+/// to vary the strong tag along with it, and proxies do: Caddy appends the
+/// content coding, so a manifest served through compression arrives tagged
+/// `"<hash>-zstd"`. What the body actually is gets established by the caller
+/// comparing it against canonical JSON, not by the shape of this header.
 fn parse_strong_etag(value: Option<&HeaderValue>) -> Result<String> {
     let value = value
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| eyre!("remote action manifest response is missing an ETag"))?;
+    if value.starts_with("W/") {
+        // If-Match rejects a weak validator, so an update could not tell that it
+        // was overwriting a manifest someone else had published.
+        bail!("remote action manifest response has a weak ETag");
+    }
     let etag = value
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
-        .filter(|value| is_lower_hex_digest(value))
+        .filter(|value| is_entity_tag(value))
         .ok_or_else(|| eyre!("remote action manifest response has an invalid ETag"))?;
     Ok(etag.to_owned())
 }
 
 fn quoted_etag(etag: &str) -> Result<HeaderValue> {
-    if !is_lower_hex_digest(etag) {
+    if !is_entity_tag(etag) {
         bail!("invalid remote action manifest ETag");
     }
     Ok(HeaderValue::from_str(&format!("\"{etag}\""))?)
 }
 
-fn is_lower_hex_digest(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+/// Whether this is the opaque body of a strong entity tag (RFC 9110 `etagc`).
+///
+/// `HeaderValue::to_str` has already ruled out anything but visible ASCII, so
+/// the double quote that would end the tag early is all that is left to reject.
+fn is_entity_tag(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_ETAG_BYTES
+        && value.bytes().all(|byte| matches!(byte, 0x21 | 0x23..=0x7e))
 }
 
 #[derive(Clone)]

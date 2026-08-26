@@ -54,6 +54,17 @@ before hashing. The conformance fixture locks their canonical v1 bytes, the
 protocol constants, and the normalized shape of every local-agent message to
 prevent accidental drift.
 
+Action manifests are updated conditionally: a `GET` returns a strong `ETag` that
+the following `PUT` sends back as `If-Match`, and a first write uses
+`If-None-Match: *`. That entity tag is **opaque**. A client must echo it
+unchanged and must not read content from it, because a manifest can reach the
+client through an intermediary — RFC 9110 section 8.8.3.3 requires a proxy that
+compresses a response to vary the strong tag along with the coding, and Caddy
+does so by appending the coding name. What the body is gets established by
+comparing it against its canonical JSON and validating the task identity it
+claims, never by the tag. A server may therefore choose any strong tag; a weak
+one leaves the manifest readable but not updatable.
+
 ## Rust API compatibility
 
 Published Rust APIs follow semantic versioning independently of the wire

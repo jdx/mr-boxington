@@ -548,6 +548,77 @@ async fn rejects_action_json_larger_than_the_limit() {
 }
 
 #[tokio::test]
+async fn manifest_etags_survive_a_proxy_that_re_encodes_the_response() {
+    // RFC 9110 section 8.8.3.3 obliges an intermediary that compresses a
+    // response to vary the strong ETag with the coding, and Caddy does it by
+    // appending the coding name. Every deployment behind such a proxy serves
+    // tags that cannot be the body's digest, and they still have to reach
+    // If-Match intact or no manifest can ever be updated.
+    let mut server = mockito::Server::new_async().await;
+    let key = CacheDigest::blake3(b"manifest");
+    let body = br#"{"predictions":[],"task":"a","version":1}"#;
+    let proxied = format!("{}-zstd", blake3::hash(body).to_hex());
+    let path = format!(
+        "/v{PROTOCOL_VERSION}/action-manifests/{}/{}/{}",
+        key.algorithm, key.hash, key.size
+    );
+    let get = server
+        .mock("GET", path.as_str())
+        .with_status(200)
+        .with_header("etag", &format!("\"{proxied}\""))
+        .with_body(body)
+        .create_async()
+        .await;
+    let put = server
+        .mock("PUT", path.as_str())
+        .match_header("if-match", format!("\"{proxied}\"").as_str())
+        .with_status(204)
+        .create_async()
+        .await;
+    let client = test_client(&server);
+
+    let manifest = client.get_action_manifest(&key).await.unwrap().unwrap();
+    assert_eq!(manifest.etag, proxied);
+    assert_eq!(manifest.bytes, body);
+    assert_eq!(
+        client
+            .put_action_manifest(&key, &manifest.bytes, Some(&manifest.etag))
+            .await
+            .unwrap(),
+        ManifestPutOutcome::Stored
+    );
+    get.assert_async().await;
+    put.assert_async().await;
+}
+
+#[test]
+fn entity_tags_are_opaque_but_still_have_to_be_strong() {
+    let hash = blake3::hash(b"manifest").to_hex().to_string();
+    for accepted in [hash.clone(), format!("{hash}-zstd"), "anything".into()] {
+        let header = HeaderValue::from_str(&format!("\"{accepted}\"")).unwrap();
+        assert_eq!(parse_strong_etag(Some(&header)).unwrap(), accepted);
+        assert!(quoted_etag(&accepted).is_ok());
+    }
+    // A weak validator cannot carry a conditional update, and an unquoted or
+    // prematurely terminated tag is not one at all.
+    for rejected in [
+        format!("W/\"{hash}\""),
+        hash.clone(),
+        format!("\"{hash}"),
+        "\"\"".into(),
+        "\"quo\"te\"".into(),
+    ] {
+        let header = HeaderValue::from_str(&rejected).unwrap();
+        assert!(
+            parse_strong_etag(Some(&header)).is_err(),
+            "accepted {rejected}"
+        );
+    }
+    assert!(parse_strong_etag(None).is_err());
+    assert!(quoted_etag(&"x".repeat(MAX_ETAG_BYTES + 1)).is_err());
+}
+
+#[tokio::test]
 async fn uploads_compress_when_the_server_offers_zstd() {
     let mut server = mockito::Server::new_async().await;
     server
