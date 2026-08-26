@@ -42,6 +42,7 @@ jobs:
         if: steps.deny.outcome == 'failure'
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          NOTIFY_FROM: ${{ secrets.NOTIFY_FROM }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
           REPOSITORY: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -49,13 +50,13 @@ jobs:
           # A missing secret must not masquerade as a clean audit, but it must
           # not hide the advisory either: warn, and let the failing step below
           # still turn the run red.
-          if [[ -z "$RESEND_API_KEY" || -z "$NOTIFY_EMAIL" ]]; then
-            echo "::warning::RESEND_API_KEY or NOTIFY_EMAIL is unset; skipping the advisory email."
+          if [[ -z "$RESEND_API_KEY" || -z "$NOTIFY_FROM" || -z "$NOTIFY_EMAIL" ]]; then
+            echo "::warning::a notification secret is unset; skipping the advisory email."
             exit 0
           fi
           # jq builds the payload so an advisory title can never break the JSON.
           payload="$(jq -n \
-            --arg from 'mbx advisories <mbx@en.dev>' \
+            --arg from "$NOTIFY_FROM" \
             --arg to "$NOTIFY_EMAIL" \
             --arg subject "cargo-deny found an advisory in ${REPOSITORY}" \
             --arg html "<p><code>cargo deny check advisories</code> failed on <strong>${REPOSITORY}</strong>.</p><p><a href=\"${RUN_URL}\">View the workflow run</a> for the advisory list.</p>" \
