@@ -78,6 +78,9 @@ const MAX_REMOTE_JSON_BYTES: u64 = 16 * 1024 * 1024;
 /// A tag is only ever echoed into `If-Match`, so its length is bounded to keep
 /// a server from choosing how large a request header this client sends.
 const MAX_ETAG_BYTES: usize = 256;
+// Match the server's default maximum while retaining a client-side ceiling
+// when the remote advertises or names something larger.
+const MAX_REMOTE_BLOB_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const MAX_STAGED_BLOB_PACK_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_STAGED_BLOB_PACK_ITEMS: usize = 2 * 1024;
 const BLOB_PACK_TIMEOUT_BYTES_PER_UNIT: u64 = MAX_STAGED_BLOB_PACK_BYTES / 4;
@@ -500,12 +503,26 @@ impl RemoteCacheClient {
         digests: &[CacheDigest],
         staging_dir: &Path,
     ) -> Result<Option<RemoteBlobPack>> {
+        self.get_blob_pack_with_limit(digests, staging_dir, MAX_STAGED_BLOB_PACK_BYTES)
+            .await
+    }
+
+    pub(crate) async fn get_blob_pack_with_limit(
+        &self,
+        digests: &[CacheDigest],
+        staging_dir: &Path,
+        max_bytes: u64,
+    ) -> Result<Option<RemoteBlobPack>> {
         if digests.is_empty() || self.blob_packs_disabled.load(Ordering::Relaxed) {
             return Ok(None);
         }
-        let Some(limits) = self.blob_pack_limits().await? else {
+        let Some(mut limits) = self.blob_pack_limits().await? else {
             return Ok(None);
         };
+        limits.max_bytes = limits.max_bytes.min(max_bytes);
+        if limits.max_bytes == 0 {
+            bail!("remote cache download budget is exhausted");
+        }
         fs::create_dir_all(staging_dir)?;
         let chunk = blob_pack_chunk(digests, limits)?;
         if chunk.is_empty() {
@@ -696,6 +713,13 @@ impl RemoteCacheClient {
         media_type: &'static str,
     ) -> Result<Vec<u8>> {
         digest.validate()?;
+        if digest.size > MAX_REMOTE_JSON_BYTES {
+            bail!(
+                "remote cache in-memory blob declared {} bytes, over the {} byte limit",
+                digest.size,
+                MAX_REMOTE_JSON_BYTES
+            );
+        }
         let url = self.blob_endpoint(digest)?;
         retry_async("GET", &url, self.retries, || async {
             let mut response = self
@@ -728,6 +752,14 @@ impl RemoteCacheClient {
         digest: &CacheDigest,
         staging_dir: &Path,
     ) -> Result<tempfile::NamedTempFile> {
+        digest.validate()?;
+        if digest.size > MAX_REMOTE_BLOB_BYTES {
+            bail!(
+                "remote cache blob declared {} bytes, over the {} byte limit",
+                digest.size,
+                MAX_REMOTE_BLOB_BYTES
+            );
+        }
         let url = self.blob_endpoint(digest)?;
         let download = retry_async("GET", &url, self.retries, || async {
             let mut response = self

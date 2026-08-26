@@ -1138,6 +1138,159 @@ async fn foreground_blob_batches_use_blob_packs() {
 }
 
 #[tokio::test]
+async fn pack_and_individual_fetches_share_a_digest_lock() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let bytes = b"one remote transfer";
+    let digest = CacheDigest::blake3(bytes);
+    let capabilities = server
+        .mock("GET", "/v1/capabilities")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            serde_json::json!({
+                "protocol":{"major":1},
+                "features":{"blob_packs":true},
+                "limits":{"max_batch_items":100,"max_pack_bytes":1048576}
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let response_started = started.clone();
+    let response_release = release.clone();
+    let pack_body = blob_pack_body(&[(digest.clone(), bytes.as_slice())]);
+    let pack = server
+        .mock("POST", "/v1/blobs:pack")
+        .with_status(200)
+        .with_header("content-type", crate::BLOB_PACK_MEDIA_TYPE)
+        .with_chunked_body(move |writer| {
+            response_started.store(true, Ordering::Release);
+            while !response_release.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::io::Write::write_all(writer, &pack_body)
+        })
+        .expect(1)
+        .create_async()
+        .await;
+    let individual = server
+        .mock("GET", blob_path(&digest).as_str())
+        .with_status(200)
+        .with_body(bytes)
+        .expect(0)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().join("reader"),
+        RemoteCacheMode::ReadOnly,
+    );
+
+    let pack_agent = agent.clone();
+    let pack_digest = digest.clone();
+    let pack_fetch = tokio::spawn(async move {
+        let remote = pack_agent.remote.as_deref().unwrap();
+        pack_agent
+            .fetch_remote_blobs(remote, vec![pack_digest], None)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !started.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("pack request did not start");
+
+    let foreground_agent = agent.clone();
+    let foreground_digest = digest.clone();
+    let foreground_fetch = tokio::spawn(async move {
+        let remote = foreground_agent.remote.as_deref().unwrap();
+        foreground_agent
+            .fetch_remote_blob(remote, &foreground_digest)
+            .await
+    });
+    release.store(true, Ordering::Release);
+
+    let packed = pack_fetch.await.unwrap();
+    let foreground = foreground_fetch.await.unwrap().unwrap();
+    assert_eq!(fs::read(&packed[&digest]).unwrap(), bytes);
+    assert_eq!(fs::read(foreground).unwrap(), bytes);
+    assert_eq!(
+        agent.remote_download_bytes.load(Ordering::Relaxed),
+        digest.size
+    );
+    capabilities.assert_async().await;
+    pack.assert_async().await;
+    individual.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_smaller_server_pack_cap_does_not_block_later_candidates() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let oversized = CacheDigest {
+        algorithm: "blake3".into(),
+        hash: "00".repeat(32),
+        size: MAX_STAGED_BLOB_PACK_BYTES,
+    };
+    let packed_bytes = b"fit";
+    let packed = CacheDigest::blake3(packed_bytes);
+    let capabilities = server
+        .mock("GET", "/v1/capabilities")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            serde_json::json!({
+                "protocol":{"major":1},
+                "features":{"blob_packs":true},
+                "limits":{"max_batch_items":100,"max_pack_bytes":4}
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let pack = server
+        .mock("POST", "/v1/blobs:pack")
+        .match_body(mockito::Matcher::Json(serde_json::json!({
+            "digests": [&packed]
+        })))
+        .with_status(200)
+        .with_header("content-type", crate::BLOB_PACK_MEDIA_TYPE)
+        .with_body(blob_pack_body(&[(packed.clone(), packed_bytes.as_slice())]))
+        .expect(1)
+        .create_async()
+        .await;
+    let fallback = server
+        .mock("GET", blob_path(&oversized).as_str())
+        .with_status(404)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().join("reader"),
+        RemoteCacheMode::ReadOnly,
+    );
+    let remote = agent.remote.as_deref().unwrap();
+
+    let verified = agent
+        .fetch_remote_blobs(remote, vec![oversized, packed.clone()], None)
+        .await;
+
+    assert_eq!(verified.len(), 1);
+    assert_eq!(fs::read(&verified[&packed]).unwrap(), packed_bytes);
+    capabilities.assert_async().await;
+    pack.assert_async().await;
+    fallback.assert_async().await;
+}
+
+#[tokio::test]
 async fn preserves_successful_pack_metrics_when_a_later_chunk_falls_back() {
     let directory = tempfile::tempdir().unwrap();
     let mut server = mockito::Server::new_async().await;
@@ -1591,6 +1744,15 @@ fn remote_agent(
 }
 
 fn remote_agent_url(base_url: url::Url, cache_dir: PathBuf, mode: RemoteCacheMode) -> CacheAgent {
+    remote_agent_url_with_limit(base_url, cache_dir, mode, DEFAULT_MAX_REMOTE_DOWNLOAD_BYTES)
+}
+
+fn remote_agent_url_with_limit(
+    base_url: url::Url,
+    cache_dir: PathBuf,
+    mode: RemoteCacheMode,
+    max_remote_download_bytes: u64,
+) -> CacheAgent {
     let client = RemoteCacheClient::new(crate::RemoteCacheConfig {
         base_url,
         namespace: "test".into(),
@@ -1603,7 +1765,7 @@ fn remote_agent_url(base_url: url::Url, cache_dir: PathBuf, mode: RemoteCacheMod
         retries: 0,
     })
     .unwrap();
-    CacheAgent::new_remote(
+    CacheAgent::new_remote_with_download_limit(
         &cache_dir,
         "test-version",
         AgentRemoteCache {
@@ -1611,6 +1773,7 @@ fn remote_agent_url(base_url: url::Url, cache_dir: PathBuf, mode: RemoteCacheMod
             mode,
             staging_dir: cache_dir.join("remote"),
         },
+        max_remote_download_bytes,
     )
 }
 
@@ -1633,6 +1796,55 @@ fn action_manifest_path(digest: &CacheDigest) -> String {
         "/v1/action-manifests/{}/{}/{}",
         digest.algorithm, digest.hash, digest.size
     )
+}
+
+#[tokio::test]
+async fn bounds_cumulative_remote_downloads_for_a_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let first = CacheDigest::blake3(b"first");
+    let second = CacheDigest::blake3(b"second");
+    let first_download = server
+        .mock("GET", blob_path(&first).as_str())
+        .with_status(200)
+        .with_body("first")
+        .expect(1)
+        .create_async()
+        .await;
+    let second_download = server
+        .mock("GET", blob_path(&second).as_str())
+        .with_status(200)
+        .with_body("second")
+        .expect(0)
+        .create_async()
+        .await;
+    let agent = remote_agent_url_with_limit(
+        server.url().parse().unwrap(),
+        directory.path().join("reader"),
+        RemoteCacheMode::ReadOnly,
+        first.size,
+    );
+
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::FindBlob {
+                digest: first.clone()
+            })
+            .await,
+        AgentResponse::Blob { path: Some(_) }
+    ));
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::FindBlob { digest: second })
+            .await,
+        AgentResponse::Blob { path: None }
+    ));
+    assert_eq!(
+        agent.remote_download_bytes.load(Ordering::Relaxed),
+        first.size
+    );
+    first_download.assert_async().await;
+    second_download.assert_async().await;
 }
 
 #[tokio::test]

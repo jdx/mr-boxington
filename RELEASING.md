@@ -44,8 +44,13 @@ crates.io but get no GitHub release of their own. Asset names carry no version
 
 ## Setup this depends on
 
-These settings live outside the repository, and releases fail without them:
+These settings live outside the repository and are required for secure,
+successful releases:
 
+- **Immutable releases enabled for the repository** — draft assets remain
+  replaceable while the matrix is being assembled, then GitHub locks the tag
+  and every asset when the draft is published. This also gives consumers a
+  release attestation they can verify independently of `SHA256SUMS`.
 - **`RELEASE_PLZ_TOKEN`** — a PAT with `contents: write` and
   `pull-requests: write`. The default `GITHUB_TOKEN` cannot be used: pushes made
   with it do not trigger workflows, so the release PR would never run CI.
@@ -65,8 +70,10 @@ These settings live outside the repository, and releases fail without them:
 ## When a release goes wrong
 
 If the tag was created but the binaries failed to build, fix the problem and
-run the `release` workflow manually with that tag. It rebuilds, re-attaches
-with `--clobber`, and undrafts the release itself — dispatching by hand is the
-one path where nothing else would. If the tag exists but its release does not,
-because release-plz failed after tagging or the draft was deleted, that run
-recreates it rather than failing.
+run the `release` workflow manually with that tag while the release is still a
+draft. It rebuilds, re-attaches with `--clobber`, and undrafts the release
+itself — dispatching by hand is the one path where nothing else would. If the
+tag exists but its release does not, because release-plz failed after tagging
+or the draft was deleted, that run recreates it rather than failing. The
+workflow refuses to replace assets after publication; release a new version if
+a published artifact is wrong.
