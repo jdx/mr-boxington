@@ -105,6 +105,11 @@ const COMPILER_BUNDLED_WASM_TARGETS: &[&str] = &[
 /// A bypass is an expected conservative outcome, not necessarily a compiler
 /// error. Variants carry diagnostic context while [`BypassReason::kind`]
 /// provides a stable aggregation key.
+///
+/// This set exists to shrink: every invocation the adapter learns to model
+/// retires a variant, and every construct it learns to reject adds one. Match
+/// on [`BypassReason::kind`] for aggregation rather than on the variants.
+#[non_exhaustive]
 pub enum BypassReason {
     /// An argument cannot be represented in the canonical UTF-8 key.
     #[error("rustc argument {index} is not valid UTF-8")]

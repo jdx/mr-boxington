@@ -399,7 +399,12 @@ fn valid_task_identity(value: &str) -> bool {
 }
 
 /// Version advertised by a cache service.
+///
+/// Capability records are the protocol's additive surface: a server may
+/// advertise fields a client does not know, so every type below stays open to
+/// extension rather than requiring a major release per advertised field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CapabilityProtocol {
     /// Protocol major version.
     pub major: u8,
@@ -408,8 +413,16 @@ pub struct CapabilityProtocol {
     pub minor: u8,
 }
 
+impl CapabilityProtocol {
+    /// A protocol version advertisement.
+    pub fn new(major: u8, minor: u8) -> Self {
+        Self { major, minor }
+    }
+}
+
 /// Schemas supported for one action adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ActionKindCapability {
     /// Action descriptor schema version.
     pub action_schema: u8,
@@ -417,8 +430,19 @@ pub struct ActionKindCapability {
     pub metadata_schema: u8,
 }
 
+impl ActionKindCapability {
+    /// The schema pair one adapter accepts.
+    pub fn new(action_schema: u8, metadata_schema: u8) -> Self {
+        Self {
+            action_schema,
+            metadata_schema,
+        }
+    }
+}
+
 /// Optional server protocol features.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CapabilityFeatures {
     /// Conditional action-manifest endpoints are available.
     #[serde(default)]
@@ -439,6 +463,7 @@ pub struct CapabilityFeatures {
 
 /// Server-advertised request and object limits.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CapabilityLimits {
     /// Maximum digests accepted by one batch request.
     #[serde(default)]
@@ -456,6 +481,7 @@ pub struct CapabilityLimits {
 
 /// Cache service capabilities negotiated before optional protocol features.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Capabilities {
     /// Protocol version implemented by the server.
     pub protocol: CapabilityProtocol,
@@ -474,6 +500,23 @@ pub struct Capabilities {
     /// Server-enforced request limits.
     #[serde(default)]
     pub limits: CapabilityLimits,
+}
+
+impl Capabilities {
+    /// A baseline advertisement for `protocol`, claiming no optional features.
+    ///
+    /// The remaining fields are public and assignable, so a service adds only
+    /// what it actually supports.
+    pub fn new(protocol: CapabilityProtocol) -> Self {
+        Self {
+            protocol,
+            digest_algorithms: Vec::new(),
+            compressors: Vec::new(),
+            action_kinds: BTreeMap::new(),
+            features: CapabilityFeatures::default(),
+            limits: CapabilityLimits::default(),
+        }
+    }
 }
 
 #[cfg(test)]

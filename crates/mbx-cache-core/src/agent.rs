@@ -326,13 +326,29 @@ pub struct AgentStats {
 }
 
 /// Count and cumulative wall time for one compiler-invocation outcome.
+///
+/// Non-exhaustive for the same reason as [`AgentStats`], which holds these:
+/// leaving the outer bag open does not help if describing an outcome in more
+/// detail still breaks the type inside it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CompilerStats {
     /// Number of compiler invocations observed.
     pub invocations: u64,
     /// Cumulative wall time spent in those invocations.
     pub duration_ns: u64,
 }
+
+impl CompilerStats {
+    /// The counts observed for one outcome.
+    pub fn new(invocations: u64, duration_ns: u64) -> Self {
+        Self {
+            invocations,
+            duration_ns,
+        }
+    }
+}
+
 #[derive(Default)]
 struct AtomicAgentStats {
     lookups: AtomicU64,
