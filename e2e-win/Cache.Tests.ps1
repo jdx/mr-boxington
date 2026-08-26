@@ -42,8 +42,11 @@ edition = "2024"
 fn main() {
     println!("cargo:rustc-link-search=native={}", std::env::var("OUT_DIR").unwrap());
 }
-'@ | Set-Content -Encoding utf8 build.rs
+        '@ | Set-Content -Encoding utf8 build.rs
         'pub fn value() -> u8 { 1 }' | Set-Content -Encoding utf8 src\lib.rs
+
+        $lockfile = & cargo generate-lockfile 2>&1 | Out-String
+        $LASTEXITCODE | Should -Be 0 -Because $lockfile
 
         $cold = & mbx build 2>&1 | Out-String
         $LASTEXITCODE | Should -Be 0 -Because $cold
