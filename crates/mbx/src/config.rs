@@ -110,6 +110,9 @@ pub(crate) struct RawConfig {
     /// Append the full reason for every bypassed compilation to this path.
     #[usage(key = "bypass_log", env = "MBX_BYPASS_LOG", scope = "env")]
     _bypass_log: Option<PathBuf>,
+    /// Log filter for mbx's own diagnostics, such as `debug` or `mbx=trace`.
+    #[usage(key = "log", env = "MBX_LOG", default = "info", scope = "env")]
+    _log: String,
     #[usage(flatten)]
     remote: RawRemote,
     #[usage(flatten)]
