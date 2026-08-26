@@ -101,7 +101,7 @@ mbx keeps a running total of what that has been worth and reports one line of
 it after a build:
 
 ```text
-mbx: 41.7 GiB of target/ had outlived its checkouts. it has been dealt with.
+mbx[savings]: 41.7 GiB of target/ had outlived its checkouts. it has been dealt with.
 ```
 
 The line is drawn from a pool, so it does not repeat itself. Prefer a build

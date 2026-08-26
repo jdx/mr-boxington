@@ -286,7 +286,7 @@ impl Default for CliSettings {
 /// How the line about accumulated savings reads.
 ///
 /// The quips are the product's voice and the default; `plain` is the same
-/// facts in the register of the `cache:` and `gc:` lines beside them, for
+/// facts in the register of the `mbx[cache]:` and `mbx[gc]:` lines beside them, for
 /// people who want their build logs to keep a straight face; `off` keeps the
 /// totals without printing anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

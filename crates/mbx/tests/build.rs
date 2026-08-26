@@ -647,7 +647,7 @@ fn a_build_sweeps_the_store_to_its_budget() {
     );
 
     assert!(
-        stderr.contains("gc: evicted"),
+        stderr.contains("mbx[gc]: evicted"),
         "the sweep should say what it evicted: {stderr}"
     );
     let stats = mbx(store.path(), &["cache", "stats"]);
@@ -675,7 +675,10 @@ fn automatic_sweeps_can_be_turned_off() {
         ],
     );
 
-    assert!(!stderr.contains("gc:"), "no sweep should run: {stderr}");
+    assert!(
+        !stderr.contains("mbx[gc]:"),
+        "no sweep should run: {stderr}"
+    );
     let stats = mbx(store.path(), &["cache", "stats"]);
     assert!(
         !stats.contains("objects: 0"),

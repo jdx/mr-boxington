@@ -93,7 +93,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                         );
                     }
                     Err(error) => {
-                        eprintln!("mbx warning: compiler timing was not refreshed: {error:#}");
+                        eprintln!("mbx[warning]: compiler timing was not refreshed: {error:#}");
                     }
                 }
                 if verify {
@@ -106,7 +106,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             }
             Ok(None) => {}
             Err(error) => {
-                eprintln!("mbx warning: result was not restored: {error:#}");
+                eprintln!("mbx[warning]: result was not restored: {error:#}");
             }
         }
     }
@@ -130,7 +130,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             }
             Ok(None) => {}
             Err(error) => {
-                eprintln!("mbx warning: prediction was not restored: {error:#}");
+                eprintln!("mbx[warning]: prediction was not restored: {error:#}");
             }
         }
     }
@@ -166,7 +166,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
         let matched = cached_matches(&cached, &output);
         record_verification(matched, cached.restore);
         if !matched {
-            eprintln!("mbx warning: shadow verification diverged from cached output");
+            eprintln!("mbx[warning]: shadow verification diverged from cached output");
         }
         return Ok(exit_code(output.status));
     }
@@ -195,7 +195,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             Ok(())
         })();
         if let Err(error) = publication {
-            eprintln!("mbx warning: result was not stored: {error:#}");
+            eprintln!("mbx[warning]: result was not stored: {error:#}");
         }
     }
     Ok(exit_code(output.status))
@@ -408,7 +408,7 @@ fn record_prediction(
         Result::<()>::Ok(())
     })();
     if let Err(error) = result {
-        eprintln!("mbx warning: action prediction was not recorded: {error:#}");
+        eprintln!("mbx[warning]: action prediction was not recorded: {error:#}");
     }
 }
 
@@ -481,7 +481,7 @@ fn record_prediction_value(invocation: CacheDigest, action: CacheDigest, payload
         }
     })();
     if let Err(error) = result {
-        eprintln!("mbx warning: action prediction was not recorded: {error:#}");
+        eprintln!("mbx[warning]: action prediction was not recorded: {error:#}");
     }
 }
 
@@ -695,11 +695,11 @@ fn record_verification(matched: bool, restore: RestoreStats) {
     match responses.map(|responses| responses.into_iter().next()) {
         Ok(Some(AgentResponse::ActionVerificationRecorded)) => {}
         Ok(Some(AgentResponse::Error { message })) => {
-            eprintln!("mbx warning: verification was not recorded: {message}");
+            eprintln!("mbx[warning]: verification was not recorded: {message}");
         }
-        Ok(_) => eprintln!("mbx warning: verification was not recorded"),
+        Ok(_) => eprintln!("mbx[warning]: verification was not recorded"),
         Err(error) => {
-            eprintln!("mbx warning: verification was not recorded: {error:#}");
+            eprintln!("mbx[warning]: verification was not recorded: {error:#}");
         }
     }
 }
@@ -724,7 +724,7 @@ fn persist_outputs(staged: StagedOutputs) -> Result<()> {
                     Ok(()) => {}
                     Err(remove_error) if remove_error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(remove_error) => eprintln!(
-                        "mbx warning: failed to roll back {}: {remove_error}",
+                        "mbx[warning]: failed to roll back {}: {remove_error}",
                         destination.display()
                     ),
                 }
@@ -743,11 +743,11 @@ fn record_action_hit(action: &CacheDigest, restore: RestoreStats) {
     match responses.map(|responses| responses.into_iter().next()) {
         Ok(Some(AgentResponse::ActionHitRecorded)) => {}
         Ok(Some(AgentResponse::Error { message })) => {
-            eprintln!("mbx warning: hit was not recorded: {message}");
+            eprintln!("mbx[warning]: hit was not recorded: {message}");
         }
-        Ok(_) => eprintln!("mbx warning: hit was not recorded"),
+        Ok(_) => eprintln!("mbx[warning]: hit was not recorded"),
         Err(error) => {
-            eprintln!("mbx warning: hit was not recorded: {error:#}");
+            eprintln!("mbx[warning]: hit was not recorded: {error:#}");
         }
     }
 }

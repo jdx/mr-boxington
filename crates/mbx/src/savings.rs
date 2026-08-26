@@ -172,7 +172,7 @@ struct Candidate {
     /// The mascot's variants: a cache box in a monocle, deadpan, mentioning
     /// the chores exactly once. One is chosen at random per build.
     cheeky: Vec<String>,
-    /// The same fact in the register of the `cache:` and `gc:` lines.
+    /// The same fact in the register of the `mbx[cache]:` and `mbx[gc]:` lines.
     plain: String,
 }
 
@@ -194,21 +194,21 @@ fn facts_worth_telling(tally: &Tally, facts: &SessionFacts) -> Vec<Candidate> {
         let dur = nanos(facts.avoided_compiler_ns);
         eligible.push(Candidate {
             cheeky: tellings![
-                "mbx: served {hits} compilations from cache; rustc showed up ready to do {dur} of work and was sent home",
-                "mbx: {hits} compilations you did not wait for. the {dur} is yours now. spend it wisely.",
-                "mbx: this build borrowed {hits} compilations from an earlier one. rustc was not informed. ({dur} saved)",
-                "mbx: {hits} compilations arrived precompiled. somewhere a fan is not spinning. ({dur} saved)",
-                "mbx: cargo asked for {hits} compilations; mbx had them filed under already-done. ({dur} saved)",
-                "mbx: {hits} compilations replayed from cache. rustc's services were not required. ({dur} saved)",
-                "mbx: intercepted {hits} compilations before rustc could get attached. ({dur} saved)",
-                "mbx: rustc had {dur} of work planned. mbx had {hits} of its answers already.",
-                "mbx: {hits} compilations answered from memory. rustc can finish its coffee. ({dur} saved)",
-                "mbx: rustc arrived to find {hits} compilations already done. awkward. ({dur} saved)",
-                "mbx: quietly substituted {hits} cached compilations. nobody noticed. that is the job. ({dur} saved)",
-                "mbx: {hits} compilations in, zero compiled. {dur} returned to circulation.",
+                "mbx[savings]: served {hits} compilations from cache; rustc showed up ready to do {dur} of work and was sent home",
+                "mbx[savings]: {hits} compilations you did not wait for. the {dur} is yours now. spend it wisely.",
+                "mbx[savings]: this build borrowed {hits} compilations from an earlier one. rustc was not informed. ({dur} saved)",
+                "mbx[savings]: {hits} compilations arrived precompiled. somewhere a fan is not spinning. ({dur} saved)",
+                "mbx[savings]: cargo asked for {hits} compilations; mbx had them filed under already-done. ({dur} saved)",
+                "mbx[savings]: {hits} compilations replayed from cache. rustc's services were not required. ({dur} saved)",
+                "mbx[savings]: intercepted {hits} compilations before rustc could get attached. ({dur} saved)",
+                "mbx[savings]: rustc had {dur} of work planned. mbx had {hits} of its answers already.",
+                "mbx[savings]: {hits} compilations answered from memory. rustc can finish its coffee. ({dur} saved)",
+                "mbx[savings]: rustc arrived to find {hits} compilations already done. awkward. ({dur} saved)",
+                "mbx[savings]: quietly substituted {hits} cached compilations. nobody noticed. that is the job. ({dur} saved)",
+                "mbx[savings]: {hits} compilations in, zero compiled. {dur} returned to circulation.",
             ],
             plain: format!(
-                "savings: {hits} compilations restored from cache this build, avoiding {dur} of compiler time"
+                "mbx[savings]: {hits} compilations restored from cache this build, avoiding {dur} of compiler time"
             ),
         });
     }
@@ -217,91 +217,91 @@ fn facts_worth_telling(tally: &Tally, facts: &SessionFacts) -> Vec<Candidate> {
         let over = builds(tally.builds);
         eligible.push(Candidate {
             cheeky: tellings![
-                "mbx: {dur} of compiling skipped across {over}. rustc suspects nothing.",
-                "mbx: {dur} refunded over {over}. no receipt necessary.",
-                "mbx: rustc believes it compiled everything. it is down {dur} across {over}. let it believe.",
-                "mbx: has saved {dur} across {over}. this line is the only thanks it needs.",
-                "mbx: across {over}, rustc has been excused from {dur} of its duties.",
-                "mbx: {dur} not spent compiling, over {over}. what you did instead is between you and the terminal.",
-                "mbx: the running total stands at {dur} across {over}. nobody is counting except the box.",
-                "mbx: {dur} of compilation avoided across {over}. imagine the fan noise. now stop.",
-                "mbx: {dur} saved across {over}. put it toward something with a progress bar.",
-                "mbx: {dur} of rustc's calendar cleared across {over}.",
-                "mbx: {dur} unspent across {over}. compounding, in a sense.",
+                "mbx[savings]: {dur} of compiling skipped across {over}. rustc suspects nothing.",
+                "mbx[savings]: {dur} refunded over {over}. no receipt necessary.",
+                "mbx[savings]: rustc believes it compiled everything. it is down {dur} across {over}. let it believe.",
+                "mbx[savings]: has saved {dur} across {over}. this line is the only thanks it needs.",
+                "mbx[savings]: across {over}, rustc has been excused from {dur} of its duties.",
+                "mbx[savings]: {dur} not spent compiling, over {over}. what you did instead is between you and the terminal.",
+                "mbx[savings]: the running total stands at {dur} across {over}. nobody is counting except the box.",
+                "mbx[savings]: {dur} of compilation avoided across {over}. imagine the fan noise. now stop.",
+                "mbx[savings]: {dur} saved across {over}. put it toward something with a progress bar.",
+                "mbx[savings]: {dur} of rustc's calendar cleared across {over}.",
+                "mbx[savings]: {dur} unspent across {over}. compounding, in a sense.",
             ],
-            plain: format!("savings: {dur} of compiler time avoided across {over}"),
+            plain: format!("mbx[savings]: {dur} of compiler time avoided across {over}"),
         });
     }
     if freed >= MIN_FREED_BYTES {
         let size = iec(freed);
         eligible.push(Candidate {
             cheeky: tellings![
-                "mbx: {size} of build debris binned so far. cargo clean remains unemployed.",
-                "mbx: has quietly disposed of {size} of build leftovers. nobody saw anything.",
-                "mbx: {size} reclaimed to date. the disk sends its regards.",
-                "mbx: {size} of build debris has left the building.",
-                "mbx: swept up {size} so far. the broom is content-addressed.",
-                "mbx: {size} tidied away. you may continue not thinking about it.",
-                "mbx: {size} reclaimed while you were busy compiling other things.",
-                "mbx: {size} of old build output has been shown the door.",
-                "mbx: disposed of {size} without being asked. that is rather the point.",
-                "mbx: the sweep found {size} nobody would miss. nobody has.",
+                "mbx[savings]: {size} of build debris binned so far. cargo clean remains unemployed.",
+                "mbx[savings]: has quietly disposed of {size} of build leftovers. nobody saw anything.",
+                "mbx[savings]: {size} reclaimed to date. the disk sends its regards.",
+                "mbx[savings]: {size} of build debris has left the building.",
+                "mbx[savings]: swept up {size} so far. the broom is content-addressed.",
+                "mbx[savings]: {size} tidied away. you may continue not thinking about it.",
+                "mbx[savings]: {size} reclaimed while you were busy compiling other things.",
+                "mbx[savings]: {size} of old build output has been shown the door.",
+                "mbx[savings]: disposed of {size} without being asked. that is rather the point.",
+                "mbx[savings]: the sweep found {size} nobody would miss. nobody has.",
             ],
-            plain: format!("savings: {size} reclaimed by collection so far"),
+            plain: format!("mbx[savings]: {size} reclaimed by collection so far"),
         });
     }
     if tally.freed_target_bytes >= MIN_FREED_TARGET_BYTES {
         let size = iec(tally.freed_target_bytes);
         eligible.push(Candidate {
             cheeky: tellings![
-                "mbx: {size} of target/ had outlived its checkouts. it has been dealt with.",
-                "mbx: found {size} of target/ whose checkouts left long ago. the estate has been settled.",
-                "mbx: your deleted worktrees left {size} behind. left. past tense.",
-                "mbx: {size} of target/ belonged to checkouts that no longer exist. neither does it.",
-                "mbx: cleaned up {size} after checkouts that left without saying goodbye.",
-                "mbx: {size} of outputs had survived their checkouts. an unnatural state, now corrected.",
-                "mbx: the checkouts are gone. their {size} has gone to join them.",
-                "mbx: {size} of target/ was waiting for checkouts that are never coming back. it has stopped waiting.",
-                "mbx: escorted {size} of ownerless outputs off the premises.",
-                "mbx: worktrees come and go. their {size} now goes with them.",
+                "mbx[savings]: {size} of target/ had outlived its checkouts. it has been dealt with.",
+                "mbx[savings]: found {size} of target/ whose checkouts left long ago. the estate has been settled.",
+                "mbx[savings]: your deleted worktrees left {size} behind. left. past tense.",
+                "mbx[savings]: {size} of target/ belonged to checkouts that no longer exist. neither does it.",
+                "mbx[savings]: cleaned up {size} after checkouts that left without saying goodbye.",
+                "mbx[savings]: {size} of outputs had survived their checkouts. an unnatural state, now corrected.",
+                "mbx[savings]: the checkouts are gone. their {size} has gone to join them.",
+                "mbx[savings]: {size} of target/ was waiting for checkouts that are never coming back. it has stopped waiting.",
+                "mbx[savings]: escorted {size} of ownerless outputs off the premises.",
+                "mbx[savings]: worktrees come and go. their {size} now goes with them.",
             ],
-            plain: format!("savings: {size} of abandoned target directories reclaimed"),
+            plain: format!("mbx[savings]: {size} of abandoned target directories reclaimed"),
         });
     }
     if tally.reflinked_bytes >= MIN_REFLINKED_BYTES {
         let size = iec(tally.reflinked_bytes);
         eligible.push(Candidate {
             cheeky: tellings![
-                "mbx: every checkout believes it owns {size} of outputs. the disk keeps one copy and says nothing.",
-                "mbx: {size} of outputs, one copy, several very confident checkouts.",
-                "mbx: reflinked {size} into place. copying is for people with disk to spare.",
-                "mbx: {size} of outputs exist once and appear everywhere. do not tell the checkouts.",
-                "mbx: {size} of target/ is an elaborate illusion. the disk is in on it.",
-                "mbx: lent the same {size} to every checkout at once. none of them has checked.",
-                "mbx: {size} shared among checkouts that each believe they are an only child.",
-                "mbx: {size} on loan to every checkout simultaneously. the paperwork is an inode.",
-                "mbx: {size} of outputs materialized by reflink. the copy machine stays off.",
-                "mbx: {size} in every checkout, {size} on disk. arithmetic declined to comment.",
+                "mbx[savings]: every checkout believes it owns {size} of outputs. the disk keeps one copy and says nothing.",
+                "mbx[savings]: {size} of outputs, one copy, several very confident checkouts.",
+                "mbx[savings]: reflinked {size} into place. copying is for people with disk to spare.",
+                "mbx[savings]: {size} of outputs exist once and appear everywhere. do not tell the checkouts.",
+                "mbx[savings]: {size} of target/ is an elaborate illusion. the disk is in on it.",
+                "mbx[savings]: lent the same {size} to every checkout at once. none of them has checked.",
+                "mbx[savings]: {size} shared among checkouts that each believe they are an only child.",
+                "mbx[savings]: {size} on loan to every checkout simultaneously. the paperwork is an inode.",
+                "mbx[savings]: {size} of outputs materialized by reflink. the copy machine stays off.",
+                "mbx[savings]: {size} in every checkout, {size} on disk. arithmetic declined to comment.",
             ],
-            plain: format!("savings: {size} of outputs reflinked rather than copied"),
+            plain: format!("mbx[savings]: {size} of outputs reflinked rather than copied"),
         });
     }
     if tally.cached_compilations >= MIN_CACHED_COMPILATIONS {
         let count = tally.cached_compilations;
         eligible.push(Candidate {
             cheeky: tellings![
-                "mbx: {count} compilations, each compiled once and served warm ever since",
-                "mbx: {count} cache hits and counting. rustc thinks it has been busy.",
-                "mbx: {count} compilations on file. the box remembers.",
-                "mbx: {count} compilations old. not one compiled twice.",
-                "mbx: {count} compilations served. the monocle stays on.",
-                "mbx: {count} compilations dispensed from stock. inventory immaculate.",
-                "mbx: {count} compilations, and the box has forgotten none of them.",
-                "mbx: {count} compilations retrieved with a straight face.",
-                "mbx: {count} compilations. rustc did each once; mbx did the rest of the showing up.",
-                "mbx: {count} compilations served. ask rustc how many it remembers doing.",
+                "mbx[savings]: {count} compilations, each compiled once and served warm ever since",
+                "mbx[savings]: {count} cache hits and counting. rustc thinks it has been busy.",
+                "mbx[savings]: {count} compilations on file. the box remembers.",
+                "mbx[savings]: {count} compilations old. not one compiled twice.",
+                "mbx[savings]: {count} compilations served. the monocle stays on.",
+                "mbx[savings]: {count} compilations dispensed from stock. inventory immaculate.",
+                "mbx[savings]: {count} compilations, and the box has forgotten none of them.",
+                "mbx[savings]: {count} compilations retrieved with a straight face.",
+                "mbx[savings]: {count} compilations. rustc did each once; mbx did the rest of the showing up.",
+                "mbx[savings]: {count} compilations served. ask rustc how many it remembers doing.",
             ],
-            plain: format!("savings: {count} compilations served from cache to date"),
+            plain: format!("mbx[savings]: {count} compilations served from cache to date"),
         });
     }
     eligible
