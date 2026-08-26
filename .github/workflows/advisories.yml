@@ -1,0 +1,70 @@
+name: advisories
+
+# CI checks advisories on every push and pull request, which leaves a repository
+# with no traffic unaudited: an advisory published against a dependency of a
+# released version would wait for the next PR to surface. This run is the
+# standing watch for that case, so it reports by email rather than only turning
+# a run red where nobody is looking.
+on:
+  workflow_dispatch:
+  schedule:
+    # Daily, away from the top of the hour and clear of the weekly canary in
+    # measure.yml.
+    - cron: "37 7 * * *"
+
+concurrency:
+  group: advisories
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  advisories:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Advisories only. Licenses, bans, and sources are policy over the
+      # manifests, so they cannot change without a commit and CI already gates
+      # them; the advisory database changes on its own.
+      - id: deny
+        continue-on-error: true
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories
+
+      - name: Email the advisory report
+        if: steps.deny.outcome == 'failure'
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # A missing secret must not masquerade as a clean audit, but it must
+          # not hide the advisory either: warn, and let the failing step below
+          # still turn the run red.
+          if [[ -z "$RESEND_API_KEY" || -z "$NOTIFY_EMAIL" ]]; then
+            echo "::warning::RESEND_API_KEY or NOTIFY_EMAIL is unset; skipping the advisory email."
+            exit 0
+          fi
+          # jq builds the payload so an advisory title can never break the JSON.
+          payload="$(jq -n \
+            --arg from 'mbx advisories <mbx@en.dev>' \
+            --arg to "$NOTIFY_EMAIL" \
+            --arg subject "cargo-deny found an advisory in ${REPOSITORY}" \
+            --arg html "<p><code>cargo deny check advisories</code> failed on <strong>${REPOSITORY}</strong>.</p><p><a href=\"${RUN_URL}\">View the workflow run</a> for the advisory list.</p>" \
+            '{from: $from, to: [$to], subject: $subject, html: $html}')"
+          curl --fail-with-body -sS -X POST 'https://api.resend.com/emails' \
+            -H "Authorization: Bearer ${RESEND_API_KEY}" \
+            -H 'Content-Type: application/json' \
+            -d "$payload"
+
+      - name: Report the advisory
+        if: steps.deny.outcome == 'failure'
+        run: exit 1
