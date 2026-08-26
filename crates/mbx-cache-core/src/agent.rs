@@ -1,7 +1,8 @@
 use crate::{
-    ActionPrediction, BlobSource, BlobUpload, CacheDigest, CacheDirectory, LocalActionCache,
-    LocalCas, MAX_STAGED_BLOB_PACK_BYTES, ManifestPutOutcome, RemoteActionResult,
-    RemoteCacheClient, RemoteCacheMode, RustcMetadata, TaskActionManifest, canonical_json,
+    ActionPrediction, BlobPackLimits, BlobSource, BlobUpload, CacheDigest, CacheDirectory,
+    LocalActionCache, LocalCas, MAX_STAGED_BLOB_PACK_BYTES, MAX_STAGED_BLOB_PACK_ITEMS,
+    ManifestPutOutcome, RemoteActionResult, RemoteCacheClient, RemoteCacheMode, RustcMetadata,
+    TaskActionManifest, blob_pack_chunk, canonical_json,
 };
 use eyre::{Context, Result, bail};
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream};
@@ -1329,7 +1330,48 @@ impl CacheAgent {
 
         let mut pack_candidates = missing.clone();
         while !pack_candidates.is_empty() {
-            let requested = pack_candidates.keys().cloned().collect::<Vec<_>>();
+            let candidates = match blob_pack_chunk(
+                &pack_candidates.keys().cloned().collect::<Vec<_>>(),
+                BlobPackLimits {
+                    max_items: MAX_STAGED_BLOB_PACK_ITEMS,
+                    max_bytes: MAX_STAGED_BLOB_PACK_BYTES,
+                },
+            ) {
+                Ok(candidates) if !candidates.is_empty() => candidates,
+                Ok(_) => break,
+                Err(error) => {
+                    warn!("remote cache blob pack skipped: {error}");
+                    break;
+                }
+            };
+            // A pack and an individual fetch share these per-digest locks. Hold
+            // them through ingestion so overlapping prefetch and foreground
+            // requests cannot download or charge the same object twice.
+            let mut pack_guards = BTreeMap::new();
+            for digest in candidates {
+                let guard = self.write_lock(&digest).lock_owned().await;
+                match self.find_verified_blob(&digest) {
+                    Ok(Some(path)) => {
+                        pack_candidates.remove(&digest);
+                        missing.remove(&digest);
+                        verified.insert(digest, path);
+                    }
+                    Ok(None) => {
+                        pack_guards.insert(digest, guard);
+                    }
+                    Err(error) => {
+                        warn!(
+                            "local cache blob lookup failed for {}: {error}",
+                            digest.hash
+                        );
+                        pack_guards.insert(digest, guard);
+                    }
+                }
+            }
+            let requested = pack_guards.keys().cloned().collect::<Vec<_>>();
+            if requested.is_empty() {
+                continue;
+            }
             let requested_bytes = requested
                 .iter()
                 .fold(0_u64, |total, digest| total.saturating_add(digest.size));
@@ -1403,10 +1445,13 @@ impl CacheAgent {
             }
             let mut ingests = stream::iter(pack.blobs.into_iter().map(|(digest, source)| {
                 let digest_for_result = digest.clone();
+                let guard = pack_guards
+                    .remove(&digest)
+                    .expect("requested packed blob has a write lock");
                 async move {
                     (
                         digest_for_result,
-                        self.ingest_packed_blob(digest, source).await,
+                        self.ingest_packed_blob(digest, source, guard).await,
                     )
                 }
             }))
@@ -1450,10 +1495,13 @@ impl CacheAgent {
         verified
     }
 
-    async fn ingest_packed_blob(&self, digest: CacheDigest, source: PathBuf) -> Result<PathBuf> {
+    async fn ingest_packed_blob(
+        &self,
+        digest: CacheDigest,
+        source: PathBuf,
+        _guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<PathBuf> {
         let digest_size = digest.size;
-        let lock = self.write_lock(&digest);
-        let _guard = lock.lock().await;
         let agent = self.clone();
         let (path, stored, cas_duration_ns) = tokio::task::spawn_blocking(move || {
             if let Some(path) = agent.find_verified_blob(&digest)? {
