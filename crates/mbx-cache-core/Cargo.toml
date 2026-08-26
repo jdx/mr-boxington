@@ -1,6 +1,6 @@
 [package]
 name = "mbx-cache-core"
-version = "0.4.0"
+version = "0.4.1"
 description = "mbx internals: CAS, authentication, transport, and the cache agent. No API stability -- use the mbx CLI or mbx-cache-protocol."
 edition.workspace = true
 rust-version.workspace = true
@@ -22,7 +22,7 @@ fslock = "0.2"
 futures-util = "0.3"
 hex = "0.4"
 log = "0.4"
-mbx-cache-protocol = { path = "../mbx-cache-protocol", version = "0.4.0" }
+mbx-cache-protocol = { path = "../mbx-cache-protocol", version = "0.4.1" }
 rand = "0.10"
 reflink-copy = "0.1"
 async-compression = { version = "0.4", default-features = false, features = [
