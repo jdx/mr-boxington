@@ -61,3 +61,18 @@ protocols. Pull requests that touch workspace crates run `cargo-semver-checks`
 against the pull request's base commit with all features enabled. An intentional
 breaking API change must include the corresponding major version change; wire
 format changes still require the protocol-version steps above.
+
+The four published crates do not share a version, because they do not promise
+the same things:
+
+| Crate | Version line | What it promises |
+| --- | --- | --- |
+| `mbx` | independent | The command line: subcommands and versioned JSON output. The library target is internal. |
+| `mbx-cache-protocol` | independent | The remote cache wire contract, as described above. Depend on this to speak to an mbx cache. |
+| `mbx-cache-core` | shared `0.x` | Nothing. Internal. |
+| `mbx-cache-rustc` | shared `0.x` | Nothing. Internal. |
+
+`mbx-cache-core` and `mbx-cache-rustc` are published because the `mbx` binary
+is built from them, not because they are meant to be built against. They stay
+on `0.x`, where a minor bump is allowed to break, and they move together. Build
+against them and an upgrade may not compile.

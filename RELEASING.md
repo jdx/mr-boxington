@@ -17,6 +17,24 @@ hand.
 `release_always = false`, so a push to `main` that merely carries a version
 bump does not release — only merging a release PR does.
 
+## Versions
+
+The crates do not share a version. `mbx` and `mbx-cache-protocol` each have an
+independent one, because each carries a stability promise the other should not
+be able to break: the CLI's surface is its commands and JSON output, and the
+protocol crate's is the remote cache wire contract that `jdx/mbx-cache` depends
+on. `mbx-cache-core` and `mbx-cache-rustc` are internals; they share the
+`mbx-internals` version group, move together, and stay on `0.x` so semver
+itself says a minor bump may break them.
+
+release-plz computes each line from the commits that touched it and updates the
+path dependencies' version requirements, so a release can move one crate and
+leave the rest alone. When `mbx` reaches `1.0`, the internal crates stay on
+`0.x`: the CLI depending on a `0.x` library is normal, and the library target
+inside `mbx` is `#[doc(hidden)]` so none of those types are part of the
+promise. See [protocol compatibility](docs/protocol-compatibility.md) for the
+promise each version line makes.
+
 ## Tags and asset names
 
 The `mbx` crate is tagged `v{version}`; the three library crates are published to

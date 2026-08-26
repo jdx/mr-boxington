@@ -139,8 +139,10 @@ jobs:
           # anything outside this workspace is meant to build against, which
           # `crates/mbx/src/lib.rs` says outright. Checking it would mean a
           # major bump every time the CLI gains a setting, or contorting
-          # internal types to avoid one. The published API lives in
-          # mbx-cache-core and mbx-cache-rustc, which stay checked.
+          # internal types to avoid one. mbx-cache-protocol is the crate with a
+          # promise to keep; mbx-cache-core and mbx-cache-rustc are internals on
+          # 0.x. All three stay checked, so a bump that breaks one is at least
+          # deliberate -- semver-checks understands 0.x rules.
           UNCHECKED_PACKAGES: mbx
         run: |
           baseline_dir="$(mktemp -d)"

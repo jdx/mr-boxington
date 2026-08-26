@@ -1,7 +1,7 @@
 [package]
 name = "mbx-cache-core"
-version.workspace = true
-description = "Action cache protocol, CAS, authentication, and transport primitives for mbx"
+version = "0.4.0"
+description = "mbx internals: CAS, authentication, transport, and the cache agent. No API stability -- use the mbx CLI or mbx-cache-protocol."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
