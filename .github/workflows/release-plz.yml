@@ -158,6 +158,106 @@ jobs:
           TAG: ${{ needs.release-plz-release.outputs.tag }}
         run: gh release edit "$TAG" --repo "${{ github.repository }}" --draft=false
 
+  trust-action-assets:
+    name: Update action trust store
+    needs: [release-plz-release, upload-assets, publish-release]
+    if: ${{ needs.release-plz-release.outputs.tag != '' }}
+    runs-on: namespace-profile-endev-linux-amd64
+    permissions:
+      contents: read
+    steps:
+      - name: Download published checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-plz-release.outputs.tag }}
+        run: |
+          mkdir release
+          gh release download "$TAG" \
+            --repo "${{ github.repository }}" \
+            --pattern SHA256SUMS \
+            --dir release
+
+      - name: Check out the action
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jdx/mr-boxington-action
+          path: action
+          persist-credentials: false
+
+      - name: Prepare the update
+        id: update
+        working-directory: action
+        env:
+          TAG: ${{ needs.release-plz-release.outputs.tag }}
+        run: |
+          version=${TAG#v}
+          if [[ "v$version" != "$TAG" ]]; then
+            echo "::error::mbx release tag must start with v: $TAG"
+            exit 1
+          fi
+          branch="automation/trust-mbx-$version"
+
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            git fetch origin "$branch:refs/remotes/origin/$branch"
+          fi
+          git switch --force-create "$branch" origin/main
+
+          npm ci
+          npm run trust-release -- "$version" ../release/SHA256SUMS
+          npm run check
+          npm test
+          npm run build
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          if git diff --quiet -- src/trusted-release-digests.json dist/index.js; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push the update
+        if: steps.update.outputs.changed == 'true'
+        working-directory: action
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          BRANCH: ${{ steps.update.outputs.branch }}
+          VERSION: ${{ steps.update.outputs.version }}
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/trusted-release-digests.json dist/index.js
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: trust mbx $VERSION release assets"
+          fi
+          gh auth setup-git
+          git push --force-with-lease --set-upstream origin "$BRANCH"
+
+      - name: Open the pull request
+        if: steps.update.outputs.changed == 'true'
+        working-directory: action
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          BRANCH: ${{ steps.update.outputs.branch }}
+          VERSION: ${{ steps.update.outputs.version }}
+        run: |
+          if gh pr list \
+            --repo jdx/mr-boxington-action \
+            --head "jdx:$BRANCH" \
+            --state open \
+            --json number \
+            --jq 'length > 0' | grep -qx true; then
+            echo "A trust-store pull request for mbx $VERSION is already open"
+            exit 0
+          fi
+
+          gh pr create \
+            --repo jdx/mr-boxington-action \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore: trust mbx $VERSION release assets" \
+            --body "Pins the SHA-256 digests published with [mbx $VERSION](https://github.com/jdx/mr-boxington/releases/tag/v$VERSION) and rebuilds the checked-in action bundle."
+
   release-plz-pr:
     name: Release PR
     runs-on: namespace-profile-endev-linux-amd64
