@@ -601,9 +601,26 @@ impl CacheAgent {
     }
 
     fn reserve_remote_download_up_to(&self, requested: u64) -> Result<RemoteDownloadReservation> {
-        let used = self.remote_download_bytes.load(Ordering::Acquire);
-        let available = self.remote_download_limit.saturating_sub(used);
-        self.reserve_remote_download(requested.min(available))
+        let mut current = self.remote_download_bytes.load(Ordering::Acquire);
+        loop {
+            let reserved = requested.min(self.remote_download_limit.saturating_sub(current));
+            let next = current + reserved;
+            match self.remote_download_bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(RemoteDownloadReservation {
+                        counter: self.remote_download_bytes.clone(),
+                        reserved,
+                        committed: false,
+                    });
+                }
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     /// Load the last committed action manifest for a task into this session.
