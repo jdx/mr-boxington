@@ -66,12 +66,7 @@ credentials, diagnostics, target placement, and garbage collection are not
 accepted from a repository-owned file. mbx reports an error instead of applying
 an unsafe or misspelled workspace setting.
 
-## Settings
-
-The complete settings reference—including TOML keys, environment variables,
-types, defaults, choices, and environment-only diagnostics—is generated from
-the same usage-rs declaration mbx uses at runtime. See
-[CLI configuration reference](/cli/configuration).
+## Verify mode
 
 `MBX_VERIFY=1` compiles and consults the cache side by side and compares the
 results. It is deliberately expensive — use it to qualify correctness, not for
@@ -96,3 +91,12 @@ disables it because a fresh runner has no incremental state to reuse.
 
 Sizes accept SI and IEC units. `20GB` and `20GiB` are different values. Durations
 accept values such as `30s`, `15m`, and `1h`.
+
+## Settings
+
+Every setting, generated from the same usage-rs declaration mbx uses at
+runtime.
+
+<!-- The line range skips the generated header and file-precedence preamble;
+     the top of this page describes precedence more completely. -->
+<!--@include: ./cli/configuration.md{9,}-->

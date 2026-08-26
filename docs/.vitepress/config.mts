@@ -90,7 +90,7 @@ export default defineConfig({
             ],
           },
           { text: "prefetch", link: "/cli/prefetch" },
-          { text: "CLI configuration", link: "/cli/configuration" },
+          { text: "Settings", link: "/configuration#settings" },
         ],
       },
     ],
