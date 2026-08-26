@@ -56,6 +56,8 @@ export default defineConfig({
         text: "Understand mbx",
         items: [
           { text: "How it works", link: "/how-it-works" },
+          { text: "How mbx compares", link: "/compared" },
+          { text: "Stability", link: "/stability" },
           { text: "Protocol compatibility", link: "/protocol-compatibility" },
           { text: "Cache results", link: "/cache-results" },
           { text: "Limits", link: "/limits" },

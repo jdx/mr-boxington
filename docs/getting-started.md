@@ -35,6 +35,22 @@ for downloads and `SHA256SUMS`.
 cargo install mbx
 ```
 
+## Supported platforms
+
+Release binaries cover Linux x86-64 and ARM64 (static musl builds), macOS on
+Apple Silicon, and Windows x86-64; other platforms with a Rust toolchain can
+build from source with `cargo install mbx`. mbx wraps whichever Cargo and
+rustc are active, including rustup-managed toolchains — `mbx doctor` reports
+the pair it found.
+
+Reflinked output restoration needs a filesystem with copy-on-write file
+cloning: APFS on macOS, btrfs or XFS on Linux, ReFS (Dev Drive) on Windows.
+mbx probes the actual cache and target locations rather than assuming from
+the platform, and copies bytes where cloning is unavailable — caching still
+works on ext4 or NTFS, it just spends the disk twice. On Windows, managed
+target directories also need Developer Mode or a privileged process to create
+the `target` link; see [managed target directories](/managed-targets).
+
 ## Run a build
 
 Put `mbx` before cargo's subcommand:
@@ -96,8 +112,11 @@ mbx deliberately declined to cache the action. See [Cache results](/cache-result
 ## Inspect the store
 
 ```sh
-mbx cache dir
-mbx cache stats
+mbx cache dir       # where the store lives
+mbx cache stats     # size and contents of the store
+mbx cache projects  # cache use attributed to recorded workspaces
+mbx cache largest   # the largest objects and action results
+mbx cache verify    # check local objects against their digests
 mbx gc
 mbx gc --dry-run
 mbx gc --max-size 20GiB

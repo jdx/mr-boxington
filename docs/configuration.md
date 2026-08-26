@@ -27,6 +27,7 @@ Every value below is optional; these are shown set explicitly.
 cache_dir = "/var/cache/mbx"
 incremental = false
 share_out_dir = false
+savings = "quips"        # or "plain", "off"
 
 [gc]
 auto = true
@@ -76,19 +77,13 @@ the same usage-rs declaration mbx uses at runtime. See
 results. It is deliberately expensive — use it to qualify correctness, not for
 everyday builds.
 
-## Explicit remote prefetch
+## The savings line
 
-After a command has published its action manifest, another machine can warm
-the same build without running Cargo:
-
-```sh
-mbx prefetch build --workspace --release
-```
-
-The workspace's `Cargo.lock` and complete Cargo argument list select the same
-manifest as a normal mbx build. Prefetch requires a configured remote in
-`read-only` or `read-write` mode, waits for every predicted action, and returns
-an error when the manifest lookup fails.
+`savings` controls the one-line report of accumulated savings after a build
+(`MBX_SAVINGS` from the environment). `quips` — the default — draws the line
+from a pool of dry one-liners, `plain` states the same facts in the register
+of the other `mbx[...]` lines, and `off` keeps the totals without printing
+anything.
 
 ## Incremental builds
 
