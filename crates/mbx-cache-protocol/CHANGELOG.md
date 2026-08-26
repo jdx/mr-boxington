@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.4.0...mbx-cache-protocol-v0.5.0) - 2026-08-26
+
+### Added
+
+- [**breaking**] open the extensible public types to extension ([#103](https://github.com/jdx/mr-boxington/pull/103))
+
+### Other
+
+- simplify the landing page for 1.0 ([#96](https://github.com/jdx/mr-boxington/pull/96))
+- give every published crate its crates.io metadata ([#97](https://github.com/jdx/mr-boxington/pull/97))
+- version each crate by what it promises ([#100](https://github.com/jdx/mr-boxington/pull/100))
+
 ## [0.4.0](https://github.com/jdx/mr-boxington/releases/tag/mbx-cache-protocol-v0.4.0) - 2026-08-25
 
 ### Added
