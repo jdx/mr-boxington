@@ -18,6 +18,9 @@ export default defineConfig({
   lastUpdated: true,
   appearance: "force-dark",
   cleanUrls: true,
+  // The configuration reference is embedded into /configuration with an
+  // @include rather than shipped as its own page.
+  srcExclude: ["cli/configuration.md"],
   rewrites: {
     "cli/cache.md": "cli/cache/index.md",
   },
