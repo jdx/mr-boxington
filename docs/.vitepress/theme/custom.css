@@ -220,10 +220,10 @@ body::after {
 .VPFeature .icon {
   background: linear-gradient(160deg, rgb(var(--mbx-amber-rgb) / 0.22), rgb(var(--mbx-teal-rgb) / 0.16));
   border: 1px solid rgb(var(--mbx-amber-rgb) / 0.25);
-  border-radius: 10px;
+  border-radius: 16px;
   font-size: 26px;
-  height: 52px;
-  width: 52px;
+  height: 88px;
+  width: 88px;
 }
 
 .VPFeature .title {

@@ -87,8 +87,19 @@ run = "aube install && exec aube run docs:build"
 [tasks."render:docs"]
 description = "Generate reference documentation from the usage spec"
 depends = ["bootstrap"]
-run = "rm -rf docs/cli && ./target/mbx-bootstrap/mbx __usage_spec__ | usage generate markdown --file - --multi --replace-pre-with-code-fences --url-prefix /cli --out-dir docs/cli"
-run_windows = "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue docs/cli; ./target/mbx-bootstrap/mbx.exe __usage_spec__ | usage generate markdown --file - --multi --replace-pre-with-code-fences --url-prefix /cli --out-dir docs/cli"
+# The configuration reference is not its own page: /configuration embeds it
+# with an @include, so its headings are demoted to sit under that page's
+# "Settings" section and the generated index links there instead.
+run = [
+  "rm -rf docs/cli && ./target/mbx-bootstrap/mbx __usage_spec__ | usage generate markdown --file - --multi --replace-pre-with-code-fences --url-prefix /cli --out-dir docs/cli",
+  "sed -i.bak -e 's/^## /### /' docs/cli/configuration.md && rm docs/cli/configuration.md.bak",
+  "sed -i.bak -e 's|(/cli/configuration.md)|(/configuration#settings)|' docs/cli/index.md && rm docs/cli/index.md.bak",
+]
+run_windows = [
+  "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue docs/cli; ./target/mbx-bootstrap/mbx.exe __usage_spec__ | usage generate markdown --file - --multi --replace-pre-with-code-fences --url-prefix /cli --out-dir docs/cli",
+  "[IO.File]::WriteAllText('docs/cli/configuration.md', ([IO.File]::ReadAllText('docs/cli/configuration.md') -replace '(?m)^## ', '### '))",
+  "[IO.File]::WriteAllText('docs/cli/index.md', ([IO.File]::ReadAllText('docs/cli/index.md') -replace [regex]::Escape('(/cli/configuration.md)'), '(/configuration#settings)'))",
+]
 
 [tasks."check:docs"]
 description = "Check that generated documentation is current"

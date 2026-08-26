@@ -11,8 +11,8 @@ subcommand.
 5. A hit restores the action's outputs; a miss runs the real compiler and publishes the result.
 6. The agent exits with the build. There is no persistent daemon.
 
-Every mbx command works this way; there is no separate mode to install or keep
-current.
+Every mbx command works this way; there is no separate mode to turn on and no
+component to keep up to date.
 
 ## Portable keys
 

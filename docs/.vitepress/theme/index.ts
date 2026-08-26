@@ -1,5 +1,6 @@
 import DefaultTheme from "vitepress/theme";
 import type { Theme } from "vitepress";
+import { enhanceAppWithTabs } from "vitepress-plugin-tabs/client";
 import { h, onMounted, onUnmounted } from "vue";
 import { data as starsData } from "../stars.data";
 import EndevFooter from "./EndevFooter.vue";
@@ -16,7 +17,8 @@ export default {
       "layout-bottom": () => [h(EndevSponsors), h(EndevFooter)],
     });
   },
-  enhanceApp() {
+  enhanceApp({ app }) {
+    enhanceAppWithTabs(app);
     initBanner();
   },
   setup() {

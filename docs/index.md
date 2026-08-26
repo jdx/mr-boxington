@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: "mr boxington"
-  text: "target/, fixed: shared, self-pruning, drop-in."
-  tagline: Put mbx in front of any Cargo command. Compiled work is shared across worktrees and CI, build storage keeps itself inside a budget, and mbx tells you what it saved.
+  text: "fix target/"
+  tagline: Put mbx in front of any cargo command. One cache warms every worktree and CI run, and prunes itself to a size budget.
   image:
     src: /logo.svg
     alt: Mr Boxington, a friendly cache box
@@ -20,33 +20,36 @@ hero:
       link: /github-actions
 
 features:
-  - icon: "⚙️"
+  - icon:
+      src: /features/drop-in.svg
+      alt: A golden gear
+      width: 64
+      height: 64
     title: Drop it in front of cargo
-    details: Put mbx before build, test, or clippy. Nothing to configure and nothing to install into Cargo; the first build explains what it set up.
+    details: mbx build, mbx test, mbx clippy. Nothing to configure, no daemon to manage, nothing to install into Cargo.
     link: /getting-started
-  - icon: "🌳"
+  - icon:
+      src: /features/worktrees.svg
+      alt: A tree growing small cache boxes
+      width: 64
+      height: 64
     title: Warm every worktree
-    details: Cache keys contain no checkout-specific absolute paths, so building one checkout warms its siblings automatically.
+    details: Build in one checkout and every other worktree starts warm.
     link: /cache-results
-  - icon: "☁️"
+  - icon:
+      src: /features/ci.svg
+      alt: A cloud with upload and download arrows
+      width: 64
+      height: 64
     title: Warm CI runners
-    details: Use a remote cache or GitHub Actions cache while untrusted pull requests remain read-only.
+    details: Share the same cache with CI through a remote cache or GitHub Actions.
     link: /github-actions
-  - icon: "🧹"
+  - icon:
+      src: /features/prune.svg
+      alt: A broom sweeping
+      width: 64
+      height: 64
     title: Prune automatically
-    details: Budgets scale with the disk. Managed target directories go when their checkout disappears, when they sit unused for 30 days, or when they outgrow their share.
+    details: Stale or oversized target directories clean themselves up.
     link: /managed-targets
-  - icon: "🧾"
-    title: Keeps receipts
-    details: One line after a build says what the cache was worth — compilations skipped, hours refunded, gigabytes binned. Deadpan included; savings = "plain" if your logs must keep a straight face.
-    link: /getting-started#read-the-result
-  - icon: "🔍"
-    title: Never lies about a hit
-    details: mbx reports hits, misses, what it could not look up, and what it deliberately bypassed. A high hit rate cannot hide work that never entered the cache.
-    link: /cache-results
 ---
-
-::: warning Experimental
-mr boxington is pre-1.0. The cache format and behavior may change without notice,
-and releases are not a stability promise.
-:::

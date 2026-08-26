@@ -54,7 +54,7 @@ custom save policies need to share the same entry:
 - uses: jdx/mise-action@v4
   with:
     cache: false
-    install_args: github:jdx/mr-boxington
+    install_args: mr-boxington
 - run: mbx test --workspace
 - run: mbx gc --max-size 3GB
   if: always()
@@ -71,7 +71,7 @@ commit SHAs in a real workflow.
 ## Cache server
 
 For trusted runners and teams, mbx can talk to a compatible remote server such
-as [`jdx/mbx-cache`](https://github.com/jdx/mbx-cache). The action exports the
+as the self-hostable [cache server](/cache-server). The action exports the
 remote configuration for subsequent steps:
 
 ```yaml
@@ -94,3 +94,15 @@ Only a push to a protected branch may write. Pull requests degrade to read-only,
 and tag or release builds do not use the remote cache at all. If fork authors
 must not reach the host, use the GitHub backend for those jobs instead. A bearer
 token can be supplied with the action's `token` input when OIDC is unavailable.
+
+::: warning Release builds are never cached
+In a tag or release build (or with `MBX_RELEASE=1`), mbx runs plain Cargo —
+no local or remote cache — because published artifacts must not depend on any
+cache being correct. Hold the rest of the workflow to the same rule: release
+jobs should not restore `target/` through `actions/cache` or rust-cache, and
+should not use any other compiler cache.
+:::
+
+For a repository that combines both backends — the server for trusted runs, the
+GitHub cache for fork pull requests — see
+[CI with fork pull requests](/cookbook/fork-prs).

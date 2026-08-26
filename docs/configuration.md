@@ -3,8 +3,8 @@
 mbx loads environment variables over `.mbx.toml` at the resolved Cargo
 workspace root, then `mbx/config.toml` in the platform configuration directory,
 then defaults. This honors platform and XDG overrides through the operating
-system's configuration-directory lookup. Unknown TOML keys are rejected so
-misspelled settings do not silently do nothing.
+system's configuration-directory lookup. Unknown TOML keys are rejected, so a
+misspelled setting is an error rather than a silent no-op.
 
 ## Disk-scaled defaults
 
@@ -27,6 +27,7 @@ Every value below is optional; these are shown set explicitly.
 cache_dir = "/var/cache/mbx"
 incremental = false
 share_out_dir = false
+savings = "quips"        # or "plain", "off"
 
 [gc]
 auto = true
@@ -65,29 +66,19 @@ credentials, diagnostics, target placement, and garbage collection are not
 accepted from a repository-owned file. mbx reports an error instead of applying
 an unsafe or misspelled workspace setting.
 
-## Settings
+## Verify mode
 
-The complete settings reference—including TOML keys, environment variables,
-types, defaults, choices, and environment-only diagnostics—is generated from
-the same usage-rs declaration mbx uses at runtime. See
-[CLI configuration reference](/cli/configuration).
+`MBX_VERIFY=1` compiles and consults the cache side by side and compares the
+results. It is deliberately expensive — use it to qualify correctness, not for
+everyday builds.
 
-`MBX_VERIFY=1` is deliberately slower. It qualifies correctness; it is not a
-normal build mode.
+## The savings line
 
-## Explicit remote prefetch
-
-After a command has published its action manifest, another machine can warm
-the same build without running Cargo:
-
-```sh
-mbx prefetch build --workspace --release
-```
-
-The workspace's `Cargo.lock` and complete Cargo argument list select the same
-manifest as a normal mbx build. Prefetch requires a configured remote in
-`read-only` or `read-write` mode, waits for every predicted action, and returns
-an error when the manifest lookup fails.
+`savings` controls the one-line report of accumulated savings after a build
+(`MBX_SAVINGS` from the environment). `quips` — the default — draws the line
+from a pool of dry one-liners, `plain` states the same facts in the register
+of the other `mbx[...]` lines, and `off` keeps the totals without printing
+anything.
 
 ## Incremental builds
 
@@ -100,3 +91,12 @@ disables it because a fresh runner has no incremental state to reuse.
 
 Sizes accept SI and IEC units. `20GB` and `20GiB` are different values. Durations
 accept values such as `30s`, `15m`, and `1h`.
+
+## Settings
+
+Every setting, generated from the same usage-rs declaration mbx uses at
+runtime.
+
+<!-- The line range skips the generated header and file-precedence preamble;
+     the top of this page describes precedence more completely. -->
+<!--@include: ./cli/configuration.md{9,}-->

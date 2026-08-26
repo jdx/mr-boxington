@@ -6,7 +6,7 @@ Read from, in ascending precedence — the last one that names a setting wins:
 - `<config directory>/mbx/config.toml` (global), toml
 
 
-## `bypass_log`
+### `bypass_log`
 
 - **Type:** `option<path>`
 - **Optional:** true
@@ -15,7 +15,7 @@ Read from, in ascending precedence — the last one that names a setting wins:
 
 Append the full reason for every bypassed compilation to this path.
 
-## `cache_dir`
+### `cache_dir`
 
 - **Type:** `option<path>`
 - **Optional:** true
@@ -24,7 +24,7 @@ Append the full reason for every bypassed compilation to this path.
 
 Cache root.
 
-## `gc.auto`
+### `gc.auto`
 
 - **Type:** `bool`
 - **Default:** `true`
@@ -32,7 +32,7 @@ Cache root.
 
 Sweep after a build when collection is due.
 
-## `gc.interval`
+### `gc.interval`
 
 - **Type:** `duration`
 - **Default:** `1h`
@@ -40,7 +40,7 @@ Sweep after a build when collection is due.
 
 Minimum interval between automatic sweeps.
 
-## `gc.max_size`
+### `gc.max_size`
 
 - **Type:** `option<string>`
 - **Optional:** true
@@ -49,7 +49,7 @@ Minimum interval between automatic sweeps.
 
 Action-store budget.
 
-## `gc.max_total_size`
+### `gc.max_total_size`
 
 - **Type:** `option<string>`
 - **Optional:** true
@@ -57,7 +57,7 @@ Action-store budget.
 
 Combined action-store and managed-target budget, or "none".
 
-## `http.download_timeout`
+### `http.download_timeout`
 
 - **Type:** `duration`
 - **Default:** `10m`
@@ -65,7 +65,7 @@ Combined action-store and managed-target budget, or "none".
 
 Blob download timeout.
 
-## `http.retries`
+### `http.retries`
 
 - **Type:** `int`
 - **Default:** `3`
@@ -73,7 +73,7 @@ Blob download timeout.
 
 Request retries.
 
-## `http.timeout`
+### `http.timeout`
 
 - **Type:** `duration`
 - **Default:** `30s`
@@ -81,7 +81,7 @@ Request retries.
 
 Connect and request timeout.
 
-## `incremental`
+### `incremental`
 
 - **Type:** `bool`
 - **Default:** `false`
@@ -89,7 +89,7 @@ Connect and request timeout.
 
 Let local workspace members compile incrementally.
 
-## `remote.mode`
+### `remote.mode`
 
 - **Type:** `string`
 - **Default:** `read-write`
@@ -103,7 +103,7 @@ Remote access mode.
 - `write-only`
 
 
-## `remote.namespace`
+### `remote.namespace`
 
 - **Type:** `option<string>`
 - **Optional:** true
@@ -111,7 +111,7 @@ Remote access mode.
 
 Remote namespace; required when a URL is configured.
 
-## `remote.oidc_audience`
+### `remote.oidc_audience`
 
 - **Type:** `option<string>`
 - **Optional:** true
@@ -119,7 +119,7 @@ Remote namespace; required when a URL is configured.
 
 CI OIDC audience.
 
-## `remote.token`
+### `remote.token`
 
 - **Type:** `option<string>`
 - **Optional:** true
@@ -127,7 +127,7 @@ CI OIDC audience.
 
 Bearer token for the remote cache.
 
-## `remote.token_file`
+### `remote.token_file`
 
 - **Type:** `option<path>`
 - **Optional:** true
@@ -135,7 +135,7 @@ Bearer token for the remote cache.
 
 File containing a bearer token.
 
-## `remote.url`
+### `remote.url`
 
 - **Type:** `option<url>`
 - **Optional:** true
@@ -143,7 +143,7 @@ File containing a bearer token.
 
 Remote cache URL.
 
-## `savings`
+### `savings`
 
 - **Type:** `string`
 - **Default:** `quips`
@@ -157,7 +157,7 @@ How the savings line after a build reads.
 - `off`
 
 
-## `share_out_dir`
+### `share_out_dir`
 
 - **Type:** `bool`
 - **Default:** `false`
@@ -165,7 +165,7 @@ How the savings line after a build reads.
 
 Share eligible compilations that read `OUT_DIR`.
 
-## `stats_report`
+### `stats_report`
 
 - **Type:** `option<path>`
 - **Optional:** true
@@ -173,7 +173,7 @@ Share eligible compilations that read `OUT_DIR`.
 
 Write a JSON build report to this path.
 
-## `target.max_age`
+### `target.max_age`
 
 - **Type:** `duration`
 - **Default:** `30d`
@@ -181,7 +181,7 @@ Write a JSON build report to this path.
 
 Collect live managed targets unused this long, or "none".
 
-## `target.max_size`
+### `target.max_size`
 
 - **Type:** `option<string>`
 - **Optional:** true
@@ -190,7 +190,7 @@ Collect live managed targets unused this long, or "none".
 
 Managed-target budget, or "none". Live views are collected oldest-first.
 
-## `target.root`
+### `target.root`
 
 - **Type:** `option<path>`
 - **Optional:** true
@@ -199,7 +199,7 @@ Managed-target budget, or "none". Live views are collected oldest-first.
 
 Managed target root.
 
-## `target.views`
+### `target.views`
 
 - **Type:** `bool`
 - **Default:** `true`
@@ -207,7 +207,7 @@ Managed target root.
 
 Let mbx place eligible target directories under the managed root.
 
-## `verify`
+### `verify`
 
 - **Type:** `bool`
 - **Default:** `false`

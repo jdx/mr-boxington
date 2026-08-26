@@ -5,16 +5,15 @@
 ### mise
 
 ```sh
-mise use -g github:jdx/mr-boxington
+mise use -g mr-boxington
 ```
 
 ### Release archive
 
-Linux x86-64:
+:::tabs
+== Linux x86-64
 
 ```sh
-(
-set -e
 mkdir -p ~/.local/bin
 archive=mbx-x86_64-unknown-linux-musl.tar.gz
 release=https://github.com/jdx/mr-boxington/releases/latest/download
@@ -22,18 +21,78 @@ curl -fsSLO "$release/$archive"
 curl -fsSLO "$release/SHA256SUMS"
 grep "  $archive$" SHA256SUMS | sha256sum --check --strict -
 tar -xzf "$archive" -C ~/.local/bin
-)
 ```
 
-Release archives are also available for Linux ARM64, Apple Silicon, and Windows
-x86-64. See [GitHub Releases](https://github.com/jdx/mr-boxington/releases)
-for downloads and `SHA256SUMS`.
+== Linux ARM64
+
+```sh
+mkdir -p ~/.local/bin
+archive=mbx-aarch64-unknown-linux-musl.tar.gz
+release=https://github.com/jdx/mr-boxington/releases/latest/download
+curl -fsSLO "$release/$archive"
+curl -fsSLO "$release/SHA256SUMS"
+grep "  $archive$" SHA256SUMS | sha256sum --check --strict -
+tar -xzf "$archive" -C ~/.local/bin
+```
+
+== macOS
+
+```sh
+mkdir -p ~/.local/bin
+archive=mbx-aarch64-apple-darwin.tar.gz
+release=https://github.com/jdx/mr-boxington/releases/latest/download
+curl -fsSLO "$release/$archive"
+curl -fsSLO "$release/SHA256SUMS"
+grep "  $archive$" SHA256SUMS | shasum -a 256 --check --strict -
+tar -xzf "$archive" -C ~/.local/bin
+```
+
+== Windows
+
+```powershell
+$archive = "mbx-x86_64-pc-windows-msvc.zip"
+$release = "https://github.com/jdx/mr-boxington/releases/latest/download"
+Invoke-WebRequest "$release/$archive" -OutFile $archive
+Invoke-WebRequest "$release/SHA256SUMS" -OutFile SHA256SUMS
+$expected = (Select-String -Path SHA256SUMS -Pattern $archive).Line.Split(" ")[0]
+if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $expected.ToUpper()) {
+  throw "checksum mismatch"
+}
+Expand-Archive $archive -DestinationPath "$env:LOCALAPPDATA\Programs\mbx"
+```
+
+Add `%LOCALAPPDATA%\Programs\mbx` to `PATH`.
+
+:::
+
+Every release publishes its archives and `SHA256SUMS` on
+[GitHub Releases](https://github.com/jdx/mr-boxington/releases).
 
 ### Cargo
 
 ```sh
 cargo install mbx
 ```
+
+## Supported platforms
+
+Release binaries cover:
+
+- Linux x86-64 and ARM64 (static musl builds)
+- macOS on Apple Silicon
+- Windows x86-64
+
+Other platforms with a Rust toolchain can build from source with
+`cargo install mbx`. mbx wraps whichever Cargo and rustc are active, including
+rustup-managed toolchains — `mbx doctor` reports the pair it found.
+
+Reflinked output restoration needs a filesystem with copy-on-write file
+cloning: APFS on macOS, btrfs or XFS on Linux, ReFS (Dev Drive) on Windows.
+mbx probes the actual cache and target locations rather than assuming from
+the platform, and copies bytes where cloning is unavailable — caching still
+works on ext4 or NTFS, it just spends the disk twice. On Windows, managed
+target directories also need Developer Mode or a privileged process to create
+the `target` link; see [managed target directories](/managed-targets).
 
 ## Run a build
 
@@ -47,21 +106,19 @@ mbx clippy --workspace --all-targets
 
 The command and its arguments are passed to Cargo unchanged. Cargo still owns
 dependency resolution, feature unification, build planning, and linking. mbx
-also forwards Cargo aliases and installed subcommands.
-
-That is the whole setup. There is nothing to install into Cargo's
-configuration and nothing to tune before the first build.
+also forwards Cargo aliases and installed subcommands. Nothing goes into
+Cargo's configuration, and there is nothing to tune before the first build.
 
 ## The first build
 
-The first build on a machine says what it arranged:
+The first build on a machine prints what it set up:
 
 ```text
-mbx[setup]: first build on this machine -- here is the arrangement:
-mbx[setup]:   compiled work is cached once in /home/you/.cache/mbx and shared with every checkout and worktree; the store sweeps itself back to 50.0 GiB
-mbx[setup]:   this filesystem can reflink, so outputs land in target/ without copying -- many checkouts, one copy on disk
-mbx[setup]:   target/ directories are managed and collected when their checkout disappears, they sit unused for 30 days, or they together outgrow 100.0 GiB
-mbx[setup]:   nothing else to run; `mbx gc --dry-run` previews a cleanup and every cap is configurable
+mbx[setup]: first build on this machine
+mbx[setup]:   cache is /home/you/.cache/mbx, shared by every checkout and worktree, pruned to 50.0 GiB
+mbx[setup]:   this filesystem supports reflinks, so target/ shares disk with the cache instead of copying
+mbx[setup]:   target/ is managed: deleted when its checkout is gone, unused for 30 days, or over 100.0 GiB total
+mbx[setup]:   `mbx gc --dry-run` previews cleanup; every limit is configurable
 ```
 
 The budgets are a share of the disk holding the cache, so the numbers above
@@ -74,6 +131,18 @@ or disable each limit.
 
 ```sh
 mbx doctor
+```
+
+```text
+  ok  cargo        cargo 1.98.0 (797e8a9bc 2026-08-05)
+  ok  rustc        rustc 1.98.0 (88d9e12ae 2026-08-18)
+  ok  cache        /home/you/.cache/mbx is writable
+  ok  config       20.0 GiB budget, automatic gc enabled, managed targets enabled at /home/you/.cache/mbx/targets
+  ok  reflink      supported by the cache filesystem
+  ok  setup        no plain-cargo wrapper installed; mbx wraps cargo directly
+  ok  remote       not configured; using the local cache
+
+0 failures, 0 warnings
 ```
 
 Doctor checks the Cargo and rustc executables, cache write access, filesystem
@@ -98,8 +167,11 @@ mbx deliberately declined to cache the action. See [Cache results](/cache-result
 ## Inspect the store
 
 ```sh
-mbx cache dir
-mbx cache stats
+mbx cache dir       # where the store lives
+mbx cache stats     # size and contents of the store
+mbx cache projects  # cache use attributed to recorded workspaces
+mbx cache largest   # the largest objects and action results
+mbx cache verify    # check local objects against their digests
 mbx gc
 mbx gc --dry-run
 mbx gc --max-size 20GiB

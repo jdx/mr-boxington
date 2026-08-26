@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitepress";
+import { tabsMarkdownPlugin } from "vitepress-plugin-tabs";
 
 const configDir = dirname(fileURLToPath(import.meta.url));
 const cargoToml = readFileSync(resolve(configDir, "../../Cargo.toml"), "utf8");
@@ -17,11 +18,19 @@ export default defineConfig({
   lastUpdated: true,
   appearance: "force-dark",
   cleanUrls: true,
+  // The configuration reference is embedded into /configuration with an
+  // @include rather than shipped as its own page.
+  srcExclude: ["cli/configuration.md"],
   rewrites: {
     "cli/cache.md": "cli/cache/index.md",
   },
   sitemap: {
     hostname: "https://mr-boxington.jdx.dev",
+  },
+  markdown: {
+    config(md) {
+      md.use(tabsMarkdownPlugin);
+    },
   },
   themeConfig: {
     logo: "/logo.svg",
@@ -49,13 +58,22 @@ export default defineConfig({
           { text: "Configuration", link: "/configuration" },
           { text: "GitHub Actions", link: "/github-actions" },
           { text: "Remote cache", link: "/remote-cache" },
+          { text: "Cache server", link: "/cache-server" },
           { text: "Managed targets", link: "/managed-targets" },
+        ],
+      },
+      {
+        text: "Cookbook",
+        items: [
+          { text: "CI with fork pull requests", link: "/cookbook/fork-prs" },
         ],
       },
       {
         text: "Understand mbx",
         items: [
           { text: "How it works", link: "/how-it-works" },
+          { text: "How mbx compares", link: "/compared" },
+          { text: "Stability", link: "/stability" },
           { text: "Protocol compatibility", link: "/protocol-compatibility" },
           { text: "Cache results", link: "/cache-results" },
           { text: "Limits", link: "/limits" },
@@ -82,7 +100,7 @@ export default defineConfig({
             ],
           },
           { text: "prefetch", link: "/cli/prefetch" },
-          { text: "CLI configuration", link: "/cli/configuration" },
+          { text: "Settings", link: "/configuration#settings" },
         ],
       },
     ],

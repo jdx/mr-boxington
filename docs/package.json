@@ -8,13 +8,22 @@
     "docs:preview": "vitepress preview"
   },
   "devDependencies": {
-    "vitepress": "^1.6.3"
+    "vitepress": "^1.6.3",
+    "vitepress-plugin-tabs": "^0.9.1"
   },
   "pnpm": {
     "supportedArchitectures": {
-      "os": ["linux", "darwin"],
-      "cpu": ["x64", "arm64"],
-      "libc": ["glibc"]
+      "os": [
+        "linux",
+        "darwin"
+      ],
+      "cpu": [
+        "x64",
+        "arm64"
+      ],
+      "libc": [
+        "glibc"
+      ]
     },
     "allowBuilds": {
       "esbuild": true

@@ -27,4 +27,4 @@
 
 ## Configuration
 
-- [Settings](/cli/configuration.md)
+- [Settings](/configuration#settings)

@@ -33,7 +33,7 @@ mbx explain build --workspace
 
 The command preserves Cargo's exit status after printing the explanation.
 
-## Why hit rate is not the whole story
+## Reading the hit rate
 
 A build can report a high hit rate among attempted lookups while spending most
 of its time on actions that were not looked up or were bypassed. Read all three
@@ -42,6 +42,38 @@ summary lines together, and compare wall-clock time when evaluating the cache.
 Native link steps always run, so an otherwise warm native binary build still
 has work to do. Binaries, tests, and `cdylib`s for supported self-contained
 WebAssembly targets are the exception and may be restored as hits.
+
+## Troubleshooting a low hit rate
+
+Run the build through `mbx explain` first — it collects the per-action
+records, groups identical causes, and prints guidance for each category:
+
+```sh
+mbx explain build --workspace
+```
+
+The usual causes, roughly in the order they show up:
+
+- **The store is cold.** A first build has no dep-info to derive keys from, so
+  "could not look up" dominates and everything is stored rather than restored.
+  The second build is the honest measurement.
+- **Incremental builds are enabled.** With `MBX_INCREMENTAL=1`, workspace
+  members compile incrementally, those compilations bypass the cache, and the
+  changed artifacts make crates above them miss too. See
+  [limits](/limits#incremental-compilations-are-not-cached).
+- **Link steps always run.** Native binaries, tests, and dylibs re-link even
+  when every compilation hit, so a warm build of a large binary still takes
+  time. Self-contained WebAssembly targets are the exception.
+- **The inputs actually differ.** A different toolchain, feature set, profile,
+  or `RUSTFLAGS` between two checkouts is a different key, and the summary
+  reports it as an ordinary miss. `cargo tree` and comparing the two commands
+  usually finds it.
+- **Build-script output paths.** A crate that embeds its `OUT_DIR` produces
+  checkout-specific inputs for its dependents. `MBX_SHARE_OUT_DIR=1` remaps
+  it; see [limits](/limits#out_dir-sharing-is-opt-in).
+- **CI restored nothing.** On GitHub Actions, check that the cache step
+  actually restored an entry — a changed `cache-generation` or a fresh
+  repository starts empty by design.
 
 ## Compiler time
 

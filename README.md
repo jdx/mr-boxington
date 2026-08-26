@@ -5,8 +5,8 @@
 <h1 align="center">mr boxington</h1>
 
 <p align="center">
-  <strong><code>target/</code>, fixed: shared, self-pruning, drop-in.</strong><br>
-  Put mbx in front of any Cargo command. Compiled work is shared across worktrees and CI, build storage keeps itself inside a budget, and mbx tells you what it saved.
+  <strong>fix <code>target/</code></strong><br>
+  Put mbx in front of any cargo command. One cache warms every worktree and CI run, and prunes itself to a size budget.
 </p>
 
 <p align="center">
@@ -16,10 +16,6 @@
   ·
   <a href="PLAN.md">Road to v1</a>
 </p>
-
-> [!WARNING]
-> mr boxington is pre-1.0. The cache format and behavior may change without
-> notice, and releases are not a stability promise.
 
 `mbx` wraps ordinary Cargo commands with a content-addressed rustc cache. Cargo
 still resolves dependencies, plans builds, and links outputs; mbx restores
@@ -34,19 +30,18 @@ mbx clippy --workspace     # cargo clippy --workspace, with caching
 mbx gc --dry-run           # preview what cleanup would reclaim
 ```
 
-The first build explains what it set up — where the cache lives, the budget it
-sweeps itself back to, and when a `target/` directory becomes collectable.
+The first build prints what it set up — where the cache lives, the budget it
+is pruned to, and when a `target/` directory becomes collectable.
 
 ## Why mbx?
 
 - **Warm every worktree.** Cache keys contain no checkout-specific absolute
   paths, so building one checkout warms its siblings automatically without
   sharing a Cargo target lock.
-- **Bounded disk, without a chore.** The action store sweeps itself back to a
-  budget, and managed `target/` directories go when their checkout disappears,
-  when they sit unused for 30 days, or when they outgrow their share of the
-  disk. Both budgets scale with the disk rather than assuming every machine is
-  the same size.
+- **Bounded disk, without a chore.** The action store prunes itself to a
+  budget, and managed `target/` directories are deleted when their checkout is
+  gone, unused for 30 days, or over their share of the disk. Both budgets
+  scale with the disk rather than assuming every machine is the same size.
 - **Warm CI safely.** GitHub Actions cache can warm fork pull requests from a
   cache built on `main`, while a self-hosted remote can serve trusted runners
   and teammates. Pull requests never publish remote objects.
@@ -59,7 +54,7 @@ sweeps itself back to, and when a `target/` directory becomes collectable.
 With [mise](https://mise.jdx.dev):
 
 ```sh
-mise use -g github:jdx/mr-boxington
+mise use -g mr-boxington
 ```
 
 With Cargo:
@@ -71,8 +66,6 @@ cargo install mbx
 Or install the latest Linux x86-64 release archive:
 
 ```sh
-(
-set -e
 mkdir -p ~/.local/bin
 archive=mbx-x86_64-unknown-linux-musl.tar.gz
 release=https://github.com/jdx/mr-boxington/releases/latest/download
@@ -80,7 +73,6 @@ curl -fsSLO "$release/$archive"
 curl -fsSLO "$release/SHA256SUMS"
 grep "  $archive$" SHA256SUMS | sha256sum --check --strict -
 tar -xzf "$archive" -C ~/.local/bin
-)
 ```
 
 Release archives also cover Linux ARM64, Apple Silicon, and Windows x86-64.
@@ -104,10 +96,9 @@ it after a build:
 mbx[savings]: 41.7 GiB of target/ had outlived its checkouts. it has been dealt with.
 ```
 
-The line is drawn from a pool, so it does not repeat itself. Prefer a build
-log with a straight face? `savings = "plain"` states the same facts dryly, and
-`savings = "off"` keeps the totals without printing anything (`MBX_SAVINGS`
-from the environment). Inspect or collect the store explicitly with:
+The line is drawn from a pool, so it does not repeat itself. `savings =
+"plain"` states the same facts without the joke, and `savings = "off"` keeps
+the totals without printing anything (`MBX_SAVINGS` from the environment). Inspect or collect the store explicitly with:
 
 ```sh
 mbx cache stats
@@ -147,8 +138,8 @@ target directory.
 For GitHub-hosted CI, [`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action)
 can install mbx and use GitHub Actions cache, saving only from the default
 branch and restoring in pull requests. Trusted environments can switch the
-same action to a compatible remote such as
-[`jdx/mbx-cache`](https://github.com/jdx/mbx-cache).
+same action to a compatible remote such as the self-hostable
+[cache server](https://mr-boxington.jdx.dev/cache-server).
 
 [Configure GitHub Actions →](https://mr-boxington.jdx.dev/github-actions)
 
