@@ -143,6 +143,11 @@ jobs:
     secrets:
       CERTIFICATES_P12: ${{ secrets.CERTIFICATES_P12 }}
       CERTIFICATES_P12_PASS: ${{ secrets.CERTIFICATES_P12_PASS }}
+      # Optional: absent, the macOS binary ships signed but un-notarized and
+      # the build annotates a warning rather than failing the release.
+      APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
 
   publish-release:
     name: Publish release

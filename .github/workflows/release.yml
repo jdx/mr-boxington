@@ -19,6 +19,12 @@ on:
         required: true
       CERTIFICATES_P12_PASS:
         required: true
+      APPLE_API_KEY_P8:
+        required: false
+      APPLE_API_KEY_ID:
+        required: false
+      APPLE_API_ISSUER_ID:
+        required: false
   workflow_dispatch:
     inputs:
       tag:
@@ -126,6 +132,77 @@ jobs:
           codesign --force --sign "$IDENTITY" --options runtime --timestamp \
             --prefix dev.jdx. "$BINARY"
           codesign --verify --verbose=2 "$BINARY"
+
+      # Signing alone is not enough for an archive a browser downloaded:
+      # quarantine makes Gatekeeper demand a notarization ticket, and without
+      # one it blocks the binary behind a "cannot be verified" dialog that only
+      # a deliberate override gets past. A `curl`-installed tarball is never
+      # quarantined and never consults a ticket either way, so this covers the
+      # release-page download rather than the documented install.
+      #
+      # The ticket stays on Apple's side: `stapler` writes tickets into
+      # bundles, disk images, and installer packages, and a bare Mach-O is none
+      # of those. Gatekeeper resolves it online instead, which is why nothing
+      # here staples and why the shipped archive is byte-identical to the
+      # signed binary above -- touching it after notarization would invalidate
+      # the signature the ticket is keyed to.
+      - name: Notarize macOS binary
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          BINARY: target/${{ matrix.target }}/release/${{ matrix.bin }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$APPLE_API_KEY_P8" ] || [ -z "$APPLE_API_KEY_ID" ] || [ -z "$APPLE_API_ISSUER_ID" ]; then
+            echo "::warning title=Not notarized::App Store Connect credentials are unset, so this release ships a signed but un-notarized macOS binary. Gatekeeper will block it for anyone who downloads the archive through a browser. See RELEASING.md."
+            exit 0
+          fi
+
+          # Outside the workspace, so no later step can sweep the key into an
+          # artifact, and removed even when notarization fails.
+          key="$(mktemp -t mbx-notary-key)"
+          submission="$(mktemp -d -t mbx-notary)/mbx.zip"
+          trap 'rm -rf "$key" "$(dirname "$submission")"' EXIT
+          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$key"
+
+          # notarytool takes a container, never a bare executable. Dropping
+          # resource forks and xattrs keeps the zip to the one entry that
+          # matters; the ticket is keyed to the Mach-O's cdhash, which this
+          # cannot change.
+          ditto -c -k --norsrc --noextattr "$BINARY" "$submission"
+
+          # `--wait` alone is not a gate: parse the reported status rather than
+          # trusting the exit code to distinguish Accepted from Invalid.
+          # plutil reads JSON and ships with macOS, so this needs no jq.
+          result="$(xcrun notarytool submit "$submission" \
+            --key "$key" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --output-format json \
+            --timeout 30m \
+            --wait)"
+          echo "$result"
+
+          status="$(printf '%s' "$result" | plutil -extract status raw -o - -)"
+          id="$(printf '%s' "$result" | plutil -extract id raw -o - -)"
+          if [ "$status" != "Accepted" ]; then
+            echo "::error::notarization returned $status for submission $id"
+            xcrun notarytool log "$id" \
+              --key "$key" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER_ID" || true
+            exit 1
+          fi
+          echo "notarized: submission $id"
+
+          # Informational. A ticket takes a moment to reach the service spctl
+          # asks, so a fresh negative here is not evidence of a bad build --
+          # the submission status above is the gate.
+          spctl --assess --type exec -vv "$BINARY" || true
 
       - name: Check the binary runs
         shell: bash

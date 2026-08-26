@@ -59,6 +59,16 @@ successful releases:
   jdx.dev CLI release workflows. The macOS jobs import the certificate and sign
   `mbx` as `Developer ID Application: Jeffrey Dickey (4993Y37DX6)` before
   creating the release archives.
+- **`APPLE_API_KEY_P8`, `APPLE_API_KEY_ID`, and `APPLE_API_ISSUER_ID`** — an App
+  Store Connect **team** API key with the Developer role, base64-encoded, plus
+  its key and issuer identifiers. It has to be a team key rather than an
+  individual one: `notarytool` takes an issuer only for team keys and rejects it
+  for individual keys. The macOS job submits the signed binary to Apple's
+  notary service with them. These three are the one optional entry in this list:
+  without them the release still ships, the binary is still signed, and the
+  build annotates a warning instead of failing. What it loses is Gatekeeper
+  approval for anyone who downloads the archive through a browser — see
+  [Notarization](#notarization).
 - **A crates.io Trusted Publisher for each of `mbx`, `mbx-cache-core`,
   `mbx-cache-protocol`, and `mbx-cache-rustc`**, naming this repository and the
   workflow file `release-plz.yml`. Publishing is OIDC-only; no registry token
@@ -66,6 +76,33 @@ successful releases:
   trusted publishers are updated to match. A crate that does not exist on
   crates.io yet cannot be created this way — publish its first version by hand
   with a `publish-new` token, then configure its trusted publisher.
+
+## Notarization
+
+Signing proves who built the binary; notarization is what Gatekeeper asks for
+when the archive carries the quarantine bit, which is to say when someone
+downloaded it from the releases page in a browser rather than with `curl`. An
+un-notarized binary is blocked there behind a "cannot be verified" dialog.
+Getting past it takes a deliberate override — approving the binary under Privacy
+& Security, or stripping `com.apple.quarantine` by hand — which is not something
+to ask of someone installing a build tool.
+
+The ticket lives on Apple's side and is never stapled into the archive.
+`stapler` writes tickets into bundles, disk images, and installer packages, and
+`mbx` is a bare Mach-O executable in a tarball — none of those. Gatekeeper
+resolves the ticket online instead, which is the normal arrangement for a CLI
+distributed this way. Two consequences worth knowing:
+
+- The shipped archive is byte-identical to the signed binary. Nothing may
+  re-sign, strip, or rewrite it after notarization, or the ticket no longer
+  matches what a user runs.
+- A machine with no network reaching Apple cannot confirm the ticket. That is
+  the trade a non-bundle CLI makes; the alternative is shipping a `.pkg`.
+
+The build's `spctl` output is informational. Tickets take a moment to propagate
+after a submission is accepted, so a negative assessment in a release log is not
+by itself evidence of a bad build — the accepted submission status is the gate,
+and the job fails when it is anything else.
 
 ## When a release goes wrong
 
