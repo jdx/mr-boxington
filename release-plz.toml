@@ -8,11 +8,20 @@ git_release_enable = true
 # later. release-plz.yml undrafts it once the upload succeeds.
 git_release_draft = true
 
-# Every crate shares one version: a single group is what makes release-plz
-# bump them together instead of computing a separate number for each.
+# Three version tiers, because the crates promise different things.
+#
+# `mbx` and `mbx-cache-protocol` each carry a stability promise, so each gets an
+# independent version: the CLI's surface is its commands and its JSON output,
+# the protocol crate's is a wire contract with an external consumer (the
+# `jdx/mbx-cache` server depends on it and nothing else). Neither should be
+# forced to a major bump by the other, which is what sharing a number would do.
+#
+# `mbx-cache-core` and `mbx-cache-rustc` are internals with no promise to keep.
+# They share a group so a release moves them together, and they stay on 0.x so
+# semver itself says a minor bump may break them. They cannot hold the CLI's
+# number without making every refactor inside them a major mbx release.
 [[package]]
 name = "mbx"
-version_group = "mbx"
 publish = true
 # release-plz would otherwise tag the binary crate `mbx-vX.Y.Z`. The README's
 # install URLs are written against `v{version}`, and this is the tag people
@@ -21,21 +30,20 @@ git_tag_name = "v{{ version }}"
 git_release_enable = true
 
 [[package]]
-name = "mbx-cache-core"
-version_group = "mbx"
+name = "mbx-cache-protocol"
 publish = true
 # A library: crates.io is its distribution. A GitHub release for it would carry
 # no assets and would sit drafted forever, since only the `mbx` tag is undrafted.
 git_release_enable = false
 
 [[package]]
-name = "mbx-cache-protocol"
-version_group = "mbx"
+name = "mbx-cache-core"
+version_group = "mbx-internals"
 publish = true
 git_release_enable = false
 
 [[package]]
 name = "mbx-cache-rustc"
-version_group = "mbx"
+version_group = "mbx-internals"
 publish = true
 git_release_enable = false
