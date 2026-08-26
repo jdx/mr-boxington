@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.4.0...mbx-cache-rustc-v0.4.1) - 2026-08-26
+
+### Other
+
+- give every published crate its crates.io metadata ([#97](https://github.com/jdx/mr-boxington/pull/97))
+- version each crate by what it promises ([#100](https://github.com/jdx/mr-boxington/pull/100))
+
 ## [0.4.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.3.0...mbx-cache-rustc-v0.4.0) - 2026-08-25
 
 ### Added
