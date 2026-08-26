@@ -715,10 +715,7 @@ fn first_run_notice(config: &Config, retention: &RetentionSettings, reflinks: bo
             reasons.push(format!("unused for {}", crate::util::format_span(age)));
         }
         if let Some(bytes) = retention.target_max_bytes {
-            reasons.push(format!(
-                "over {} total",
-                ByteSize::b(bytes).display().iec()
-            ));
+            reasons.push(format!("over {} total", ByteSize::b(bytes).display().iec()));
         }
         lines.push(format!(
             "mbx[setup]:   target/ is managed: deleted when {}",
