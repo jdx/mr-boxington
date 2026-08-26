@@ -59,7 +59,7 @@ onMounted(() => {
 .MbxDemo {
   box-sizing: border-box;
   margin: 0 auto;
-  max-width: 1152px;
+  max-width: 1280px;
   padding: 16px 24px 8px;
   width: 100%;
 }
@@ -180,6 +180,7 @@ onMounted(() => {
 
 .quip {
   color: rgb(var(--mbx-amber-rgb) / 0.9);
+  min-height: 1.75em;
 }
 
 .cursor {
