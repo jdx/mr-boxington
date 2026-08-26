@@ -46,16 +46,16 @@ onMounted(() => {
       >
         <div v-if="buildsRun === 0" class="line"><span class="path">~/proj</span> <span class="prompt">$</span> <span aria-hidden="true" class="cursor"></span></div>
         <template v-if="buildsRun >= 1">
-          <div class="build-output">
+          <div class="build-output cold-build">
             <div class="line"><span class="path">~/proj</span> <span class="prompt">$</span> <span class="cmd">mbx build</span></div>
             <div class="line"><span class="verb">   Compiling</span> libc v0.2.174</div>
             <div class="line"><span class="verb">   Compiling</span> serde v1.0.219</div>
             <div class="line dim">            … 193 more crates …</div>
             <div class="line"><span class="verb">    Finished</span> `dev` profile [unoptimized + debuginfo] target(s) in <span class="time">3m 41s</span></div>
+            <div aria-hidden="true" class="line gap"></div>
+            <div class="line"><span class="path">~/proj</span> <span class="prompt">$</span> <span class="cmd">git worktree add ../review &amp;&amp; cd ../review</span></div>
+            <div v-if="buildsRun === 1" class="line"><span class="path">~/review</span> <span class="prompt">$</span> <span aria-hidden="true" class="cursor"></span></div>
           </div>
-          <div aria-hidden="true" class="line gap"></div>
-          <div class="line"><span class="path">~/proj</span> <span class="prompt">$</span> <span class="cmd">git worktree add ../review &amp;&amp; cd ../review</span></div>
-          <div v-if="buildsRun === 1" class="line"><span class="path">~/review</span> <span class="prompt">$</span> <span aria-hidden="true" class="cursor"></span></div>
         </template>
         <template v-if="buildsRun >= 2">
           <div class="build-output warm-build">
@@ -149,6 +149,10 @@ onMounted(() => {
 .build-output .line:nth-child(3) { animation-delay: 0.4s; }
 .build-output .line:nth-child(4) { animation-delay: 0.55s; }
 .build-output .line:nth-child(5) { animation-delay: 0.85s; }
+
+.cold-build .line:nth-child(6) { animation-delay: 0.85s; }
+.cold-build .line:nth-child(7) { animation-delay: 1.05s; }
+.cold-build .line:nth-child(8) { animation-delay: 1.25s; }
 
 .warm-build .line:nth-child(2) { animation-delay: 0.35s; }
 .warm-build .line:nth-child(3) { animation-delay: 0.55s; }
