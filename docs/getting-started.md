@@ -57,11 +57,11 @@ configuration and nothing to tune before the first build.
 The first build on a machine says what it arranged:
 
 ```text
-mbx: first build on this machine -- here is the arrangement:
-mbx:   compiled work is cached once in /home/you/.cache/mbx and shared with every checkout and worktree; the store sweeps itself back to 50.0 GiB
-mbx:   this filesystem can reflink, so outputs land in target/ without copying -- many checkouts, one copy on disk
-mbx:   target/ directories are managed and collected when their checkout disappears, they sit unused for 30 days, or they together outgrow 100.0 GiB
-mbx:   nothing else to run; `mbx gc --dry-run` previews a cleanup and every cap is configurable
+mbx[setup]: first build on this machine -- here is the arrangement:
+mbx[setup]:   compiled work is cached once in /home/you/.cache/mbx and shared with every checkout and worktree; the store sweeps itself back to 50.0 GiB
+mbx[setup]:   this filesystem can reflink, so outputs land in target/ without copying -- many checkouts, one copy on disk
+mbx[setup]:   target/ directories are managed and collected when their checkout disappears, they sit unused for 30 days, or they together outgrow 100.0 GiB
+mbx[setup]:   nothing else to run; `mbx gc --dry-run` previews a cleanup and every cap is configurable
 ```
 
 The budgets are a share of the disk holding the cache, so the numbers above
@@ -86,9 +86,9 @@ exit unsuccessfully.
 After a build that used the cache, mbx prints a summary to stderr:
 
 ```text
-cache: 139 hits, 8 misses, 147 prefetched; 312.4 MiB downloaded, 0 B uploaded, 280.1 MiB stored locally
-cache could not look up 4 compilations: no usable dep-info from an earlier build and no prediction to derive an action key from
-cache bypassed 7 compilations: 5 unsupported-crate-type, 2 unsupported-search-path
+mbx[cache]: 139 hits, 8 misses, 147 prefetched; 312.4 MiB downloaded, 0 B uploaded, 280.1 MiB stored locally
+mbx[cache]: could not look up 4 compilations: no usable dep-info from an earlier build and no prediction to derive an action key from
+mbx[cache]: bypassed 7 compilations: 5 unsupported-crate-type, 2 unsupported-search-path
 ```
 
 These are three different outcomes: a miss means mbx looked up an action and

@@ -15,7 +15,7 @@ fn main() -> ExitCode {
     match mbx::cli::run() {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("mbx: {error:#}");
+            eprintln!("mbx[error]: {error:#}");
             ExitCode::FAILURE
         }
     }

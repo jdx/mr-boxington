@@ -290,7 +290,7 @@ fn plain_style_states_the_fact_without_the_bit() {
     for _ in 0..20 {
         let line = quip(&tally, &busy_session(), SavingsStyle::Plain).unwrap();
         assert!(
-            line.starts_with("savings: "),
+            line.starts_with("mbx[savings]: "),
             "plain lines read like the cache/gc notes: {line:?}"
         );
     }

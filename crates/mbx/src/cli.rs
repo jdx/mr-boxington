@@ -530,7 +530,7 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
     };
     if let Some(bytes) = removed_target_bytes {
         crate::session::note(&format!(
-            "freed {} by removing the existing target/ directory",
+            "mbx[gc]: freed {} by removing the existing target/ directory",
             ByteSize::b(bytes).display().iec()
         ));
     }
@@ -686,18 +686,18 @@ fn mark_explained(store: &Path) {
 /// rather than described.
 fn first_run_notice(config: &Config, retention: &RetentionSettings, reflinks: bool) -> String {
     let mut lines =
-        vec!["mbx: first build on this machine -- here is the arrangement:".to_string()];
+        vec!["mbx[setup]: first build on this machine -- here is the arrangement:".to_string()];
     // Collection is what the rest of this describes, so a machine that turned
     // it off is told what it has instead of what it does not.
     if config.gc.auto {
         lines.push(format!(
-            "mbx:   compiled work is cached once in {} and shared with every checkout and worktree; the store sweeps itself back to {}",
+            "mbx[setup]:   compiled work is cached once in {} and shared with every checkout and worktree; the store sweeps itself back to {}",
             config.cache_dir.display(),
             ByteSize::b(config.gc.max_bytes).display().iec(),
         ));
     } else {
         lines.push(format!(
-            "mbx:   compiled work is cached once in {} and shared with every checkout and worktree; automatic collection is off, so `mbx gc` is the only thing that reclaims it",
+            "mbx[setup]:   compiled work is cached once in {} and shared with every checkout and worktree; automatic collection is off, so `mbx gc` is the only thing that reclaims it",
             config.cache_dir.display(),
         ));
     }
@@ -706,7 +706,7 @@ fn first_run_notice(config: &Config, retention: &RetentionSettings, reflinks: bo
     // sharing that every restore will quietly turn into a copy.
     if reflinks {
         lines.push(
-            "mbx:   this filesystem can reflink, so outputs land in target/ without copying -- many checkouts, one copy on disk"
+            "mbx[setup]:   this filesystem can reflink, so outputs land in target/ without copying -- many checkouts, one copy on disk"
                 .to_string(),
         );
     }
@@ -725,12 +725,12 @@ fn first_run_notice(config: &Config, retention: &RetentionSettings, reflinks: bo
             ));
         }
         lines.push(format!(
-            "mbx:   target/ directories are managed and collected when {}",
+            "mbx[setup]:   target/ directories are managed and collected when {}",
             join_clauses(&reasons),
         ));
     }
     lines.push(
-        "mbx:   nothing else to run; `mbx gc --dry-run` previews a cleanup and every cap is configurable".to_string(),
+        "mbx[setup]:   nothing else to run; `mbx gc --dry-run` previews a cleanup and every cap is configurable".to_string(),
     );
 
     lines.join("\n")
@@ -1015,7 +1015,7 @@ fn sweep_store(config: &Config, retention: &RetentionSettings) -> crate::savings
             };
             delta.freed_store_bytes = outcome.removed_bytes;
             if outcome.removed_bytes > 0 {
-                crate::session::note(&format!("gc: {}", evictions(&outcome)));
+                crate::session::note(&format!("mbx[gc]: {}", evictions(&outcome)));
             }
         }
         Err(error) => {
@@ -1053,7 +1053,7 @@ fn prune_targets(
     ) {
         Ok(pruned) => {
             if pruned.removed_views > 0 {
-                crate::session::note(&format!("gc: {}", target_removals(&pruned, false)));
+                crate::session::note(&format!("mbx[gc]: {}", target_removals(&pruned, false)));
             }
             PruneReport {
                 remaining_bytes: Some(pruned.remaining_bytes),

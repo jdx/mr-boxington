@@ -6,14 +6,14 @@ import { onMounted, ref } from "vue";
 // line is drawn at random per build. Pick one when the demo mounts and keep it
 // for the lifetime of the page, just like one invocation of mbx would.
 const quips = [
-  "mbx: served 191 compilations from cache; rustc showed up ready to do 3m 36s of work and was sent home",
-  "mbx: 6h 14m of compiling skipped across 87 builds. rustc suspects nothing.",
-  "mbx: 47.0 GiB of build debris binned so far. cargo clean remains unemployed.",
-  "mbx: your deleted worktrees left 41.0 GiB behind. left. past tense.",
-  "mbx: every checkout believes it owns 22.0 GiB of outputs. the disk keeps one copy and says nothing.",
-  "mbx: 4312 compilations on file. the box remembers.",
-  "mbx: rustc believes it compiled everything. it is down 6h 14m across 87 builds. let it believe.",
-  "mbx: 22.0 GiB in every checkout, 22.0 GiB on disk. arithmetic declined to comment.",
+  "mbx[savings]: served 191 compilations from cache; rustc showed up ready to do 3m 36s of work and was sent home",
+  "mbx[savings]: 6h 14m of compiling skipped across 87 builds. rustc suspects nothing.",
+  "mbx[savings]: 47.0 GiB of build debris binned so far. cargo clean remains unemployed.",
+  "mbx[savings]: your deleted worktrees left 41.0 GiB behind. left. past tense.",
+  "mbx[savings]: every checkout believes it owns 22.0 GiB of outputs. the disk keeps one copy and says nothing.",
+  "mbx[savings]: 4312 compilations on file. the box remembers.",
+  "mbx[savings]: rustc believes it compiled everything. it is down 6h 14m across 87 builds. let it believe.",
+  "mbx[savings]: 22.0 GiB in every checkout, 22.0 GiB on disk. arithmetic declined to comment.",
 ];
 // Leave the SSR render empty so hydration agrees, then make the one random
 // choice in the browser. The line arrives with the rest of the transcript.
@@ -61,7 +61,7 @@ onMounted(() => {
           <div class="build-output warm-build">
             <div class="line"><span class="path">~/review</span> <span class="prompt">$</span> <span class="cmd">mbx build</span></div>
             <div class="line"><span class="verb">    Finished</span> `dev` profile [unoptimized + debuginfo] target(s) in <span class="time fast">4.9s</span></div>
-            <div class="line cache">cache: 191 hits, 3 misses, 187 prefetched; 0 B downloaded, 0 B uploaded, 412.6 MiB stored locally</div>
+            <div class="line cache">mbx[cache]: 191 hits, 3 misses, 187 prefetched; 0 B downloaded, 0 B uploaded, 412.6 MiB stored locally</div>
             <div class="line quip">{{ quip }}</div>
             <div class="line"><span class="path">~/review</span> <span class="prompt">$</span> <span aria-hidden="true" class="cursor"></span></div>
           </div>

@@ -417,7 +417,7 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
         return;
     }
     note(&format!(
-        "cache: {} hits, {} misses, {} prefetched; {} downloaded, {} uploaded, {} stored locally",
+        "mbx[cache]: {} hits, {} misses, {} prefetched; {} downloaded, {} uploaded, {} stored locally",
         stats.hits,
         cache_misses(stats),
         stats.prefetched_actions,
@@ -431,7 +431,7 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
         // reads as though the cache was asked and had nothing, rather than that
         // it was never asked. These compilations are still stored afterwards.
         note(&format!(
-            "cache could not look up {} compilations: no usable dep-info from an earlier build and no prediction to derive an action key from",
+            "mbx[cache]: could not look up {} compilations: no usable dep-info from an earlier build and no prediction to derive an action key from",
             stats.unconsulted,
         ));
     }
@@ -445,7 +445,9 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
             .map(|(kind, count)| format!("{count} {kind}"))
             .collect::<Vec<_>>()
             .join(", ");
-        note(&format!("cache bypassed {total} compilations: {detail}"));
+        note(&format!(
+            "mbx[cache]: bypassed {total} compilations: {detail}"
+        ));
     }
     if !stats.compiler.is_empty() || stats.avoided_compiler_duration_ns > 0 {
         let spent = stats.compiler.values().fold(0_u64, |total, compiler| {
@@ -465,14 +467,14 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
             .collect::<Vec<_>>()
             .join(", ");
         note(&format!(
-            "compiler time: {} estimated avoided; {} spent ({detail})",
+            "mbx[cache]: compiler time: {} estimated avoided; {} spent ({detail})",
             format_nanos(stats.avoided_compiler_duration_ns),
             format_nanos(spent),
         ));
         let slow = slow_compilations(stats);
         if !slow.is_empty() {
             note(&format!(
-                "slowest uncached crates: {}",
+                "mbx[cache]: slowest uncached crates: {}",
                 slow.into_iter()
                     .map(|(name, duration)| format!("{name} {}", format_nanos(*duration)))
                     .collect::<Vec<_>>()
@@ -484,7 +486,7 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
         .remote_manifest_lookup_duration_ns
         .saturating_add(stats.remote_action_lookup_duration_ns);
     note(&format!(
-        "cache timing: {} session, {} prefetch; cumulative {} remote lookup, {} blob transfer, {} CAS write, {} materialization",
+        "mbx[cache]: timing: {} session, {} prefetch; cumulative {} remote lookup, {} blob transfer, {} CAS write, {} materialization",
         format_nanos(stats.session_duration_ns),
         format_nanos(stats.prefetch_duration_ns),
         format_nanos(remote_lookup_duration_ns),
@@ -494,7 +496,7 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
     ));
     if stats.restored_output_files > 0 {
         note(&format!(
-            "cache materialization: {} outputs ({}) reflinked, {} outputs ({}) copied",
+            "mbx[cache]: materialization: {} outputs ({}) reflinked, {} outputs ({}) copied",
             stats.reflinked_output_files,
             ByteSize::b(stats.reflinked_output_bytes).display().iec(),
             stats.copied_output_files,
@@ -503,7 +505,7 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
     }
     if stats.verifications > 0 {
         note(&format!(
-            "cache qualification: {} verified, {} diverged",
+            "mbx[cache]: qualification: {} verified, {} diverged",
             stats.verifications, stats.divergences,
         ));
     }
@@ -867,7 +869,7 @@ pub fn is_rustc_shim() -> bool {
 pub fn run_rustc_shim() -> ExitCode {
     let mut arguments = std::env::args_os().skip(1);
     let Some(rustc) = arguments.next() else {
-        eprintln!("mbx: the rustc shim expected the rustc executable as its first argument");
+        eprintln!("mbx[error]: the rustc shim expected the rustc executable as its first argument");
         return ExitCode::from(1);
     };
     let arguments = arguments.collect::<Vec<_>>();
@@ -877,7 +879,7 @@ pub fn run_rustc_shim() -> ExitCode {
             Err(error) => {
                 record_bypass(&error);
                 #[cfg(debug_assertions)]
-                eprintln!("mbx: rustc cache bypassed: {error:#}");
+                eprintln!("mbx[warning]: rustc cache bypassed: {error:#}");
             }
         }
     }
@@ -905,7 +907,7 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
         use std::os::unix::process::CommandExt as _;
 
         let error = command.exec();
-        eprintln!("mbx: the rustc shim failed to execute rustc: {error}");
+        eprintln!("mbx[error]: the rustc shim failed to execute rustc: {error}");
         ExitCode::from(1)
     }
     #[cfg(windows)]
@@ -937,7 +939,7 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
                 unsafe { windows_sys::Win32::System::Threading::ExitProcess(exit_code) }
             }
             Err(error) => {
-                eprintln!("mbx: the rustc shim failed to execute rustc: {error}");
+                eprintln!("mbx[error]: the rustc shim failed to execute rustc: {error}");
                 ExitCode::from(1)
             }
         }
@@ -1032,7 +1034,7 @@ fn append_bypass_log(kind: &str, error: &eyre::Report) {
         static WARNED: std::sync::Once = std::sync::Once::new();
         WARNED.call_once(|| {
             eprintln!(
-                "mbx warning: {BYPASS_LOG_ENV} was not written ({}): {problem}",
+                "mbx[warning]: {BYPASS_LOG_ENV} was not written ({}): {problem}",
                 Path::new(&path).display()
             );
         });
