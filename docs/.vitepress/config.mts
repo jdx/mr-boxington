@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitepress";
+import { tabsMarkdownPlugin } from "vitepress-plugin-tabs";
 
 const configDir = dirname(fileURLToPath(import.meta.url));
 const cargoToml = readFileSync(resolve(configDir, "../../Cargo.toml"), "utf8");
@@ -22,6 +23,11 @@ export default defineConfig({
   },
   sitemap: {
     hostname: "https://mr-boxington.jdx.dev",
+  },
+  markdown: {
+    config(md) {
+      md.use(tabsMarkdownPlugin);
+    },
   },
   themeConfig: {
     logo: "/logo.svg",

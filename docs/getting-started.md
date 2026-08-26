@@ -10,7 +10,8 @@ mise use -g mr-boxington
 
 ### Release archive
 
-Linux x86-64:
+:::tabs
+== Linux x86-64
 
 ```sh
 (
@@ -25,9 +26,56 @@ tar -xzf "$archive" -C ~/.local/bin
 )
 ```
 
-Release archives are also available for Linux ARM64, Apple Silicon, and Windows
-x86-64. See [GitHub Releases](https://github.com/jdx/mr-boxington/releases)
-for downloads and `SHA256SUMS`.
+== Linux ARM64
+
+```sh
+(
+set -e
+mkdir -p ~/.local/bin
+archive=mbx-aarch64-unknown-linux-musl.tar.gz
+release=https://github.com/jdx/mr-boxington/releases/latest/download
+curl -fsSLO "$release/$archive"
+curl -fsSLO "$release/SHA256SUMS"
+grep "  $archive$" SHA256SUMS | sha256sum --check --strict -
+tar -xzf "$archive" -C ~/.local/bin
+)
+```
+
+== macOS
+
+```sh
+(
+set -e
+mkdir -p ~/.local/bin
+archive=mbx-aarch64-apple-darwin.tar.gz
+release=https://github.com/jdx/mr-boxington/releases/latest/download
+curl -fsSLO "$release/$archive"
+curl -fsSLO "$release/SHA256SUMS"
+grep "  $archive$" SHA256SUMS | shasum -a 256 --check --strict -
+tar -xzf "$archive" -C ~/.local/bin
+)
+```
+
+== Windows
+
+```powershell
+$archive = "mbx-x86_64-pc-windows-msvc.zip"
+$release = "https://github.com/jdx/mr-boxington/releases/latest/download"
+Invoke-WebRequest "$release/$archive" -OutFile $archive
+Invoke-WebRequest "$release/SHA256SUMS" -OutFile SHA256SUMS
+$expected = (Select-String -Path SHA256SUMS -Pattern $archive).Line.Split(" ")[0]
+if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $expected.ToUpper()) {
+  throw "checksum mismatch"
+}
+Expand-Archive $archive -DestinationPath "$env:LOCALAPPDATA\Programs\mbx"
+```
+
+Add `%LOCALAPPDATA%\Programs\mbx` to `PATH`.
+
+:::
+
+Every release publishes its archives and `SHA256SUMS` on
+[GitHub Releases](https://github.com/jdx/mr-boxington/releases).
 
 ### Cargo
 
