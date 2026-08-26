@@ -173,13 +173,8 @@ fn qualification_results_are_not_reported_as_misses() {
 #[test]
 fn compiler_only_sessions_are_reportable() {
     let stats = agent_stats(|stats| {
-        stats.compiler = BTreeMap::from([(
-            "bypass".into(),
-            mbx_cache_core::CompilerStats {
-                invocations: 1,
-                duration_ns: 42,
-            },
-        )]);
+        stats.compiler =
+            BTreeMap::from([("bypass".into(), mbx_cache_core::CompilerStats::new(1, 42))]);
     });
 
     assert!(should_display_stats(&stats));
@@ -213,13 +208,8 @@ fn writes_versioned_stats_report() {
         stats.copied_output_files = 2;
         stats.copied_output_bytes = 512;
         stats.avoided_compiler_duration_ns = 2_000;
-        stats.compiler = BTreeMap::from([(
-            "miss".into(),
-            mbx_cache_core::CompilerStats {
-                invocations: 3,
-                duration_ns: 4_000,
-            },
-        )]);
+        stats.compiler =
+            BTreeMap::from([("miss".into(), mbx_cache_core::CompilerStats::new(3, 4_000))]);
         stats.slow_compilations = BTreeMap::from([("slow_crate".into(), 3_000)]);
         stats.remote_blob_requests = 4;
         stats.remote_blob_pack_requests = 2;

@@ -98,3 +98,9 @@ protocol major rather than an added field. `BypassReason` is also
 `#[non_exhaustive]`: the set of uncacheable invocations shifts as the adapter
 learns to model more of them, so aggregate on `BypassReason::kind` rather than
 matching every variant.
+
+The same rule sorts the statistics types. `AgentStats` and `CompilerStats`
+accumulate whatever a session turns out to be worth measuring, so both are open
+to extension; build them from `default` or `CompilerStats::new`. `RestoreStats`
+stays constructible, because the shim reports one on every compilation — it is
+an input to the crate rather than something the crate hands back.
