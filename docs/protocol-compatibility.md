@@ -69,9 +69,28 @@ one leaves the manifest readable but not updatable.
 
 Published Rust APIs follow semantic versioning independently of the wire
 protocols. Pull requests that touch workspace crates run `cargo-semver-checks`
-against the pull request's base commit with all features enabled. An intentional
-breaking API change must include the corresponding major version change; wire
-format changes still require the protocol-version steps above.
+against the pull request's base commit with all features enabled. Wire format
+changes still require the protocol-version steps above.
+
+A breaking API change is *declared*, not numbered by hand. Mark the commit
+breaking -- `feat!:`, or a `BREAKING CHANGE:` footer -- and release-plz prices
+it into the version when it opens the release PR. Do not edit a crate's version
+in a pull request: release-plz owns those numbers, and it knows that a crate on
+`0.x` needs a minor bump where a `1.x` crate would need a major one.
+
+One consequence is worth knowing before it surprises you. A pull request that
+breaks an API on purpose leaves `public API compatibility` red, because the
+version it compares against cannot move until the release PR exists. The
+breaking marker on the commit is what makes the break deliberate; the red check
+is the expected state of an honest breaking change, not a problem to solve
+inside the pull request.
+
+Read that job's output as a list of what broke, not as an instruction. Its
+summary says "semver requires new major version" whatever the crate's position,
+so for the crates on `0.x` it names a bump Cargo does not want -- there, a break
+is a minor. The lint names above the summary are the useful part: they say which
+items changed shape, which is what a reviewer needs to judge whether the break
+was intended.
 
 The four published crates do not share a version, because they do not promise
 the same things:
