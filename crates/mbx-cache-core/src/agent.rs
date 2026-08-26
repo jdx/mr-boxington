@@ -277,6 +277,14 @@ pub struct AgentStats {
     pub compiler: BTreeMap<String, CompilerStats>,
     /// Cumulative real compiler time by crate name.
     pub slow_compilations: BTreeMap<String, u64>,
+    /// Remote cache operations that failed and were degraded to a local result.
+    ///
+    /// A remote cache that cannot be reached, or that answers in a way this
+    /// client refuses, costs hit rate rather than correctness, so every one of
+    /// these is recovered from rather than raised. Counting them is what keeps a
+    /// remote that is failing every request from reading as one that merely had
+    /// nothing to offer.
+    pub remote_failures: u64,
     /// Number of task manifest requests made to the remote cache.
     pub remote_manifest_lookups: u64,
     /// Cumulative time spent requesting remote task manifests.
@@ -335,6 +343,7 @@ struct AtomicAgentStats {
     downloaded_bytes: AtomicU64,
     uploaded_bytes: AtomicU64,
     prefetched_actions: AtomicU64,
+    remote_failures: AtomicU64,
     remote_manifest_lookups: AtomicU64,
     remote_manifest_lookup_duration_ns: AtomicU64,
     remote_action_lookups: AtomicU64,
@@ -535,6 +544,7 @@ impl CacheAgent {
                             format!("remote task action manifest lookup failed for {task}")
                         });
                     }
+                    self.note_remote_failure();
                     warn!("remote task action manifest lookup failed for {task}: {error}");
                     (None, None)
                 }
@@ -683,6 +693,7 @@ impl CacheAgent {
                     }
                 }
                 Err(error) => {
+                    self.note_remote_failure();
                     warn!("remote task action manifest upload failed for {task}: {error}");
                 }
             }
@@ -819,6 +830,7 @@ impl CacheAgent {
                 .load(Ordering::Relaxed),
             compiler: self.stats.compiler.lock().unwrap().clone(),
             slow_compilations: self.stats.slow_compilations.lock().unwrap().clone(),
+            remote_failures: self.stats.remote_failures.load(Ordering::Relaxed),
             remote_manifest_lookups: self.stats.remote_manifest_lookups.load(Ordering::Relaxed),
             remote_manifest_lookup_duration_ns: self
                 .stats
@@ -949,8 +961,14 @@ impl CacheAgent {
             match result {
                 Ok(Ok(Some(action))) => resolved.push(action),
                 Ok(Ok(None)) => {}
-                Ok(Err(error)) => warn!("remote action prefetch failed: {error}"),
-                Err(error) => warn!("remote action prefetch task failed: {error}"),
+                Ok(Err(error)) => {
+                    self.note_remote_failure();
+                    warn!("remote action prefetch failed: {error}");
+                }
+                Err(error) => {
+                    self.note_remote_failure();
+                    warn!("remote action prefetch task failed: {error}");
+                }
             }
             if let Some((action, adapter)) = actions.next() {
                 let agent = self.clone();
@@ -1653,6 +1671,7 @@ impl CacheAgent {
                 })
                 .await
             {
+                self.note_remote_failure();
                 warn!(
                     "remote cache blob upload failed for {}: {error}",
                     digest.hash
@@ -1731,6 +1750,7 @@ impl CacheAgent {
             }
             Ok(None) => Ok(AgentResponse::ActionResult { result: None }),
             Err(error) => {
+                self.note_remote_failure();
                 warn!(
                     "remote cache action lookup failed for {}: {error}",
                     action.hash
@@ -1747,6 +1767,7 @@ impl CacheAgent {
         {
             let _permit = self.remote_transfers.acquire().await?;
             if let Err(error) = remote.put_action_result(result).await {
+                self.note_remote_failure();
                 warn!(
                     "remote cache action upload failed for {}: {error}",
                     result.action.hash
@@ -1754,6 +1775,11 @@ impl CacheAgent {
             }
         }
         Ok(AgentResponse::ActionStored { path })
+    }
+
+    /// Record that a remote operation failed and the build carried on without it.
+    fn note_remote_failure(&self) {
+        self.stats.remote_failures.fetch_add(1, Ordering::Relaxed);
     }
 
     async fn get_remote_action_result(

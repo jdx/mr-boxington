@@ -186,6 +186,16 @@ fn compiler_only_sessions_are_reportable() {
 }
 
 #[test]
+fn a_session_that_only_failed_its_remote_is_reportable() {
+    // Nothing was looked up, stored or compiled, so every other signal this
+    // gate reads is zero -- and a remote cache that answered nothing but
+    // failures is the one thing the build most needs to be told about.
+    let stats = agent_stats(|stats| stats.remote_failures = 3);
+
+    assert!(should_display_stats(&stats));
+}
+
+#[test]
 fn writes_versioned_stats_report() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("nested").join("stats.json");
