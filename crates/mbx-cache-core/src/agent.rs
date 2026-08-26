@@ -235,7 +235,13 @@ pub enum AgentResponse {
 }
 
 /// Aggregate cache activity for one task session.
+///
+/// The agent produces these; nothing outside this crate has cause to build one.
+/// Saying so keeps a new counter from being a breaking change, which is what
+/// this type exists to accumulate -- reach for [`AgentStats::default`] and
+/// assign the fields a test needs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AgentStats {
     /// End-to-end lifetime of the task-scoped cache session.
     pub session_duration_ns: u64,

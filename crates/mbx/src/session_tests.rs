@@ -150,29 +150,37 @@ fn handshake_rejects_version_skew() {
     assert!(validate_handshake_response(&response).is_err());
 }
 
+/// Build the statistics a test needs without naming every counter.
+///
+/// `AgentStats` is `#[non_exhaustive]` so that the agent can keep adding
+/// counters, which also means no struct literal can be written from here.
+fn agent_stats(fill: impl FnOnce(&mut AgentStats)) -> AgentStats {
+    let mut stats = AgentStats::default();
+    fill(&mut stats);
+    stats
+}
+
 #[test]
 fn qualification_results_are_not_reported_as_misses() {
-    let stats = AgentStats {
-        lookups: 5,
-        hits: 2,
-        verifications: 2,
-        ..AgentStats::default()
-    };
+    let stats = agent_stats(|stats| {
+        stats.lookups = 5;
+        stats.hits = 2;
+        stats.verifications = 2;
+    });
     assert_eq!(cache_misses(&stats), 1);
 }
 
 #[test]
 fn compiler_only_sessions_are_reportable() {
-    let stats = AgentStats {
-        compiler: BTreeMap::from([(
+    let stats = agent_stats(|stats| {
+        stats.compiler = BTreeMap::from([(
             "bypass".into(),
             mbx_cache_core::CompilerStats {
                 invocations: 1,
                 duration_ns: 42,
             },
-        )]),
-        ..AgentStats::default()
-    };
+        )]);
+    });
 
     assert!(should_display_stats(&stats));
 }
@@ -181,34 +189,33 @@ fn compiler_only_sessions_are_reportable() {
 fn writes_versioned_stats_report() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("nested").join("stats.json");
-    let stats = AgentStats {
-        session_duration_ns: 42,
-        lookups: 5,
-        hits: 2,
-        verifications: 1,
-        prefetched_actions: 3,
-        downloaded_bytes: 1024,
-        restored_output_files: 7,
-        restored_output_bytes: 2048,
-        reflinked_output_files: 5,
-        reflinked_output_bytes: 1536,
-        copied_output_files: 2,
-        copied_output_bytes: 512,
-        avoided_compiler_duration_ns: 2_000,
-        compiler: BTreeMap::from([(
+    let stats = agent_stats(|stats| {
+        stats.session_duration_ns = 42;
+        stats.lookups = 5;
+        stats.hits = 2;
+        stats.verifications = 1;
+        stats.prefetched_actions = 3;
+        stats.downloaded_bytes = 1024;
+        stats.restored_output_files = 7;
+        stats.restored_output_bytes = 2048;
+        stats.reflinked_output_files = 5;
+        stats.reflinked_output_bytes = 1536;
+        stats.copied_output_files = 2;
+        stats.copied_output_bytes = 512;
+        stats.avoided_compiler_duration_ns = 2_000;
+        stats.compiler = BTreeMap::from([(
             "miss".into(),
             mbx_cache_core::CompilerStats {
                 invocations: 3,
                 duration_ns: 4_000,
             },
-        )]),
-        slow_compilations: BTreeMap::from([("slow_crate".into(), 3_000)]),
-        remote_blob_requests: 4,
-        remote_blob_pack_requests: 2,
-        remote_blob_pack_blobs: 100,
-        materialization_duration_ns: 9,
-        ..AgentStats::default()
-    };
+        )]);
+        stats.slow_compilations = BTreeMap::from([("slow_crate".into(), 3_000)]);
+        stats.remote_blob_requests = 4;
+        stats.remote_blob_pack_requests = 2;
+        stats.remote_blob_pack_blobs = 100;
+        stats.materialization_duration_ns = 9;
+    });
 
     write_stats_report(&path, &stats).unwrap();
     let report: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
