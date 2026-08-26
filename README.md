@@ -13,8 +13,6 @@
   <a href="https://mr-boxington.jdx.dev">Documentation</a>
   ·
   <a href="https://github.com/jdx/mr-boxington/releases">Releases</a>
-  ·
-  <a href="PLAN.md">Road to v1</a>
 </p>
 
 `mbx` wraps ordinary Cargo commands with a content-addressed rustc cache. Cargo
