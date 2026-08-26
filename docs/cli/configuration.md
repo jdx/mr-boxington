@@ -89,6 +89,15 @@ Connect and request timeout.
 
 Let local workspace members compile incrementally.
 
+### `log`
+
+- **Type:** `string`
+- **Default:** `info`
+- **Scope:** only from the environment or the command line
+- **Set with:** `MBX_LOG`
+
+Log filter for mbx's own diagnostics, such as `debug` or `mbx=trace`.
+
 ### `remote.mode`
 
 - **Type:** `string`

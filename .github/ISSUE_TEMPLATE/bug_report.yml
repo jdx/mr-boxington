@@ -1,0 +1,79 @@
+name: Bug report
+description: Something mbx did wrong, or did not do at all
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. `mbx doctor --json` answers most of the questions
+        a first reply would otherwise ask, so it is required below.
+
+        Do not report a security vulnerability here — use
+        [private vulnerability reporting](https://github.com/jdx/mr-boxington/security/advisories/new)
+        instead. See [SECURITY.md](https://github.com/jdx/mr-boxington/blob/main/SECURITY.md).
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: mbx doctor --json
+      description: |
+        Run `mbx doctor --json` in the affected workspace and paste the whole
+        document. It reports the mbx, cargo, and rustc versions, the store, the
+        resolved configuration, and filesystem support. Remove any path you do
+        not want to publish.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran, what mbx did, and what you expected instead.
+      placeholder: |
+        `mbx test --workspace` rebuilt every dependency on the second run, and
+        the summary reported 0 hits where the first run stored 300 actions.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: |
+        The commands, in order, from a known state. A public repository that
+        shows the problem is the fastest path to a fix; if the workspace is
+        private, say what is unusual about it — a build script, a `links` crate,
+        a custom target, a sysroot, a vendored registry.
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: MBX_LOG=debug output
+      description: |
+        `MBX_LOG=debug mbx build` (or the command that misbehaves). This is
+        mbx's own diagnostics for the process driving the build. Trim it to the
+        relevant part if it is long.
+      render: shell
+
+  - type: textarea
+    id: bypass
+    attributes:
+      label: Bypass or cache-result detail
+      description: |
+        For an unexpectedly cold build, `mbx explain build` groups the reasons
+        compilations were not cached. `MBX_BYPASS_LOG=bypass.log mbx build`
+        records the full per-action reason instead.
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I reproduced this on the latest mbx release.
+          required: true
+        - label: I removed bearer tokens, OIDC credentials, and any private path I did not want to publish.
+          required: true
