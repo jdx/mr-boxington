@@ -173,7 +173,7 @@ struct RawGc {
     /// Sweep after a build when collection is due.
     #[usage(env = "MBX_GC_AUTO", default = true)]
     auto: bool,
-    /// Action-store budget.
+    /// Action-store and per-session remote-download budget.
     #[usage(
         env = "MBX_GC_MAX_SIZE",
         default_note = "5% of the cache disk, from 5GiB to 100GiB"

@@ -1591,6 +1591,15 @@ fn remote_agent(
 }
 
 fn remote_agent_url(base_url: url::Url, cache_dir: PathBuf, mode: RemoteCacheMode) -> CacheAgent {
+    remote_agent_url_with_limit(base_url, cache_dir, mode, DEFAULT_MAX_REMOTE_DOWNLOAD_BYTES)
+}
+
+fn remote_agent_url_with_limit(
+    base_url: url::Url,
+    cache_dir: PathBuf,
+    mode: RemoteCacheMode,
+    max_remote_download_bytes: u64,
+) -> CacheAgent {
     let client = RemoteCacheClient::new(crate::RemoteCacheConfig {
         base_url,
         namespace: "test".into(),
@@ -1603,7 +1612,7 @@ fn remote_agent_url(base_url: url::Url, cache_dir: PathBuf, mode: RemoteCacheMod
         retries: 0,
     })
     .unwrap();
-    CacheAgent::new_remote(
+    CacheAgent::new_remote_with_download_limit(
         &cache_dir,
         "test-version",
         AgentRemoteCache {
@@ -1611,6 +1620,7 @@ fn remote_agent_url(base_url: url::Url, cache_dir: PathBuf, mode: RemoteCacheMod
             mode,
             staging_dir: cache_dir.join("remote"),
         },
+        max_remote_download_bytes,
     )
 }
 
@@ -1633,6 +1643,55 @@ fn action_manifest_path(digest: &CacheDigest) -> String {
         "/v1/action-manifests/{}/{}/{}",
         digest.algorithm, digest.hash, digest.size
     )
+}
+
+#[tokio::test]
+async fn bounds_cumulative_remote_downloads_for_a_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let first = CacheDigest::blake3(b"first");
+    let second = CacheDigest::blake3(b"second");
+    let first_download = server
+        .mock("GET", blob_path(&first).as_str())
+        .with_status(200)
+        .with_body("first")
+        .expect(1)
+        .create_async()
+        .await;
+    let second_download = server
+        .mock("GET", blob_path(&second).as_str())
+        .with_status(200)
+        .with_body("second")
+        .expect(0)
+        .create_async()
+        .await;
+    let agent = remote_agent_url_with_limit(
+        server.url().parse().unwrap(),
+        directory.path().join("reader"),
+        RemoteCacheMode::ReadOnly,
+        first.size,
+    );
+
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::FindBlob {
+                digest: first.clone()
+            })
+            .await,
+        AgentResponse::Blob { path: Some(_) }
+    ));
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::FindBlob { digest: second })
+            .await,
+        AgentResponse::Blob { path: None }
+    ));
+    assert_eq!(
+        agent.remote_download_bytes.load(Ordering::Relaxed),
+        first.size
+    );
+    first_download.assert_async().await;
+    second_download.assert_async().await;
 }
 
 #[tokio::test]

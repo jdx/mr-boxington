@@ -1,7 +1,7 @@
 use crate::{
     ActionPrediction, BlobSource, BlobUpload, CacheDigest, CacheDirectory, LocalActionCache,
-    LocalCas, ManifestPutOutcome, RemoteActionResult, RemoteCacheClient, RemoteCacheMode,
-    RustcMetadata, TaskActionManifest, canonical_json,
+    LocalCas, MAX_STAGED_BLOB_PACK_BYTES, ManifestPutOutcome, RemoteActionResult,
+    RemoteCacheClient, RemoteCacheMode, RustcMetadata, TaskActionManifest, canonical_json,
 };
 use eyre::{Context, Result, bail};
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream};
@@ -26,6 +26,7 @@ const MAX_PREFETCH_ACTION_BATCH: usize = 256;
 const PREFETCH_ACTION_BATCH_DELAY: Duration = Duration::from_millis(5);
 const MAX_PREFETCH_DIRECTORY_OBJECTS: usize = 100_000;
 const MAX_PREFETCH_OBJECTS_PER_WAVE: usize = 100_000;
+const DEFAULT_MAX_REMOTE_DOWNLOAD_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
 /// Remote action-cache access owned by one task session.
 pub struct AgentRemoteCache {
@@ -438,6 +439,8 @@ pub struct CacheAgent {
     remote: Option<Arc<RemoteCacheClient>>,
     remote_mode: RemoteCacheMode,
     remote_staging_dir: Arc<PathBuf>,
+    remote_download_limit: u64,
+    remote_download_bytes: Arc<AtomicU64>,
     pending_remote_actions: Arc<Mutex<BTreeMap<CacheDigest, RemoteActionResult>>>,
     remote_transfers: Arc<tokio::sync::Semaphore>,
     prefetch_transfers: Arc<tokio::sync::Semaphore>,
@@ -458,6 +461,33 @@ struct PrefetchedAction {
     result: RemoteActionResult,
 }
 
+struct RemoteDownloadReservation {
+    counter: Arc<AtomicU64>,
+    reserved: u64,
+    committed: bool,
+}
+
+impl RemoteDownloadReservation {
+    fn bytes(&self) -> u64 {
+        self.reserved
+    }
+
+    fn commit(mut self, bytes: u64) {
+        debug_assert!(bytes <= self.reserved);
+        self.counter
+            .fetch_sub(self.reserved.saturating_sub(bytes), Ordering::AcqRel);
+        self.committed = true;
+    }
+}
+
+impl Drop for RemoteDownloadReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.counter.fetch_sub(self.reserved, Ordering::AcqRel);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ExecutableIdentityKey {
     executable: PathBuf,
@@ -467,7 +497,7 @@ struct ExecutableIdentityKey {
 impl CacheAgent {
     /// Create an agent backed by the cache rooted at `cache_dir`.
     pub fn new(cache_dir: impl Into<PathBuf>, version: impl Into<Arc<str>>) -> Self {
-        Self::build(cache_dir.into(), version.into(), None)
+        Self::build(cache_dir.into(), version.into(), None, 0)
     }
 
     /// Create an agent with local-first access to a remote action cache.
@@ -476,10 +506,35 @@ impl CacheAgent {
         version: impl Into<Arc<str>>,
         remote: AgentRemoteCache,
     ) -> Self {
-        Self::build(cache_dir.into(), version.into(), Some(remote))
+        Self::build(
+            cache_dir.into(),
+            version.into(),
+            Some(remote),
+            DEFAULT_MAX_REMOTE_DOWNLOAD_BYTES,
+        )
     }
 
-    fn build(cache_dir: PathBuf, version: Arc<str>, remote: Option<AgentRemoteCache>) -> Self {
+    /// Create a remote agent with a cumulative download budget for the session.
+    pub fn new_remote_with_download_limit(
+        cache_dir: impl Into<PathBuf>,
+        version: impl Into<Arc<str>>,
+        remote: AgentRemoteCache,
+        max_remote_download_bytes: u64,
+    ) -> Self {
+        Self::build(
+            cache_dir.into(),
+            version.into(),
+            Some(remote),
+            max_remote_download_bytes,
+        )
+    }
+
+    fn build(
+        cache_dir: PathBuf,
+        version: Arc<str>,
+        remote: Option<AgentRemoteCache>,
+        remote_download_limit: u64,
+    ) -> Self {
         let remote_mode = remote
             .as_ref()
             .map_or(RemoteCacheMode::ReadOnly, |remote| remote.mode);
@@ -504,11 +559,51 @@ impl CacheAgent {
             remote,
             remote_mode,
             remote_staging_dir: Arc::new(remote_staging_dir),
+            remote_download_limit,
+            remote_download_bytes: Arc::new(AtomicU64::new(0)),
             pending_remote_actions: Arc::new(Mutex::new(BTreeMap::new())),
             remote_transfers: Arc::new(tokio::sync::Semaphore::new(MAX_REMOTE_TRANSFERS)),
             prefetch_transfers: Arc::new(tokio::sync::Semaphore::new(MAX_PREFETCH_TRANSFERS)),
             prefetch_tasks: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    fn reserve_remote_download(&self, bytes: u64) -> Result<RemoteDownloadReservation> {
+        let mut current = self.remote_download_bytes.load(Ordering::Acquire);
+        loop {
+            let next = current
+                .checked_add(bytes)
+                .ok_or_else(|| eyre::eyre!("remote cache download budget overflowed"))?;
+            if next > self.remote_download_limit {
+                bail!(
+                    "remote cache download budget exceeded: {} bytes requested with {} of {} bytes already used",
+                    bytes,
+                    current,
+                    self.remote_download_limit
+                );
+            }
+            match self.remote_download_bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(RemoteDownloadReservation {
+                        counter: self.remote_download_bytes.clone(),
+                        reserved: bytes,
+                        committed: false,
+                    });
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn reserve_remote_download_up_to(&self, requested: u64) -> Result<RemoteDownloadReservation> {
+        let used = self.remote_download_bytes.load(Ordering::Acquire);
+        let available = self.remote_download_limit.saturating_sub(used);
+        self.reserve_remote_download(requested.min(available))
     }
 
     /// Load the last committed action manifest for a task into this session.
@@ -1218,6 +1313,19 @@ impl CacheAgent {
         let mut pack_candidates = missing.clone();
         while !pack_candidates.is_empty() {
             let requested = pack_candidates.keys().cloned().collect::<Vec<_>>();
+            let requested_bytes = requested
+                .iter()
+                .fold(0_u64, |total, digest| total.saturating_add(digest.size));
+            let pack_reservation = match self
+                .reserve_remote_download_up_to(requested_bytes.min(MAX_STAGED_BLOB_PACK_BYTES))
+            {
+                Ok(reservation) if reservation.bytes() > 0 => reservation,
+                Ok(_) => break,
+                Err(error) => {
+                    warn!("remote cache blob pack skipped: {error}");
+                    break;
+                }
+            };
             let (pack, transfer_duration_ns) = {
                 let _prefetch_permit = match prefetch_limit {
                     Some(limit) => match limit.acquire().await {
@@ -1240,7 +1348,11 @@ impl CacheAgent {
                 };
                 let transfer_started = Instant::now();
                 let pack = remote
-                    .get_blob_pack(&requested, self.remote_staging_dir.as_path())
+                    .get_blob_pack_with_limit(
+                        &requested,
+                        self.remote_staging_dir.as_path(),
+                        pack_reservation.bytes(),
+                    )
                     .await;
                 (pack, duration_ns(transfer_started))
             };
@@ -1258,6 +1370,7 @@ impl CacheAgent {
                     break;
                 }
             };
+            pack_reservation.commit(pack.payload_bytes);
             atomic_saturating_add(
                 &self.stats.remote_blob_transfer_duration_ns,
                 transfer_duration_ns,
@@ -1492,6 +1605,7 @@ impl CacheAgent {
             None => None,
         };
         let _permit = self.remote_transfers.acquire().await?;
+        let reservation = self.reserve_remote_download(digest.size)?;
         self.stats
             .remote_blob_requests
             .fetch_add(1, Ordering::Relaxed);
@@ -1503,6 +1617,7 @@ impl CacheAgent {
         drop(transfer_timer);
         let _cas_timer = AtomicDurationTimer::start(&self.stats.local_cas_write_duration_ns);
         let path = self.cas.store_verified_file(digest, temporary.path())?;
+        reservation.commit(digest.size);
         self.remember_verified_blob(digest, &path);
         self.stats.stores.fetch_add(1, Ordering::Relaxed);
         self.stats

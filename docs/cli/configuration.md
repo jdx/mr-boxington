@@ -47,7 +47,7 @@ Minimum interval between automatic sweeps.
 - **Default:** 5% of the cache disk, from 5GiB to 100GiB
 - **Set with:** `MBX_GC_MAX_SIZE`
 
-Action-store budget.
+Action-store and per-session remote-download budget.
 
 ## `gc.max_total_size`
 

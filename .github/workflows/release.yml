@@ -204,6 +204,10 @@ jobs:
               --title "$TAG" \
               --verify-tag
           fi
+          if [[ $(gh release view "$TAG" --repo "${{ github.repository }}" --json isDraft --jq .isDraft) != true ]]; then
+            echo "::error::refusing to replace assets on published release $TAG"
+            exit 1
+          fi
           gh release upload "$TAG" release-assets/* --repo "${{ github.repository }}" --clobber
 
       # Called from release-plz.yml, undrafting is that workflow's job — it

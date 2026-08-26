@@ -486,6 +486,40 @@ async fn rejects_blob_larger_than_its_digest() {
 }
 
 #[tokio::test]
+async fn rejects_remote_blobs_over_client_limits_before_downloading() {
+    let server = mockito::Server::new_async().await;
+    let client = test_client(&server);
+    let staging = tempfile::tempdir().unwrap();
+    let buffered = CacheDigest {
+        algorithm: "blake3".into(),
+        hash: "0".repeat(64),
+        size: MAX_REMOTE_JSON_BYTES + 1,
+    };
+    let streamed = CacheDigest {
+        algorithm: "blake3".into(),
+        hash: "0".repeat(64),
+        size: MAX_REMOTE_BLOB_BYTES + 1,
+    };
+
+    assert!(
+        client
+            .get_blob(&buffered, BLOB_MEDIA_TYPE)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("in-memory blob declared")
+    );
+    assert!(
+        client
+            .get_blob_file(&streamed, staging.path())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("remote cache blob declared")
+    );
+}
+
+#[tokio::test]
 async fn rejects_oversized_capabilities() {
     let mut server = mockito::Server::new_async().await;
     server
