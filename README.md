@@ -66,8 +66,6 @@ cargo install mbx
 Or install the latest Linux x86-64 release archive:
 
 ```sh
-(
-set -e
 mkdir -p ~/.local/bin
 archive=mbx-x86_64-unknown-linux-musl.tar.gz
 release=https://github.com/jdx/mr-boxington/releases/latest/download
@@ -75,7 +73,6 @@ curl -fsSLO "$release/$archive"
 curl -fsSLO "$release/SHA256SUMS"
 grep "  $archive$" SHA256SUMS | sha256sum --check --strict -
 tar -xzf "$archive" -C ~/.local/bin
-)
 ```
 
 Release archives also cover Linux ARM64, Apple Silicon, and Windows x86-64.

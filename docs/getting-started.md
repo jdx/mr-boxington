@@ -14,8 +14,6 @@ mise use -g mr-boxington
 == Linux x86-64
 
 ```sh
-(
-set -e
 mkdir -p ~/.local/bin
 archive=mbx-x86_64-unknown-linux-musl.tar.gz
 release=https://github.com/jdx/mr-boxington/releases/latest/download
@@ -23,14 +21,11 @@ curl -fsSLO "$release/$archive"
 curl -fsSLO "$release/SHA256SUMS"
 grep "  $archive$" SHA256SUMS | sha256sum --check --strict -
 tar -xzf "$archive" -C ~/.local/bin
-)
 ```
 
 == Linux ARM64
 
 ```sh
-(
-set -e
 mkdir -p ~/.local/bin
 archive=mbx-aarch64-unknown-linux-musl.tar.gz
 release=https://github.com/jdx/mr-boxington/releases/latest/download
@@ -38,14 +33,11 @@ curl -fsSLO "$release/$archive"
 curl -fsSLO "$release/SHA256SUMS"
 grep "  $archive$" SHA256SUMS | sha256sum --check --strict -
 tar -xzf "$archive" -C ~/.local/bin
-)
 ```
 
 == macOS
 
 ```sh
-(
-set -e
 mkdir -p ~/.local/bin
 archive=mbx-aarch64-apple-darwin.tar.gz
 release=https://github.com/jdx/mr-boxington/releases/latest/download
@@ -53,7 +45,6 @@ curl -fsSLO "$release/$archive"
 curl -fsSLO "$release/SHA256SUMS"
 grep "  $archive$" SHA256SUMS | shasum -a 256 --check --strict -
 tar -xzf "$archive" -C ~/.local/bin
-)
 ```
 
 == Windows
@@ -85,11 +76,15 @@ cargo install mbx
 
 ## Supported platforms
 
-Release binaries cover Linux x86-64 and ARM64 (static musl builds), macOS on
-Apple Silicon, and Windows x86-64; other platforms with a Rust toolchain can
-build from source with `cargo install mbx`. mbx wraps whichever Cargo and
-rustc are active, including rustup-managed toolchains — `mbx doctor` reports
-the pair it found.
+Release binaries cover:
+
+- Linux x86-64 and ARM64 (static musl builds)
+- macOS on Apple Silicon
+- Windows x86-64
+
+Other platforms with a Rust toolchain can build from source with
+`cargo install mbx`. mbx wraps whichever Cargo and rustc are active, including
+rustup-managed toolchains — `mbx doctor` reports the pair it found.
 
 Reflinked output restoration needs a filesystem with copy-on-write file
 cloning: APFS on macOS, btrfs or XFS on Linux, ReFS (Dev Drive) on Windows.
@@ -136,6 +131,18 @@ or disable each limit.
 
 ```sh
 mbx doctor
+```
+
+```text
+  ok  cargo        cargo 1.98.0 (797e8a9bc 2026-08-05)
+  ok  rustc        rustc 1.98.0 (88d9e12ae 2026-08-18)
+  ok  cache        /home/you/.cache/mbx is writable
+  ok  config       20.0 GiB budget, automatic gc enabled, managed targets enabled at /home/you/.cache/mbx/targets
+  ok  reflink      supported by the cache filesystem
+  ok  setup        no plain-cargo wrapper installed; mbx wraps cargo directly
+  ok  remote       not configured; using the local cache
+
+0 failures, 0 warnings
 ```
 
 Doctor checks the Cargo and rustc executables, cache write access, filesystem
