@@ -1230,6 +1230,67 @@ async fn pack_and_individual_fetches_share_a_digest_lock() {
 }
 
 #[tokio::test]
+async fn a_smaller_server_pack_cap_does_not_block_later_candidates() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let oversized = CacheDigest {
+        algorithm: "blake3".into(),
+        hash: "00".repeat(32),
+        size: MAX_STAGED_BLOB_PACK_BYTES,
+    };
+    let packed_bytes = b"fit";
+    let packed = CacheDigest::blake3(packed_bytes);
+    let capabilities = server
+        .mock("GET", "/v1/capabilities")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            serde_json::json!({
+                "protocol":{"major":1},
+                "features":{"blob_packs":true},
+                "limits":{"max_batch_items":100,"max_pack_bytes":4}
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let pack = server
+        .mock("POST", "/v1/blobs:pack")
+        .match_body(mockito::Matcher::Json(serde_json::json!({
+            "digests": [&packed]
+        })))
+        .with_status(200)
+        .with_header("content-type", crate::BLOB_PACK_MEDIA_TYPE)
+        .with_body(blob_pack_body(&[(packed.clone(), packed_bytes.as_slice())]))
+        .expect(1)
+        .create_async()
+        .await;
+    let fallback = server
+        .mock("GET", blob_path(&oversized).as_str())
+        .with_status(404)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().join("reader"),
+        RemoteCacheMode::ReadOnly,
+    );
+    let remote = agent.remote.as_deref().unwrap();
+
+    let verified = agent
+        .fetch_remote_blobs(remote, vec![oversized, packed.clone()], None)
+        .await;
+
+    assert_eq!(verified.len(), 1);
+    assert_eq!(fs::read(&verified[&packed]).unwrap(), packed_bytes);
+    capabilities.assert_async().await;
+    pack.assert_async().await;
+    fallback.assert_async().await;
+}
+
+#[tokio::test]
 async fn preserves_successful_pack_metrics_when_a_later_chunk_falls_back() {
     let directory = tempfile::tempdir().unwrap();
     let mut server = mockito::Server::new_async().await;

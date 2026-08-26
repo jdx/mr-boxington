@@ -1438,7 +1438,13 @@ impl CacheAgent {
             atomic_saturating_add(&self.stats.remote_blob_pack_blobs, pack.blob_count);
             atomic_saturating_add(&self.stats.downloaded_bytes, pack.payload_bytes);
             if pack.requested.is_empty() {
-                break;
+                // The server's negotiated cap can be smaller than the local
+                // staging cap used to select this locked slice. Fall back for
+                // this slice, but keep packing later candidates that may fit.
+                for digest in &requested {
+                    pack_candidates.remove(digest);
+                }
+                continue;
             }
             for digest in &pack.requested {
                 pack_candidates.remove(digest);
