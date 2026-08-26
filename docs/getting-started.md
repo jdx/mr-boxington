@@ -55,11 +55,11 @@ Cargo's configuration, and there is nothing to tune before the first build.
 The first build on a machine prints what it set up:
 
 ```text
-mbx[setup]: first build on this machine -- here is the arrangement:
-mbx[setup]:   compiled work is cached once in /home/you/.cache/mbx and shared with every checkout and worktree; the store sweeps itself back to 50.0 GiB
-mbx[setup]:   this filesystem can reflink, so outputs land in target/ without copying -- many checkouts, one copy on disk
-mbx[setup]:   target/ directories are managed and collected when their checkout disappears, they sit unused for 30 days, or they together outgrow 100.0 GiB
-mbx[setup]:   nothing else to run; `mbx gc --dry-run` previews a cleanup and every cap is configurable
+mbx[setup]: first build on this machine
+mbx[setup]:   cache is /home/you/.cache/mbx, shared by every checkout and worktree, pruned to 50.0 GiB
+mbx[setup]:   this filesystem supports reflinks, so target/ shares disk with the cache instead of copying
+mbx[setup]:   target/ is managed: deleted when its checkout is gone, unused for 30 days, or over 100.0 GiB total
+mbx[setup]:   `mbx gc --dry-run` previews cleanup; every limit is configurable
 ```
 
 The budgets are a share of the disk holding the cache, so the numbers above

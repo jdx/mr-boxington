@@ -685,19 +685,18 @@ fn mark_explained(store: &Path) {
 /// be wrong on most machines. A limit somebody turned off is left unmentioned
 /// rather than described.
 fn first_run_notice(config: &Config, retention: &RetentionSettings, reflinks: bool) -> String {
-    let mut lines =
-        vec!["mbx[setup]: first build on this machine -- here is the arrangement:".to_string()];
+    let mut lines = vec!["mbx[setup]: first build on this machine".to_string()];
     // Collection is what the rest of this describes, so a machine that turned
     // it off is told what it has instead of what it does not.
     if config.gc.auto {
         lines.push(format!(
-            "mbx[setup]:   compiled work is cached once in {} and shared with every checkout and worktree; the store sweeps itself back to {}",
+            "mbx[setup]:   cache is {}, shared by every checkout and worktree, pruned to {}",
             config.cache_dir.display(),
             ByteSize::b(config.gc.max_bytes).display().iec(),
         ));
     } else {
         lines.push(format!(
-            "mbx[setup]:   compiled work is cached once in {} and shared with every checkout and worktree; automatic collection is off, so `mbx gc` is the only thing that reclaims it",
+            "mbx[setup]:   cache is {}, shared by every checkout and worktree; automatic collection is off, so only `mbx gc` reclaims it",
             config.cache_dir.display(),
         ));
     }
@@ -706,31 +705,29 @@ fn first_run_notice(config: &Config, retention: &RetentionSettings, reflinks: bo
     // sharing that every restore will quietly turn into a copy.
     if reflinks {
         lines.push(
-            "mbx[setup]:   this filesystem can reflink, so outputs land in target/ without copying -- many checkouts, one copy on disk"
+            "mbx[setup]:   this filesystem supports reflinks, so target/ shares disk with the cache instead of copying"
                 .to_string(),
         );
     }
     if config.target.views && config.gc.auto {
-        let mut reasons = vec!["their checkout disappears".to_string()];
+        let mut reasons = vec!["its checkout is gone".to_string()];
         if let Some(age) = retention.target_max_age {
-            reasons.push(format!(
-                "they sit unused for {}",
-                crate::util::format_span(age)
-            ));
+            reasons.push(format!("unused for {}", crate::util::format_span(age)));
         }
         if let Some(bytes) = retention.target_max_bytes {
             reasons.push(format!(
-                "they together outgrow {}",
+                "over {} total",
                 ByteSize::b(bytes).display().iec()
             ));
         }
         lines.push(format!(
-            "mbx[setup]:   target/ directories are managed and collected when {}",
+            "mbx[setup]:   target/ is managed: deleted when {}",
             join_clauses(&reasons),
         ));
     }
     lines.push(
-        "mbx[setup]:   nothing else to run; `mbx gc --dry-run` previews a cleanup and every cap is configurable".to_string(),
+        "mbx[setup]:   `mbx gc --dry-run` previews cleanup; every limit is configurable"
+            .to_string(),
     );
 
     lines.join("\n")

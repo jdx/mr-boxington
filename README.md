@@ -30,19 +30,18 @@ mbx clippy --workspace     # cargo clippy --workspace, with caching
 mbx gc --dry-run           # preview what cleanup would reclaim
 ```
 
-The first build explains what it set up — where the cache lives, the budget it
-sweeps itself back to, and when a `target/` directory becomes collectable.
+The first build prints what it set up — where the cache lives, the budget it
+is pruned to, and when a `target/` directory becomes collectable.
 
 ## Why mbx?
 
 - **Warm every worktree.** Cache keys contain no checkout-specific absolute
   paths, so building one checkout warms its siblings automatically without
   sharing a Cargo target lock.
-- **Bounded disk, without a chore.** The action store sweeps itself back to a
-  budget, and managed `target/` directories go when their checkout disappears,
-  when they sit unused for 30 days, or when they outgrow their share of the
-  disk. Both budgets scale with the disk rather than assuming every machine is
-  the same size.
+- **Bounded disk, without a chore.** The action store prunes itself to a
+  budget, and managed `target/` directories are deleted when their checkout is
+  gone, unused for 30 days, or over their share of the disk. Both budgets
+  scale with the disk rather than assuming every machine is the same size.
 - **Warm CI safely.** GitHub Actions cache can warm fork pull requests from a
   cache built on `main`, while a self-hosted remote can serve trusted runners
   and teammates. Pull requests never publish remote objects.

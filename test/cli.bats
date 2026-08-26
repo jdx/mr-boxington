@@ -129,8 +129,8 @@ EOF
   assert_output --partial "first build on this machine"
   # The caps are resolved from this machine's disk, so assert the shape of the
   # explanation rather than the numbers in it.
-  assert_output --partial "sweeps itself back to"
-  assert_output --partial "their checkout disappears"
+  assert_output --partial "pruned to"
+  assert_output --partial "its checkout is gone"
 
   # A machine that has been told does not need telling again.
   run "$MBX_BIN" build --offline --manifest-path "$project/Cargo.toml"

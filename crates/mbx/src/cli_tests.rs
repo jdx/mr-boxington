@@ -537,7 +537,7 @@ fn the_first_run_notice_states_the_resolved_caps() {
     assert!(notice.contains("12.0 GiB"), "{notice}");
     assert!(notice.contains("25.0 GiB"), "{notice}");
     assert!(notice.contains("30 days"), "{notice}");
-    assert!(notice.contains("their checkout disappears"), "{notice}");
+    assert!(notice.contains("its checkout is gone"), "{notice}");
 }
 
 #[test]
@@ -552,9 +552,9 @@ fn the_first_run_notice_omits_limits_that_are_off() {
 
     let notice = first_run_notice(&config, &retention, false);
 
-    assert!(notice.contains("their checkout disappears"), "{notice}");
-    assert!(!notice.contains("sit unused"), "{notice}");
-    assert!(!notice.contains("outgrow"), "{notice}");
+    assert!(notice.contains("its checkout is gone"), "{notice}");
+    assert!(!notice.contains("unused for"), "{notice}");
+    assert!(!notice.contains("GiB total"), "{notice}");
 }
 
 #[test]
@@ -566,11 +566,8 @@ fn the_first_run_notice_does_not_promise_collection_that_is_off() {
     let notice = first_run_notice(&config, &RetentionSettings::default(), false);
 
     assert!(notice.contains("automatic collection is off"), "{notice}");
-    assert!(!notice.contains("sweeps itself back to"), "{notice}");
-    assert!(
-        !notice.contains("target/ directories are managed"),
-        "{notice}"
-    );
+    assert!(!notice.contains("pruned to"), "{notice}");
+    assert!(!notice.contains("target/ is managed"), "{notice}");
 }
 
 #[test]
@@ -581,8 +578,8 @@ fn the_first_run_notice_skips_targets_it_does_not_manage() {
 
     let notice = first_run_notice(&config, &RetentionSettings::default(), false);
 
-    assert!(!notice.contains("target/ directories"), "{notice}");
-    assert!(notice.contains("sweeps itself back to"), "{notice}");
+    assert!(!notice.contains("target/ is managed"), "{notice}");
+    assert!(notice.contains("pruned to"), "{notice}");
 }
 
 #[test]
@@ -593,8 +590,8 @@ fn the_first_run_notice_promises_reflinks_only_when_proven() {
     let with = first_run_notice(&config, &RetentionSettings::default(), true);
     let without = first_run_notice(&config, &RetentionSettings::default(), false);
 
-    assert!(with.contains("can reflink"), "{with}");
-    assert!(with.contains("one copy on disk"), "{with}");
+    assert!(with.contains("supports reflinks"), "{with}");
+    assert!(with.contains("instead of copying"), "{with}");
     // A machine whose filesystem copies must not be told its restores are
     // free; silence beats a promise the disk will break.
     assert!(!without.contains("reflink"), "{without}");
