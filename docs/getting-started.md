@@ -201,6 +201,11 @@ MBX_LOG=debug mbx build     # mbx's own diagnostics for the run
 MBX_BYPASS_LOG=bypass.log mbx build   # why each compilation was not cached
 ```
 
+All three describe your machine: `mbx doctor --json` reports absolute cache
+paths and the URL and namespace of any configured remote, and the logs name
+the crates you build. Credentials themselves are never printed, but remove
+whatever else you would rather not publish before posting.
+
 `MBX_LOG` takes an [env_logger](https://docs.rs/env_logger) filter, so
 `debug`, `trace`, or a per-module filter such as `mbx=trace` all work; it
 defaults to `info`. It covers the `mbx` process that drives the build. The
@@ -208,8 +213,14 @@ rustc shim runs without a logger, so per-compilation detail comes from
 `MBX_BYPASS_LOG` instead, or from `mbx explain` for a grouped summary. See
 [Cache results](/cache-results).
 
-Report issues at
-[github.com/jdx/mr-boxington/issues](https://github.com/jdx/mr-boxington/issues).
+Report a problem in
+[Q&A discussions](https://github.com/jdx/mr-boxington/discussions/categories/q-a),
+and propose a change in
+[Ideas](https://github.com/jdx/mr-boxington/discussions/categories/ideas).
+A suspected vulnerability goes through
+[private advisory reporting](https://github.com/jdx/mr-boxington/security/advisories/new)
+rather than a public thread; see
+[SECURITY.md](https://github.com/jdx/mr-boxington/blob/main/SECURITY.md).
 
 ## Next steps
 
