@@ -36,7 +36,7 @@ Configured mode is constrained by the environment:
 | --- | --- |
 | Protected branch push on GitHub Actions or GitLab CI | Configured mode |
 | Pull request, merge request, local shell, or unprotected branch | Read-only; `write-only` becomes disabled |
-| Tag or release build | Remote cache disabled |
+| Tag or release build | All caching disabled — mbx runs plain Cargo |
 
 This policy prevents untrusted code from publishing objects that later builds
 would trust. The server should still authenticate and authorize requests; the
