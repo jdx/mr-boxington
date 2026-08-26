@@ -1,10 +1,10 @@
 <script setup>
-import { onMounted, onUnmounted, ref } from "vue";
+import { onMounted, ref } from "vue";
 
 // A sample of the savings pool, with numbers consistent with the transcript
 // below (191 hits; the cold build took 3m 41s, the warm one 4.9s). The real
-// line is drawn at random per build; rotating here is how a static page shows
-// that it does not repeat itself.
+// line is drawn at random per build. Pick one when the demo mounts and keep it
+// for the lifetime of the page, just like one invocation of mbx would.
 const quips = [
   "mbx: served 191 compilations from cache; rustc showed up ready to do 3m 36s of work and was sent home",
   "mbx: 6h 14m of compiling skipped across 87 builds. rustc suspects nothing.",
@@ -15,22 +15,12 @@ const quips = [
   "mbx: rustc believes it compiled everything. it is down 6h 14m across 87 builds. let it believe.",
   "mbx: 22.0 GiB in every checkout, 22.0 GiB on disk. arithmetic declined to comment.",
 ];
-// Server and first client render must agree, so rotation starts on mount --
-// and not at all for someone who asked for reduced motion, matching the
-// entrance animations this component already suppresses for them.
-const quip = ref(quips[0]);
-let at = 0;
-let timer;
+// Leave the SSR render empty so hydration agrees, then make the one random
+// choice in the browser. The line arrives with the rest of the transcript.
+const quip = ref("");
 onMounted(() => {
-  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-    return;
-  }
-  timer = setInterval(() => {
-    at = (at + 1) % quips.length;
-    quip.value = quips[at];
-  }, 4000);
+  quip.value = quips[Math.floor(Math.random() * quips.length)];
 });
-onUnmounted(() => clearInterval(timer));
 </script>
 
 <template>
@@ -67,9 +57,11 @@ onUnmounted(() => clearInterval(timer));
 
 <style scoped>
 .MbxDemo {
+  box-sizing: border-box;
   margin: 0 auto;
-  max-width: 852px;
+  max-width: 1280px;
   padding: 16px 24px 8px;
+  width: 100%;
 }
 
 @media (min-width: 640px) {
@@ -127,22 +119,22 @@ onUnmounted(() => clearInterval(timer));
 }
 
 .line {
-  animation: mbx-line-in 0.35s ease both;
+  animation: mbx-line-in 0.45s ease both;
   white-space: pre;
 }
 
-.line:nth-child(1) { animation-delay: 0.15s; }
-.line:nth-child(2) { animation-delay: 0.45s; }
-.line:nth-child(3) { animation-delay: 0.6s; }
-.line:nth-child(4) { animation-delay: 0.75s; }
-.line:nth-child(5) { animation-delay: 1.15s; }
-.line:nth-child(6) { animation-delay: 1.15s; }
-.line:nth-child(7) { animation-delay: 1.45s; }
-.line:nth-child(8) { animation-delay: 1.85s; }
-.line:nth-child(9) { animation-delay: 2.15s; }
-.line:nth-child(10) { animation-delay: 2.35s; }
-.line:nth-child(11) { animation-delay: 2.6s; }
-.line:nth-child(12) { animation-delay: 2.85s; }
+.line:nth-child(1) { animation-delay: 0.25s; }
+.line:nth-child(2) { animation-delay: 0.85s; }
+.line:nth-child(3) { animation-delay: 1.15s; }
+.line:nth-child(4) { animation-delay: 1.45s; }
+.line:nth-child(5) { animation-delay: 2.2s; }
+.line:nth-child(6) { animation-delay: 2.2s; }
+.line:nth-child(7) { animation-delay: 2.7s; }
+.line:nth-child(8) { animation-delay: 3.5s; }
+.line:nth-child(9) { animation-delay: 4.1s; }
+.line:nth-child(10) { animation-delay: 4.55s; }
+.line:nth-child(11) { animation-delay: 5.05s; }
+.line:nth-child(12) { animation-delay: 5.45s; }
 
 .gap {
   height: 0.9em;
@@ -188,10 +180,11 @@ onUnmounted(() => clearInterval(timer));
 
 .quip {
   color: rgb(var(--mbx-amber-rgb) / 0.9);
+  min-height: 1.75em;
 }
 
 .cursor {
-  animation: mbx-line-in 0.35s ease 2.85s both, mbx-blink 1.1s steps(1) 3.2s infinite;
+  animation: mbx-line-in 0.45s ease 5.45s both, mbx-blink 1.1s steps(1) 5.9s infinite;
   background: var(--vp-c-brand-1);
   display: inline-block;
   height: 1.1em;
