@@ -58,7 +58,29 @@ jobs:
             runner: namespace-profile-endev-macos-arm64
           - os: windows-latest
             runner: windows-latest
+          # Every Linux binary a release ships is musl, and every job above
+          # builds gnu, so without these the shipped configuration would reach
+          # users having only ever run `--version`. File locks, unix sockets,
+          # and the reflink ioctls are where a musl-only divergence would hide.
+          # Both release architectures have a native runner, so a static musl
+          # binary needs no emulation to build or run its own test suite.
+          - os: ubuntu-latest
+            runner: namespace-profile-endev-linux-amd64
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            runner: namespace-profile-endev-linux-arm64
+            target: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.runner }}
+    env:
+      # Empty for the host-target jobs, which pass no `--target` at all and
+      # keep cargo's default directory layout.
+      TARGET: ${{ matrix.target }}
+      # rustls brings in aws-lc-sys, which compiles C: cc-rs looks for a
+      # target-prefixed compiler, and Debian's musl-tools only ships
+      # `musl-gcc`. Naming it for both musl targets is harmless elsewhere,
+      # since nothing else consults these variables.
+      CC_x86_64_unknown_linux_musl: musl-gcc
+      CC_aarch64_unknown_linux_musl: musl-gcc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -72,19 +94,36 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: rustup target add wasm32-unknown-unknown
+      - name: Install the musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - run: rustup target add wasm32-unknown-unknown ${{ matrix.target }}
       - name: Bootstrap mbx
         shell: bash
         run: |
-          cargo build --package mbx --target-dir target/mbx-bootstrap-build
+          target_flags=()
+          [[ -n "$TARGET" ]] && target_flags+=(--target "$TARGET")
+          cargo build --package mbx --target-dir target/mbx-bootstrap-build "${target_flags[@]}"
+          # A `--target` build nests its artifacts one level deeper.
+          build_dir="target/mbx-bootstrap-build${TARGET:+/$TARGET}/debug"
           mkdir -p target/mbx-bootstrap
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cp target/mbx-bootstrap-build/debug/mbx.exe target/mbx-bootstrap/mbx.exe
+            cp "$build_dir/mbx.exe" target/mbx-bootstrap/mbx.exe
           else
-            cp target/mbx-bootstrap-build/debug/mbx target/mbx-bootstrap/mbx
+            cp "$build_dir/mbx" target/mbx-bootstrap/mbx
           fi
-      - run: ./target/mbx-bootstrap/mbx${{ runner.os == 'Windows' && '.exe' || '' }} build --workspace --all-targets
-      - run: ./target/mbx-bootstrap/mbx${{ runner.os == 'Windows' && '.exe' || '' }} test --workspace
+      - shell: bash
+        run: |
+          target_flags=()
+          [[ -n "$TARGET" ]] && target_flags+=(--target "$TARGET")
+          ./target/mbx-bootstrap/mbx${{ runner.os == 'Windows' && '.exe' || '' }} build --workspace --all-targets "${target_flags[@]}"
+      - shell: bash
+        run: |
+          target_flags=()
+          [[ -n "$TARGET" ]] && target_flags+=(--target "$TARGET")
+          ./target/mbx-bootstrap/mbx${{ runner.os == 'Windows' && '.exe' || '' }} test --workspace "${target_flags[@]}"
       - name: Run Bats behavioral tests
         if: runner.os != 'Windows'
         env:
