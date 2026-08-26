@@ -49,9 +49,6 @@ These settings live outside the repository, and releases fail without them:
 - **`RELEASE_PLZ_TOKEN`** — a PAT with `contents: write` and
   `pull-requests: write`. The default `GITHUB_TOKEN` cannot be used: pushes made
   with it do not trigger workflows, so the release PR would never run CI.
-- **`CRATES_IO_PUBLISH_NEW_TOKEN`** — a crates.io token restricted to the
-  `publish-new` endpoint. It bootstraps `mbx-cache-protocol`, because trusted
-  publishing cannot create a crate. Delete the secret after its first release.
 - **`CERTIFICATES_P12`** and **`CERTIFICATES_P12_PASS`** — the base64-encoded
   Developer ID Application certificate and its password used by the other
   jdx.dev CLI release workflows. The macOS jobs import the certificate and sign
@@ -59,10 +56,11 @@ These settings live outside the repository, and releases fail without them:
   creating the release archives.
 - **A crates.io Trusted Publisher for each of `mbx`, `mbx-cache-core`,
   `mbx-cache-protocol`, and `mbx-cache-rustc`**, naming this repository and the
-  workflow file `release-plz.yml`. Configure the protocol publisher after its
-  bootstrap release; later publishing uses OIDC and does not need a registry
-  token. **Renaming `release-plz.yml` breaks publishing** until the trusted
-  publishers are updated to match.
+  workflow file `release-plz.yml`. Publishing is OIDC-only; no registry token
+  exists anywhere. **Renaming `release-plz.yml` breaks publishing** until the
+  trusted publishers are updated to match. A crate that does not exist on
+  crates.io yet cannot be created this way — publish its first version by hand
+  with a `publish-new` token, then configure its trusted publisher.
 
 ## When a release goes wrong
 
