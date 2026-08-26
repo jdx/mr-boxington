@@ -55,8 +55,10 @@ These settings live outside the repository, and releases fail without them:
   `mbx` as `Developer ID Application: Jeffrey Dickey (4993Y37DX6)` before
   creating the release archives.
 - **`APPLE_API_KEY_P8`, `APPLE_API_KEY_ID`, and `APPLE_API_ISSUER_ID`** — an App
-  Store Connect API key with the Developer ID role, base64-encoded, plus its key
-  and issuer identifiers. The macOS job submits the signed binary to Apple's
+  Store Connect **team** API key with the Developer role, base64-encoded, plus
+  its key and issuer identifiers. It has to be a team key rather than an
+  individual one: `notarytool` takes an issuer only for team keys and rejects it
+  for individual keys. The macOS job submits the signed binary to Apple's
   notary service with them. These three are the one optional entry in this list:
   without them the release still ships, the binary is still signed, and the
   build annotates a warning instead of failing. What it loses is Gatekeeper
