@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/jdx/mr-boxington/compare/v0.4.0...v0.4.1) - 2026-08-26
+
+### Added
+
+- make landing demo interactive and tag output ([#94](https://github.com/jdx/mr-boxington/pull/94))
+
 ## [0.4.0](https://github.com/jdx/mr-boxington/compare/v0.3.0...v0.4.0) - 2026-08-25
 
 ### Added

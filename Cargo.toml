@@ -11,7 +11,7 @@ members = [
 # One version for every crate in the workspace. release-plz keeps them in step
 # through the `version_group` in release-plz.toml, so a release moves all four
 # together rather than leaving each on a number of its own.
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT"
