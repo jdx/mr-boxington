@@ -33,6 +33,22 @@ mbx explain build --workspace
 
 The command preserves Cargo's exit status after printing the explanation.
 
+## Remote failure
+
+A remote cache request failed and the build carried on without it: unreachable
+host, refused credentials, or a response this client would not accept. mbx never
+fails a build over a remote cache, so these only ever cost hit rate — but a
+remote that is failing every request reports the same hits, misses, and bytes as
+one that was merely empty, which is why the summary counts them:
+
+```text
+mbx[cache]: the remote cache failed 4 of its requests; this build ran without what it could not reach, and the warnings above say why
+```
+
+The individual warnings, printed as the build runs, say what failed. The count
+also appears as `remote_failures` in the JSON statistics report, so CI can alert
+on a cache that has quietly stopped serving.
+
 ## Reading the hit rate
 
 A build can report a high hit rate among attempted lookups while spending most
@@ -73,7 +89,9 @@ The usual causes, roughly in the order they show up:
   it; see [limits](/limits#out_dir-sharing-is-opt-in).
 - **CI restored nothing.** On GitHub Actions, check that the cache step
   actually restored an entry — a changed `cache-generation` or a fresh
-  repository starts empty by design.
+  repository starts empty by design. With a remote cache configured, check the
+  [remote failure](#remote-failure) count too: a remote that is failing every
+  request reports the same zeros as one that is merely empty.
 
 ## Compiler time
 

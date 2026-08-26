@@ -318,6 +318,7 @@ struct StatsReport {
     reflinked_output_bytes: u64,
     copied_output_files: u64,
     copied_output_bytes: u64,
+    remote_failures: u64,
     remote_manifest_lookups: u64,
     remote_action_lookups: u64,
     remote_blob_requests: u64,
@@ -388,6 +389,7 @@ impl From<&AgentStats> for StatsReport {
             reflinked_output_bytes: stats.reflinked_output_bytes,
             copied_output_files: stats.copied_output_files,
             copied_output_bytes: stats.copied_output_bytes,
+            remote_failures: stats.remote_failures,
             remote_manifest_lookups: stats.remote_manifest_lookups,
             remote_action_lookups: stats.remote_action_lookups,
             remote_blob_requests: stats.remote_blob_requests,
@@ -425,6 +427,17 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
         ByteSize::b(stats.uploaded_bytes).display().iec(),
         ByteSize::b(stats.stored_bytes).display().iec(),
     ));
+    if stats.remote_failures > 0 {
+        // A remote cache that fails every request reports the same hits, misses
+        // and bytes as one that was simply empty, and the warnings explaining
+        // why scroll past hundreds of lines earlier. Without this line the
+        // summary reads as "the remote had nothing for us" no matter which it
+        // was, and a cache that has stopped working looks like a cold one.
+        note(&format!(
+            "mbx[cache]: the remote cache failed {} of its requests; this build ran without what it could not reach, and the warnings above say why",
+            stats.remote_failures,
+        ));
+    }
     if stats.unconsulted > 0 {
         // A cold target directory hits this for everything it compiles, and
         // reporting only hits and misses there says "0 hits, 0 misses" -- which
@@ -530,6 +543,9 @@ fn should_display_stats(stats: &AgentStats) -> bool {
         || !stats.bypasses.is_empty()
         || !stats.compiler.is_empty()
         || stats.avoided_compiler_duration_ns > 0
+        // A session that reached a remote cache and got nothing but failures has
+        // nothing else to report, and is the session most worth reporting.
+        || stats.remote_failures > 0
 }
 
 /// Write to stderr without failing the build when the pipe is closed.
