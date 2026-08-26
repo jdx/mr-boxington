@@ -13,7 +13,7 @@ fn portable_for(values: &[&str]) -> Portable {
 fn compiler_timing_survives_a_changed_action_key() {
     let invocation = CacheDigest::blake3(b"invocation");
     let timing = RustcInputPrediction {
-        version: 2,
+        version: 3,
         inputs: Vec::new(),
         environment: Vec::new(),
         compiler_duration_ns: 42,

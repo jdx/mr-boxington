@@ -87,6 +87,10 @@ const SUPPORTED_CODEGEN_OPTIONS: &[&str] = &[
     "tls-model",
 ];
 
+const NATIVE_DIRECTORY_PREDICTION_PREFIX: &str = "@native-directory:";
+const MAX_PREDICTED_INPUTS: usize = 16 * 1024;
+const MAX_NATIVE_INPUT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
 /// Built-in WebAssembly targets whose default linkers and CRT inputs ship in
 /// the Rust toolchain. Custom target specs never enter this list.
 const COMPILER_BUNDLED_WASM_TARGETS: &[&str] = &[
@@ -443,16 +447,26 @@ impl RustcInvocation {
     ) -> Result<RustcInputPrediction, BypassReason> {
         let builder = ActionBuilder::new(self, context.clone());
         builder.validate_mappings()?;
-        let inputs = discovered
+        let mut inputs = discovered
             .inputs
             .iter()
             .map(|input| builder.normalize_path(&input.path))
-            .collect::<Result<BTreeSet<_>, _>>()?
-            .into_iter()
-            .collect();
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let mut has_native_directory = false;
+        for argument in &self.arguments {
+            if let Argument::SearchPath { kind, path } = argument
+                && kind == "native"
+            {
+                has_native_directory = true;
+                inputs.insert(format!(
+                    "{NATIVE_DIRECTORY_PREDICTION_PREFIX}{}",
+                    builder.normalize_path(path)?
+                ));
+            }
+        }
         Ok(RustcInputPrediction {
-            version: 1,
-            inputs,
+            version: if has_native_directory { 3 } else { 1 },
+            inputs: inputs.into_iter().collect(),
             environment: discovered.environment.keys().cloned().collect(),
             compiler_duration_ns: 0,
             crate_name: String::new(),
@@ -674,17 +688,30 @@ impl RustcInputPrediction {
         working_dir: &Path,
         path_mappings: &[PathMapping],
     ) -> Result<DiscoveredInputs, BypassReason> {
-        if !matches!(self.version, 1 | 2) {
+        if !matches!(self.version, 1..=3) {
             return Err(BypassReason::UnsupportedPrediction);
         }
-        if self.inputs.len() > 16 * 1024 || self.environment.len() > 4 * 1024 {
+        if self.inputs.len() > MAX_PREDICTED_INPUTS || self.environment.len() > 4 * 1024 {
             return Err(BypassReason::UnsupportedPrediction);
         }
-        let paths = self
-            .inputs
-            .iter()
-            .map(|path| denormalize_path(path, path_mappings))
-            .collect::<Result<BTreeSet<_>, _>>()?;
+        let mut paths = BTreeSet::new();
+        let admitted_roots = dep_info::native_input_roots(working_dir, path_mappings);
+        let mut native_bytes = 0_u64;
+        for path in &self.inputs {
+            if self.version >= 3
+                && let Some(path) = path.strip_prefix(NATIVE_DIRECTORY_PREDICTION_PREFIX)
+            {
+                let directory = denormalize_path(path, path_mappings)?;
+                dep_info::collect_native_directory(
+                    &directory,
+                    &admitted_roots,
+                    &mut paths,
+                    &mut native_bytes,
+                )?;
+            } else {
+                paths.insert(denormalize_path(path, path_mappings)?);
+            }
+        }
         let environment = self
             .environment
             .iter()
@@ -1058,7 +1085,7 @@ impl<'a> Parser<'a> {
             let (kind, path) = search
                 .split_once('=')
                 .map_or(("all", search.as_str()), |(kind, path)| (kind, path));
-            if kind != "dependency" {
+            if !matches!(kind, "dependency" | "native") {
                 return Err(BypassReason::UnsupportedSearchPath(kind.into()));
             }
             self.parsed.push(Argument::SearchPath {

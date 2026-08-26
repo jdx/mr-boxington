@@ -1,5 +1,6 @@
 use super::{
-    ActionContext, ActionInput, Argument, BypassReason, RustcInvocation, normalize_components,
+    ActionContext, ActionInput, Argument, BypassReason, MAX_NATIVE_INPUT_BYTES,
+    MAX_PREDICTED_INPUTS, PathMapping, RustcInvocation, normalize_components,
 };
 use mbx_cache_core::CacheDigest;
 use std::collections::{BTreeMap, BTreeSet};
@@ -271,13 +272,24 @@ impl RustcInvocation {
         dep_info: &RustcDepInfo,
         working_dir: &Path,
     ) -> Result<DiscoveredInputs, BypassReason> {
+        self.discover_inputs_with_mappings(dep_info, working_dir, &[])
+    }
+
+    /// Hash dep-info sources plus modeled compiler inputs, allowing native
+    /// search directories beneath the working directory or a mapped root.
+    pub fn discover_inputs_with_mappings(
+        &self,
+        dep_info: &RustcDepInfo,
+        working_dir: &Path,
+        path_mappings: &[PathMapping],
+    ) -> Result<DiscoveredInputs, BypassReason> {
         if !working_dir.is_absolute() {
             return Err(BypassReason::RelativeWorkingDirectory(
                 working_dir.to_path_buf(),
             ));
         }
         let working_dir = normalize_components(working_dir);
-        let paths = dep_info
+        let mut paths = dep_info
             .files
             .iter()
             .chain(&self.required_inputs)
@@ -290,8 +302,102 @@ impl RustcInvocation {
                 normalize_components(&absolute)
             })
             .collect::<BTreeSet<_>>();
+        let admitted_roots = native_input_roots(&working_dir, path_mappings);
+        let mut native_bytes = 0_u64;
+        for argument in &self.arguments {
+            if let Argument::SearchPath { kind, path } = argument
+                && kind == "native"
+            {
+                let directory = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    working_dir.join(path)
+                };
+                collect_native_directory(
+                    &directory,
+                    &admitted_roots,
+                    &mut paths,
+                    &mut native_bytes,
+                )?;
+            }
+        }
         DiscoveredInputs::from_paths(&working_dir, paths, dep_info.environment.clone())
     }
+}
+
+/// Return normalized roots whose native search directories can be tracked.
+pub(super) fn native_input_roots(
+    working_dir: &Path,
+    path_mappings: &[PathMapping],
+) -> Vec<PathBuf> {
+    std::iter::once(working_dir)
+        .chain(path_mappings.iter().map(|mapping| mapping.root.as_path()))
+        .map(normalize_components)
+        .collect()
+}
+
+/// Add regular files beneath an admitted native search directory, enforcing
+/// the prediction input count and the caller's cumulative native byte budget.
+pub(super) fn collect_native_directory(
+    directory: &Path,
+    admitted_roots: &[PathBuf],
+    paths: &mut BTreeSet<PathBuf>,
+    native_bytes: &mut u64,
+) -> Result<(), BypassReason> {
+    let directory = normalize_components(directory);
+    if !admitted_roots
+        .iter()
+        .any(|root| directory.starts_with(root))
+    {
+        return Err(BypassReason::UnsupportedSearchPath("native".into()));
+    }
+
+    let mut pending = vec![directory];
+    while let Some(directory) = pending.pop() {
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(BypassReason::InputRead {
+                    path: directory,
+                    message: error.to_string(),
+                });
+            }
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| BypassReason::InputRead {
+                path: directory.clone(),
+                message: error.to_string(),
+            })?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|error| BypassReason::InputRead {
+                path: path.clone(),
+                message: error.to_string(),
+            })?;
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if file_type.is_file() {
+                *native_bytes = native_bytes
+                    .checked_add(
+                        entry
+                            .metadata()
+                            .map_err(|error| BypassReason::InputRead {
+                                path: path.clone(),
+                                message: error.to_string(),
+                            })?
+                            .len(),
+                    )
+                    .ok_or_else(|| BypassReason::UnsupportedSearchPath("native".into()))?;
+                paths.insert(path);
+            } else {
+                return Err(BypassReason::UnsupportedSearchPath("native".into()));
+            }
+            if paths.len() > MAX_PREDICTED_INPUTS || *native_bytes > MAX_NATIVE_INPUT_BYTES {
+                return Err(BypassReason::UnsupportedSearchPath("native".into()));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn render_argument(argument: &Argument) -> Result<OsString, BypassReason> {
@@ -394,6 +500,22 @@ mod tests {
         ] {
             assert!(RustcDepInfo::parse(contents).is_err(), "{contents:?}");
         }
+    }
+
+    #[test]
+    fn native_directory_byte_limit_is_cumulative() {
+        let directory = tempfile::tempdir().unwrap();
+        let native = directory.path().join("native");
+        std::fs::create_dir_all(&native).unwrap();
+        std::fs::write(native.join("input.lib"), b"xx").unwrap();
+        let roots = native_input_roots(directory.path(), &[]);
+        let mut paths = BTreeSet::new();
+        let mut native_bytes = MAX_NATIVE_INPUT_BYTES - 1;
+
+        assert_eq!(
+            collect_native_directory(&native, &roots, &mut paths, &mut native_bytes),
+            Err(BypassReason::UnsupportedSearchPath("native".into()))
+        );
     }
 
     #[test]

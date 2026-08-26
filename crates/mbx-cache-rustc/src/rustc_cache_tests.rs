@@ -139,6 +139,75 @@ fn parses_a_cargo_library_invocation() {
 }
 
 #[test]
+fn tracks_native_search_path_contents_but_still_rejects_native_libraries() {
+    let directory = tempfile::tempdir().unwrap();
+    let working_dir = directory.path().join("registry/widget");
+    let native = directory.path().join("target/native");
+    std::fs::create_dir_all(&working_dir).unwrap();
+    std::fs::create_dir_all(&native).unwrap();
+    std::fs::write(working_dir.join("src.rs"), "pub fn value() {}\n").unwrap();
+    std::fs::write(native.join("fixture.lib"), "first").unwrap();
+    let native_argument = format!("-Lnative={}", native.display());
+    let invocation = RustcInvocation::parse(&args(&[
+        "--crate-name=widget",
+        "--crate-type=lib",
+        "--emit=dep-info,metadata,link",
+        "--out-dir=target/debug/deps",
+        &native_argument,
+        "src.rs",
+    ]))
+    .unwrap();
+    let dep_info = RustcDepInfo::parse("target/debug/deps/widget.d: src.rs\n").unwrap();
+    let discovered = invocation
+        .discover_inputs_with_mappings(
+            &dep_info,
+            &working_dir,
+            &[PathMapping::new(directory.path().join("target"), "target")],
+        )
+        .unwrap();
+    assert!(
+        discovered
+            .inputs
+            .iter()
+            .any(|input| input.path == native.join("fixture.lib"))
+    );
+
+    let action_context = ActionContext {
+        working_dir: working_dir.clone(),
+        path_mappings: vec![
+            PathMapping::new(&working_dir, "workspace"),
+            PathMapping::new(directory.path().join("target"), "target"),
+        ],
+        inputs: discovered.inputs.clone(),
+        ..context(&[])
+    };
+    let prediction = invocation.prediction(&action_context, &discovered).unwrap();
+    assert_eq!(prediction.version, 3);
+    std::fs::write(native.join("added.lib"), "second").unwrap();
+    let predicted = prediction
+        .discover(&working_dir, &action_context.path_mappings)
+        .unwrap();
+    assert!(
+        predicted
+            .inputs
+            .iter()
+            .any(|input| input.path == native.join("added.lib"))
+    );
+
+    let linked = args(&[
+        "--crate-type=lib",
+        "--emit=dep-info,metadata,link",
+        "-Lnative=target/native",
+        "-lstatic=fixture",
+        "src/lib.rs",
+    ]);
+    assert_eq!(
+        RustcInvocation::parse(&linked),
+        Err(BypassReason::NativeLibrary)
+    );
+}
+
+#[test]
 fn expands_utf8_response_files_one_argument_per_line() {
     let directory = tempfile::tempdir().unwrap();
     let response = directory.path().join("rustc.args");
