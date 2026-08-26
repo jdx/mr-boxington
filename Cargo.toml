@@ -16,6 +16,9 @@ rust-version = "1.91"
 license = "MIT"
 homepage = "https://github.com/jdx/mr-boxington"
 repository = "https://github.com/jdx/mr-boxington"
+# Every crate ships the workspace README, so a crates.io page describes the
+# whole tool rather than repeating a paragraph per crate.
+readme = "README.md"
 
 [profile.release]
 lto = "thin"

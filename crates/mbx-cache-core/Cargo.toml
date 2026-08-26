@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
+keywords = ["cache", "build-cache", "cas", "content-addressed", "rustc"]
+categories = ["development-tools::build-utils", "caching", "network-programming"]
+readme.workspace = true
 
 [package.metadata.docs.rs]
 all-features = true
