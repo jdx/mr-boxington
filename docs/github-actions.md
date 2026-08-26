@@ -94,3 +94,7 @@ Only a push to a protected branch may write. Pull requests degrade to read-only,
 and tag or release builds do not use the remote cache at all. If fork authors
 must not reach the host, use the GitHub backend for those jobs instead. A bearer
 token can be supplied with the action's `token` input when OIDC is unavailable.
+
+For a repository that combines both backends — the server for trusted runs, the
+GitHub cache for fork pull requests — see
+[CI with fork pull requests](/cookbook/fork-prs).

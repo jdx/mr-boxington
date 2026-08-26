@@ -62,6 +62,12 @@ export default defineConfig({
         ],
       },
       {
+        text: "Cookbook",
+        items: [
+          { text: "CI with fork pull requests", link: "/cookbook/fork-prs" },
+        ],
+      },
+      {
         text: "Understand mbx",
         items: [
           { text: "How it works", link: "/how-it-works" },
