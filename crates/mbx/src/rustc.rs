@@ -400,7 +400,7 @@ fn record_prediction(
         let context = base_action_context(rustc, working_dir, portable)?;
         let invocation_digest = invocation.invocation_digest(&context)?;
         let mut prediction = invocation.prediction(&context, discovered)?;
-        prediction.version = 2;
+        prediction.version = prediction.version.max(2);
         prediction.compiler_duration_ns = timing.duration_ns;
         prediction.crate_name.clone_from(&timing.crate_name);
         let payload = String::from_utf8(canonical_json(&prediction)?)?;

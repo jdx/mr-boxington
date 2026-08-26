@@ -139,6 +139,65 @@ fn parses_a_cargo_library_invocation() {
 }
 
 #[test]
+fn tracks_native_search_path_contents_but_still_rejects_native_libraries() {
+    let directory = tempfile::tempdir().unwrap();
+    let native = directory.path().join("target/native");
+    std::fs::create_dir_all(&native).unwrap();
+    std::fs::write(directory.path().join("src.rs"), "pub fn value() {}\n").unwrap();
+    std::fs::write(native.join("fixture.lib"), "first").unwrap();
+    let invocation = RustcInvocation::parse(&args(&[
+        "--crate-name=widget",
+        "--crate-type=lib",
+        "--emit=dep-info,metadata,link",
+        "--out-dir=target/debug/deps",
+        "-Lnative=target/native",
+        "src.rs",
+    ]))
+    .unwrap();
+    let dep_info = RustcDepInfo::parse("target/debug/deps/widget.d: src.rs\n").unwrap();
+    let discovered = invocation
+        .discover_inputs(&dep_info, directory.path())
+        .unwrap();
+    assert!(
+        discovered
+            .inputs
+            .iter()
+            .any(|input| input.path == native.join("fixture.lib"))
+    );
+
+    let action_context = ActionContext {
+        working_dir: directory.path().to_path_buf(),
+        path_mappings: vec![PathMapping::new(directory.path(), "workspace")],
+        inputs: discovered.inputs.clone(),
+        ..context(&[])
+    };
+    let prediction = invocation.prediction(&action_context, &discovered).unwrap();
+    assert_eq!(prediction.version, 3);
+    std::fs::write(native.join("added.lib"), "second").unwrap();
+    let predicted = prediction
+        .discover(directory.path(), &action_context.path_mappings)
+        .unwrap();
+    assert!(
+        predicted
+            .inputs
+            .iter()
+            .any(|input| input.path == native.join("added.lib"))
+    );
+
+    let linked = args(&[
+        "--crate-type=lib",
+        "--emit=dep-info,metadata,link",
+        "-Lnative=target/native",
+        "-lstatic=fixture",
+        "src/lib.rs",
+    ]);
+    assert_eq!(
+        RustcInvocation::parse(&linked),
+        Err(BypassReason::NativeLibrary)
+    );
+}
+
+#[test]
 fn expands_utf8_response_files_one_argument_per_line() {
     let directory = tempfile::tempdir().unwrap();
     let response = directory.path().join("rustc.args");

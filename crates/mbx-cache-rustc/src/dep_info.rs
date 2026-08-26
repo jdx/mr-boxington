@@ -1,5 +1,6 @@
 use super::{
-    ActionContext, ActionInput, Argument, BypassReason, RustcInvocation, normalize_components,
+    ActionContext, ActionInput, Argument, BypassReason, MAX_NATIVE_INPUT_BYTES,
+    MAX_PREDICTED_INPUTS, RustcInvocation, normalize_components,
 };
 use mbx_cache_core::CacheDigest;
 use std::collections::{BTreeMap, BTreeSet};
@@ -277,7 +278,7 @@ impl RustcInvocation {
             ));
         }
         let working_dir = normalize_components(working_dir);
-        let paths = dep_info
+        let mut paths = dep_info
             .files
             .iter()
             .chain(&self.required_inputs)
@@ -290,8 +291,80 @@ impl RustcInvocation {
                 normalize_components(&absolute)
             })
             .collect::<BTreeSet<_>>();
+        for argument in &self.arguments {
+            if let Argument::SearchPath { kind, path } = argument
+                && kind == "native"
+            {
+                let directory = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    working_dir.join(path)
+                };
+                collect_native_directory(&directory, &working_dir, &mut paths)?;
+            }
+        }
         DiscoveredInputs::from_paths(&working_dir, paths, dep_info.environment.clone())
     }
+}
+
+pub(super) fn collect_native_directory(
+    directory: &Path,
+    working_dir: &Path,
+    paths: &mut BTreeSet<PathBuf>,
+) -> Result<(), BypassReason> {
+    let directory = normalize_components(directory);
+    let working_dir = normalize_components(working_dir);
+    if !directory.starts_with(&working_dir) {
+        return Err(BypassReason::UnsupportedSearchPath("native".into()));
+    }
+
+    let mut pending = vec![directory];
+    let mut bytes = 0_u64;
+    while let Some(directory) = pending.pop() {
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(BypassReason::InputRead {
+                    path: directory,
+                    message: error.to_string(),
+                });
+            }
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| BypassReason::InputRead {
+                path: directory.clone(),
+                message: error.to_string(),
+            })?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|error| BypassReason::InputRead {
+                path: path.clone(),
+                message: error.to_string(),
+            })?;
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if file_type.is_file() {
+                bytes = bytes
+                    .checked_add(
+                        entry
+                            .metadata()
+                            .map_err(|error| BypassReason::InputRead {
+                                path: path.clone(),
+                                message: error.to_string(),
+                            })?
+                            .len(),
+                    )
+                    .ok_or_else(|| BypassReason::UnsupportedSearchPath("native".into()))?;
+                paths.insert(path);
+            } else {
+                return Err(BypassReason::UnsupportedSearchPath("native".into()));
+            }
+            if paths.len() > MAX_PREDICTED_INPUTS || bytes > MAX_NATIVE_INPUT_BYTES {
+                return Err(BypassReason::UnsupportedSearchPath("native".into()));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn render_argument(argument: &Argument) -> Result<OsString, BypassReason> {
