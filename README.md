@@ -138,8 +138,8 @@ target directory.
 For GitHub-hosted CI, [`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action)
 can install mbx and use GitHub Actions cache, saving only from the default
 branch and restoring in pull requests. Trusted environments can switch the
-same action to a compatible remote such as
-[`jdx/mbx-cache`](https://github.com/jdx/mbx-cache).
+same action to a compatible remote such as the self-hostable
+[cache server](https://mr-boxington.jdx.dev/cache-server).
 
 [Configure GitHub Actions →](https://mr-boxington.jdx.dev/github-actions)
 

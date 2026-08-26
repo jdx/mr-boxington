@@ -58,6 +58,7 @@ export default defineConfig({
           { text: "Configuration", link: "/configuration" },
           { text: "GitHub Actions", link: "/github-actions" },
           { text: "Remote cache", link: "/remote-cache" },
+          { text: "Cache server", link: "/cache-server" },
           { text: "Managed targets", link: "/managed-targets" },
         ],
       },

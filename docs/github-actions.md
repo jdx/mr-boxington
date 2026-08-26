@@ -71,7 +71,7 @@ commit SHAs in a real workflow.
 ## Cache server
 
 For trusted runners and teams, mbx can talk to a compatible remote server such
-as [`jdx/mbx-cache`](https://github.com/jdx/mbx-cache). The action exports the
+as the self-hostable [cache server](/cache-server). The action exports the
 remote configuration for subsequent steps:
 
 ```yaml

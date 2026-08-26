@@ -15,7 +15,7 @@ mode = "read-write"
 ```
 
 The namespace isolates one project's cache from another. It is required when a
-remote URL is set.
+remote URL is set. To host your own server, see [cache server](/cache-server).
 
 ## Authenticate
 
