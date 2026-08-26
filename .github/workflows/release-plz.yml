@@ -61,52 +61,6 @@ jobs:
             --jq '[.[] | select(.merged_at != null) | select(.head.ref | startswith("release-plz-"))][0].number // ""')
           echo "number=$number" >> "$GITHUB_OUTPUT"
 
-      # Trusted publishing cannot create a crate. Bootstrap the protocol crate
-      # with a token restricted to `publish-new`, then wait until crates.io can
-      # see that exact version so release-plz recognizes it as already
-      # published. Once the crate exists this step never reads or uses the
-      # token; later versions use OIDC with the rest of the workspace.
-      - name: Bootstrap mbx-cache-protocol on crates.io
-        if: steps.release-pr.outputs.number != ''
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_PUBLISH_NEW_TOKEN }}
-        run: |
-          crate=mbx-cache-protocol
-          version=$(cargo metadata --no-deps --format-version 1 |
-            jq -r --arg crate "$crate" '.packages[] | select(.name == $crate).version')
-          crate_endpoint="https://crates.io/api/v1/crates/$crate"
-          version_endpoint="$crate_endpoint/$version"
-          user_agent="mr-boxington release workflow (https://github.com/${{ github.repository }})"
-          status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-            --user-agent "$user_agent" "$crate_endpoint")
-
-          if [ "$status" = 200 ]; then
-            echo "$crate already exists; release-plz will publish version $version with OIDC"
-            exit 0
-          fi
-          if [ "$status" != 404 ]; then
-            echo "::error::crates.io returned HTTP $status while checking $crate $version"
-            exit 1
-          fi
-
-          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
-            echo "::error::CRATES_IO_PUBLISH_NEW_TOKEN is required to publish the first $crate release"
-            exit 1
-          fi
-
-          cargo publish --locked --package "$crate"
-
-          # The publish endpoint can return before the new version is visible
-          # to release-plz through the crates.io API.
-          for _ in $(seq 1 12); do
-            if curl --fail --silent --show-error --user-agent "$user_agent" "$version_endpoint" >/dev/null; then
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "::error::$crate $version did not become visible on crates.io"
-          exit 1
-
       # Exchanges the OIDC token for a short-lived crates.io token. Each crate
       # needs a Trusted Publisher naming this repository and this workflow
       # file, so renaming this file breaks publishing.
@@ -140,9 +94,8 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "mbx tag: ${tag:-<none released>}"
 
-      # An empty result is expected when re-running a completed release, or
-      # when bootstrapping the protocol crate was the only work. Verify the
-      # desired end state instead of rejecting those idempotent cases.
+      # An empty result is expected when re-running a completed release.
+      # Verify the desired end state instead of rejecting that idempotent case.
       - name: Verify an empty release result for a merged release PR
         if: steps.mbx-tag.outputs.tag == '' && steps.release-pr.outputs.number != ''
         env:
