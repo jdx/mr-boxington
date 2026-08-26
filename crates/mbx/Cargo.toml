@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
+keywords = ["cache", "build-cache", "cargo", "rustc", "build"]
+categories = ["development-tools::build-utils", "development-tools::cargo-plugins", "command-line-utilities", "caching"]
+readme.workspace = true
+documentation = "https://mr-boxington.jdx.dev"
 
 [package.metadata.docs.rs]
 all-features = true
