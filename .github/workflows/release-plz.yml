@@ -149,9 +149,54 @@ jobs:
       APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
       APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
 
+  # release-plz gives the draft a serviceable changelog body. Communiqué
+  # replaces it with prose informed by the commits, PRs, and diffs while the
+  # binary matrix runs. Waiting keeps the raw notes from briefly going live;
+  # immutable releases separately lock the tag and assets at publication.
+  #
+  # This is an enhancement rather than a release gate. A missing provider key
+  # or transient model failure leaves the original release-plz notes intact.
+  enhance-release:
+    name: Enhance release notes
+    needs: release-plz-release
+    if: ${{ needs.release-plz-release.outputs.tag != '' }}
+    runs-on: namespace-profile-endev-linux-amd64
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Communiqué diffs this tag against its predecessor.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # MISE_LOCKED prevents a future `latest` from silently replacing the
+      # reviewed Communiqué build. Bump it deliberately with `mise lock`.
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4.2.5
+        with:
+          install_args: communique
+          cache: false
+        env:
+          MISE_LOCKED: "1"
+
+      # The PAT is intentional: GitHub's release-by-tag endpoint hides drafts,
+      # so Communiqué falls back to listing releases, which needs write access.
+      - name: Rewrite the draft release body with Communiqué
+        env:
+          TAG: ${{ needs.release-plz-release.outputs.tag }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::warning title=Communiqué skipped::ANTHROPIC_API_KEY is not configured; keeping the release-plz notes"
+            exit 0
+          fi
+          communique generate "$TAG" --github-release
+
   publish-release:
     name: Publish release
-    needs: [release-plz-release, upload-assets]
+    needs: [release-plz-release, upload-assets, enhance-release]
     if: ${{ needs.release-plz-release.outputs.tag != '' }}
     runs-on: namespace-profile-endev-linux-amd64
     permissions:

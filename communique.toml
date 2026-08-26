@@ -1,0 +1,19 @@
+context = """
+mr boxington (`mbx`) is a Rust CLI that wraps ordinary Cargo commands with a content-addressed
+rustc cache. It shares cached compilations across worktrees and CI runs, manages target
+directories, prunes both stores to disk-aware budgets, and can use GitHub Actions or a trusted
+remote cache. Cargo remains responsible for dependency resolution, build planning, and linking.
+
+The workspace also publishes `mbx-cache-protocol`, the stable remote-cache wire contract, plus
+the internal `mbx-cache-core` and `mbx-cache-rustc` crates. Only the `mbx` tag gets a GitHub
+release and downloadable binaries.
+"""
+
+system_extra = """
+Write for developers using mbx locally or in CI. Explain user-visible consequences rather than
+repeating commit subjects, distinguish CLI behavior from library-only changes, and call out
+breaking changes plainly. Do not claim that mbx replaces Cargo or caches linking.
+"""
+
+[defaults]
+emoji = false

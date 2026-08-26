@@ -124,6 +124,7 @@ run = "tak run --record"
 [tools]
 "github:jdx/tak" = "0.0.7"
 aube = "latest"
+communique = "latest"
 node = "24"
 rust = "1.97.1"
 usage = "6.3.0"
