@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/jdx/mr-boxington/compare/v0.4.0...v0.5.0) - 2026-08-26
+
+### Added
+
+- [**breaking**] open the extensible public types to extension ([#103](https://github.com/jdx/mr-boxington/pull/103))
+- count remote cache failures in the summary ([#112](https://github.com/jdx/mr-boxington/pull/112))
+- make landing demo interactive and tag output ([#94](https://github.com/jdx/mr-boxington/pull/94))
+
+### Other
+
+- document MBX_LOG and how to report a problem ([#99](https://github.com/jdx/mr-boxington/pull/99))
+- simplify the landing page for 1.0 ([#96](https://github.com/jdx/mr-boxington/pull/96))
+- let the agent's statistics grow without breaking ([#114](https://github.com/jdx/mr-boxington/pull/114))
+- give every published crate its crates.io metadata ([#97](https://github.com/jdx/mr-boxington/pull/97))
+- version each crate by what it promises ([#100](https://github.com/jdx/mr-boxington/pull/100))
+
+### Security
+
+- bound remote downloads and protect release assets ([#109](https://github.com/jdx/mr-boxington/pull/109))
+
 ## [0.4.0](https://github.com/jdx/mr-boxington/compare/v0.3.0...v0.4.0) - 2026-08-25
 
 ### Added
