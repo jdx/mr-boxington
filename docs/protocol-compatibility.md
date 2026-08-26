@@ -87,3 +87,14 @@ the same things:
 is built from them, not because they are meant to be built against. They stay
 on `0.x`, where a minor bump is allowed to break, and they move together. Build
 against them and an upgrade may not compile.
+
+The Rust types mirror which wire records are open to extension and which are
+not. Capability records are `#[non_exhaustive]`, so a newly advertised feature
+or limit is a minor release rather than a major one; build them with
+`Capabilities::new` and assign the fields a service actually supports. The
+canonical persisted records are deliberately left exhaustive, because their
+shape is covered by a digest and a change to it requires a new media type and
+protocol major rather than an added field. `BypassReason` is also
+`#[non_exhaustive]`: the set of uncacheable invocations shifts as the adapter
+learns to model more of them, so aggregate on `BypassReason::kind` rather than
+matching every variant.
