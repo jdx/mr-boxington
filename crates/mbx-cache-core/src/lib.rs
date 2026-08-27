@@ -49,12 +49,14 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use url::{Host, Url};
 
 mod agent;
+mod client;
 mod local;
 
 pub use agent::{
     AGENT_PROTOCOL_VERSION, AgentRemoteCache, AgentRequest, AgentResponse, AgentStats, CacheAgent,
     CompilerStats, RestoreStats, is_task_identity, task_manifest_actions,
 };
+pub use client::BlockingAgentClient;
 pub use local::{LocalActionCache, LocalCas};
 pub use mbx_cache_protocol::{
     ACTION_RESULT_MEDIA_TYPE, ActionPrediction, ActionResult as RemoteActionResult,

@@ -1,4 +1,6 @@
-request.hello	{"client_version":"0.3.0","protocol":2,"type":"hello"}
+request.hello	{"client_version":"0.3.0","protocol":3,"type":"hello"}
+request.begin_task	{"task":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","type":"begin_task"}
+request.commit_task	{"run":"task-run","type":"commit_task"}
 request.find_blob	{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"type":"find_blob"}
 request.find_blobs	{"digests":[{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7}],"type":"find_blobs"}
 request.store_blob	{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"source":"cache/blob","type":"store_blob"}
@@ -13,7 +15,9 @@ request.find_action_prediction	{"invocation":{"algorithm":"blake3","hash":"aaaaa
 request.record_action_prediction	{"prediction":{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"adapter":"rustc","invocation":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"payload":"{}"},"task":"task-id","type":"record_action_prediction"}
 request.find_executable_identity	{"environment":{"RUSTFLAGS":"-Cdebuginfo=1","UNSET":null},"executable":"bin/rustc","type":"find_executable_identity"}
 request.store_executable_identity	{"environment":{"RUSTFLAGS":"-Cdebuginfo=1","UNSET":null},"executable":"bin/rustc","stdout":[114,117,115,116,99],"type":"store_executable_identity"}
-response.hello	{"agent_version":"0.3.0","protocol":2,"type":"hello"}
+response.hello	{"agent_version":"0.3.0","protocol":3,"type":"hello"}
+response.task_begun	{"run":"task-run","type":"task_begun"}
+response.task_committed	{"type":"task_committed"}
 response.blob	{"path":"cache/blob","type":"blob"}
 response.blob_missing	{"path":null,"type":"blob"}
 response.blobs	{"paths":["cache/blob",null],"type":"blobs"}

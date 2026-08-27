@@ -1145,8 +1145,10 @@ dependencies = [
  "fslock",
  "libc",
  "log",
+ "mbx-cache-cargo",
  "mbx-cache-core",
  "mbx-cache-rustc",
+ "mbx-cache-store",
  "rand 0.10.2",
  "reflink-copy",
  "serde",
@@ -1159,6 +1161,18 @@ dependencies = [
  "usage-rs",
  "which",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mbx-cache-cargo"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "mbx-cache-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]
@@ -1213,6 +1227,20 @@ dependencies = [
  "strum",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "mbx-cache-store"
+version = "0.1.0"
+dependencies = [
+ "eyre",
+ "filetime",
+ "fslock",
+ "log",
+ "mbx-cache-core",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

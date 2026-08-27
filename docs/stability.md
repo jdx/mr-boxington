@@ -27,9 +27,15 @@ retires a setting fails loudly instead of silently ignoring what you wrote.
 
 ## Wire protocols and crates
 
-The shim/agent protocol is internal — both halves ship in one binary and
-require exact version equality, so there is nothing to keep compatible across
-machines. The remote cache protocol is versioned under `/v1/` with explicit
-evolution rules, and published Rust crates follow semantic versioning enforced
-by `cargo-semver-checks` in CI. See
+The local shim/agent protocol requires exact protocol and application-version
+equality. Embedders can connect to it, but must upgrade their client alongside
+mbx when that exact-match version changes. The remote cache protocol is
+versioned under `/v1/` with explicit evolution rules, and published Rust crates
+follow semantic versioning enforced by `cargo-semver-checks` in CI. See
 [protocol compatibility](/protocol-compatibility) for the details.
+
+`mbx-cache-cargo`, `mbx-cache-store`, `mbx-cache-core`, and
+`mbx-cache-rustc` are supported building blocks for coordinated embedding.
+They intentionally stay on `0.x`: their public APIs can change in a new minor
+release, and embedders should pin a compatible minor. Store and wire formats
+remain independently versioned and treat unfamiliar records as cache misses.

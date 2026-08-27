@@ -47,3 +47,13 @@ name = "mbx-cache-rustc"
 version_group = "mbx-internals"
 publish = true
 git_release_enable = false
+
+[[package]]
+name = "mbx-cache-cargo"
+publish = true
+git_release_enable = false
+
+[[package]]
+name = "mbx-cache-store"
+publish = true
+git_release_enable = false

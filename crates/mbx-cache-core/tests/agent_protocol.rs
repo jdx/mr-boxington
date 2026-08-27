@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v2.jsonl");
+const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v3.jsonl");
 
 fn digest() -> CacheDigest {
     CacheDigest {
@@ -83,8 +83,20 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
         (
             "request.hello",
             AgentRequest::Hello {
-                protocol: 2,
+                protocol: 3,
                 client_version: "0.3.0".into(),
+            },
+        ),
+        (
+            "request.begin_task",
+            AgentRequest::BeginTask {
+                task: "a".repeat(64),
+            },
+        ),
+        (
+            "request.commit_task",
+            AgentRequest::CommitTask {
+                run: "task-run".into(),
             },
         ),
         (
@@ -181,10 +193,17 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
         (
             "response.hello",
             AgentResponse::Hello {
-                protocol: 2,
+                protocol: 3,
                 agent_version: "0.3.0".into(),
             },
         ),
+        (
+            "response.task_begun",
+            AgentResponse::TaskBegun {
+                run: "task-run".into(),
+            },
+        ),
+        ("response.task_committed", AgentResponse::TaskCommitted),
         (
             "response.blob",
             AgentResponse::Blob {
@@ -290,7 +309,7 @@ fn assert_fixture<T: Serialize>(expected: &mut BTreeMap<&str, &str>, name: &str,
 }
 
 #[test]
-fn agent_protocol_v2_shapes_match_the_conformance_fixture() {
+fn agent_protocol_v3_shapes_match_the_conformance_fixture() {
     let mut expected = fixture();
     for line in AGENT_FIXTURE.lines() {
         let (name, json) = line
@@ -358,7 +377,7 @@ fn agent_protocol_v2_shapes_match_the_conformance_fixture() {
 
 #[test]
 fn protocol_constants_match_the_contract() {
-    assert_eq!(AGENT_PROTOCOL_VERSION, 2);
+    assert_eq!(AGENT_PROTOCOL_VERSION, 3);
     assert_eq!(PROTOCOL_VERSION, 1);
     assert_eq!(
         ACTION_RESULT_MEDIA_TYPE,
@@ -385,6 +404,8 @@ fn protocol_constants_match_the_contract() {
 
 define_variant_coverage!(request_variant_name, EXPECTED_REQUEST_VARIANTS, AgentRequest, {
     AgentRequest::Hello { .. } => "hello",
+    AgentRequest::BeginTask { .. } => "begin_task",
+    AgentRequest::CommitTask { .. } => "commit_task",
     AgentRequest::FindBlob { .. } => "find_blob",
     AgentRequest::FindBlobs { .. } => "find_blobs",
     AgentRequest::StoreBlob { .. } => "store_blob",
@@ -403,6 +424,8 @@ define_variant_coverage!(request_variant_name, EXPECTED_REQUEST_VARIANTS, AgentR
 
 define_variant_coverage!(response_variant_name, EXPECTED_RESPONSE_VARIANTS, AgentResponse, {
     AgentResponse::Hello { .. } => "hello",
+    AgentResponse::TaskBegun { .. } => "task_begun",
+    AgentResponse::TaskCommitted => "task_committed",
     AgentResponse::Blob { .. } => "blob",
     AgentResponse::Blobs { .. } => "blobs",
     AgentResponse::Stored { .. } => "stored",

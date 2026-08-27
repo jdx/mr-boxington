@@ -40,7 +40,7 @@ pub struct AgentRemoteCache {
 }
 
 /// Wire protocol version used between an in-process cache agent and its shims.
-pub const AGENT_PROTOCOL_VERSION: u8 = 2;
+pub const AGENT_PROTOCOL_VERSION: u8 = 3;
 /// Largest single protocol request the agent will read.
 ///
 /// Requests are small JSON objects; the largest legitimate ones carry an output
@@ -57,6 +57,16 @@ pub enum AgentRequest {
         protocol: u8,
         /// Human-readable mbx client version.
         client_version: String,
+    },
+    /// Begin a prediction-manifest run for a stable Cargo or task identity.
+    BeginTask {
+        /// Stable 64-character lowercase hexadecimal task identity.
+        task: String,
+    },
+    /// Commit predictions collected by an earlier [`Self::BeginTask`].
+    CommitTask {
+        /// Opaque run identifier returned by the agent.
+        run: String,
     },
     /// Resolve a blob to a session-verified local CAS path.
     FindBlob {
@@ -182,6 +192,13 @@ pub enum AgentResponse {
         /// Human-readable agent version.
         agent_version: String,
     },
+    /// A task prediction run was begun.
+    TaskBegun {
+        /// Opaque run identifier to pass to compiler shims and commit later.
+        run: String,
+    },
+    /// A task prediction run was committed.
+    TaskCommitted,
     /// A local CAS path already verified against the requested digest.
     Blob {
         /// Verified local path, or `None` on a cache miss.
@@ -1736,6 +1753,14 @@ impl CacheAgent {
 
     async fn respond(&self, request: AgentRequest) -> AgentResponse {
         let result = match request {
+            AgentRequest::BeginTask { task } => self
+                .begin_task(&task)
+                .await
+                .map(|run| AgentResponse::TaskBegun { run }),
+            AgentRequest::CommitTask { run } => self
+                .commit_task(&run)
+                .await
+                .map(|()| AgentResponse::TaskCommitted),
             AgentRequest::FindBlob { digest } => self.find_blob(&digest).await,
             AgentRequest::FindBlobs { digests } => self.find_blobs(digests).await,
             AgentRequest::StoreBlob { digest, source } => self.store_blob(&digest, &source).await,

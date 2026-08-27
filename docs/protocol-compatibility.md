@@ -14,13 +14,14 @@ the handshake and do not exchange cache requests. Adding, removing, or changing
 a request or response therefore requires incrementing `AGENT_PROTOCOL_VERSION`.
 
 `crates/mbx-cache-core/tests/agent_protocol.rs` exercises every request and
-response variant against `tests/fixtures/agent-protocol-v2.jsonl`. Its exhaustive
+response variant against `tests/fixtures/agent-protocol-v3.jsonl`. Its exhaustive
 matches make a newly added variant fail to compile until the fixture and the
 protocol-version decision are reviewed together.
 
-Agent protocol v2 adds compiler-duration accounting to hits and real compiler
-invocations. Because shim and agent are always installed from the same binary,
-they still require exact protocol and package-version equality.
+Agent protocol v3 adds `begin_task` and `commit_task`, allowing an embedded
+Cargo shim to create one prediction manifest for each real Cargo invocation.
+The client and agent still require exact protocol and application-version
+equality, including when they are shipped by different applications.
 
 ## Remote cache protocol
 
@@ -92,20 +93,22 @@ is a minor. The lint names above the summary are the useful part: they say which
 items changed shape, which is what a reviewer needs to judge whether the break
 was intended.
 
-The four published crates do not share a version, because they do not promise
+The published crates do not all share a version, because they do not promise
 the same things:
 
 | Crate | Version line | What it promises |
 | --- | --- | --- |
 | `mbx` | independent | The command line: subcommands and versioned JSON output. The library target is internal. |
 | `mbx-cache-protocol` | independent | The remote cache wire contract, as described above. Depend on this to speak to an mbx cache. |
-| `mbx-cache-core` | shared `0.x` | Nothing. Internal. |
-| `mbx-cache-rustc` | shared `0.x` | Nothing. Internal. |
+| `mbx-cache-core` | shared `0.x` | Unstable session, store, and agent primitives for coordinated embedding. |
+| `mbx-cache-rustc` | shared `0.x` | Unstable rustc action modeling for coordinated embedding. |
+| `mbx-cache-cargo` | independent `0.x` | Unstable Cargo invocation and shared-cache-root resolution. |
+| `mbx-cache-store` | independent `0.x` | Unstable checkout claims and disk-bounded shared-store GC. |
 
-`mbx-cache-core` and `mbx-cache-rustc` are published because the `mbx` binary
-is built from them, not because they are meant to be built against. They stay
-on `0.x`, where a minor bump is allowed to break, and they move together. Build
-against them and an upgrade may not compile.
+The embedding crates stay on `0.x`, where a minor bump is allowed to break.
+`mbx-cache-core` and `mbx-cache-rustc` move together; the smaller Cargo and
+store crates release independently. Pin compatible minors and expect an
+upgrade to require source changes.
 
 The Rust types mirror which wire records are open to extension and which are
 not. Capability records are `#[non_exhaustive]`, so a newly advertised feature
