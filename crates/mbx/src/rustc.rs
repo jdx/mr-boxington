@@ -1550,15 +1550,8 @@ fn resolve_executable(executable: &OsStr) -> Result<PathBuf> {
 /// corruption rather than a translation.
 fn normalize_output_text(bytes: &[u8], mappings: &[PathMapping]) -> Vec<u8> {
     let mut normalized = bytes.to_vec();
-    for mapping in PathMapping::ordered(mappings) {
-        let Some(root) = mapping.root.to_str() else {
-            continue;
-        };
-        normalized = replace_bytes(
-            &normalized,
-            root.as_bytes(),
-            format!("${{{}}}", mapping.placeholder).as_bytes(),
-        );
+    for (root, placeholder) in root_spellings(mappings) {
+        normalized = replace_bytes(&normalized, root.as_bytes(), placeholder.as_bytes());
     }
     normalized
 }
@@ -1566,17 +1559,37 @@ fn normalize_output_text(bytes: &[u8], mappings: &[PathMapping]) -> Vec<u8> {
 /// Rewrite placeholders in a cached text output back into this machine's paths.
 fn denormalize_output_text(bytes: &[u8], mappings: &[PathMapping]) -> Vec<u8> {
     let mut text = bytes.to_vec();
+    for (root, placeholder) in root_spellings(mappings) {
+        text = replace_bytes(&text, placeholder.as_bytes(), root.as_bytes());
+    }
+    text
+}
+
+/// Every spelling a root can take in these outputs, paired with the
+/// placeholder that stands for it.
+///
+/// The dep-info writes a path literally, but stderr is JSON, where a Windows
+/// separator arrives doubled. Matching only the literal spelling would leave
+/// every artifact notification on Windows carrying the publishing checkout's
+/// path, so each root is looked for both ways and each way gets its own
+/// placeholder -- otherwise a restore could not tell which spelling to write
+/// back.
+///
+/// Deepest root first, so a target directory inside a workspace wins over the
+/// workspace, and the escaped spelling before the literal one it contains.
+fn root_spellings(mappings: &[PathMapping]) -> Vec<(String, String)> {
+    let mut spellings = Vec::new();
     for mapping in PathMapping::ordered(mappings) {
         let Some(root) = mapping.root.to_str() else {
             continue;
         };
-        text = replace_bytes(
-            &text,
-            format!("${{{}}}", mapping.placeholder).as_bytes(),
-            root.as_bytes(),
-        );
+        let escaped = root.replace('\\', "\\\\");
+        if escaped != root {
+            spellings.push((escaped, format!("${{{}:escaped}}", mapping.placeholder)));
+        }
+        spellings.push((root.to_string(), format!("${{{}}}", mapping.placeholder)));
     }
-    text
+    spellings
 }
 
 fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {

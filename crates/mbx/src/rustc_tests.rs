@@ -539,3 +539,80 @@ fn benchmark_cached_output_materialization() {
         legacy.as_secs_f64() / materialized.as_secs_f64()
     );
 }
+
+/// The dep-info writes a path literally; stderr is JSON, where a Windows
+/// separator arrives doubled. Both spellings have to round-trip, or every
+/// artifact notification on Windows keeps the publishing checkout's path.
+#[test]
+fn both_spellings_of_a_root_round_trip_through_a_placeholder() {
+    let mappings = vec![PathMapping::new(
+        if cfg!(windows) {
+            r"D:\work\target"
+        } else {
+            "/work/target"
+        },
+        "target",
+    )];
+    let root = mappings[0].root.to_str().unwrap().to_string();
+    let escaped = root.replace('\\', r"\\");
+
+    // A dep-info rule and a JSON artifact notification, as rustc writes them.
+    let original = format!("{root}/deps/lib.rlib: src/lib.rs\n{{\"artifact\":\"{escaped}\"}}\n");
+    let normalized = normalize_output_text(original.as_bytes(), &mappings);
+
+    assert!(
+        !String::from_utf8_lossy(&normalized).contains(&root),
+        "the literal root survived normalization: {}",
+        String::from_utf8_lossy(&normalized)
+    );
+    if escaped != root {
+        assert!(
+            !String::from_utf8_lossy(&normalized).contains(&escaped),
+            "the escaped root survived normalization: {}",
+            String::from_utf8_lossy(&normalized)
+        );
+    }
+    assert_eq!(
+        denormalize_output_text(&normalized, &mappings),
+        original.as_bytes(),
+        "a normalized output did not come back as it went in"
+    );
+}
+
+/// A restore happens on a machine whose roots differ from the one that
+/// published, which is the whole point of the placeholder.
+#[test]
+fn a_placeholder_is_rewritten_into_the_restoring_checkouts_root() {
+    let published = vec![PathMapping::new(
+        if cfg!(windows) {
+            r"D:\one\target"
+        } else {
+            "/one/target"
+        },
+        "target",
+    )];
+    let restoring = vec![PathMapping::new(
+        if cfg!(windows) {
+            r"D:\two\target"
+        } else {
+            "/two/target"
+        },
+        "target",
+    )];
+    let published_root = published[0].root.to_str().unwrap();
+    let restoring_root = restoring[0].root.to_str().unwrap();
+
+    let original = format!("{published_root}/deps/lib.rlib: src/lib.rs\n");
+    let stored = normalize_output_text(original.as_bytes(), &published);
+    let restored = denormalize_output_text(&stored, &restoring);
+
+    let restored = String::from_utf8_lossy(&restored).into_owned();
+    assert!(
+        restored.contains(restoring_root),
+        "restore should name the restoring root: {restored}"
+    );
+    assert!(
+        !restored.contains(published_root),
+        "restore still names the publishing root: {restored}"
+    );
+}
