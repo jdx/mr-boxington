@@ -39,6 +39,14 @@ produce different keys and miss, rather than sharing a binary neither of them
 built. It is experimental — qualify it on your own workload as described in
 [verify mode](/configuration#verify-mode) before relying on it.
 
+Some hosts cannot be described at all. mbx asks the driver to place a startup
+object and a libc, and a host where neither resolves gets no linker identity
+and therefore no cached links — refusing is the only safe answer, because two
+hosts failing the same probe would otherwise agree on a key without either of
+them having pinned what it stood for. The same goes for a driver that names no
+linker or reports no version. Those links appear in `mbx explain` like any
+other bypass.
+
 Even then, a link bypasses if it names a native library, overrides the linker,
 or carries a flag that would embed this checkout's paths (`-Crpath`,
 `-Cprefer-dynamic`), leave a file beside the binary that mbx does not store
