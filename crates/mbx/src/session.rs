@@ -9,8 +9,7 @@ use eyre::{Context, Result, bail};
 use log::{debug, warn};
 use mbx_cache_core::{
     AGENT_PROTOCOL_VERSION, AgentEvent, AgentEventObserver, AgentRemoteCache, AgentRequest,
-    AgentResponse, AgentStats, CacheAgent, CacheDigest, RemoteCacheClient, RemoteCacheConfig,
-    canonical_json,
+    AgentResponse, AgentStats, CacheAgent, RemoteCacheClient, RemoteCacheConfig,
 };
 use serde::Serialize;
 use std::cell::RefCell;
@@ -37,7 +36,6 @@ pub(crate) const TARGET_DIR_ENV: &str = "MBX_TARGET_DIR";
 const PREVIOUS_RUSTC_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WRAPPER";
 pub(crate) const BYPASS_LOG_ENV: &str = "MBX_BYPASS_LOG";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const IDENTITY_VERSION: u8 = 1;
 
 /// A cache session: the agent, its listener, and the shim cargo will invoke.
 pub struct CacheSession {
@@ -327,40 +325,13 @@ impl ActionRun {
     }
 }
 
-#[derive(Serialize)]
-struct ActionIdentity<'a> {
-    version: u8,
-    workspace: &'a str,
-    command: &'a [String],
-}
-
 /// Identity for this build's prefetch manifest.
 ///
 /// Manifests are namespaced by identity, so this only affects how well one
 /// build can predict another's actions; action keys themselves are independent
 /// of it.
 pub fn build_identity(workspace_root: &Path, command: &[String]) -> String {
-    let workspace = workspace_marker(workspace_root);
-    let material = ActionIdentity {
-        version: IDENTITY_VERSION,
-        workspace: &workspace,
-        command,
-    };
-    let bytes = canonical_json(&material).expect("build identity must serialize");
-    CacheDigest::blake3(&bytes).hash
-}
-
-/// Identify a workspace by its dependency graph rather than its location, so
-/// that separate worktrees of one project share a manifest.
-fn workspace_marker(workspace_root: &Path) -> String {
-    match std::fs::read(workspace_root.join("Cargo.lock")) {
-        Ok(lock) => CacheDigest::blake3(&lock).hash,
-        Err(_) => workspace_root
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned(),
-    }
+    mbx_cache_cargo::build_identity(workspace_root, command)
 }
 
 fn action_remote_cache(config: &Config, store: &Path) -> Result<Option<AgentRemoteCache>> {

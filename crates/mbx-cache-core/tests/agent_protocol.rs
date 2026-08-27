@@ -89,6 +89,18 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
             },
         ),
         (
+            "request.begin_task",
+            AgentRequest::BeginTask {
+                task: "a".repeat(64),
+            },
+        ),
+        (
+            "request.commit_task",
+            AgentRequest::CommitTask {
+                run: "task-run".into(),
+            },
+        ),
+        (
             "request.find_blob",
             AgentRequest::FindBlob { digest: digest() },
         ),
@@ -187,6 +199,13 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
                 agent_version: "0.3.0".into(),
             },
         ),
+        (
+            "response.task_begun",
+            AgentResponse::TaskBegun {
+                run: "task-run".into(),
+            },
+        ),
+        ("response.task_committed", AgentResponse::TaskCommitted),
         (
             "response.blob",
             AgentResponse::Blob {
@@ -395,6 +414,8 @@ fn protocol_constants_match_the_contract() {
 
 define_variant_coverage!(request_variant_name, EXPECTED_REQUEST_VARIANTS, AgentRequest, {
     AgentRequest::Hello { .. } => "hello",
+    AgentRequest::BeginTask { .. } => "begin_task",
+    AgentRequest::CommitTask { .. } => "commit_task",
     AgentRequest::FindBlob { .. } => "find_blob",
     AgentRequest::FindBlobs { .. } => "find_blobs",
     AgentRequest::StoreBlob { .. } => "store_blob",
@@ -413,6 +434,8 @@ define_variant_coverage!(request_variant_name, EXPECTED_REQUEST_VARIANTS, AgentR
 
 define_variant_coverage!(response_variant_name, EXPECTED_RESPONSE_VARIANTS, AgentResponse, {
     AgentResponse::Hello { .. } => "hello",
+    AgentResponse::TaskBegun { .. } => "task_begun",
+    AgentResponse::TaskCommitted => "task_committed",
     AgentResponse::Blob { .. } => "blob",
     AgentResponse::Blobs { .. } => "blobs",
     AgentResponse::Stored { .. } => "stored",

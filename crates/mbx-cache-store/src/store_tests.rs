@@ -80,7 +80,7 @@ fn record_build(store: &Path, identity: &str, workspace_root: &Path, actions: &[
         .join("task-manifests")
         .join("v1")
         .join(format!("{identity}.json"));
-    crate::util::write_atomic(&path, &serde_json::to_vec(&manifest).unwrap()).unwrap();
+    write_atomic(&path, &serde_json::to_vec(&manifest).unwrap()).unwrap();
 }
 
 #[test]
@@ -209,7 +209,7 @@ fn project_usage_excludes_expired_claims() {
             - CHECKOUT_RETENTION.as_secs()
             - 1,
     };
-    crate::util::write_atomic(
+    write_atomic(
         &checkout_record_path(directory.path(), &identity, &workspace),
         &serde_json::to_vec(&stale).unwrap(),
     )
@@ -632,7 +632,7 @@ fn forgets_a_claim_no_build_has_renewed() {
             - CHECKOUT_RETENTION.as_secs()
             - 1,
     };
-    crate::util::write_atomic(
+    write_atomic(
         &checkout_record_path(&store, &identity, &checkout),
         &serde_json::to_vec(&stale).unwrap(),
     )

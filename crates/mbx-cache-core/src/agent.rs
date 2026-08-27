@@ -62,6 +62,16 @@ pub enum AgentRequest {
         /// Human-readable mbx client version.
         client_version: String,
     },
+    /// Begin a prediction-manifest run for a stable Cargo or task identity.
+    BeginTask {
+        /// Stable 64-character lowercase hexadecimal task identity.
+        task: String,
+    },
+    /// Commit predictions collected by an earlier [`Self::BeginTask`].
+    CommitTask {
+        /// Opaque run identifier returned by the agent.
+        run: String,
+    },
     /// Resolve a blob to a session-verified local CAS path.
     FindBlob {
         /// Blob to resolve.
@@ -238,6 +248,13 @@ pub enum AgentResponse {
         /// Human-readable agent version.
         agent_version: String,
     },
+    /// A task prediction run was begun.
+    TaskBegun {
+        /// Opaque run identifier to pass to compiler shims and commit later.
+        run: String,
+    },
+    /// A task prediction run was committed.
+    TaskCommitted,
     /// A local CAS path already verified against the requested digest.
     Blob {
         /// Verified local path, or `None` on a cache miss.
@@ -2080,6 +2097,14 @@ impl CacheAgent {
         connection: &mut ConnectionUploads,
     ) -> AgentResponse {
         let result = match request {
+            AgentRequest::BeginTask { task } => self
+                .begin_task(&task)
+                .await
+                .map(|run| AgentResponse::TaskBegun { run }),
+            AgentRequest::CommitTask { run } => self
+                .commit_task(&run)
+                .await
+                .map(|()| AgentResponse::TaskCommitted),
             AgentRequest::FindBlob { digest } => self.find_blob(&digest).await,
             AgentRequest::FindBlobs { digests } => self.find_blobs(digests).await,
             AgentRequest::StoreBlob { digest, source } => {

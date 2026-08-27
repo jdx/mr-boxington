@@ -49,6 +49,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use url::{Host, Url};
 
 mod agent;
+mod client;
 mod local;
 mod uploads;
 
@@ -57,6 +58,7 @@ pub use agent::{
     AgentResponse, AgentStats, CacheAgent, CompilerStats, RestoreStats, is_task_identity,
     task_manifest_actions,
 };
+pub use client::BlockingAgentClient;
 pub use local::{LocalActionCache, LocalCas};
 pub use mbx_cache_protocol::{
     ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE, ActionPrediction,

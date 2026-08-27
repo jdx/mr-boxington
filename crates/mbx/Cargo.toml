@@ -23,8 +23,10 @@ dirs = "6"
 eyre = "0.6"
 fslock = "0.2"
 log = "0.4"
-mbx-cache-core = { path = "../mbx-cache-core", version = "0.6.0", default-features = false }
-mbx-cache-rustc = { path = "../mbx-cache-rustc", version = "0.6.0", default-features = false }
+mbx-cache-core = { path = "../mbx-cache-core", version = "0.7.0", default-features = false }
+mbx-cache-cargo = { path = "../mbx-cache-cargo", version = "0.1.0", default-features = false }
+mbx-cache-rustc = { path = "../mbx-cache-rustc", version = "0.7.0", default-features = false }
+mbx-cache-store = { path = "../mbx-cache-store", version = "0.1.0", default-features = false }
 rand = "0.10"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 reflink-copy = "0.1"
@@ -57,9 +59,11 @@ windows-sys = { version = "0.61", features = [
 
 [features]
 default = ["rustls"]
-native-tls = ["mbx-cache-core/native-tls", "mbx-cache-rustc/native-tls"]
-rustls = ["mbx-cache-core/rustls", "mbx-cache-rustc/rustls"]
+native-tls = ["mbx-cache-cargo/native-tls", "mbx-cache-core/native-tls", "mbx-cache-rustc/native-tls", "mbx-cache-store/native-tls"]
+rustls = ["mbx-cache-cargo/rustls", "mbx-cache-core/rustls", "mbx-cache-rustc/rustls", "mbx-cache-store/rustls"]
 rustls-native-roots = [
+  "mbx-cache-cargo/rustls-native-roots",
   "mbx-cache-core/rustls-native-roots",
   "mbx-cache-rustc/rustls-native-roots",
+  "mbx-cache-store/rustls-native-roots",
 ]

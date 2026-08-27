@@ -2,6 +2,7 @@
 
 use crate::config::{CliSettings, Config, RetentionSettings};
 use crate::session::{self, CacheSession};
+#[cfg(test)]
 use crate::util::workspace_root;
 use crate::{policy, store, target};
 use bytesize::ByteSize;
@@ -1376,37 +1377,11 @@ fn resolve_roots_with(
     working_dir: &Path,
     target_dir_env: Option<std::ffi::OsString>,
 ) -> Roots {
-    // Everything below inspects cargo's own flags only; the real build still
-    // receives the full argument list untouched.
-    let arguments = cargo_arguments(arguments);
-    let reported = cargo_roots(cargo, arguments, target_dir_env.as_deref());
-    // `-C` moves the directory cargo resolves relative paths against, so the
-    // fallbacks below have to follow it rather than this process's cwd.
-    let invocation_dir = invocation_dir(arguments, working_dir);
-    let workspace_root = reported
-        .as_ref()
-        .map(|roots| roots.workspace_root.clone())
-        .unwrap_or_else(|| workspace_root(&invocation_dir));
-    let flagged = target_dir_argument(arguments);
-    let from_environment = target_dir_env.as_ref().is_some_and(|dir| !dir.is_empty());
-    let target_dir_requested = flagged.is_some()
-        || from_environment
-        || cargo_config_may_set_target_dir(arguments, &invocation_dir);
-    // An explicit flag outranks anything cargo reports from configuration.
-    let target_dir = flagged
-        .map(|value| absolute(&invocation_dir, value))
-        .or_else(|| reported.map(|roots| roots.target_dir))
-        .or_else(|| {
-            target_dir_env
-                .map(PathBuf::from)
-                .filter(|dir| !dir.as_os_str().is_empty())
-                .map(|dir| absolute(&invocation_dir, &dir.to_string_lossy()))
-        })
-        .unwrap_or_else(|| workspace_root.join("target"));
+    let resolved = mbx_cache_cargo::resolve(cargo, arguments, working_dir, target_dir_env);
     Roots {
-        workspace_root,
-        target_dir,
-        target_dir_requested,
+        workspace_root: resolved.workspace_root,
+        target_dir: resolved.target_dir,
+        target_dir_requested: resolved.target_dir_requested,
     }
 }
 
@@ -1436,6 +1411,7 @@ const PROBE_MANIFEST_TOGGLES: [&str; 3] = ["--offline", "--frozen", "--locked"];
 /// not a directory for cargo to run in, and `-C opt-level=3` is ordinary. Reading
 /// one as the other would point the probe and the path mapping at a directory
 /// that does not exist, so every action would bypass.
+#[cfg(test)]
 fn cargo_arguments(arguments: &[String]) -> &[String] {
     let end = arguments
         .iter()
@@ -1473,6 +1449,7 @@ fn forwarded_flags(arguments: &[String], flags: &[&str]) -> Vec<String> {
 }
 
 /// The directory cargo resolves relative paths against, which `-C` can move.
+#[cfg(test)]
 fn invocation_dir(arguments: &[String], working_dir: &Path) -> PathBuf {
     flag_value(arguments, "-C")
         .map(|value| absolute(working_dir, value))
@@ -1524,6 +1501,7 @@ fn parse_cargo_roots(metadata: &[u8]) -> Option<Roots> {
     })
 }
 
+#[cfg(test)]
 fn target_dir_argument(arguments: &[String]) -> Option<&str> {
     flag_value(arguments, "--target-dir")
 }
@@ -1534,6 +1512,7 @@ fn target_dir_argument(arguments: &[String]) -> Option<&str> {
 /// `build.target-dir = "target"` is otherwise indistinguishable from Cargo's
 /// default. Any explicit config file passed on the command line is treated
 /// conservatively because it may include another file.
+#[cfg(test)]
 fn cargo_config_may_set_target_dir(arguments: &[String], invocation_dir: &Path) -> bool {
     if std::env::var_os("CARGO_BUILD_TARGET_DIR").is_some_and(|value| !value.is_empty()) {
         return true;
@@ -1560,6 +1539,7 @@ fn cargo_config_may_set_target_dir(arguments: &[String], invocation_dir: &Path) 
         .any(|path| cargo_config_file_may_set_target_dir(&path))
 }
 
+#[cfg(test)]
 fn config_arguments(arguments: &[String]) -> impl Iterator<Item = &str> {
     let mut values = Vec::new();
     let mut remaining = arguments.iter();
@@ -1575,6 +1555,7 @@ fn config_arguments(arguments: &[String]) -> impl Iterator<Item = &str> {
     values.into_iter()
 }
 
+#[cfg(test)]
 fn cargo_config_file_may_set_target_dir(path: &Path) -> bool {
     let contents = match std::fs::read_to_string(path) {
         Ok(contents) => contents,

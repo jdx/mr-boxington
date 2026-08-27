@@ -511,32 +511,6 @@ fn locked(lock: &Path) -> bool {
     }
 }
 
-/// Whether a build is still writing session `id` in `store`.
-pub(crate) fn session_is_live(store: &Path, id: &str) -> bool {
-    locked(&session_paths(store, id).lock)
-}
-
-/// Locks left behind with no stream beside them.
-///
-/// A lock is taken before the stream it names is created, so a failure in
-/// between leaves one nothing else refers to -- and since only streams are
-/// listed, nothing else would ever collect it.
-pub(crate) fn orphaned_locks(store: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(store.join(SESSIONS_DIR)) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let id = name.strip_suffix(".lock")?;
-            let stream = session_paths(store, id).events;
-            (!stream.exists() && !locked(&path)).then_some(path)
-        })
-        .collect()
-}
-
 /// The session streams present in `store`, oldest name first.
 ///
 /// Ids begin with the start time in milliseconds and are fixed width for the
