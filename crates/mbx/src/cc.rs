@@ -385,10 +385,15 @@ fn record_prediction(
 /// found by the next. A shim running outside a session falls back to sharding
 /// by the invocation fingerprint, which keeps each manifest bounded.
 fn prediction_task(invocation: &CacheDigest) -> String {
-    std::env::var(session::BUILD_ENV).unwrap_or_else(|_| {
-        let shard = invocation.hash.get(..2).unwrap_or(&invocation.hash);
-        CacheDigest::blake3(format!("cc-standalone-predictions-v1\0{shard}").as_bytes()).hash
-    })
+    std::env::var(session::BUILD_ENV).unwrap_or_else(|_| standalone_prediction_task(invocation))
+}
+
+/// Shard predictions by invocation fingerprint, which is what a shim outside a
+/// session has to fall back to. A single manifest would eventually reach the
+/// protocol's prediction limit.
+fn standalone_prediction_task(invocation: &CacheDigest) -> String {
+    let shard = invocation.hash.get(..2).unwrap_or(&invocation.hash);
+    CacheDigest::blake3(format!("cc-standalone-predictions-v1\0{shard}").as_bytes()).hash
 }
 
 fn restore_result(

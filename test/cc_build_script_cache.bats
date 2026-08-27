@@ -7,7 +7,10 @@ setup() {
   export CARGO_HOME="${CARGO_HOME:-$developer_home/.cargo}"
   _common_setup
 
+  # CC and CXX are unset for the same reason MBX_CC is: an inherited compiler
+  # choice would make mbx stand aside and the fixture prove nothing.
   unset CARGO_TARGET_DIR MBX_INCREMENTAL CARGO_INCREMENTAL CI MBX_CC
+  unset CC CXX TARGET_CC TARGET_CXX MBX_REAL_CC MBX_REAL_CXX
   export MBX_CACHE_DIR="$BATS_TEST_TMPDIR/store"
 
   if ! cc -v >/dev/null 2>&1; then

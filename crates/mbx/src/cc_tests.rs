@@ -1,9 +1,12 @@
 use super::*;
 
+/// Inside a build the task is the session's run id, so predictions land in the
+/// manifest the session commits. Only the standalone fallback is derived here,
+/// and it must still be a legal task identity.
 #[test]
-fn prediction_tasks_are_valid_shard_identities() {
+fn standalone_prediction_tasks_are_valid_shard_identities() {
     let digest = CacheDigest::blake3(b"invocation");
-    let task = prediction_task(&digest);
+    let task = standalone_prediction_task(&digest);
     assert!(
         mbx_cache_core::is_task_identity(&task),
         "prediction task {task} must satisfy the protocol's identity rules"
@@ -11,15 +14,14 @@ fn prediction_tasks_are_valid_shard_identities() {
 }
 
 #[test]
-fn prediction_tasks_shard_rather_than_collecting_every_compile() {
-    let one = prediction_task(&CacheDigest::blake3(b"one"));
-    let two = prediction_task(&CacheDigest::blake3(b"two"));
+fn standalone_prediction_tasks_shard_rather_than_collecting_every_compile() {
     let shards = (0..64)
-        .map(|index| prediction_task(&CacheDigest::blake3(format!("{index}").as_bytes())))
+        .map(|index| {
+            standalone_prediction_task(&CacheDigest::blake3(format!("{index}").as_bytes()))
+        })
         .collect::<BTreeSet<_>>();
     assert!(shards.len() > 1, "compiles must not share one manifest");
     assert!(shards.len() <= 256, "shards are bounded by the hash prefix");
-    let _ = (one, two);
 }
 
 #[test]

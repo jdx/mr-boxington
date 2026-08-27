@@ -100,6 +100,7 @@ const SUPPORTED_F_FLAGS: &[&str] = &[
     "diagnostics-color",
     "exceptions",
     "function-sections",
+    "merge-all-constants",
     "no-asynchronous-unwind-tables",
     "no-builtin",
     "no-common",
@@ -137,6 +138,8 @@ const SUPPORTED_M_FLAGS: &[&str] = &[
     "fpu",
     "iphoneos-version-min",
     "macosx-version-min",
+    "no-omit-leaf-frame-pointer",
+    "omit-leaf-frame-pointer",
     "sse",
     "sse2",
     "sse3",
@@ -188,9 +191,22 @@ const COMPILER_QUERY_FLAGS: &[&str] = &[
     "--help",
     "--version",
     "-###",
+    // The `cc` crate probes with `-?` to tell an MSVC-style driver from a
+    // gcc-style one; neither answer is a compilation.
+    "-?",
     "-dumpmachine",
     "-dumpversion",
     "-v",
+];
+
+/// Flags that rewrite a path prefix in the compiler's own output.
+///
+/// The left side is a real path and normalizes like any other; the right side
+/// is the text it is replaced with and enters the key verbatim.
+const PREFIX_MAP_FLAGS: &[&str] = &[
+    "-fdebug-prefix-map",
+    "-ffile-prefix-map",
+    "-fmacro-prefix-map",
 ];
 
 impl CcBypassReason {
@@ -552,6 +568,12 @@ enum Argument {
     Plain(String),
     /// Keyed with its path normalized.
     Path { flag: String, path: PathBuf },
+    /// A prefix rewrite: the source path normalizes, the replacement does not.
+    PrefixMap {
+        flag: String,
+        from: PathBuf,
+        to: String,
+    },
     /// The source file.
     Source(PathBuf),
 }
@@ -912,6 +934,9 @@ impl<'a> ActionBuilder<'a> {
         match argument {
             Argument::Plain(value) => Ok(value.clone()),
             Argument::Path { flag, path } => Ok(format!("{flag}={}", self.normalize_path(path)?)),
+            Argument::PrefixMap { flag, from, to } => {
+                Ok(format!("{flag}={}={to}", self.normalize_path(from)?))
+            }
             Argument::Source(path) => Ok(self.normalize_path(path)?),
         }
     }
@@ -1157,6 +1182,42 @@ impl<'a> Parser<'a> {
                 flag: value.into(),
                 path,
             });
+            return Ok(());
+        }
+        // `--include=<file>` is the long spelling of `-include <file>`; the
+        // `cc` crate emits it for prefixed headers.
+        if let Some(rest) = value.strip_prefix("--include=") {
+            let path = PathBuf::from(rest);
+            self.required_inputs.push(path.clone());
+            self.parsed.push(Argument::Path {
+                flag: "-include".into(),
+                path,
+            });
+            return Ok(());
+        }
+        if let Some((flag, rest)) = PREFIX_MAP_FLAGS.iter().find_map(|flag| {
+            value
+                .strip_prefix(&format!("{flag}="))
+                .map(|rest| (*flag, rest))
+        }) {
+            let (from, to) = rest.split_once('=').unwrap_or((rest, ""));
+            self.parsed.push(Argument::PrefixMap {
+                flag: flag.into(),
+                from: PathBuf::from(from),
+                to: to.into(),
+            });
+            return Ok(());
+        }
+        // `--param name=value` tunes the optimizer; its text fully describes it.
+        if value == "--param" {
+            let parameter = self.take_value("--param", None)?;
+            self.parsed
+                .push(Argument::Plain(format!("--param={parameter}")));
+            return Ok(());
+        }
+        if let Some(parameter) = value.strip_prefix("--param=") {
+            self.parsed
+                .push(Argument::Plain(format!("--param={parameter}")));
             return Ok(());
         }
         if let Some(rest) = value.strip_prefix("--sysroot=") {

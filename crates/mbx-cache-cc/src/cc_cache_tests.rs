@@ -659,3 +659,68 @@ fn a_prediction_from_a_future_schema_bypasses() {
         "unsupported-prediction"
     );
 }
+
+/// Flags observed on real sys-crate builds, which the first cut of the
+/// allowlist rejected. Each one is deterministic key material.
+#[test]
+fn flags_real_sys_crates_pass_are_admitted() {
+    let cases = [
+        "--include=/registry/aws-lc-sys-0.44.0/generated-include/prefix.h",
+        "-mno-omit-leaf-frame-pointer",
+        "-fmerge-all-constants",
+        "--param=ssp-buffer-size=4",
+    ];
+    for flag in cases {
+        let arguments = argv(&[flag, "-c", "-o", "a.o", "a.c"]);
+        assert!(
+            CcInvocation::parse(&arguments).is_ok(),
+            "{flag} should be admitted"
+        );
+    }
+}
+
+/// The `cc` crate probes drivers with `-?` to tell MSVC from gcc. That is a
+/// question, not a compilation, and must not read as an unmodeled flag.
+#[test]
+fn the_msvc_probe_flag_reads_as_a_compiler_query() {
+    let arguments = argv(&["-?"]);
+    assert_eq!(
+        CcInvocation::parse(&arguments).unwrap_err().kind(),
+        "compiler-query"
+    );
+}
+
+/// A prefix map rewrites paths inside the object. Normalizing its left side is
+/// what lets two checkouts agree on the key, since the path being rewritten is
+/// itself checkout-specific.
+#[test]
+fn prefix_map_sources_normalize_while_replacements_stay_verbatim() {
+    let build = |workspace: &str| {
+        let flag = format!("-ffile-prefix-map={workspace}=");
+        let arguments = argv(&[&flag, "-c", "-o", "out.o", "src/a.c"]);
+        let invocation = CcInvocation::parse(&arguments).expect("admitted");
+        let mut context = context(workspace, &format!("{workspace}/target"));
+        context.inputs = vec![CcActionInput {
+            path: PathBuf::from(format!("{workspace}/src/a.c")),
+            digest: digest_of("source"),
+        }];
+        invocation.action(context).expect("action")
+    };
+    let one = build("/work/one");
+    let two = build("/elsewhere/two");
+    assert_eq!(one.digest, two.digest);
+    let descriptor = String::from_utf8(one.bytes).expect("utf-8");
+    assert!(
+        descriptor.contains("-ffile-prefix-map=${workspace}="),
+        "{descriptor}"
+    );
+}
+
+/// A separate `--param` consumes its value rather than leaving it to be
+/// mistaken for the source file.
+#[test]
+fn a_separate_param_value_is_not_mistaken_for_a_source() {
+    let arguments = argv(&["--param", "ssp-buffer-size=4", "-c", "-o", "a.o", "a.c"]);
+    let invocation = CcInvocation::parse(&arguments).expect("admitted");
+    assert_eq!(invocation.source(), Path::new("a.c"));
+}

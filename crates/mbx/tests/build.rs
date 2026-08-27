@@ -195,8 +195,17 @@ fn build_with(
         .env_remove("MBX_SHARE_OUT_DIR")
         .env_remove("MBX_LEARNED_INCREMENTAL")
         // The C shims are on by default; a test that says nothing about them
-        // must not inherit a different answer from the developer's shell.
-        .env_remove("MBX_CC");
+        // must not inherit a different answer from the developer's shell. The
+        // compiler variables matter just as much: this suite is itself run
+        // through mbx, so without this a fixture would inherit the outer
+        // session's shims and every build here would stand aside.
+        .env_remove("MBX_CC")
+        .env_remove("CC")
+        .env_remove("CXX")
+        .env_remove("TARGET_CC")
+        .env_remove("TARGET_CXX")
+        .env_remove("MBX_REAL_CC")
+        .env_remove("MBX_REAL_CXX");
     for (name, value) in settings {
         command.env(name, value);
     }
