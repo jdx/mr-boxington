@@ -1690,6 +1690,76 @@ fn a_build_script_c_compilation_crosses_checkouts() {
     );
 }
 
+/// A prediction that no longer describes the tree must not strand the
+/// compilation.
+///
+/// This adapter has no second way to build a key, so a stale prediction that
+/// aborted the cache path would fail identically on every later build. The
+/// recovery is what the test pins: compile, republish, and hit next time.
+#[cfg(unix)]
+#[test]
+fn a_stale_prediction_recovers_instead_of_stranding_the_compilation() {
+    if !has_c_compiler() {
+        return;
+    }
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_c_project(project.path());
+
+    // Record a prediction that names the header.
+    build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+        &[],
+    );
+
+    // Delete the header and stop including it. The command line is untouched,
+    // so the invocation still resolves to the same prediction -- one that now
+    // names a file that is gone.
+    std::fs::remove_file(project.path().join("include/hello.h")).unwrap();
+    std::fs::write(
+        project.path().join("src/hello.c"),
+        "int hello_value(void) { return 7; }\n",
+    )
+    .unwrap();
+
+    let (recovered, _) = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("recover.json"),
+        &[],
+    );
+    assert_eq!(
+        recovered["bypasses"].get("cc-input-read"),
+        None,
+        "a stale prediction is not a bypass: {recovered}"
+    );
+
+    // A second checkout of the same modified sources shares the store but none
+    // of the outputs, so what it restores is what the recovery republished.
+    let second = tempfile::tempdir().unwrap();
+    write_c_project(second.path());
+    std::fs::remove_file(second.path().join("include/hello.h")).unwrap();
+    std::fs::write(
+        second.path().join("src/hello.c"),
+        "int hello_value(void) { return 7; }\n",
+    )
+    .unwrap();
+    let (warm, _) = build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("warm.json"),
+        &[],
+    );
+    assert_eq!(
+        count(&warm, "hits"),
+        2,
+        "both the Rust and the C compilation should be restored: {warm}"
+    );
+}
+
 /// A build that chose its own compiler keeps it.
 ///
 /// `CC` is commonly exported machine-wide, so the shim standing aside is the

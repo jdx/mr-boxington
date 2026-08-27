@@ -1,9 +1,9 @@
 use crate::materialize::{
     CachedCompilation, CachedOutput, Materialization, StagedOutputs, apply_file_mode,
-    denormalize_output_text, executable_mode_matches, file_mode, find_blobs, normalize_output_text,
-    persist_outputs, read_canonical_blob, read_verified_blob, record_action_hit,
-    record_verification, replay_bytes, resolve_executable, stage_verified_cached_output,
-    staging_directory, validate_file_mode,
+    denormalize_output_text, executable_mode_matches, exit_code, file_mode, find_blobs,
+    normalize_output_text, persist_outputs, read_canonical_blob, read_verified_blob,
+    record_action_hit, record_verification, replay_bytes, resolve_executable,
+    stage_verified_cached_output, staging_directory, validate_file_mode,
 };
 use crate::{session, util::workspace_root};
 use eyre::{Context, Result, bail};
@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, ExitStatus, Output};
+use std::process::{Command, ExitCode, Output};
 use std::time::{Instant, SystemTime};
 
 #[derive(Clone, Debug, Default)]
@@ -1479,23 +1479,6 @@ fn staged_bytes(directory: &Path, name: &str, bytes: &[u8]) -> Result<(CacheDige
     let path = directory.join(name);
     std::fs::write(&path, bytes)?;
     Ok((CacheDigest::blake3(bytes), path))
-}
-
-#[cfg(unix)]
-fn exit_code(status: ExitStatus) -> ExitCode {
-    use std::os::unix::process::ExitStatusExt as _;
-    ExitCode::from(
-        status
-            .code()
-            .unwrap_or_else(|| 128 + status.signal().unwrap_or(1)) as u8,
-    )
-}
-
-#[cfg(windows)]
-fn exit_code(status: ExitStatus) -> ExitCode {
-    // SAFETY: this process is only a compiler wrapper and must preserve the
-    // compiler's full Windows status code, which stable ExitCode cannot hold.
-    unsafe { windows_sys::Win32::System::Threading::ExitProcess(status.code().unwrap_or(1) as u32) }
 }
 
 #[cfg(test)]

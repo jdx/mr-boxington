@@ -17,6 +17,7 @@ use serde::de::DeserializeOwned;
 use std::ffi::OsStr;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::process::{ExitCode, ExitStatus};
 
 /// A compilation reconstructed from the cache.
 pub(crate) struct CachedCompilation {
@@ -443,4 +444,26 @@ fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> 
     }
     out.extend_from_slice(&haystack[index..]);
     out
+}
+
+/// Reproduce a compiler's exit status as this process's own.
+///
+/// A shim that captured the compiler's output has to hand the status back
+/// itself, and a compiler killed by a signal reports no exit code at all --
+/// reporting 1 there would turn a crash into an ordinary failure.
+#[cfg(unix)]
+pub(crate) fn exit_code(status: ExitStatus) -> ExitCode {
+    use std::os::unix::process::ExitStatusExt as _;
+    ExitCode::from(
+        status
+            .code()
+            .unwrap_or_else(|| 128 + status.signal().unwrap_or(1)) as u8,
+    )
+}
+
+#[cfg(windows)]
+pub(crate) fn exit_code(status: ExitStatus) -> ExitCode {
+    // SAFETY: this process is only a compiler wrapper and must preserve the
+    // compiler's full Windows status code, which stable ExitCode cannot hold.
+    unsafe { windows_sys::Win32::System::Threading::ExitProcess(status.code().unwrap_or(1) as u32) }
 }

@@ -805,26 +805,16 @@ fn lowercase_include_flags_are_not_swallowed_by_the_include_path_prefix() {
             PathBuf::from("after"),
         ]
     );
-    assert!(
-        invocation
-            .required_inputs()
-            .contains(&PathBuf::from("forced.h"))
-    );
-    assert!(
-        invocation
-            .required_inputs()
-            .contains(&PathBuf::from("macros.h"))
-    );
+    // Forced includes are keyed but not required to exist beside the working
+    // directory; the include chain decides where they come from.
+    assert_eq!(invocation.required_inputs(), [PathBuf::from("src/a.c")]);
 
     // Each one is keyed under its own flag rather than as an include path.
     let mut context = context(&workspace, &target);
-    context.inputs = ["src/a.c", "forced.h", "macros.h"]
-        .into_iter()
-        .map(|name| CcActionInput {
-            path: workspace.join(name),
-            digest: digest_of(name),
-        })
-        .collect();
+    context.inputs = vec![CcActionInput {
+        path: workspace.join("src/a.c"),
+        digest: digest_of("source"),
+    }];
     let action = invocation.action(context).expect("action");
     let descriptor = String::from_utf8(action.bytes).expect("utf-8");
     for flag in [
@@ -861,4 +851,44 @@ fn tuning_for_the_local_cpu_bypasses() {
     // A named architecture is ordinary key material.
     let arguments = argv(&["-march=armv8-a", "-mtune=generic", "-c", "-o", "a.o", "a.c"]);
     assert!(CcInvocation::parse(&arguments).is_ok());
+}
+
+/// A forced include is resolved through the include chain, not against the
+/// working directory, so it must not be asserted as a required input: the
+/// dependency list names it at whatever path it was actually found at.
+#[test]
+fn forced_includes_are_not_required_to_sit_beside_the_working_directory() {
+    for flag in [
+        &["-Iinc", "-include", "prefix.h"][..],
+        &["-Iinc", "-imacros", "prefix.h"][..],
+        &["-Iinc", "--include=prefix.h"][..],
+    ] {
+        let mut values = flag.to_vec();
+        values.extend(["-c", "-o", "out.o", "src/a.c"]);
+        let invocation = CcInvocation::parse(&argv(&values)).expect("admitted");
+        assert_eq!(
+            invocation.required_inputs(),
+            [PathBuf::from("src/a.c")],
+            "only the source is a required input for {flag:?}"
+        );
+    }
+}
+
+/// The forced header still enters the key, so two compilations that force
+/// different headers cannot share an entry.
+#[test]
+fn forced_includes_still_enter_the_key() {
+    let build = |header: &str| {
+        let (workspace, target) = checkout("one");
+        let invocation =
+            CcInvocation::parse(&argv(&["-include", header, "-c", "-o", "out.o", "src/a.c"]))
+                .expect("admitted");
+        let mut context = context(&workspace, &target);
+        context.inputs = vec![CcActionInput {
+            path: workspace.join("src/a.c"),
+            digest: digest_of("source"),
+        }];
+        invocation.action(context).expect("action").digest
+    };
+    assert_ne!(build("one.h"), build("two.h"));
 }

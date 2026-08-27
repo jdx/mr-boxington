@@ -1177,8 +1177,12 @@ impl<'a> Parser<'a> {
             let path = PathBuf::from(self.take_value(value, None)?);
             match value {
                 "-isystem" | "-iquote" | "-idirafter" => self.include_dirs.push(path.clone()),
-                "-include" | "-imacros" => self.required_inputs.push(path.clone()),
                 "-isysroot" => self.sysroot = Some(path.clone()),
+                // `-include` and `-imacros` are deliberately not required
+                // inputs. The driver resolves the name through the include
+                // chain, so the file need not exist relative to the working
+                // directory, and the dependency list names it at whatever path
+                // it was actually found at.
                 _ => {}
             }
             self.parsed.push(Argument::Path {
@@ -1191,7 +1195,6 @@ impl<'a> Parser<'a> {
         // `cc` crate emits it for prefixed headers.
         if let Some(rest) = value.strip_prefix("--include=") {
             let path = PathBuf::from(rest);
-            self.required_inputs.push(path.clone());
             self.parsed.push(Argument::Path {
                 flag: "-include".into(),
                 path,

@@ -11,7 +11,7 @@
 
 use crate::materialize::{
     CachedCompilation, CachedOutput, Materialization, StagedOutputs, executable_mode_matches,
-    file_mode, find_blobs, persist_outputs, read_canonical_blob, read_verified_blob,
+    exit_code, file_mode, find_blobs, persist_outputs, read_canonical_blob, read_verified_blob,
     record_action_hit, record_verification, replay_bytes, resolve_executable,
     stage_verified_cached_output, staging_directory, validate_file_mode,
 };
@@ -57,8 +57,18 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     let invocation_digest = invocation.invocation_digest(&context)?;
     let task = prediction_task(&invocation_digest);
     let mut verification = None;
-    if let Some(prediction) = find_prediction(&task, &invocation_digest)? {
-        let discovered = prediction.discover(&working_dir, &context.path_mappings)?;
+    // A prediction that no longer describes the tree -- a header it named has
+    // been deleted, say -- is not an error, it is simply no longer usable. It
+    // must not abort the cache path: this adapter has no second way to build a
+    // key, so bypassing here would leave the compilation permanently uncached,
+    // with the same stale prediction failing the same way on every later build.
+    // Falling through compiles and republishes, which replaces it.
+    let usable = find_prediction(&task, &invocation_digest)?.and_then(|prediction| {
+        prediction
+            .discover(&working_dir, &context.path_mappings)
+            .ok()
+    });
+    if let Some(discovered) = usable {
         let mut candidate = context.clone();
         discovered.clone().apply_to(&mut candidate)?;
         let action = invocation.action(candidate)?;
@@ -109,7 +119,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
 
     replay_bytes(&output.stdout, &output.stderr)?;
     if !output.status.success() {
-        return Ok(exit_code(&output));
+        return Ok(exit_code(output.status));
     }
 
     // A failure to publish must not fail a compilation that already succeeded.
@@ -128,7 +138,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         #[cfg(not(debug_assertions))]
         let _ = error;
     }
-    Ok(exit_code(&output))
+    Ok(exit_code(output.status))
 }
 
 /// Digest the inputs the compiler reported, build the key, and store the
@@ -617,10 +627,6 @@ fn cached_matches(cached: &CachedCompilation, output: &Output) -> bool {
 /// Prefixed so a C source cannot be mistaken for a crate in the same table.
 fn compilation_name(invocation: &CcInvocation) -> String {
     format!("{ADAPTER}:{}", invocation.source_name())
-}
-
-fn exit_code(output: &Output) -> ExitCode {
-    ExitCode::from(u8::try_from(output.status.code().unwrap_or(1)).unwrap_or(1))
 }
 
 fn duration_ns(duration: std::time::Duration) -> u64 {
