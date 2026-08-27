@@ -161,7 +161,14 @@ pub struct RemoteCacheConfig {
     pub connect_timeout: Duration,
     /// Maximum time without response progress for ordinary requests.
     pub read_timeout: Duration,
-    /// Overall deadline for an individual blob download attempt.
+    /// Deadline for one blob download, spanning every retry attempt and the
+    /// backoff between them rather than bounding a single attempt.
+    ///
+    /// A single stalled attempt is already bounded by `connect_timeout` and
+    /// `read_timeout`, so this budget exists to cap the total wall-clock one
+    /// logical download may spend: exhausting it fails the download even when
+    /// retries remain. Size it for the largest artifact worth waiting on, not
+    /// for one attempt at it.
     pub download_timeout: Duration,
     /// Number of attempts after the initial request for retryable failures.
     pub retries: i64,

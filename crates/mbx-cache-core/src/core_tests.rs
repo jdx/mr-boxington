@@ -753,6 +753,14 @@ async fn downloads_decompress_zstd_responses() {
 }
 
 fn test_client(server: &mockito::ServerGuard) -> HttpRemoteCache {
+    test_client_with(server, Duration::from_secs(1), 0)
+}
+
+fn test_client_with(
+    server: &mockito::ServerGuard,
+    download_timeout: Duration,
+    retries: i64,
+) -> HttpRemoteCache {
     HttpRemoteCache::new(RemoteCacheConfig {
         base_url: server.url().parse().unwrap(),
         namespace: "test".into(),
@@ -761,8 +769,8 @@ fn test_client(server: &mockito::ServerGuard) -> HttpRemoteCache {
         oidc_audience: None,
         connect_timeout: Duration::from_secs(1),
         read_timeout: Duration::from_secs(1),
-        download_timeout: Duration::from_secs(1),
-        retries: 0,
+        download_timeout,
+        retries,
     })
     .unwrap()
 }
@@ -1295,4 +1303,107 @@ fn remote_urls_require_https_for_authenticated_requests() {
     assert!(validate_remote_url(&insecure, true).is_err());
     validate_remote_url(&insecure, false).unwrap();
     assert!(validate_remote_url(&"ftp://localhost/cache".parse().unwrap(), false).is_err());
+}
+
+/// `download_timeout` is a deadline for the whole download rather than a budget
+/// each attempt gets afresh, so it has to expire while retries are still
+/// unspent. Four retries sleep at least 100ms + 500ms + 2s + 7.5s between
+/// attempts, so returning well inside that shows the deadline cut the retry
+/// loop short instead of restarting with every attempt.
+#[tokio::test]
+async fn blob_download_timeout_spans_retries_rather_than_one_attempt() {
+    let mut server = mockito::Server::new_async().await;
+    let digest = CacheDigest::blake3(b"retried blob");
+    let request = server
+        .mock(
+            "GET",
+            format!("/v1/blobs/blake3/{}/{}", digest.hash, digest.size).as_str(),
+        )
+        .with_status(503)
+        .expect_at_least(1)
+        .create_async()
+        .await;
+    let client = test_client_with(&server, Duration::from_millis(200), 4);
+    let staging = tempfile::tempdir().unwrap();
+
+    let started = Instant::now();
+    let error = client
+        .get_blob_file(&digest, staging.path())
+        .await
+        .err()
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(
+        error
+            .to_string()
+            .contains("exceeded its 200ms budget across all attempts"),
+        "{error}"
+    );
+    assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+    request.assert_async().await;
+}
+
+/// The packed path shares the deadline semantics of the single-blob path; only
+/// the size of the budget differs, scaled by what the pack declares.
+#[tokio::test]
+async fn blob_pack_download_timeout_spans_retries_rather_than_one_attempt() {
+    let mut server = mockito::Server::new_async().await;
+    let digest = CacheDigest::blake3(b"retried packed blob");
+    mock_blob_pack_capabilities(&mut server).await;
+    let request = server
+        .mock("POST", "/v1/blobs:pack")
+        .with_status(503)
+        .expect_at_least(1)
+        .create_async()
+        .await;
+    let client = test_client_with(&server, Duration::from_millis(200), 4);
+    let staging = tempfile::tempdir().unwrap();
+
+    let started = Instant::now();
+    let error = client
+        .get_blob_pack(&[digest], staging.path())
+        .await
+        .err()
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(
+        error
+            .to_string()
+            .contains("exceeded its 200ms budget across all attempts"),
+        "{error}"
+    );
+    assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+    request.assert_async().await;
+}
+
+/// A 503 is transient, so without the deadline the retry loop would run to the
+/// end of its backoff. This is the control for the two tests above: the same
+/// server, given a budget large enough to cover the whole loop, spends every
+/// retry and fails with the server's error rather than a timeout.
+#[tokio::test]
+async fn transient_failures_exhaust_retries_within_a_generous_deadline() {
+    let mut server = mockito::Server::new_async().await;
+    let digest = CacheDigest::blake3(b"retried blob");
+    let request = server
+        .mock(
+            "GET",
+            format!("/v1/blobs/blake3/{}/{}", digest.hash, digest.size).as_str(),
+        )
+        .with_status(503)
+        .expect(2)
+        .create_async()
+        .await;
+    let client = test_client_with(&server, Duration::from_secs(30), 1);
+    let staging = tempfile::tempdir().unwrap();
+
+    let error = client
+        .get_blob_file(&digest, staging.path())
+        .await
+        .err()
+        .unwrap();
+
+    assert!(!error.to_string().contains("budget"), "{error}");
+    request.assert_async().await;
 }

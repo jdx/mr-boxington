@@ -80,7 +80,7 @@ Combined action-store and managed-target budget, or "none".
 - **Default:** `10m`
 - **Set with:** `MBX_HTTP_DOWNLOAD_TIMEOUT`
 
-Blob download timeout.
+Deadline for one blob download, retries and backoff included.
 
 ### `http.retries`
 

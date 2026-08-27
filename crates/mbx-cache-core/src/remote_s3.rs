@@ -77,7 +77,14 @@ pub struct S3RemoteCacheConfig {
     pub connect_timeout: Duration,
     /// Maximum time without response progress for ordinary requests.
     pub read_timeout: Duration,
-    /// Overall deadline for an individual blob download attempt.
+    /// Deadline for one blob download, spanning every retry attempt and the
+    /// backoff between them rather than bounding a single attempt.
+    ///
+    /// A single stalled attempt is already bounded by `connect_timeout` and
+    /// `read_timeout`, so this budget exists to cap the total wall-clock one
+    /// logical download may spend: exhausting it fails the download even when
+    /// retries remain. Size it for the largest artifact worth waiting on, not
+    /// for one attempt at it.
     pub download_timeout: Duration,
     /// Number of attempts after the initial request for retryable failures.
     pub retries: i64,
@@ -345,9 +352,17 @@ impl S3RemoteCache {
             }
             Ok(temporary)
         });
-        tokio::time::timeout(self.download_timeout, download)
+        let download_timeout = self.download_timeout;
+        // Deliberately outside `retry_async`: `download_timeout` is a deadline
+        // for the whole download, not a per-attempt bound. A stalled attempt is
+        // already caught by the client's connect and read timeouts.
+        tokio::time::timeout(download_timeout, download)
             .await
-            .map_err(|_| eyre!("remote cache blob download timed out for {url}"))?
+            .map_err(|_| {
+                eyre!(
+                    "remote cache blob download for {url} exceeded its {download_timeout:?} budget across all attempts"
+                )
+            })?
     }
 
     /// Fetch an object that must exist, turning any other status into an error.
