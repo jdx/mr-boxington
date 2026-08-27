@@ -49,8 +49,10 @@ one bucket between projects. Keys are laid out under
 `<prefix>/<namespace>/v1/`, so a bucket policy can scope a writer to its own
 prefix.
 
-An IAM policy needs only `s3:GetObject` and `s3:PutObject` on that prefix.
-Nothing lists the bucket.
+An IAM policy needs `s3:GetObject` and `s3:PutObject` on that prefix, and
+`s3:ListBucket` on the bucket. mbx never lists anything, but without that
+permission S3 answers `403` instead of `404` for an object that is not there —
+and then every cache miss looks like a failure rather than a miss.
 
 ### Cloudflare R2 and MinIO
 
@@ -70,7 +72,13 @@ in transit without TLS.
 
 ### What a bucket does not do
 
-A bucket stores objects; it does not answer batched lookups, stream blob packs,
+A cache server verifies every blob against the digest in its URL before storing
+it. A bucket stores what it is given, so a corrupted object in the local store
+can be published under a key naming different content, and because writes are
+create-only nothing later overwrites it: every machine that downloads it fails
+verification and recompiles. `mbx cache verify` finds such an object locally.
+
+A bucket also does not answer batched lookups, stream blob packs,
 or negotiate compression. mbx asks for none of them against S3 and falls back
 to per-object requests, which is what every version of the protocol has done
 against a server without the extensions. Expect more requests for the same
