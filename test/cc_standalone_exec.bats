@@ -85,6 +85,16 @@ EOF
   run "$MBX_BIN" exec /bin/echo a -- b
   assert_success
   assert_line 'a -- b'
+
+  # One that separates exec's own options from the command belongs to exec,
+  # and running it as the program would fail.
+  run "$MBX_BIN" exec -- /bin/echo hi
+  assert_success
+  assert_line 'hi'
+
+  run "$MBX_BIN" exec --project-root "$project" -- /bin/echo ok
+  assert_success
+  assert_line 'ok'
 }
 
 @test "a configured build directory outlives the session that configured it" {

@@ -282,6 +282,13 @@ fn original_exec_arguments(arguments: &[std::ffi::OsString]) -> Result<Vec<Strin
             break;
         }
     }
+    // A delimiter separating exec's options from the command was consumed by
+    // the parser, so putting it back would make `--` the program to run. One
+    // inside the command -- `cmake --build build -- -j8` -- is past the first
+    // positional and is exactly what this recovery exists to preserve.
+    if rest.first().is_some_and(|argument| argument == "--") {
+        rest = &rest[1..];
+    }
     strings(rest)
 }
 

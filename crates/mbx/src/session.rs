@@ -990,7 +990,13 @@ pub fn install_path_shims(directory: &Path) -> Result<Option<PathShims>> {
 /// and recreating would not.
 #[cfg(unix)]
 fn link_path_shim(executable: &Path, destination: &Path) -> Result<()> {
-    if std::fs::read_link(destination).is_ok_and(|target| target == executable) {
+    // Absolutized for the same reason [`symlink_shim`] does it: a symlink is
+    // resolved from the directory holding it, which here is the cache's shim
+    // directory and never the caller's. `current_exe` has been absolute on
+    // every platform mbx runs on, but its contract does not promise one, and a
+    // relative target would point inside the shim directory itself.
+    let target = std::path::absolute(executable)?;
+    if std::fs::read_link(destination).is_ok_and(|existing| existing == target) {
         return Ok(());
     }
     let staging = destination.with_file_name(format!(
@@ -1002,7 +1008,7 @@ fn link_path_shim(executable: &Path, destination: &Path) -> Result<()> {
         std::process::id()
     ));
     let _ = std::fs::remove_file(&staging);
-    std::os::unix::fs::symlink(executable, &staging)?;
+    std::os::unix::fs::symlink(&target, &staging)?;
     std::fs::rename(&staging, destination)
         .wrap_err_with(|| format!("failed to install the shim {}", destination.display()))?;
     Ok(())
