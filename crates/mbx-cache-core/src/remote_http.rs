@@ -455,9 +455,16 @@ impl HttpRemoteCache {
                 decode_blob_pack(response, digests, staging_dir).await?,
             ))
         });
+        // Deliberately outside `retry_async`: `download_timeout` is a deadline
+        // for the whole download, not a per-attempt bound. A stalled attempt is
+        // already caught by the client's connect and read timeouts.
         tokio::time::timeout(download_timeout, download)
             .await
-            .map_err(|_| eyre!("remote cache blob pack download timed out for {url}"))?
+            .map_err(|_| {
+                eyre!(
+                    "remote cache blob pack download for {url} exceeded its {download_timeout:?} budget across all attempts"
+                )
+            })?
     }
 
     pub(crate) async fn get_action_result(
@@ -730,9 +737,17 @@ impl HttpRemoteCache {
             }
             Ok(temporary)
         });
-        tokio::time::timeout(self.download_timeout, download)
+        let download_timeout = self.download_timeout;
+        // Deliberately outside `retry_async`: `download_timeout` is a deadline
+        // for the whole download, not a per-attempt bound. A stalled attempt is
+        // already caught by the client's connect and read timeouts.
+        tokio::time::timeout(download_timeout, download)
             .await
-            .map_err(|_| eyre!("remote cache blob download timed out for {url}"))?
+            .map_err(|_| {
+                eyre!(
+                    "remote cache blob download for {url} exceeded its {download_timeout:?} budget across all attempts"
+                )
+            })?
     }
 
     pub(crate) async fn blob_pack_upload_limits(&self) -> Result<Option<BlobPackLimits>> {
@@ -916,6 +931,11 @@ pub(crate) fn blob_pack_chunk(
     Ok(chunk)
 }
 
+/// Scale the configured download deadline by the work a pack declares.
+///
+/// The deadline covers the whole download, retries included, so one request
+/// carrying many megabytes or thousands of objects needs a proportionally
+/// larger budget than the single blob the configured value is written for.
 fn blob_pack_download_timeout(base: Duration, digests: &[CacheDigest]) -> Duration {
     let bytes = digests
         .iter()

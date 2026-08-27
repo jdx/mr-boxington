@@ -228,3 +228,13 @@ Remote blobs are compressed with zstd. `MBX_HTTP_DOWNLOAD_TIMEOUT` is separate
 from the normal request timeout because artifacts can be much larger than
 metadata responses. Failed requests are retried according to
 `MBX_HTTP_RETRIES`.
+
+`MBX_HTTP_DOWNLOAD_TIMEOUT` is a deadline for the whole download rather than a
+budget per attempt: it spans every retry named by `MBX_HTTP_RETRIES` and the
+backoff between them, so a download that exhausts it fails even with retries
+left. That bounds how long one blob can hold a build open, and a stalled attempt
+is separately cut short by `MBX_HTTP_TIMEOUT`. Both the protocol server and the
+bucket backend read it the same way; a packed request to a protocol server
+scales the deadline up with the bytes and object count it asks for, since the
+configured value describes a single blob. Raise `MBX_HTTP_DOWNLOAD_TIMEOUT` if a
+slow link makes large artifacts run out of time before their retries are spent.

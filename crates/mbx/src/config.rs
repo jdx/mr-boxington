@@ -223,7 +223,7 @@ struct RawHttp {
     /// Connect and request timeout.
     #[usage(env = "MBX_HTTP_TIMEOUT", default = "30s", ty = "duration")]
     timeout: String,
-    /// Blob download timeout.
+    /// Deadline for one blob download, retries and backoff included.
     #[usage(env = "MBX_HTTP_DOWNLOAD_TIMEOUT", default = "10m", ty = "duration")]
     download_timeout: String,
     /// Request retries.

@@ -35,6 +35,19 @@ fn test_store(server: &mockito::ServerGuard) -> S3RemoteCache {
     S3RemoteCache::new(config(server)).unwrap()
 }
 
+fn test_store_with(
+    server: &mockito::ServerGuard,
+    download_timeout: Duration,
+    retries: i64,
+) -> S3RemoteCache {
+    S3RemoteCache::new(S3RemoteCacheConfig {
+        download_timeout,
+        retries,
+        ..config(server)
+    })
+    .unwrap()
+}
+
 /// The key a blob of these bytes lands on, under the test configuration.
 fn blob_path(digest: &CacheDigest) -> String {
     format!(
@@ -861,4 +874,69 @@ fn error_codes_are_read_out_of_an_s3_error_document() {
         Some("AccessDenied")
     );
     assert_eq!(error_code(&"é".repeat(16 * 1024)), None);
+}
+
+/// The bucket backend reads `download_timeout` exactly as the protocol backend
+/// does: a deadline for the whole download, not a budget each attempt gets
+/// afresh. A `503` is what a store sends for a prefix under load and is
+/// retryable, so four retries would otherwise sleep at least
+/// 100ms + 500ms + 2s + 7.5s; returning well inside that shows the deadline cut
+/// the retry loop short instead of restarting with every attempt.
+#[tokio::test]
+async fn blob_download_timeout_spans_retries_rather_than_one_attempt() {
+    let mut server = mockito::Server::new_async().await;
+    let digest = CacheDigest::blake3(b"retried blob");
+    let request = server
+        .mock("GET", blob_path(&digest).as_str())
+        .with_status(503)
+        .with_body(s3_error_body("SlowDown"))
+        .expect_at_least(1)
+        .create_async()
+        .await;
+    let store = test_store_with(&server, Duration::from_millis(200), 4);
+    let staging = tempfile::tempdir().unwrap();
+
+    let started = Instant::now();
+    let error = store
+        .get_blob_file(&digest, staging.path())
+        .await
+        .err()
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(
+        error
+            .to_string()
+            .contains("exceeded its 200ms budget across all attempts"),
+        "{error}"
+    );
+    assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+    request.assert_async().await;
+}
+
+/// The control for the test above: the same store, given a budget large enough
+/// to cover the whole retry loop, spends every retry and fails with the store's
+/// own error rather than a timeout.
+#[tokio::test]
+async fn transient_failures_exhaust_retries_within_a_generous_deadline() {
+    let mut server = mockito::Server::new_async().await;
+    let digest = CacheDigest::blake3(b"retried blob");
+    let request = server
+        .mock("GET", blob_path(&digest).as_str())
+        .with_status(503)
+        .with_body(s3_error_body("SlowDown"))
+        .expect(2)
+        .create_async()
+        .await;
+    let store = test_store_with(&server, Duration::from_secs(30), 1);
+    let staging = tempfile::tempdir().unwrap();
+
+    let error = store
+        .get_blob_file(&digest, staging.path())
+        .await
+        .err()
+        .unwrap();
+
+    assert!(!error.to_string().contains("budget"), "{error}");
+    request.assert_async().await;
 }
