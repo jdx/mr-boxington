@@ -56,7 +56,7 @@ pub use mbx_cache_protocol::{
     ActionResult as RemoteActionResult, BLOB_MEDIA_TYPE, BLOB_PACK_BLOBS_HEADER,
     BLOB_PACK_BYTES_HEADER, BLOB_PACK_HEADER_BYTES, BLOB_PACK_MAGIC, BLOB_PACK_MEDIA_TYPE,
     BLOB_PACK_RECEIPT_MEDIA_TYPE, CLIENT_METADATA_MEDIA_TYPE, Capabilities, CapabilityFeatures,
-    CapabilityLimits, CapabilityProtocol, DIGEST_LIST_MEDIA_TYPE, DIRECTORY_MEDIA_TYPE,
+    CapabilityLimits, CapabilityProtocol, CcMetadata, DIGEST_LIST_MEDIA_TYPE, DIRECTORY_MEDIA_TYPE,
     Digest as CacheDigest, DigestAlgorithm, Directory as CacheDirectory,
     DirectoryNode as CacheDirectoryNode, FileNode as CacheFileNode, NAMESPACE_HEADER,
     PROTOCOL_HEADER, PROTOCOL_VERSION, RustcMetadata, SymlinkNode as CacheSymlinkNode,

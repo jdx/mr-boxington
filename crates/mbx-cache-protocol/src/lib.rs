@@ -316,6 +316,30 @@ impl RustcMetadata {
     }
 }
 
+/// C and C++ action metadata stored alongside compiled objects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CcMetadata {
+    /// Metadata schema version.
+    pub version: u8,
+    /// Adapter-defined output kind.
+    pub kind: String,
+    /// Digest of captured compiler standard output.
+    pub stdout: Digest,
+    /// Digest of captured compiler standard error.
+    pub stderr: Digest,
+}
+
+impl CcMetadata {
+    /// Whether the metadata satisfies the version-one cc schema invariants.
+    pub fn validate(&self) -> bool {
+        self.version == 1
+            && self.kind == "cc"
+            && self.stdout.validate().is_ok()
+            && self.stderr.validate().is_ok()
+    }
+}
+
 /// Adapter-owned data needed to reconstruct an action from a prior task run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
