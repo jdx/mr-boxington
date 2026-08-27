@@ -78,6 +78,35 @@ manifest as a normal mbx build. Prefetch requires a configured remote in
 `read-only` or `read-write` mode, waits for every predicted action, and returns
 an error when the manifest lookup fails.
 
+## Deferred publication
+
+An upload is not on the critical path of the build that produced it. A store
+request returns once the object is durable in the local content-addressed store,
+and the upload it implies is queued and performed while the build continues, so a
+compilation never waits for a round trip that only later builds benefit from.
+
+Two rules follow from that:
+
+- An action result is published only after every blob it references. A server
+  validates an action result's output tree before committing it, so publishing
+  one early would be rejected — and a reader that fetched it would find outputs
+  it cannot restore. A blob that fails to upload therefore withholds the action
+  result naming it, and a task manifest waits for the results it predicts.
+- The session drains its queue before exiting. Uploads belong to the build's
+  process, so a command killed part way through publishes less than it stored.
+  Nothing is lost but hit rate: the next build recomputes what never landed.
+
+A failed upload is reported, counted in `remote_failures`, and recovered from.
+The build keeps its local result either way. The session summary reports what was
+published and what the drain cost:
+
+```text
+mbx[cache]: uploads: 143 published, 0 not published; 412ms waited for after the build
+```
+
+`MBX_STATS_REPORT` carries the same figures as `background_uploads`,
+`background_upload_failures`, and `upload_drain_duration_ns`.
+
 ## Transfer behavior
 
 Remote blobs are compressed with zstd. `MBX_HTTP_DOWNLOAD_TIMEOUT` is separate

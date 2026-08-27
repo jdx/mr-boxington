@@ -9,7 +9,8 @@ subcommand.
 3. Cargo runs normally with the shim set as `RUSTC_WRAPPER`.
 4. The shim analyzes each rustc invocation and derives a content-addressed action key.
 5. A hit restores the action's outputs; a miss runs the real compiler and publishes the result.
-6. The agent exits with the build. There is no persistent daemon.
+6. The agent exits with the build, draining any remote uploads it still owes.
+   There is no persistent daemon.
 
 Every mbx command works this way; there is no separate mode to turn on and no
 component to keep up to date.

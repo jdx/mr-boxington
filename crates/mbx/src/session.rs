@@ -211,6 +211,9 @@ impl CacheSession {
             server.await??;
         }
         self.agent.cancel_prefetches().await;
+        // Cancelling first hands the queue the transfer budget the abandoned
+        // downloads were holding.
+        self.agent.wait_for_uploads().await;
         let mut stats = self.agent.stats();
         stats.session_duration_ns = duration_ns(self.started.elapsed());
         // The same totals the summary reports, so a reader of a finished stream
@@ -409,6 +412,9 @@ struct StatsReport {
     bypasses: BTreeMap<String, u64>,
     downloaded_bytes: u64,
     uploaded_bytes: u64,
+    background_uploads: u64,
+    background_upload_failures: u64,
+    upload_drain_duration_ns: u64,
     stored_bytes: u64,
     restored_output_files: u64,
     restored_output_bytes: u64,
@@ -480,6 +486,9 @@ impl From<&AgentStats> for StatsReport {
             bypasses: stats.bypasses.clone(),
             downloaded_bytes: stats.downloaded_bytes,
             uploaded_bytes: stats.uploaded_bytes,
+            background_uploads: stats.background_uploads,
+            background_upload_failures: stats.background_upload_failures,
+            upload_drain_duration_ns: stats.upload_drain_duration_ns,
             stored_bytes: stats.stored_bytes,
             restored_output_files: stats.restored_output_files,
             restored_output_bytes: stats.restored_output_bytes,
@@ -605,6 +614,14 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
         format_nanos(stats.local_cas_write_duration_ns),
         format_nanos(stats.materialization_duration_ns),
     ));
+    if stats.background_uploads > 0 || stats.background_upload_failures > 0 {
+        note(&format!(
+            "mbx[cache]: uploads: {} published, {} not published; {} waited for after the build",
+            stats.background_uploads,
+            stats.background_upload_failures,
+            format_nanos(stats.upload_drain_duration_ns),
+        ));
+    }
     if stats.restored_output_files > 0 {
         note(&format!(
             "mbx[cache]: materialization: {} outputs ({}) reflinked, {} outputs ({}) copied",
