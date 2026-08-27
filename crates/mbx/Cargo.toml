@@ -23,9 +23,9 @@ dirs = "6"
 eyre = "0.6"
 fslock = "0.2"
 log = "0.4"
-mbx-cache-core = { path = "../mbx-cache-core", version = "0.6.0", default-features = false }
+mbx-cache-core = { path = "../mbx-cache-core", version = "0.7.0", default-features = false }
 mbx-cache-cargo = { path = "../mbx-cache-cargo", version = "0.1.0", default-features = false }
-mbx-cache-rustc = { path = "../mbx-cache-rustc", version = "0.6.0", default-features = false }
+mbx-cache-rustc = { path = "../mbx-cache-rustc", version = "0.7.0", default-features = false }
 mbx-cache-store = { path = "../mbx-cache-store", version = "0.1.0", default-features = false }
 rand = "0.10"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }

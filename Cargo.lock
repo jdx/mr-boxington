@@ -1429,7 +1429,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-compression",
  "base64 0.23.1",
@@ -1470,7 +1470,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-rustc"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "mbx-cache-core",
  "serde",
