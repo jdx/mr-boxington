@@ -97,6 +97,14 @@ Connect and request timeout.
 
 Let local workspace members compile incrementally.
 
+### `learned_incremental`
+
+- **Type:** `bool`
+- **Default:** `true`
+- **Set with:** `MBX_LEARNED_INCREMENTAL`
+
+Compile crates that keep missing the cache with changed content incrementally, keeping their outputs out of the shared cache.
+
 ### `log`
 
 - **Type:** `string`

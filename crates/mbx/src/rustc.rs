@@ -8,8 +8,8 @@ use mbx_cache_rustc::{
     ActionContext, CompilerIdentity, DiscoveredInputs, PathMapping, RustcAction, RustcDepInfo,
     RustcInputPrediction, RustcInvocation, RustcOutputs, normalize_mapped_path,
 };
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{Read as _, Write as _};
@@ -48,6 +48,90 @@ struct CompileTiming {
     duration_ns: u64,
 }
 
+/// Consecutive misses with changed content before a unit compiles incrementally.
+///
+/// One changed key is an edit; a run of them is a developer working here. The
+/// threshold is what separates the two, and it is small because the cost of
+/// guessing wrong is one uncached compilation the unit was going to pay anyway.
+const HOT_STREAK_THRESHOLD: u32 = 3;
+
+/// Schema version of the per-checkout churn record.
+const CHURN_STATE_VERSION: u8 = 1;
+
+/// How large one unit's incremental state may grow before it is discarded.
+const INCREMENTAL_DIR_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// What a churning unit gets: its own incremental state, and no publication.
+#[derive(Clone, Debug, Default)]
+struct LearnedPlan {
+    /// Whether this unit has churned often enough to keep incremental state.
+    hot: bool,
+    /// Consecutive changed-content misses, including this one.
+    streak: u32,
+    /// Where that state lives, once somewhere to put it has been resolved.
+    directory: Option<PathBuf>,
+    /// Where to record what this compilation compiled, and what that was.
+    record: Option<(PathBuf, CacheDigest)>,
+}
+
+impl LearnedPlan {
+    /// Find somewhere to keep the state, for a unit that earned it.
+    fn resolved(mut self, invocation: &CacheDigest) -> Self {
+        if self.hot {
+            self.directory = incremental_directory(invocation);
+        }
+        self
+    }
+
+    /// Record what this crate compiled, now that it has.
+    ///
+    /// Deliberately after the compiler succeeds rather than before it runs. A
+    /// failed compilation leaves nothing behind to compare against, so
+    /// recording its sources would make the retry that follows -- with nothing
+    /// edited in between -- look like a crate that had settled, and drop it
+    /// back to compiling from scratch.
+    fn record_compiled(&self) {
+        let Some((path, sources)) = &self.record else {
+            return;
+        };
+        if let Err(error) = write_churn_state(path, sources, self.streak) {
+            eprintln!("mbx[warning]: churn was not recorded for this crate: {error:#}");
+        }
+    }
+
+    /// Whether this compilation actually carries incremental state. A hot unit
+    /// with nowhere to keep it compiles and publishes like any other miss.
+    fn engaged(&self) -> bool {
+        self.directory.is_some()
+    }
+}
+
+/// What one checkout last compiled for one unit, and how long its sources have
+/// been moving.
+///
+/// Kept beside the incremental state it decides, in this checkout's target
+/// directory, rather than in the prediction manifest: a manifest is shared by
+/// every worktree resolving the same lockfile, so a streak recorded there would
+/// let one developer's edit loop mark a crate hot for a sibling worktree that
+/// is merely building it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChurnState {
+    /// Version of this record's schema.
+    version: u8,
+    /// Digest of the sources compiled here last time.
+    sources: String,
+    /// Consecutive compilations whose sources had changed.
+    streak: u32,
+}
+
+/// What every step of one compilation needs to identify it.
+struct Compilation<'a> {
+    rustc: &'a OsStr,
+    invocation: &'a RustcInvocation,
+    working_dir: &'a Path,
+    portable: &'a Portable,
+}
+
 pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode> {
     let working_dir = std::env::current_dir()?;
     // The orchestrated session supplies the target root. A persistent wrapper
@@ -65,8 +149,18 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     let outputs = invocation.outputs(&working_dir)?;
 
     let verify = session::verify_requested();
+    // A shadow compilation compares its result against a cached one, which an
+    // incremental artifact would never match, so the two modes are exclusive.
+    let learned_enabled = session::learned_incremental_requested() && !verify;
     let mut verification = None;
     let mut action_lookup_attempted = false;
+    let mut learned = LearnedPlan::default();
+    let compilation = Compilation {
+        rustc,
+        invocation: &invocation,
+        working_dir: &working_dir,
+        portable: &portable,
+    };
     if outputs.dep_info.is_file()
         && let Ok((candidates, discovered)) = action_from_current_dep_info(
             rustc,
@@ -79,18 +173,10 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
         action_lookup_attempted = true;
         match restore_candidates(&candidates, &outputs, &discovered, !verify) {
             Ok(Some((action, mut cached))) => {
-                match prediction_timing(rustc, &invocation, &working_dir, &portable) {
+                match prediction_timing(&compilation) {
                     Ok(timing) => {
                         cached.restore.avoided_compiler_duration_ns = timing.duration_ns;
-                        record_prediction(
-                            rustc,
-                            &invocation,
-                            &action,
-                            &discovered,
-                            &working_dir,
-                            &portable,
-                            &timing,
-                        );
+                        record_prediction(&compilation, &action, &discovered, &timing);
                     }
                     Err(error) => {
                         eprintln!("mbx[warning]: compiler timing was not refreshed: {error:#}");
@@ -104,7 +190,9 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                     return Ok(ExitCode::SUCCESS);
                 }
             }
-            Ok(None) => {}
+            Ok(None) => {
+                learned = plan_learned_reuse(&compilation, &discovered, learned_enabled);
+            }
             Err(error) => {
                 eprintln!("mbx[warning]: result was not restored: {error:#}");
             }
@@ -112,13 +200,12 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     }
     if !action_lookup_attempted {
         match restore_predicted_result(
-            rustc,
-            &invocation,
+            &compilation,
             &outputs,
-            &working_dir,
-            &portable,
             !verify,
             &mut action_lookup_attempted,
+            learned_enabled,
+            &mut learned,
         ) {
             Ok(Some(cached)) => {
                 if verify {
@@ -137,11 +224,17 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
 
     let compilation_started = SystemTime::now();
     let compiler_timer = Instant::now();
-    let output = Command::new(rustc)
-        .args(&arguments)
-        .current_dir(&working_dir)
-        .output()
-        .wrap_err("failed to execute rustc")?;
+    let mut command = Command::new(rustc);
+    command.args(&arguments).current_dir(&working_dir);
+    if let Some(directory) = learned.directory.as_deref() {
+        // Appended here rather than to the parsed argument vector: the parser
+        // treats incremental state as uncacheable and would bypass the whole
+        // compilation, which is the opposite of what this is for.
+        let mut flag = OsString::from("-Cincremental=");
+        flag.push(directory);
+        command.arg(flag);
+    }
+    let output = command.output().wrap_err("failed to execute rustc")?;
     let timing = CompileTiming {
         crate_name: invocation.crate_name().to_string(),
         duration_ns: compiler_timer
@@ -153,6 +246,8 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     session::record_compiler_invocation(
         if verification.is_some() {
             "verification"
+        } else if learned.engaged() {
+            "incremental"
         } else if action_lookup_attempted {
             "miss"
         } else {
@@ -171,6 +266,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
         return Ok(exit_code(output.status));
     }
     if output.status.success() {
+        learned.record_compiled();
         let publication: Result<()> = (|| {
             let (candidates, discovered) = action_from_dep_info(
                 rustc,
@@ -181,17 +277,19 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             )?;
             discovered.verify_not_modified_since(compilation_started)?;
             discovered.verify()?;
-            let action = candidates.publishable(&portable, &outputs.files)?;
-            publish_result(&action.digest, &action.bytes, &outputs, &output)?;
-            record_prediction(
-                rustc,
-                &invocation,
-                &action.digest,
-                &discovered,
-                &working_dir,
-                &portable,
-                &timing,
-            );
+            // An incremental artifact carries state from this checkout's edit
+            // history, so it is recorded as what the unit currently contains --
+            // which is how the next build notices the churn ended -- but never
+            // published for another checkout to restore. The literal key is
+            // enough for that, and it skips reading the outputs back.
+            let action = if learned.engaged() {
+                &candidates.literal
+            } else {
+                let action = candidates.publishable(&portable, &outputs.files)?;
+                publish_result(&action.digest, &action.bytes, &outputs, &output)?;
+                action
+            };
+            record_prediction(&compilation, &action.digest, &discovered, &timing);
             Ok(())
         })();
         if let Err(error) = publication {
@@ -201,16 +299,185 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     Ok(exit_code(output.status))
 }
 
+/// Decide whether a missed compilation should carry its own incremental state.
+///
+/// The comparison is against this crate's own sources, not against its action
+/// key: a key also hashes the artifacts the crate links against, so a rebuilt
+/// dependency changes it without anybody having touched this crate. Watching
+/// the key would drag the whole cone above an edited crate into compiling
+/// incrementally and withholding its results, which is the sharing loss this
+/// is meant to avoid.
+///
+/// Unchanged sources are therefore never churn, however the compilation got
+/// here. A miss on them means something else lost the result -- a wiped target
+/// directory, a first build in this checkout -- and recompiling normally
+/// republishes it for everyone.
+fn learned_plan(
+    recorded: Option<&ChurnState>,
+    sources: &CacheDigest,
+    enabled: bool,
+) -> LearnedPlan {
+    let streak = match recorded {
+        Some(recorded) if recorded.sources == sources.key() => 0,
+        // Capped at the threshold: the streak is a state, not a tally, and
+        // letting it climb would only delay noticing that the churn stopped.
+        Some(recorded) => recorded.streak.saturating_add(1).min(HOT_STREAK_THRESHOLD),
+        None => 0,
+    };
+    LearnedPlan {
+        hot: enabled && streak >= HOT_STREAK_THRESHOLD,
+        streak,
+        directory: None,
+        record: None,
+    }
+}
+
+/// Where one unit keeps its incremental state.
+///
+/// It lives under the target directory the session already manages, so a
+/// managed target reclaims it with everything else it holds, and `cargo clean`
+/// reaches it in a checkout that owns its own. A shim with no session has
+/// nowhere of its own to put it, and compiles normally instead.
+fn incremental_directory(invocation: &CacheDigest) -> Option<PathBuf> {
+    let target_dir = std::env::var_os(session::TARGET_DIR_ENV)?;
+    let key = invocation.key();
+    let shard = key.get(..16)?;
+    let directory = PathBuf::from(target_dir)
+        .join("mbx-incremental")
+        .join(shard);
+    match prepare_incremental_directory(&directory) {
+        Ok(()) => Some(directory),
+        Err(error) => {
+            eprintln!("mbx[warning]: incremental state was not prepared: {error:#}");
+            None
+        }
+    }
+}
+
+/// Make sure the unit's state directory exists and is not unbounded.
+///
+/// Incremental state grows with the edit history rather than the source, so it
+/// is discarded wholesale once it is large. Losing it costs one full
+/// recompilation, which is what this unit would have paid without it.
+fn prepare_incremental_directory(directory: &Path) -> Result<()> {
+    if directory_bytes(directory) > INCREMENTAL_DIR_MAX_BYTES {
+        std::fs::remove_dir_all(directory)
+            .wrap_err("failed to discard oversized incremental state")?;
+    }
+    std::fs::create_dir_all(directory).wrap_err("failed to create the incremental directory")
+}
+
+fn directory_bytes(directory: &Path) -> u64 {
+    let mut total = 0;
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        let Ok(listing) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in listing.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else if metadata.is_file() {
+                total += metadata.len();
+            }
+        }
+    }
+    total
+}
+
+/// Work out the plan for a compilation that is about to miss.
+///
+/// Reads what this checkout last compiled for the unit, decides, and records
+/// what it is about to compile now. A checkout with nowhere to keep that -- a
+/// shim running without a session -- compiles normally.
+fn plan_learned_reuse(
+    compilation: &Compilation<'_>,
+    discovered: &DiscoveredInputs,
+    enabled: bool,
+) -> LearnedPlan {
+    let planned = (|| {
+        let sources = compilation.invocation.source_fingerprint(discovered);
+        let context = base_action_context(
+            compilation.rustc,
+            compilation.working_dir,
+            compilation.portable,
+        )?;
+        let unit = compilation.invocation.invocation_digest(&context)?;
+        let Some(state_path) = churn_state_path(&unit) else {
+            return Result::<LearnedPlan>::Ok(LearnedPlan::default());
+        };
+        let plan = learned_plan(read_churn_state(&state_path).as_ref(), &sources, enabled);
+        Ok(LearnedPlan {
+            record: Some((state_path, sources)),
+            ..plan
+        }
+        .resolved(&unit))
+    })();
+    match planned {
+        Ok(plan) => plan,
+        Err(error) => {
+            eprintln!("mbx[warning]: churn was not tracked for this crate: {error:#}");
+            LearnedPlan::default()
+        }
+    }
+}
+
+/// Where this checkout records what it last compiled for one unit.
+///
+/// A sibling of the unit's incremental directory, so both are reclaimed with
+/// the target directory that holds them.
+fn churn_state_path(unit: &CacheDigest) -> Option<PathBuf> {
+    let target_dir = std::env::var_os(session::TARGET_DIR_ENV)?;
+    let key = unit.key();
+    let shard = key.get(..16)?;
+    Some(
+        PathBuf::from(target_dir)
+            .join("mbx-incremental")
+            .join(format!("{shard}.json")),
+    )
+}
+
+/// A record this version cannot read is treated as no record: the cost is one
+/// compilation that does not count toward a streak.
+fn read_churn_state(path: &Path) -> Option<ChurnState> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice::<ChurnState>(&bytes)
+        .ok()
+        .filter(|state| state.version == CHURN_STATE_VERSION)
+}
+
+fn write_churn_state(path: &Path, sources: &CacheDigest, streak: u32) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .wrap_err("failed to create the incremental state directory")?;
+    }
+    let state = ChurnState {
+        version: CHURN_STATE_VERSION,
+        sources: sources.key(),
+        streak,
+    };
+    crate::util::write_atomic(path, &serde_json::to_vec(&state)?)
+        .wrap_err("failed to record what this crate last compiled")
+}
+
 fn restore_predicted_result(
-    rustc: &OsStr,
-    invocation: &RustcInvocation,
+    compilation: &Compilation<'_>,
     outputs: &RustcOutputs,
-    working_dir: &Path,
-    portable: &Portable,
     restore_outputs: bool,
     action_lookup_attempted: &mut bool,
+    learned_enabled: bool,
+    learned: &mut LearnedPlan,
 ) -> Result<Option<CachedCompilation>> {
-    let mut context = base_action_context(rustc, working_dir, portable)?;
+    let Compilation {
+        invocation,
+        working_dir,
+        portable,
+        ..
+    } = compilation;
+    let mut context = base_action_context(compilation.rustc, working_dir, portable)?;
     let invocation_digest = invocation.invocation_digest(&context)?;
     let task = prediction_task(&invocation_digest);
     let responses = session::request_agent(&[AgentRequest::FindActionPrediction {
@@ -260,7 +527,10 @@ fn restore_predicted_result(
             record_prediction_value(invocation_digest, action, prediction.payload);
             Ok(Some(cached))
         }
-        None => Ok(None),
+        None => {
+            *learned = plan_learned_reuse(compilation, &discovered, learned_enabled);
+            Ok(None)
+        }
     }
 }
 
@@ -389,16 +659,18 @@ fn base_action_context(
 }
 
 fn record_prediction(
-    rustc: &OsStr,
-    invocation: &RustcInvocation,
+    compilation: &Compilation<'_>,
     action: &CacheDigest,
     discovered: &DiscoveredInputs,
-    working_dir: &Path,
-    portable: &Portable,
     timing: &CompileTiming,
 ) {
     let result = (|| {
-        let context = base_action_context(rustc, working_dir, portable)?;
+        let context = base_action_context(
+            compilation.rustc,
+            compilation.working_dir,
+            compilation.portable,
+        )?;
+        let invocation = compilation.invocation;
         let invocation_digest = invocation.invocation_digest(&context)?;
         let mut prediction = invocation.prediction(&context, discovered)?;
         prediction.version = prediction.version.max(2);
@@ -413,14 +685,13 @@ fn record_prediction(
     }
 }
 
-fn prediction_timing(
-    rustc: &OsStr,
-    invocation: &RustcInvocation,
-    working_dir: &Path,
-    portable: &Portable,
-) -> Result<CompileTiming> {
-    let context = base_action_context(rustc, working_dir, portable)?;
-    let invocation_digest = invocation.invocation_digest(&context)?;
+fn prediction_timing(compilation: &Compilation<'_>) -> Result<CompileTiming> {
+    let context = base_action_context(
+        compilation.rustc,
+        compilation.working_dir,
+        compilation.portable,
+    )?;
+    let invocation_digest = compilation.invocation.invocation_digest(&context)?;
     let task = prediction_task(&invocation_digest);
     let responses = session::request_agent(&[AgentRequest::FindActionPrediction {
         task,

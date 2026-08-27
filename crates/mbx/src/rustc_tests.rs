@@ -9,6 +9,73 @@ fn portable_for(values: &[&str]) -> Portable {
     }
 }
 
+fn churn(sources: &str, streak: u32) -> ChurnState {
+    ChurnState {
+        version: CHURN_STATE_VERSION,
+        sources: CacheDigest::blake3(sources.as_bytes()).key(),
+        streak,
+    }
+}
+
+/// The streak is what separates a crate someone is editing from one that merely
+/// lost its result, and it only counts while that crate's own sources move.
+#[test]
+fn only_a_run_of_changed_sources_earns_incremental_state() {
+    let now = CacheDigest::blake3(b"current sources");
+
+    // Nothing recorded here yet: a first compilation in a checkout is not
+    // evidence of anything, and neither is a wiped target directory.
+    assert_eq!(learned_plan(None, &now, true).streak, 0);
+
+    // Recorded against the sources this compilation already has, so nobody
+    // edited it -- something else lost the result, and recompiling normally
+    // restores it for everyone.
+    let unchanged = churn("current sources", HOT_STREAK_THRESHOLD);
+    let plan = learned_plan(Some(&unchanged), &now, true);
+    assert_eq!(plan.streak, 0);
+    assert!(!plan.hot);
+
+    // Changed sources climb the streak, and only its last step is hot.
+    for previous in 0..HOT_STREAK_THRESHOLD - 1 {
+        let recorded = churn("older sources", previous);
+        let plan = learned_plan(Some(&recorded), &now, true);
+        assert_eq!(plan.streak, previous + 1);
+        assert!(!plan.hot);
+    }
+    let recorded = churn("older sources", HOT_STREAK_THRESHOLD - 1);
+    assert!(learned_plan(Some(&recorded), &now, true).hot);
+
+    // The streak is a state rather than a tally, so it stops at the threshold.
+    let saturated = churn("older sources", HOT_STREAK_THRESHOLD);
+    assert_eq!(
+        learned_plan(Some(&saturated), &now, true).streak,
+        HOT_STREAK_THRESHOLD
+    );
+
+    // Disabled, the streak is still tracked so that enabling it later works.
+    let plan = learned_plan(Some(&saturated), &now, false);
+    assert_eq!(plan.streak, HOT_STREAK_THRESHOLD);
+    assert!(!plan.hot);
+}
+
+/// The record belongs to one checkout, so a sibling worktree that cannot read
+/// it simply starts over rather than inheriting somebody else's edit loop.
+#[test]
+fn an_unreadable_record_is_no_record() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.json");
+    let sources = CacheDigest::blake3(b"sources");
+
+    write_churn_state(&path, &sources, 2).unwrap();
+    assert_eq!(read_churn_state(&path).unwrap().streak, 2);
+
+    std::fs::write(&path, br#"{"version":99,"sources":"x","streak":3}"#).unwrap();
+    assert!(read_churn_state(&path).is_none());
+
+    std::fs::write(&path, b"not json").unwrap();
+    assert!(read_churn_state(&path).is_none());
+}
+
 #[test]
 fn compiler_timing_survives_a_changed_action_key() {
     let invocation = CacheDigest::blake3(b"invocation");
