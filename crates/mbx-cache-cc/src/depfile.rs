@@ -5,7 +5,7 @@ use crate::{
     MAX_PREDICTED_INPUTS, normalize_components,
 };
 use mbx_cache_core::CacheDigest;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -265,7 +265,52 @@ fn is_manifest_input(path: &Path) -> bool {
         .is_some_and(|path| path.starts_with(INCLUDE_MANIFEST_PREFIX))
 }
 
-/// Digest the sorted file names beneath a directory.
+/// Digest the includable names in each directory, reading no file contents.
+///
+/// Taken once before the compiler runs and again before publishing, this is
+/// what detects a header that appeared in a search directory *while* the
+/// compilation was in flight. The manifest recorded in the key is the one from
+/// after the compile, and without this check that later state would be claimed
+/// as the state the compiler saw.
+pub fn manifest_snapshot(
+    directories: &BTreeSet<PathBuf>,
+) -> Result<BTreeMap<PathBuf, CacheDigest>, CcBypassReason> {
+    let mut budget = 0_usize;
+    directories
+        .iter()
+        .map(|directory| {
+            include_manifest(directory, &mut budget).map(|digest| (directory.clone(), digest))
+        })
+        .collect()
+}
+
+/// Extensions a file must carry to be a plausible `#include` target.
+///
+/// An extensionless name also qualifies: C++ standard headers are spelled that
+/// way and projects ship their own.
+const INCLUDABLE_EXTENSIONS: &[&str] = &[
+    "def", "h", "h++", "hh", "hpp", "hxx", "inc", "inl", "ipp", "tcc",
+];
+
+/// Whether a file name could be what an `#include` directive names.
+///
+/// The manifest exists to notice a file appearing where it would shadow a
+/// header that was read. A build writes its own objects, dependency files, and
+/// archives into these directories -- often the very directory a generated
+/// header lives in -- and none of those can shadow an include. Counting them
+/// would make the key depend on how many sibling compilations had finished,
+/// which is not a property of this compilation at all.
+fn is_includable(name: &str) -> bool {
+    match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => INCLUDABLE_EXTENSIONS
+            .binary_search(&extension.to_ascii_lowercase().as_str())
+            .is_ok(),
+        // No extension, or a leading-dot name like `.keep`.
+        _ => !name.starts_with('.'),
+    }
+}
+
+/// Digest the sorted includable file names beneath a directory.
 ///
 /// Names only: the contents of anything actually read are digested as inputs,
 /// so this exists purely to notice a file appearing where it could shadow one
@@ -307,6 +352,9 @@ fn include_manifest(directory: &Path, budget: &mut usize) -> Result<CacheDigest,
                 })?;
             if file_type.is_dir() {
                 pending.push((entry.path(), relative));
+                continue;
+            }
+            if !is_includable(name) {
                 continue;
             }
             *budget += 1;

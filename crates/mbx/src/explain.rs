@@ -152,6 +152,9 @@ fn guidance(kind: &str) -> &'static str {
         "cc-unsupported-environment" => {
             "An include-path or sub-tool environment variable changes the compilation in a way the argv model cannot see. Unset it to make these compilations cacheable."
         }
+        "cc-search-path-modified-during-compilation" => {
+            "An include directory gained or lost a header while the compiler was running, so what it read cannot be established. Avoid writing headers into a search directory during a build."
+        }
         "cc-local-cpu-target" => {
             "A build script compiles for the machine's own processor (`-march=native` or similar), so the object it produces is not a function of anything the cache key names. Name the architecture explicitly to make these compilations cacheable."
         }

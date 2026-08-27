@@ -27,7 +27,7 @@ use thiserror::Error;
 
 mod depfile;
 
-pub use depfile::{CcDepfile, CcDiscoveredInputs, INCLUDE_MANIFEST_PREFIX};
+pub use depfile::{CcDepfile, CcDiscoveredInputs, INCLUDE_MANIFEST_PREFIX, manifest_snapshot};
 
 /// Schema version embedded in canonical cc action descriptors.
 pub const ACTION_SCHEMA_VERSION: u8 = 1;
@@ -287,6 +287,10 @@ pub enum CcBypassReason {
     /// A compiler plugin makes the output depend on unmodeled code.
     #[error("compiler plugins are not modeled by the cache adapter: {0}")]
     Plugin(String),
+    /// An include search directory gained or lost a header while the compiler
+    /// ran, so the manifest recorded after it is not what the compilation saw.
+    #[error("include search directory changed during the compilation: {0}")]
+    SearchPathModifiedDuringCompilation(PathBuf),
     /// The object depends on the machine's own CPU rather than on named inputs.
     #[error("compiler flag tunes for the local CPU: {0}")]
     LocalCpuTarget(String),

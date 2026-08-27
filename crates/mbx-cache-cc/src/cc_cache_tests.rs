@@ -56,6 +56,10 @@ fn bypass_kinds_are_stable_and_field_independent() {
         ),
         (CcBypassReason::Plugin("-fplugin=x".into()), "plugin"),
         (
+            CcBypassReason::SearchPathModifiedDuringCompilation("/w/inc".into()),
+            "search-path-modified-during-compilation",
+        ),
+        (
             CcBypassReason::LocalCpuTarget("-march=native".into()),
             "local-cpu-target",
         ),

@@ -32,9 +32,17 @@ to read, and publishing one would add a file the uncached build never produced.
 So the shim asks for its own dependency list, keeps it private, and keys the
 compilation on the files that list names. A cold compilation therefore has no
 key to look up yet — it is stored after compiling and warms the next build. The
-directories the compile searched also contribute a manifest of their file
-names, so a header that appears where it would *shadow* one that was read
-changes the key even though every file that was read is unchanged.
+directories the compile searched also contribute a manifest of the names in
+them that could answer an `#include`, so a header appearing where it would
+*shadow* one that was read changes the key even though every file that was read
+is unchanged. Objects and dependency files are not counted: they cannot shadow
+an include, and a build writes them into the very directory a generated header
+lives in.
+
+Those manifests are taken once before the compiler runs and again before
+publishing. A header that appeared while the compilation was in flight is one
+the compiler never saw, so recording it would claim a state that did not
+produce this object.
 
 ## Portable keys
 

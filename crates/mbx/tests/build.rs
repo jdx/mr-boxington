@@ -1690,6 +1690,100 @@ fn a_build_script_c_compilation_crosses_checkouts() {
     );
 }
 
+/// Write a fixture whose build script generates a header into `OUT_DIR` and
+/// compiles several objects into that same directory.
+///
+/// This is the shape that a manifest counting every filename gets wrong: the
+/// objects land beside the generated header, so what the key recorded depended
+/// on how many sibling compilations had finished.
+#[cfg(unix)]
+fn write_generated_header_project(directory: &Path) {
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::write(
+        directory.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    for name in ["a", "b", "c"] {
+        std::fs::write(
+            directory.join(format!("src/{name}.c")),
+            format!("#include \"config.h\"\nint {name}(void) {{ return CONFIG_V; }}\n"),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        directory.join("build.rs"),
+        r##"use std::{env, fs, path::PathBuf, process::Command};
+
+fn main() {
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    fs::write(out.join("config.h"), "#define CONFIG_V 7
+").unwrap();
+    let compiler = env::var("HOST_CC")
+        .or_else(|_| env::var("CC"))
+        .unwrap_or_else(|_| "cc".into());
+    for name in ["a", "b", "c"] {
+        let status = Command::new(&compiler)
+            .arg(format!("-I{}", out.display()))
+            .arg("-c")
+            .arg("-o")
+            .arg(out.join(format!("{name}.o")))
+            .arg(format!("src/{name}.c"))
+            .status()
+            .expect("the C compiler should run");
+        assert!(status.success());
+    }
+}
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("src/lib.rs"),
+        "pub fn value() -> u32 { 7 }\n",
+    )
+    .unwrap();
+    let status = Command::new(cargo())
+        .current_dir(directory)
+        .args(["generate-lockfile", "--offline"])
+        .status()
+        .expect("cargo should run");
+    assert!(status.success(), "the fixture should resolve offline");
+}
+
+/// A header generated into `OUT_DIR` is cached like any other, even though the
+/// build writes its objects into that same directory.
+#[cfg(unix)]
+#[test]
+fn objects_landing_beside_a_generated_header_still_cross_checkouts() {
+    if !has_c_compiler() {
+        return;
+    }
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    write_generated_header_project(first.path());
+    write_generated_header_project(second.path());
+
+    build_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+        &[],
+    );
+    let (warm, _) = build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("warm.json"),
+        &[],
+    );
+    assert_eq!(
+        count(&warm, "hits"),
+        4,
+        "all three C compilations and the Rust one should be restored: {warm}"
+    );
+}
+
 /// A prediction that no longer describes the tree must not strand the
 /// compilation.
 ///

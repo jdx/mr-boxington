@@ -1,4 +1,5 @@
 use super::*;
+use crate::manifest_snapshot;
 use std::collections::BTreeSet;
 
 #[test]
@@ -188,4 +189,55 @@ fn discovery_requires_an_absolute_working_directory() {
             .kind(),
         "relative-working-directory"
     );
+}
+
+/// A build writes objects, dependency files, and archives into the same
+/// directories a generated header lives in. None of those can shadow an
+/// include, and counting them would make the key depend on how many sibling
+/// compilations had finished by the time this one was discovered.
+#[test]
+fn manifests_ignore_files_that_could_never_shadow_an_include() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let root = directory.path();
+    let include = root.join("include");
+    std::fs::create_dir_all(&include).expect("create include dir");
+    write(&include, "config.h", "#define V 1\n");
+
+    let manifest = |directory: &Path| {
+        manifest_snapshot(&BTreeSet::from([directory.to_path_buf()]))
+            .expect("snapshot")
+            .remove(directory)
+            .expect("directory manifest")
+    };
+    let before = manifest(&include);
+
+    // A sibling object landing beside the generated header must not move the
+    // key.
+    write(&include, "a.o", "\0object\0");
+    write(&include, "a.d", "a.o: a.c\n");
+    write(&include, "libfoo.a", "!<arch>\n");
+    assert_eq!(before, manifest(&include));
+
+    // A header appearing there still does.
+    write(&include, "shadowing.h", "#define V 2\n");
+    assert_ne!(before, manifest(&include));
+}
+
+/// Extensionless names are how C++ standard headers are spelled, and projects
+/// ship their own, so they stay in the manifest.
+#[test]
+fn extensionless_names_count_as_includable() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let root = directory.path();
+    let include = root.join("include");
+    std::fs::create_dir_all(&include).expect("create include dir");
+    let manifest = |directory: &Path| {
+        manifest_snapshot(&BTreeSet::from([directory.to_path_buf()]))
+            .expect("snapshot")
+            .remove(directory)
+            .expect("directory manifest")
+    };
+    let empty = manifest(&include);
+    write(&include, "vector", "#pragma once\n");
+    assert_ne!(empty, manifest(&include));
 }

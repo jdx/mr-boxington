@@ -92,6 +92,20 @@ A flag that tunes for the machine's own processor -- `-march=native` and its
 relatives -- bypasses as well, since the object it produces is not a function
 of anything the key names.
 
+## Shadowing is modeled by name, not by content
+
+An include directory contributes the names in it that could answer an
+`#include`: header extensions, and names without one. A file that could not be
+included -- an object, a dependency file, an archive -- is ignored, so a build
+writing its outputs beside a generated header does not disturb the key.
+
+The cost is a narrow gap. A source included under an unusual name, such as
+`#include "generated.c"`, is still digested when it is read, but its *arrival*
+in a search directory does not change the key on its own. System roots are
+exempt from manifests entirely: enumerating an SDK on every compile costs more
+than the risk, and anything actually read from one is digested like any other
+input.
+
 The shims are only installed when the build has not chosen its own compiler.
 Setting `CC`, `CXX`, `HOST_CC`, `HOST_CXX`, `TARGET_CC`, or `TARGET_CXX` leaves
 that build's C compilations uncached, and `MBX_CC=0` disables the feature.

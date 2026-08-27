@@ -20,7 +20,7 @@ use eyre::{Context, Result, bail};
 use mbx_cache_cc::{
     CcAction, CcActionContext, CcBypassReason, CcCompilerFamily, CcCompilerIdentity, CcDepfile,
     CcDiscoveredInputs, CcInputPrediction, CcInvocation, CcLanguage, environment_inputs,
-    is_system_path,
+    is_system_path, manifest_snapshot,
 };
 use mbx_cache_core::{
     ActionPrediction, AgentRequest, AgentResponse, CacheDigest, CacheDirectory, CacheFileNode,
@@ -90,6 +90,11 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
 
     let depfile_staging = staging_directory()?;
     let depfile = depfile_staging.path().join("compile.d");
+    // Taken before the compiler runs: the manifest that lands in the key is
+    // computed afterwards, and comparing the two is what stops a header that
+    // appeared mid-compile from being recorded as one the compiler had seen.
+    let searchable = searchable_directories(&invocation, &working_dir);
+    let before = manifest_snapshot(&searchable).ok();
     let started = Instant::now();
     let compilation_started = SystemTime::now();
     let mut command = Command::new(compiler);
@@ -132,6 +137,8 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         &task,
         &invocation_digest,
         duration_ns,
+        &searchable,
+        before,
     ) {
         #[cfg(debug_assertions)]
         eprintln!("mbx[warning]: cc result was not published: {error:#}");
@@ -153,9 +160,12 @@ fn publish(
     task: &str,
     invocation_digest: &CacheDigest,
     duration_ns: u64,
+    searchable: &BTreeSet<PathBuf>,
+    before: Option<BTreeMap<PathBuf, CacheDigest>>,
 ) -> Result<()> {
     let discovered = discover(invocation, context, depfile)?;
     discovered.verify_not_modified_since(compilation_started)?;
+    verify_search_path_unchanged(searchable, before)?;
     discovered.verify()?;
     discovered.apply_to(context)?;
     let action = invocation.action(context.clone())?;
@@ -185,6 +195,50 @@ fn discover(
         files.clone(),
         manifest_directories(invocation, context, &files),
     )?)
+}
+
+/// Directories a shadowing header could appear in that are known before the
+/// compiler runs.
+///
+/// The include search path and the source's own directory are named on the
+/// command line, so they can be snapshotted up front. A directory reached only
+/// through a header that includes its neighbour is not known until the
+/// dependency list names it, and is covered by the digests of the files that
+/// were actually read.
+fn searchable_directories(invocation: &CcInvocation, working_dir: &Path) -> BTreeSet<PathBuf> {
+    invocation
+        .include_dirs()
+        .iter()
+        .map(|directory| absolute(directory, working_dir))
+        .chain(
+            invocation
+                .source()
+                .parent()
+                .map(|parent| absolute(parent, working_dir)),
+        )
+        .filter(|directory| !is_system_path(directory))
+        .collect()
+}
+
+/// Reject a compilation whose include search path shifted underneath it.
+fn verify_search_path_unchanged(
+    searchable: &BTreeSet<PathBuf>,
+    before: Option<BTreeMap<PathBuf, CacheDigest>>,
+) -> Result<()> {
+    // A snapshot that could not be taken is not evidence of a change; the
+    // directory walk failing is already reported when discovery repeats it.
+    let Some(before) = before else {
+        return Ok(());
+    };
+    let after = manifest_snapshot(searchable)?;
+    for (directory, digest) in &before {
+        if after.get(directory) != Some(digest) {
+            return Err(
+                CcBypassReason::SearchPathModifiedDuringCompilation(directory.clone()).into(),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Directories whose contents could change which file a future include
