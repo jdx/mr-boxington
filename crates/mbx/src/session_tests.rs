@@ -257,3 +257,50 @@ fn finds_crate_names_in_transparent_invocations() {
     );
     assert_eq!(crate_name_argument(&["--version".into()]), None);
 }
+
+/// The session shim must be a symlink, not a hard link.
+///
+/// Cargo execs it within milliseconds of its creation, and a hard link that new
+/// is not reliably runnable on macOS -- see [`install_shim`]. Asserted on the
+/// kind of link rather than by racing the kernel, which no test can do
+/// dependably.
+#[cfg(unix)]
+#[test]
+fn the_session_shim_tracks_the_binary_it_was_installed_from() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = std::env::current_exe().unwrap();
+    let shim = install_shim(&executable, directory.path(), ShimLink::Tracking).unwrap();
+
+    let metadata = std::fs::symlink_metadata(&shim).unwrap();
+    assert!(
+        metadata.file_type().is_symlink(),
+        "the session shim should be a symlink, found {metadata:?}"
+    );
+    assert_eq!(std::fs::read_link(&shim).unwrap(), executable);
+}
+
+/// The `mbx setup` wrapper keeps the bytes it was installed from.
+///
+/// A symlink there would break the moment the binary it names is deleted, and
+/// nothing execs it soon enough for the race to matter.
+#[cfg(unix)]
+#[test]
+fn the_installed_wrapper_pins_the_bytes_it_was_made_from() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = std::env::current_exe().unwrap();
+    let shim = install_shim(&executable, directory.path(), ShimLink::Pinned).unwrap();
+
+    assert!(
+        !std::fs::symlink_metadata(&shim)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    // Length rather than contents: the point is that the shim is a file of its
+    // own and not a name that can dangle, and reading the binary twice to prove
+    // it costs a hundred megabytes.
+    assert_eq!(
+        std::fs::metadata(&shim).unwrap().len(),
+        std::fs::metadata(&executable).unwrap().len()
+    );
+}

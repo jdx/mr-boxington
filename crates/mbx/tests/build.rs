@@ -79,14 +79,19 @@ fn cargo() -> std::ffi::OsString {
 #[test]
 fn transparent_rustc_replaces_the_shim_process() {
     let directory = tempfile::tempdir().unwrap();
-    let shim =
-        mbx::session::install_shim(Path::new(env!("CARGO_BIN_EXE_mbx")), directory.path()).unwrap();
+    let shim = mbx::session::install_shim(
+        Path::new(env!("CARGO_BIN_EXE_mbx")),
+        directory.path(),
+        mbx::session::ShimLink::Tracking,
+    )
+    .unwrap();
     let pid_file = directory.path().join("compiler.pid");
 
-    // Retried because exec of a just-written executable can transiently fail
-    // with ETXTBSY: a sibling test may fork while its own shim copy is still
-    // open for write, and until that child reaches its exec, the inherited
-    // descriptor (cloexec or not) counts as a writer of this file too.
+    // Retried because exec of the binary behind the shim can transiently fail
+    // with ETXTBSY: anyone holding it open for write blocks the exec, and a
+    // sibling test that forks while cargo is writing it counts, since until
+    // that child reaches its own exec the inherited descriptor (cloexec or not)
+    // is a writer of this file too.
     let mut child = {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
@@ -157,7 +162,8 @@ fn build_with(
     let output = command.output().expect("mbx should run");
     assert!(
         output.status.success(),
-        "build failed: {}",
+        "build failed ({}): {}",
+        output.status,
         String::from_utf8_lossy(&output.stderr)
     );
     let stats = std::fs::read(report).expect("a statistics report should be written");
@@ -176,7 +182,8 @@ fn mbx(store: &Path, arguments: &[&str]) -> String {
         .expect("mbx should run");
     assert!(
         output.status.success(),
-        "{arguments:?} failed: {}",
+        "{arguments:?} failed ({}): {}",
+        output.status,
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).into_owned()
