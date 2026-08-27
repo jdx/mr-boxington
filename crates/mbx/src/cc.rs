@@ -10,10 +10,11 @@
 //! rehashed to rebuild the full key.
 
 use crate::materialize::{
-    CachedCompilation, CachedOutput, Materialization, StagedOutputs, executable_mode_matches,
-    exit_code, file_mode, find_blobs, persist_outputs, read_canonical_blob, read_verified_blob,
-    record_action_hit, record_verification, replay_bytes, resolve_executable,
-    stage_verified_cached_output, staging_directory, validate_file_mode,
+    CachedCompilation, CachedOutput, Materialization, StagedOutputs, denormalize_output_text,
+    executable_mode_matches, exit_code, file_mode, find_blobs, normalize_output_text,
+    persist_outputs, read_canonical_blob, read_verified_blob, record_action_hit,
+    record_verification, replay_bytes, resolve_executable, stage_verified_cached_output,
+    staging_directory, validate_file_mode,
 };
 use crate::session;
 use eyre::{Context, Result, bail};
@@ -77,7 +78,13 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         discovered.clone().apply_to(&mut candidate)?;
         let action = invocation.action(candidate)?;
         looked_up = true;
-        if let Some(cached) = restore_result(&action, &invocation, &discovered, !verify)? {
+        if let Some(cached) = restore_result(
+            &action,
+            &invocation,
+            &discovered,
+            !verify,
+            &context.path_mappings,
+        )? {
             if !verify {
                 replay_bytes(&cached.stdout, &cached.stderr)?;
                 record_action_hit(
@@ -176,7 +183,7 @@ fn publish(
     discovered.verify()?;
     discovered.apply_to(context)?;
     let action = invocation.action(context.clone())?;
-    publish_result(&action, invocation, output)?;
+    publish_result(&action, invocation, output, &context.path_mappings)?;
     let prediction = invocation.prediction(context, duration_ns)?;
     record_prediction(task, invocation_digest, &action.digest, &prediction);
     Ok(())
@@ -504,6 +511,7 @@ fn restore_result(
     invocation: &CcInvocation,
     discovered: &CcDiscoveredInputs,
     restore_outputs: bool,
+    mappings: &[PathMapping],
 ) -> Result<Option<CachedCompilation>> {
     let responses = session::request_agent(&[AgentRequest::FindActionResult {
         action: action.digest.clone(),
@@ -551,8 +559,17 @@ fn restore_result(
         metadata.stderr.clone(),
         node.digest.clone(),
     ])?;
-    let stdout = read_verified_blob(&blobs[0], &metadata.stdout, "stdout")?;
-    let stderr = read_verified_blob(&blobs[1], &metadata.stderr, "stderr")?;
+    // A compiler diagnostic names the file it is about, so a warning stored by
+    // one checkout would otherwise be replayed in another pointing at paths
+    // that belong to the checkout that published it.
+    let stdout = denormalize_output_text(
+        &read_verified_blob(&blobs[0], &metadata.stdout, "stdout")?,
+        mappings,
+    );
+    let stderr = denormalize_output_text(
+        &read_verified_blob(&blobs[1], &metadata.stderr, "stderr")?,
+        mappings,
+    );
 
     let materialization_started = Instant::now();
     let parent = destination
@@ -623,7 +640,12 @@ fn validated_object(directory: CacheDirectory, invocation: &CcInvocation) -> Res
     Ok(node)
 }
 
-fn publish_result(action: &CcAction, invocation: &CcInvocation, output: &Output) -> Result<()> {
+fn publish_result(
+    action: &CcAction,
+    invocation: &CcInvocation,
+    output: &Output,
+    mappings: &[PathMapping],
+) -> Result<()> {
     let object = invocation.output();
     let metadata = std::fs::metadata(object)
         .wrap_err_with(|| format!("failed to inspect cc output {}", object.display()))?;
@@ -632,8 +654,16 @@ fn publish_result(action: &CcAction, invocation: &CcInvocation, output: &Output)
     }
     let staging = staging_directory()?;
     let mut blobs = vec![staged_bytes(staging.path(), "action.json", &action.bytes)?];
-    let stdout = staged_bytes(staging.path(), "stdout", &output.stdout)?;
-    let stderr = staged_bytes(staging.path(), "stderr", &output.stderr)?;
+    let stdout = staged_bytes(
+        staging.path(),
+        "stdout",
+        &normalize_output_text(&output.stdout, mappings),
+    )?;
+    let stderr = staged_bytes(
+        staging.path(),
+        "stderr",
+        &normalize_output_text(&output.stderr, mappings),
+    )?;
     blobs.extend([stdout.clone(), stderr.clone()]);
 
     let digest = CacheDigest::blake3_file(object)?;

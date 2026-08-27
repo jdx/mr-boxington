@@ -1784,6 +1784,102 @@ fn objects_landing_beside_a_generated_header_still_cross_checkouts() {
     );
 }
 
+/// A cached C warning names the checkout it is replayed in, not the one that
+/// published it.
+///
+/// A compiler diagnostic names the file it is about, and a generated source
+/// lives at an absolute path that differs per checkout, so replaying the stored
+/// bytes verbatim would point the reader at somebody else's tree.
+#[cfg(unix)]
+#[test]
+fn a_restored_c_diagnostic_names_the_checkout_it_is_replayed_in() {
+    if !has_c_compiler() {
+        return;
+    }
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    write_warning_project(first.path());
+    write_warning_project(second.path());
+
+    build_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+        &[],
+    );
+    let (warm, stderr) = build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("warm.json"),
+        &[],
+    );
+    assert!(
+        count(&warm, "hits") > 0,
+        "the second checkout should have restored the compilation: {warm}"
+    );
+    let diagnostic = stderr
+        .lines()
+        .find(|line| line.contains("CCWARN>>>"))
+        .unwrap_or_default();
+    assert!(
+        !diagnostic.contains(&first.path().display().to_string()),
+        "a replayed warning must not name the checkout that published it: {diagnostic}"
+    );
+}
+
+/// A fixture whose build script compiles a generated source that warns, so the
+/// diagnostic carries an absolute path.
+#[cfg(unix)]
+fn write_warning_project(directory: &Path) {
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::write(
+        directory.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("build.rs"),
+        r##"use std::{env, fs, path::PathBuf, process::Command};
+
+fn main() {
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let source = out.join("gen.c");
+    fs::write(&source, "int value(void) { int unused = 1; return 7; }
+").unwrap();
+    let compiler = env::var("HOST_CC")
+        .or_else(|_| env::var("CC"))
+        .unwrap_or_else(|_| "cc".into());
+    let output = Command::new(&compiler)
+        .arg("-Wall")
+        .arg("-c")
+        .arg("-o")
+        .arg(out.join("gen.o"))
+        .arg(&source)
+        .output()
+        .expect("the C compiler should run");
+    for line in String::from_utf8_lossy(&output.stderr).lines() {
+        println!("cargo:warning=CCWARN>>>{line}");
+    }
+    assert!(output.status.success());
+}
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("src/lib.rs"),
+        "pub fn value() -> u32 { 7 }\n",
+    )
+    .unwrap();
+    let status = Command::new(cargo())
+        .current_dir(directory)
+        .args(["generate-lockfile", "--offline"])
+        .status()
+        .expect("cargo should run");
+    assert!(status.success(), "the fixture should resolve offline");
+}
+
 /// A prediction that no longer describes the tree must not strand the
 /// compilation.
 ///
