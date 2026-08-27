@@ -46,6 +46,22 @@ fn incremental_allowed_with(configured: bool, get_env: impl Fn(&str) -> Option<S
     configured && !env_truthy(get_env("CI"))
 }
 
+/// Whether a crate that keeps missing with changed content may compile with its
+/// own incremental state.
+///
+/// CI is excluded for the same reason as [`incremental_allowed`]: a fresh runner
+/// has no state to reuse, so the trade is all cost and no saving.
+pub fn learned_incremental_allowed(configured: bool) -> bool {
+    learned_incremental_allowed_with(configured, |name| std::env::var(name).ok())
+}
+
+fn learned_incremental_allowed_with(
+    configured: bool,
+    get_env: impl Fn(&str) -> Option<String>,
+) -> bool {
+    configured && !env_truthy(get_env("CI"))
+}
+
 fn trusted_cache_writer(get_env: &impl Fn(&str) -> Option<String>) -> bool {
     if env_truthy(get_env("GITHUB_ACTIONS")) {
         return get_env("GITHUB_EVENT_NAME").as_deref() == Some("push")
@@ -146,6 +162,16 @@ mod tests {
         assert!(!incremental_allowed_with(true, env(&[("CI", "true")])));
         assert!(incremental_allowed_with(true, env(&[])));
         assert!(!incremental_allowed_with(false, env(&[])));
+    }
+
+    #[test]
+    fn ci_never_learns_to_compile_incrementally() {
+        assert!(!learned_incremental_allowed_with(
+            true,
+            env(&[("CI", "true")])
+        ));
+        assert!(learned_incremental_allowed_with(true, env(&[])));
+        assert!(!learned_incremental_allowed_with(false, env(&[])));
     }
 
     #[test]

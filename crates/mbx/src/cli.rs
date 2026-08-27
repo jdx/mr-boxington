@@ -1,7 +1,7 @@
 //! The mbx command line.
 
 use crate::config::{CliSettings, Config, RetentionSettings};
-use crate::session::CacheSession;
+use crate::session::{self, CacheSession};
 use crate::util::workspace_root;
 use crate::{policy, store, target};
 use bytesize::ByteSize;
@@ -503,6 +503,12 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
         );
     }
     config.incremental = incremental;
+    // Cargo-managed incremental already covers the inner loop, and a shadow
+    // compilation has nothing to compare against if its inputs carry
+    // incremental state, so learned reuse yields to both.
+    let learned_incremental = policy::learned_incremental_allowed(settings.learned_incremental)
+        && !incremental
+        && !config.verify;
     let config = &config;
 
     let migrate_existing = prompt_to_manage_existing_target(config, &roots, arguments)?;
@@ -586,6 +592,12 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
                 &mut environment,
             )
             .await;
+        // Stated explicitly for the same reason as the session's own keys: an
+        // unset value would let the shim inherit one from the parent.
+        environment.insert(
+            session::LEARNED_INCREMENTAL_ENV.into(),
+            if learned_incremental { "1" } else { "0" }.into(),
+        );
 
         let status = run_cargo(&cargo, arguments, environment);
 

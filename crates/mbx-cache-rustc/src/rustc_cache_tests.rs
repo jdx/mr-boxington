@@ -909,3 +909,39 @@ fn remap_destinations_are_stable_virtual_paths() {
             .contains(r#"--remap-path-prefix=${workspace}=/src"#)
     );
 }
+
+/// A payload written before churn was tracked has to keep round-tripping
+/// byte-for-byte: the shim rejects a prediction whose canonical encoding does
+/// not match what it was handed, so a field that serialized when it was zero
+/// would invalidate every prediction already on disk.
+#[test]
+fn churn_is_absent_from_a_prediction_that_is_not_churning() {
+    let payload = r#"{"compiler_duration_ns":42,"crate_name":"demo","environment":[],"inputs":["${workspace}/src/lib.rs"],"version":3}"#;
+
+    let prediction: RustcInputPrediction = serde_json::from_str(payload).unwrap();
+
+    assert_eq!(prediction.churn_streak, 0);
+    assert_eq!(
+        String::from_utf8(canonical_json(&prediction).unwrap()).unwrap(),
+        payload
+    );
+}
+
+#[test]
+fn a_churning_prediction_round_trips_its_streak() {
+    let prediction = RustcInputPrediction {
+        version: 3,
+        inputs: Vec::new(),
+        environment: Vec::new(),
+        compiler_duration_ns: 0,
+        crate_name: "demo".into(),
+        churn_streak: 2,
+    };
+
+    let encoded = String::from_utf8(canonical_json(&prediction).unwrap()).unwrap();
+
+    assert_eq!(
+        serde_json::from_str::<RustcInputPrediction>(&encoded).unwrap(),
+        prediction
+    );
+}

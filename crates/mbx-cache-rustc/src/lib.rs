@@ -470,6 +470,7 @@ impl RustcInvocation {
             environment: discovered.environment.keys().cloned().collect(),
             compiler_duration_ns: 0,
             crate_name: String::new(),
+            churn_streak: 0,
         })
     }
 }
@@ -674,9 +675,17 @@ pub struct RustcInputPrediction {
     /// Crate name associated with the timing hint.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub crate_name: String,
+    /// Consecutive misses whose action digest differed from the one recorded
+    /// before them. Zero means this invocation's content is not churning.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub churn_streak: u32,
 }
 
 fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 

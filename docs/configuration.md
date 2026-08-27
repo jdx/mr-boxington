@@ -87,6 +87,28 @@ can help an edit/rebuild loop, but an incremental workspace artifact changes
 the inputs of crates above it and reduces reuse across worktrees. CI always
 disables it because a fresh runner has no incremental state to reuse.
 
+## Learned incremental reuse
+
+The crate you are editing misses the cache on every build, because its content
+is new every time. After three consecutive misses under a changed key, mbx
+compiles that crate with its own incremental state rather than from scratch,
+and keeps the result out of the shared cache — an incremental artifact
+describes one checkout's edit history, not its source, so it is never
+something another checkout should restore. The build reports those
+compilations as `incremental` and says how many were held back.
+
+The same evidence ends it. A compilation whose key matches the one it recorded
+last time is not churning — something else lost the result, such as a wiped
+`target/` — so it compiles normally and publishes for everyone. A cache hit
+settles the crate too.
+
+State lives in `mbx-incremental/` inside the build's target directory, so a
+managed target reclaims it along with everything else it holds, and each crate's
+share is discarded once it passes 1 GiB. CI never does this, for the same reason
+it never compiles incrementally: there is no earlier state to build on.
+`MBX_LEARNED_INCREMENTAL=0` turns it off, and `MBX_INCREMENTAL=1` supersedes it
+by handing the whole decision back to cargo.
+
 ## Sizes and durations
 
 Sizes accept SI and IEC units. `20GB` and `20GiB` are different values. Durations

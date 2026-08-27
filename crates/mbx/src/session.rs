@@ -29,6 +29,7 @@ pub(crate) const STAGING_ENV: &str = "MBX_STAGING_DIR";
 pub(crate) const BUILD_ENV: &str = "MBX_BUILD";
 pub(crate) const VERIFY_ENV: &str = "MBX_VERIFY";
 pub(crate) const SHARE_OUT_DIR_ENV: &str = "MBX_SHARE_OUT_DIR";
+pub(crate) const LEARNED_INCREMENTAL_ENV: &str = "MBX_LEARNED_INCREMENTAL";
 pub(crate) const WORKSPACE_ROOT_ENV: &str = "MBX_WORKSPACE_ROOT";
 pub(crate) const TARGET_DIR_ENV: &str = "MBX_TARGET_DIR";
 const PREVIOUS_RUSTC_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WRAPPER";
@@ -489,6 +490,14 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
             format_nanos(stats.avoided_compiler_duration_ns),
             format_nanos(spent),
         ));
+        if let Some(compiler) = stats.compiler.get("incremental") {
+            // The compiler-time line above already counts these; what it cannot
+            // say is why they are absent from the store.
+            note(&format!(
+                "mbx[cache]: {} compilations kept their own incremental state, so they were not stored",
+                compiler.invocations
+            ));
+        }
         let slow = slow_compilations(stats);
         if !slow.is_empty() {
             note(&format!(
@@ -998,6 +1007,12 @@ pub(crate) fn verify_requested() -> bool {
 /// checkouts can share it. Read the same way as verify mode.
 pub(crate) fn share_out_dir_requested() -> bool {
     std::env::var_os(SHARE_OUT_DIR_ENV).is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+/// Whether the shim may compile a churning crate with its own incremental
+/// state instead of publishing it. Read the same way as verify mode.
+pub(crate) fn learned_incremental_requested() -> bool {
+    std::env::var_os(LEARNED_INCREMENTAL_ENV).is_some_and(|value| !value.is_empty() && value != "0")
 }
 
 /// Tell the session that this compilation was not cacheable.

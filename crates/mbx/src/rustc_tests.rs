@@ -9,6 +9,91 @@ fn portable_for(values: &[&str]) -> Portable {
     }
 }
 
+fn action_for(bytes: &[u8]) -> RustcAction {
+    RustcAction {
+        digest: CacheDigest::blake3(bytes),
+        bytes: bytes.to_vec(),
+    }
+}
+
+fn candidates_for(bytes: &[u8]) -> ActionCandidates {
+    ActionCandidates {
+        portable: None,
+        literal: action_for(bytes),
+    }
+}
+
+fn recorded_for(action: &[u8], churn_streak: u32) -> RecordedPrediction {
+    RecordedPrediction {
+        invocation: CacheDigest::blake3(b"invocation"),
+        action: CacheDigest::blake3(action),
+        prediction: RustcInputPrediction {
+            version: 3,
+            inputs: Vec::new(),
+            environment: Vec::new(),
+            compiler_duration_ns: 0,
+            crate_name: "demo".into(),
+            churn_streak,
+        },
+    }
+}
+
+/// The streak is what separates a crate someone is editing from one that merely
+/// lost its result, and it only counts while the content keeps moving.
+#[test]
+fn only_a_run_of_changed_keys_earns_incremental_state() {
+    let candidates = candidates_for(b"current");
+
+    // Nothing recorded yet: a first compilation is not evidence of anything.
+    assert_eq!(learned_plan(None, &candidates, true).streak, 0);
+
+    // Recorded under the key this compilation already has, so the content did
+    // not move -- something else lost the result, and recompiling restores it
+    // for everyone.
+    let unchanged = recorded_for(b"current", HOT_STREAK_THRESHOLD);
+    let plan = learned_plan(Some(&unchanged), &candidates, true);
+    assert_eq!(plan.streak, 0);
+    assert!(!plan.hot);
+
+    // A changed key climbs the streak, and only its last step is hot.
+    for previous in 0..HOT_STREAK_THRESHOLD - 1 {
+        let recorded = recorded_for(b"stale", previous);
+        let plan = learned_plan(Some(&recorded), &candidates, true);
+        assert_eq!(plan.streak, previous + 1);
+        assert!(!plan.hot);
+    }
+    let recorded = recorded_for(b"stale", HOT_STREAK_THRESHOLD - 1);
+    assert!(learned_plan(Some(&recorded), &candidates, true).hot);
+
+    // The streak is a state rather than a tally, so it stops at the threshold.
+    let saturated = recorded_for(b"stale", HOT_STREAK_THRESHOLD);
+    assert_eq!(
+        learned_plan(Some(&saturated), &candidates, true).streak,
+        HOT_STREAK_THRESHOLD
+    );
+
+    // Disabled, the streak is still recorded so that enabling it later works.
+    let plan = learned_plan(Some(&saturated), &candidates, false);
+    assert_eq!(plan.streak, HOT_STREAK_THRESHOLD);
+    assert!(!plan.hot);
+}
+
+/// Either key hitting means the recorded content is the current content: a
+/// portable and a literal action describe one compilation, not two.
+#[test]
+fn a_portable_key_match_is_not_churn() {
+    let candidates = ActionCandidates {
+        portable: Some(action_for(b"portable")),
+        literal: action_for(b"literal"),
+    };
+    let recorded = recorded_for(b"portable", HOT_STREAK_THRESHOLD - 1);
+
+    let plan = learned_plan(Some(&recorded), &candidates, true);
+
+    assert_eq!(plan.streak, 0);
+    assert!(!plan.hot);
+}
+
 #[test]
 fn compiler_timing_survives_a_changed_action_key() {
     let invocation = CacheDigest::blake3(b"invocation");
@@ -18,6 +103,7 @@ fn compiler_timing_survives_a_changed_action_key() {
         environment: Vec::new(),
         compiler_duration_ns: 42,
         crate_name: "demo".into(),
+        churn_streak: 0,
     };
     let prediction = ActionPrediction {
         invocation: invocation.clone(),
@@ -26,9 +112,9 @@ fn compiler_timing_survives_a_changed_action_key() {
         payload: String::from_utf8(canonical_json(&timing).unwrap()).unwrap(),
     };
 
-    let decoded = decode_prediction_timing(&prediction, &invocation).unwrap();
+    let decoded = decode_prediction(&prediction, &invocation).unwrap();
     assert_eq!(decoded.crate_name, "demo");
-    assert_eq!(decoded.duration_ns, 42);
+    assert_eq!(decoded.compiler_duration_ns, 42);
 }
 
 /// `--remap-path-prefix` covers the paths rustc writes itself, so most

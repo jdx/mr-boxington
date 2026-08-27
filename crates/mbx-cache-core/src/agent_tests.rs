@@ -140,6 +140,40 @@ async fn counts_bypasses_by_reason() {
     assert_eq!(stats.bypasses.get("incremental"), Some(&1));
 }
 
+/// Outcomes are a closed set because they name the categories a build summary
+/// adds up; an unrecognized one would appear as its own line and count as
+/// nothing.
+#[tokio::test]
+async fn compiler_invocations_are_counted_by_known_outcomes() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+
+    for outcome in ["miss", "incremental", "incremental"] {
+        agent
+            .respond(AgentRequest::RecordCompilerInvocation {
+                outcome: outcome.into(),
+                crate_name: Some("demo".into()),
+                duration_ns: 10,
+            })
+            .await;
+    }
+    let rejected = agent
+        .respond(AgentRequest::RecordCompilerInvocation {
+            outcome: "invented".into(),
+            crate_name: None,
+            duration_ns: 0,
+        })
+        .await;
+
+    let stats = agent.stats();
+    assert_eq!(
+        stats.compiler.get("incremental").map(|it| it.invocations),
+        Some(2)
+    );
+    assert_eq!(stats.compiler.get("miss").map(|it| it.invocations), Some(1));
+    assert!(matches!(rejected, AgentResponse::Error { .. }));
+}
+
 #[tokio::test]
 async fn handshake_and_blob_round_trip() {
     let directory = tempfile::tempdir().unwrap();

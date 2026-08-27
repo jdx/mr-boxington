@@ -97,7 +97,9 @@ pub enum AgentRequest {
     RecordUnconsulted,
     /// Account for one real compiler invocation performed by the adapter.
     RecordCompilerInvocation {
-        /// Stable outcome category such as `miss`, `unconsulted`, or `bypass`.
+        /// Stable outcome category such as `miss`, `unconsulted`, `bypass`, or
+        /// `incremental` for a compilation the adapter deliberately ran with
+        /// incremental state instead of publishing.
         outcome: String,
         /// Compiler crate name, when the invocation supplied one.
         crate_name: Option<String>,
@@ -2040,7 +2042,10 @@ impl CacheAgent {
         crate_name: Option<&str>,
         duration_ns: u64,
     ) -> Result<AgentResponse> {
-        if !matches!(outcome, "miss" | "unconsulted" | "bypass" | "verification") {
+        if !matches!(
+            outcome,
+            "miss" | "unconsulted" | "bypass" | "verification" | "incremental"
+        ) {
             bail!("invalid compiler invocation outcome");
         }
         if let Some(crate_name) = crate_name

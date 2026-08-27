@@ -108,7 +108,7 @@ fn guidance(kind: &str) -> &'static str {
             "Expected for Cargo probes: source supplied on standard input cannot be rediscovered later."
         }
         "incremental" => {
-            "Disable incremental compilation (`MBX_INCREMENTAL=0`) to make this action cacheable."
+            "Cargo compiled this incrementally, which mbx cannot cache. `MBX_INCREMENTAL=0` makes it cacheable again; mbx already gives a crate you are editing its own incremental state without giving up the rest of the cache."
         }
         "response-file" => {
             "The invocation uses an `@response-file`; mbx does not model response-file contents yet."

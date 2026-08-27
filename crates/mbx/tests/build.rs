@@ -150,7 +150,8 @@ fn build_with(
         .env_remove("CI")
         // Same reason: a test asserting the default cross-checkout behaviour
         // must not read an answer out of the developer's environment.
-        .env_remove("MBX_SHARE_OUT_DIR");
+        .env_remove("MBX_SHARE_OUT_DIR")
+        .env_remove("MBX_LEARNED_INCREMENTAL");
     for (name, value) in settings {
         command.env(name, value);
     }
@@ -295,6 +296,196 @@ fn incremental_sessions(project: &Path) -> usize {
         Ok(entries) => entries.count(),
         Err(_) => 0,
     }
+}
+
+/// Edit the fixture so it compiles to something new.
+fn edit_project(project: &Path, revision: u32) {
+    std::fs::write(
+        project.join("src/lib.rs"),
+        format!(
+            "pub fn double(value: u32) -> u32 {{\n    value * 2 + {revision} - {revision}\n}}\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// Incremental state mbx is keeping for churning units, as opposed to the
+/// `incremental/` directory cargo drives itself.
+fn learned_sessions(project: &Path) -> usize {
+    let target = project.join("target");
+    let outputs = std::fs::read_link(&target).unwrap_or(target);
+    match std::fs::read_dir(outputs.join("mbx-incremental")) {
+        Ok(entries) => entries.count(),
+        Err(_) => 0,
+    }
+}
+
+fn compiled_incrementally(stats: &serde_json::Value) -> u64 {
+    stats["compiler"]["incremental"]["invocations"]
+        .as_u64()
+        .unwrap_or(0)
+}
+
+/// A crate somebody is editing misses on every build no matter what the cache
+/// does. After enough of those in a row, it gets to keep its own incremental
+/// state -- which never reaches the store, because it describes one checkout's
+/// edit history rather than its source.
+#[test]
+fn a_churning_crate_earns_its_own_incremental_state() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+
+    let mut stats = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+    );
+    for revision in 1..=4 {
+        edit_project(project.path(), revision);
+        stats = build(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("edit-{revision}.json")),
+        );
+        // The streak has to build up first, so nothing is expected before it.
+        if revision < 3 {
+            assert_eq!(
+                compiled_incrementally(&stats),
+                0,
+                "one or two edits is not a pattern yet: {stats}"
+            );
+        }
+    }
+
+    assert!(
+        compiled_incrementally(&stats) > 0,
+        "the edited crate should have compiled incrementally by now: {stats}"
+    );
+    assert!(
+        learned_sessions(project.path()) > 0,
+        "it should have left incremental state behind: {stats}"
+    );
+    assert_eq!(
+        stats["stored_bytes"].as_u64(),
+        Some(0),
+        "an incremental artifact must never be published: {stats}"
+    );
+}
+
+/// The same evidence that turns it on turns it off: once the content stops
+/// moving, the unit compiles normally again and rejoins the shared cache.
+#[test]
+fn a_settled_crate_publishes_again() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+    );
+    for revision in 1..=4 {
+        edit_project(project.path(), revision);
+        build(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("edit-{revision}.json")),
+        );
+    }
+
+    // Same content as the last build, so the key it recorded is the key this
+    // compilation has: the churn is over.
+    wipe_target(project.path());
+    let settled = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("settled.json"),
+    );
+    assert_eq!(
+        compiled_incrementally(&settled),
+        0,
+        "unchanged content should compile normally: {settled}"
+    );
+    assert!(
+        settled["stored_bytes"].as_u64().unwrap_or(0) > 0,
+        "and it should be published: {settled}"
+    );
+
+    wipe_target(project.path());
+    let warm = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("warm.json"),
+    );
+    assert!(
+        warm["hits"].as_u64().unwrap_or(0) > 0,
+        "so a later build can restore it: {warm}"
+    );
+}
+
+/// A fresh runner has no incremental state to reuse, so the trade is all cost.
+#[test]
+fn churn_earns_nothing_in_ci() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+
+    let mut stats = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+    );
+    for revision in 1..=4 {
+        edit_project(project.path(), revision);
+        stats = build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("edit-{revision}.json")),
+            &[("CI", "true")],
+        )
+        .0;
+    }
+
+    assert_eq!(
+        compiled_incrementally(&stats),
+        0,
+        "CI should have compiled every edit normally: {stats}"
+    );
+}
+
+#[test]
+fn learned_incremental_can_be_turned_off() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+
+    let mut stats = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+    );
+    for revision in 1..=4 {
+        edit_project(project.path(), revision);
+        stats = build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("edit-{revision}.json")),
+            &[("MBX_LEARNED_INCREMENTAL", "0")],
+        )
+        .0;
+    }
+
+    assert_eq!(
+        compiled_incrementally(&stats),
+        0,
+        "the setting should have kept every edit normal: {stats}"
+    );
 }
 
 #[test]
