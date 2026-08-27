@@ -1428,3 +1428,130 @@ mod target_views {
         assert!(project.path().join("target/debug/libfixture.rlib").exists());
     }
 }
+
+/// Build `project` into an explicit target directory, so two builds of the
+/// same checkout differ only in where their outputs land.
+fn build_into_target(
+    project: &Path,
+    store: &Path,
+    target: &Path,
+    settings: &[(&str, &str)],
+) -> String {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mbx"));
+    command
+        .current_dir(project)
+        .args(["build", "--offline"])
+        .env("MBX_CACHE_DIR", store)
+        .env("CARGO_TARGET_DIR", target)
+        .env_remove("MBX_INCREMENTAL")
+        .env_remove("CARGO_INCREMENTAL")
+        .env_remove("MBX_LEARNED_INCREMENTAL")
+        .env_remove("CI")
+        .env_remove("MBX_SHARE_OUT_DIR");
+    for (name, value) in settings {
+        command.env(name, value);
+    }
+    let output = command.output().expect("mbx should run");
+    assert!(
+        output.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// Read the dep-info rustc wrote for the fixture's library.
+fn dep_info_contents(target: &Path) -> String {
+    let deps = target.join("debug/deps");
+    let entry = std::fs::read_dir(&deps)
+        .expect("deps directory should exist")
+        .filter_map(Result::ok)
+        .find(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("fixture-") && name.ends_with(".d")
+        })
+        .expect("the library's dep-info should exist");
+    std::fs::read_to_string(entry.path()).expect("dep-info should be readable")
+}
+
+/// A restored compilation must describe the checkout it was restored into.
+///
+/// Dep-info rules are keyed by absolute output paths, so a result stored
+/// verbatim hands the next target directory rules naming the one that
+/// published them. Cargo reads that file, and `MBX_VERIFY=1` compares it, so
+/// the stale spelling is both a wrong artifact and a permanent divergence.
+#[test]
+fn a_restored_dep_info_names_the_target_directory_it_was_restored_into() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    write_project(project.path());
+
+    build_into_target(project.path(), store.path(), first.path(), &[]);
+    build_into_target(project.path(), store.path(), second.path(), &[]);
+
+    let restored = dep_info_contents(second.path());
+    let foreign = first.path().to_string_lossy().into_owned();
+    assert!(
+        !restored.contains(&foreign),
+        "restored dep-info still names the publishing target directory:\n{restored}"
+    );
+    assert!(
+        restored.contains(&*second.path().to_string_lossy()),
+        "restored dep-info should name this target directory:\n{restored}"
+    );
+}
+
+/// The same compilation restored into a different target directory is what a
+/// fresh compilation there would have produced.
+///
+/// Unix only, and the reason is worth stating. On Windows the compiled
+/// artifact itself is not byte-identical between two target directories: with
+/// everything else held constant -- one checkout, one set of sources,
+/// incremental off -- the rlib still differs, because the debug information
+/// records where the compilation wrote its objects. Nothing this fix does can
+/// change that, and rewriting inside a compiled artifact would be corruption
+/// rather than translation, so verification there reports a difference that is
+/// real.
+#[cfg(unix)]
+#[test]
+fn verification_is_clean_across_target_directories() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    write_project(project.path());
+
+    build_into_target(project.path(), store.path(), first.path(), &[]);
+    let report = reports.path().join("verify.json");
+    let stderr = build_into_target(
+        project.path(),
+        store.path(),
+        second.path(),
+        &[
+            ("MBX_VERIFY", "1"),
+            ("MBX_STATS_REPORT", report.to_str().unwrap()),
+        ],
+    );
+    let reported = stderr
+        .lines()
+        .filter(|line| line.contains("diverged"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let stats: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report).expect("a report should be written"))
+            .expect("the report should be JSON");
+    assert!(
+        count(&stats, "verifications") > 0,
+        "the run should have verified something: {stats}"
+    );
+    assert_eq!(
+        count(&stats, "divergences"),
+        0,
+        "a restore into another target directory diverged: {reported}"
+    );
+}

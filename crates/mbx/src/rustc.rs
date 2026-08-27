@@ -171,7 +171,13 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
         )
     {
         action_lookup_attempted = true;
-        match restore_candidates(&candidates, &outputs, &discovered, !verify) {
+        match restore_candidates(
+            &candidates,
+            &outputs,
+            &discovered,
+            !verify,
+            &portable.mappings,
+        ) {
             Ok(Some((action, mut cached))) => {
                 match prediction_timing(&compilation) {
                     Ok(timing) => {
@@ -258,10 +264,12 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     );
     let _ = replay_output(&output);
     if let Some(cached) = verification {
-        let matched = cached_matches(&cached, &output);
-        record_verification(matched, cached.restore);
-        if !matched {
-            eprintln!("mbx[warning]: shadow verification diverged from cached output");
+        let divergence = verification_divergence(&cached, &output);
+        record_verification(divergence.is_none(), cached.restore);
+        if let Some(divergence) = divergence {
+            eprintln!(
+                "mbx[warning]: shadow verification diverged from cached output: {divergence}"
+            );
         }
         return Ok(exit_code(output.status));
     }
@@ -286,7 +294,13 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                 &candidates.literal
             } else {
                 let action = candidates.publishable(&portable, &outputs.files)?;
-                publish_result(&action.digest, &action.bytes, &outputs, &output)?;
+                publish_result(
+                    &action.digest,
+                    &action.bytes,
+                    &outputs,
+                    &output,
+                    &portable.mappings,
+                )?;
                 action
             };
             record_prediction(&compilation, &action.digest, &discovered, &timing);
@@ -517,7 +531,13 @@ fn restore_predicted_result(
     // From this point onward, every return follows at least one action-result
     // request, including error responses from a corrupt local record.
     *action_lookup_attempted = true;
-    let restored = restore_candidates(&candidates, outputs, &discovered, restore_outputs)?;
+    let restored = restore_candidates(
+        &candidates,
+        outputs,
+        &discovered,
+        restore_outputs,
+        &portable.mappings,
+    )?;
     match restored {
         Some((action, mut cached)) => {
             cached.restore.avoided_compiler_duration_ns = input_prediction.compiler_duration_ns;
@@ -596,9 +616,12 @@ fn restore_candidates(
     outputs: &RustcOutputs,
     discovered: &DiscoveredInputs,
     restore_outputs: bool,
+    mappings: &[PathMapping],
 ) -> Result<Option<(CacheDigest, CachedCompilation)>> {
     for action in candidates.ordered() {
-        if let Some(cached) = restore_result(action, outputs, discovered, restore_outputs)? {
+        if let Some(cached) =
+            restore_result(action, outputs, discovered, restore_outputs, mappings)?
+        {
             return Ok(Some((action.digest.clone(), cached)));
         }
     }
@@ -790,6 +813,7 @@ fn restore_result(
     outputs: &RustcOutputs,
     discovered: &DiscoveredInputs,
     restore_outputs: bool,
+    mappings: &[PathMapping],
 ) -> Result<Option<CachedCompilation>> {
     let responses = session::request_agent(&[AgentRequest::FindActionResult {
         action: action.digest.clone(),
@@ -831,15 +855,6 @@ fn restore_result(
     let directory: CacheDirectory =
         read_canonical_blob(&roots[2], &output_root_digest, "output directory")?;
     let files = validated_outputs(directory, outputs)?;
-    let cached_outputs = files
-        .iter()
-        .map(|(node, destination)| CachedOutput {
-            path: destination.clone(),
-            digest: node.digest.clone(),
-            executable: node.executable,
-            mode: node.mode,
-        })
-        .collect();
     let restored_output_files = files.len().try_into().unwrap_or(u64::MAX);
     let restored_output_bytes = files.iter().fold(0_u64, |total, (node, _)| {
         total.saturating_add(node.digest.size)
@@ -848,8 +863,14 @@ fn restore_result(
     let mut digests = vec![metadata.stdout.clone(), metadata.stderr.clone()];
     digests.extend(files.iter().map(|(node, _)| node.digest.clone()));
     let blobs = find_blobs(&digests)?;
-    let stdout = read_verified_blob(&blobs[0], &metadata.stdout, "stdout")?;
-    let stderr = read_verified_blob(&blobs[1], &metadata.stderr, "stderr")?;
+    let stdout = denormalize_output_text(
+        &read_verified_blob(&blobs[0], &metadata.stdout, "stdout")?,
+        mappings,
+    );
+    let stderr = denormalize_output_text(
+        &read_verified_blob(&blobs[1], &metadata.stderr, "stderr")?,
+        mappings,
+    );
 
     let materialization_started = Instant::now();
     std::fs::create_dir_all(&outputs.directory)?;
@@ -860,7 +881,39 @@ fn restore_result(
         output_bytes: restored_output_bytes,
         ..RestoreStats::default()
     };
+    let mut cached_outputs = Vec::with_capacity(files.len());
     for (index, ((node, destination), source)) in files.into_iter().zip(&blobs[2..]).enumerate() {
+        // The dep-info was stored in placeholder form, so it is written out
+        // rather than cloned: what belongs on disk is this checkout's spelling
+        // of it, and that is what the verification below must compare against.
+        if destination == outputs.dep_info {
+            let bytes = denormalize_output_text(
+                &read_verified_blob(source, &node.digest, "dep-info")?,
+                mappings,
+            );
+            let temporary = staging.path().join(format!("output-{index}"));
+            std::fs::write(&temporary, &bytes)?;
+            let temporary = tempfile::TempPath::try_from_path(temporary)?;
+            apply_file_mode(&temporary, node.mode, node.executable)?;
+            restore.copied_output_files = restore.copied_output_files.saturating_add(1);
+            restore.copied_output_bytes = restore
+                .copied_output_bytes
+                .saturating_add(bytes.len().try_into().unwrap_or(u64::MAX));
+            cached_outputs.push(CachedOutput {
+                path: destination.clone(),
+                digest: CacheDigest::blake3(&bytes),
+                executable: node.executable,
+                mode: node.mode,
+            });
+            staged.push((temporary, destination));
+            continue;
+        }
+        cached_outputs.push(CachedOutput {
+            path: destination.clone(),
+            digest: node.digest.clone(),
+            executable: node.executable,
+            mode: node.mode,
+        });
         let (temporary, materialization) =
             stage_verified_cached_output(staging.path(), index, source, &node)?;
         match materialization {
@@ -945,20 +998,41 @@ fn stage_verified_cached_output(
     Ok((temporary, materialization))
 }
 
-fn cached_matches(cached: &CachedCompilation, output: &Output) -> bool {
-    output.status.success()
-        && cached.stdout == output.stdout
-        && cached.stderr == output.stderr
-        && cached.outputs.iter().all(|expected| {
-            std::fs::metadata(&expected.path).is_ok_and(|metadata| {
-                file_mode(&metadata) == expected.mode
-                    && executable_mode_matches(&metadata, expected.executable)
-                    && expected
-                        .digest
-                        .matches_file(&expected.path)
-                        .unwrap_or(false)
-            })
-        })
+/// Describe how a restore differs from the compilation it was checked against.
+///
+/// `None` means they agree. A divergence names what disagreed, because that is
+/// the whole output of a qualification run: knowing that something differed is
+/// not actionable, and the answer is usually one specific file.
+fn verification_divergence(cached: &CachedCompilation, output: &Output) -> Option<String> {
+    if !output.status.success() {
+        return Some("the shadow compilation failed".into());
+    }
+    if cached.stdout != output.stdout {
+        return Some("standard output differs".into());
+    }
+    if cached.stderr != output.stderr {
+        return Some("standard error differs".into());
+    }
+    for expected in &cached.outputs {
+        let name = expected.path.display();
+        let Ok(metadata) = std::fs::metadata(&expected.path) else {
+            return Some(format!("{name} is missing"));
+        };
+        if file_mode(&metadata) != expected.mode {
+            return Some(format!("{name} has a different file mode"));
+        }
+        if !executable_mode_matches(&metadata, expected.executable) {
+            return Some(format!("{name} has a different executable bit"));
+        }
+        if !expected
+            .digest
+            .matches_file(&expected.path)
+            .unwrap_or(false)
+        {
+            return Some(format!("{name} has different contents"));
+        }
+    }
+    None
 }
 
 fn record_verification(matched: bool, restore: RestoreStats) {
@@ -1483,19 +1557,141 @@ fn resolve_executable(executable: &OsStr) -> Result<PathBuf> {
     })
 }
 
+/// Rewrite this machine's paths in a cached text output into the placeholders
+/// the action key already uses.
+///
+/// Two outputs of a compilation are text that names where the compilation ran:
+/// the dep-info file, whose rules are keyed by absolute output paths, and the
+/// compiler's stderr, which carries an artifact notification per emitted file
+/// when cargo asks for one. Both are the same compilation wherever it runs, but
+/// neither is byte-identical across target directories, so storing them
+/// verbatim means a restore hands the next checkout paths belonging to the one
+/// that published them.
+///
+/// Only these two are rewritten. Compiled artifacts are opaque bytes that do
+/// not carry the target directory, and rewriting inside them would be a
+/// corruption rather than a translation.
+fn normalize_output_text(bytes: &[u8], mappings: &[PathMapping]) -> Vec<u8> {
+    let mut normalized = bytes.to_vec();
+    for (root, placeholder) in root_spellings(mappings) {
+        normalized = replace_bytes(&normalized, root.as_bytes(), placeholder.as_bytes());
+    }
+    normalized
+}
+
+/// Rewrite placeholders in a cached text output back into this machine's paths.
+fn denormalize_output_text(bytes: &[u8], mappings: &[PathMapping]) -> Vec<u8> {
+    let mut text = bytes.to_vec();
+    for (root, placeholder) in root_spellings(mappings) {
+        text = replace_bytes(&text, placeholder.as_bytes(), root.as_bytes());
+    }
+    text
+}
+
+/// Every spelling a root can take in these outputs, paired with the
+/// placeholder that stands for it.
+///
+/// rustc writes a path with the platform separator in some places and forward
+/// slashes in others -- the reason [`carries`] searches both -- and stderr is
+/// JSON, where a Windows separator arrives doubled. A spelling missed here is
+/// a path from the publishing checkout left in place, so each is looked for,
+/// and each gets its own placeholder because a restore has to know which one
+/// to write back.
+///
+/// Deepest root first, so a target directory inside a workspace wins over the
+/// workspace, and within a root the doubled spelling before the single one.
+fn root_spellings(mappings: &[PathMapping]) -> Vec<(String, String)> {
+    let mut spellings = Vec::new();
+    for mapping in PathMapping::ordered(mappings) {
+        let Some(root) = mapping.root.to_str() else {
+            continue;
+        };
+        // A root arrives however its environment variable was written, and
+        // `CARGO_TARGET_DIR=/work/target/` is as valid as the same path
+        // without. Trailing separators are dropped so the boundary check sees
+        // the separator before a child rather than the child's first letter,
+        // which would otherwise reject every path under such a root and leave
+        // it in the publishing checkout's spelling. A Windows drive root like
+        // `C:\` trims to `C:`, which its own separator then follows.
+        let root = root.trim_end_matches(['/', '\\']);
+        if root.is_empty() {
+            continue;
+        }
+        // The literal spelling first, so a platform whose separator needs no
+        // escaping keeps the plain placeholder rather than an escaped one that
+        // means the same thing.
+        for (spelling, suffix) in [
+            (root.to_string(), ""),
+            (root.replace('\\', "\\\\"), ":escaped"),
+            (root.replace('\\', "/"), ":slash"),
+        ] {
+            if spellings.iter().any(|(existing, _)| existing == &spelling) {
+                continue;
+            }
+            spellings.push((spelling, format!("${{{}{suffix}}}", mapping.placeholder)));
+        }
+    }
+    spellings
+}
+
+/// Whether a root matched at `end` stops there rather than running into a
+/// longer name.
+///
+/// `/work/target` is not a prefix of `/work/target-backup` in any sense that
+/// matters, but a plain substring search cannot tell them apart, and rewriting
+/// the second would hand a restore a directory that never existed.
+/// [`normalize_mapped_path`] gets this from comparing components; here the
+/// following byte has to say it.
+fn ends_at_boundary(haystack: &[u8], end: usize) -> bool {
+    match haystack.get(end) {
+        None => true,
+        Some(byte) => !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
+    }
+}
+
+fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return haystack.to_vec();
+    }
+    let mut out = Vec::with_capacity(haystack.len());
+    let mut index = 0;
+    while index <= haystack.len() - needle.len() {
+        if &haystack[index..index + needle.len()] == needle
+            && ends_at_boundary(haystack, index + needle.len())
+        {
+            out.extend_from_slice(replacement);
+            index += needle.len();
+        } else {
+            out.push(haystack[index]);
+            index += 1;
+        }
+    }
+    out.extend_from_slice(&haystack[index..]);
+    out
+}
+
 fn publish_result(
     action: &CacheDigest,
     action_bytes: &[u8],
     outputs: &RustcOutputs,
     output: &Output,
+    mappings: &[PathMapping],
 ) -> Result<()> {
     if outputs.files.is_empty() {
         bail!("rustc produced no cacheable outputs");
     }
     let staging = staging_directory()?;
     let mut blobs = vec![staged_bytes(staging.path(), "action.json", action_bytes)?];
-    let stdout = staged_bytes(staging.path(), "stdout", &output.stdout)?;
-    let stderr = staged_bytes(staging.path(), "stderr", &output.stderr)?;
+    let stdout = staged_bytes(
+        staging.path(),
+        "stdout",
+        &normalize_output_text(&output.stdout, mappings),
+    )?;
+    let stderr = staged_bytes(
+        staging.path(),
+        "stderr",
+        &normalize_output_text(&output.stderr, mappings),
+    )?;
     blobs.extend([stdout.clone(), stderr.clone()]);
 
     let output_paths = outputs
@@ -1509,8 +1705,19 @@ fn publish_result(
         if !metadata.is_file() {
             bail!("rustc output is not a regular file: {}", path.display());
         }
-        let digest = CacheDigest::blake3_file(path)?;
-        blobs.push((digest.clone(), path.clone()));
+        // The dep-info is stored in its placeholder form, so the checkout that
+        // restores it gets rules naming its own target directory rather than
+        // the one that published them.
+        let digest = if path == &outputs.dep_info {
+            let normalized = normalize_output_text(&std::fs::read(path)?, mappings);
+            let staged = staged_bytes(staging.path(), "dep-info", &normalized)?;
+            blobs.push(staged.clone());
+            staged.0
+        } else {
+            let digest = CacheDigest::blake3_file(path)?;
+            blobs.push((digest.clone(), path.clone()));
+            digest
+        };
         files.push(CacheFileNode {
             digest,
             executable: outputs.is_executable(path),

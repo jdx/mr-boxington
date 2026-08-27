@@ -539,3 +539,179 @@ fn benchmark_cached_output_materialization() {
         legacy.as_secs_f64() / materialized.as_secs_f64()
     );
 }
+
+/// The dep-info writes a path literally; stderr is JSON, where a Windows
+/// separator arrives doubled. Both spellings have to round-trip, or every
+/// artifact notification on Windows keeps the publishing checkout's path.
+#[test]
+fn both_spellings_of_a_root_round_trip_through_a_placeholder() {
+    let mappings = vec![PathMapping::new(
+        if cfg!(windows) {
+            r"D:\work\target"
+        } else {
+            "/work/target"
+        },
+        "target",
+    )];
+    let root = mappings[0].root.to_str().unwrap().to_string();
+    let escaped = root.replace('\\', r"\\");
+
+    // A dep-info rule and a JSON artifact notification, as rustc writes them.
+    let original = format!("{root}/deps/lib.rlib: src/lib.rs\n{{\"artifact\":\"{escaped}\"}}\n");
+    let normalized = normalize_output_text(original.as_bytes(), &mappings);
+
+    assert!(
+        !String::from_utf8_lossy(&normalized).contains(&root),
+        "the literal root survived normalization: {}",
+        String::from_utf8_lossy(&normalized)
+    );
+    if escaped != root {
+        assert!(
+            !String::from_utf8_lossy(&normalized).contains(&escaped),
+            "the escaped root survived normalization: {}",
+            String::from_utf8_lossy(&normalized)
+        );
+    }
+    assert_eq!(
+        denormalize_output_text(&normalized, &mappings),
+        original.as_bytes(),
+        "a normalized output did not come back as it went in"
+    );
+}
+
+/// A restore happens on a machine whose roots differ from the one that
+/// published, which is the whole point of the placeholder.
+#[test]
+fn a_placeholder_is_rewritten_into_the_restoring_checkouts_root() {
+    let published = vec![PathMapping::new(
+        if cfg!(windows) {
+            r"D:\one\target"
+        } else {
+            "/one/target"
+        },
+        "target",
+    )];
+    let restoring = vec![PathMapping::new(
+        if cfg!(windows) {
+            r"D:\two\target"
+        } else {
+            "/two/target"
+        },
+        "target",
+    )];
+    let published_root = published[0].root.to_str().unwrap();
+    let restoring_root = restoring[0].root.to_str().unwrap();
+
+    let original = format!("{published_root}/deps/lib.rlib: src/lib.rs\n");
+    let stored = normalize_output_text(original.as_bytes(), &published);
+    let restored = denormalize_output_text(&stored, &restoring);
+
+    let restored = String::from_utf8_lossy(&restored).into_owned();
+    assert!(
+        restored.contains(restoring_root),
+        "restore should name the restoring root: {restored}"
+    );
+    assert!(
+        !restored.contains(published_root),
+        "restore still names the publishing root: {restored}"
+    );
+}
+
+/// rustc writes a path with the platform separator in some places and forward
+/// slashes in others, which is why `carries` searches both, and stderr is JSON
+/// where a Windows separator arrives doubled. A spelling missed here is a path
+/// from the publishing checkout left in place.
+///
+/// The root is spelled the Windows way whatever this platform is, because a
+/// unix root has only one spelling and the test would prove nothing there.
+#[test]
+fn every_spelling_of_a_root_is_normalized() {
+    let mappings = vec![PathMapping::new(r"D:\work\target", "target")];
+    let root = r"D:\work\target";
+    let spellings = [
+        root.to_string(),
+        root.replace('\\', r"\\"),
+        root.replace('\\', "/"),
+    ];
+    assert_eq!(
+        spellings
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3,
+        "the fixture should exercise three distinct spellings"
+    );
+
+    for spelling in &spellings {
+        let original = format!("{spelling}/deps/lib.rlib: src/lib.rs\n");
+        let normalized = normalize_output_text(original.as_bytes(), &mappings);
+        assert!(
+            !String::from_utf8_lossy(&normalized).contains(spelling.as_str()),
+            "{spelling} survived normalization: {}",
+            String::from_utf8_lossy(&normalized)
+        );
+        assert_eq!(
+            denormalize_output_text(&normalized, &mappings),
+            original.as_bytes(),
+            "{spelling} did not come back as it went in"
+        );
+    }
+}
+
+/// A root is a directory, not a text prefix. `/work/target` has nothing to do
+/// with `/work/target-backup`, and rewriting the second would hand a restore a
+/// directory that never existed.
+#[test]
+fn a_sibling_sharing_a_prefix_is_left_alone() {
+    let mappings = vec![PathMapping::new(
+        if cfg!(windows) {
+            r"D:\work\target"
+        } else {
+            "/work/target"
+        },
+        "target",
+    )];
+    let root = mappings[0].root.to_str().unwrap().to_string();
+    let separator = if cfg!(windows) { '\\' } else { '/' };
+    let sibling = format!("{root}-backup{separator}keep.rlib");
+    let inside = format!("{root}{separator}deps{separator}lib.rlib");
+
+    let original = format!("{sibling}\n{inside}\n");
+    let normalized = normalize_output_text(original.as_bytes(), &mappings);
+    let normalized = String::from_utf8_lossy(&normalized).into_owned();
+
+    assert!(
+        normalized.contains(&sibling),
+        "the sibling directory was rewritten: {normalized}"
+    );
+    assert!(
+        !normalized.contains(&inside),
+        "the root itself was not rewritten: {normalized}"
+    );
+}
+
+/// A root arrives however its environment variable was written, and a
+/// trailing separator must not stop the rewrite: the byte after the match
+/// would then be a child's first letter rather than the separator before it.
+#[test]
+fn a_root_written_with_a_trailing_separator_still_rewrites() {
+    let plain = vec![PathMapping::new("/work/target", "target")];
+    let trailing = vec![PathMapping::new("/work/target/", "target")];
+    let original = "/work/target/deps/lib.rlib: src/lib.rs\n";
+
+    let from_trailing = normalize_output_text(original.as_bytes(), &trailing);
+    assert!(
+        !String::from_utf8_lossy(&from_trailing).contains("/work/target/deps"),
+        "a trailing separator left the path unrewritten: {}",
+        String::from_utf8_lossy(&from_trailing)
+    );
+    assert_eq!(
+        from_trailing,
+        normalize_output_text(original.as_bytes(), &plain),
+        "how the root was written should not change what is stored"
+    );
+    assert_eq!(
+        denormalize_output_text(&from_trailing, &trailing),
+        original.as_bytes()
+    );
+}
