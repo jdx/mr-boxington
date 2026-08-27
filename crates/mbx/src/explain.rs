@@ -152,6 +152,9 @@ fn guidance(kind: &str) -> &'static str {
         "cc-unsupported-environment" => {
             "An include-path or sub-tool environment variable changes the compilation in a way the argv model cannot see. Unset it to make these compilations cacheable."
         }
+        "cc-local-cpu-target" => {
+            "A build script compiles for the machine's own processor (`-march=native` or similar), so the object it produces is not a function of anything the cache key names. Name the architecture explicitly to make these compilations cacheable."
+        }
         "cc-unsupported-compiler-driver" => {
             "mbx models gcc-style and clang-style drivers. Other compilers, including MSVC, compile normally without caching."
         }
