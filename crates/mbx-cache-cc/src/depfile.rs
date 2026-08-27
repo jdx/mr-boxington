@@ -288,8 +288,14 @@ pub fn manifest_snapshot(
 ///
 /// An extensionless name also qualifies: C++ standard headers are spelled that
 /// way and projects ship their own.
+///
+/// `gch` and `pch` are here because a precompiled header answers an `#include`
+/// without being named by one. GCC prefers `foo.h.gch` over `foo.h` on its own,
+/// with nothing on the command line to say so, which is precisely the
+/// substitution these manifests exist to notice -- and the one case the
+/// adapter's explicit precompiled-header bypass cannot see.
 const INCLUDABLE_EXTENSIONS: &[&str] = &[
-    "def", "h", "h++", "hh", "hpp", "hxx", "inc", "inl", "ipp", "tcc",
+    "def", "gch", "h", "h++", "hh", "hpp", "hxx", "inc", "inl", "ipp", "pch", "tcc",
 ];
 
 /// Whether a file name could be what an `#include` directive names.

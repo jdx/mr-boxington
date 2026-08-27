@@ -95,7 +95,9 @@ of anything the key names.
 ## Shadowing is modeled by name, not by content
 
 An include directory contributes the names in it that could answer an
-`#include`: header extensions, and names without one. A file that could not be
+`#include`: header extensions, names without one, and precompiled headers,
+which GCC prefers over the header they were built from without anything on the
+command line saying so. A file that could not be
 included -- an object, a dependency file, an archive -- is ignored, so a build
 writing its outputs beside a generated header does not disturb the key.
 

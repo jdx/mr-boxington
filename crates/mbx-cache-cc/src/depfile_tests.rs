@@ -241,3 +241,32 @@ fn extensionless_names_count_as_includable() {
     write(&include, "vector", "#pragma once\n");
     assert_ne!(empty, manifest(&include));
 }
+
+/// A precompiled header answers an `#include` without being named by one:
+/// GCC prefers `foo.h.gch` over `foo.h` with nothing on the command line to
+/// say so. Nothing else in the adapter can see that substitution, so the
+/// manifest has to.
+#[test]
+fn a_precompiled_header_appearing_beside_its_header_changes_the_manifest() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let include = directory.path().join("include");
+    std::fs::create_dir_all(&include).expect("create include dir");
+    write(&include, "foo.h", "#define V 1\n");
+
+    let manifest = |directory: &Path| {
+        manifest_snapshot(&BTreeSet::from([directory.to_path_buf()]))
+            .expect("snapshot")
+            .remove(directory)
+            .expect("directory manifest")
+    };
+    let before = manifest(&include);
+    for precompiled in ["foo.h.gch", "foo.h.pch"] {
+        write(&include, precompiled, "\0precompiled\0");
+        assert_ne!(
+            before,
+            manifest(&include),
+            "{precompiled} can answer an #include and must move the key"
+        );
+        std::fs::remove_file(include.join(precompiled)).expect("remove");
+    }
+}
