@@ -23,7 +23,7 @@ use crate::{BlobSource, BlobUpload, CacheDigest, RemoteActionResult, RemoteCache
 use futures_util::future::{BoxFuture, Shared};
 use futures_util::{FutureExt, StreamExt, stream};
 use log::warn;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -233,21 +233,32 @@ impl UploadQueue {
         *worker = Some(tokio::spawn(async move { inner.run().await }));
     }
 
-    /// Wait for the action results covering `actions` to be published.
+    /// Wait for the action results covering `actions`, reporting the ones that
+    /// did not publish.
     ///
     /// A task manifest names the actions it predicts, so publishing it before
-    /// those results exist would advertise work a reader cannot fetch.
-    pub(crate) async fn wait_for_actions(&self, actions: &[CacheDigest]) {
-        let tickets: Vec<UploadTicket> = {
+    /// those results exist would advertise work a reader cannot fetch. An action
+    /// this queue never held is not reported: it was published by an earlier
+    /// session, which is what a manifest baseline is made of.
+    pub(crate) async fn wait_for_actions(&self, actions: &[CacheDigest]) -> BTreeSet<CacheDigest> {
+        let tickets: Vec<(CacheDigest, UploadTicket)> = {
             let queued = self.inner.action_tickets.lock().unwrap();
             actions
                 .iter()
-                .filter_map(|action| queued.get(action).cloned())
+                .filter_map(|action| {
+                    queued
+                        .get(action)
+                        .map(|ticket| (action.clone(), ticket.clone()))
+                })
                 .collect()
         };
-        for ticket in tickets {
-            ticket.await;
+        let mut unpublished = BTreeSet::new();
+        for (action, ticket) in tickets {
+            if !ticket.await.published() {
+                unpublished.insert(action);
+            }
         }
+        unpublished
     }
 
     /// Publish everything queued, then stop the worker.

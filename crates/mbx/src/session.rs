@@ -207,13 +207,21 @@ impl CacheSession {
             let _ = shutdown.send(());
         }
         let server = self.server.lock().unwrap().take();
-        if let Some(server) = server {
-            server.await??;
-        }
+        // Held rather than raised: the shims have already been told their objects
+        // were stored, so a listener that failed is no reason to abandon the
+        // uploads that promise implies.
+        let served = match server {
+            Some(server) => server
+                .await
+                .map_err(eyre::Report::from)
+                .and_then(|served| served),
+            None => Ok(()),
+        };
         self.agent.cancel_prefetches().await;
         // Cancelling first hands the queue the transfer budget the abandoned
         // downloads were holding.
         self.agent.wait_for_uploads().await;
+        served?;
         let mut stats = self.agent.stats();
         stats.session_duration_ns = duration_ns(self.started.elapsed());
         // The same totals the summary reports, so a reader of a finished stream
@@ -655,6 +663,9 @@ fn should_display_stats(stats: &AgentStats) -> bool {
         || stats.verifications > 0
         || stats.downloaded_bytes > 0
         || stats.uploaded_bytes > 0
+        // An action result published on its own moves no payload bytes, and is
+        // still the whole of what a session did.
+        || stats.background_uploads > 0
         || !stats.bypasses.is_empty()
         || !stats.compiler.is_empty()
         || stats.avoided_compiler_duration_ns > 0
@@ -743,20 +754,31 @@ async fn spawn_server(
     let endpoint = socket.to_string_lossy().into_owned();
     let server = tokio::spawn(async move {
         let _cleanup = SocketCleanup(socket);
-        loop {
+        let mut connections = tokio::task::JoinSet::new();
+        let outcome = loop {
             tokio::select! {
                 accepted = listener.accept() => {
-                    let (stream, _) = accepted?;
+                    let (stream, _) = match accepted {
+                        Ok(accepted) => accepted,
+                        Err(error) => break Err(eyre::Report::from(error)),
+                    };
                     let agent = agent.clone();
-                    tokio::spawn(async move {
+                    connections.spawn(async move {
                         if let Err(error) = agent.handle_connection(stream).await {
                             debug!("cache agent connection failed: {error}");
                         }
                     });
+                    // A build makes one connection per compilation, so finished
+                    // ones are reaped as they go rather than held until shutdown.
+                    while connections.try_join_next().is_some() {}
                 }
-                _ = &mut shutdown => return Ok(()),
+                _ = &mut shutdown => break Ok(()),
             }
-        }
+        };
+        // A connection answers requests, and a store request queues an upload,
+        // so the session has not stopped accepting work until these are done.
+        while connections.join_next().await.is_some() {}
+        outcome
     });
     Ok((endpoint, server))
 }
@@ -786,24 +808,37 @@ async fn spawn_server(
     let server_endpoint = endpoint.clone();
     let server = tokio::spawn(async move {
         let mut next_server = Some(first_server);
-        loop {
+        let mut connections = tokio::task::JoinSet::new();
+        let outcome = loop {
             let pipe = next_server
                 .take()
                 .expect("the next named-pipe server is always prepared");
             tokio::select! {
                 connected = pipe.connect() => {
-                    connected?;
-                    next_server = Some(create_named_pipe(&server_endpoint, false)?);
+                    if let Err(error) = connected {
+                        break Err(eyre::Report::from(error));
+                    }
+                    match create_named_pipe(&server_endpoint, false) {
+                        Ok(prepared) => next_server = Some(prepared),
+                        Err(error) => break Err(error),
+                    }
                     let agent = agent.clone();
-                    tokio::spawn(async move {
+                    connections.spawn(async move {
                         if let Err(error) = agent.handle_connection(pipe).await {
                             debug!("cache agent connection failed: {error}");
                         }
                     });
+                    // A build makes one connection per compilation, so finished
+                    // ones are reaped as they go rather than held until shutdown.
+                    while connections.try_join_next().is_some() {}
                 }
-                _ = &mut shutdown => return Ok(()),
+                _ = &mut shutdown => break Ok(()),
             }
-        }
+        };
+        // A connection answers requests, and a store request queues an upload,
+        // so the session has not stopped accepting work until these are done.
+        while connections.join_next().await.is_some() {}
+        outcome
     });
     Ok((endpoint, server))
 }

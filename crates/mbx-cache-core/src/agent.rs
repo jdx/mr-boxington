@@ -952,14 +952,27 @@ impl CacheAgent {
         if self.remote_mode.writes() {
             // A manifest advertises the actions it predicts, so it must not
             // reach the remote cache before the results a reader would then go
-            // looking for.
+            // looking for -- nor name a result that never got there at all.
+            let mut manifest = manifest;
             if let Some(uploads) = &self.uploads {
                 let actions: Vec<CacheDigest> = manifest
                     .predictions
                     .iter()
                     .map(|prediction| prediction.action.clone())
                     .collect();
-                uploads.wait_for_actions(&actions).await;
+                let unpublished = uploads.wait_for_actions(&actions).await;
+                if !unpublished.is_empty() {
+                    // The local manifest keeps them: this checkout can still use
+                    // what it built, and a later session can publish it.
+                    warn!(
+                        "{} of {} predicted actions were not published, so the remote task action manifest omits them",
+                        unpublished.len(),
+                        manifest.predictions.len()
+                    );
+                    manifest
+                        .predictions
+                        .retain(|prediction| !unpublished.contains(&prediction.action));
+                }
             }
             match self
                 .put_remote_task_manifest(&task, manifest, state.remote_etag)

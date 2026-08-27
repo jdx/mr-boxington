@@ -1785,6 +1785,98 @@ async fn an_action_result_is_published_after_the_blobs_it_references() {
 }
 
 #[tokio::test]
+async fn a_task_manifest_omits_predictions_that_were_not_published() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let task = "5".repeat(64);
+    let published_bytes = b"published action".to_vec();
+    let withheld_bytes = b"withheld action".to_vec();
+    let published = CacheDigest::blake3(&published_bytes);
+    let withheld = CacheDigest::blake3(&withheld_bytes);
+    let predictions: Vec<ActionPrediction> = [&published, &withheld]
+        .into_iter()
+        .enumerate()
+        .map(|(index, action)| ActionPrediction {
+            invocation: CacheDigest::blake3(format!("invocation {index}").as_bytes()),
+            action: action.clone(),
+            adapter: "rustc".into(),
+            payload: "{}".into(),
+        })
+        .collect();
+    server
+        .mock("PUT", blob_path(&published).as_str())
+        .with_status(200)
+        .create_async()
+        .await;
+    // This blob never lands, so the action result naming it is withheld, and a
+    // manifest advertising that action would send readers after nothing.
+    server
+        .mock("PUT", blob_path(&withheld).as_str())
+        .with_status(500)
+        .create_async()
+        .await;
+    server
+        .mock("PUT", action_path(&published).as_str())
+        .with_status(200)
+        .create_async()
+        .await;
+    let (_, selector) = CacheAgent::task_manifest_selector(&task).unwrap();
+    let expected = canonical_json(&TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: vec![predictions[0].clone()],
+    })
+    .unwrap();
+    let manifest = server
+        .mock("PUT", action_manifest_path(&selector).as_str())
+        .match_body(expected)
+        .with_status(201)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().join("writer"),
+        RemoteCacheMode::WriteOnly,
+    );
+    let run = agent.begin_task(&task).await.unwrap();
+    for (index, (action, bytes)) in [(&published, &published_bytes), (&withheld, &withheld_bytes)]
+        .into_iter()
+        .enumerate()
+    {
+        let source = directory.path().join(format!("source-{index}"));
+        fs::write(&source, bytes).unwrap();
+        agent
+            .handle_requests([
+                AgentRequest::StoreBlob {
+                    digest: action.clone(),
+                    source,
+                },
+                AgentRequest::StoreActionResult {
+                    result: RemoteActionResult {
+                        action: action.clone(),
+                        metadata: None,
+                        output_root: None,
+                        version: 1,
+                    },
+                },
+                AgentRequest::RecordActionPrediction {
+                    task: run.clone(),
+                    prediction: predictions[index].clone(),
+                },
+            ])
+            .await;
+    }
+    agent.commit_task(&run).await.unwrap();
+    agent.wait_for_uploads().await;
+
+    manifest.assert_async().await;
+    // The local manifest keeps both: this checkout can still use what it built.
+    let local = agent.load_task_manifest(&task).unwrap().unwrap();
+    assert_eq!(local.predictions.len(), 2);
+}
+
+#[tokio::test]
 async fn a_blob_that_fails_to_upload_withholds_its_action_result() {
     let directory = tempfile::tempdir().unwrap();
     let mut server = mockito::Server::new_async().await;
