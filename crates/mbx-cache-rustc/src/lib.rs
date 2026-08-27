@@ -312,6 +312,15 @@ pub struct ParseOptions {
     pub cache_native_links: bool,
 }
 
+impl ParseOptions {
+    /// Options that admit native links when `enabled`.
+    pub fn caching_native_links(enabled: bool) -> Self {
+        Self {
+            cache_native_links: enabled,
+        }
+    }
+}
+
 /// The cacheable files and dependency manifest produced by a rustc invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RustcOutputs {
@@ -750,7 +759,8 @@ pub struct ActionContext {
 /// against. Nothing here is placeholder-mapped -- these paths are host
 /// locations rather than checkout locations, and two hosts that differ should
 /// miss rather than share.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LinkerIdentity {
     /// Resolved absolute path of the linker driver rustc will invoke.
     pub driver: String,

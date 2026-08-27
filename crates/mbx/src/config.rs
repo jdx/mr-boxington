@@ -118,6 +118,15 @@ pub(crate) struct RawConfig {
         choices("quips", "plain", "off")
     )]
     savings: String,
+    /// Cache natively linked test binaries and executables. Experimental:
+    /// qualify it on your own workload with MBX_VERIFY=1 before relying on it.
+    #[usage(
+        key = "cache_links",
+        env = "MBX_CACHE_LINKS",
+        default = false,
+        scope = "env"
+    )]
+    _cache_links: bool,
     /// Append the full reason for every bypassed compilation to this path.
     #[usage(key = "bypass_log", env = "MBX_BYPASS_LOG", scope = "env")]
     _bypass_log: Option<PathBuf>,

@@ -74,6 +74,21 @@ an unsafe or misspelled workspace setting.
 results. It is deliberately expensive — use it to qualify correctness, not for
 everyday builds.
 
+The build reports what it found:
+
+```text
+mbx[cache]: qualification: 24 verified, 0 diverged
+```
+
+Run it in the checkout that filled the cache, so that what is being measured
+is whether a compilation reproduces itself rather than whether two checkouts
+embed the same paths. Anything above zero divergences is a modeling bug worth
+reporting; `MBX_BYPASS_LOG` and `mbx explain` show what was left out.
+
+This is how to qualify an experimental setting such as
+[`MBX_CACHE_LINKS`](/limits#native-linking-is-not-cached) on your own
+workload before relying on it.
+
 ## The savings line
 
 `savings` controls the one-line report of accumulated savings after a build

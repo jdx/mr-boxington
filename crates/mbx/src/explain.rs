@@ -114,7 +114,10 @@ fn guidance(kind: &str) -> &'static str {
             "The invocation uses an `@response-file`; mbx does not model response-file contents yet."
         }
         "unsupported-crate-type" => {
-            "This artifact type is outside mbx's current cacheability tier. Native binaries and dynamic libraries still link normally."
+            "This artifact type is outside mbx's current cacheability tier. Dynamic libraries still link normally; `MBX_CACHE_LINKS=1` adds native test binaries and executables."
+        }
+        "unportable-native-link" => {
+            "This link would embed a path, a timestamp, or a file mbx does not store, so another checkout could not use its result."
         }
         "unsupported-search-path" | "native-library" => {
             "A native dependency or search path is not a precise compiler input, so mbx cannot safely reuse this action."

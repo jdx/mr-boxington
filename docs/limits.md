@@ -27,9 +27,25 @@ targets using its compiler-bundled self-contained linker:
 
 mbx caches those links because all explicit artifacts are modeled inputs and
 the linker, CRT objects, and bundled libc are covered by the Rust toolchain
-identity. Native targets, custom target specifications, external WebAssembly
-toolchains, native libraries, custom linkers, disabled WASI CRT bundling, and
+identity. Custom target specifications, external WebAssembly toolchains,
+native libraries, custom linkers, disabled WASI CRT bundling, and
 non-affirmative `link-self-contained` modes remain uncached.
+
+`MBX_CACHE_LINKS=1` adds host test binaries and executables on Linux and
+macOS, by putting the rest of the link into the key: the resolved `cc` driver
+and its version, the linker it selects, the startup objects and libc it
+resolves (hashed), and on macOS the SDK. Two hosts that differ in any of those
+produce different keys and miss, rather than sharing a binary neither of them
+built. It is experimental — qualify it on your own workload as described in
+[verify mode](/configuration#verify-mode) before relying on it.
+
+Even then, a link bypasses if it names a native library, overrides the linker,
+or carries a flag that would embed this checkout's paths (`-Crpath`,
+`-Cprefer-dynamic`), leave a file beside the binary that mbx does not store
+(`-Csplit-debuginfo`), or — on macOS — record absolute object paths and their
+timestamps in the binary's debug map (`-Cdebuginfo` above `0`). An explicit
+`--target` bypasses too, even when it spells the host triple: rustc without one
+links for the host by construction, and that is the only linker mbx identifies.
 
 ## Restored artifacts are equivalent, not always identical
 

@@ -954,11 +954,10 @@ fn a_rebuilt_dependency_does_not_move_the_source_fingerprint() {
     // The crate itself changed.
     std::fs::write(working_dir.join("src.rs"), "pub fn value() -> u32 { 1 }\n").unwrap();
     assert_ne!(fingerprint(), before);
+}
 
 fn native_links() -> ParseOptions {
-    ParseOptions {
-        cache_native_links: true,
-    }
+    ParseOptions::caching_native_links(true)
 }
 
 /// Off, a native link stays outside the cacheable tier exactly as before: the
