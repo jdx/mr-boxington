@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.5.0...mbx-cache-protocol-v0.5.1) - 2026-08-27
+
+### Added
+
+- cache C and C++ compiles from build scripts ([#132](https://github.com/jdx/mr-boxington/pull/132))
+- batch remote action lookups and blob uploads ([#131](https://github.com/jdx/mr-boxington/pull/131))
+- mbx tui, a live view of every build's cache activity ([#128](https://github.com/jdx/mr-boxington/pull/128))
+
 ## [0.5.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.4.0...mbx-cache-protocol-v0.5.0) - 2026-08-26
 
 ### Added

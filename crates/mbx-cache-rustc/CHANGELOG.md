@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.5.1...mbx-cache-rustc-v0.7.0) - 2026-08-27
+
+### Added
+
+- cache natively linked test binaries ([#129](https://github.com/jdx/mr-boxington/pull/129))
+- *(cache)* expose shared Cargo cache integration ([#130](https://github.com/jdx/mr-boxington/pull/130))
+- compile churning crates incrementally ([#127](https://github.com/jdx/mr-boxington/pull/127))
+- mbx tui, a live view of every build's cache activity ([#128](https://github.com/jdx/mr-boxington/pull/128))
+
+### Fixed
+
+- *(rustc)* restore results into the checkout that asked for them ([#141](https://github.com/jdx/mr-boxington/pull/141))
+
 ## [0.5.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.5.0...mbx-cache-rustc-v0.5.1) - 2026-08-26
 
 ### Fixed
