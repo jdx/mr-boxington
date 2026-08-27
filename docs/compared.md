@@ -71,6 +71,11 @@ not offer today. The differences are in the mechanics:
   mbx it is opt-in (`MBX_CACHE_LINKS=1`) and experimental, and the key
   includes the resolved linker, startup objects, libc, and SDK rather than
   dep-info alone.
+- **A store other tools embed.** mbx's cache crates also power Rust task
+  caching in the [mise](https://github.com/jdx/mise) task runner: a task run
+  through mise and a direct mbx build fill and hit the same shared action
+  store and speak the same remote protocol, so each warms the other. kache's
+  integration points are its compiler wrappers and its GitHub Action.
 
 If your repository mixes cargo with substantial C/C++ under other build
 systems, or you want published benchmark numbers to check claims against,
