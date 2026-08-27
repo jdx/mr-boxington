@@ -58,13 +58,17 @@ enum Commands {
 }
 
 #[derive(usage::Args)]
-#[usage(unknown_flags = "value", dont_delimit_trailing_values = true)]
 struct ExecArgs {
     /// Directory that identifies the project across worktrees.
     #[usage(long, value_name = "DIR")]
     project_root: Option<String>,
     /// Build command and its arguments.
-    #[usage(value_name = "COMMAND", required = true)]
+    // `automatic` is the wrapper spelling: once the command is named, the rest
+    // of the line belongs to it, so an option exec knows is not taken from the
+    // command that meant it. A plain comment rather than a doc comment,
+    // because the generated CLI reference renders those and this is a note to
+    // the next reader here.
+    #[usage(value_name = "COMMAND", required = true, double_dash = "automatic")]
     command: Vec<String>,
 }
 
@@ -259,10 +263,13 @@ pub fn run() -> Result<ExitCode> {
 
 /// Recover `mbx exec`'s command exactly as it was typed.
 ///
-/// The usage parser consumes a `--` delimiter, and a build command may need one
-/// of its own -- `cmake --build build -- -j8` passes `-j8` to the underlying
-/// tool, not to cmake. Only the raw argv still holds it, so the command is
-/// taken from there, past exec's own options.
+/// `double_dash = "automatic"` already stops flag interpretation once the
+/// command is named, which is what keeps exec from reading a `--project-root`
+/// meant for the command. What it does not do is hand over the first `--` that
+/// follows: the parser still consumes one, deliberately, so that a `--` can
+/// unlock an argument declared as requiring one. exec declares no such
+/// argument, and `cmake --build build -- -j8` needs that separator, so it is
+/// taken back from the raw argv, past exec's own options.
 fn original_exec_arguments(arguments: &[std::ffi::OsString]) -> Result<Vec<String>> {
     let Some(index) = arguments
         .iter()
@@ -271,8 +278,6 @@ fn original_exec_arguments(arguments: &[std::ffi::OsString]) -> Result<Vec<Strin
         eyre::bail!("could not recover exec arguments");
     };
     let mut rest = &arguments[index + 1..];
-    // exec's own options precede the command, so anything the parser would
-    // have taken for itself is skipped rather than run.
     while let Some(first) = rest.first().and_then(|argument| argument.to_str()) {
         if first == "--project-root" {
             rest = rest.get(2..).unwrap_or_default();
@@ -282,10 +287,8 @@ fn original_exec_arguments(arguments: &[std::ffi::OsString]) -> Result<Vec<Strin
             break;
         }
     }
-    // A delimiter separating exec's options from the command was consumed by
-    // the parser, so putting it back would make `--` the program to run. One
-    // inside the command -- `cmake --build build -- -j8` -- is past the first
-    // positional and is exactly what this recovery exists to preserve.
+    // A separator before the command belongs to exec, and running it would
+    // look for a program named `--`.
     if rest.first().is_some_and(|argument| argument == "--") {
         rest = &rest[1..];
     }

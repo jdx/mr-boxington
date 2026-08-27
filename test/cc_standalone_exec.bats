@@ -95,6 +95,11 @@ EOF
   run "$MBX_BIN" exec --project-root "$project" -- /bin/echo ok
   assert_success
   assert_line 'ok'
+
+  # An option exec knows, named after the command, belongs to the command.
+  run "$MBX_BIN" exec /bin/echo --project-root x
+  assert_success
+  assert_line '--project-root x'
 }
 
 @test "a configured build directory outlives the session that configured it" {

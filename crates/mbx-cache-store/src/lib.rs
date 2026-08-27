@@ -131,11 +131,6 @@ pub fn stats(store: &Path) -> Result<StoreStats> {
     })
 }
 
-/// Attribute cache and target bytes to each recorded workspace.
-///
-/// Shared objects are counted for every workspace that can reach them. That
-/// makes each row answer "how much keeps this workspace warm" without
-/// pretending shared storage can be divided exactly between projects.
 /// Size the target tree a checkout record names, if it names one.
 ///
 /// A build with no target directory of its own -- one driven by make or CMake,
@@ -149,6 +144,11 @@ fn checkout_target_bytes(sizes: &mut BTreeMap<PathBuf, u64>, record: &CheckoutRe
     cached_tree_bytes(sizes, &record.target_dir)
 }
 
+/// Attribute cache and target bytes to each recorded workspace.
+///
+/// Shared objects are counted for every workspace that can reach them. That
+/// makes each row answer "how much keeps this workspace warm" without
+/// pretending shared storage can be divided exactly between projects.
 pub fn projects(store: &Path) -> Result<Vec<ProjectUsage>> {
     let mut projects: BTreeMap<PathBuf, (BTreeSet<String>, bool, u64)> = BTreeMap::new();
     let mut target_sizes = BTreeMap::new();
@@ -167,7 +167,9 @@ pub fn projects(store: &Path) -> Result<Vec<ProjectUsage>> {
                 project.0.insert(identity.clone());
                 project.1 = true;
             }
-            project.2 = project.2.max(checkout_target_bytes(&mut target_sizes, &record));
+            project.2 = project
+                .2
+                .max(checkout_target_bytes(&mut target_sizes, &record));
         }
     }
     let action_cache = mbx_cache_core::LocalActionCache::new(store);
