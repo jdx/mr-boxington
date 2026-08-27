@@ -41,9 +41,11 @@ max_size = "30GiB"       # default: 10% of the cache disk
 max_age = "30d"          # default
 
 [remote]
-url = "https://cache.example.com"
+url = "https://cache.example.com"  # or "s3://bucket/prefix"
 namespace = "acme/backend"
 mode = "read-write"
+# s3_endpoint = "https://<account>.r2.cloudflarestorage.com"
+# s3_region = "auto"
 
 [http]
 timeout = "30s"

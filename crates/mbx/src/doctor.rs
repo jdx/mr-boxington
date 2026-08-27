@@ -3,7 +3,6 @@
 use crate::config::Config;
 use crate::policy;
 use eyre::{Context, Result};
-use mbx_cache_core::{RemoteCacheClient, RemoteCacheConfig};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -272,7 +271,13 @@ async fn remote_checks_with_policy(
     release_context: bool,
     effective_mode: Option<mbx_cache_core::RemoteCacheMode>,
 ) -> Vec<Check> {
-    let Some(base_url) = &config.remote.url else {
+    let Some(base_url) = config
+        .remote
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    else {
         return vec![Check::pass(
             "remote",
             "not configured; using the local cache",
@@ -296,42 +301,22 @@ async fn remote_checks_with_policy(
             Check::pass("remote", "probe skipped because remote caching is disabled"),
         ];
     }
-    let Some(namespace) = config
+    let namespace = config
         .remote
         .namespace
         .as_deref()
-        .map(str::trim)
-        .filter(|namespace| !namespace.is_empty())
-    else {
-        return vec![
-            policy,
-            Check::fail(
-                "remote",
-                "remote.namespace is required when remote.url is set",
-            ),
-        ];
-    };
-    let parsed = match base_url.parse() {
-        Ok(url) => url,
-        Err(error) => {
+        .unwrap_or_default()
+        .trim();
+    // The build builds its client the same way, so a configuration it would
+    // refuse is reported here rather than discovered mid-compilation.
+    let client = match crate::remote::remote_client(config) {
+        Ok(Some(client)) => client,
+        Ok(None) => {
             return vec![
                 policy,
-                Check::fail("remote", format!("invalid URL {base_url:?}: {error}")),
+                Check::pass("remote", "not configured; using the local cache"),
             ];
         }
-    };
-    let client = match RemoteCacheClient::new(RemoteCacheConfig {
-        base_url: parsed,
-        namespace: namespace.to_string(),
-        token: config.remote.token.clone(),
-        token_file: config.remote.token_file.clone(),
-        oidc_audience: config.remote.oidc_audience.clone(),
-        connect_timeout: config.http.timeout,
-        read_timeout: config.http.timeout,
-        download_timeout: config.http.download_timeout,
-        retries: config.http.retries,
-    }) {
-        Ok(client) => client,
         Err(error) => return vec![policy, Check::fail("remote", format!("{error:#}"))],
     };
     let remote = match client

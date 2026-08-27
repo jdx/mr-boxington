@@ -1,4 +1,5 @@
 use super::*;
+use crate::*;
 
 #[test]
 fn protocol_json_uses_jcs_key_and_number_encoding() {
@@ -55,7 +56,7 @@ fn cache_digest_verifies_its_declared_algorithm() {
 
 #[test]
 fn action_result_keys_require_blake3() {
-    let client = RemoteCacheClient::new(RemoteCacheConfig {
+    let client = HttpRemoteCache::new(RemoteCacheConfig {
         base_url: "http://127.0.0.1:1".parse().unwrap(),
         namespace: "test".into(),
         token: None,
@@ -751,8 +752,8 @@ async fn downloads_decompress_zstd_responses() {
     assert_eq!(bytes, payload);
 }
 
-fn test_client(server: &mockito::ServerGuard) -> RemoteCacheClient {
-    RemoteCacheClient::new(RemoteCacheConfig {
+fn test_client(server: &mockito::ServerGuard) -> HttpRemoteCache {
+    HttpRemoteCache::new(RemoteCacheConfig {
         base_url: server.url().parse().unwrap(),
         namespace: "test".into(),
         token: Some("test-token".into()),
