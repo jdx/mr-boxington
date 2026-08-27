@@ -65,8 +65,14 @@ test_binary() {
     MBX_STATS_REPORT="$warm_report" \
     "$MBX_BIN" test --offline --no-run --manifest-path "$PROJECT/Cargo.toml"
   assert_success
-  run grep -E '"hits"[[:space:]]*:[[:space:]]*[1-9]' "$warm_report"
+  # Two hits, not merely one: the library and the linked test binary. A host
+  # whose linker mbx cannot identify bypasses the link and still restores the
+  # library, so a laxer assertion would pass while the feature did nothing.
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*[2-9]' "$warm_report"
   assert_success
+  # And it bypassed nothing beyond the probes cargo always makes.
+  run grep -E '"(other|unsupported-crate-type|unportable-native-link)"' "$warm_report"
+  assert_failure
 
   local first second
   first="$(test_binary "$first_target")"
