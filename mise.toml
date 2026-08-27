@@ -122,7 +122,7 @@ depends = ["perf:prepare"]
 run = "tak run --record"
 
 [tools]
-"github:jdx/tak" = "0.0.7"
+"github:jdx/tak" = "0.0.8"
 aube = "latest"
 communique = "latest"
 node = "24"
