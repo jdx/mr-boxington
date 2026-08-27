@@ -7,6 +7,7 @@ use crate::util::workspace_root;
 use crate::{policy, store, target};
 use bytesize::ByteSize;
 use eyre::{Context, Result};
+use mbx_cache_core::AgentStats;
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -50,8 +51,26 @@ enum Commands {
     Tui(TuiArgs),
     /// Download predicted remote artifacts without running Cargo.
     Prefetch(PrefetchArgs),
+    /// Run a build command outside cargo with its C and C++ compiles cached.
+    ///
+    /// Shims for cc, c++, gcc, g++, clang, and clang++ are placed first on
+    /// PATH for the command's duration, so make and CMake builds share the
+    /// same store, remote cache, and write policy as cargo builds.
+    Exec(ExecArgs),
     #[usage(external_subcommand)]
     Cargo(Vec<String>),
+}
+
+#[derive(usage::Args)]
+#[usage(unknown_flags = "value", dont_delimit_trailing_values = true)]
+struct ExecArgs {
+    /// Directory that identifies the project across worktrees; defaults to
+    /// the enclosing git checkout, or the current directory outside one.
+    #[usage(long, value_name = "DIR")]
+    project_root: Option<String>,
+    /// Build command and its arguments.
+    #[usage(value_name = "COMMAND", required = true)]
+    command: Vec<String>,
 }
 
 #[derive(usage::Args)]
@@ -235,6 +254,7 @@ pub fn run() -> Result<ExitCode> {
         },
         Commands::Tui(args) => crate::tui::run(&config, args.once),
         Commands::Prefetch(args) => prefetch(&config, &args.cargo_args),
+        Commands::Exec(args) => exec(&config, &settings, &args),
         Commands::Cargo(arguments) => cargo(&config, &settings, &arguments),
     }
 }
@@ -650,15 +670,27 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
         };
         Ok((status, stats))
     });
+    account_session(config, settings, session_outcome, removed_target_bytes)
+}
+
+/// Sweep the store and record the session's savings after a build session.
+///
+/// Shared by every session-running command, and placed after its runtime has
+/// been dropped, so a walk of the whole store cannot occupy a worker thread
+/// and adds nothing to the build the user is waiting on.
+fn account_session(
+    config: &Config,
+    settings: &CliSettings,
+    session_outcome: Result<(Result<ExitCode>, Option<AgentStats>)>,
+    removed_target_bytes: Option<u64>,
+) -> Result<ExitCode> {
+    let retention = &settings.retention;
     // A session that never started still leaves collection to do, so the error
     // travels as the build's result rather than short-circuiting past the sweep.
     let (status, stats) = match session_outcome {
         Ok((status, stats)) => (status, stats),
         Err(error) => (Err(error), None),
     };
-    // Outside the runtime, so a walk of the whole store cannot occupy a worker
-    // thread, and after cargo has exited, so it adds nothing to the build the
-    // user is waiting on.
     let mut delta = sweep_store(config, retention);
     // Removing the checkout's own `target/` on the way in freed disk too, and
     // it is the largest single reclaim a first build ever reports -- but the
@@ -692,6 +724,89 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
         crate::session::note(&line);
     }
     status
+}
+
+/// Run a build command outside cargo with the C and C++ shims first on PATH.
+fn exec(config: &Config, settings: &CliSettings, args: &ExecArgs) -> Result<ExitCode> {
+    let Some((program, arguments)) = args.command.split_first() else {
+        eyre::bail!("exec needs a command to run");
+    };
+    let program: std::ffi::OsString = program.into();
+    // The same two stand-asides as a cargo build: a release build must not
+    // depend on a cache, and MBX_CC=0 turns the C and C++ cache off -- which
+    // is all of what this command caches.
+    if policy::release_context() {
+        log::warn!("the build cache is disabled for release builds");
+        return run_cargo(&program, arguments, BTreeMap::new());
+    }
+    let working_dir = std::env::current_dir()?;
+    let project_root = match &args.project_root {
+        Some(root) => absolute(&working_dir, root),
+        None => discover_project_root(&working_dir),
+    };
+    let mut config = config.clone();
+    config.apply_workspace_policy(&project_root)?;
+    let config = &config;
+    if !config.cc {
+        log::warn!("the C and C++ cache is disabled, so this command is not cached");
+        return run_cargo(&program, arguments, BTreeMap::new());
+    }
+
+    let session_dir = tempfile::Builder::new().prefix("mbx-session-").tempdir()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let session_outcome = runtime.block_on(async {
+        let Some(shims) = session::install_path_shims(session_dir.path())? else {
+            log::warn!("no C or C++ compiler was found on PATH, so this command is not cached");
+            return Ok((run_cargo(&program, arguments, BTreeMap::new()), None));
+        };
+        let session = CacheSession::start(session_dir.path(), config).await?;
+        let mut environment = inherited_environment(|name| std::env::var(name).ok(), &working_dir);
+        let run = session
+            .begin_exec(&project_root, &args.command, &shims, &mut environment)
+            .await;
+
+        let status = run_cargo(&program, arguments, environment);
+
+        // As in a cargo build: a compilation that was restored or published
+        // before a later one failed is still worth remembering.
+        if let Some(run) = run
+            && let Err(error) = run.commit().await
+        {
+            log::warn!("the build manifest was not committed: {error}");
+        }
+        let stats = match session.finish().await {
+            Ok(stats) => {
+                crate::session::display_stats(&stats, config);
+                Some(stats)
+            }
+            Err(error) => {
+                log::warn!("the cache session did not shut down cleanly: {error}");
+                None
+            }
+        };
+        Ok((status, stats))
+    });
+    account_session(config, settings, session_outcome, None)
+}
+
+/// The root `mbx exec` keys paths against: the enclosing git checkout, so
+/// every subdirectory of one project agrees on it, or the working directory
+/// outside one.
+fn discover_project_root(working_dir: &Path) -> PathBuf {
+    let mut directory = working_dir;
+    loop {
+        // A plain file rather than a directory in linked worktrees, which are
+        // exactly the checkouts worth recognizing.
+        if directory.join(".git").exists() {
+            return directory.to_path_buf();
+        }
+        match directory.parent() {
+            Some(parent) => directory = parent,
+            None => return working_dir.to_path_buf(),
+        }
+    }
 }
 
 /// Marks that this machine has been told what mbx set up.

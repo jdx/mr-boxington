@@ -143,6 +143,63 @@ fn identity_falls_back_to_the_directory_name() {
 }
 
 #[test]
+fn path_shim_names_select_their_language() {
+    assert_eq!(path_shim_language("cc"), Some(CcLanguage::C));
+    assert_eq!(path_shim_language("gcc"), Some(CcLanguage::C));
+    assert_eq!(path_shim_language("clang"), Some(CcLanguage::C));
+    assert_eq!(path_shim_language("c++"), Some(CcLanguage::Cxx));
+    assert_eq!(path_shim_language("g++"), Some(CcLanguage::Cxx));
+    assert_eq!(path_shim_language("clang++"), Some(CcLanguage::Cxx));
+    // A versioned driver was chosen deliberately and is never intercepted.
+    assert_eq!(path_shim_language("gcc-13"), None);
+    assert_eq!(path_shim_language("mbx"), None);
+}
+
+#[test]
+fn exec_identity_is_shared_across_checkouts_with_one_lockfile() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    std::fs::write(first.path().join("Cargo.lock"), "version = 4\n").unwrap();
+    std::fs::write(second.path().join("Cargo.lock"), "version = 4\n").unwrap();
+    let command = ["make".to_string()];
+
+    assert_eq!(
+        exec_identity(first.path(), &command),
+        exec_identity(second.path(), &command),
+        "worktrees of one project must share a manifest for predictions to travel"
+    );
+    assert_ne!(
+        exec_identity(first.path(), &command),
+        exec_identity(first.path(), &["make".to_string(), "-j8".to_string()]),
+    );
+}
+
+#[test]
+fn exec_identity_falls_back_to_the_directory_name() {
+    let directory = tempfile::tempdir().unwrap();
+    let command = ["make".to_string()];
+    assert_eq!(
+        exec_identity(directory.path(), &command).len(),
+        64,
+        "a project with no lockfile and no git origin still gets an identity"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hard_linked_shim_is_recognized_as_this_binary() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = std::env::current_exe().unwrap();
+    let shim = install_shim_named(&executable, directory.path(), "cc", ShimLink::Pinned).unwrap();
+    assert!(is_same_binary(&shim, Some(&executable)));
+    std::fs::write(directory.path().join("other"), b"#!/bin/sh\n").unwrap();
+    assert!(!is_same_binary(
+        &directory.path().join("other"),
+        Some(&executable)
+    ));
+}
+
+#[test]
 fn handshake_rejects_version_skew() {
     let response = serde_json::to_string(&AgentResponse::Hello {
         protocol: AGENT_PROTOCOL_VERSION,

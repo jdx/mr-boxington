@@ -10,7 +10,7 @@ use log::{debug, warn};
 use mbx_cache_cc::CcLanguage;
 use mbx_cache_core::{
     AGENT_PROTOCOL_VERSION, AgentEvent, AgentEventObserver, AgentRemoteCache, AgentRequest,
-    AgentResponse, AgentStats, CacheAgent,
+    AgentResponse, AgentStats, CacheAgent, CacheDigest, canonical_json,
 };
 use serde::Serialize;
 use std::cell::RefCell;
@@ -28,6 +28,7 @@ use tokio::task::JoinHandle;
 pub const RUSTC_SHIM_STEM: &str = "mbx-rustc";
 pub const CC_SHIM_STEM: &str = "mbx-cc";
 pub const CXX_SHIM_STEM: &str = "mbx-cxx";
+pub(crate) const PATH_SHIMS_ENV: &str = "MBX_CC_SHIM_COMPILERS";
 const SOCKET_ENV: &str = "MBX_SOCKET";
 pub(crate) const REAL_CC_ENV: &str = "MBX_REAL_CC";
 pub(crate) const REAL_CXX_ENV: &str = "MBX_REAL_CXX";
@@ -236,6 +237,72 @@ impl CacheSession {
         shims.apply_to(environment);
     }
 
+    /// Begin a standalone build's action run and return the environment it
+    /// needs.
+    ///
+    /// The cargo-specific keys -- `RUSTC_WRAPPER`, `HOST_CC`,
+    /// `CARGO_INCREMENTAL` -- stay untouched: the build finds its compilers
+    /// through the shim directory placed first on `PATH` instead.
+    pub async fn begin_exec(
+        &self,
+        project_root: &Path,
+        command: &[String],
+        shims: &PathShims,
+        environment: &mut BTreeMap<String, String>,
+    ) -> Option<ActionRun> {
+        let identity = exec_identity(project_root, command);
+        if let Some(events) = &self.events {
+            events.0.started(project_root, command);
+        }
+        // The project root stands in for the target directory: a standalone
+        // build owns its output directory, so there is nothing managed to
+        // record, but the checkout itself must be known for its objects to
+        // count as reachable.
+        if let Err(error) =
+            crate::store::record_checkout(&self.store, &identity, project_root, project_root)
+        {
+            warn!("this checkout was not recorded as a cache root: {error}");
+        }
+        let (protocol_build, action_run) = match self.agent.begin_task(&identity).await {
+            Ok(run) => (
+                run.clone(),
+                Some(ActionRun {
+                    run,
+                    agent: self.agent.clone(),
+                }),
+            ),
+            Err(error) => {
+                warn!("build action manifest was not loaded: {error}");
+                (identity, None)
+            }
+        };
+        environment.insert(
+            WORKSPACE_ROOT_ENV.into(),
+            project_root.to_string_lossy().into_owned(),
+        );
+        environment.insert(SOCKET_ENV.into(), self.socket.clone());
+        environment.insert(
+            STAGING_ENV.into(),
+            self.staging.to_string_lossy().into_owned(),
+        );
+        environment.insert(BUILD_ENV.into(), protocol_build);
+        environment.insert(
+            VERIFY_ENV.into(),
+            if self.verify { "1" } else { "0" }.into(),
+        );
+        if let Ok(pins) = serde_json::to_string(&shims.compilers) {
+            environment.insert(PATH_SHIMS_ENV.into(), pins);
+        }
+        // First on PATH, so `make`'s default `cc` and an explicit `CC=gcc`
+        // both resolve to a shim, which chains to the compiler pinned above.
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let paths = std::iter::once(shims.directory.clone()).chain(std::env::split_paths(&path));
+        if let Ok(joined) = std::env::join_paths(paths) {
+            environment.insert("PATH".into(), joined.to_string_lossy().into_owned());
+        }
+        action_run
+    }
+
     /// Warm the recorded actions for a Cargo command without running Cargo.
     pub async fn prefetch(&self, workspace_root: &Path, command: &[String]) -> Result<()> {
         let identity = build_identity(workspace_root, command);
@@ -375,6 +442,68 @@ impl ActionRun {
 /// of it.
 pub fn build_identity(workspace_root: &Path, command: &[String]) -> String {
     mbx_cache_cargo::build_identity(workspace_root, command)
+}
+
+/// Identity material for a standalone build's prediction manifest.
+///
+/// Its own record rather than a reuse of the Cargo one: the two identity
+/// spaces must not collide, and the Cargo crate keeps its material private
+/// precisely so its scheme can evolve for Cargo's own reasons.
+#[derive(Serialize)]
+struct ExecIdentity<'a> {
+    version: u8,
+    project: &'a str,
+    command: &'a [String],
+}
+
+/// Identity of a standalone build: the project and the command it runs.
+///
+/// Worktrees of one project must share a manifest for predictions to travel --
+/// the cc adapter has no second way to build a key -- so the marker prefers
+/// content and origin over location: a `Cargo.lock` digest where one exists,
+/// then the git origin URL, and only then the directory name.
+pub fn exec_identity(project_root: &Path, command: &[String]) -> String {
+    let project = exec_marker(project_root);
+    let material = ExecIdentity {
+        version: 1,
+        project: &project,
+        command,
+    };
+    let bytes = canonical_json(&material).expect("exec identity must serialize");
+    CacheDigest::blake3(&bytes).hash
+}
+
+fn exec_marker(project_root: &Path) -> String {
+    if let Ok(lock) = std::fs::read(project_root.join("Cargo.lock")) {
+        return CacheDigest::blake3(&lock).hash;
+    }
+    if let Some(origin) = git_origin_marker(project_root) {
+        return origin;
+    }
+    project_root
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The origin URL names a project the same way in every worktree and clone,
+/// which a checkout's directory name does not.
+fn git_origin_marker(project_root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .args(["config", "--get", "remote.origin.url"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if url.is_empty() {
+        return None;
+    }
+    Some(format!("origin\0{url}"))
 }
 
 fn action_remote_cache(config: &Config, store: &Path) -> Result<Option<AgentRemoteCache>> {
@@ -804,6 +933,53 @@ fn resolve_on_path(name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// A directory of compiler-named shims for builds that find their compiler on
+/// `PATH`, and the compilers those shims stand in for.
+pub struct PathShims {
+    pub directory: PathBuf,
+    pub compilers: BTreeMap<String, PathBuf>,
+}
+
+/// Install a shim under every plain compiler name that resolves on `PATH`.
+///
+/// Resolution happens here rather than in the shim so the whole build agrees
+/// on one compiler per name, and skips the running binary so a stale shim
+/// directory an outer session left on `PATH` cannot become its own compiler.
+/// A machine with none of the names simply gets no shim directory.
+pub fn install_path_shims(session_dir: &Path) -> Result<Option<PathShims>> {
+    if !cfg!(unix) {
+        return Ok(None);
+    }
+    let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
+    let directory = session_dir.join("cc-path");
+    std::fs::create_dir(&directory)?;
+    let mut compilers = BTreeMap::new();
+    for (name, _) in PATH_SHIM_NAMES {
+        let Some(real) = resolve_on_path_excluding(name, &executable) else {
+            continue;
+        };
+        // Tracking, like the session shims: on macOS a hard link taken while
+        // the binary is replaced can be killed at exec.
+        install_shim_named(&executable, &directory, name, ShimLink::Tracking)?;
+        compilers.insert((*name).to_string(), real);
+    }
+    if compilers.is_empty() {
+        debug!("no C or C++ compilers were found on PATH; nothing to shim");
+        return Ok(None);
+    }
+    Ok(Some(PathShims {
+        directory,
+        compilers,
+    }))
+}
+
+fn resolve_on_path_excluding(name: &str, this_binary: &Path) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file() && !is_same_binary(candidate, Some(this_binary)))
+}
+
 fn install_session_shim(session_dir: &Path) -> Result<PathBuf> {
     let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
     install_shim(&executable, session_dir, ShimLink::Tracking)
@@ -1218,6 +1394,29 @@ pub fn is_rustc_shim() -> bool {
         .is_some_and(|stem| stem == OsStr::new(RUSTC_SHIM_STEM))
 }
 
+/// Compiler names the standalone shim directory stands in for, and the
+/// language each name selects.
+///
+/// Only the plain platform drivers: a versioned name such as `gcc-13` was
+/// chosen deliberately by the build, and a compiler chosen that specifically
+/// is one this table should not silently intercept.
+const PATH_SHIM_NAMES: &[(&str, CcLanguage)] = &[
+    ("cc", CcLanguage::C),
+    ("gcc", CcLanguage::C),
+    ("clang", CcLanguage::C),
+    ("c++", CcLanguage::Cxx),
+    ("g++", CcLanguage::Cxx),
+    ("clang++", CcLanguage::Cxx),
+];
+
+/// The language a standalone shim name selects, if the name is one.
+fn path_shim_language(name: &str) -> Option<CcLanguage> {
+    PATH_SHIM_NAMES
+        .iter()
+        .find(|(shim, _)| *shim == name)
+        .map(|(_, language)| *language)
+}
+
 /// Which compiler this process was invoked as a shim for, if any.
 pub fn is_cc_shim() -> Option<CcLanguage> {
     let stem = std::env::args_os()
@@ -1230,8 +1429,19 @@ pub fn is_cc_shim() -> Option<CcLanguage> {
     match stem.as_str() {
         CC_SHIM_STEM => Some(CcLanguage::C),
         CXX_SHIM_STEM => Some(CcLanguage::Cxx),
-        _ => None,
+        other => path_shim_language(other),
     }
+}
+
+/// The file name this process was invoked under.
+fn shim_invocation_name() -> Option<String> {
+    std::env::args_os()
+        .next()
+        .as_deref()
+        .map(Path::new)
+        .and_then(Path::file_name)?
+        .to_str()
+        .map(ToOwned::to_owned)
 }
 
 /// Ultra-early argv0 path used by the `CC` and `CXX` build scripts inherit.
@@ -1266,11 +1476,18 @@ pub fn run_cc_shim(language: CcLanguage) -> ExitCode {
 
 /// The compiler a cc shim stands in for.
 ///
-/// The session pins this when it installs the shims. A shim invoked with that
-/// variable missing searches `PATH` for the platform default, skipping any
-/// candidate that is this binary, so an inherited `CC` cannot make the shim
-/// call itself.
+/// The session pins this when it installs the shims: `mbx exec` pins every
+/// name it placed on `PATH`, and a cargo session pins the pair build scripts
+/// inherit. A shim invoked with no pin searches `PATH` for the name it was
+/// invoked under, skipping any candidate that is this binary, so an inherited
+/// `CC` or a stale shim directory cannot make the shim call itself.
 fn real_compiler(language: CcLanguage) -> Result<OsString> {
+    let invoked = shim_invocation_name();
+    if let Some(name) = invoked.as_deref()
+        && let Some(compiler) = pinned_path_shim(name)
+    {
+        return Ok(compiler.into_os_string());
+    }
     let pinned = match language {
         CcLanguage::C => REAL_CC_ENV,
         CcLanguage::Cxx => REAL_CXX_ENV,
@@ -1278,23 +1495,57 @@ fn real_compiler(language: CcLanguage) -> Result<OsString> {
     if let Some(compiler) = std::env::var_os(pinned).filter(|value| !value.is_empty()) {
         return Ok(compiler);
     }
-    let current = std::env::current_exe()
-        .ok()
-        .and_then(|path| std::fs::canonicalize(&path).ok().or(Some(path)));
-    let name = language.default_driver();
+    // A shim named after a real driver stands in for exactly that driver; the
+    // session shim names have no driver of their own and fall back to the
+    // platform default.
+    let name = invoked
+        .as_deref()
+        .filter(|name| path_shim_language(name).is_some())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| language.default_driver().to_string());
+    let current = std::env::current_exe().ok();
     let path = std::env::var_os("PATH").unwrap_or_default();
     for directory in std::env::split_paths(&path) {
-        let candidate = directory.join(name);
-        if !candidate.is_file() {
-            continue;
-        }
-        let resolved = std::fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
-        if current.as_deref() == Some(resolved.as_path()) {
+        let candidate = directory.join(&name);
+        if !candidate.is_file() || is_same_binary(&candidate, current.as_deref()) {
             continue;
         }
         return Ok(candidate.into_os_string());
     }
     eyre::bail!("no {name} was found on PATH")
+}
+
+/// The compiler an exec session pinned for this shim name, if any.
+fn pinned_path_shim(name: &str) -> Option<PathBuf> {
+    let pins = std::env::var(PATH_SHIMS_ENV).ok()?;
+    let pins: BTreeMap<String, PathBuf> = serde_json::from_str(&pins).ok()?;
+    pins.get(name).cloned()
+}
+
+/// Whether `candidate` is the running mbx binary under another name.
+///
+/// Shims are hard links, so a path comparison alone cannot recognize one that
+/// lives in a different directory -- a stale shim directory an outer session
+/// left on `PATH`, say. Device and inode identify the file itself.
+fn is_same_binary(candidate: &Path, current: Option<&Path>) -> bool {
+    let Some(current) = current else {
+        return false;
+    };
+    let resolved = std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+    let current_resolved = std::fs::canonicalize(current)
+        .ok()
+        .unwrap_or_else(|| current.to_path_buf());
+    if resolved == current_resolved {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if let (Ok(a), Ok(b)) = (std::fs::metadata(&resolved), std::fs::metadata(current)) {
+            return a.dev() == b.dev() && a.ino() == b.ino();
+        }
+    }
+    false
 }
 
 fn run_transparent_cc(compiler: OsString, arguments: Vec<OsString>) -> ExitCode {
