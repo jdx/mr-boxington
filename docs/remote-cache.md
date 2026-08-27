@@ -107,6 +107,24 @@ mbx[cache]: uploads: 143 published, 0 not published; 412ms waited for after the 
 `MBX_STATS_REPORT` carries the same figures as `background_uploads`,
 `background_upload_failures`, and `upload_drain_duration_ns`.
 
+Where the server accepts them, queued blobs are published several to a request
+rather than one at a time — rustc output is many small objects, so one request
+each spends most of its time in round trips. The summary says how many went that
+way, and `remote_blob_pack_uploads` and `remote_blob_pack_upload_blobs` report
+it. A pack the server refuses is republished blob by blob, which also says which
+blob was the problem.
+
+## Batched lookups
+
+A prefetch knows every action it wants before it asks for any of them, so where
+the server offers batched lookups it asks for them together instead of once per
+action. `remote_action_lookups` counts requests rather than actions, so the same
+build reports far fewer of them against a server with the extension.
+
+Both extensions are negotiated. A server without them, or one that advertises an
+endpoint it does not serve, gets the single-object requests every version of mbx
+has made; nothing needs configuring either way.
+
 ## Transfer behavior
 
 Remote blobs are compressed with zstd. `MBX_HTTP_DOWNLOAD_TIMEOUT` is separate

@@ -41,8 +41,26 @@ uses these resources:
 | capabilities | `GET /v1/capabilities` | JSON capability document |
 | action result | `GET`/`PUT /v1/action-results/{algorithm}/{hash}/{size}` | `application/vnd.mbx.cache-action-result.v1+json` |
 | action manifest | `GET`/`PUT /v1/action-manifests/{algorithm}/{hash}/{size}` | `application/vnd.mbx.cache-task-action-manifest.v1+json` |
+| action result batch | `POST /v1/action-results:batch` | `application/vnd.mbx.cache-action-result-batch.v1+json` |
 | blob | `GET`/`PUT /v1/blobs/{algorithm}/{hash}/{size}` | media type requested by the caller |
 | blob pack | `POST /v1/blobs:pack` | `application/vnd.mbx.cache-blob-pack.v1` |
+| blob pack upload | `POST /v1/blobs:pack-upload` | `application/vnd.mbx.cache-blob-pack-receipt.v1+json` |
+
+Both batched resources are extensions, gated on their own capability
+(`features.action_batch` and `features.blob_pack_uploads`) and bounded by
+`limits.max_batch_items` and `limits.max_pack_bytes`. A client falls back to the
+single-object resources when a feature is not advertised, and also when an
+advertised endpoint answers `404`, `405`, or `501` — after which it stops asking
+for the rest of the session. Neither is required to serve the baseline.
+
+A batched action-result response carries only the records the service holds, in
+no order, so each one is bound to its request by the action digest inside it
+rather than by position: a client refuses a batch naming an action it did not
+ask for. An uploaded pack repeats the `MBXPACK1` framing of a downloaded one and
+declares its contents in the pack headers; because every blob in it is
+content-addressed and immutable, a rejected pack may leave an accepted prefix
+stored, and the client republishes its blobs individually rather than relying on
+that.
 
 The capabilities endpoint is optional: `404`, `405`, or `501` selects the v1
 baseline without extensions. Advertised capabilities must report the same

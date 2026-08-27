@@ -423,6 +423,8 @@ struct StatsReport {
     uploaded_bytes: u64,
     background_uploads: u64,
     background_upload_failures: u64,
+    remote_blob_pack_uploads: u64,
+    remote_blob_pack_upload_blobs: u64,
     upload_drain_duration_ns: u64,
     stored_bytes: u64,
     restored_output_files: u64,
@@ -497,6 +499,8 @@ impl From<&AgentStats> for StatsReport {
             uploaded_bytes: stats.uploaded_bytes,
             background_uploads: stats.background_uploads,
             background_upload_failures: stats.background_upload_failures,
+            remote_blob_pack_uploads: stats.remote_blob_pack_uploads,
+            remote_blob_pack_upload_blobs: stats.remote_blob_pack_upload_blobs,
             upload_drain_duration_ns: stats.upload_drain_duration_ns,
             stored_bytes: stats.stored_bytes,
             restored_output_files: stats.restored_output_files,
@@ -632,8 +636,16 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
         format_nanos(stats.materialization_duration_ns),
     ));
     if stats.background_uploads > 0 || stats.background_upload_failures > 0 {
+        let packed = if stats.remote_blob_pack_uploads > 0 {
+            format!(
+                " ({} of them in {} packs)",
+                stats.remote_blob_pack_upload_blobs, stats.remote_blob_pack_uploads
+            )
+        } else {
+            String::new()
+        };
         note(&format!(
-            "mbx[cache]: uploads: {} published, {} not published; {} waited for after the build",
+            "mbx[cache]: uploads: {} published{packed}, {} not published; {} waited for after the build",
             stats.background_uploads,
             stats.background_upload_failures,
             format_nanos(stats.upload_drain_duration_ns),

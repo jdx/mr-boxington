@@ -783,6 +783,43 @@ async fn mock_blob_pack_capabilities(server: &mut mockito::ServerGuard) {
         .await;
 }
 
+async fn mock_capabilities(server: &mut mockito::ServerGuard, features: serde_json::Value) {
+    server
+        .mock("GET", "/v1/capabilities")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            serde_json::json!({
+                "protocol":{"major":1},
+                "features":features,
+                "limits":{"max_batch_items":100,"max_pack_bytes":1024}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+}
+
+/// Read a framed pack the way a server would, for asserting what was uploaded.
+fn decode_blob_pack_frames(pack: &[u8]) -> Vec<(String, u64, Vec<u8>)> {
+    assert_eq!(&pack[..BLOB_PACK_MAGIC.len()], BLOB_PACK_MAGIC);
+    let mut frames = Vec::new();
+    let mut rest = &pack[BLOB_PACK_MAGIC.len()..];
+    while !rest.is_empty() {
+        let algorithm = match rest[0] {
+            1 => "blake3",
+            2 => "sha256",
+            other => panic!("unexpected pack algorithm {other}"),
+        };
+        let hash = hex::encode(&rest[1..33]);
+        let size = u64::from_be_bytes(rest[33..41].try_into().unwrap());
+        let end = 41 + size as usize;
+        frames.push((format!("{algorithm}:{hash}"), size, rest[41..end].to_vec()));
+        rest = &rest[end..];
+    }
+    frames
+}
+
 fn encode_blob_pack(entries: &[(&CacheDigest, &[u8])]) -> Vec<u8> {
     let mut pack = BLOB_PACK_MAGIC.to_vec();
     for (digest, contents) in entries {
@@ -797,6 +834,242 @@ fn encode_blob_pack(entries: &[(&CacheDigest, &[u8])]) -> Vec<u8> {
         pack.extend_from_slice(contents);
     }
     pack
+}
+
+#[tokio::test]
+async fn looks_up_negotiated_action_batches() {
+    let mut server = mockito::Server::new_async().await;
+    mock_capabilities(&mut server, serde_json::json!({ "action_batch": true })).await;
+    let found = CacheDigest::blake3(b"found action");
+    let missing = CacheDigest::blake3(b"missing action");
+    let result = RemoteActionResult {
+        action: found.clone(),
+        metadata: None,
+        output_root: None,
+        version: 1,
+    };
+    let batch = server
+        .mock("POST", "/v1/action-results:batch")
+        .match_header("content-type", DIGEST_LIST_MEDIA_TYPE)
+        .match_header("accept", ACTION_RESULT_BATCH_MEDIA_TYPE)
+        .match_body(mockito::Matcher::Json(serde_json::json!({
+            "digests": [found, missing],
+        })))
+        .with_status(200)
+        .with_header("content-type", ACTION_RESULT_BATCH_MEDIA_TYPE)
+        // A server answers only for what it holds, and may describe the batch
+        // with fields this client does not know.
+        .with_body(serde_json::json!({"results":[result],"truncated":false}).to_string())
+        .expect(1)
+        .create_async()
+        .await;
+    let client = test_client(&server);
+
+    let results = client
+        .get_action_results(&[found.clone(), missing])
+        .await
+        .unwrap()
+        .expect("the server advertised batched lookups");
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, found);
+    batch.assert_async().await;
+}
+
+#[tokio::test]
+async fn action_batches_fall_back_when_not_advertised() {
+    let mut server = mockito::Server::new_async().await;
+    mock_capabilities(&mut server, serde_json::json!({})).await;
+    let batch = server
+        .mock("POST", "/v1/action-results:batch")
+        .expect(0)
+        .create_async()
+        .await;
+    let client = test_client(&server);
+
+    let action = CacheDigest::blake3(b"unbatched action");
+    assert!(
+        client
+            .get_action_results(&[action])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    batch.assert_async().await;
+}
+
+#[tokio::test]
+async fn action_batches_stop_after_the_endpoint_is_missing() {
+    let mut server = mockito::Server::new_async().await;
+    mock_capabilities(&mut server, serde_json::json!({ "action_batch": true })).await;
+    // Advertised but not served: asking again every wave would cost a round
+    // trip to learn the same thing.
+    let batch = server
+        .mock("POST", "/v1/action-results:batch")
+        .with_status(404)
+        .expect(1)
+        .create_async()
+        .await;
+    let client = test_client(&server);
+
+    let action = CacheDigest::blake3(b"absent endpoint");
+    assert!(
+        client
+            .get_action_results(std::slice::from_ref(&action))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        client
+            .get_action_results(&[action])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    batch.assert_async().await;
+}
+
+#[tokio::test]
+async fn rejects_action_batch_results_that_were_not_requested() {
+    let mut server = mockito::Server::new_async().await;
+    mock_capabilities(&mut server, serde_json::json!({ "action_batch": true })).await;
+    let requested = CacheDigest::blake3(b"requested action");
+    // Accepting this would key cached outputs under an action this client never
+    // derived.
+    let unrequested = RemoteActionResult {
+        action: CacheDigest::blake3(b"someone else's action"),
+        metadata: None,
+        output_root: None,
+        version: 1,
+    };
+    server
+        .mock("POST", "/v1/action-results:batch")
+        .with_status(200)
+        .with_header("content-type", ACTION_RESULT_BATCH_MEDIA_TYPE)
+        .with_body(serde_json::json!({ "results": [unrequested] }).to_string())
+        .create_async()
+        .await;
+    let client = test_client(&server);
+
+    let error = client
+        .get_action_results(&[requested])
+        .await
+        .expect_err("an unrequested action result was accepted");
+    assert!(error.to_string().contains("unrequested action"));
+}
+
+#[tokio::test]
+async fn uploads_negotiated_blob_packs() {
+    let mut server = mockito::Server::new_async().await;
+    mock_capabilities(
+        &mut server,
+        serde_json::json!({ "blob_pack_uploads": true }),
+    )
+    .await;
+    let first_bytes = b"first packed blob".to_vec();
+    let second_bytes = b"second packed blob".to_vec();
+    let first = CacheDigest::blake3(&first_bytes);
+    let second = CacheDigest::blake3(&second_bytes);
+    let expected = vec![
+        (
+            format!("blake3:{}", first.hash),
+            first.size,
+            first_bytes.clone(),
+        ),
+        (
+            format!("blake3:{}", second.hash),
+            second.size,
+            second_bytes.clone(),
+        ),
+    ];
+    let framed =
+        BLOB_PACK_MAGIC.len() as u64 + first.size + second.size + BLOB_PACK_HEADER_BYTES * 2;
+    let upload = server
+        .mock("POST", "/v1/blobs:pack-upload")
+        .match_header("content-type", BLOB_PACK_MEDIA_TYPE)
+        .match_header(BLOB_PACK_BLOBS_HEADER, "2")
+        .match_header(
+            BLOB_PACK_BYTES_HEADER,
+            (first.size + second.size).to_string().as_str(),
+        )
+        .match_header("content-length", framed.to_string().as_str())
+        .match_request(move |request| decode_blob_pack_frames(request.body().unwrap()) == expected)
+        .with_status(200)
+        .with_header("content-type", BLOB_PACK_RECEIPT_MEDIA_TYPE)
+        .with_body(serde_json::json!({"created":2,"existing":0}).to_string())
+        .expect(1)
+        .create_async()
+        .await;
+    let client = test_client(&server);
+
+    let receipt = client
+        .put_blob_pack(&[
+            BlobUpload {
+                digest: first,
+                source: BlobSource::Bytes(first_bytes),
+            },
+            BlobUpload {
+                digest: second,
+                source: BlobSource::Bytes(second_bytes),
+            },
+        ])
+        .await
+        .unwrap()
+        .expect("the server advertised packed uploads");
+
+    assert_eq!(receipt.created, 2);
+    assert_eq!(receipt.existing, 0);
+    upload.assert_async().await;
+}
+
+#[tokio::test]
+async fn packed_uploads_fall_back_when_not_advertised() {
+    let mut server = mockito::Server::new_async().await;
+    mock_capabilities(&mut server, serde_json::json!({ "blob_packs": true })).await;
+    let upload = server
+        .mock("POST", "/v1/blobs:pack-upload")
+        .expect(0)
+        .create_async()
+        .await;
+    let client = test_client(&server);
+
+    let bytes = b"unpacked blob".to_vec();
+    let digest = CacheDigest::blake3(&bytes);
+    assert!(
+        client
+            .put_blob_pack(&[BlobUpload {
+                digest,
+                source: BlobSource::Bytes(bytes),
+            }])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    upload.assert_async().await;
+}
+
+#[tokio::test]
+async fn refuses_packs_over_the_negotiated_size() {
+    let mut server = mockito::Server::new_async().await;
+    mock_capabilities(
+        &mut server,
+        serde_json::json!({ "blob_pack_uploads": true }),
+    )
+    .await;
+    let client = test_client(&server);
+
+    // The advertised ceiling is 1024 bytes.
+    let bytes = vec![0u8; 2048];
+    let digest = CacheDigest::blake3(&bytes);
+    let error = client
+        .put_blob_pack(&[BlobUpload {
+            digest,
+            source: BlobSource::Bytes(bytes),
+        }])
+        .await
+        .expect_err("an oversized pack was sent");
+    assert!(error.to_string().contains("exceeds the negotiated limit"));
 }
 
 #[tokio::test]

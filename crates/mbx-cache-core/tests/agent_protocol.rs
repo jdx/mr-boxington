@@ -1,8 +1,9 @@
 use mbx_cache_core::{
-    ACTION_RESULT_MEDIA_TYPE, AGENT_PROTOCOL_VERSION, ActionPrediction, AgentRequest,
-    AgentResponse, BLOB_MEDIA_TYPE, BLOB_PACK_MEDIA_TYPE, CLIENT_METADATA_MEDIA_TYPE, CacheDigest,
-    CacheDirectory, CacheFileNode, DIRECTORY_MEDIA_TYPE, PROTOCOL_VERSION, RemoteActionResult,
-    RestoreStats, RustcMetadata, TASK_ACTION_MANIFEST_MEDIA_TYPE, canonical_json,
+    ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE, AGENT_PROTOCOL_VERSION,
+    ActionPrediction, AgentRequest, AgentResponse, BLOB_MEDIA_TYPE, BLOB_PACK_MEDIA_TYPE,
+    BLOB_PACK_RECEIPT_MEDIA_TYPE, CLIENT_METADATA_MEDIA_TYPE, CacheDigest, CacheDirectory,
+    CacheFileNode, DIRECTORY_MEDIA_TYPE, PROTOCOL_VERSION, RemoteActionResult, RestoreStats,
+    RustcMetadata, TASK_ACTION_MANIFEST_MEDIA_TYPE, canonical_json,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -381,6 +382,14 @@ fn protocol_constants_match_the_contract() {
     assert_eq!(
         BLOB_PACK_MEDIA_TYPE,
         "application/vnd.mbx.cache-blob-pack.v1"
+    );
+    assert_eq!(
+        ACTION_RESULT_BATCH_MEDIA_TYPE,
+        "application/vnd.mbx.cache-action-result-batch.v1+json"
+    );
+    assert_eq!(
+        BLOB_PACK_RECEIPT_MEDIA_TYPE,
+        "application/vnd.mbx.cache-blob-pack-receipt.v1+json"
     );
 }
 

@@ -1,5 +1,5 @@
 use super::*;
-use crate::ACTION_RESULT_MEDIA_TYPE;
+use crate::{ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE, BLOB_PACK_BLOBS_HEADER};
 use std::time::Duration;
 
 #[test]
@@ -2144,6 +2144,304 @@ async fn a_blob_that_failed_is_uploaded_again_for_a_later_result() {
     retried.assert_async().await;
     second_blob.assert_async().await;
     second_result.assert_async().await;
+}
+
+#[tokio::test]
+async fn prefetch_resolves_predicted_actions_in_one_lookup() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    mock_agent_capabilities(&mut server, serde_json::json!({ "action_batch": true })).await;
+    let task = "7".repeat(64);
+    let mut predictions = Vec::new();
+    let mut results = Vec::new();
+    let mut action_blobs = Vec::new();
+    let mut skipped = Vec::new();
+    for index in 0..3 {
+        let action_bytes = format!("predicted action {index}").into_bytes();
+        let action = CacheDigest::blake3(&action_bytes);
+        predictions.push(ActionPrediction {
+            invocation: CacheDigest::blake3(format!("invocation {index}").as_bytes()),
+            action: action.clone(),
+            adapter: "rustc".into(),
+            payload: "{}".into(),
+        });
+        results.push(RemoteActionResult {
+            action: action.clone(),
+            metadata: None,
+            output_root: None,
+            version: 1,
+        });
+        action_blobs.push(
+            server
+                .mock("GET", blob_path(&action).as_str())
+                .with_status(200)
+                .with_body(action_bytes)
+                .expect(1)
+                .create_async()
+                .await,
+        );
+        // One batched lookup replaces a request per predicted action.
+        skipped.push(
+            server
+                .mock("GET", action_path(&action).as_str())
+                .expect(0)
+                .create_async()
+                .await,
+        );
+    }
+    let manifest_bytes = canonical_json(&TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: predictions.clone(),
+    })
+    .unwrap();
+    let manifest_etag = blake3::hash(&manifest_bytes).to_hex().to_string();
+    let (_, selector) = CacheAgent::task_manifest_selector(&task).unwrap();
+    let manifest = server
+        .mock("GET", action_manifest_path(&selector).as_str())
+        .with_status(200)
+        .with_header("etag", &format!("\"{manifest_etag}\""))
+        .with_body(manifest_bytes)
+        .expect(1)
+        .create_async()
+        .await;
+    let batch = server
+        .mock("POST", "/v1/action-results:batch")
+        .with_status(200)
+        .with_header("content-type", ACTION_RESULT_BATCH_MEDIA_TYPE)
+        .with_body(serde_json::json!({ "results": results }).to_string())
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().join("reader"),
+        RemoteCacheMode::ReadOnly,
+    );
+
+    agent.begin_task(&task).await.unwrap();
+    agent.wait_for_prefetches().await;
+
+    manifest.assert_async().await;
+    batch.assert_async().await;
+    for mock in action_blobs.into_iter().chain(skipped) {
+        mock.assert_async().await;
+    }
+    for result in &results {
+        assert!(agent.actions.find(&result.action).unwrap().is_some());
+    }
+    assert_eq!(agent.stats().remote_action_lookups, 1);
+}
+
+#[tokio::test]
+async fn prefetch_falls_back_when_batched_lookups_are_unavailable() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    // Advertised, then absent: the client must still resolve the prediction.
+    mock_agent_capabilities(&mut server, serde_json::json!({ "action_batch": true })).await;
+    let task = "6".repeat(64);
+    let action_bytes = b"fallback action".to_vec();
+    let action = CacheDigest::blake3(&action_bytes);
+    let result = RemoteActionResult {
+        action: action.clone(),
+        metadata: None,
+        output_root: None,
+        version: 1,
+    };
+    let manifest_bytes = canonical_json(&TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: vec![ActionPrediction {
+            invocation: CacheDigest::blake3(b"fallback invocation"),
+            action: action.clone(),
+            adapter: "rustc".into(),
+            payload: "{}".into(),
+        }],
+    })
+    .unwrap();
+    let manifest_etag = blake3::hash(&manifest_bytes).to_hex().to_string();
+    let (_, selector) = CacheAgent::task_manifest_selector(&task).unwrap();
+    let manifest = server
+        .mock("GET", action_manifest_path(&selector).as_str())
+        .with_status(200)
+        .with_header("etag", &format!("\"{manifest_etag}\""))
+        .with_body(manifest_bytes)
+        .expect(1)
+        .create_async()
+        .await;
+    let batch = server
+        .mock("POST", "/v1/action-results:batch")
+        .with_status(404)
+        .expect(1)
+        .create_async()
+        .await;
+    let single = server
+        .mock("GET", action_path(&action).as_str())
+        .with_status(200)
+        .with_header("content-type", ACTION_RESULT_MEDIA_TYPE)
+        .with_body(serde_json::to_vec(&result).unwrap())
+        .expect(1)
+        .create_async()
+        .await;
+    let action_blob = server
+        .mock("GET", blob_path(&action).as_str())
+        .with_status(200)
+        .with_body(action_bytes)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().join("reader"),
+        RemoteCacheMode::ReadOnly,
+    );
+
+    agent.begin_task(&task).await.unwrap();
+    agent.wait_for_prefetches().await;
+
+    manifest.assert_async().await;
+    batch.assert_async().await;
+    single.assert_async().await;
+    action_blob.assert_async().await;
+    assert!(agent.actions.find(&action).unwrap().is_some());
+}
+
+async fn mock_agent_capabilities(server: &mut mockito::ServerGuard, features: serde_json::Value) {
+    server
+        .mock("GET", "/v1/capabilities")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            serde_json::json!({
+                "protocol":{"major":1},
+                "features":features,
+                "limits":{"max_batch_items":100,"max_pack_bytes":1048576}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+}
+
+#[tokio::test]
+async fn queued_blobs_are_published_in_one_pack() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    mock_agent_capabilities(
+        &mut server,
+        serde_json::json!({ "blob_pack_uploads": true }),
+    )
+    .await;
+    let contents = [
+        b"first output".to_vec(),
+        b"second output".to_vec(),
+        b"third output".to_vec(),
+    ];
+    let digests: Vec<CacheDigest> = contents
+        .iter()
+        .map(|bytes| CacheDigest::blake3(bytes))
+        .collect();
+    let pack = server
+        .mock("POST", "/v1/blobs:pack-upload")
+        .match_header(BLOB_PACK_BLOBS_HEADER, "3")
+        .with_status(200)
+        .with_body(serde_json::json!({"created":3,"existing":0}).to_string())
+        .expect(1)
+        .create_async()
+        .await;
+    // One request replaces three, so none of the individual endpoints are used.
+    let mut singles = Vec::new();
+    for digest in &digests {
+        singles.push(
+            server
+                .mock("PUT", blob_path(digest).as_str())
+                .expect(0)
+                .create_async()
+                .await,
+        );
+    }
+    let agent = remote_agent(
+        &server,
+        directory.path().join("writer"),
+        RemoteCacheMode::WriteOnly,
+    );
+    let mut requests = Vec::new();
+    for (index, (digest, bytes)) in digests.iter().zip(&contents).enumerate() {
+        let source = directory.path().join(format!("source-{index}"));
+        fs::write(&source, bytes).unwrap();
+        requests.push(AgentRequest::StoreBlob {
+            digest: digest.clone(),
+            source,
+        });
+    }
+    agent.handle_requests(requests).await;
+    agent.wait_for_uploads().await;
+
+    pack.assert_async().await;
+    for single in singles {
+        single.assert_async().await;
+    }
+    let stats = agent.stats();
+    assert_eq!(stats.remote_blob_pack_uploads, 1);
+    assert_eq!(stats.remote_blob_pack_upload_blobs, 3);
+    assert_eq!(stats.background_uploads, 3);
+}
+
+#[tokio::test]
+async fn a_rejected_pack_falls_back_to_individual_uploads() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    mock_agent_capabilities(
+        &mut server,
+        serde_json::json!({ "blob_pack_uploads": true }),
+    )
+    .await;
+    let contents = [b"first output".to_vec(), b"second output".to_vec()];
+    let digests: Vec<CacheDigest> = contents
+        .iter()
+        .map(|bytes| CacheDigest::blake3(bytes))
+        .collect();
+    let pack = server
+        .mock("POST", "/v1/blobs:pack-upload")
+        .with_status(500)
+        .expect(1)
+        .create_async()
+        .await;
+    let mut singles = Vec::new();
+    for digest in &digests {
+        singles.push(
+            server
+                .mock("PUT", blob_path(digest).as_str())
+                .with_status(200)
+                .expect(1)
+                .create_async()
+                .await,
+        );
+    }
+    let agent = remote_agent(
+        &server,
+        directory.path().join("writer"),
+        RemoteCacheMode::WriteOnly,
+    );
+    let mut requests = Vec::new();
+    for (index, (digest, bytes)) in digests.iter().zip(&contents).enumerate() {
+        let source = directory.path().join(format!("source-{index}"));
+        fs::write(&source, bytes).unwrap();
+        requests.push(AgentRequest::StoreBlob {
+            digest: digest.clone(),
+            source,
+        });
+    }
+    agent.handle_requests(requests).await;
+    agent.wait_for_uploads().await;
+
+    pack.assert_async().await;
+    for single in singles {
+        single.assert_async().await;
+    }
+    // Everything still published, so nothing downstream is withheld.
+    assert_eq!(agent.stats().background_uploads, 2);
+    assert_eq!(agent.stats().remote_blob_pack_uploads, 0);
 }
 
 #[tokio::test]

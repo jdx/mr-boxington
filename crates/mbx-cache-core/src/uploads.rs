@@ -19,7 +19,9 @@
 //! so an action result carries the tickets of the blobs enqueued before it and
 //! waits for them itself.
 
-use crate::{BlobSource, BlobUpload, CacheDigest, RemoteActionResult, RemoteCacheClient};
+use crate::{
+    BlobPackLimits, BlobSource, BlobUpload, CacheDigest, RemoteActionResult, RemoteCacheClient,
+};
 use futures_util::future::{BoxFuture, Shared};
 use futures_util::{FutureExt, StreamExt, stream};
 use log::warn;
@@ -88,6 +90,8 @@ pub(crate) trait UploadSink: Send + Sync {
     fn record_blob_uploaded(&self, bytes: u64);
     /// Record an action result published.
     fn record_action_uploaded(&self);
+    /// Record one framed request that published `blobs` blobs.
+    fn record_blob_pack_uploaded(&self, blobs: u64);
     /// Record an upload that did not publish, having already been reported.
     fn record_upload_failure(&self);
 }
@@ -108,6 +112,55 @@ enum QueuedUpload {
 impl QueuedUpload {
     fn is_blob(&self) -> bool {
         matches!(self, Self::Blob { .. })
+    }
+}
+
+/// A queued blob considered for packing with others.
+struct PackMember {
+    digest: CacheDigest,
+    path: PathBuf,
+    done: tokio::sync::oneshot::Sender<UploadOutcome>,
+}
+
+/// Split blobs into packs the server will accept, plus the ones to send alone.
+///
+/// A blob too large for any pack, or left over as a group of one, is not worth
+/// framing: a pack of one costs the same round trip as the blob itself.
+fn group_into_packs(
+    members: Vec<PackMember>,
+    limits: BlobPackLimits,
+) -> (Vec<Vec<PackMember>>, Vec<PackMember>) {
+    let mut packs = Vec::new();
+    let mut singles = Vec::new();
+    let mut current: Vec<PackMember> = Vec::new();
+    let mut current_bytes = 0u64;
+    for member in members {
+        if member.digest.size > limits.max_bytes {
+            singles.push(member);
+            continue;
+        }
+        let would_exceed = current.len() >= limits.max_items
+            || current_bytes.saturating_add(member.digest.size) > limits.max_bytes;
+        if would_exceed && !current.is_empty() {
+            close_pack(std::mem::take(&mut current), &mut packs, &mut singles);
+            current_bytes = 0;
+        }
+        current_bytes = current_bytes.saturating_add(member.digest.size);
+        current.push(member);
+    }
+    close_pack(current, &mut packs, &mut singles);
+    (packs, singles)
+}
+
+fn close_pack(
+    pack: Vec<PackMember>,
+    packs: &mut Vec<Vec<PackMember>>,
+    singles: &mut Vec<PackMember>,
+) {
+    if pack.len() < 2 {
+        singles.extend(pack);
+    } else {
+        packs.push(pack);
     }
 }
 
@@ -312,13 +365,123 @@ impl Inner {
     /// this batch's blob phase or in a batch that has already run.
     async fn run_batch(&self, batch: Vec<QueuedUpload>) {
         let (blobs, results): (Vec<_>, Vec<_>) = batch.into_iter().partition(QueuedUpload::is_blob);
-        for phase in [blobs, results] {
-            stream::iter(phase)
-                .map(|upload| self.run_upload(upload))
-                .buffer_unordered(MAX_UPLOAD_TRANSFERS)
-                .collect::<Vec<()>>()
-                .await;
+        self.run_blob_phase(blobs).await;
+        self.run_phase(results).await;
+    }
+
+    async fn run_phase(&self, uploads: Vec<QueuedUpload>) {
+        stream::iter(uploads)
+            .map(|upload| self.run_upload(upload))
+            .buffer_unordered(MAX_UPLOAD_TRANSFERS)
+            .collect::<Vec<()>>()
+            .await;
+    }
+
+    /// Publish this batch's blobs, packing them together where the server takes
+    /// packs.
+    ///
+    /// Rustc output is many small objects, so one request per object spends most
+    /// of its time in round trips rather than in transfer.
+    async fn run_blob_phase(&self, blobs: Vec<QueuedUpload>) {
+        if blobs.len() < 2 {
+            return self.run_phase(blobs).await;
         }
+        // A negotiation this cannot complete is not worth failing the uploads
+        // over; individual requests still publish everything.
+        let limits = self
+            .remote
+            .blob_pack_upload_limits()
+            .await
+            .unwrap_or_default();
+        let Some(limits) = limits else {
+            return self.run_phase(blobs).await;
+        };
+        let mut members = Vec::with_capacity(blobs.len());
+        for upload in blobs {
+            match upload {
+                QueuedUpload::Blob { digest, path, done } => {
+                    members.push(PackMember { digest, path, done });
+                }
+                // The partition in `run_batch` leaves only blobs here.
+                other => self.run_upload(other).await,
+            }
+        }
+        let (packs, singles) = group_into_packs(members, limits);
+        let packed = stream::iter(packs)
+            .map(|pack| self.upload_pack(pack))
+            .buffer_unordered(MAX_UPLOAD_TRANSFERS);
+        let single = stream::iter(singles)
+            .map(|member| self.upload_member(member))
+            .buffer_unordered(MAX_UPLOAD_TRANSFERS);
+        futures_util::future::join(packed.collect::<Vec<()>>(), single.collect::<Vec<()>>()).await;
+    }
+
+    /// Publish one group of blobs in a single framed request.
+    ///
+    /// A pack the server will not take -- because it does not serve the
+    /// extension, or because the request failed -- leaves its members to be sent
+    /// individually, which also reports precisely which blob was the problem.
+    async fn upload_pack(&self, pack: Vec<PackMember>) {
+        let mut present = Vec::with_capacity(pack.len());
+        for member in pack {
+            if tokio::fs::try_exists(&member.path).await.unwrap_or(false) {
+                present.push(member);
+            } else {
+                warn!(
+                    "remote cache blob upload skipped for {}: the local object is gone",
+                    member.digest.hash
+                );
+                self.sink.record_upload_failure();
+                let _ = member.done.send(UploadOutcome::Skipped);
+            }
+        }
+        if present.len() < 2 {
+            for member in present {
+                self.upload_member(member).await;
+            }
+            return;
+        }
+        let uploads: Vec<BlobUpload> = present
+            .iter()
+            .map(|member| BlobUpload {
+                digest: member.digest.clone(),
+                source: BlobSource::Path(member.path.clone()),
+            })
+            .collect();
+        let receipt = {
+            let Ok(_permit) = self.transfers.acquire().await else {
+                return;
+            };
+            let Ok(_transfer) = self.remote_transfers.acquire().await else {
+                return;
+            };
+            self.remote.put_blob_pack(&uploads).await
+        };
+        match receipt {
+            Ok(Some(_)) => {
+                self.sink.record_blob_pack_uploaded(present.len() as u64);
+                for member in present {
+                    self.sink.record_blob_uploaded(member.digest.size);
+                    let _ = member.done.send(UploadOutcome::Uploaded);
+                }
+            }
+            Ok(None) => {
+                for member in present {
+                    self.upload_member(member).await;
+                }
+            }
+            Err(error) => {
+                warn!("remote cache blob pack upload failed: {error}");
+                for member in present {
+                    self.upload_member(member).await;
+                }
+            }
+        }
+    }
+
+    async fn upload_member(&self, member: PackMember) {
+        let outcome = self.upload_blob(&member.digest, &member.path).await;
+        let _ = member.done.send(outcome);
     }
 
     async fn run_upload(&self, upload: QueuedUpload) {

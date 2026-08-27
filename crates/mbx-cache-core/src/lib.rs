@@ -59,11 +59,12 @@ pub use agent::{
 };
 pub use local::{LocalActionCache, LocalCas};
 pub use mbx_cache_protocol::{
-    ACTION_RESULT_MEDIA_TYPE, ActionPrediction, ActionResult as RemoteActionResult,
-    BLOB_MEDIA_TYPE, BLOB_PACK_BLOBS_HEADER, BLOB_PACK_BYTES_HEADER, BLOB_PACK_HEADER_BYTES,
-    BLOB_PACK_MAGIC, BLOB_PACK_MEDIA_TYPE, CLIENT_METADATA_MEDIA_TYPE, Capabilities,
-    CapabilityFeatures, CapabilityLimits, CapabilityProtocol, DIGEST_LIST_MEDIA_TYPE,
-    DIRECTORY_MEDIA_TYPE, Digest as CacheDigest, DigestAlgorithm, Directory as CacheDirectory,
+    ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE, ActionPrediction,
+    ActionResult as RemoteActionResult, BLOB_MEDIA_TYPE, BLOB_PACK_BLOBS_HEADER,
+    BLOB_PACK_BYTES_HEADER, BLOB_PACK_HEADER_BYTES, BLOB_PACK_MAGIC, BLOB_PACK_MEDIA_TYPE,
+    BLOB_PACK_RECEIPT_MEDIA_TYPE, CLIENT_METADATA_MEDIA_TYPE, Capabilities, CapabilityFeatures,
+    CapabilityLimits, CapabilityProtocol, DIGEST_LIST_MEDIA_TYPE, DIRECTORY_MEDIA_TYPE,
+    Digest as CacheDigest, DigestAlgorithm, Directory as CacheDirectory,
     DirectoryNode as CacheDirectoryNode, FileNode as CacheFileNode, NAMESPACE_HEADER,
     PROTOCOL_HEADER, PROTOCOL_VERSION, RustcMetadata, SymlinkNode as CacheSymlinkNode,
     TASK_ACTION_MANIFEST_MEDIA_TYPE, TaskActionManifest,
@@ -87,6 +88,14 @@ const MAX_STAGED_BLOB_PACK_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_STAGED_BLOB_PACK_ITEMS: usize = 2 * 1024;
 const BLOB_PACK_TIMEOUT_BYTES_PER_UNIT: u64 = MAX_STAGED_BLOB_PACK_BYTES / 4;
 const BLOB_PACK_TIMEOUT_ITEMS_PER_UNIT: usize = MAX_STAGED_BLOB_PACK_ITEMS / 4;
+/// Actions looked up in one batched request.
+///
+/// A prefetch wants its first results back while the rest are still being
+/// answered, so a batch stays small enough to keep the download pipeline fed
+/// rather than as large as a server would accept.
+const MAX_ACTION_BATCH_ITEMS: usize = 256;
+/// Ceiling on one batched action-result response, scaled by what was asked for.
+const MAX_ACTION_RESULT_BYTES: u64 = 64 * 1024;
 
 /// Serialize a protocol object using the JSON Canonicalization Scheme.
 ///
@@ -292,12 +301,36 @@ struct BlobPackLimits {
 #[derive(Debug, Clone, Copy, Default)]
 struct NegotiatedCapabilities {
     blob_packs: Option<BlobPackLimits>,
+    blob_pack_uploads: Option<BlobPackLimits>,
+    action_batches: Option<usize>,
     zstd_uploads: bool,
 }
 
 #[derive(Serialize)]
 struct DigestList<'a> {
     digests: &'a [CacheDigest],
+}
+
+/// Action results a server holds, in no particular order.
+///
+/// Deliberately tolerant of fields it does not know, so a later protocol minor
+/// can describe more about a batch without this client refusing the response.
+/// The records inside stay canonical and exhaustive.
+#[derive(Deserialize)]
+struct ActionResultBatch {
+    #[serde(default)]
+    results: Vec<RemoteActionResult>,
+}
+
+/// What a server did with the blobs in an uploaded pack.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct BlobPackReceipt {
+    /// Blobs this request added to the remote cache.
+    #[serde(default)]
+    pub created: u64,
+    /// Blobs the remote cache already held.
+    #[serde(default)]
+    pub existing: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -322,6 +355,8 @@ pub struct RemoteCacheClient {
     retries: i64,
     capabilities: tokio::sync::OnceCell<NegotiatedCapabilities>,
     blob_packs_disabled: AtomicBool,
+    blob_pack_uploads_disabled: AtomicBool,
+    action_batches_disabled: AtomicBool,
 }
 
 impl RemoteCacheClient {
@@ -352,6 +387,8 @@ impl RemoteCacheClient {
             retries: config.retries,
             capabilities: tokio::sync::OnceCell::new(),
             blob_packs_disabled: AtomicBool::new(false),
+            blob_pack_uploads_disabled: AtomicBool::new(false),
+            action_batches_disabled: AtomicBool::new(false),
         })
     }
 
@@ -405,6 +442,18 @@ impl RemoteCacheClient {
         Ok(self
             .base_url
             .join(&format!("v{PROTOCOL_VERSION}/blobs:pack"))?)
+    }
+
+    fn blob_pack_upload_endpoint(&self) -> Result<Url> {
+        Ok(self
+            .base_url
+            .join(&format!("v{PROTOCOL_VERSION}/blobs:pack-upload"))?)
+    }
+
+    fn action_result_batch_endpoint(&self) -> Result<Url> {
+        Ok(self
+            .base_url
+            .join(&format!("v{PROTOCOL_VERSION}/action-results:batch"))?)
     }
 
     async fn request(
@@ -469,7 +518,10 @@ impl RemoteCacheClient {
             .compressors
             .iter()
             .any(|compressor| compressor == "zstd");
-        let blob_packs = if capabilities.features.blob_packs {
+        let pack_limits = |feature: bool| -> Result<Option<BlobPackLimits>> {
+            if !feature {
+                return Ok(None);
+            }
             let max_items = usize::try_from(capabilities.limits.max_batch_items)
                 .ok()
                 .filter(|limit| *limit > 0)
@@ -479,18 +531,31 @@ impl RemoteCacheClient {
             if capabilities.limits.max_pack_bytes == 0 {
                 bail!("remote cache blob packs require a positive max_pack_bytes limit");
             }
-            Some(BlobPackLimits {
+            Ok(Some(BlobPackLimits {
                 max_items: max_items.min(MAX_STAGED_BLOB_PACK_ITEMS),
                 max_bytes: capabilities
                     .limits
                     .max_pack_bytes
                     .min(MAX_STAGED_BLOB_PACK_BYTES),
-            })
+            }))
+        };
+        let blob_packs = pack_limits(capabilities.features.blob_packs)?;
+        let blob_pack_uploads = pack_limits(capabilities.features.blob_pack_uploads)?;
+        let action_batches = if capabilities.features.action_batch {
+            let max_items = usize::try_from(capabilities.limits.max_batch_items)
+                .ok()
+                .filter(|limit| *limit > 0)
+                .ok_or_else(|| {
+                    eyre!("remote cache action batches require a positive max_batch_items limit")
+                })?;
+            Some(max_items.min(MAX_ACTION_BATCH_ITEMS))
         } else {
             None
         };
         Ok(NegotiatedCapabilities {
             blob_packs,
+            blob_pack_uploads,
+            action_batches,
             zstd_uploads,
         })
     }
@@ -623,6 +688,99 @@ impl RemoteCacheClient {
             bail!("remote action result does not match requested action");
         }
         Ok(result)
+    }
+
+    /// How many actions one batched lookup may ask about.
+    ///
+    /// `None` means the server does not answer batched lookups.
+    pub(crate) async fn action_batch_limit(&self) -> Result<Option<usize>> {
+        if self.action_batches_disabled.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        Ok(self.negotiated_capabilities().await?.action_batches)
+    }
+
+    /// Look up several action results in one request.
+    ///
+    /// `None` means the server does not answer batched lookups, leaving the
+    /// caller to ask for each action individually. The response carries only the
+    /// results the server holds, in no particular order, so each record is bound
+    /// to its request by the action digest it names rather than by position.
+    pub async fn get_action_results(
+        &self,
+        actions: &[CacheDigest],
+    ) -> Result<Option<Vec<RemoteActionResult>>> {
+        if actions.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        if self.action_batches_disabled.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let Some(limit) = self.negotiated_capabilities().await?.action_batches else {
+            return Ok(None);
+        };
+        if actions.len() > limit {
+            bail!(
+                "remote cache action batch of {} exceeds the negotiated limit of {limit}",
+                actions.len()
+            );
+        }
+        let mut requested = BTreeSet::new();
+        for action in actions {
+            action.validate()?;
+            if action.algorithm != "blake3" {
+                bail!("remote cache action keys must use blake3");
+            }
+            requested.insert(action.clone());
+        }
+        let url = self.action_result_batch_endpoint()?;
+        let body = serde_json::to_vec(&DigestList { digests: actions })?;
+        let bound = MAX_ACTION_RESULT_BYTES.saturating_mul(actions.len() as u64);
+        let batch = retry_async("POST", &url, self.retries, || async {
+            let response = self
+                .request(
+                    reqwest::Method::POST,
+                    url.clone(),
+                    ACTION_RESULT_BATCH_MEDIA_TYPE,
+                )
+                .await?
+                .header(CONTENT_TYPE, DIGEST_LIST_MEDIA_TYPE)
+                .body(body.clone())
+                .send()
+                .await?;
+            if matches!(
+                response.status(),
+                StatusCode::NOT_FOUND
+                    | StatusCode::METHOD_NOT_ALLOWED
+                    | StatusCode::NOT_IMPLEMENTED
+            ) {
+                // Advertised but not served. Asking again every wave would cost
+                // a round trip each time to learn the same thing.
+                self.action_batches_disabled.store(true, Ordering::Relaxed);
+                return Ok(None);
+            }
+            let bytes =
+                read_json_within(response.error_for_status()?, "action result batch", bound)
+                    .await?;
+            Ok(Some(serde_json::from_slice::<ActionResultBatch>(&bytes)?))
+        })
+        .await?;
+        let Some(batch) = batch else {
+            return Ok(None);
+        };
+        // A result for an action that was not asked for would key cached outputs
+        // under a digest this client never derived, so it is refused rather than
+        // ignored.
+        let mut seen = BTreeSet::new();
+        for result in &batch.results {
+            if result.version != 1 || !requested.contains(&result.action) {
+                bail!("remote action result batch contains an unrequested action");
+            }
+            if !seen.insert(result.action.clone()) {
+                bail!("remote action result batch repeats an action");
+            }
+        }
+        Ok(Some(batch.results))
     }
 
     /// Canonically serialize and store an action-result record.
@@ -795,6 +953,110 @@ impl RemoteCacheClient {
             .map_err(|_| eyre!("remote cache blob download timed out for {url}"))?
     }
 
+    /// How many blobs, and how many payload bytes, one uploaded pack may carry.
+    ///
+    /// `None` means the server does not accept packed uploads.
+    pub(crate) async fn blob_pack_upload_limits(&self) -> Result<Option<BlobPackLimits>> {
+        if self.blob_pack_uploads_disabled.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        Ok(self.negotiated_capabilities().await?.blob_pack_uploads)
+    }
+
+    /// Upload several content-addressed blobs in one framed request.
+    ///
+    /// `None` means the server does not accept packed uploads, leaving the
+    /// caller to send each blob on its own. A rejected pack is reported as an
+    /// error and publishes nothing the caller may rely on: a server verifies
+    /// each frame as it arrives, so an accepted prefix may exist, but every blob
+    /// is content-addressed and storing one twice is not an error.
+    pub async fn put_blob_pack(&self, uploads: &[BlobUpload]) -> Result<Option<BlobPackReceipt>> {
+        if uploads.is_empty() {
+            return Ok(Some(BlobPackReceipt {
+                created: 0,
+                existing: 0,
+            }));
+        }
+        let Some(limits) = self.blob_pack_upload_limits().await? else {
+            return Ok(None);
+        };
+        if uploads.len() > limits.max_items {
+            bail!(
+                "remote cache blob pack of {} blobs exceeds the negotiated limit of {}",
+                uploads.len(),
+                limits.max_items
+            );
+        }
+        let mut payload_bytes = 0u64;
+        for upload in uploads {
+            upload.digest.validate()?;
+            payload_bytes = payload_bytes
+                .checked_add(upload.digest.size)
+                .ok_or_else(|| eyre!("remote cache blob pack payload overflowed"))?;
+        }
+        if payload_bytes > limits.max_bytes {
+            bail!(
+                "remote cache blob pack of {payload_bytes} bytes exceeds the negotiated limit of {}",
+                limits.max_bytes
+            );
+        }
+        let framed_bytes = BLOB_PACK_MAGIC.len() as u64
+            + payload_bytes
+            + BLOB_PACK_HEADER_BYTES * uploads.len() as u64;
+        let compress = self
+            .negotiated_capabilities()
+            .await
+            .map(|capabilities| capabilities.zstd_uploads)
+            .unwrap_or(false);
+        let url = self.blob_pack_upload_endpoint()?;
+        retry_async("POST", &url, self.retries, || async {
+            let request = self
+                .request(
+                    reqwest::Method::POST,
+                    url.clone(),
+                    BLOB_PACK_RECEIPT_MEDIA_TYPE,
+                )
+                .await?
+                .header(CONTENT_TYPE, BLOB_PACK_MEDIA_TYPE)
+                .header(BLOB_PACK_BLOBS_HEADER, uploads.len())
+                .header(BLOB_PACK_BYTES_HEADER, payload_bytes);
+            // Each attempt reads the sources again, so the pack is rebuilt here
+            // rather than buffered once and held in memory.
+            let reader = blob_pack_reader(uploads).await?;
+            let request = if compress {
+                let encoder = async_compression::tokio::bufread::ZstdEncoder::new(
+                    tokio::io::BufReader::new(reader),
+                );
+                request
+                    .header(CONTENT_ENCODING, "zstd")
+                    .body(reqwest::Body::wrap_stream(
+                        tokio_util::io::ReaderStream::new(encoder),
+                    ))
+            } else {
+                request
+                    .header(CONTENT_LENGTH, framed_bytes)
+                    .body(reqwest::Body::wrap_stream(
+                        tokio_util::io::ReaderStream::new(reader),
+                    ))
+            };
+            let response = request.send().await?;
+            if matches!(
+                response.status(),
+                StatusCode::NOT_FOUND
+                    | StatusCode::METHOD_NOT_ALLOWED
+                    | StatusCode::NOT_IMPLEMENTED
+            ) {
+                self.blob_pack_uploads_disabled
+                    .store(true, Ordering::Relaxed);
+                return Ok(None);
+            }
+            let bytes =
+                read_bounded_json(response.error_for_status()?, "blob pack receipt").await?;
+            Ok(Some(serde_json::from_slice::<BlobPackReceipt>(&bytes)?))
+        })
+        .await
+    }
+
     /// Verify and upload a content-addressed blob.
     pub async fn put_blob(&self, upload: &BlobUpload) -> Result<()> {
         let url = self.blob_endpoint(&upload.digest)?;
@@ -895,19 +1157,60 @@ fn blob_pack_download_timeout(base: Duration, digests: &[CacheDigest]) -> Durati
 /// A declared `Content-Length` is rejected up front so an oversized body costs
 /// nothing to refuse; the streaming check then covers servers that understate or
 /// omit it.
+/// Frame blobs into one `MBXPACK1` stream, read on demand rather than buffered.
+///
+/// The frames mirror what [`decode_blob_pack_reader`] accepts, so both
+/// directions of the extension agree on the format by construction.
+async fn blob_pack_reader(
+    uploads: &[BlobUpload],
+) -> Result<Box<dyn AsyncRead + Send + Sync + Unpin>> {
+    use tokio::io::AsyncReadExt as _;
+
+    let mut reader: Box<dyn AsyncRead + Send + Sync + Unpin> =
+        Box::new(std::io::Cursor::new(BLOB_PACK_MAGIC.to_vec()));
+    for upload in uploads {
+        let header = blob_pack_frame_header(&upload.digest)?;
+        let payload: Box<dyn AsyncRead + Send + Sync + Unpin> = match &upload.source {
+            BlobSource::Bytes(bytes) => Box::new(std::io::Cursor::new(bytes.clone())),
+            BlobSource::File(file) => Box::new(tokio::fs::File::open(file.path()).await?),
+            BlobSource::Path(path) => Box::new(tokio::fs::File::open(path).await?),
+        };
+        reader = Box::new(reader.chain(std::io::Cursor::new(header)).chain(payload));
+    }
+    Ok(reader)
+}
+
+fn blob_pack_frame_header(digest: &CacheDigest) -> Result<Vec<u8>> {
+    let algorithm = match digest.algorithm_kind()? {
+        DigestAlgorithm::Blake3 => 1u8,
+        DigestAlgorithm::Sha256 => 2u8,
+    };
+    let hash = hex::decode(&digest.hash)?;
+    if hash.len() != 32 {
+        bail!("remote cache blob pack digests must be 32 bytes");
+    }
+    let mut header = Vec::with_capacity(BLOB_PACK_HEADER_BYTES as usize);
+    header.push(algorithm);
+    header.extend_from_slice(&hash);
+    header.extend_from_slice(&digest.size.to_be_bytes());
+    Ok(header)
+}
+
 async fn read_bounded_json(response: reqwest::Response, what: &str) -> Result<Vec<u8>> {
+    read_json_within(response, what, MAX_REMOTE_JSON_BYTES).await
+}
+
+async fn read_json_within(response: reqwest::Response, what: &str, limit: u64) -> Result<Vec<u8>> {
     if let Some(length) = response.content_length()
-        && length > MAX_REMOTE_JSON_BYTES
+        && length > limit
     {
-        bail!(
-            "remote cache {what} declared {length} bytes, over the {MAX_REMOTE_JSON_BYTES} byte limit"
-        );
+        bail!("remote cache {what} declared {length} bytes, over the {limit} byte limit");
     }
     let mut response = response;
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await? {
-        if bytes.len() as u64 + chunk.len() as u64 > MAX_REMOTE_JSON_BYTES {
-            bail!("remote cache {what} exceeded the {MAX_REMOTE_JSON_BYTES} byte limit");
+        if bytes.len() as u64 + chunk.len() as u64 > limit {
+            bail!("remote cache {what} exceeded the {limit} byte limit");
         }
         bytes.extend_from_slice(&chunk);
     }
