@@ -6,7 +6,7 @@
 use crate::util::parse_duration;
 use bytesize::ByteSize;
 use eyre::{Context, Result, bail};
-use mbx_cache_core::RemoteCacheMode;
+use mbx_cache_core::{RemoteCacheMode, S3ConditionalWrites};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use usage_config::{EnvLayer, FileLayer, FileScope, Layers};
@@ -159,6 +159,22 @@ struct RawRemote {
         choices("read-write", "read-only", "write-only")
     )]
     mode: String,
+    /// S3 endpoint for a store that is not AWS, such as MinIO or R2.
+    #[usage(env = "MBX_REMOTE_S3_ENDPOINT", ty = "url")]
+    s3_endpoint: Option<String>,
+    /// S3 region; Cloudflare R2 uses "auto".
+    #[usage(env = "MBX_REMOTE_S3_REGION")]
+    s3_region: Option<String>,
+    /// Address S3 buckets in the path rather than the host.
+    #[usage(env = "MBX_REMOTE_S3_FORCE_PATH_STYLE")]
+    s3_force_path_style: Option<bool>,
+    /// How to treat an S3 store that does not implement conditional writes.
+    #[usage(
+        env = "MBX_REMOTE_S3_CONDITIONAL_WRITES",
+        default = "auto",
+        choices("auto", "required", "off")
+    )]
+    s3_conditional_writes: String,
 }
 
 #[derive(Debug, usage::Config)]
@@ -241,6 +257,29 @@ pub struct Config {
     pub target: TargetSettings,
 }
 
+impl Config {
+    /// A configuration with everything defaulted, for tests that care about one
+    /// setting and should not have to spell out the rest.
+    #[cfg(test)]
+    pub fn for_test(cache_dir: &std::path::Path) -> Self {
+        Self {
+            cache_dir: cache_dir.to_path_buf(),
+            stats_report: None,
+            verify: false,
+            incremental: false,
+            share_out_dir: false,
+            events: false,
+            remote: Default::default(),
+            http: Default::default(),
+            gc: Default::default(),
+            target: TargetSettings {
+                views: true,
+                root: cache_dir.join("targets"),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RemoteSettings {
     pub url: Option<String>,
@@ -249,6 +288,10 @@ pub struct RemoteSettings {
     pub token_file: Option<PathBuf>,
     pub oidc_audience: Option<String>,
     pub mode: RemoteCacheMode,
+    pub s3_endpoint: Option<String>,
+    pub s3_region: Option<String>,
+    pub s3_force_path_style: Option<bool>,
+    pub s3_conditional_writes: S3ConditionalWrites,
 }
 
 #[derive(Debug, Clone)]
@@ -474,6 +517,11 @@ impl Config {
                 .flatten(),
         };
         let mode = raw.remote.mode.parse().wrap_err("invalid remote.mode")?;
+        let s3_conditional_writes = raw
+            .remote
+            .s3_conditional_writes
+            .parse()
+            .wrap_err("invalid remote.s3_conditional_writes")?;
         let http = HttpSettings {
             timeout: parse_duration(&raw.http.timeout).wrap_err("invalid http.timeout")?,
             download_timeout: parse_duration(&raw.http.download_timeout)
@@ -505,6 +553,10 @@ impl Config {
                 token_file: raw.remote.token_file,
                 oidc_audience: raw.remote.oidc_audience,
                 mode,
+                s3_endpoint: raw.remote.s3_endpoint,
+                s3_region: raw.remote.s3_region,
+                s3_force_path_style: raw.remote.s3_force_path_style,
+                s3_conditional_writes,
             },
             http,
         };
@@ -692,6 +744,7 @@ mod tests {
             url = "https://file.example"
             namespace = "file"
             mode = "read-only"
+            s3_conditional_writes = "required"
             [http]
             timeout = "5s"
             retries = 9
@@ -723,6 +776,10 @@ mod tests {
         assert_eq!(config.gc.max_bytes, 2 * 1024 * 1024 * 1024);
         // Values absent from the environment still come from the file.
         assert_eq!(config.remote.namespace.unwrap(), "file");
+        assert_eq!(
+            config.remote.s3_conditional_writes,
+            S3ConditionalWrites::Required
+        );
         assert_eq!(config.http.retries, 9);
         assert!(!config.gc.auto);
         assert_eq!(config.gc.interval, Duration::from_secs(6 * 60 * 60));
@@ -733,6 +790,10 @@ mod tests {
     #[test]
     fn defaults_apply_without_configuration() {
         let (config, retention) = configured_retention(None, &[]).unwrap();
+        assert_eq!(
+            config.remote.s3_conditional_writes,
+            S3ConditionalWrites::Auto
+        );
         assert_eq!(config.http.timeout, DEFAULT_HTTP_TIMEOUT);
         assert_eq!(config.http.download_timeout, DEFAULT_HTTP_DOWNLOAD_TIMEOUT);
         assert_eq!(config.http.retries, DEFAULT_HTTP_RETRIES);
@@ -1050,6 +1111,10 @@ mod tests {
             "cache_dir = \"elsewhere\"",
             "verify = true",
             "[remote]\nurl = \"https://example.com\"",
+            // Credentials and the store they authenticate to are a machine's
+            // business, never a repository's.
+            "[remote]\ns3_endpoint = \"https://store.example.com\"",
+            "[remote]\ns3_region = \"us-west-2\"",
             "[gc]\nauto = false",
             "[target]\nviews = false",
         ] {

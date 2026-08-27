@@ -144,6 +144,44 @@ Remote namespace; required when a URL is configured.
 
 CI OIDC audience.
 
+### `remote.s3_conditional_writes`
+
+- **Type:** `string`
+- **Default:** `auto`
+- **Set with:** `MBX_REMOTE_S3_CONDITIONAL_WRITES`
+
+How to treat an S3 store that does not implement conditional writes.
+
+**Choices:**
+- `auto`
+- `required`
+- `off`
+
+
+### `remote.s3_endpoint`
+
+- **Type:** `option<url>`
+- **Optional:** true
+- **Set with:** `MBX_REMOTE_S3_ENDPOINT`
+
+S3 endpoint for a store that is not AWS, such as MinIO or R2.
+
+### `remote.s3_force_path_style`
+
+- **Type:** `option<bool>`
+- **Optional:** true
+- **Set with:** `MBX_REMOTE_S3_FORCE_PATH_STYLE`
+
+Address S3 buckets in the path rather than the host.
+
+### `remote.s3_region`
+
+- **Type:** `option<string>`
+- **Optional:** true
+- **Set with:** `MBX_REMOTE_S3_REGION`
+
+S3 region; Cloudflare R2 uses "auto".
+
 ### `remote.token`
 
 - **Type:** `option<string>`

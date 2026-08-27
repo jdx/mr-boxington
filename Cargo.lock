@@ -1409,6 +1409,7 @@ dependencies = [
  "tokio",
  "toml",
  "toml_edit",
+ "url",
  "usage-config",
  "usage-rs",
  "which",

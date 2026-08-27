@@ -95,6 +95,37 @@ and tag or release builds do not use the remote cache at all. If fork authors
 must not reach the host, use the GitHub backend for those jobs instead. A bearer
 token can be supplied with the action's `token` input when OIDC is unavailable.
 
+## S3-compatible bucket
+
+A bucket needs nothing running.
+[`aws-actions/configure-aws-credentials`](https://github.com/aws-actions/configure-aws-credentials)
+exchanges the runner's OIDC token for a role and exports the credentials mbx
+reads, so no long-lived secret is stored:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  MBX_REMOTE_URL: s3://acme-build-cache
+  MBX_REMOTE_NAMESPACE: acme/backend
+
+steps:
+  - uses: actions/checkout@v7
+  - uses: aws-actions/configure-aws-credentials@v5
+    with:
+      role-to-assume: arn:aws:iam::111122223333:role/mbx-cache
+      aws-region: us-west-2
+  - uses: jdx/mr-boxington-action@v1
+  - run: mbx build --workspace --all-features
+```
+
+mbx still refuses to publish from a pull request. Because a bucket has no
+server to authorize anything, make IAM agree: scope the role's trust policy to
+the branches allowed to assume it, and give pull request jobs a role that can
+only read. See [remote cache](/remote-cache#who-may-publish).
+
 ::: warning Release builds are never cached
 In a tag or release build (or with `MBX_RELEASE=1`), mbx runs plain Cargo —
 no local or remote cache — because published artifacts must not depend on any

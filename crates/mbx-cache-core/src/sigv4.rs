@@ -6,7 +6,7 @@
 //! the headers that authenticate it, which is what makes it testable against
 //! published vectors.
 
-use eyre::{Result, bail};
+use eyre::Result;
 use reqwest::header::{HeaderName, HeaderValue};
 use sha2::{Digest as _, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -43,24 +43,15 @@ pub struct S3Credentials {
 impl S3Credentials {
     /// Read credentials from the environment variables the AWS tools set.
     ///
-    /// This is the whole credential chain mbx implements. Anything that
-    /// produces temporary credentials -- an OIDC exchange, an instance role --
-    /// is expected to have exported them here first, which is what
+    /// This is the whole credential chain mbx implements, and `None` means the
+    /// environment does not carry one. Anything that produces temporary
+    /// credentials -- an OIDC exchange, an instance role -- is expected to have
+    /// exported them here first, which is what
     /// `aws-actions/configure-aws-credentials` does on GitHub Actions.
-    pub fn from_env() -> Result<Self> {
-        let access_key_id = non_empty_var("AWS_ACCESS_KEY_ID");
-        let secret_access_key = non_empty_var("AWS_SECRET_ACCESS_KEY");
-        let (Some(access_key_id), Some(secret_access_key)) = (access_key_id, secret_access_key)
-        else {
-            bail!(
-                "an S3 remote cache needs AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; \
-                 on GitHub Actions, aws-actions/configure-aws-credentials exports them \
-                 from an OIDC role assumption"
-            );
-        };
-        Ok(Self {
-            access_key_id,
-            secret_access_key,
+    pub fn from_env() -> Option<Self> {
+        Some(Self {
+            access_key_id: non_empty_var("AWS_ACCESS_KEY_ID")?,
+            secret_access_key: non_empty_var("AWS_SECRET_ACCESS_KEY")?,
             session_token: non_empty_var("AWS_SESSION_TOKEN"),
         })
     }

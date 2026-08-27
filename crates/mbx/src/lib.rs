@@ -33,6 +33,7 @@ pub(crate) mod events;
 pub mod explain;
 #[doc(hidden)]
 pub mod policy;
+pub mod remote;
 pub(crate) mod savings;
 #[doc(hidden)]
 pub mod session;

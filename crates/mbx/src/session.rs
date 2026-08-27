@@ -9,7 +9,7 @@ use eyre::{Context, Result, bail};
 use log::{debug, warn};
 use mbx_cache_core::{
     AGENT_PROTOCOL_VERSION, AgentEvent, AgentEventObserver, AgentRemoteCache, AgentRequest,
-    AgentResponse, AgentStats, CacheAgent, RemoteCacheClient, RemoteCacheConfig,
+    AgentResponse, AgentStats, CacheAgent,
 };
 use serde::Serialize;
 use std::cell::RefCell;
@@ -335,28 +335,9 @@ pub fn build_identity(workspace_root: &Path, command: &[String]) -> String {
 }
 
 fn action_remote_cache(config: &Config, store: &Path) -> Result<Option<AgentRemoteCache>> {
-    let Some(base_url) = config.remote.url.clone() else {
+    let Some(client) = crate::remote::remote_client(config)? else {
         return Ok(None);
     };
-    let namespace = config
-        .remote
-        .namespace
-        .as_deref()
-        .map(str::trim)
-        .filter(|namespace| !namespace.is_empty())
-        .ok_or_else(|| eyre::eyre!("a remote cache namespace is required when a URL is set"))?
-        .to_string();
-    let client = RemoteCacheClient::new(RemoteCacheConfig {
-        base_url: base_url.parse().wrap_err("invalid remote cache URL")?,
-        namespace,
-        token: config.remote.token.clone(),
-        token_file: config.remote.token_file.clone(),
-        oidc_audience: config.remote.oidc_audience.clone(),
-        connect_timeout: config.http.timeout,
-        read_timeout: config.http.timeout,
-        download_timeout: config.http.download_timeout,
-        retries: config.http.retries,
-    })?;
     // Release builds publish artifacts that must not depend on a cache, so they
     // do not read one either. The CLI already skips the whole session; this
     // keeps a library caller from reaching the remote behind its back.
