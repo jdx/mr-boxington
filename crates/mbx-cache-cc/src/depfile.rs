@@ -295,7 +295,8 @@ pub fn manifest_snapshot(
 /// substitution these manifests exist to notice -- and the one case the
 /// adapter's explicit precompiled-header bypass cannot see.
 const INCLUDABLE_EXTENSIONS: &[&str] = &[
-    "def", "gch", "h", "h++", "hh", "hpp", "hxx", "inc", "inl", "ipp", "pch", "tcc",
+    "c", "c++", "cc", "cpp", "cxx", "def", "gch", "h", "h++", "hh", "hpp", "hxx", "inc", "inl",
+    "ipp", "pch", "tcc",
 ];
 
 /// Whether a file name could be what an `#include` directive names.

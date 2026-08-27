@@ -223,6 +223,35 @@ fn manifests_ignore_files_that_could_never_shadow_an_include() {
     assert_ne!(before, manifest(&include));
 }
 
+/// A source can satisfy an `#include` too -- `#include "generated.c"` is
+/// unusual but legal -- so one appearing in a search directory has to move the
+/// key. Counting them is safe because a build writes its generated sources
+/// before compiling, unlike the objects it emits during.
+#[test]
+fn a_source_appearing_in_a_search_directory_changes_the_manifest() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let include = directory.path().join("include");
+    std::fs::create_dir_all(&include).expect("create include dir");
+    write(&include, "used.h", "int a(void);\n");
+
+    let manifest = |directory: &Path| {
+        manifest_snapshot(&BTreeSet::from([directory.to_path_buf()]))
+            .expect("snapshot")
+            .remove(directory)
+            .expect("directory manifest")
+    };
+    let before = manifest(&include);
+    for source in ["shadow.c", "shadow.cpp", "shadow.cc", "shadow.cxx"] {
+        write(&include, source, "int a(void) { return 0; }\n");
+        assert_ne!(
+            before,
+            manifest(&include),
+            "{source} can satisfy an #include and must move the key"
+        );
+        std::fs::remove_file(include.join(source)).expect("remove");
+    }
+}
+
 /// Extensionless names are how C++ standard headers are spelled, and projects
 /// ship their own, so they stay in the manifest.
 #[test]

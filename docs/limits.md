@@ -64,9 +64,11 @@ name the directory it is building into.
 The compiled artifacts are reused as they were produced, and two things can
 make them differ from what a fresh compilation here would have written. rustc
 records absolute source paths in metadata and debug information, so artifacts
-built from two checkouts differ even when the sources are identical. On
-Windows they differ between two target directories as well, because the debug
-information also records where the objects were written.
+built from two checkouts differ even when the sources are identical. A C or C++
+object compiled with debug information does the same, recording the directory
+the compiler ran in. On Windows they differ between two target directories as
+well, because the debug information also records where the objects were
+written.
 
 Neither changes what the artifact does. Both are visible to `MBX_VERIFY=1`,
 which compares bytes: a divergence it reports for a compilation restored from
@@ -95,18 +97,19 @@ of anything the key names.
 ## Shadowing is modeled by name, not by content
 
 An include directory contributes the names in it that could answer an
-`#include`: header extensions, names without one, and precompiled headers,
-which GCC prefers over the header they were built from without anything on the
-command line saying so. A file that could not be
-included -- an object, a dependency file, an archive -- is ignored, so a build
-writing its outputs beside a generated header does not disturb the key.
+`#include`: headers, sources -- `#include "generated.c"` is unusual but legal
+-- names without an extension, and precompiled headers, which GCC prefers over
+the header they were built from without anything on the command line saying so.
 
-The cost is a narrow gap. A source included under an unusual name, such as
-`#include "generated.c"`, is still digested when it is read, but its *arrival*
-in a search directory does not change the key on its own. System roots are
-exempt from manifests entirely: enumerating an SDK on every compile costs more
-than the risk, and anything actually read from one is digested like any other
-input.
+What is left out is what cannot answer an `#include` at all: an object, a
+dependency file, an archive. That distinction is what keeps the key stable,
+because a build writes those into the very directory a generated header lives
+in, and counting them would make the key depend on how many sibling
+compilations had finished rather than on anything about this one.
+
+System roots are exempt from manifests entirely: enumerating an SDK on every
+compile costs more than the risk, and anything actually read from one is
+digested like any other input.
 
 The shims are only installed when the build has not chosen its own compiler.
 Setting `CC`, `CXX`, `HOST_CC`, `HOST_CXX`, `TARGET_CC`, or `TARGET_CXX` leaves

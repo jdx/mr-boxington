@@ -78,13 +78,24 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         discovered.clone().apply_to(&mut candidate)?;
         let action = invocation.action(candidate)?;
         looked_up = true;
-        if let Some(cached) = restore_result(
+        // A restore that fails is a miss, not a bypass. Bypassing would leave
+        // the compilation uncached and publish nothing, so a partial or corrupt
+        // entry would fail the same way on every later build; compiling and
+        // republishing is what repairs it.
+        let restored = match restore_result(
             &action,
             &invocation,
             &discovered,
             !verify,
             &context.path_mappings,
-        )? {
+        ) {
+            Ok(restored) => restored,
+            Err(error) => {
+                eprintln!("mbx[warning]: cc result was not restored: {error:#}");
+                None
+            }
+        };
+        if let Some(cached) = restored {
             if !verify {
                 replay_bytes(&cached.stdout, &cached.stderr)?;
                 record_action_hit(
