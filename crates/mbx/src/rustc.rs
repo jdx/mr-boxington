@@ -70,6 +70,8 @@ struct LearnedPlan {
     streak: u32,
     /// Where that state lives, once somewhere to put it has been resolved.
     directory: Option<PathBuf>,
+    /// Where to record what this compilation compiled, and what that was.
+    record: Option<(PathBuf, CacheDigest)>,
 }
 
 impl LearnedPlan {
@@ -79,6 +81,22 @@ impl LearnedPlan {
             self.directory = incremental_directory(invocation);
         }
         self
+    }
+
+    /// Record what this crate compiled, now that it has.
+    ///
+    /// Deliberately after the compiler succeeds rather than before it runs. A
+    /// failed compilation leaves nothing behind to compare against, so
+    /// recording its sources would make the retry that follows -- with nothing
+    /// edited in between -- look like a crate that had settled, and drop it
+    /// back to compiling from scratch.
+    fn record_compiled(&self) {
+        let Some((path, sources)) = &self.record else {
+            return;
+        };
+        if let Err(error) = write_churn_state(path, sources, self.streak) {
+            eprintln!("mbx[warning]: churn was not recorded for this crate: {error:#}");
+        }
     }
 
     /// Whether this compilation actually carries incremental state. A hot unit
@@ -248,6 +266,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
         return Ok(exit_code(output.status));
     }
     if output.status.success() {
+        learned.record_compiled();
         let publication: Result<()> = (|| {
             let (candidates, discovered) = action_from_dep_info(
                 rustc,
@@ -309,6 +328,7 @@ fn learned_plan(
         hot: enabled && streak >= HOT_STREAK_THRESHOLD,
         streak,
         directory: None,
+        record: None,
     }
 }
 
@@ -390,8 +410,11 @@ fn plan_learned_reuse(
             return Result::<LearnedPlan>::Ok(LearnedPlan::default());
         };
         let plan = learned_plan(read_churn_state(&state_path).as_ref(), &sources, enabled);
-        write_churn_state(&state_path, &sources, plan.streak)?;
-        Ok(plan.resolved(&unit))
+        Ok(LearnedPlan {
+            record: Some((state_path, sources)),
+            ..plan
+        }
+        .resolved(&unit))
     })();
     match planned {
         Ok(plan) => plan,

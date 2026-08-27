@@ -471,6 +471,60 @@ fn a_settled_crate_publishes_again() {
     );
 }
 
+/// A compilation that failed left nothing behind to compare against, so the
+/// retry that follows -- with nothing edited in between -- must not read as a
+/// crate that had settled and drop it back to compiling from scratch.
+#[test]
+fn a_failed_build_does_not_cost_the_streak() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+    );
+    for revision in 1..=3 {
+        edit_project(project.path(), revision);
+        build(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("edit-{revision}.json")),
+        );
+    }
+
+    // Break it, then retry the same broken source twice over.
+    std::fs::write(project.path().join("src/lib.rs"), "fn broken( {\n").unwrap();
+    for attempt in 0..2 {
+        let failed = Command::new(env!("CARGO_BIN_EXE_mbx"))
+            .current_dir(project.path())
+            .args(["build", "--offline"])
+            .env("MBX_CACHE_DIR", store.path())
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("MBX_INCREMENTAL")
+            .env_remove("CARGO_INCREMENTAL")
+            .env_remove("CI")
+            .output()
+            .expect("mbx should run");
+        assert!(!failed.status.success(), "attempt {attempt} should fail");
+    }
+
+    // One more real edit is all it should take to go hot.
+    edit_project(project.path(), 4);
+    let stats = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("recovered.json"),
+    );
+
+    assert!(
+        compiled_incrementally(&stats) > 0,
+        "the failures should not have reset what the edits established: {stats}"
+    );
+}
+
 /// A fresh runner has no incremental state to reuse, so the trade is all cost.
 #[test]
 fn churn_earns_nothing_in_ci() {
