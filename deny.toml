@@ -11,6 +11,9 @@ allow = [
   "MIT",
   "MPL-2.0",
   "Unicode-3.0",
+  # foldhash, by way of ratatui's line cache. Permissive, OSI approved, and FSF
+  # Free/Libre, on the same terms as the rest of this list.
+  "Zlib",
 ]
 
 [bans]

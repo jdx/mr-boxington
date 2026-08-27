@@ -8,6 +8,7 @@ fn test_config(root: &Path, views: bool) -> Config {
         verify: false,
         incremental: false,
         share_out_dir: false,
+        events: false,
         remote: Default::default(),
         http: Default::default(),
         gc: Default::default(),

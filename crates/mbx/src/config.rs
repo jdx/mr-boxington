@@ -97,9 +97,20 @@ pub(crate) struct RawConfig {
     /// Let local workspace members compile incrementally.
     #[usage(env = "MBX_INCREMENTAL", default = false)]
     incremental: bool,
+    /// Compile crates that keep missing the cache with changed content
+    /// incrementally, keeping their outputs out of the shared cache.
+    #[usage(
+        key = "learned_incremental",
+        env = "MBX_LEARNED_INCREMENTAL",
+        default = true
+    )]
+    _learned_incremental: bool,
     /// Share eligible compilations that read `OUT_DIR`.
     #[usage(env = "MBX_SHARE_OUT_DIR", default = false)]
     share_out_dir: bool,
+    /// Record a per-compilation event stream for `mbx tui` to watch.
+    #[usage(env = "MBX_EVENTS", default = true)]
+    events: bool,
     /// How the savings line after a build reads.
     #[usage(
         env = "MBX_SAVINGS",
@@ -218,6 +229,12 @@ pub struct Config {
     /// sources out of debug info, and its safety rests on reading the outputs
     /// rather than on the inputs alone.
     pub share_out_dir: bool,
+    /// Append a per-compilation event stream to the store, for `mbx tui`.
+    ///
+    /// On by default: one small buffered append per accounted compilation, with
+    /// no flush of its own, against a compile or restore measured in
+    /// milliseconds. Turn it off to keep the store free of build history.
+    pub events: bool,
     pub remote: RemoteSettings,
     pub http: HttpSettings,
     pub gc: GcSettings,
@@ -273,6 +290,8 @@ pub(crate) struct RetentionSettings {
 pub(crate) struct CliSettings {
     pub retention: RetentionSettings,
     pub savings: SavingsStyle,
+    /// Whether a churning crate may compile with its own incremental state.
+    pub learned_incremental: bool,
 }
 
 /// Matches the declared defaults: a derived `Default` would silence the savings
@@ -282,6 +301,7 @@ impl Default for CliSettings {
         Self {
             retention: RetentionSettings::default(),
             savings: SavingsStyle::default(),
+            learned_incremental: true,
         }
     }
 }
@@ -477,6 +497,7 @@ impl Config {
             verify: raw.verify,
             incremental: raw.incremental,
             share_out_dir: raw.share_out_dir,
+            events: raw.events,
             remote: RemoteSettings {
                 url: raw.remote.url,
                 namespace: raw.remote.namespace,
@@ -492,6 +513,7 @@ impl Config {
             CliSettings {
                 retention,
                 savings: raw.savings.parse().wrap_err("invalid savings")?,
+                learned_incremental: raw._learned_incremental,
             },
         ))
     }
@@ -972,6 +994,17 @@ mod tests {
         assert!(config.incremental);
         let config = configured(Some(file), &[("MBX_INCREMENTAL", "0")]).unwrap();
         assert!(!config.incremental);
+    }
+
+    /// On by default: a crate nobody is editing never reaches the threshold, so
+    /// the setting only matters to the one the developer is working in.
+    #[test]
+    fn learned_incremental_is_on_until_it_is_turned_off() {
+        let (_, settings) = configured_for_cli(None, &[]).unwrap();
+        assert!(settings.learned_incremental);
+
+        let (_, settings) = configured_for_cli(None, &[("MBX_LEARNED_INCREMENTAL", "0")]).unwrap();
+        assert!(!settings.learned_incremental);
     }
 
     #[test]

@@ -140,6 +140,40 @@ async fn counts_bypasses_by_reason() {
     assert_eq!(stats.bypasses.get("incremental"), Some(&1));
 }
 
+/// Outcomes are a closed set because they name the categories a build summary
+/// adds up; an unrecognized one would appear as its own line and count as
+/// nothing.
+#[tokio::test]
+async fn compiler_invocations_are_counted_by_known_outcomes() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+
+    for outcome in ["miss", "incremental", "incremental"] {
+        agent
+            .respond(AgentRequest::RecordCompilerInvocation {
+                outcome: outcome.into(),
+                crate_name: Some("demo".into()),
+                duration_ns: 10,
+            })
+            .await;
+    }
+    let rejected = agent
+        .respond(AgentRequest::RecordCompilerInvocation {
+            outcome: "invented".into(),
+            crate_name: None,
+            duration_ns: 0,
+        })
+        .await;
+
+    let stats = agent.stats();
+    assert_eq!(
+        stats.compiler.get("incremental").map(|it| it.invocations),
+        Some(2)
+    );
+    assert_eq!(stats.compiler.get("miss").map(|it| it.invocations), Some(1));
+    assert!(matches!(rejected, AgentResponse::Error { .. }));
+}
+
 #[tokio::test]
 async fn handshake_and_blob_round_trip() {
     let directory = tempfile::tempdir().unwrap();
@@ -197,6 +231,100 @@ fn remembered_blobs_reject_same_size_corruption() {
     assert!(!agent.verified_blobs.lock().unwrap().contains_key(&digest));
 }
 
+#[derive(Default)]
+struct RecordingObserver {
+    events: Mutex<Vec<AgentEvent>>,
+}
+
+impl AgentEventObserver for RecordingObserver {
+    fn event(&self, event: AgentEvent) {
+        self.events.lock().unwrap().push(event);
+    }
+}
+
+#[tokio::test]
+async fn reports_each_accounted_decision_to_an_observer() {
+    let directory = tempfile::tempdir().unwrap();
+    let observer = Arc::new(RecordingObserver::default());
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version")
+        .with_observer(observer.clone());
+
+    agent
+        .respond(AgentRequest::RecordBypass {
+            kind: "incremental".into(),
+        })
+        .await;
+    agent.respond(AgentRequest::RecordUnconsulted).await;
+    agent
+        .respond(AgentRequest::RecordCompilerInvocation {
+            outcome: "miss".into(),
+            crate_name: Some("serde".into()),
+            duration_ns: 42,
+        })
+        .await;
+    agent
+        .respond(AgentRequest::RecordActionVerification {
+            matched: false,
+            restore: RestoreStats::default(),
+        })
+        .await;
+
+    let events = observer.events.lock().unwrap();
+    assert!(matches!(
+        events.as_slice(),
+        [
+            AgentEvent::Bypass { kind },
+            AgentEvent::Unconsulted,
+            AgentEvent::CompilerInvocation {
+                outcome,
+                crate_name: Some(crate_name),
+                duration_ns: 42,
+            },
+            AgentEvent::Verification { matched: false, .. },
+        ] if kind == "incremental" && outcome == "miss" && crate_name == "serde"
+    ));
+}
+
+#[tokio::test]
+async fn a_rejected_hit_reports_no_event() {
+    let directory = tempfile::tempdir().unwrap();
+    let observer = Arc::new(RecordingObserver::default());
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version")
+        .with_observer(observer.clone());
+
+    // A hit for an action the store never had is an error, and an error is not
+    // an outcome an observer should see.
+    let response = agent
+        .respond(AgentRequest::RecordActionHit {
+            action: CacheDigest::blake3(b"absent"),
+            restore: RestoreStats::default(),
+            crate_name: Some("serde".into()),
+        })
+        .await;
+
+    assert!(matches!(response, AgentResponse::Error { .. }));
+    assert!(observer.events.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_hit_carrying_an_unusable_crate_name_is_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+
+    let response = agent
+        .respond(AgentRequest::RecordActionHit {
+            action: CacheDigest::blake3(b"action"),
+            restore: RestoreStats::default(),
+            crate_name: Some("serde\nrustc".into()),
+        })
+        .await;
+
+    assert!(matches!(
+        response,
+        AgentResponse::Error { message } if message.contains("invalid compiler crate name")
+    ));
+}
+
 #[tokio::test]
 async fn publishes_a_complete_action_result() {
     let directory = tempfile::tempdir().unwrap();
@@ -247,6 +375,7 @@ async fn publishes_a_complete_action_result() {
                     copied_output_files: 1,
                     copied_output_bytes: 4,
                 },
+                crate_name: None,
             })
             .await,
         AgentResponse::ActionHitRecorded
@@ -289,6 +418,7 @@ async fn missing_action_result_is_a_cache_miss() {
             .respond(AgentRequest::RecordActionHit {
                 action,
                 restore: RestoreStats::default(),
+                crate_name: None,
             })
             .await,
         AgentResponse::Error { .. }
@@ -769,6 +899,7 @@ async fn round_trips_task_actions_between_fresh_local_caches() {
             .respond(AgentRequest::RecordActionHit {
                 action,
                 restore: RestoreStats::default(),
+                crate_name: None,
             })
             .await,
         AgentResponse::ActionHitRecorded

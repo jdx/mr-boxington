@@ -49,6 +49,13 @@ The individual warnings, printed as the build runs, say what failed. The count
 also appears as `remote_failures` in the JSON statistics report, so CI can alert
 on a cache that has quietly stopped serving.
 
+## Watching a build instead
+
+Everything above describes the summary printed after a build. To see the same
+outcomes as they are decided -- one row per compilation, with the crate it
+belongs to -- run [`mbx tui`](/tui) in another terminal. It reads every build on
+the machine, including ones already running.
+
 ## Reading the hit rate
 
 A build can report a high hit rate among attempted lookups while spending most

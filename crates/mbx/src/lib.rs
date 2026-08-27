@@ -28,6 +28,7 @@ pub mod cli;
 pub mod config;
 #[doc(hidden)]
 pub mod doctor;
+pub(crate) mod events;
 #[doc(hidden)]
 pub mod explain;
 #[doc(hidden)]
@@ -39,6 +40,8 @@ pub mod session;
 pub mod store;
 #[doc(hidden)]
 pub mod target;
+#[doc(hidden)]
+pub mod tui;
 #[doc(hidden)]
 pub mod util;
 

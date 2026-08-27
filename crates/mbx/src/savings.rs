@@ -145,6 +145,11 @@ fn read(path: &Path) -> Tally {
         .unwrap_or_default()
 }
 
+/// The stored totals for `store`, or an empty tally when there are none yet.
+pub(crate) fn read_tally(store: &Path) -> Tally {
+    read(&tally_path(store))
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

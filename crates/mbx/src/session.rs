@@ -2,13 +2,14 @@
 //! that cargo invokes through `RUSTC_WRAPPER`.
 
 use crate::config::Config;
+use crate::events::{ActionDetail, ActionOutcome, EventWriter};
 use crate::util::{duration_ns, format_duration, write_atomic};
 use bytesize::ByteSize;
 use eyre::{Context, Result, bail};
 use log::{debug, warn};
 use mbx_cache_core::{
-    AGENT_PROTOCOL_VERSION, AgentRemoteCache, AgentRequest, AgentResponse, AgentStats, CacheAgent,
-    RemoteCacheClient, RemoteCacheConfig,
+    AGENT_PROTOCOL_VERSION, AgentEvent, AgentEventObserver, AgentRemoteCache, AgentRequest,
+    AgentResponse, AgentStats, CacheAgent, RemoteCacheClient, RemoteCacheConfig,
 };
 use serde::Serialize;
 use std::cell::RefCell;
@@ -18,7 +19,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -29,6 +30,7 @@ pub(crate) const STAGING_ENV: &str = "MBX_STAGING_DIR";
 pub(crate) const BUILD_ENV: &str = "MBX_BUILD";
 pub(crate) const VERIFY_ENV: &str = "MBX_VERIFY";
 pub(crate) const SHARE_OUT_DIR_ENV: &str = "MBX_SHARE_OUT_DIR";
+pub(crate) const LEARNED_INCREMENTAL_ENV: &str = "MBX_LEARNED_INCREMENTAL";
 pub(crate) const WORKSPACE_ROOT_ENV: &str = "MBX_WORKSPACE_ROOT";
 pub(crate) const TARGET_DIR_ENV: &str = "MBX_TARGET_DIR";
 const PREVIOUS_RUSTC_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WRAPPER";
@@ -44,6 +46,8 @@ pub struct CacheSession {
     incremental: bool,
     share_out_dir: bool,
     agent: CacheAgent,
+    /// The stream `mbx tui` watches, when event recording is on.
+    events: Option<EventStream>,
     store: PathBuf,
     started: Instant,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
@@ -70,6 +74,14 @@ impl CacheSession {
         } else {
             CacheAgent::new(store.clone(), VERSION)
         };
+        let events = config
+            .events
+            .then(|| Arc::new(EventWriter::new(&store)))
+            .map(EventStream);
+        let agent = match &events {
+            Some(events) => agent.with_observer(Arc::new(events.clone())),
+            None => agent,
+        };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (socket, server) = spawn_server(session_dir, agent.clone(), shutdown_rx).await?;
         Ok(Self {
@@ -80,6 +92,7 @@ impl CacheSession {
             incremental: config.incremental,
             share_out_dir: config.share_out_dir,
             agent,
+            events,
             store,
             started: Instant::now(),
             shutdown: Mutex::new(Some(shutdown_tx)),
@@ -102,6 +115,11 @@ impl CacheSession {
         environment: &mut BTreeMap<String, String>,
     ) -> Option<ActionRun> {
         let identity = build_identity(workspace_root, command);
+        // Named before the first compilation, so a TUI that attaches mid-build
+        // can say whose build it is watching rather than showing bare rows.
+        if let Some(events) = &self.events {
+            events.0.started(workspace_root, command);
+        }
         // Recorded before the build rather than after it: a build that fails
         // still means this checkout is here and using the store, and the record
         // is what stops the collector treating its artifacts as abandoned.
@@ -194,6 +212,14 @@ impl CacheSession {
         self.agent.cancel_prefetches().await;
         let mut stats = self.agent.stats();
         stats.session_duration_ns = duration_ns(self.started.elapsed());
+        // The same totals the summary reports, so a reader of a finished stream
+        // does not have to re-derive them from the rows -- and so a stream that
+        // hit its row cap still ends with the whole truth.
+        if let Some(events) = &self.events
+            && let Ok(totals) = serde_json::to_value(StatsReport::from(&stats))
+        {
+            events.0.finished(totals);
+        }
         Ok(stats)
     }
 }
@@ -205,6 +231,73 @@ impl Drop for CacheSession {
         }
         if let Some(server) = self.server.get_mut().unwrap().take() {
             server.abort();
+        }
+    }
+}
+
+/// Writes the agent's decisions to this session's event stream.
+///
+/// The translation lives here rather than in the agent because the agent
+/// accounts for compilations and has no opinion about who is watching. What it
+/// reports as a compiler invocation becomes a miss, an unconsulted compilation,
+/// or a verification row, since that is the distinction a reader wants; a
+/// bypass's own compile is dropped, because the bypass row already said so.
+#[derive(Clone)]
+struct EventStream(Arc<EventWriter>);
+
+impl AgentEventObserver for EventStream {
+    fn event(&self, event: AgentEvent) {
+        match event {
+            AgentEvent::ActionHit {
+                crate_name,
+                restore,
+            } => self.0.action(
+                ActionOutcome::Hit,
+                crate_name,
+                restore.duration_ns,
+                ActionDetail {
+                    avoided_compiler_ns: restore.avoided_compiler_duration_ns,
+                    output_files: restore.output_files,
+                    output_bytes: restore.output_bytes,
+                    reflinked_output_bytes: restore.reflinked_output_bytes,
+                    copied_output_bytes: restore.copied_output_bytes,
+                },
+            ),
+            AgentEvent::Bypass { kind } => self.0.action(
+                ActionOutcome::Bypass { reason: kind },
+                None,
+                0,
+                ActionDetail::default(),
+            ),
+            // Nothing is emitted for the counter itself: the compiler
+            // invocation that follows carries the same fact with a crate name
+            // and a duration attached, and two rows would double-count it.
+            AgentEvent::Unconsulted => {}
+            AgentEvent::CompilerInvocation {
+                outcome,
+                crate_name,
+                duration_ns,
+            } => {
+                let outcome = match outcome.as_str() {
+                    "miss" => ActionOutcome::Miss,
+                    "unconsulted" => ActionOutcome::Unconsulted,
+                    // A verification's own row comes from the verification
+                    // event, which knows whether it matched; a bypass already
+                    // has one.
+                    _ => return,
+                };
+                self.0
+                    .action(outcome, crate_name, duration_ns, ActionDetail::default());
+            }
+            AgentEvent::Verification { matched, restore } => self.0.action(
+                ActionOutcome::Verification { matched },
+                None,
+                restore.duration_ns,
+                ActionDetail::default(),
+            ),
+            // A decision this build does not know how to describe is left out
+            // rather than guessed at; the totals still count it.
+            _ => {}
         }
     }
 }
@@ -461,6 +554,14 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
             format_nanos(stats.avoided_compiler_duration_ns),
             format_nanos(spent),
         ));
+        if let Some(compiler) = stats.compiler.get("incremental") {
+            // The compiler-time line above already counts these; what it cannot
+            // say is why they are absent from the store.
+            note(&format!(
+                "mbx[cache]: {} compilations kept their own incremental state, so they were not stored",
+                compiler.invocations
+            ));
+        }
         let slow = slow_compilations(stats);
         if !slow.is_empty() {
             note(&format!(
@@ -970,6 +1071,12 @@ pub(crate) fn verify_requested() -> bool {
 /// checkouts can share it. Read the same way as verify mode.
 pub(crate) fn share_out_dir_requested() -> bool {
     std::env::var_os(SHARE_OUT_DIR_ENV).is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+/// Whether the shim may compile a churning crate with its own incremental
+/// state instead of publishing it. Read the same way as verify mode.
+pub(crate) fn learned_incremental_requested() -> bool {
+    std::env::var_os(LEARNED_INCREMENTAL_ENV).is_some_and(|value| !value.is_empty() && value != "0")
 }
 
 /// Tell the session that this compilation was not cacheable.

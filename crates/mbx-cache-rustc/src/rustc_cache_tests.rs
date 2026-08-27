@@ -909,3 +909,40 @@ fn remap_destinations_are_stable_virtual_paths() {
             .contains(r#"--remap-path-prefix=${workspace}=/src"#)
     );
 }
+
+/// A dependency that was rebuilt changes an action key without anybody having
+/// touched this crate, so churn detection cannot watch the key. What it watches
+/// is this: the crate's own sources, and nothing it merely links against.
+#[test]
+fn a_rebuilt_dependency_does_not_move_the_source_fingerprint() {
+    let directory = tempfile::tempdir().unwrap();
+    let working_dir = directory.path();
+    let deps = working_dir.join("target/debug/deps");
+    std::fs::create_dir_all(&deps).unwrap();
+    std::fs::write(working_dir.join("src.rs"), "pub fn value() {}\n").unwrap();
+    let rlib = deps.join("libserde.rlib");
+    std::fs::write(&rlib, "serde").unwrap();
+    let invocation = RustcInvocation::parse(&args(&[
+        "--crate-name=widget",
+        "--crate-type=lib",
+        "--emit=dep-info,metadata,link",
+        "--out-dir=target/debug/deps",
+        &format!("--extern=serde={}", rlib.display()),
+        "src.rs",
+    ]))
+    .unwrap();
+    let dep_info = RustcDepInfo::parse("target/debug/deps/widget.d: src.rs\n").unwrap();
+    let fingerprint = || {
+        let discovered = invocation.discover_inputs(&dep_info, working_dir).unwrap();
+        invocation.source_fingerprint(&discovered)
+    };
+    let before = fingerprint();
+
+    // The linked artifact changed; this crate did not.
+    std::fs::write(&rlib, "serde rebuilt").unwrap();
+    assert_eq!(fingerprint(), before);
+
+    // The crate itself changed.
+    std::fs::write(working_dir.join("src.rs"), "pub fn value() -> u32 { 1 }\n").unwrap();
+    assert_ne!(fingerprint(), before);
+}

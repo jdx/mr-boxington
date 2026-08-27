@@ -758,3 +758,141 @@ fn does_not_count_its_own_bookkeeping_against_the_budget() {
     // trees; counting them would make the budget mean something else.
     assert_eq!(stats(&store).unwrap().total_bytes(), 0);
 }
+
+/// Write a session event stream as though a build had left it behind.
+fn write_session(store: &Path, id: &str, age: Duration) {
+    let paths = crate::events::session_paths(store, id);
+    std::fs::create_dir_all(paths.events.parent().unwrap()).unwrap();
+    std::fs::write(
+        &paths.events,
+        "{\"type\":\"truncated\",\"v\":1,\"ts_ms\":1}\n",
+    )
+    .unwrap();
+    let when = SystemTime::now() - age;
+    let time = filetime::FileTime::from_system_time(when);
+    filetime::set_file_times(&paths.events, time, time).unwrap();
+}
+
+fn session_count(store: &Path) -> usize {
+    crate::events::session_ids(store).len()
+}
+
+#[test]
+fn collection_drops_session_streams_past_their_retention() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("store");
+    write_session(
+        &store,
+        "100-1-aaaa",
+        SESSION_RETENTION + Duration::from_secs(60),
+    );
+    write_session(&store, "200-1-bbbb", Duration::from_secs(60));
+
+    let outcome = gc(&store, u64::MAX).unwrap();
+
+    assert_eq!(outcome.removed_session_streams, 1);
+    assert!(outcome.removed_bytes > 0);
+    // A stream's bytes are history, not cache content, so they are never part
+    // of what the budget is measured against.
+    assert_eq!(outcome.remaining_bytes, 0);
+    assert_eq!(session_count(&store), 1);
+}
+
+#[test]
+fn collection_keeps_only_the_newest_streams_however_new_they_are() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("store");
+    // Ids sort oldest-first because they begin with a start time; pad so they
+    // sort as numbers of the same width do.
+    for index in 0..MAX_SESSIONS + 5 {
+        write_session(
+            &store,
+            &format!("{index:06}-1-aaaa"),
+            Duration::from_secs(1),
+        );
+    }
+
+    let outcome = gc(&store, u64::MAX).unwrap();
+
+    assert_eq!(outcome.removed_session_streams, 5);
+    assert_eq!(session_count(&store), MAX_SESSIONS);
+    // The five oldest went, not five arbitrary ones.
+    let remaining = crate::events::session_ids(&store);
+    assert_eq!(remaining.first().unwrap(), "000005-1-aaaa");
+}
+
+#[test]
+fn collection_leaves_a_stream_a_build_is_still_writing() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("store");
+    let writer = crate::events::EventWriter::new(&store);
+    writer.started(Path::new("/workspace"), &["build".into()]);
+    let live = writer.id().to_string();
+    // Old enough to be swept, were anything but the lock protecting it.
+    let paths = crate::events::session_paths(&store, &live);
+    let when = SystemTime::now() - (SESSION_RETENTION + Duration::from_secs(60));
+    let time = filetime::FileTime::from_system_time(when);
+    filetime::set_file_times(&paths.events, time, time).unwrap();
+
+    let outcome = gc(&store, u64::MAX).unwrap();
+
+    assert_eq!(outcome.removed_session_streams, 0);
+    assert!(paths.events.exists(), "a running build keeps its stream");
+
+    // Once the build is gone, the same sweep collects it.
+    drop(writer);
+    let outcome = gc(&store, u64::MAX).unwrap();
+    assert_eq!(outcome.removed_session_streams, 1);
+    assert!(!paths.events.exists());
+    assert!(
+        !paths.lock.exists(),
+        "the lock goes with the stream it named"
+    );
+}
+
+#[test]
+fn a_dry_run_reports_the_streams_it_would_drop_and_keeps_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("store");
+    write_session(
+        &store,
+        "100-1-aaaa",
+        SESSION_RETENTION + Duration::from_secs(60),
+    );
+
+    let outcome = gc_dry_run(&store, u64::MAX).unwrap();
+
+    assert_eq!(outcome.removed_session_streams, 1);
+    assert_eq!(session_count(&store), 1, "a dry run removes nothing");
+}
+
+#[test]
+fn collection_removes_a_lock_whose_stream_never_appeared() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("store");
+    // A lock is taken before the stream it names is created, so a failure in
+    // between leaves one no listing of streams would reach.
+    let paths = crate::events::session_paths(&store, "100-1-aaaa");
+    std::fs::create_dir_all(paths.lock.parent().unwrap()).unwrap();
+    std::fs::write(&paths.lock, b"").unwrap();
+
+    gc(&store, u64::MAX).unwrap();
+
+    assert!(!paths.lock.exists(), "an orphaned lock should be collected");
+}
+
+#[test]
+fn collection_leaves_the_lock_of_a_stream_that_is_still_there() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("store");
+    write_session(&store, "100-1-aaaa", Duration::from_secs(60));
+    let paths = crate::events::session_paths(&store, "100-1-aaaa");
+    std::fs::write(&paths.lock, b"").unwrap();
+
+    gc(&store, u64::MAX).unwrap();
+
+    // The stream is neither stale nor surplus, so neither it nor its lock is
+    // any of collection's business.
+    assert!(paths.events.exists());
+    assert!(paths.lock.exists());
+}

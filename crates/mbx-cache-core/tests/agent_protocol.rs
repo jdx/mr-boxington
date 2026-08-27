@@ -125,6 +125,7 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
             AgentRequest::RecordActionHit {
                 action: digest(),
                 restore: restore(),
+                crate_name: Some("serde".into()),
             },
         ),
         (

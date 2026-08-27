@@ -1,11 +1,14 @@
 //! Store inspection and garbage collection.
 //!
-//! The store holds four trees: `cas/v1` for content-addressed objects,
+//! The store holds five trees: `cas/v1` for content-addressed objects,
 //! `action-results/v1` for the results that reference them, `task-manifests/v1`
-//! for the prediction index, and `checkouts/v1` for the checkouts that have
-//! built each identity. Only the first two are collected for size; manifests
-//! are small and are what makes a cold build fast, and a checkout record is
-//! dropped when its checkout is gone rather than when the store is full.
+//! for the prediction index, `checkouts/v1` for the checkouts that have built
+//! each identity, and `sessions/v1` for per-build event streams. Only the first
+//! two are collected for size; manifests are small and make cold builds fast,
+//! checkout records expire with their checkout claims, and session streams are
+//! bounded by age and count because they are history rather than cache content.
+
+mod events;
 
 use eyre::{Context, Result};
 use mbx_cache_core::{
@@ -23,6 +26,9 @@ const CHECKOUTS_DIR: &str = "checkouts/v1";
 const SWEEP_STAMP: &str = "gc/v1/last-sweep";
 const SWEEP_LOCK: &str = "gc/v1/sweep.lock";
 const CHECKOUT_RECORD_VERSION: u8 = 1;
+
+const SESSION_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const MAX_SESSIONS: usize = 256;
 
 /// How long a checkout's claim outlives the last build that renewed it.
 ///
@@ -60,6 +66,9 @@ pub struct GcOutcome {
     pub removed_objects: u64,
     pub removed_action_results: u64,
     pub removed_checkout_records: u64,
+    /// Event streams dropped on age or count. These bytes are not included in
+    /// `remaining_bytes` because session history is not cache content.
+    pub removed_session_streams: u64,
     pub removed_bytes: u64,
     pub remaining_bytes: u64,
 }
@@ -392,8 +401,58 @@ fn gc_with_mode(store: &Path, max_bytes: u64, dry_run: bool) -> Result<GcOutcome
         }
     }
 
+    let sessions = prune_sessions(store, dry_run)?;
+    outcome.removed_session_streams += sessions.removed_streams;
+    outcome.removed_bytes += sessions.removed_bytes;
+
     outcome.remaining_bytes = live_bytes;
     Ok(outcome)
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SessionPrune {
+    removed_streams: u64,
+    removed_bytes: u64,
+}
+
+fn prune_sessions(store: &Path, dry_run: bool) -> Result<SessionPrune> {
+    let mut prune = SessionPrune::default();
+    let ids = events::session_ids(store);
+    let surplus = ids.len().saturating_sub(MAX_SESSIONS);
+    for (index, id) in ids.iter().enumerate() {
+        let paths = events::session_paths(store, id);
+        let metadata = match std::fs::metadata(&paths.events) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        let stale = metadata
+            .modified()
+            .ok()
+            .and_then(|at| SystemTime::now().duration_since(at).ok())
+            .is_some_and(|age| age > SESSION_RETENTION);
+        if index >= surplus && !stale {
+            continue;
+        }
+        if events::session_is_live(store, id) {
+            continue;
+        }
+        if dry_run {
+            prune.removed_streams += 1;
+            prune.removed_bytes += metadata.len();
+            continue;
+        }
+        if matches!(remove(&paths.events)?, Removal::Removed) {
+            prune.removed_streams += 1;
+            prune.removed_bytes += metadata.len();
+            let _ = std::fs::remove_file(&paths.lock);
+        }
+    }
+    if !dry_run {
+        for lock in events::orphaned_locks(store) {
+            let _ = std::fs::remove_file(lock);
+        }
+    }
+    Ok(prune)
 }
 
 /// Sweep the store if `interval` has passed since the last attempt.

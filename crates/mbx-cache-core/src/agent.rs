@@ -96,6 +96,9 @@ pub enum AgentRequest {
         action: CacheDigest,
         /// Restoration work performed by the adapter.
         restore: RestoreStats,
+        /// Compiler crate name, when the invocation supplied one.
+        #[serde(default)]
+        crate_name: Option<String>,
     },
     /// A compilation the adapter declined to cache, grouped by reason.
     RecordBypass {
@@ -107,7 +110,9 @@ pub enum AgentRequest {
     RecordUnconsulted,
     /// Account for one real compiler invocation performed by the adapter.
     RecordCompilerInvocation {
-        /// Stable outcome category such as `miss`, `unconsulted`, or `bypass`.
+        /// Stable outcome category such as `miss`, `unconsulted`, `bypass`, or
+        /// `incremental` for a compilation the adapter deliberately ran with
+        /// incremental state instead of publishing.
         outcome: String,
         /// Compiler crate name, when the invocation supplied one.
         crate_name: Option<String>,
@@ -179,6 +184,53 @@ pub struct RestoreStats {
     pub copied_output_files: u64,
     /// Declared size of restored outputs that required a byte-for-byte copy.
     pub copied_output_bytes: u64,
+}
+
+/// One accounted cache decision, as it happens.
+///
+/// The agent already folds every one of these into [`AgentStats`]; an observer
+/// sees the same decisions individually, before that summing loses the crate
+/// they belong to. Delivered synchronously from the request handler, so an
+/// observer that blocks slows the build it is watching.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum AgentEvent {
+    /// An action's outputs were restored from cache.
+    ActionHit {
+        /// Compiler crate name, when the invocation supplied one.
+        crate_name: Option<String>,
+        /// Restoration work performed by the adapter.
+        restore: RestoreStats,
+    },
+    /// A compilation the adapter declined to cache.
+    Bypass {
+        /// Stable, low-cardinality bypass-reason name.
+        kind: String,
+    },
+    /// A compilation no lookup was possible for.
+    Unconsulted,
+    /// A real compiler invocation ran.
+    CompilerInvocation {
+        /// Stable outcome category such as `miss`, `unconsulted`, or `bypass`.
+        outcome: String,
+        /// Compiler crate name, when the invocation supplied one.
+        crate_name: Option<String>,
+        /// Wall time spent running the compiler.
+        duration_ns: u64,
+    },
+    /// A hit was rebuilt to verify it.
+    Verification {
+        /// Whether rebuilt and cached outputs matched.
+        matched: bool,
+        /// Restoration work performed before rebuilding.
+        restore: RestoreStats,
+    },
+}
+
+/// A sink for [`AgentEvent`]s observed during one session.
+pub trait AgentEventObserver: Send + Sync {
+    /// Handle one event. Must not panic, and should not block.
+    fn event(&self, event: AgentEvent);
 }
 
 /// A response returned by the task-scoped cache agent.
@@ -427,6 +479,15 @@ fn duration_ns(started: Instant) -> u64 {
     started.elapsed().as_nanos().try_into().unwrap_or(u64::MAX)
 }
 
+fn validate_crate_name(crate_name: Option<&str>) -> Result<()> {
+    if let Some(crate_name) = crate_name
+        && (crate_name.len() > 256 || crate_name.contains(['\0', '\n', '\r']))
+    {
+        bail!("invalid compiler crate name");
+    }
+    Ok(())
+}
+
 fn atomic_saturating_add(target: &AtomicU64, value: u64) {
     let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_add(value))
@@ -474,6 +535,7 @@ pub struct CacheAgent {
     write_locks: Arc<Mutex<BTreeMap<CacheDigest, Weak<tokio::sync::Mutex<()>>>>>,
     action_locks: Arc<Mutex<BTreeMap<CacheDigest, Weak<tokio::sync::Mutex<()>>>>>,
     stats: Arc<AtomicAgentStats>,
+    observer: Option<Arc<dyn AgentEventObserver>>,
     executable_identities: Arc<Mutex<BTreeMap<ExecutableIdentityKey, Vec<u8>>>>,
     manifest_dir: Arc<PathBuf>,
     task_actions: Arc<Mutex<BTreeMap<String, TaskActionState>>>,
@@ -594,6 +656,7 @@ impl CacheAgent {
             write_locks: Arc::new(Mutex::new(BTreeMap::new())),
             action_locks: Arc::new(Mutex::new(BTreeMap::new())),
             stats: Arc::new(AtomicAgentStats::default()),
+            observer: None,
             executable_identities: Arc::new(Mutex::new(BTreeMap::new())),
             manifest_dir: Arc::new(task_manifest_dir(&cache_dir)),
             task_actions: Arc::new(Mutex::new(BTreeMap::new())),
@@ -608,6 +671,19 @@ impl CacheAgent {
             remote_transfers: Arc::new(tokio::sync::Semaphore::new(MAX_REMOTE_TRANSFERS)),
             prefetch_transfers: Arc::new(tokio::sync::Semaphore::new(MAX_PREFETCH_TRANSFERS)),
             prefetch_tasks: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Report each accounted cache decision to `observer` as it happens.
+    #[must_use]
+    pub fn with_observer(mut self, observer: Arc<dyn AgentEventObserver>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
+    fn emit(&self, event: impl FnOnce() -> AgentEvent) {
+        if let Some(observer) = &self.observer {
+            observer.event(event());
         }
     }
 
@@ -1768,15 +1844,25 @@ impl CacheAgent {
                 self.stats.lookups.fetch_add(1, Ordering::Relaxed);
                 self.find_action_result(&action).await
             }
-            AgentRequest::RecordActionHit { action, restore } => {
-                self.record_action_hit(&action, restore)
-            }
+            AgentRequest::RecordActionHit {
+                action,
+                restore,
+                crate_name,
+            } => self.record_action_hit(&action, restore, crate_name),
             AgentRequest::RecordBypass { kind } => {
-                *self.stats.bypasses.lock().unwrap().entry(kind).or_insert(0) += 1;
+                *self
+                    .stats
+                    .bypasses
+                    .lock()
+                    .unwrap()
+                    .entry(kind.clone())
+                    .or_insert(0) += 1;
+                self.emit(|| AgentEvent::Bypass { kind });
                 Ok(AgentResponse::BypassRecorded)
             }
             AgentRequest::RecordUnconsulted => {
                 self.stats.unconsulted.fetch_add(1, Ordering::Relaxed);
+                self.emit(|| AgentEvent::Unconsulted);
                 Ok(AgentResponse::UnconsultedRecorded)
             }
             AgentRequest::RecordCompilerInvocation {
@@ -1790,6 +1876,7 @@ impl CacheAgent {
                 if !matched {
                     self.stats.divergences.fetch_add(1, Ordering::Relaxed);
                 }
+                self.emit(|| AgentEvent::Verification { matched, restore });
                 Ok(AgentResponse::ActionVerificationRecorded)
             }
             AgentRequest::StoreActionResult { result } => self.store_action_result(&result).await,
@@ -2025,7 +2112,9 @@ impl CacheAgent {
         &self,
         action: &CacheDigest,
         restore: RestoreStats,
+        crate_name: Option<String>,
     ) -> Result<AgentResponse> {
+        validate_crate_name(crate_name.as_deref())?;
         if self.actions.find(action)?.is_none() {
             let pending = self.pending_remote_actions.lock().unwrap().remove(action);
             if let Some(result) = pending {
@@ -2036,6 +2125,10 @@ impl CacheAgent {
         }
         self.record_restore(restore);
         self.stats.hits.fetch_add(1, Ordering::Relaxed);
+        self.emit(|| AgentEvent::ActionHit {
+            crate_name,
+            restore,
+        });
         Ok(AgentResponse::ActionHitRecorded)
     }
 
@@ -2065,14 +2158,13 @@ impl CacheAgent {
         crate_name: Option<&str>,
         duration_ns: u64,
     ) -> Result<AgentResponse> {
-        if !matches!(outcome, "miss" | "unconsulted" | "bypass" | "verification") {
+        if !matches!(
+            outcome,
+            "miss" | "unconsulted" | "bypass" | "verification" | "incremental"
+        ) {
             bail!("invalid compiler invocation outcome");
         }
-        if let Some(crate_name) = crate_name
-            && (crate_name.len() > 256 || crate_name.contains(['\0', '\n', '\r']))
-        {
-            bail!("invalid compiler crate name");
-        }
+        validate_crate_name(crate_name)?;
         let mut compiler = self.stats.compiler.lock().unwrap();
         let stats = compiler.entry(outcome.to_string()).or_default();
         stats.invocations = stats.invocations.saturating_add(1);
@@ -2085,6 +2177,11 @@ impl CacheAgent {
             let duration = slow.entry(crate_name.to_string()).or_default();
             *duration = duration.saturating_add(duration_ns);
         }
+        self.emit(|| AgentEvent::CompilerInvocation {
+            outcome: outcome.to_string(),
+            crate_name: crate_name.map(str::to_string),
+            duration_ns,
+        });
         Ok(AgentResponse::CompilerInvocationRecorded)
     }
 

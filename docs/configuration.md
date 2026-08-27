@@ -87,6 +87,39 @@ can help an edit/rebuild loop, but an incremental workspace artifact changes
 the inputs of crates above it and reduces reuse across worktrees. CI always
 disables it because a fresh runner has no incremental state to reuse.
 
+## Learned incremental reuse
+
+The crate you are editing misses the cache on every build, because its content
+is new every time. After three consecutive compilations whose sources changed,
+mbx compiles that crate with its own incremental state rather than from
+scratch, and keeps the result out of the shared cache — an incremental artifact
+describes one checkout's edit history, not its source, so it is never something
+another checkout should restore. The build reports those compilations as
+`incremental` and says how many were held back.
+
+What it watches is the crate's own sources, not its cache key. A key also
+covers the artifacts a crate links against, so rebuilding one dependency
+changes the key of everything above it; watching that would send a whole
+dependency cone incremental because one crate at the bottom was edited, and
+stop all of it publishing. Crates above the one you are editing keep compiling
+and publishing normally.
+
+Unchanged sources are never churn, however the compilation got here. A miss on
+them means something else lost the result — a wiped `target/`, a first build in
+a new checkout — so it compiles normally and publishes for everyone.
+
+The record of what a crate last compiled belongs to one checkout, and lives in
+`mbx-incremental/` inside that build's target directory alongside the
+incremental state itself. A sibling worktree keeps its own, so one developer's
+edit loop cannot mark a crate hot for a worktree that is merely building it. A
+managed target reclaims both along with everything else it holds, and each
+crate's incremental state is discarded once it passes 1 GiB.
+
+CI never does this, for the same reason it never compiles incrementally: there
+is no earlier state to build on. `MBX_LEARNED_INCREMENTAL=0` turns it off, and
+`MBX_INCREMENTAL=1` supersedes it by handing the whole decision back to
+cargo.
+
 ## Sizes and durations
 
 Sizes accept SI and IEC units. `20GB` and `20GiB` are different values. Durations

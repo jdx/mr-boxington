@@ -20,6 +20,13 @@ shape change bumps the version. Scripts should read the version field and
 parse JSON rather than the human-readable `mbx[...]` stderr lines, which are
 written for people and may be reworded at any time.
 
+### Session event streams are not
+
+The per-compilation streams under `sessions/v1/` that back
+[`mbx tui`](/tui) are an implementation detail of that command. Their records
+carry a version field, but the format may change in any release and nothing
+parses them but mbx itself. Scripts should read `MBX_STATS_REPORT`.
+
 ## Configuration
 
 Unknown TOML keys and invalid values are errors, so an upgrade that renames or

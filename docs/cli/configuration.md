@@ -24,6 +24,14 @@ Append the full reason for every bypassed compilation to this path.
 
 Cache root.
 
+### `events`
+
+- **Type:** `bool`
+- **Default:** `true`
+- **Set with:** `MBX_EVENTS`
+
+Record a per-compilation event stream for `mbx tui` to watch.
+
 ### `gc.auto`
 
 - **Type:** `bool`
@@ -88,6 +96,14 @@ Connect and request timeout.
 - **Set with:** `MBX_INCREMENTAL`
 
 Let local workspace members compile incrementally.
+
+### `learned_incremental`
+
+- **Type:** `bool`
+- **Default:** `true`
+- **Set with:** `MBX_LEARNED_INCREMENTAL`
+
+Compile crates that keep missing the cache with changed content incrementally, keeping their outputs out of the shared cache.
 
 ### `log`
 
