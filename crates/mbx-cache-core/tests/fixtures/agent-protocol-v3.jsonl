@@ -1,9 +1,9 @@
-request.hello	{"client_version":"0.3.0","protocol":2,"type":"hello"}
+request.hello	{"client_version":"0.3.0","protocol":3,"type":"hello"}
 request.find_blob	{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"type":"find_blob"}
 request.find_blobs	{"digests":[{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7}],"type":"find_blobs"}
 request.store_blob	{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"source":"cache/blob","type":"store_blob"}
 request.find_action_result	{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"type":"find_action_result"}
-request.record_action_hit	{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"restore":{"avoided_compiler_duration_ns":10,"copied_output_bytes":17,"copied_output_files":16,"duration_ns":11,"output_bytes":13,"output_files":12,"reflinked_output_bytes":15,"reflinked_output_files":14},"type":"record_action_hit"}
+request.record_action_hit	{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"crate_name":"serde","restore":{"avoided_compiler_duration_ns":10,"copied_output_bytes":17,"copied_output_files":16,"duration_ns":11,"output_bytes":13,"output_files":12,"reflinked_output_bytes":15,"reflinked_output_files":14},"type":"record_action_hit"}
 request.record_bypass	{"kind":"compiler-query","type":"record_bypass"}
 request.record_unconsulted	{"type":"record_unconsulted"}
 request.record_compiler_invocation	{"crate_name":"fixture","duration_ns":19,"outcome":"miss","type":"record_compiler_invocation"}
@@ -13,7 +13,7 @@ request.find_action_prediction	{"invocation":{"algorithm":"blake3","hash":"aaaaa
 request.record_action_prediction	{"prediction":{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"adapter":"rustc","invocation":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"payload":"{}"},"task":"task-id","type":"record_action_prediction"}
 request.find_executable_identity	{"environment":{"RUSTFLAGS":"-Cdebuginfo=1","UNSET":null},"executable":"bin/rustc","type":"find_executable_identity"}
 request.store_executable_identity	{"environment":{"RUSTFLAGS":"-Cdebuginfo=1","UNSET":null},"executable":"bin/rustc","stdout":[114,117,115,116,99],"type":"store_executable_identity"}
-response.hello	{"agent_version":"0.3.0","protocol":2,"type":"hello"}
+response.hello	{"agent_version":"0.3.0","protocol":3,"type":"hello"}
 response.blob	{"path":"cache/blob","type":"blob"}
 response.blob_missing	{"path":null,"type":"blob"}
 response.blobs	{"paths":["cache/blob",null],"type":"blobs"}

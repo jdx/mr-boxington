@@ -60,6 +60,7 @@ export default defineConfig({
           { text: "Remote cache", link: "/remote-cache" },
           { text: "Cache server", link: "/cache-server" },
           { text: "Managed targets", link: "/managed-targets" },
+          { text: "Watching builds", link: "/tui" },
         ],
       },
       {
@@ -99,6 +100,7 @@ export default defineConfig({
               { text: "remove", link: "/cli/cache/remove" },
             ],
           },
+          { text: "tui", link: "/cli/tui" },
           { text: "prefetch", link: "/cli/prefetch" },
           { text: "Settings", link: "/configuration#settings" },
         ],

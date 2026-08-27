@@ -24,6 +24,14 @@ Append the full reason for every bypassed compilation to this path.
 
 Cache root.
 
+### `events`
+
+- **Type:** `bool`
+- **Default:** `true`
+- **Set with:** `MBX_EVENTS`
+
+Record a per-compilation event stream for `mbx tui` to watch.
+
 ### `gc.auto`
 
 - **Type:** `bool`

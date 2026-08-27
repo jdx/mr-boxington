@@ -100,6 +100,9 @@ pub(crate) struct RawConfig {
     /// Share eligible compilations that read `OUT_DIR`.
     #[usage(env = "MBX_SHARE_OUT_DIR", default = false)]
     share_out_dir: bool,
+    /// Record a per-compilation event stream for `mbx tui` to watch.
+    #[usage(env = "MBX_EVENTS", default = true)]
+    events: bool,
     /// How the savings line after a build reads.
     #[usage(
         env = "MBX_SAVINGS",
@@ -218,6 +221,12 @@ pub struct Config {
     /// sources out of debug info, and its safety rests on reading the outputs
     /// rather than on the inputs alone.
     pub share_out_dir: bool,
+    /// Append a per-compilation event stream to the store, for `mbx tui`.
+    ///
+    /// On by default: one small buffered append per accounted compilation, with
+    /// no flush of its own, against a compile or restore measured in
+    /// milliseconds. Turn it off to keep the store free of build history.
+    pub events: bool,
     pub remote: RemoteSettings,
     pub http: HttpSettings,
     pub gc: GcSettings,
@@ -477,6 +486,7 @@ impl Config {
             verify: raw.verify,
             incremental: raw.incremental,
             share_out_dir: raw.share_out_dir,
+            events: raw.events,
             remote: RemoteSettings {
                 url: raw.remote.url,
                 namespace: raw.remote.namespace,
