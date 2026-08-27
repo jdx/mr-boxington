@@ -9,7 +9,7 @@ use eyre::{Context, Result, bail};
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream};
 use log::warn;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -921,7 +921,7 @@ impl CacheAgent {
         }
         let task = state.manifest;
         validate_task_identity(&task)?;
-        let manifest = {
+        let (manifest, introduced) = {
             let _write_guard = self.manifest_write_lock.lock().unwrap();
             let _file_guard = self.lock_task_manifest(&task)?;
             let mut predictions = self
@@ -934,6 +934,16 @@ impl CacheAgent {
                         .collect::<BTreeMap<_, _>>()
                 })
                 .unwrap_or_default();
+            // Which predictions this run adds, as opposed to inherits. Only a
+            // new one may be withheld for a failed upload: retracting an
+            // inherited one would un-advertise a result that is plausibly still
+            // on the server from whichever session put it there.
+            let introduced: BTreeSet<CacheDigest> = state
+                .pending_predictions
+                .keys()
+                .filter(|invocation| !predictions.contains_key(*invocation))
+                .cloned()
+                .collect();
             // Only publish predictions recorded by this run. `predictions`
             // also contains the baseline loaded by `begin_task`; extending
             // with that snapshot would overwrite newer entries committed by
@@ -946,7 +956,7 @@ impl CacheAgent {
             };
             validate_task_manifest(&manifest, &task)?;
             self.persist_task_manifest(&manifest)?;
-            manifest
+            (manifest, introduced)
         };
         self.task_actions.lock().unwrap().remove(run);
         if self.remote_mode.writes() {
@@ -961,17 +971,25 @@ impl CacheAgent {
                     .map(|prediction| prediction.action.clone())
                     .collect();
                 let unpublished = uploads.wait_for_actions(&actions).await;
-                if !unpublished.is_empty() {
+                let withheld = manifest
+                    .predictions
+                    .iter()
+                    .filter(|prediction| {
+                        introduced.contains(&prediction.invocation)
+                            && unpublished.contains(&prediction.action)
+                    })
+                    .count();
+                if withheld > 0 {
                     // The local manifest keeps them: this checkout can still use
                     // what it built, and a later session can publish it.
                     warn!(
-                        "{} of {} predicted actions were not published, so the remote task action manifest omits them",
-                        unpublished.len(),
+                        "{withheld} of {} predicted actions were not published, so the remote task action manifest omits them",
                         manifest.predictions.len()
                     );
-                    manifest
-                        .predictions
-                        .retain(|prediction| !unpublished.contains(&prediction.action));
+                    manifest.predictions.retain(|prediction| {
+                        !(introduced.contains(&prediction.invocation)
+                            && unpublished.contains(&prediction.action))
+                    });
                 }
             }
             match self

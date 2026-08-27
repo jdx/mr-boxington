@@ -1784,6 +1784,92 @@ async fn an_action_result_is_published_after_the_blobs_it_references() {
     );
 }
 
+/// A failed re-upload must not retract what an earlier session advertised.
+///
+/// The conditional manifest write replaces the remote manifest when its entity
+/// tag still matches, so dropping an inherited prediction would un-advertise a
+/// result that is plausibly still on the server.
+#[tokio::test]
+async fn a_task_manifest_keeps_inherited_predictions_whose_upload_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let task = "4".repeat(64);
+    let action_bytes = b"inherited action".to_vec();
+    let action = CacheDigest::blake3(&action_bytes);
+    let prediction = ActionPrediction {
+        invocation: CacheDigest::blake3(b"inherited invocation"),
+        action: action.clone(),
+        adapter: "rustc".into(),
+        payload: "{}".into(),
+    };
+    let manifest_bytes = canonical_json(&TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: vec![prediction.clone()],
+    })
+    .unwrap();
+    let manifest_etag = blake3::hash(&manifest_bytes).to_hex().to_string();
+    let (_, selector) = CacheAgent::task_manifest_selector(&task).unwrap();
+    // The prediction is already advertised remotely when this session starts.
+    server
+        .mock("GET", action_manifest_path(&selector).as_str())
+        .with_status(200)
+        .with_header("etag", &format!("\"{manifest_etag}\""))
+        .with_body(manifest_bytes.clone())
+        .create_async()
+        .await;
+    server
+        .mock("GET", action_path(&action).as_str())
+        .with_status(404)
+        .create_async()
+        .await;
+    server
+        .mock("PUT", blob_path(&action).as_str())
+        .with_status(500)
+        .create_async()
+        .await;
+    let manifest = server
+        .mock("PUT", action_manifest_path(&selector).as_str())
+        .match_body(manifest_bytes)
+        .with_status(201)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().join("writer"),
+        RemoteCacheMode::ReadWrite,
+    );
+    let run = agent.begin_task(&task).await.unwrap();
+    agent.wait_for_prefetches().await;
+    let source = directory.path().join("source");
+    fs::write(&source, &action_bytes).unwrap();
+    agent
+        .handle_requests([
+            AgentRequest::StoreBlob {
+                digest: action.clone(),
+                source,
+            },
+            AgentRequest::StoreActionResult {
+                result: RemoteActionResult {
+                    action: action.clone(),
+                    metadata: None,
+                    output_root: None,
+                    version: 1,
+                },
+            },
+            AgentRequest::RecordActionPrediction {
+                task: run.clone(),
+                prediction,
+            },
+        ])
+        .await;
+    agent.commit_task(&run).await.unwrap();
+    agent.wait_for_uploads().await;
+
+    manifest.assert_async().await;
+}
+
 #[tokio::test]
 async fn a_task_manifest_omits_predictions_that_were_not_published() {
     let directory = tempfile::tempdir().unwrap();
