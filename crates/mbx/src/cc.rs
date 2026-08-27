@@ -68,10 +68,15 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
             .discover(&working_dir, &context.path_mappings)
             .ok()
     });
+    // Whether an action lookup actually ran. A cold compilation has no
+    // prediction to build a key from, so nothing was ever asked of the cache --
+    // which the summary and the TUI report separately from a lookup that missed.
+    let mut looked_up = false;
     if let Some(discovered) = usable {
         let mut candidate = context.clone();
         discovered.clone().apply_to(&mut candidate)?;
         let action = invocation.action(candidate)?;
+        looked_up = true;
         if let Some(cached) = restore_result(&action, &invocation, &discovered, !verify)? {
             if !verify {
                 replay_bytes(&cached.stdout, &cached.stderr)?;
@@ -107,8 +112,10 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     session::record_compiler_invocation(
         if verification.is_some() {
             "verification"
-        } else {
+        } else if looked_up {
             "miss"
+        } else {
+            "unconsulted"
         },
         Some(&compilation_name(&invocation)),
         duration_ns,

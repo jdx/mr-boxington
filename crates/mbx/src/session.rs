@@ -233,22 +233,7 @@ impl CacheSession {
         // silently build target objects with the host driver. `HOST_CC` is
         // consulted only when host and target agree, which is exactly the
         // compilation these shims can stand in for.
-        environment.insert(
-            "HOST_CC".into(),
-            shims.cc_shim.to_string_lossy().into_owned(),
-        );
-        environment.insert(
-            "HOST_CXX".into(),
-            shims.cxx_shim.to_string_lossy().into_owned(),
-        );
-        environment.insert(
-            REAL_CC_ENV.into(),
-            shims.real_cc.to_string_lossy().into_owned(),
-        );
-        environment.insert(
-            REAL_CXX_ENV.into(),
-            shims.real_cxx.to_string_lossy().into_owned(),
-        );
+        shims.apply_to(environment);
     }
 
     /// Warm the recorded actions for a Cargo command without running Cargo.
@@ -737,10 +722,28 @@ fn cache_misses(stats: &AgentStats) -> u64 {
 
 /// Installed C and C++ shims, and the compilers they stand in for.
 struct CcShims {
-    cc_shim: PathBuf,
-    cxx_shim: PathBuf,
-    real_cc: PathBuf,
-    real_cxx: PathBuf,
+    /// Installed C shim and the compiler it stands in for, when there is one.
+    cc: Option<(PathBuf, PathBuf)>,
+    /// The same for C++.
+    cxx: Option<(PathBuf, PathBuf)>,
+}
+
+impl CcShims {
+    /// Point build scripts at whichever shims were installed.
+    ///
+    /// A language with no compiler on the machine contributes nothing, so a C
+    /// build on an image without a C++ compiler still gets its caching.
+    fn apply_to(&self, environment: &mut BTreeMap<String, String>) {
+        for (installed, host, real) in [
+            (&self.cc, "HOST_CC", REAL_CC_ENV),
+            (&self.cxx, "HOST_CXX", REAL_CXX_ENV),
+        ] {
+            if let Some((shim, compiler)) = installed {
+                environment.insert(host.into(), shim.to_string_lossy().into_owned());
+                environment.insert(real.into(), compiler.to_string_lossy().into_owned());
+            }
+        }
+    }
 }
 
 /// Variables the `cc` crate consults before falling back to the platform
@@ -765,19 +768,33 @@ fn install_cc_shims(session_dir: &Path) -> Result<Option<CcShims>> {
         return Ok(None);
     }
     let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
-    let (Some(real_cc), Some(real_cxx)) = (
-        resolve_on_path(CcLanguage::C.default_driver()),
-        resolve_on_path(CcLanguage::Cxx.default_driver()),
-    ) else {
-        debug!("no C and C++ compilers were found on PATH; build script compiles are not cached");
+    // Each language stands alone. An image with a C compiler and no C++ one is
+    // ordinary, and it must not cost a C-only sys-crate its caching.
+    let real_cc = resolve_on_path(CcLanguage::C.default_driver());
+    let real_cxx = resolve_on_path(CcLanguage::Cxx.default_driver());
+    if real_cc.is_none() && real_cxx.is_none() {
+        debug!("no C or C++ compiler was found on PATH; build script compiles are not cached");
         return Ok(None);
+    }
+    let shim = |language: CcLanguage| -> Result<PathBuf> {
+        install_shim_named(
+            &executable,
+            session_dir,
+            language.shim_stem(),
+            ShimLink::Tracking,
+        )
     };
-    Ok(Some(CcShims {
-        cc_shim: install_shim_named(&executable, session_dir, CC_SHIM_STEM, ShimLink::Tracking)?,
-        cxx_shim: install_shim_named(&executable, session_dir, CXX_SHIM_STEM, ShimLink::Tracking)?,
-        real_cc,
-        real_cxx,
-    }))
+    let mut installed = CcShims {
+        cc: None,
+        cxx: None,
+    };
+    if let Some(real) = real_cc {
+        installed.cc = Some((shim(CcLanguage::C)?, real));
+    }
+    if let Some(real) = real_cxx {
+        installed.cxx = Some((shim(CcLanguage::Cxx)?, real));
+    }
+    Ok(Some(installed))
 }
 
 fn resolve_on_path(name: &str) -> Option<PathBuf> {
