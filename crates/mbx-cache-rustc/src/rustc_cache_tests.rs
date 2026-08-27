@@ -20,6 +20,10 @@ fn bypass_kinds_are_stable_and_field_independent() {
         BypassReason::UnportableNativeLink("rpath=yes".into()).kind(),
         "unportable-native-link"
     );
+    assert_eq!(
+        BypassReason::AmbiguousOutputName(PathBuf::from("a.rlib")).kind(),
+        "ambiguous-output-name"
+    );
     // Two reasons of one kind group together despite differing fields.
     assert_eq!(
         BypassReason::UnmappedAbsolutePath(PathBuf::from("/a")).kind(),
@@ -1217,5 +1221,42 @@ fn the_linker_identity_changes_the_action_key() {
             driver_version: "Apple clang version 18.0.0".into(),
             ..test_linker()
         })
+    );
+}
+
+/// Executability is read back off an output's name, so a program answering to
+/// a library's name would come back without the permission that runs it.
+#[test]
+fn a_program_named_like_a_library_is_not_cacheable() {
+    let arguments = args(&[
+        "--crate-name=widget",
+        "--test",
+        "--emit=dep-info,link",
+        "--out-dir=target/debug/deps",
+        "-Cextra-filename=.rlib",
+        "src/lib.rs",
+    ]);
+    let invocation = RustcInvocation::parse_with(&arguments, native_links()).unwrap();
+
+    assert_eq!(
+        invocation.outputs(&workspace()),
+        Err(BypassReason::AmbiguousOutputName(
+            workspace().join("target/debug/deps/widget.rlib")
+        ))
+    );
+
+    // A library by that name is exactly what it claims to be.
+    let library = args(&[
+        "--crate-name=widget",
+        "--crate-type=lib",
+        "--emit=dep-info,link",
+        "--out-dir=target/debug/deps",
+        "src/lib.rs",
+    ]);
+    assert!(
+        RustcInvocation::parse_with(&library, native_links())
+            .unwrap()
+            .outputs(&workspace())
+            .is_ok()
     );
 }

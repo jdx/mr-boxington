@@ -177,6 +177,9 @@ pub enum BypassReason {
     /// Native-library lookup is not modeled as a precise input.
     #[error("native library lookup is not cacheable yet")]
     NativeLibrary,
+    /// An output's name does not say whether it is a program or a library.
+    #[error("rustc output name does not distinguish a program from a library: {0}")]
+    AmbiguousOutputName(PathBuf),
     /// A native link would embed something no other checkout can reproduce.
     #[error("native link is not reproducible across checkouts: {0}")]
     UnportableNativeLink(String),
@@ -494,6 +497,19 @@ impl RustcInvocation {
             }
             if path.parent() != Some(output_directory.as_path()) {
                 return Err(BypassReason::SplitOutputDirectories);
+            }
+            // Whether a restored output is a program is read back off its name,
+            // so a program that answers to a library's name would be restored
+            // without the permission that makes it runnable. Nothing cargo
+            // emits looks like this; a hand-built invocation could.
+            if emit.kind == "link"
+                && !matches!(self.link_output, LinkOutput::Library)
+                && matches!(
+                    path.extension().and_then(|extension| extension.to_str()),
+                    Some("rlib" | "rmeta")
+                )
+            {
+                return Err(BypassReason::AmbiguousOutputName(path));
             }
             files.insert(path);
         }

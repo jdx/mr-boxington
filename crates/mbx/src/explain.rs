@@ -116,6 +116,9 @@ fn guidance(kind: &str) -> &'static str {
         "unsupported-crate-type" => {
             "This artifact type is outside mbx's current cacheability tier. Dynamic libraries still link normally; `MBX_CACHE_LINKS=1` adds native test binaries and executables."
         }
+        "ambiguous-output-name" => {
+            "This output is named like a library but is a program, so mbx cannot tell which permissions to restore it with."
+        }
         "unportable-native-link" => {
             "This link would embed a path, a timestamp, or a file mbx does not store, so another checkout could not use its result."
         }
