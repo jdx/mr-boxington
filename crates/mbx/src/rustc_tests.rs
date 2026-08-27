@@ -9,89 +9,71 @@ fn portable_for(values: &[&str]) -> Portable {
     }
 }
 
-fn action_for(bytes: &[u8]) -> RustcAction {
-    RustcAction {
-        digest: CacheDigest::blake3(bytes),
-        bytes: bytes.to_vec(),
-    }
-}
-
-fn candidates_for(bytes: &[u8]) -> ActionCandidates {
-    ActionCandidates {
-        portable: None,
-        literal: action_for(bytes),
-    }
-}
-
-fn recorded_for(action: &[u8], churn_streak: u32) -> RecordedPrediction {
-    RecordedPrediction {
-        invocation: CacheDigest::blake3(b"invocation"),
-        action: CacheDigest::blake3(action),
-        prediction: RustcInputPrediction {
-            version: 3,
-            inputs: Vec::new(),
-            environment: Vec::new(),
-            compiler_duration_ns: 0,
-            crate_name: "demo".into(),
-            churn_streak,
-        },
+fn churn(sources: &str, streak: u32) -> ChurnState {
+    ChurnState {
+        version: CHURN_STATE_VERSION,
+        sources: CacheDigest::blake3(sources.as_bytes()).key(),
+        streak,
     }
 }
 
 /// The streak is what separates a crate someone is editing from one that merely
-/// lost its result, and it only counts while the content keeps moving.
+/// lost its result, and it only counts while that crate's own sources move.
 #[test]
-fn only_a_run_of_changed_keys_earns_incremental_state() {
-    let candidates = candidates_for(b"current");
+fn only_a_run_of_changed_sources_earns_incremental_state() {
+    let now = CacheDigest::blake3(b"current sources");
 
-    // Nothing recorded yet: a first compilation is not evidence of anything.
-    assert_eq!(learned_plan(None, &candidates, true).streak, 0);
+    // Nothing recorded here yet: a first compilation in a checkout is not
+    // evidence of anything, and neither is a wiped target directory.
+    assert_eq!(learned_plan(None, &now, true).streak, 0);
 
-    // Recorded under the key this compilation already has, so the content did
-    // not move -- something else lost the result, and recompiling restores it
-    // for everyone.
-    let unchanged = recorded_for(b"current", HOT_STREAK_THRESHOLD);
-    let plan = learned_plan(Some(&unchanged), &candidates, true);
+    // Recorded against the sources this compilation already has, so nobody
+    // edited it -- something else lost the result, and recompiling normally
+    // restores it for everyone.
+    let unchanged = churn("current sources", HOT_STREAK_THRESHOLD);
+    let plan = learned_plan(Some(&unchanged), &now, true);
     assert_eq!(plan.streak, 0);
     assert!(!plan.hot);
 
-    // A changed key climbs the streak, and only its last step is hot.
+    // Changed sources climb the streak, and only its last step is hot.
     for previous in 0..HOT_STREAK_THRESHOLD - 1 {
-        let recorded = recorded_for(b"stale", previous);
-        let plan = learned_plan(Some(&recorded), &candidates, true);
+        let recorded = churn("older sources", previous);
+        let plan = learned_plan(Some(&recorded), &now, true);
         assert_eq!(plan.streak, previous + 1);
         assert!(!plan.hot);
     }
-    let recorded = recorded_for(b"stale", HOT_STREAK_THRESHOLD - 1);
-    assert!(learned_plan(Some(&recorded), &candidates, true).hot);
+    let recorded = churn("older sources", HOT_STREAK_THRESHOLD - 1);
+    assert!(learned_plan(Some(&recorded), &now, true).hot);
 
     // The streak is a state rather than a tally, so it stops at the threshold.
-    let saturated = recorded_for(b"stale", HOT_STREAK_THRESHOLD);
+    let saturated = churn("older sources", HOT_STREAK_THRESHOLD);
     assert_eq!(
-        learned_plan(Some(&saturated), &candidates, true).streak,
+        learned_plan(Some(&saturated), &now, true).streak,
         HOT_STREAK_THRESHOLD
     );
 
-    // Disabled, the streak is still recorded so that enabling it later works.
-    let plan = learned_plan(Some(&saturated), &candidates, false);
+    // Disabled, the streak is still tracked so that enabling it later works.
+    let plan = learned_plan(Some(&saturated), &now, false);
     assert_eq!(plan.streak, HOT_STREAK_THRESHOLD);
     assert!(!plan.hot);
 }
 
-/// Either key hitting means the recorded content is the current content: a
-/// portable and a literal action describe one compilation, not two.
+/// The record belongs to one checkout, so a sibling worktree that cannot read
+/// it simply starts over rather than inheriting somebody else's edit loop.
 #[test]
-fn a_portable_key_match_is_not_churn() {
-    let candidates = ActionCandidates {
-        portable: Some(action_for(b"portable")),
-        literal: action_for(b"literal"),
-    };
-    let recorded = recorded_for(b"portable", HOT_STREAK_THRESHOLD - 1);
+fn an_unreadable_record_is_no_record() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.json");
+    let sources = CacheDigest::blake3(b"sources");
 
-    let plan = learned_plan(Some(&recorded), &candidates, true);
+    write_churn_state(&path, &sources, 2).unwrap();
+    assert_eq!(read_churn_state(&path).unwrap().streak, 2);
 
-    assert_eq!(plan.streak, 0);
-    assert!(!plan.hot);
+    std::fs::write(&path, br#"{"version":99,"sources":"x","streak":3}"#).unwrap();
+    assert!(read_churn_state(&path).is_none());
+
+    std::fs::write(&path, b"not json").unwrap();
+    assert!(read_churn_state(&path).is_none());
 }
 
 #[test]
@@ -103,7 +85,6 @@ fn compiler_timing_survives_a_changed_action_key() {
         environment: Vec::new(),
         compiler_duration_ns: 42,
         crate_name: "demo".into(),
-        churn_streak: 0,
     };
     let prediction = ActionPrediction {
         invocation: invocation.clone(),
@@ -112,9 +93,9 @@ fn compiler_timing_survives_a_changed_action_key() {
         payload: String::from_utf8(canonical_json(&timing).unwrap()).unwrap(),
     };
 
-    let decoded = decode_prediction(&prediction, &invocation).unwrap();
+    let decoded = decode_prediction_timing(&prediction, &invocation).unwrap();
     assert_eq!(decoded.crate_name, "demo");
-    assert_eq!(decoded.compiler_duration_ns, 42);
+    assert_eq!(decoded.duration_ns, 42);
 }
 
 /// `--remap-path-prefix` covers the paths rustc writes itself, so most

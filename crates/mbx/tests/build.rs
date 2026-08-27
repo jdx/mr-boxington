@@ -38,6 +38,43 @@ fn write_named_project(directory: &Path, name: &str) {
     assert!(status.success(), "the fixture should resolve offline");
 }
 
+/// Write a workspace where one member depends on another.
+fn write_dependent_project(directory: &Path) {
+    std::fs::create_dir_all(directory.join("base/src")).unwrap();
+    std::fs::create_dir_all(directory.join("above/src")).unwrap();
+    std::fs::write(
+        directory.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"base\", \"above\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("base/Cargo.toml"),
+        "[package]\nname = \"base\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("base/src/lib.rs"),
+        "pub fn value() -> u32 { 0 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("above/Cargo.toml"),
+        "[package]\nname = \"above\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nbase = { path = \"../base\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("above/src/lib.rs"),
+        "pub fn doubled() -> u32 { base::value() * 2 }\n",
+    )
+    .unwrap();
+    let status = Command::new(cargo())
+        .current_dir(directory)
+        .args(["generate-lockfile", "--offline"])
+        .status()
+        .expect("cargo should run");
+    assert!(status.success(), "the fixture should resolve offline");
+}
+
 /// Write a workspace whose dependency builds before a member that fails.
 fn write_partially_failing_project(directory: &Path) {
     std::fs::create_dir_all(directory.join("good/src")).unwrap();
@@ -311,11 +348,18 @@ fn edit_project(project: &Path, revision: u32) {
 
 /// Incremental state mbx is keeping for churning units, as opposed to the
 /// `incremental/` directory cargo drives itself.
+///
+/// Directories only: the churn records that decide when to create one live
+/// beside them as files, and every compilation writes one of those whether or
+/// not it ever goes hot.
 fn learned_sessions(project: &Path) -> usize {
     let target = project.join("target");
     let outputs = std::fs::read_link(&target).unwrap_or(target);
     match std::fs::read_dir(outputs.join("mbx-incremental")) {
-        Ok(entries) => entries.count(),
+        Ok(entries) => entries
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .count(),
         Err(_) => 0,
     }
 }
@@ -455,6 +499,47 @@ fn churn_earns_nothing_in_ci() {
         compiled_incrementally(&stats),
         0,
         "CI should have compiled every edit normally: {stats}"
+    );
+}
+
+/// A crate's action key hashes the artifacts it links against, so rebuilding a
+/// dependency changes it without anybody having touched the crate. Watching the
+/// key instead of the sources would send the whole cone above an edited crate
+/// hot, and stop all of it publishing -- the sharing loss this feature exists
+/// to avoid.
+#[test]
+fn editing_one_crate_leaves_its_dependents_publishing() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_dependent_project(project.path());
+
+    let mut stats = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+    );
+    for revision in 1..=5 {
+        std::fs::write(
+            project.path().join("base/src/lib.rs"),
+            format!("pub fn value() -> u32 {{ {revision} }}\n"),
+        )
+        .unwrap();
+        stats = build(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("edit-{revision}.json")),
+        );
+    }
+
+    assert_eq!(
+        compiled_incrementally(&stats),
+        1,
+        "only the edited crate should be compiling incrementally: {stats}"
+    );
+    assert!(
+        stats["stored_bytes"].as_u64().unwrap_or(0) > 0,
+        "the crate above it never changed, so it should still publish: {stats}"
     );
 }
 

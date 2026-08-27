@@ -910,38 +910,39 @@ fn remap_destinations_are_stable_virtual_paths() {
     );
 }
 
-/// A payload written before churn was tracked has to keep round-tripping
-/// byte-for-byte: the shim rejects a prediction whose canonical encoding does
-/// not match what it was handed, so a field that serialized when it was zero
-/// would invalidate every prediction already on disk.
+/// A dependency that was rebuilt changes an action key without anybody having
+/// touched this crate, so churn detection cannot watch the key. What it watches
+/// is this: the crate's own sources, and nothing it merely links against.
 #[test]
-fn churn_is_absent_from_a_prediction_that_is_not_churning() {
-    let payload = r#"{"compiler_duration_ns":42,"crate_name":"demo","environment":[],"inputs":["${workspace}/src/lib.rs"],"version":3}"#;
-
-    let prediction: RustcInputPrediction = serde_json::from_str(payload).unwrap();
-
-    assert_eq!(prediction.churn_streak, 0);
-    assert_eq!(
-        String::from_utf8(canonical_json(&prediction).unwrap()).unwrap(),
-        payload
-    );
-}
-
-#[test]
-fn a_churning_prediction_round_trips_its_streak() {
-    let prediction = RustcInputPrediction {
-        version: 3,
-        inputs: Vec::new(),
-        environment: Vec::new(),
-        compiler_duration_ns: 0,
-        crate_name: "demo".into(),
-        churn_streak: 2,
+fn a_rebuilt_dependency_does_not_move_the_source_fingerprint() {
+    let directory = tempfile::tempdir().unwrap();
+    let working_dir = directory.path();
+    let deps = working_dir.join("target/debug/deps");
+    std::fs::create_dir_all(&deps).unwrap();
+    std::fs::write(working_dir.join("src.rs"), "pub fn value() {}\n").unwrap();
+    let rlib = deps.join("libserde.rlib");
+    std::fs::write(&rlib, "serde").unwrap();
+    let invocation = RustcInvocation::parse(&args(&[
+        "--crate-name=widget",
+        "--crate-type=lib",
+        "--emit=dep-info,metadata,link",
+        "--out-dir=target/debug/deps",
+        &format!("--extern=serde={}", rlib.display()),
+        "src.rs",
+    ]))
+    .unwrap();
+    let dep_info = RustcDepInfo::parse("target/debug/deps/widget.d: src.rs\n").unwrap();
+    let fingerprint = || {
+        let discovered = invocation.discover_inputs(&dep_info, working_dir).unwrap();
+        invocation.source_fingerprint(&discovered)
     };
+    let before = fingerprint();
 
-    let encoded = String::from_utf8(canonical_json(&prediction).unwrap()).unwrap();
+    // The linked artifact changed; this crate did not.
+    std::fs::write(&rlib, "serde rebuilt").unwrap();
+    assert_eq!(fingerprint(), before);
 
-    assert_eq!(
-        serde_json::from_str::<RustcInputPrediction>(&encoded).unwrap(),
-        prediction
-    );
+    // The crate itself changed.
+    std::fs::write(working_dir.join("src.rs"), "pub fn value() -> u32 { 1 }\n").unwrap();
+    assert_ne!(fingerprint(), before);
 }

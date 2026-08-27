@@ -329,6 +329,45 @@ impl RustcInvocation {
         &self.crate_name
     }
 
+    /// Digest of the inputs this compilation owns: its sources and whatever
+    /// they read, but not the artifacts it merely links against.
+    ///
+    /// This is what separates a crate someone is editing from one sitting
+    /// above it in the graph. Rebuilding a dependency changes the action key of
+    /// every crate that links it, because their keys hash its artifact; it does
+    /// not change this. A caller watching for churn has to watch this instead,
+    /// or a single edited crate would drag its whole dependent cone along.
+    ///
+    /// Host paths enter the digest as they are. This describes one checkout to
+    /// itself rather than to the cache, so there is nothing here to make
+    /// portable.
+    pub fn source_fingerprint(&self, discovered: &DiscoveredInputs) -> CacheDigest {
+        let linked = self
+            .arguments
+            .iter()
+            .filter_map(|argument| match argument {
+                Argument::Extern {
+                    path: Some(path), ..
+                } => Some(path.as_path()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let owned = discovered
+            .inputs
+            .iter()
+            .filter(|input| !linked.contains(input.path.as_path()))
+            .map(|input| (input.path.as_path(), &input.digest))
+            .collect::<BTreeMap<_, _>>();
+        let mut bytes = Vec::new();
+        for (path, digest) in owned {
+            bytes.extend_from_slice(path.as_os_str().as_encoded_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(digest.key().as_bytes());
+            bytes.push(0);
+        }
+        CacheDigest::blake3(&bytes)
+    }
+
     /// Resolve the files produced by this invocation.
     ///
     /// The initial cache tier requires one output directory so its artifact can
@@ -470,7 +509,6 @@ impl RustcInvocation {
             environment: discovered.environment.keys().cloned().collect(),
             compiler_duration_ns: 0,
             crate_name: String::new(),
-            churn_streak: 0,
         })
     }
 }
@@ -675,17 +713,9 @@ pub struct RustcInputPrediction {
     /// Crate name associated with the timing hint.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub crate_name: String,
-    /// Consecutive misses whose action digest differed from the one recorded
-    /// before them. Zero means this invocation's content is not churning.
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
-    pub churn_streak: u32,
 }
 
 fn is_zero(value: &u64) -> bool {
-    *value == 0
-}
-
-fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 

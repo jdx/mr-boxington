@@ -8,8 +8,8 @@ use mbx_cache_rustc::{
     ActionContext, CompilerIdentity, DiscoveredInputs, PathMapping, RustcAction, RustcDepInfo,
     RustcInputPrediction, RustcInvocation, RustcOutputs, normalize_mapped_path,
 };
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{Read as _, Write as _};
@@ -55,6 +55,9 @@ struct CompileTiming {
 /// guessing wrong is one uncached compilation the unit was going to pay anyway.
 const HOT_STREAK_THRESHOLD: u32 = 3;
 
+/// Schema version of the per-checkout churn record.
+const CHURN_STATE_VERSION: u8 = 1;
+
 /// How large one unit's incremental state may grow before it is discarded.
 const INCREMENTAL_DIR_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 
@@ -85,11 +88,22 @@ impl LearnedPlan {
     }
 }
 
-/// One unit's last recorded prediction, with the key it was recorded under.
-struct RecordedPrediction {
-    invocation: CacheDigest,
-    action: CacheDigest,
-    prediction: RustcInputPrediction,
+/// What one checkout last compiled for one unit, and how long its sources have
+/// been moving.
+///
+/// Kept beside the incremental state it decides, in this checkout's target
+/// directory, rather than in the prediction manifest: a manifest is shared by
+/// every worktree resolving the same lockfile, so a streak recorded there would
+/// let one developer's edit loop mark a crate hot for a sibling worktree that
+/// is merely building it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChurnState {
+    /// Version of this record's schema.
+    version: u8,
+    /// Digest of the sources compiled here last time.
+    sources: String,
+    /// Consecutive compilations whose sources had changed.
+    streak: u32,
 }
 
 /// What every step of one compilation needs to identify it.
@@ -144,9 +158,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                 match prediction_timing(&compilation) {
                     Ok(timing) => {
                         cached.restore.avoided_compiler_duration_ns = timing.duration_ns;
-                        // A hit means the shared cache has this content, so
-                        // whatever churn was recorded before it is over.
-                        record_prediction(&compilation, &action, &discovered, &timing, 0);
+                        record_prediction(&compilation, &action, &discovered, &timing);
                     }
                     Err(error) => {
                         eprintln!("mbx[warning]: compiler timing was not refreshed: {error:#}");
@@ -161,7 +173,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                 }
             }
             Ok(None) => {
-                learned = plan_learned_reuse(&compilation, &candidates, learned_enabled);
+                learned = plan_learned_reuse(&compilation, &discovered, learned_enabled);
             }
             Err(error) => {
                 eprintln!("mbx[warning]: result was not restored: {error:#}");
@@ -258,13 +270,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                 publish_result(&action.digest, &action.bytes, &outputs, &output)?;
                 action
             };
-            record_prediction(
-                &compilation,
-                &action.digest,
-                &discovered,
-                &timing,
-                learned.streak,
-            );
+            record_prediction(&compilation, &action.digest, &discovered, &timing);
             Ok(())
         })();
         if let Err(error) = publication {
@@ -276,39 +282,34 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
 
 /// Decide whether a missed compilation should carry its own incremental state.
 ///
-/// The comparison is against the key the unit recorded last time, not against
-/// the cache as a whole: a miss under an unchanged key means something else
-/// lost the result, such as a wiped target directory, and recompiling it
-/// normally republishes it for everyone. Only a changed key means the source
-/// moved out from under the cache, and only a run of changed keys means someone
-/// is editing here rather than passing through.
+/// The comparison is against this crate's own sources, not against its action
+/// key: a key also hashes the artifacts the crate links against, so a rebuilt
+/// dependency changes it without anybody having touched this crate. Watching
+/// the key would drag the whole cone above an edited crate into compiling
+/// incrementally and withholding its results, which is the sharing loss this
+/// is meant to avoid.
+///
+/// Unchanged sources are therefore never churn, however the compilation got
+/// here. A miss on them means something else lost the result -- a wiped target
+/// directory, a first build in this checkout -- and recompiling normally
+/// republishes it for everyone.
 fn learned_plan(
-    recorded: Option<&RecordedPrediction>,
-    candidates: &ActionCandidates,
+    recorded: Option<&ChurnState>,
+    sources: &CacheDigest,
     enabled: bool,
 ) -> LearnedPlan {
-    let Some(recorded) = recorded else {
-        return LearnedPlan::default();
+    let streak = match recorded {
+        Some(recorded) if recorded.sources == sources.key() => 0,
+        // Capped at the threshold: the streak is a state, not a tally, and
+        // letting it climb would only delay noticing that the churn stopped.
+        Some(recorded) => recorded.streak.saturating_add(1).min(HOT_STREAK_THRESHOLD),
+        None => 0,
     };
-    if candidates
-        .ordered()
-        .any(|action| action.digest == recorded.action)
-    {
-        return LearnedPlan::default();
-    }
-    // Capped at the threshold: the streak is a state, not a tally, and letting
-    // it climb would only make a cooled-down unit take longer to notice.
-    let streak = recorded
-        .prediction
-        .churn_streak
-        .saturating_add(1)
-        .min(HOT_STREAK_THRESHOLD);
     LearnedPlan {
         hot: enabled && streak >= HOT_STREAK_THRESHOLD,
         streak,
         directory: None,
     }
-    .resolved(&recorded.invocation)
 }
 
 /// Where one unit keeps its incremental state.
@@ -367,19 +368,76 @@ fn directory_bytes(directory: &Path) -> u64 {
     total
 }
 
-/// Work out the plan for a compilation that missed with dep-info in hand.
+/// Work out the plan for a compilation that is about to miss.
+///
+/// Reads what this checkout last compiled for the unit, decides, and records
+/// what it is about to compile now. A checkout with nowhere to keep that -- a
+/// shim running without a session -- compiles normally.
 fn plan_learned_reuse(
     compilation: &Compilation<'_>,
-    candidates: &ActionCandidates,
+    discovered: &DiscoveredInputs,
     enabled: bool,
 ) -> LearnedPlan {
-    match fetch_recorded_prediction(compilation) {
-        Ok(recorded) => learned_plan(recorded.as_ref(), candidates, enabled),
+    let planned = (|| {
+        let sources = compilation.invocation.source_fingerprint(discovered);
+        let context = base_action_context(
+            compilation.rustc,
+            compilation.working_dir,
+            compilation.portable,
+        )?;
+        let unit = compilation.invocation.invocation_digest(&context)?;
+        let Some(state_path) = churn_state_path(&unit) else {
+            return Result::<LearnedPlan>::Ok(LearnedPlan::default());
+        };
+        let plan = learned_plan(read_churn_state(&state_path).as_ref(), &sources, enabled);
+        write_churn_state(&state_path, &sources, plan.streak)?;
+        Ok(plan.resolved(&unit))
+    })();
+    match planned {
+        Ok(plan) => plan,
         Err(error) => {
-            eprintln!("mbx[warning]: recorded prediction was not read: {error:#}");
+            eprintln!("mbx[warning]: churn was not tracked for this crate: {error:#}");
             LearnedPlan::default()
         }
     }
+}
+
+/// Where this checkout records what it last compiled for one unit.
+///
+/// A sibling of the unit's incremental directory, so both are reclaimed with
+/// the target directory that holds them.
+fn churn_state_path(unit: &CacheDigest) -> Option<PathBuf> {
+    let target_dir = std::env::var_os(session::TARGET_DIR_ENV)?;
+    let key = unit.key();
+    let shard = key.get(..16)?;
+    Some(
+        PathBuf::from(target_dir)
+            .join("mbx-incremental")
+            .join(format!("{shard}.json")),
+    )
+}
+
+/// A record this version cannot read is treated as no record: the cost is one
+/// compilation that does not count toward a streak.
+fn read_churn_state(path: &Path) -> Option<ChurnState> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice::<ChurnState>(&bytes)
+        .ok()
+        .filter(|state| state.version == CHURN_STATE_VERSION)
+}
+
+fn write_churn_state(path: &Path, sources: &CacheDigest, streak: u32) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .wrap_err("failed to create the incremental state directory")?;
+    }
+    let state = ChurnState {
+        version: CHURN_STATE_VERSION,
+        sources: sources.key(),
+        streak,
+    };
+    crate::util::write_atomic(path, &serde_json::to_vec(&state)?)
+        .wrap_err("failed to record what this crate last compiled")
 }
 
 fn restore_predicted_result(
@@ -443,30 +501,11 @@ fn restore_predicted_result(
             if restore_outputs {
                 record_action_hit(&action, cached.restore);
             }
-            // The shared cache has this content, so any churn recorded before
-            // it is over. Re-encode only when there is something to clear.
-            let payload = if input_prediction.churn_streak == 0 {
-                prediction.payload
-            } else {
-                let cooled = RustcInputPrediction {
-                    churn_streak: 0,
-                    ..input_prediction
-                };
-                String::from_utf8(canonical_json(&cooled)?)?
-            };
-            record_prediction_value(invocation_digest, action, payload);
+            record_prediction_value(invocation_digest, action, prediction.payload);
             Ok(Some(cached))
         }
         None => {
-            *learned = learned_plan(
-                Some(&RecordedPrediction {
-                    invocation: invocation_digest,
-                    action: prediction.action,
-                    prediction: input_prediction,
-                }),
-                &candidates,
-                learned_enabled,
-            );
+            *learned = plan_learned_reuse(compilation, &discovered, learned_enabled);
             Ok(None)
         }
     }
@@ -601,7 +640,6 @@ fn record_prediction(
     action: &CacheDigest,
     discovered: &DiscoveredInputs,
     timing: &CompileTiming,
-    churn_streak: u32,
 ) {
     let result = (|| {
         let context = base_action_context(
@@ -615,7 +653,6 @@ fn record_prediction(
         prediction.version = prediction.version.max(2);
         prediction.compiler_duration_ns = timing.duration_ns;
         prediction.crate_name.clone_from(&timing.crate_name);
-        prediction.churn_streak = churn_streak;
         let payload = String::from_utf8(canonical_json(&prediction)?)?;
         record_prediction_value(invocation_digest, action.clone(), payload);
         Result::<()>::Ok(())
@@ -626,17 +663,6 @@ fn record_prediction(
 }
 
 fn prediction_timing(compilation: &Compilation<'_>) -> Result<CompileTiming> {
-    let recorded = fetch_recorded_prediction(compilation)?;
-    Ok(
-        recorded.map_or_else(CompileTiming::default, |recorded| CompileTiming {
-            crate_name: recorded.prediction.crate_name,
-            duration_ns: recorded.prediction.compiler_duration_ns,
-        }),
-    )
-}
-
-/// Read back what this invocation recorded after its last successful run.
-fn fetch_recorded_prediction(compilation: &Compilation<'_>) -> Result<Option<RecordedPrediction>> {
     let context = base_action_context(
         compilation.rustc,
         compilation.working_dir,
@@ -655,34 +681,34 @@ fn fetch_recorded_prediction(compilation: &Compilation<'_>) -> Result<Option<Rec
         AgentResponse::ActionPrediction {
             prediction: Some(prediction),
         } => prediction,
-        AgentResponse::ActionPrediction { prediction: None } => return Ok(None),
+        AgentResponse::ActionPrediction { prediction: None } => {
+            return Ok(CompileTiming::default());
+        }
         AgentResponse::Error { message } => bail!(message),
         _ => bail!("cache agent returned an unexpected action prediction response"),
     };
-    let decoded = decode_prediction(&prediction, &invocation_digest)?;
-    Ok(Some(RecordedPrediction {
-        invocation: invocation_digest,
-        action: prediction.action,
-        prediction: decoded,
-    }))
+    decode_prediction_timing(&prediction, &invocation_digest)
 }
 
-fn decode_prediction(
+fn decode_prediction_timing(
     prediction: &ActionPrediction,
     invocation: &CacheDigest,
-) -> Result<RustcInputPrediction> {
+) -> Result<CompileTiming> {
     if prediction.adapter != "rustc" || prediction.invocation != *invocation {
         bail!("cache agent returned an incompatible rustc timing prediction");
     }
-    let decoded: RustcInputPrediction = serde_json::from_str(&prediction.payload)?;
-    if !matches!(decoded.version, 1..=3)
-        || decoded.crate_name.len() > 256
-        || decoded.crate_name.contains(['\0', '\n', '\r'])
-        || String::from_utf8(canonical_json(&decoded)?)? != prediction.payload
+    let timing: RustcInputPrediction = serde_json::from_str(&prediction.payload)?;
+    if !matches!(timing.version, 1..=3)
+        || timing.crate_name.len() > 256
+        || timing.crate_name.contains(['\0', '\n', '\r'])
+        || String::from_utf8(canonical_json(&timing)?)? != prediction.payload
     {
         bail!("cache agent returned an invalid rustc timing prediction");
     }
-    Ok(decoded)
+    Ok(CompileTiming {
+        crate_name: timing.crate_name,
+        duration_ns: timing.compiler_duration_ns,
+    })
 }
 
 fn record_prediction_value(invocation: CacheDigest, action: CacheDigest, payload: String) {
