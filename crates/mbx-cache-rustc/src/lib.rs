@@ -42,7 +42,12 @@ pub use dep_info::{DepInfoCommand, DiscoveredInputs, RustcDepInfo};
 /// Schema version embedded in canonical rustc action descriptors.
 pub const ACTION_SCHEMA_VERSION: u8 = 1;
 /// Version of the rustc argument and input model used to construct keys.
-pub const ADAPTER_VERSION: u8 = 1;
+///
+/// Bumped to 2 when the dep-info and diagnostics stored with a result stopped
+/// carrying the publishing checkout's absolute paths. Entries written before
+/// that hold the old spelling, and nothing in them says so, so they are retired
+/// by the key rather than restored into a checkout they do not describe.
+pub const ADAPTER_VERSION: u8 = 2;
 
 impl BypassReason {
     /// A stable, low-cardinality name for this reason.
