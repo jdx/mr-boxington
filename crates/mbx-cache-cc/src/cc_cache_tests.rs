@@ -157,6 +157,22 @@ fn argv(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
 
+/// Build an absolute path that is absolute on this platform, since a key that
+/// rejects relative roots would otherwise reject every fixture on Windows.
+fn absolute(segments: &[&str]) -> PathBuf {
+    let mut path = if cfg!(windows) {
+        PathBuf::from(r"C:\")
+    } else {
+        PathBuf::from("/")
+    };
+    path.extend(segments);
+    path
+}
+
+fn text(path: &Path) -> String {
+    path.to_str().expect("fixture paths are UTF-8").to_string()
+}
+
 fn typical() -> Vec<OsString> {
     argv(&[
         "-O2",
@@ -385,10 +401,10 @@ fn identity() -> CcCompilerIdentity {
     }
 }
 
-fn context(workspace: &str, target: &str) -> CcActionContext {
+fn context(workspace: &Path, target: &Path) -> CcActionContext {
     CcActionContext {
         compiler: identity(),
-        working_dir: PathBuf::from(workspace),
+        working_dir: workspace.to_path_buf(),
         path_mappings: vec![
             PathMapping::new(target, "target"),
             PathMapping::new(workspace, "workspace"),
@@ -398,47 +414,55 @@ fn context(workspace: &str, target: &str) -> CcActionContext {
     }
 }
 
+/// A checkout and the target directory inside it.
+fn checkout(name: &str) -> (PathBuf, PathBuf) {
+    let workspace = absolute(&["work", name]);
+    let target = workspace.join("target");
+    (workspace, target)
+}
+
 fn digest_of(value: &str) -> CacheDigest {
     CacheDigest::blake3(value.as_bytes())
 }
 
 #[test]
 fn equivalent_worktrees_produce_the_same_portable_action_key() {
-    let build = |workspace: &str, target: &str| {
+    let build = |name: &str| {
+        let (workspace, target) = checkout(name);
         let arguments = argv(&["-O2", "-c", "-o", "out.o", "src/a.c"]);
         let invocation = CcInvocation::parse(&arguments).expect("admitted");
-        let mut context = context(workspace, target);
+        let mut context = context(&workspace, &target);
         context.inputs = vec![
             CcActionInput {
-                path: PathBuf::from(format!("{workspace}/src/a.c")),
+                path: workspace.join("src/a.c"),
                 digest: digest_of("source"),
             },
             CcActionInput {
-                path: PathBuf::from(format!("{workspace}/src/a.h")),
+                path: workspace.join("src/a.h"),
                 digest: digest_of("header"),
             },
         ];
         invocation.action(context).expect("action").digest
     };
-    assert_eq!(
-        build("/work/one", "/work/one/target"),
-        build("/elsewhere/two", "/elsewhere/two/target"),
-    );
+    assert_eq!(build("one"), build("two"));
 }
 
 #[test]
 fn registry_sources_normalize_under_the_cargo_home_placeholder() {
     // Cargo runs a registry crate's build script with its cwd inside the
     // registry checkout, which is nowhere near the user's workspace.
+    let (workspace, target) = checkout("one");
+    let cargo_home = absolute(&["home", "u", ".cargo"]);
+    let package = cargo_home.join("registry/src/index/zstd-sys-2.0");
     let arguments = argv(&["-c", "-o", "out.o", "zstd.c"]);
     let invocation = CcInvocation::parse(&arguments).expect("admitted");
-    let mut context = context("/work/one", "/work/one/target");
-    context.working_dir = PathBuf::from("/home/u/.cargo/registry/src/index/zstd-sys-2.0");
+    let mut context = context(&workspace, &target);
+    context.working_dir = package.clone();
     context
         .path_mappings
-        .push(PathMapping::new("/home/u/.cargo", "cargo_home"));
+        .push(PathMapping::new(cargo_home, "cargo_home"));
     context.inputs = vec![CcActionInput {
-        path: PathBuf::from("/home/u/.cargo/registry/src/index/zstd-sys-2.0/zstd.c"),
+        path: package.join("zstd.c"),
         digest: digest_of("source"),
     }];
     let action = invocation.action(context).expect("action");
@@ -449,14 +473,17 @@ fn registry_sources_normalize_under_the_cargo_home_placeholder() {
     );
 }
 
+/// The system roots are POSIX paths, and the shims are only installed on unix.
+#[cfg(unix)]
 #[test]
 fn system_headers_are_keyed_verbatim_under_admitted_roots() {
+    let (workspace, target) = checkout("one");
     let arguments = argv(&["-c", "-o", "out.o", "src/a.c"]);
     let invocation = CcInvocation::parse(&arguments).expect("admitted");
-    let mut context = context("/work/one", "/work/one/target");
+    let mut context = context(&workspace, &target);
     context.inputs = vec![
         CcActionInput {
-            path: PathBuf::from("/work/one/src/a.c"),
+            path: workspace.join("src/a.c"),
             digest: digest_of("source"),
         },
         CcActionInput {
@@ -469,13 +496,15 @@ fn system_headers_are_keyed_verbatim_under_admitted_roots() {
     assert!(descriptor.contains("/usr/include/stdio.h"), "{descriptor}");
 }
 
+#[cfg(unix)]
 #[test]
 fn unmapped_absolute_include_paths_bypass() {
+    let (workspace, target) = checkout("one");
     let arguments = argv(&["-I/opt/homebrew/include", "-c", "-o", "out.o", "src/a.c"]);
     let invocation = CcInvocation::parse(&arguments).expect("admitted");
-    let mut context = context("/work/one", "/work/one/target");
+    let mut context = context(&workspace, &target);
     context.inputs = vec![CcActionInput {
-        path: PathBuf::from("/work/one/src/a.c"),
+        path: workspace.join("src/a.c"),
         digest: digest_of("source"),
     }];
     assert_eq!(
@@ -486,9 +515,10 @@ fn unmapped_absolute_include_paths_bypass() {
 
 #[test]
 fn a_missing_required_input_is_not_publishable() {
+    let (workspace, target) = checkout("one");
     let arguments = argv(&["-c", "-o", "out.o", "src/a.c"]);
     let invocation = CcInvocation::parse(&arguments).expect("admitted");
-    let context = context("/work/one", "/work/one/target");
+    let context = context(&workspace, &target);
     assert_eq!(
         invocation.action(context).unwrap_err().kind(),
         "missing-required-input"
@@ -574,13 +604,14 @@ fn only_gcc_carries_an_external_assembler_in_its_identity() {
 #[test]
 fn the_assembler_identity_changes_the_action_key() {
     let build = |assembler: &str| {
+        let (workspace, target) = checkout("one");
         let arguments = argv(&["-c", "-o", "out.o", "src/a.c"]);
         let invocation = CcInvocation::parse(&arguments).expect("admitted");
-        let mut context = context("/work/one", "/work/one/target");
+        let mut context = context(&workspace, &target);
         context.compiler.family = CcCompilerFamily::Gcc;
         context.compiler.assembler = assembler.into();
         context.inputs = vec![CcActionInput {
-            path: PathBuf::from("/work/one/src/a.c"),
+            path: workspace.join("src/a.c"),
             digest: digest_of("source"),
         }];
         invocation.action(context).expect("action").digest
@@ -593,16 +624,20 @@ fn the_assembler_identity_changes_the_action_key() {
 
 #[test]
 fn predictions_round_trip_through_normalized_names() {
+    let (workspace, target) = checkout("one");
     let arguments = argv(&["-c", "-o", "out.o", "src/a.c"]);
     let invocation = CcInvocation::parse(&arguments).expect("admitted");
-    let mut context = context("/work/one", "/work/one/target");
+    let mut context = context(&workspace, &target);
     context.inputs = vec![
         CcActionInput {
-            path: PathBuf::from("/work/one/src/a.c"),
+            path: workspace.join("src/a.c"),
             digest: digest_of("source"),
         },
         CcActionInput {
-            path: PathBuf::from(format!("{INCLUDE_MANIFEST_PREFIX}/work/one/src")),
+            path: PathBuf::from(format!(
+                "{INCLUDE_MANIFEST_PREFIX}{}",
+                text(&workspace.join("src"))
+            )),
             digest: digest_of("manifest"),
         },
     ];
@@ -622,6 +657,7 @@ fn predictions_round_trip_through_normalized_names() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn predicted_system_paths_only_denormalize_under_admitted_roots() {
     let mappings = PathMapping::ordered(&[PathMapping::new("/work/one", "workspace")]);
@@ -695,19 +731,20 @@ fn the_msvc_probe_flag_reads_as_a_compiler_query() {
 /// itself checkout-specific.
 #[test]
 fn prefix_map_sources_normalize_while_replacements_stay_verbatim() {
-    let build = |workspace: &str| {
-        let flag = format!("-ffile-prefix-map={workspace}=");
+    let build = |name: &str| {
+        let (workspace, target) = checkout(name);
+        let flag = format!("-ffile-prefix-map={}=", text(&workspace));
         let arguments = argv(&[&flag, "-c", "-o", "out.o", "src/a.c"]);
         let invocation = CcInvocation::parse(&arguments).expect("admitted");
-        let mut context = context(workspace, &format!("{workspace}/target"));
+        let mut context = context(&workspace, &target);
         context.inputs = vec![CcActionInput {
-            path: PathBuf::from(format!("{workspace}/src/a.c")),
+            path: workspace.join("src/a.c"),
             digest: digest_of("source"),
         }];
         invocation.action(context).expect("action")
     };
-    let one = build("/work/one");
-    let two = build("/elsewhere/two");
+    let one = build("one");
+    let two = build("two");
     assert_eq!(one.digest, two.digest);
     let descriptor = String::from_utf8(one.bytes).expect("utf-8");
     assert!(

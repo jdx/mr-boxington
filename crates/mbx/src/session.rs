@@ -1274,7 +1274,7 @@ fn run_transparent_cc(compiler: OsString, arguments: Vec<OsString>) -> ExitCode 
     #[cfg(not(unix))]
     {
         match command.status() {
-            Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
+            Ok(status) => ExitCode::from(u8::try_from(status.code().unwrap_or(1)).unwrap_or(1)),
             Err(error) => {
                 eprintln!("mbx[error]: the cc shim failed to execute {compiler:?}: {error}");
                 ExitCode::from(1)

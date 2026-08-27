@@ -24,6 +24,9 @@ fn standalone_prediction_tasks_shard_rather_than_collecting_every_compile() {
     assert!(shards.len() <= 256, "shards are bounded by the hash prefix");
 }
 
+/// The exempt roots are POSIX paths and the shims are only installed on unix,
+/// so this models the platform the feature runs on.
+#[cfg(unix)]
 #[test]
 fn manifest_directories_skip_system_roots_and_include_header_parents() {
     let arguments = ["-I", "include", "-c", "-o", "a.o", "a.c"]
