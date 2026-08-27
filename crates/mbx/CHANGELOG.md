@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2](https://github.com/jdx/mr-boxington/compare/v0.5.1...v0.5.2) - 2026-08-27
+
+### Added
+
+- cache standalone C and C++ builds through mbx exec ([#138](https://github.com/jdx/mr-boxington/pull/138))
+- cache C and C++ compiles from build scripts ([#132](https://github.com/jdx/mr-boxington/pull/132))
+- cache natively linked test binaries ([#129](https://github.com/jdx/mr-boxington/pull/129))
+- cache to an S3-compatible object store ([#140](https://github.com/jdx/mr-boxington/pull/140))
+- *(cache)* expose shared Cargo cache integration ([#130](https://github.com/jdx/mr-boxington/pull/130))
+- batch remote action lookups and blob uploads ([#131](https://github.com/jdx/mr-boxington/pull/131))
+- publish remote objects after the build asks for them ([#126](https://github.com/jdx/mr-boxington/pull/126))
+- compile churning crates incrementally ([#127](https://github.com/jdx/mr-boxington/pull/127))
+- mbx tui, a live view of every build's cache activity ([#128](https://github.com/jdx/mr-boxington/pull/128))
+
+### Fixed
+
+- *(rustc)* restore results into the checkout that asked for them ([#141](https://github.com/jdx/mr-boxington/pull/141))
+- symlink the session shim so macOS cannot kill it at exec ([#134](https://github.com/jdx/mr-boxington/pull/134))
+
+### Other
+
+- define download_timeout as a whole-download deadline ([#142](https://github.com/jdx/mr-boxington/pull/142))
+
 ## [0.5.1](https://github.com/jdx/mr-boxington/compare/v0.5.0...v0.5.1) - 2026-08-26
 
 ### Fixed
