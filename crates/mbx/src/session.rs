@@ -1041,9 +1041,18 @@ fn link_path_shim(_executable: &Path, _destination: &Path) -> Result<()> {
 /// The identity check stays for the rest of `PATH`, where a copy of mbx under a
 /// compiler's name can still turn up outside any directory mbx owns.
 fn resolve_on_path_excluding(name: &str, this_binary: &Path, shims: &Path) -> Option<PathBuf> {
+    resolve_in_path(&std::env::var_os("PATH")?, name, this_binary, shims)
+}
+
+/// The search itself, over a `PATH` the caller supplies.
+///
+/// Separated from the environment so a test can hand it one: `PATH` is process
+/// global, and cargo runs these tests on a thread pool, so setting it here
+/// would race every other test that reads one -- `which` in the linker tests
+/// among them.
+fn resolve_in_path(path: &OsStr, name: &str, this_binary: &Path, shims: &Path) -> Option<PathBuf> {
     let shims = canonical(shims);
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
+    std::env::split_paths(path)
         .filter(|directory| canonical(directory) != shims)
         .map(|directory| directory.join(name))
         .find(|candidate| candidate.is_file() && !is_same_binary(candidate, Some(this_binary)))
