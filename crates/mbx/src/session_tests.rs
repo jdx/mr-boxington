@@ -187,6 +187,44 @@ fn exec_identity_falls_back_to_the_directory_name() {
 
 #[cfg(unix)]
 #[test]
+fn a_shim_directory_never_supplies_the_real_compiler() {
+    // The shim there stands for a *different* mbx than the one resolving --
+    // an upgrade, or another checkout's build -- so no identity check against
+    // the running binary can rule it out. Taking it would pin a shim as its
+    // own compiler and recurse forever, so the directory is excluded by
+    // location.
+    let directory = tempfile::tempdir().unwrap();
+    let shims = directory.path().join("shims");
+    let real_dir = directory.path().join("bin");
+    std::fs::create_dir(&shims).unwrap();
+    std::fs::create_dir(&real_dir).unwrap();
+    let other_mbx = directory.path().join("other-mbx");
+    std::fs::write(&other_mbx, b"#!/bin/sh\n").unwrap();
+    std::os::unix::fs::symlink(&other_mbx, shims.join("cc")).unwrap();
+    let real_cc = real_dir.join("cc");
+    std::fs::write(&real_cc, b"#!/bin/sh\n").unwrap();
+
+    let running = directory.path().join("mbx");
+    std::fs::write(&running, b"#!/bin/sh\n").unwrap();
+    let path = std::env::join_paths([shims.as_path(), real_dir.as_path()]).unwrap();
+    // SAFETY: single-threaded test, and the value is restored below.
+    let previous = std::env::var_os("PATH");
+    unsafe { std::env::set_var("PATH", &path) };
+    let resolved = resolve_on_path_excluding("cc", &running, &shims);
+    match previous {
+        Some(value) => unsafe { std::env::set_var("PATH", value) },
+        None => unsafe { std::env::remove_var("PATH") },
+    }
+
+    assert_eq!(
+        resolved.map(|path| std::fs::canonicalize(path).unwrap()),
+        Some(std::fs::canonicalize(&real_cc).unwrap()),
+        "a shim must never be chosen as the compiler it stands in for"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn a_hard_linked_shim_is_recognized_as_the_same_binary() {
     // Both files are created here rather than linked from the running test
     // binary: a hard link needs one filesystem, and a temporary directory is

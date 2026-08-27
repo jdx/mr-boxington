@@ -962,10 +962,18 @@ pub fn install_path_shims(directory: &Path) -> Result<Option<PathShims>> {
     std::fs::create_dir_all(directory)?;
     let mut compilers = BTreeMap::new();
     for (name, _) in PATH_SHIM_NAMES {
-        let Some(real) = resolve_on_path_excluding(name, &executable) else {
+        let destination = directory.join(name);
+        let Some(real) = resolve_on_path_excluding(name, &executable, directory) else {
             continue;
         };
-        link_path_shim(&executable, &directory.join(name))?;
+        // Belt and braces for the recursion the exclusion above prevents: a
+        // shim that stood in for itself would exec itself forever, so leave
+        // the name uncached rather than install that.
+        if canonical(&real) == canonical(&destination) {
+            debug!("{name} resolved to its own shim; leaving it uncached");
+            continue;
+        }
+        link_path_shim(&executable, &destination)?;
         compilers.insert((*name).to_string(), real);
     }
     if compilers.is_empty() {
@@ -1019,11 +1027,30 @@ fn link_path_shim(_executable: &Path, _destination: &Path) -> Result<()> {
     eyre::bail!("PATH shims are not supported on this platform")
 }
 
-fn resolve_on_path_excluding(name: &str, this_binary: &Path) -> Option<PathBuf> {
+/// Find the real compiler `name` refers to, never a shim.
+///
+/// The shim directory is skipped by location, not by identity. Identity alone
+/// is not enough: a nested `mbx exec` sees that directory first on `PATH`, and
+/// a shim there may point at a *different* mbx binary -- an upgrade, or a build
+/// from another checkout -- which no inode comparison against the running one
+/// can recognize. Choosing it would pin a shim as the compiler and then relink
+/// it to the running binary, leaving it its own compiler and recursing until
+/// the process table fills. Nothing mbx puts in that directory is ever a real
+/// compiler, so the directory itself is the honest thing to exclude.
+///
+/// The identity check stays for the rest of `PATH`, where a copy of mbx under a
+/// compiler's name can still turn up outside any directory mbx owns.
+fn resolve_on_path_excluding(name: &str, this_binary: &Path, shims: &Path) -> Option<PathBuf> {
+    let shims = canonical(shims);
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
+        .filter(|directory| canonical(directory) != shims)
         .map(|directory| directory.join(name))
         .find(|candidate| candidate.is_file() && !is_same_binary(candidate, Some(this_binary)))
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn install_session_shim(session_dir: &Path) -> Result<PathBuf> {
