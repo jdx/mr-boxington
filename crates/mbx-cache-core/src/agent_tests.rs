@@ -1717,30 +1717,38 @@ async fn an_action_result_is_published_after_the_blobs_it_references() {
         output_root: None,
         version: 1,
     };
-    // Recording the order the server saw is the assertion: an action result the
-    // server accepts before its blobs is one a reader could not restore.
-    let order = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let blob_order = order.clone();
+    // Recorded as each request arrives rather than as each response is written:
+    // an upload finishes without reading the response body, so the body is no
+    // signal for when the client moved on. Each matcher guards on its own path,
+    // because mockito may consult a matcher for a request another mock answers.
+    let arrivals = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let blob_arrivals = arrivals.clone();
+    let blob_route = blob_path(&action);
+    let matched_blob_route = blob_route.clone();
     let blob = server
-        .mock("PUT", blob_path(&action).as_str())
-        .with_status(200)
-        .with_chunked_body(move |writer| {
-            // Held long enough that an unordered upload would finish first.
-            std::thread::sleep(Duration::from_millis(200));
-            blob_order.lock().unwrap().push("blob");
-            std::io::Write::write_all(writer, b"")
+        .mock("PUT", blob_route.as_str())
+        .match_request(move |request| {
+            if request.path() == matched_blob_route {
+                blob_arrivals.lock().unwrap().push("blob");
+            }
+            true
         })
+        .with_status(200)
         .expect(1)
         .create_async()
         .await;
-    let result_order = order.clone();
+    let result_arrivals = arrivals.clone();
+    let action_route = action_path(&action);
+    let matched_action_route = action_route.clone();
     let action_result = server
-        .mock("PUT", action_path(&action).as_str())
-        .with_status(200)
-        .with_chunked_body(move |writer| {
-            result_order.lock().unwrap().push("action result");
-            std::io::Write::write_all(writer, b"")
+        .mock("PUT", action_route.as_str())
+        .match_request(move |request| {
+            if request.path() == matched_action_route {
+                result_arrivals.lock().unwrap().push("action result");
+            }
+            true
         })
+        .with_status(200)
         .expect(1)
         .create_async()
         .await;
@@ -1769,7 +1777,11 @@ async fn an_action_result_is_published_after_the_blobs_it_references() {
 
     blob.assert_async().await;
     action_result.assert_async().await;
-    assert_eq!(*order.lock().unwrap(), vec!["blob", "action result"]);
+    assert_eq!(
+        *arrivals.lock().unwrap(),
+        vec!["blob", "action result"],
+        "an action result reached the server before a blob it references"
+    );
 }
 
 #[tokio::test]
