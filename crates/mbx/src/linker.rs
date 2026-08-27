@@ -22,17 +22,22 @@ use std::process::Command;
 /// Environment that selects what the probes below report.
 const IDENTITY_ENVIRONMENT: &[&str] = &["SDKROOT", "MACOSX_DEPLOYMENT_TARGET"];
 
-/// Startup objects and libc a GNU-style link resolves against.
+/// The object that starts a program. One of these must resolve, or nothing
+/// pins what the link began with.
 #[cfg(target_os = "linux")]
-const CRT_PROBES: &[&str] = &[
-    "Scrt1.o",
-    "crt1.o",
-    "crti.o",
-    "crtn.o",
-    "crtbeginS.o",
-    "crtendS.o",
-    "libc.so.6",
-];
+const STARTUP_PROBES: &[&str] = &["Scrt1.o", "crt1.o"];
+
+/// Names a libc goes by, across the C libraries and linkage modes this tier
+/// admits. One of these must resolve too: libc is the input a statically
+/// linked program carries inside it, so a key that does not pin it is a key
+/// that lets one distribution's binary restore onto another's.
+#[cfg(target_os = "linux")]
+const LIBC_PROBES: &[&str] = &["libc.so.6", "libc.so", "libc.a", "libc.musl-x86_64.so.1"];
+
+/// Everything else a GNU-style link pulls in. Individually optional -- a
+/// toolchain that does not use one is not thereby unidentifiable.
+#[cfg(target_os = "linux")]
+const CRT_PROBES: &[&str] = &["crti.o", "crtn.o", "crtbeginS.o", "crtendS.o"];
 
 /// Describe the linker rustc will use for a native link on this host.
 ///
@@ -93,8 +98,8 @@ fn probe(driver: &Path) -> Result<LinkerIdentity> {
             .to_owned(),
         driver_version: run(driver, &["--version"])?,
         linker_version: linker_version(driver)?,
-        crt_objects: crt_objects(driver),
-        sdk: sdk_identity(),
+        crt_objects: crt_objects(driver)?,
+        sdk: sdk_identity()?,
         deployment_target: std::env::var("MACOSX_DEPLOYMENT_TARGET").ok(),
     })
 }
@@ -123,13 +128,18 @@ fn linker_version(driver: &Path) -> Result<String> {
 
 /// Hash the startup objects and libc the driver resolves.
 ///
-/// A probe that does not resolve to a readable file is left out rather than
-/// guessed at: the ones that do resolve already distinguish two hosts, and a
-/// missing entry cannot make two different hosts look alike.
+/// A probe that does not resolve is left out of the map, so a host that
+/// resolves a different set keys differently. That alone is not enough: two
+/// hosts failing the *same* probe would agree on a key without ever pinning
+/// what that probe stood for. So the inputs a link cannot be described without
+/// -- a startup object and a libc -- have to resolve, and a host where neither
+/// does gets no identity and no cached link.
 #[cfg(target_os = "linux")]
-fn crt_objects(driver: &Path) -> BTreeMap<String, CacheDigest> {
-    CRT_PROBES
+fn crt_objects(driver: &Path) -> Result<BTreeMap<String, CacheDigest>> {
+    let resolved = STARTUP_PROBES
         .iter()
+        .chain(LIBC_PROBES)
+        .chain(CRT_PROBES)
         .filter_map(|name| {
             let resolved = run(driver, &[&format!("-print-file-name={name}")]).ok()?;
             let path = PathBuf::from(resolved.trim());
@@ -139,28 +149,42 @@ fn crt_objects(driver: &Path) -> BTreeMap<String, CacheDigest> {
                 .then(|| CacheDigest::blake3_file(&path))?;
             Some(((*name).to_owned(), digest.ok()?))
         })
-        .collect()
+        .collect::<BTreeMap<_, _>>();
+    for (probes, what) in [(STARTUP_PROBES, "startup object"), (LIBC_PROBES, "libc")] {
+        if !probes.iter().any(|name| resolved.contains_key(*name)) {
+            bail!("the linker driver resolved no {what}, so its links cannot be identified");
+        }
+    }
+    Ok(resolved)
 }
 
 /// macOS links against the SDK rather than loose startup objects, and the SDK
 /// identity below covers it.
 #[cfg(not(target_os = "linux"))]
-fn crt_objects(_driver: &Path) -> BTreeMap<String, CacheDigest> {
-    BTreeMap::new()
+fn crt_objects(_driver: &Path) -> Result<BTreeMap<String, CacheDigest>> {
+    Ok(BTreeMap::new())
 }
 
 /// Identity of the SDK a link builds against, where the platform has one.
 ///
 /// The build version is what changes when Apple ships new libraries under an
-/// unchanged SDK version, so it is the half that matters most here.
+/// unchanged SDK version, so it is the half that matters most here. A host that
+/// cannot report it gets no identity rather than one that omits the SDK: two
+/// such hosts would otherwise agree on a key while linking against different
+/// system libraries.
 #[cfg(target_os = "macos")]
-fn sdk_identity() -> Option<String> {
-    let version = xcrun(&["--sdk", "macosx", "--show-sdk-version"])?;
-    let build = xcrun(&["--sdk", "macosx", "--show-sdk-build-version"])?;
-    let path = std::env::var("SDKROOT")
-        .ok()
-        .or_else(|| xcrun(&["--sdk", "macosx", "--show-sdk-path"]))?;
-    Some(format!("{path} {version} ({build})"))
+fn sdk_identity() -> Result<Option<String>> {
+    let describe = || {
+        let version = xcrun(&["--sdk", "macosx", "--show-sdk-version"])?;
+        let build = xcrun(&["--sdk", "macosx", "--show-sdk-build-version"])?;
+        let path = std::env::var("SDKROOT")
+            .ok()
+            .or_else(|| xcrun(&["--sdk", "macosx", "--show-sdk-path"]))?;
+        Some(format!("{path} {version} ({build})"))
+    };
+    describe().map(Some).ok_or_else(|| {
+        eyre::eyre!("the macOS SDK could not be identified, so its links cannot be either")
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -174,8 +198,8 @@ fn xcrun(arguments: &[&str]) -> Option<String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn sdk_identity() -> Option<String> {
-    None
+fn sdk_identity() -> Result<Option<String>> {
+    Ok(None)
 }
 
 fn run(program: &Path, arguments: &[&str]) -> Result<String> {

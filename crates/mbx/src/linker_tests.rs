@@ -17,11 +17,23 @@ fn the_probe_describes_this_host() {
     // search paths that say nothing about which linker this is.
     assert!(!identity.driver_version.contains('\n') || identity.driver_version.lines().count() > 1);
 
-    if cfg!(target_os = "linux") {
+    // Whatever the probes could not place is absent from the key, so the
+    // inputs a link cannot be described without have to be present -- two
+    // hosts failing the same probe would otherwise agree on a key without
+    // either of them having pinned what it stood for.
+    #[cfg(target_os = "linux")]
+    {
         assert!(
-            identity.crt_objects.contains_key("crt1.o")
-                || identity.crt_objects.contains_key("Scrt1.o"),
-            "a GNU-style host should resolve its startup objects: {identity:?}"
+            STARTUP_PROBES
+                .iter()
+                .any(|name| identity.crt_objects.contains_key(*name)),
+            "a resolved identity must pin what the link starts with: {identity:?}"
+        );
+        assert!(
+            LIBC_PROBES
+                .iter()
+                .any(|name| identity.crt_objects.contains_key(*name)),
+            "a resolved identity must pin the libc: {identity:?}"
         );
     }
     if cfg!(target_os = "macos") {
