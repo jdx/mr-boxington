@@ -117,9 +117,17 @@ steps:
     with:
       role-to-assume: arn:aws:iam::111122223333:role/mbx-cache
       aws-region: us-west-2
-  - uses: jdx/mr-boxington-action@v1
+  - uses: jdx/mise-action@v4
+    with:
+      cache: false
+      install_args: mr-boxington
   - run: mbx build --workspace --all-features
 ```
+
+mbx is installed rather than set up through
+[`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action) here,
+because the action's GitHub Actions cache backend would store the same actions
+a second time. Use one or the other.
 
 mbx still refuses to publish from a pull request. Because a bucket has no
 server to authorize anything, make IAM agree: scope the role's trust policy to

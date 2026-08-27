@@ -7,7 +7,9 @@
 
 use crate::config::Config;
 use eyre::{Context as _, Result, bail};
-use mbx_cache_core::{RemoteCacheClient, RemoteCacheConfig, S3Credentials, S3RemoteCacheConfig};
+use mbx_cache_core::{
+    RemoteCacheClient, RemoteCacheConfig, S3ConditionalWrites, S3Credentials, S3RemoteCacheConfig,
+};
 use url::Url;
 
 /// What the AWS environment variables say, read once at the edge so that
@@ -62,6 +64,7 @@ pub(crate) fn remote_client_with(
     if config.remote.s3_endpoint.is_some()
         || config.remote.s3_region.is_some()
         || config.remote.s3_force_path_style.is_some()
+        || config.remote.s3_conditional_writes != S3ConditionalWrites::default()
     {
         bail!("remote.s3_* settings apply to an s3:// remote cache URL, but remote.url is {url}");
     }
@@ -322,17 +325,53 @@ mod tests {
 
     #[test]
     fn s3_settings_on_a_protocol_url_are_refused() {
-        let refusal = refusal(
+        // A setting that quietly does nothing is worse than one that is
+        // refused, so every S3-only key is checked, including the one with a
+        // default that makes its absence look like its presence.
+        for remote in [
             RemoteSettings {
-                url: Some("https://cache.example.com".into()),
-                namespace: Some("acme".into()),
                 s3_region: Some("us-west-2".into()),
                 ..RemoteSettings::default()
             },
-            aws(),
-        );
+            RemoteSettings {
+                s3_endpoint: Some("https://store.example.com".into()),
+                ..RemoteSettings::default()
+            },
+            RemoteSettings {
+                s3_force_path_style: Some(true),
+                ..RemoteSettings::default()
+            },
+            RemoteSettings {
+                s3_conditional_writes: S3ConditionalWrites::Required,
+                ..RemoteSettings::default()
+            },
+        ] {
+            let refusal = refusal(
+                RemoteSettings {
+                    url: Some("https://cache.example.com".into()),
+                    namespace: Some("acme".into()),
+                    ..remote
+                },
+                aws(),
+            );
+            assert!(refusal.contains("apply to an s3:// remote"), "{refusal}");
+        }
+    }
 
-        assert!(refusal.contains("apply to an s3:// remote"));
+    #[test]
+    fn a_protocol_url_is_accepted_with_the_s3_settings_left_alone() {
+        assert!(
+            client(
+                RemoteSettings {
+                    url: Some("https://cache.example.com".into()),
+                    namespace: Some("acme".into()),
+                    ..RemoteSettings::default()
+                },
+                aws(),
+            )
+            .unwrap()
+            .is_some()
+        );
     }
 
     #[test]
