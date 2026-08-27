@@ -74,9 +74,11 @@ another checkout, or on Windows from another target directory, is that
 difference rather than a fault.
 ## C and C++ caching covers build-script compiles only
 
-mbx caches the C and C++ a cargo build script compiles through `CC` and `CXX`,
-which is what the `cc` crate uses. Standalone C projects driven by make or
-CMake are outside a cargo build and are not reached.
+mbx caches the C and C++ a cargo build script compiles for the host through
+the `cc` crate. Standalone C projects driven by make or CMake are outside a
+cargo build and are not reached, and neither are cross compilations: the shims
+are installed as `HOST_CC` and `HOST_CXX`, which the `cc` crate consults only
+when host and target agree.
 
 Only a plain single-source `-c` compile through a gcc-style or clang-style
 driver is admitted. Linking, preprocessing, assembly, Objective-C, precompiled
@@ -86,9 +88,13 @@ bypass, as does any flag the adapter does not model. A source or header that
 expands `__DATE__`, `__TIME__`, or `__TIMESTAMP__` bypasses too: its object is
 not a function of its inputs.
 
+A flag that tunes for the machine's own processor -- `-march=native` and its
+relatives -- bypasses as well, since the object it produces is not a function
+of anything the key names.
+
 The shims are only installed when the build has not chosen its own compiler.
-Setting `CC`, `CXX`, `TARGET_CC`, or `TARGET_CXX` leaves that build's C
-compilations uncached, and `MBX_CC=0` disables the feature.
+Setting `CC`, `CXX`, `HOST_CC`, `HOST_CXX`, `TARGET_CC`, or `TARGET_CXX` leaves
+that build's C compilations uncached, and `MBX_CC=0` disables the feature.
 
 ## `OUT_DIR` sharing is opt-in
 

@@ -56,6 +56,10 @@ fn bypass_kinds_are_stable_and_field_independent() {
         ),
         (CcBypassReason::Plugin("-fplugin=x".into()), "plugin"),
         (
+            CcBypassReason::LocalCpuTarget("-march=native".into()),
+            "local-cpu-target",
+        ),
+        (
             CcBypassReason::UnsupportedCompilerDriver("cl.exe".into()),
             "unsupported-compiler-driver",
         ),
@@ -760,4 +764,101 @@ fn a_separate_param_value_is_not_mistaken_for_a_source() {
     let arguments = argv(&["--param", "ssp-buffer-size=4", "-c", "-o", "a.o", "a.c"]);
     let invocation = CcInvocation::parse(&arguments).expect("admitted");
     assert_eq!(invocation.source(), Path::new("a.c"));
+}
+
+/// `-I` is the glued include flag, and the lowercase `-i…` family is a
+/// different set of flags entirely. Prefix-stripping the first must not
+/// swallow the second, so each one still reaches the handler that knows
+/// whether it names a search directory, a forced include, or a sysroot.
+#[test]
+fn lowercase_include_flags_are_not_swallowed_by_the_include_path_prefix() {
+    let (workspace, target) = checkout("one");
+    let sysroot = text(&workspace.join("sdk"));
+    let arguments = argv(&[
+        "-isystem",
+        "vendor/include",
+        "-iquote",
+        "quoted",
+        "-idirafter",
+        "after",
+        "-isysroot",
+        &sysroot,
+        "-include",
+        "forced.h",
+        "-imacros",
+        "macros.h",
+        "-c",
+        "-o",
+        "out.o",
+        "src/a.c",
+    ]);
+    let invocation = CcInvocation::parse(&arguments).expect("admitted");
+
+    // The source is still the source: a swallowed flag would have consumed it.
+    assert_eq!(invocation.source(), Path::new("src/a.c"));
+    assert_eq!(invocation.sysroot(), Some(workspace.join("sdk").as_path()));
+    assert_eq!(
+        invocation.include_dirs(),
+        [
+            PathBuf::from("vendor/include"),
+            PathBuf::from("quoted"),
+            PathBuf::from("after"),
+        ]
+    );
+    assert!(
+        invocation
+            .required_inputs()
+            .contains(&PathBuf::from("forced.h"))
+    );
+    assert!(
+        invocation
+            .required_inputs()
+            .contains(&PathBuf::from("macros.h"))
+    );
+
+    // Each one is keyed under its own flag rather than as an include path.
+    let mut context = context(&workspace, &target);
+    context.inputs = ["src/a.c", "forced.h", "macros.h"]
+        .into_iter()
+        .map(|name| CcActionInput {
+            path: workspace.join(name),
+            digest: digest_of(name),
+        })
+        .collect();
+    let action = invocation.action(context).expect("action");
+    let descriptor = String::from_utf8(action.bytes).expect("utf-8");
+    for flag in [
+        "-isystem=",
+        "-iquote=",
+        "-idirafter=",
+        "-include=",
+        "-imacros=",
+    ] {
+        assert!(
+            descriptor.contains(flag),
+            "{flag} missing from {descriptor}"
+        );
+    }
+}
+
+/// A flag that resolves against the machine's own CPU makes the object depend
+/// on something the key cannot name, so another machine must not restore it.
+#[test]
+fn tuning_for_the_local_cpu_bypasses() {
+    for flag in [
+        "-march=native",
+        "-mcpu=native",
+        "-mtune=native",
+        "-march=host",
+    ] {
+        let arguments = argv(&[flag, "-c", "-o", "a.o", "a.c"]);
+        assert_eq!(
+            CcInvocation::parse(&arguments).unwrap_err().kind(),
+            "local-cpu-target",
+            "{flag} should bypass"
+        );
+    }
+    // A named architecture is ordinary key material.
+    let arguments = argv(&["-march=armv8-a", "-mtune=generic", "-c", "-o", "a.o", "a.c"]);
+    assert!(CcInvocation::parse(&arguments).is_ok());
 }

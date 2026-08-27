@@ -10,7 +10,7 @@ setup() {
   # CC and CXX are unset for the same reason MBX_CC is: an inherited compiler
   # choice would make mbx stand aside and the fixture prove nothing.
   unset CARGO_TARGET_DIR MBX_INCREMENTAL CARGO_INCREMENTAL CI MBX_CC
-  unset CC CXX TARGET_CC TARGET_CXX MBX_REAL_CC MBX_REAL_CXX
+  unset CC CXX HOST_CC HOST_CXX TARGET_CC TARGET_CXX MBX_REAL_CC MBX_REAL_CXX
   export MBX_CACHE_DIR="$BATS_TEST_TMPDIR/store"
 
   if ! cc -v >/dev/null 2>&1; then
@@ -37,7 +37,10 @@ use std::{env, path::PathBuf, process::Command};
 
 fn main() {
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let compiler = env::var("CC").unwrap_or_else(|_| "cc".into());
+    // Mirrors the cc crate's precedence: HOST_CC before CC.
+    let compiler = env::var("HOST_CC")
+        .or_else(|_| env::var("CC"))
+        .unwrap_or_else(|_| "cc".into());
     let status = Command::new(&compiler)
         .arg("-O2")
         .arg("-Iinclude")

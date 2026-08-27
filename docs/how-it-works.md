@@ -7,7 +7,7 @@ subcommand.
 1. mbx resolves the workspace and target roots through Cargo metadata.
 2. It starts an in-process cache agent and creates shims for the build.
 3. Cargo runs normally with the rustc shim set as `RUSTC_WRAPPER`, and build
-   scripts inherit a `CC` and `CXX` pointing at the C and C++ shims.
+   scripts inherit a `HOST_CC` and `HOST_CXX` pointing at the C and C++ shims.
 4. Each shim analyzes its compiler invocation and derives a content-addressed action key.
 5. A hit restores the action's outputs; a miss runs the real compiler and publishes the result.
 6. The agent exits with the build, draining any remote uploads it still owes.
@@ -18,11 +18,14 @@ component to keep up to date.
 
 ## Build-script C and C++
 
-Cargo has no `CC_WRAPPER`, so the C and C++ shims arrive as `CC` and `CXX`
-themselves, resolved to the platform compilers when the session starts. A build
-that already sets `CC`, `CXX`, or a target-specific variant has chosen its own
-compiler, and mbx leaves it alone rather than redirecting it; `MBX_CC=0` turns
-the shims off entirely.
+Cargo has no `CC_WRAPPER`, so the shims arrive as compiler variables
+themselves, resolved to the platform compilers when the session starts. They
+are set as `HOST_CC` and `HOST_CXX` rather than `CC` and `CXX`: the `cc` crate
+consults the host pair only when it is not cross-compiling, and these shims
+wrap the host compiler, so a `cargo build --target` keeps the cross compiler it
+would have found on its own. A build that already chose a compiler through any
+of those variables is left alone, and `MBX_CC=0` turns the shims off
+entirely.
 
 Unlike rustc, a C compile leaves no dependency record behind for a later build
 to read, and publishing one would add a file the uncached build never produced.

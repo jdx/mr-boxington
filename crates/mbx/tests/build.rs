@@ -202,6 +202,8 @@ fn build_with(
         .env_remove("MBX_CC")
         .env_remove("CC")
         .env_remove("CXX")
+        .env_remove("HOST_CC")
+        .env_remove("HOST_CXX")
         .env_remove("TARGET_CC")
         .env_remove("TARGET_CXX")
         .env_remove("MBX_REAL_CC")
@@ -1597,7 +1599,12 @@ fn write_c_project(directory: &Path) {
 
 fn main() {
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let compiler = env::var("CC").unwrap_or_else(|_| "cc".into());
+    // The `cc` crate reads HOST_CC before CC when host and target agree, and
+    // that is the variable mbx sets; mirroring its precedence is what makes
+    // this fixture exercise the same path a real build script takes.
+    let compiler = env::var("HOST_CC")
+        .or_else(|_| env::var("CC"))
+        .unwrap_or_else(|_| "cc".into());
     let status = Command::new(&compiler)
         .arg("-O2")
         .arg("-Iinclude")
@@ -1695,7 +1702,7 @@ fn an_existing_cc_setting_is_left_alone() {
         return;
     }
     let chosen = which::which("cc").expect("cc should resolve");
-    let preset = warm_checkout_hits(&[("CC", chosen.to_str().unwrap())]);
+    let preset = warm_checkout_hits(&[("HOST_CC", chosen.to_str().unwrap())]);
     let uncached = warm_checkout_hits(&[("MBX_CC", "0")]);
     assert_eq!(
         preset, uncached,

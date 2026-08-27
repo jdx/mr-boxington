@@ -225,8 +225,22 @@ impl CacheSession {
             debug!("{name} is already set; C and C++ compilations are not cached");
             return;
         }
-        environment.insert("CC".into(), shims.cc_shim.to_string_lossy().into_owned());
-        environment.insert("CXX".into(), shims.cxx_shim.to_string_lossy().into_owned());
+        // `HOST_CC` rather than `CC`, because of where each sits in the `cc`
+        // crate's lookup order: it reads `CC_<target>`, then `HOST_CC` or
+        // `TARGET_CC` depending on whether it is cross-compiling, and only then
+        // plain `CC`. Setting `CC` would capture cross compiles too, and these
+        // shims wrap the *host* compiler -- a `cargo build --target` would
+        // silently build target objects with the host driver. `HOST_CC` is
+        // consulted only when host and target agree, which is exactly the
+        // compilation these shims can stand in for.
+        environment.insert(
+            "HOST_CC".into(),
+            shims.cc_shim.to_string_lossy().into_owned(),
+        );
+        environment.insert(
+            "HOST_CXX".into(),
+            shims.cxx_shim.to_string_lossy().into_owned(),
+        );
         environment.insert(
             REAL_CC_ENV.into(),
             shims.real_cc.to_string_lossy().into_owned(),
@@ -732,7 +746,14 @@ struct CcShims {
 /// Variables the `cc` crate consults before falling back to the platform
 /// default. A build that sets any of them has chosen its own compiler, and mbx
 /// stands aside rather than redirecting it.
-const CC_CRATE_ENV: &[&str] = &["CC", "CXX", "TARGET_CC", "TARGET_CXX"];
+const CC_CRATE_ENV: &[&str] = &[
+    "CC",
+    "CXX",
+    "HOST_CC",
+    "HOST_CXX",
+    "TARGET_CC",
+    "TARGET_CXX",
+];
 
 /// Install the C and C++ shims, resolving the compilers they will run.
 ///

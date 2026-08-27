@@ -287,6 +287,9 @@ pub enum CcBypassReason {
     /// A compiler plugin makes the output depend on unmodeled code.
     #[error("compiler plugins are not modeled by the cache adapter: {0}")]
     Plugin(String),
+    /// The object depends on the machine's own CPU rather than on named inputs.
+    #[error("compiler flag tunes for the local CPU: {0}")]
+    LocalCpuTarget(String),
     /// The driver is not a gcc-style or clang-style compiler.
     #[error("compiler driver is not modeled by the cache adapter: {0}")]
     UnsupportedCompilerDriver(String),
@@ -1308,6 +1311,16 @@ impl<'a> Parser<'a> {
     fn parse_m_flag(&mut self, value: &str, option: &str) -> Result<(), CcBypassReason> {
         if option == "llvm" {
             return Err(CcBypassReason::ToolPassthrough(value.into()));
+        }
+        // `-march=native` and its relatives resolve against whatever CPU this
+        // machine has. The resulting object is not a function of the key, so
+        // another machine could otherwise restore code its processor cannot
+        // run.
+        if let Some((name, selection)) = option.split_once('=')
+            && matches!(name, "arch" | "cpu" | "tune")
+            && matches!(selection, "native" | "host")
+        {
+            return Err(CcBypassReason::LocalCpuTarget(value.into()));
         }
         let name = option.split_once('=').map_or(option, |(name, _)| name);
         if SUPPORTED_M_FLAGS.binary_search(&name).is_err() {
