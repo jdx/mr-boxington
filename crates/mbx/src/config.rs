@@ -118,6 +118,15 @@ pub(crate) struct RawConfig {
         choices("quips", "plain", "off")
     )]
     savings: String,
+    /// Cache natively linked test binaries and executables. Experimental:
+    /// qualify it on your own workload with MBX_VERIFY=1 before relying on it.
+    #[usage(
+        key = "cache_links",
+        env = "MBX_CACHE_LINKS",
+        default = false,
+        scope = "env"
+    )]
+    cache_links: bool,
     /// Append the full reason for every bypassed compilation to this path.
     #[usage(key = "bypass_log", env = "MBX_BYPASS_LOG", scope = "env")]
     _bypass_log: Option<PathBuf>,
@@ -335,6 +344,8 @@ pub(crate) struct CliSettings {
     pub savings: SavingsStyle,
     /// Whether a churning crate may compile with its own incremental state.
     pub learned_incremental: bool,
+    /// Whether natively linked programs may be cached.
+    pub cache_links: bool,
 }
 
 /// Matches the declared defaults: a derived `Default` would silence the savings
@@ -345,6 +356,7 @@ impl Default for CliSettings {
             retention: RetentionSettings::default(),
             savings: SavingsStyle::default(),
             learned_incremental: true,
+            cache_links: false,
         }
     }
 }
@@ -566,6 +578,7 @@ impl Config {
                 retention,
                 savings: raw.savings.parse().wrap_err("invalid savings")?,
                 learned_incremental: raw._learned_incremental,
+                cache_links: raw.cache_links,
             },
         ))
     }

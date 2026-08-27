@@ -31,6 +31,7 @@ pub(crate) const BUILD_ENV: &str = "MBX_BUILD";
 pub(crate) const VERIFY_ENV: &str = "MBX_VERIFY";
 pub(crate) const SHARE_OUT_DIR_ENV: &str = "MBX_SHARE_OUT_DIR";
 pub(crate) const LEARNED_INCREMENTAL_ENV: &str = "MBX_LEARNED_INCREMENTAL";
+pub const CACHE_LINKS_ENV: &str = "MBX_CACHE_LINKS";
 pub(crate) const WORKSPACE_ROOT_ENV: &str = "MBX_WORKSPACE_ROOT";
 pub(crate) const TARGET_DIR_ENV: &str = "MBX_TARGET_DIR";
 const PREVIOUS_RUSTC_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WRAPPER";
@@ -1184,6 +1185,27 @@ fn crate_name_argument(arguments: &[OsString]) -> Option<String> {
 /// that an explicit disable cannot be mistaken for an enable.
 pub(crate) fn verify_requested() -> bool {
     std::env::var_os(VERIFY_ENV).is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+/// Whether this build may cache natively linked programs.
+///
+/// Restricted to platforms whose linker mbx knows how to identify: a host it
+/// cannot describe would otherwise key a link as though the linker did not
+/// matter.
+pub fn cache_links_supported() -> bool {
+    cfg!(any(target_os = "linux", target_os = "macos"))
+}
+
+/// Whether the shim may cache a natively linked program. Read the same way as
+/// verify mode.
+///
+/// The platform is checked here rather than trusted from whoever set the
+/// variable: a shim installed by `mbx setup` is driven by plain cargo, with no
+/// session to have applied the gate, so the value it reads is whatever the
+/// developer exported.
+pub(crate) fn cache_links_requested() -> bool {
+    cache_links_supported()
+        && std::env::var_os(CACHE_LINKS_ENV).is_some_and(|value| !value.is_empty() && value != "0")
 }
 
 /// Whether the shim may make a compilation independent of its `OUT_DIR` so two

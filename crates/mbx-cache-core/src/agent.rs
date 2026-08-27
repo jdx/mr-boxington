@@ -2486,10 +2486,16 @@ impl CacheAgent {
         executable: PathBuf,
         environment: BTreeMap<String, Option<String>>,
     ) -> Result<ExecutableIdentityKey> {
-        if !environment
-            .keys()
-            .all(|name| matches!(name.as_str(), "RUSTUP_HOME" | "RUSTUP_TOOLCHAIN"))
-        {
+        // Restricted to the variables that actually select what an identity
+        // probe reports: the toolchain rustup resolves, and the SDK a linker
+        // driver builds against. Anything else would let one key stand for two
+        // different compilers.
+        if !environment.keys().all(|name| {
+            matches!(
+                name.as_str(),
+                "RUSTUP_HOME" | "RUSTUP_TOOLCHAIN" | "SDKROOT" | "MACOSX_DEPLOYMENT_TARGET"
+            )
+        }) {
             bail!("executable identity contains an unsupported environment variable");
         }
         Ok(ExecutableIdentityKey {

@@ -5,8 +5,9 @@ use mbx_cache_core::{
     RemoteActionResult, RestoreStats, RustcMetadata, canonical_json,
 };
 use mbx_cache_rustc::{
-    ActionContext, CompilerIdentity, DiscoveredInputs, PathMapping, RustcAction, RustcDepInfo,
-    RustcInputPrediction, RustcInvocation, RustcOutputs, normalize_mapped_path,
+    ActionContext, BypassReason, CompilerIdentity, DiscoveredInputs, LinkerIdentity, ParseOptions,
+    PathMapping, RustcAction, RustcDepInfo, RustcInputPrediction, RustcInvocation, RustcOutputs,
+    normalize_mapped_path,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -130,6 +131,8 @@ struct Compilation<'a> {
     invocation: &'a RustcInvocation,
     working_dir: &'a Path,
     portable: &'a Portable,
+    /// Identity of the linker, for an invocation whose key must describe it.
+    linker: Option<LinkerIdentity>,
 }
 
 pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode> {
@@ -137,7 +140,8 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     // The orchestrated session supplies the target root. A persistent wrapper
     // has no parent session, so first parse just enough of the invocation to
     // learn its output directory and use that as the stable target mapping.
-    let initial_invocation = RustcInvocation::parse(arguments)?;
+    let options = ParseOptions::caching_native_links(session::cache_links_requested());
+    let initial_invocation = RustcInvocation::parse_with(arguments, options)?;
     let initial_outputs = initial_invocation.outputs(&working_dir)?;
     let portable = Portable::detect(
         &working_dir,
@@ -145,7 +149,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
         initial_invocation.target(),
     );
     let arguments = portable.applied_to(arguments);
-    let invocation = RustcInvocation::parse(&arguments)?;
+    let invocation = RustcInvocation::parse_with(&arguments, options)?;
     let outputs = invocation.outputs(&working_dir)?;
 
     let verify = session::verify_requested();
@@ -155,20 +159,20 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     let mut verification = None;
     let mut action_lookup_attempted = false;
     let mut learned = LearnedPlan::default();
+    // Probed once, before anything that would swallow the answer: a host whose
+    // linker cannot be described bypasses here, where the reason is recorded,
+    // rather than deep inside key construction where it becomes a warning
+    // nobody counts.
     let compilation = Compilation {
         rustc,
         invocation: &invocation,
         working_dir: &working_dir,
         portable: &portable,
+        linker: linker_for(&invocation)?,
     };
     if outputs.dep_info.is_file()
-        && let Ok((candidates, discovered)) = action_from_current_dep_info(
-            rustc,
-            &invocation,
-            &outputs.dep_info,
-            &working_dir,
-            &portable,
-        )
+        && let Ok((candidates, discovered)) =
+            action_from_current_dep_info(&compilation, &outputs.dep_info)
     {
         action_lookup_attempted = true;
         match restore_candidates(
@@ -276,13 +280,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     if output.status.success() {
         learned.record_compiled();
         let publication: Result<()> = (|| {
-            let (candidates, discovered) = action_from_dep_info(
-                rustc,
-                &invocation,
-                &outputs.dep_info,
-                &working_dir,
-                &portable,
-            )?;
+            let (candidates, discovered) = action_from_dep_info(&compilation, &outputs.dep_info)?;
             discovered.verify_not_modified_since(compilation_started)?;
             discovered.verify()?;
             // An incremental artifact carries state from this checkout's edit
@@ -527,7 +525,7 @@ fn restore_predicted_result(
     }
     let discovered = input_prediction.discover(working_dir, &context.path_mappings)?;
     discovered.clone().apply_to(&mut context)?;
-    let candidates = ActionCandidates::build(invocation, context)?;
+    let candidates = ActionCandidates::build(invocation, context, compilation.linker.clone())?;
     // From this point onward, every return follows at least one action-result
     // request, including error responses from a corrupt local record.
     *action_lookup_attempted = true;
@@ -568,7 +566,11 @@ struct ActionCandidates {
 }
 
 impl ActionCandidates {
-    fn build(invocation: &RustcInvocation, context: ActionContext) -> Result<Self> {
+    fn build(
+        invocation: &RustcInvocation,
+        context: ActionContext,
+        linker: Option<LinkerIdentity>,
+    ) -> Result<Self> {
         // Only worth a second key if a portable name is actually an input here.
         // Crates that never read one keep the key they always had.
         let applies = context
@@ -580,8 +582,10 @@ impl ActionCandidates {
             ..context.clone()
         };
         Ok(Self {
-            portable: applies.then(|| invocation.action(context)).transpose()?,
-            literal: invocation.action(literal_context)?,
+            portable: applies
+                .then(|| invocation.action_linked_by(context, linker.clone()))
+                .transpose()?,
+            literal: invocation.action_linked_by(literal_context, linker)?,
         })
     }
 
@@ -629,40 +633,37 @@ fn restore_candidates(
 }
 
 fn action_from_dep_info(
-    rustc: &OsStr,
-    invocation: &RustcInvocation,
+    compilation: &Compilation<'_>,
     dep_info: &Path,
-    working_dir: &Path,
-    portable: &Portable,
 ) -> Result<(ActionCandidates, DiscoveredInputs)> {
     let dep_info = RustcDepInfo::read(dep_info)?;
-    action_from_parsed_dep_info(rustc, invocation, &dep_info, working_dir, portable)
+    action_from_parsed_dep_info(compilation, &dep_info)
 }
 
 fn action_from_current_dep_info(
-    rustc: &OsStr,
-    invocation: &RustcInvocation,
+    compilation: &Compilation<'_>,
     dep_info: &Path,
-    working_dir: &Path,
-    portable: &Portable,
 ) -> Result<(ActionCandidates, DiscoveredInputs)> {
     let dep_info = RustcDepInfo::read(dep_info)?;
     verify_environment(&dep_info.environment)?;
-    action_from_parsed_dep_info(rustc, invocation, &dep_info, working_dir, portable)
+    action_from_parsed_dep_info(compilation, &dep_info)
 }
 
 fn action_from_parsed_dep_info(
-    rustc: &OsStr,
-    invocation: &RustcInvocation,
+    compilation: &Compilation<'_>,
     dep_info: &RustcDepInfo,
-    working_dir: &Path,
-    portable: &Portable,
 ) -> Result<(ActionCandidates, DiscoveredInputs)> {
+    let Compilation {
+        invocation,
+        working_dir,
+        portable,
+        ..
+    } = compilation;
     let discovered =
         invocation.discover_inputs_with_mappings(dep_info, working_dir, &portable.mappings)?;
-    let mut context = base_action_context(rustc, working_dir, portable)?;
+    let mut context = base_action_context(compilation.rustc, working_dir, portable)?;
     discovered.clone().apply_to(&mut context)?;
-    let candidates = ActionCandidates::build(invocation, context)?;
+    let candidates = ActionCandidates::build(invocation, context, compilation.linker.clone())?;
     Ok((candidates, discovered))
 }
 
@@ -681,6 +682,28 @@ fn base_action_context(
     })
 }
 
+/// Identify the linker, for the invocations whose key has to describe it.
+///
+/// Only a native link needs one, and probing costs several processes on the
+/// first one, so nothing else pays for it.
+///
+/// A host that cannot be described is reported as a bypass rather than as a
+/// failure: not knowing the linker is a reason this compilation cannot be
+/// cached, which is what a bypass is, and reporting it as anything else leaves
+/// it out of the summary and out of `mbx explain`.
+fn linker_for(invocation: &RustcInvocation) -> Result<Option<LinkerIdentity>> {
+    if !invocation.links_natively() {
+        return Ok(None);
+    }
+    match crate::linker::identity() {
+        Ok(identity) => Ok(Some(identity)),
+        Err(error) => Err(BypassReason::UnportableNativeLink(format!(
+            "the linker could not be identified: {error:#}"
+        ))
+        .into()),
+    }
+}
+
 fn record_prediction(
     compilation: &Compilation<'_>,
     action: &CacheDigest,
@@ -688,12 +711,12 @@ fn record_prediction(
     timing: &CompileTiming,
 ) {
     let result = (|| {
+        let invocation = compilation.invocation;
         let context = base_action_context(
             compilation.rustc,
             compilation.working_dir,
             compilation.portable,
         )?;
-        let invocation = compilation.invocation;
         let invocation_digest = invocation.invocation_digest(&context)?;
         let mut prediction = invocation.prediction(&context, discovered)?;
         prediction.version = prediction.version.max(2);

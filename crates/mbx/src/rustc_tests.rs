@@ -357,6 +357,25 @@ fn accepts_wasm_executable_rustc_outputs() {
     assert!(validated_outputs(test_output_directory(file), &outputs).is_ok());
 }
 
+/// A native program has no extension to recognize it by, so the contract has to
+/// be what the invocation declared rather than what the name looks like.
+#[test]
+fn accepts_native_executable_rustc_outputs() {
+    let root = tempfile::tempdir().unwrap();
+    let mut outputs = test_outputs(root.path());
+    outputs.files = vec![outputs.directory.join("demo-abc123")];
+    let mut file = test_file("demo-abc123");
+    file.executable = true;
+
+    assert!(validated_outputs(test_output_directory(file), &outputs).is_ok());
+
+    // A library artifact under the same roof is still not a program.
+    outputs.files = vec![outputs.directory.join("libdemo.rlib")];
+    let mut library = test_file("libdemo.rlib");
+    library.executable = true;
+    assert!(validated_outputs(test_output_directory(library), &outputs).is_err());
+}
+
 #[cfg(unix)]
 #[test]
 fn restores_declared_executable_permissions() {

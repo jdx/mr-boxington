@@ -499,6 +499,12 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
         return run_cargo(&cargo, arguments, BTreeMap::new());
     }
 
+    // Experimental, and only where mbx can identify the linker precisely
+    // enough to key what it produced.
+    let cache_links = settings.cache_links && session::cache_links_supported();
+    if settings.cache_links && !cache_links {
+        log::warn!("caching native links is not supported on this platform");
+    }
     let working_dir = std::env::current_dir()?;
     let mut roots = resolve_roots(&cargo, arguments, &working_dir);
     let mut config = config.clone();
@@ -609,10 +615,15 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
             )
             .await;
         // Stated explicitly for the same reason as the session's own keys: an
-        // unset value would let the shim inherit one from the parent.
+        // unset value would let the shim inherit one from the parent, with no
+        // way to turn it off here.
         environment.insert(
             session::LEARNED_INCREMENTAL_ENV.into(),
             if learned_incremental { "1" } else { "0" }.into(),
+        );
+        environment.insert(
+            session::CACHE_LINKS_ENV.into(),
+            if cache_links { "1" } else { "0" }.into(),
         );
 
         let status = run_cargo(&cargo, arguments, environment);

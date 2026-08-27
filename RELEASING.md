@@ -31,6 +31,13 @@ on. `mbx-cache-core` and `mbx-cache-rustc` are internals; they share the
 `mbx-internals` version group, move together, and stay on `0.x` so semver
 itself says a minor bump may break them.
 
+Nobody edits a version in a feature pull request. release-plz owns every
+number, and one written by hand either collides with its calculation or is
+overwritten by it. A failing `cargo semver-checks` reports what a change would
+require; it is not a request for a bump. Either the break is unintended, and
+the API is what to fix, or it is intended, and the pull request should say so
+and leave the version alone.
+
 release-plz computes each line from the commits that touched it and updates the
 path dependencies' version requirements, so a release can move one crate and
 leave the rest alone. When `mbx` reaches `1.0`, the internal crates stay on

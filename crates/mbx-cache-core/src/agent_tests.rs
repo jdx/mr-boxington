@@ -2981,6 +2981,39 @@ async fn memoizes_client_observed_executable_identities() {
     ));
 }
 
+/// A linker driver's identity depends on the SDK it builds against, so those
+/// names key an identity too. Everything else stays refused: a name that does
+/// not select what the probe reports would let one key stand for two answers.
+#[tokio::test]
+async fn identity_keys_admit_only_names_that_select_the_answer() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path(), "test-version");
+    let executable = directory.path().join("cc");
+
+    for name in ["SDKROOT", "MACOSX_DEPLOYMENT_TARGET"] {
+        let response = agent
+            .respond(AgentRequest::StoreExecutableIdentity {
+                executable: executable.clone(),
+                environment: BTreeMap::from([(name.into(), Some("value".into()))]),
+                stdout: b"cc identity".to_vec(),
+            })
+            .await;
+        assert!(
+            matches!(response, AgentResponse::ExecutableIdentity { .. }),
+            "{name} should key an identity"
+        );
+    }
+
+    let response = agent
+        .respond(AgentRequest::StoreExecutableIdentity {
+            executable,
+            environment: BTreeMap::from([("PATH".into(), Some("/usr/bin".into()))]),
+            stdout: b"cc identity".to_vec(),
+        })
+        .await;
+    assert!(matches!(response, AgentResponse::Error { .. }));
+}
+
 #[test]
 fn bounds_executable_identity_entry_count() {
     let directory = tempfile::tempdir().unwrap();

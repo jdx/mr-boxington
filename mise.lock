@@ -120,6 +120,7 @@ checksum = "sha256:fbd5e2c3366f085cb8ce71362bcdc05fbf549e7787bd401ae085a1dee09bd
 url = "https://github.com/jdx/tak/releases/download/v0.0.8/tak-aarch64-apple-darwin.tar.gz"
 url_api = "https://api.github.com/repos/jdx/tak/releases/assets/531283628"
 provenance = "github-attestations"
+provenance_verified = true
 
 [tools."github:jdx/tak"."platforms.windows-x64"]
 checksum = "sha256:fd3157419889dc558c87e5779f89d123dc909bfc4f7557c970dcb95d71a97d1b"

@@ -114,7 +114,13 @@ fn guidance(kind: &str) -> &'static str {
             "The invocation uses an `@response-file`; mbx does not model response-file contents yet."
         }
         "unsupported-crate-type" => {
-            "This artifact type is outside mbx's current cacheability tier. Native binaries and dynamic libraries still link normally."
+            "This artifact type is outside mbx's current cacheability tier. Dynamic libraries still link normally; `MBX_CACHE_LINKS=1` adds native test binaries and executables."
+        }
+        "ambiguous-output-name" => {
+            "This output is named like a library but is a program, so mbx cannot tell which permissions to restore it with."
+        }
+        "unportable-native-link" => {
+            "This link would embed a path, a timestamp, or a file mbx does not store, so another checkout could not use its result."
         }
         "unsupported-search-path" | "native-library" => {
             "A native dependency or search path is not a precise compiler input, so mbx cannot safely reuse this action."
@@ -156,6 +162,31 @@ mod tests {
         assert_eq!(records.total(), 3);
         assert_eq!(records.0["unsupported-crate-type"].values().sum::<u64>(), 2);
         assert!(guidance("incremental").contains("MBX_INCREMENTAL=0"));
+    }
+
+    /// A kind with nothing specific to say falls back to a sentence that
+    /// amounts to "look at the reason below", which is what `mbx explain`
+    /// exists to save someone from. Every kind the adapter can report should
+    /// therefore say something of its own.
+    #[test]
+    fn every_reported_kind_says_something_of_its_own() {
+        let generic = guidance("a kind nobody wrote guidance for");
+        for kind in [
+            "compiler-query",
+            "standard-input",
+            "incremental",
+            "response-file",
+            "unsupported-crate-type",
+            "unsupported-search-path",
+            "native-library",
+            "unportable-native-link",
+            "ambiguous-output-name",
+            "unknown-flag",
+            "unknown-codegen-option",
+            "unmapped-absolute-path",
+        ] {
+            assert_ne!(guidance(kind), generic, "{kind} has no guidance of its own");
+        }
     }
 
     #[test]

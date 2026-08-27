@@ -24,6 +24,15 @@ Append the full reason for every bypassed compilation to this path.
 
 Cache root.
 
+### `cache_links`
+
+- **Type:** `bool`
+- **Default:** `false`
+- **Scope:** only from the environment or the command line
+- **Set with:** `MBX_CACHE_LINKS`
+
+Cache natively linked test binaries and executables. Experimental: qualify it on your own workload with MBX_VERIFY=1 before relying on it.
+
 ### `events`
 
 - **Type:** `bool`
