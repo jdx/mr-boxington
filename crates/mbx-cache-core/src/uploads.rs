@@ -409,11 +409,9 @@ impl Inner {
         let (packs, singles) = group_into_packs(members, limits);
         let packed = stream::iter(packs)
             .map(|pack| self.upload_pack(pack))
-            .buffer_unordered(MAX_UPLOAD_TRANSFERS);
-        let single = stream::iter(singles)
-            .map(|member| self.upload_member(member))
-            .buffer_unordered(MAX_UPLOAD_TRANSFERS);
-        futures_util::future::join(packed.collect::<Vec<()>>(), single.collect::<Vec<()>>()).await;
+            .buffer_unordered(MAX_UPLOAD_TRANSFERS)
+            .collect::<Vec<()>>();
+        futures_util::future::join(packed, self.upload_members(singles)).await;
     }
 
     /// Publish one group of blobs in a single framed request.
@@ -436,9 +434,7 @@ impl Inner {
             }
         }
         if present.len() < 2 {
-            for member in present {
-                self.upload_member(member).await;
-            }
+            self.upload_members(present).await;
             return;
         }
         let uploads: Vec<BlobUpload> = present
@@ -465,18 +461,25 @@ impl Inner {
                     let _ = member.done.send(UploadOutcome::Uploaded);
                 }
             }
-            Ok(None) => {
-                for member in present {
-                    self.upload_member(member).await;
-                }
-            }
+            Ok(None) => self.upload_members(present).await,
             Err(error) => {
                 warn!("remote cache blob pack upload failed: {error}");
-                for member in present {
-                    self.upload_member(member).await;
-                }
+                self.upload_members(present).await;
             }
         }
+    }
+
+    /// Publish these blobs individually, as concurrently as any other upload.
+    ///
+    /// This is the path a pack falls back to, so it has to match what the
+    /// unpacked path would have done: sending a whole group one round trip at a
+    /// time is worst exactly when the server has just refused a request.
+    async fn upload_members(&self, members: Vec<PackMember>) {
+        stream::iter(members)
+            .map(|member| self.upload_member(member))
+            .buffer_unordered(MAX_UPLOAD_TRANSFERS)
+            .collect::<Vec<()>>()
+            .await;
     }
 
     async fn upload_member(&self, member: PackMember) {

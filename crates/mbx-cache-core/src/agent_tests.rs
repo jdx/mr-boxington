@@ -2396,7 +2396,12 @@ async fn a_rejected_pack_falls_back_to_individual_uploads() {
         serde_json::json!({ "blob_pack_uploads": true }),
     )
     .await;
-    let contents = [b"first output".to_vec(), b"second output".to_vec()];
+    // A pack's worth of members, not a pair: the fallback republishes the whole
+    // group, and doing that one round trip at a time is worst exactly when the
+    // server has just refused a request.
+    let contents: Vec<Vec<u8>> = (0..8)
+        .map(|index| format!("output {index}").into_bytes())
+        .collect();
     let digests: Vec<CacheDigest> = contents
         .iter()
         .map(|bytes| CacheDigest::blake3(bytes))
@@ -2440,7 +2445,7 @@ async fn a_rejected_pack_falls_back_to_individual_uploads() {
         single.assert_async().await;
     }
     // Everything still published, so nothing downstream is withheld.
-    assert_eq!(agent.stats().background_uploads, 2);
+    assert_eq!(agent.stats().background_uploads, digests.len() as u64);
     assert_eq!(agent.stats().remote_blob_pack_uploads, 0);
 }
 
