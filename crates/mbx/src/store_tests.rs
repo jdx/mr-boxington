@@ -865,3 +865,34 @@ fn a_dry_run_reports_the_streams_it_would_drop_and_keeps_them() {
     assert_eq!(outcome.removed_session_streams, 1);
     assert_eq!(session_count(&store), 1, "a dry run removes nothing");
 }
+
+#[test]
+fn collection_removes_a_lock_whose_stream_never_appeared() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("store");
+    // A lock is taken before the stream it names is created, so a failure in
+    // between leaves one no listing of streams would reach.
+    let paths = crate::events::session_paths(&store, "100-1-aaaa");
+    std::fs::create_dir_all(paths.lock.parent().unwrap()).unwrap();
+    std::fs::write(&paths.lock, b"").unwrap();
+
+    gc(&store, u64::MAX).unwrap();
+
+    assert!(!paths.lock.exists(), "an orphaned lock should be collected");
+}
+
+#[test]
+fn collection_leaves_the_lock_of_a_stream_that_is_still_there() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("store");
+    write_session(&store, "100-1-aaaa", Duration::from_secs(60));
+    let paths = crate::events::session_paths(&store, "100-1-aaaa");
+    std::fs::write(&paths.lock, b"").unwrap();
+
+    gc(&store, u64::MAX).unwrap();
+
+    // The stream is neither stale nor surplus, so neither it nor its lock is
+    // any of collection's business.
+    assert!(paths.events.exists());
+    assert!(paths.lock.exists());
+}

@@ -465,6 +465,13 @@ fn prune_sessions(store: &Path, dry_run: bool) -> Result<SessionPrune> {
             let _ = std::fs::remove_file(&paths.lock);
         }
     }
+    // A lock is taken before its stream exists, so a failure in between leaves
+    // one that no listing of streams would ever reach.
+    if !dry_run {
+        for lock in crate::events::orphaned_locks(store) {
+            let _ = std::fs::remove_file(lock);
+        }
+    }
     Ok(prune)
 }
 
