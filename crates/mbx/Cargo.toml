@@ -23,8 +23,8 @@ dirs = "6"
 eyre = "0.6"
 fslock = "0.2"
 log = "0.4"
-mbx-cache-core = { path = "../mbx-cache-core", version = "0.5.1", default-features = false }
-mbx-cache-rustc = { path = "../mbx-cache-rustc", version = "0.5.1", default-features = false }
+mbx-cache-core = { path = "../mbx-cache-core", version = "0.6.0", default-features = false }
+mbx-cache-rustc = { path = "../mbx-cache-rustc", version = "0.6.0", default-features = false }
 rand = "0.10"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 reflink-copy = "0.1"
