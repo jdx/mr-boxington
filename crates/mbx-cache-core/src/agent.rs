@@ -1,14 +1,15 @@
+use crate::uploads::{ConnectionUploads, UploadQueue, UploadSink};
 use crate::{
-    ActionPrediction, BlobPackLimits, BlobSource, BlobUpload, CacheDigest, CacheDirectory,
-    LocalActionCache, LocalCas, MAX_STAGED_BLOB_PACK_BYTES, MAX_STAGED_BLOB_PACK_ITEMS,
-    ManifestPutOutcome, RemoteActionResult, RemoteCacheClient, RemoteCacheMode, RustcMetadata,
-    TaskActionManifest, blob_pack_chunk, canonical_json,
+    ActionPrediction, BlobPackLimits, CacheDigest, CacheDirectory, LocalActionCache, LocalCas,
+    MAX_STAGED_BLOB_PACK_BYTES, MAX_STAGED_BLOB_PACK_ITEMS, ManifestPutOutcome, RemoteActionResult,
+    RemoteCacheClient, RemoteCacheMode, RustcMetadata, TaskActionManifest, blob_pack_chunk,
+    canonical_json,
 };
 use eyre::{Context, Result, bail};
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream};
 use log::warn;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -321,6 +322,17 @@ pub struct AgentStats {
     pub downloaded_bytes: u64,
     /// CAS payload bytes uploaded to the remote cache.
     pub uploaded_bytes: u64,
+    /// Objects published to the remote cache after the build asked for them.
+    ///
+    /// A store request returns once the object is in the local CAS, so the
+    /// upload it implies happens off the build's critical path. This counts the
+    /// blobs and action results that publication actually completed for.
+    pub background_uploads: u64,
+    /// Queued uploads that did not publish, having been reported and recovered
+    /// from.
+    pub background_upload_failures: u64,
+    /// Time the session spent waiting for queued uploads once the build ended.
+    pub upload_drain_duration_ns: u64,
     /// Complete actions staged before an adapter requested them.
     pub prefetched_actions: u64,
     /// Compilations that were not cacheable, counted by reason.
@@ -412,6 +424,9 @@ struct AtomicAgentStats {
     divergences: AtomicU64,
     downloaded_bytes: AtomicU64,
     uploaded_bytes: AtomicU64,
+    background_uploads: AtomicU64,
+    background_upload_failures: AtomicU64,
+    upload_drain_duration_ns: AtomicU64,
     prefetched_actions: AtomicU64,
     remote_failures: AtomicU64,
     remote_manifest_lookups: AtomicU64,
@@ -533,6 +548,37 @@ pub struct CacheAgent {
     remote_transfers: Arc<tokio::sync::Semaphore>,
     prefetch_transfers: Arc<tokio::sync::Semaphore>,
     prefetch_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    /// Deferred remote publication, present only when the session may write.
+    uploads: Option<UploadQueue>,
+}
+
+/// Records background upload activity against a session's statistics.
+struct AgentUploadSink {
+    stats: Arc<AtomicAgentStats>,
+}
+
+impl UploadSink for AgentUploadSink {
+    fn record_blob_uploaded(&self, bytes: u64) {
+        self.stats
+            .background_uploads
+            .fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .uploaded_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn record_action_uploaded(&self) {
+        self.stats
+            .background_uploads
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_upload_failure(&self) {
+        self.stats
+            .background_upload_failures
+            .fetch_add(1, Ordering::Relaxed);
+        self.stats.remote_failures.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -631,6 +677,22 @@ impl CacheAgent {
             |remote| remote.staging_dir.clone(),
         );
         let remote = remote.map(|remote| Arc::new(remote.client));
+        let stats = Arc::new(AtomicAgentStats::default());
+        let remote_transfers = Arc::new(tokio::sync::Semaphore::new(MAX_REMOTE_TRANSFERS));
+        // A session that cannot publish never queues an upload, so it does not
+        // need somewhere to queue one.
+        let uploads = remote
+            .clone()
+            .filter(|_| remote_mode.writes())
+            .map(|client| {
+                UploadQueue::new(
+                    client,
+                    Arc::new(AgentUploadSink {
+                        stats: stats.clone(),
+                    }),
+                    remote_transfers.clone(),
+                )
+            });
         Self {
             cas: LocalCas::new(cache_dir.clone()),
             actions: LocalActionCache::new(cache_dir.clone()),
@@ -638,7 +700,7 @@ impl CacheAgent {
             version,
             write_locks: Arc::new(Mutex::new(BTreeMap::new())),
             action_locks: Arc::new(Mutex::new(BTreeMap::new())),
-            stats: Arc::new(AtomicAgentStats::default()),
+            stats,
             observer: None,
             executable_identities: Arc::new(Mutex::new(BTreeMap::new())),
             manifest_dir: Arc::new(task_manifest_dir(&cache_dir)),
@@ -651,9 +713,10 @@ impl CacheAgent {
             remote_download_limit,
             remote_download_bytes: Arc::new(AtomicU64::new(0)),
             pending_remote_actions: Arc::new(Mutex::new(BTreeMap::new())),
-            remote_transfers: Arc::new(tokio::sync::Semaphore::new(MAX_REMOTE_TRANSFERS)),
+            remote_transfers,
             prefetch_transfers: Arc::new(tokio::sync::Semaphore::new(MAX_PREFETCH_TRANSFERS)),
             prefetch_tasks: Arc::new(Mutex::new(Vec::new())),
+            uploads,
         }
     }
 
@@ -822,6 +885,20 @@ impl CacheAgent {
         }
     }
 
+    /// Publish everything a build queued, before the session stops.
+    ///
+    /// Store requests return once an object is durable locally, so at this point
+    /// the remote cache may still be behind the local one. Uploads run on the
+    /// session's runtime and are abandoned if it goes away, so a session that
+    /// wants them published has to wait here.
+    pub async fn wait_for_uploads(&self) {
+        let Some(uploads) = &self.uploads else {
+            return;
+        };
+        let _timer = AtomicDurationTimer::start(&self.stats.upload_drain_duration_ns);
+        uploads.drain().await;
+    }
+
     async fn wait_for_prefetches(&self) {
         let tasks = std::mem::take(&mut *self.prefetch_tasks.lock().unwrap());
         for task in tasks {
@@ -846,7 +923,7 @@ impl CacheAgent {
         }
         let task = state.manifest;
         validate_task_identity(&task)?;
-        let manifest = {
+        let (manifest, introduced) = {
             let _write_guard = self.manifest_write_lock.lock().unwrap();
             let _file_guard = self.lock_task_manifest(&task)?;
             let mut predictions = self
@@ -859,6 +936,16 @@ impl CacheAgent {
                         .collect::<BTreeMap<_, _>>()
                 })
                 .unwrap_or_default();
+            // Which predictions this run adds, as opposed to inherits. Only a
+            // new one may be withheld for a failed upload: retracting an
+            // inherited one would un-advertise a result that is plausibly still
+            // on the server from whichever session put it there.
+            let introduced: BTreeSet<CacheDigest> = state
+                .pending_predictions
+                .keys()
+                .filter(|invocation| !predictions.contains_key(*invocation))
+                .cloned()
+                .collect();
             // Only publish predictions recorded by this run. `predictions`
             // also contains the baseline loaded by `begin_task`; extending
             // with that snapshot would overwrite newer entries committed by
@@ -871,10 +958,42 @@ impl CacheAgent {
             };
             validate_task_manifest(&manifest, &task)?;
             self.persist_task_manifest(&manifest)?;
-            manifest
+            (manifest, introduced)
         };
         self.task_actions.lock().unwrap().remove(run);
         if self.remote_mode.writes() {
+            // A manifest advertises the actions it predicts, so it must not
+            // reach the remote cache before the results a reader would then go
+            // looking for -- nor name a result that never got there at all.
+            let mut manifest = manifest;
+            if let Some(uploads) = &self.uploads {
+                let actions: Vec<CacheDigest> = manifest
+                    .predictions
+                    .iter()
+                    .map(|prediction| prediction.action.clone())
+                    .collect();
+                let unpublished = uploads.wait_for_actions(&actions).await;
+                let withheld = manifest
+                    .predictions
+                    .iter()
+                    .filter(|prediction| {
+                        introduced.contains(&prediction.invocation)
+                            && unpublished.contains(&prediction.action)
+                    })
+                    .count();
+                if withheld > 0 {
+                    // The local manifest keeps them: this checkout can still use
+                    // what it built, and a later session can publish it.
+                    warn!(
+                        "{withheld} of {} predicted actions were not published, so the remote task action manifest omits them",
+                        manifest.predictions.len()
+                    );
+                    manifest.predictions.retain(|prediction| {
+                        !(introduced.contains(&prediction.invocation)
+                            && unpublished.contains(&prediction.action))
+                    });
+                }
+            }
             match self
                 .put_remote_task_manifest(&task, manifest, state.remote_etag)
                 .await
@@ -1027,6 +1146,12 @@ impl CacheAgent {
             divergences: self.stats.divergences.load(Ordering::Relaxed),
             downloaded_bytes: self.stats.downloaded_bytes.load(Ordering::Relaxed),
             uploaded_bytes: self.stats.uploaded_bytes.load(Ordering::Relaxed),
+            background_uploads: self.stats.background_uploads.load(Ordering::Relaxed),
+            background_upload_failures: self
+                .stats
+                .background_upload_failures
+                .load(Ordering::Relaxed),
+            upload_drain_duration_ns: self.stats.upload_drain_duration_ns.load(Ordering::Relaxed),
             prefetched_actions: self.stats.prefetched_actions.load(Ordering::Relaxed),
             bypasses: self.stats.bypasses.lock().unwrap().clone(),
             avoided_compiler_duration_ns: self
@@ -1082,9 +1207,10 @@ impl CacheAgent {
         &self,
         requests: impl IntoIterator<Item = AgentRequest>,
     ) -> Vec<AgentResponse> {
+        let mut connection = ConnectionUploads::default();
         let mut responses = Vec::new();
         for request in requests {
-            responses.push(self.respond(request).await);
+            responses.push(self.respond_on(request, &mut connection).await);
         }
         responses
     }
@@ -1810,11 +1936,27 @@ impl CacheAgent {
         Ok(path)
     }
 
+    /// Answer one request outside any connection.
+    ///
+    /// An upload queued this way has no sibling requests to order against, so
+    /// the queue falls back to treating every blob it holds as a prerequisite.
+    #[cfg(test)]
     async fn respond(&self, request: AgentRequest) -> AgentResponse {
+        self.respond_on(request, &mut ConnectionUploads::default())
+            .await
+    }
+
+    async fn respond_on(
+        &self,
+        request: AgentRequest,
+        connection: &mut ConnectionUploads,
+    ) -> AgentResponse {
         let result = match request {
             AgentRequest::FindBlob { digest } => self.find_blob(&digest).await,
             AgentRequest::FindBlobs { digests } => self.find_blobs(digests).await,
-            AgentRequest::StoreBlob { digest, source } => self.store_blob(&digest, &source).await,
+            AgentRequest::StoreBlob { digest, source } => {
+                self.store_blob(&digest, &source, connection).await
+            }
             AgentRequest::FindActionResult { action } => {
                 self.stats.lookups.fetch_add(1, Ordering::Relaxed);
                 self.find_action_result(&action).await
@@ -1854,7 +1996,9 @@ impl CacheAgent {
                 self.emit(|| AgentEvent::Verification { matched, restore });
                 Ok(AgentResponse::ActionVerificationRecorded)
             }
-            AgentRequest::StoreActionResult { result } => self.store_action_result(&result).await,
+            AgentRequest::StoreActionResult { result } => {
+                self.store_action_result(&result, connection).await
+            }
             AgentRequest::FindActionPrediction { task, invocation } => {
                 self.find_action_prediction(&task, &invocation)
             }
@@ -1930,12 +2074,12 @@ impl CacheAgent {
         })
     }
 
-    async fn store_blob(&self, digest: &CacheDigest, source: &Path) -> Result<AgentResponse> {
-        let remote = if self.remote_mode.writes() {
-            self.remote.as_deref()
-        } else {
-            None
-        };
+    async fn store_blob(
+        &self,
+        digest: &CacheDigest,
+        source: &Path,
+        connection: &mut ConnectionUploads,
+    ) -> Result<AgentResponse> {
         let path = {
             let lock = self.write_lock(digest);
             let _guard = lock.lock().await;
@@ -1951,25 +2095,10 @@ impl CacheAgent {
                 path
             }
         };
-        if let Some(remote) = remote {
-            let _permit = self.remote_transfers.acquire().await?;
-            if let Err(error) = remote
-                .put_blob(&BlobUpload {
-                    digest: digest.clone(),
-                    source: BlobSource::Path(path.clone()),
-                })
-                .await
-            {
-                self.note_remote_failure();
-                warn!(
-                    "remote cache blob upload failed for {}: {error}",
-                    digest.hash
-                );
-            } else {
-                self.stats
-                    .uploaded_bytes
-                    .fetch_add(digest.size, Ordering::Relaxed);
-            }
+        // The object is durable locally, so the build has what it needs and the
+        // remote publication can happen after this request returns.
+        if let Some(uploads) = &self.uploads {
+            uploads.queue_blob(digest, path.clone(), connection);
         }
         Ok(AgentResponse::Stored { path })
     }
@@ -2049,19 +2178,14 @@ impl CacheAgent {
         }
     }
 
-    async fn store_action_result(&self, result: &RemoteActionResult) -> Result<AgentResponse> {
+    async fn store_action_result(
+        &self,
+        result: &RemoteActionResult,
+        connection: &ConnectionUploads,
+    ) -> Result<AgentResponse> {
         let path = self.actions.store(result)?;
-        if self.remote_mode.writes()
-            && let Some(remote) = &self.remote
-        {
-            let _permit = self.remote_transfers.acquire().await?;
-            if let Err(error) = remote.put_action_result(result).await {
-                self.note_remote_failure();
-                warn!(
-                    "remote cache action upload failed for {}: {error}",
-                    result.action.hash
-                );
-            }
+        if let Some(uploads) = &self.uploads {
+            uploads.queue_action_result(result, connection);
         }
         Ok(AgentResponse::ActionStored { path })
     }
@@ -2314,9 +2438,13 @@ impl CacheAgent {
         )
         .await?;
 
+        // Tickets accumulate for the life of the connection because a shim
+        // publishes a compilation's blobs and the action result naming them over
+        // one connection, in that order.
+        let mut connection = ConnectionUploads::default();
         while let Some(line) = read_request(&mut reader).await? {
             let response = match serde_json::from_str(&line) {
-                Ok(request) => self.respond(request).await,
+                Ok(request) => self.respond_on(request, &mut connection).await,
                 Err(error) => AgentResponse::Error {
                     message: format!("invalid agent request: {error}"),
                 },

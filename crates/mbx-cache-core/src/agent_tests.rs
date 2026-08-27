@@ -1683,6 +1683,566 @@ async fn session_completion_cancels_outstanding_prefetches() {
     assert!(agent.prefetch_tasks.lock().unwrap().is_empty());
 }
 
+/// A blocking response is what makes this deterministic: were the store waiting
+/// for its upload, it could not return while the server is still holding the
+/// response open.
+#[tokio::test]
+async fn storing_a_blob_returns_before_its_remote_upload() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let bytes = b"deferred blob".to_vec();
+    let digest = CacheDigest::blake3(&bytes);
+    let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let response_release = release.clone();
+    let upload = server
+        .mock("PUT", blob_path(&digest).as_str())
+        .with_status(200)
+        .with_chunked_body(move |writer| {
+            let (released, condition) = &*response_release;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = condition.wait(released).unwrap();
+            }
+            std::io::Write::write_all(writer, b"")
+        })
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().join("writer"),
+        RemoteCacheMode::WriteOnly,
+    );
+    let source = directory.path().join("source");
+    fs::write(&source, &bytes).unwrap();
+
+    let stored = tokio::time::timeout(
+        Duration::from_secs(2),
+        agent.respond(AgentRequest::StoreBlob {
+            digest: digest.clone(),
+            source,
+        }),
+    )
+    .await
+    .expect("storing a blob waited for its remote upload");
+    assert!(matches!(stored, AgentResponse::Stored { .. }));
+    assert!(agent.cas.find(&digest).unwrap().is_some());
+
+    let (released, condition) = &*release;
+    *released.lock().unwrap() = true;
+    condition.notify_all();
+    agent.wait_for_uploads().await;
+    upload.assert_async().await;
+    let stats = agent.stats();
+    assert_eq!(stats.background_uploads, 1);
+    assert_eq!(stats.background_upload_failures, 0);
+    assert_eq!(stats.uploaded_bytes, digest.size);
+}
+
+#[tokio::test]
+async fn an_action_result_is_published_after_the_blobs_it_references() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let action_bytes = b"ordered action".to_vec();
+    let action = CacheDigest::blake3(&action_bytes);
+    let result = RemoteActionResult {
+        action: action.clone(),
+        metadata: None,
+        output_root: None,
+        version: 1,
+    };
+    // Recorded as each request arrives rather than as each response is written:
+    // an upload finishes without reading the response body, so the body is no
+    // signal for when the client moved on. Each matcher guards on its own path,
+    // because mockito may consult a matcher for a request another mock answers.
+    let arrivals = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let blob_arrivals = arrivals.clone();
+    let blob_route = blob_path(&action);
+    let matched_blob_route = blob_route.clone();
+    let blob = server
+        .mock("PUT", blob_route.as_str())
+        .match_request(move |request| {
+            if request.path() == matched_blob_route {
+                blob_arrivals.lock().unwrap().push("blob");
+            }
+            true
+        })
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let result_arrivals = arrivals.clone();
+    let action_route = action_path(&action);
+    let matched_action_route = action_route.clone();
+    let action_result = server
+        .mock("PUT", action_route.as_str())
+        .match_request(move |request| {
+            if request.path() == matched_action_route {
+                result_arrivals.lock().unwrap().push("action result");
+            }
+            true
+        })
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().join("writer"),
+        RemoteCacheMode::WriteOnly,
+    );
+    let source = directory.path().join("source");
+    fs::write(&source, &action_bytes).unwrap();
+
+    let responses = agent
+        .handle_requests([
+            AgentRequest::StoreBlob {
+                digest: action.clone(),
+                source,
+            },
+            AgentRequest::StoreActionResult {
+                result: result.clone(),
+            },
+        ])
+        .await;
+    assert!(matches!(responses[0], AgentResponse::Stored { .. }));
+    assert!(matches!(responses[1], AgentResponse::ActionStored { .. }));
+    agent.wait_for_uploads().await;
+
+    blob.assert_async().await;
+    action_result.assert_async().await;
+    assert_eq!(
+        *arrivals.lock().unwrap(),
+        vec!["blob", "action result"],
+        "an action result reached the server before a blob it references"
+    );
+}
+
+/// A failed re-upload must not retract what an earlier session advertised.
+///
+/// The conditional manifest write replaces the remote manifest when its entity
+/// tag still matches, so dropping an inherited prediction would un-advertise a
+/// result that is plausibly still on the server.
+#[tokio::test]
+async fn a_task_manifest_keeps_inherited_predictions_whose_upload_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let task = "4".repeat(64);
+    let action_bytes = b"inherited action".to_vec();
+    let action = CacheDigest::blake3(&action_bytes);
+    let prediction = ActionPrediction {
+        invocation: CacheDigest::blake3(b"inherited invocation"),
+        action: action.clone(),
+        adapter: "rustc".into(),
+        payload: "{}".into(),
+    };
+    let manifest_bytes = canonical_json(&TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: vec![prediction.clone()],
+    })
+    .unwrap();
+    let manifest_etag = blake3::hash(&manifest_bytes).to_hex().to_string();
+    let (_, selector) = CacheAgent::task_manifest_selector(&task).unwrap();
+    // The prediction is already advertised remotely when this session starts.
+    server
+        .mock("GET", action_manifest_path(&selector).as_str())
+        .with_status(200)
+        .with_header("etag", &format!("\"{manifest_etag}\""))
+        .with_body(manifest_bytes.clone())
+        .create_async()
+        .await;
+    server
+        .mock("GET", action_path(&action).as_str())
+        .with_status(404)
+        .create_async()
+        .await;
+    server
+        .mock("PUT", blob_path(&action).as_str())
+        .with_status(500)
+        .create_async()
+        .await;
+    let manifest = server
+        .mock("PUT", action_manifest_path(&selector).as_str())
+        .match_body(manifest_bytes)
+        .with_status(201)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().join("writer"),
+        RemoteCacheMode::ReadWrite,
+    );
+    let run = agent.begin_task(&task).await.unwrap();
+    agent.wait_for_prefetches().await;
+    let source = directory.path().join("source");
+    fs::write(&source, &action_bytes).unwrap();
+    agent
+        .handle_requests([
+            AgentRequest::StoreBlob {
+                digest: action.clone(),
+                source,
+            },
+            AgentRequest::StoreActionResult {
+                result: RemoteActionResult {
+                    action: action.clone(),
+                    metadata: None,
+                    output_root: None,
+                    version: 1,
+                },
+            },
+            AgentRequest::RecordActionPrediction {
+                task: run.clone(),
+                prediction,
+            },
+        ])
+        .await;
+    agent.commit_task(&run).await.unwrap();
+    agent.wait_for_uploads().await;
+
+    manifest.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_task_manifest_omits_predictions_that_were_not_published() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let task = "5".repeat(64);
+    let published_bytes = b"published action".to_vec();
+    let withheld_bytes = b"withheld action".to_vec();
+    let published = CacheDigest::blake3(&published_bytes);
+    let withheld = CacheDigest::blake3(&withheld_bytes);
+    let predictions: Vec<ActionPrediction> = [&published, &withheld]
+        .into_iter()
+        .enumerate()
+        .map(|(index, action)| ActionPrediction {
+            invocation: CacheDigest::blake3(format!("invocation {index}").as_bytes()),
+            action: action.clone(),
+            adapter: "rustc".into(),
+            payload: "{}".into(),
+        })
+        .collect();
+    server
+        .mock("PUT", blob_path(&published).as_str())
+        .with_status(200)
+        .create_async()
+        .await;
+    // This blob never lands, so the action result naming it is withheld, and a
+    // manifest advertising that action would send readers after nothing.
+    server
+        .mock("PUT", blob_path(&withheld).as_str())
+        .with_status(500)
+        .create_async()
+        .await;
+    server
+        .mock("PUT", action_path(&published).as_str())
+        .with_status(200)
+        .create_async()
+        .await;
+    let (_, selector) = CacheAgent::task_manifest_selector(&task).unwrap();
+    let expected = canonical_json(&TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: vec![predictions[0].clone()],
+    })
+    .unwrap();
+    let manifest = server
+        .mock("PUT", action_manifest_path(&selector).as_str())
+        .match_body(expected)
+        .with_status(201)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().join("writer"),
+        RemoteCacheMode::WriteOnly,
+    );
+    let run = agent.begin_task(&task).await.unwrap();
+    for (index, (action, bytes)) in [(&published, &published_bytes), (&withheld, &withheld_bytes)]
+        .into_iter()
+        .enumerate()
+    {
+        let source = directory.path().join(format!("source-{index}"));
+        fs::write(&source, bytes).unwrap();
+        agent
+            .handle_requests([
+                AgentRequest::StoreBlob {
+                    digest: action.clone(),
+                    source,
+                },
+                AgentRequest::StoreActionResult {
+                    result: RemoteActionResult {
+                        action: action.clone(),
+                        metadata: None,
+                        output_root: None,
+                        version: 1,
+                    },
+                },
+                AgentRequest::RecordActionPrediction {
+                    task: run.clone(),
+                    prediction: predictions[index].clone(),
+                },
+            ])
+            .await;
+    }
+    agent.commit_task(&run).await.unwrap();
+    agent.wait_for_uploads().await;
+
+    manifest.assert_async().await;
+    // The local manifest keeps both: this checkout can still use what it built.
+    let local = agent.load_task_manifest(&task).unwrap().unwrap();
+    assert_eq!(local.predictions.len(), 2);
+}
+
+#[tokio::test]
+async fn a_blob_that_fails_to_upload_withholds_its_action_result() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let action_bytes = b"unpublishable action".to_vec();
+    let action = CacheDigest::blake3(&action_bytes);
+    let result = RemoteActionResult {
+        action: action.clone(),
+        metadata: None,
+        output_root: None,
+        version: 1,
+    };
+    let blob = server
+        .mock("PUT", blob_path(&action).as_str())
+        .with_status(500)
+        .expect(1)
+        .create_async()
+        .await;
+    // A server validates an action result against the blobs it references, so
+    // sending this one would be rejected anyway.
+    let action_result = server
+        .mock("PUT", action_path(&action).as_str())
+        .with_status(200)
+        .expect(0)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().join("writer"),
+        RemoteCacheMode::WriteOnly,
+    );
+    let source = directory.path().join("source");
+    fs::write(&source, &action_bytes).unwrap();
+
+    agent
+        .handle_requests([
+            AgentRequest::StoreBlob {
+                digest: action.clone(),
+                source,
+            },
+            AgentRequest::StoreActionResult { result },
+        ])
+        .await;
+    agent.wait_for_uploads().await;
+
+    blob.assert_async().await;
+    action_result.assert_async().await;
+    // The build keeps its local result: a failed upload costs hit rate, not
+    // correctness.
+    assert!(agent.actions.find(&action).unwrap().is_some());
+    let stats = agent.stats();
+    assert_eq!(stats.background_uploads, 0);
+    assert!(stats.remote_failures > 0);
+}
+
+/// A blob that failed once must not withhold everything that follows.
+///
+/// Compilations share blobs -- every empty stdout is the same object -- so a
+/// settled failure reused for the rest of the session would let one transient
+/// error suppress every action result after it.
+#[tokio::test]
+async fn a_blob_that_failed_is_uploaded_again_for_a_later_result() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let shared_bytes = b"shared across compilations".to_vec();
+    let shared = CacheDigest::blake3(&shared_bytes);
+    let second_action = CacheDigest::blake3(b"the compilation after the failure");
+    let failed = server
+        .mock("PUT", blob_path(&shared).as_str())
+        .with_status(500)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().join("writer"),
+        RemoteCacheMode::WriteOnly,
+    );
+    let store_shared = |index: usize| {
+        let source = directory.path().join(format!("source-{index}"));
+        fs::write(&source, &shared_bytes).unwrap();
+        AgentRequest::StoreBlob {
+            digest: shared.clone(),
+            source,
+        }
+    };
+
+    // The first compilation's upload of the shared blob fails, so its result is
+    // withheld.
+    agent
+        .handle_requests([
+            store_shared(0),
+            AgentRequest::StoreActionResult {
+                result: RemoteActionResult {
+                    action: shared.clone(),
+                    metadata: None,
+                    output_root: None,
+                    version: 1,
+                },
+            },
+        ])
+        .await;
+    agent.wait_for_uploads().await;
+    failed.assert_async().await;
+
+    // A later compilation stores the same bytes and must get its own attempt.
+    let retried = server
+        .mock("PUT", blob_path(&shared).as_str())
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let second_blob = server
+        .mock("PUT", blob_path(&second_action).as_str())
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let second_result = server
+        .mock("PUT", action_path(&second_action).as_str())
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let source = directory.path().join("second-action");
+    fs::write(&source, b"the compilation after the failure").unwrap();
+    agent
+        .handle_requests([
+            store_shared(1),
+            AgentRequest::StoreBlob {
+                digest: second_action.clone(),
+                source,
+            },
+            AgentRequest::StoreActionResult {
+                result: RemoteActionResult {
+                    action: second_action.clone(),
+                    metadata: None,
+                    output_root: None,
+                    version: 1,
+                },
+            },
+        ])
+        .await;
+    agent.wait_for_uploads().await;
+
+    retried.assert_async().await;
+    second_blob.assert_async().await;
+    second_result.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_repeated_blob_is_uploaded_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let bytes = b"shared blob".to_vec();
+    let digest = CacheDigest::blake3(&bytes);
+    let upload = server
+        .mock("PUT", blob_path(&digest).as_str())
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().join("writer"),
+        RemoteCacheMode::WriteOnly,
+    );
+    for index in 0..3 {
+        let source = directory.path().join(format!("source-{index}"));
+        fs::write(&source, &bytes).unwrap();
+        agent
+            .respond(AgentRequest::StoreBlob {
+                digest: digest.clone(),
+                source,
+            })
+            .await;
+    }
+    agent.wait_for_uploads().await;
+
+    upload.assert_async().await;
+    assert_eq!(agent.stats().background_uploads, 1);
+}
+
+#[tokio::test]
+async fn a_session_that_cannot_write_queues_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = mockito::Server::new_async().await;
+    let agent = remote_agent(
+        &server,
+        directory.path().join("reader"),
+        RemoteCacheMode::ReadOnly,
+    );
+    assert!(agent.uploads.is_none());
+
+    let bytes = b"local only".to_vec();
+    let digest = CacheDigest::blake3(&bytes);
+    let source = directory.path().join("source");
+    fs::write(&source, &bytes).unwrap();
+    agent
+        .respond(AgentRequest::StoreBlob {
+            digest: digest.clone(),
+            source,
+        })
+        .await;
+    // No mock is registered, so an upload attempt would fail the request.
+    tokio::time::timeout(Duration::from_secs(2), agent.wait_for_uploads())
+        .await
+        .expect("draining a read-only session blocked");
+    assert_eq!(agent.stats().background_uploads, 0);
+    assert_eq!(agent.stats().remote_failures, 0);
+}
+
+#[tokio::test]
+async fn a_collected_blob_is_skipped_rather_than_retried() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let bytes = b"collected blob".to_vec();
+    let digest = CacheDigest::blake3(&bytes);
+    let upload = server
+        .mock("PUT", blob_path(&digest).as_str())
+        .with_status(200)
+        .expect(0)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().join("writer"),
+        RemoteCacheMode::WriteOnly,
+    );
+    let source = directory.path().join("source");
+    fs::write(&source, &bytes).unwrap();
+    agent
+        .respond(AgentRequest::StoreBlob {
+            digest: digest.clone(),
+            source,
+        })
+        .await;
+    // Stand in for a collection between the store and the upload.
+    fs::remove_file(agent.cas.find(&digest).unwrap().unwrap()).unwrap();
+    agent.wait_for_uploads().await;
+
+    upload.assert_async().await;
+    let stats = agent.stats();
+    assert_eq!(stats.background_uploads, 0);
+    assert_eq!(stats.background_upload_failures, 1);
+}
+
 #[tokio::test]
 async fn prefetch_reserves_capacity_for_foreground_transfers() {
     let transfers = tokio::sync::Semaphore::new(MAX_REMOTE_TRANSFERS);

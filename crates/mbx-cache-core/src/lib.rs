@@ -50,6 +50,7 @@ use url::{Host, Url};
 
 mod agent;
 mod local;
+mod uploads;
 
 pub use agent::{
     AGENT_PROTOCOL_VERSION, AgentEvent, AgentEventObserver, AgentRemoteCache, AgentRequest,
