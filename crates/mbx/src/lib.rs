@@ -46,5 +46,7 @@ pub mod tui;
 #[doc(hidden)]
 pub mod util;
 
+mod cc;
 mod linker;
+mod materialize;
 mod rustc;

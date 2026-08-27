@@ -5,15 +5,44 @@ through it: `mbx build`, `mbx test`, `mbx clippy`, or any installed Cargo
 subcommand.
 
 1. mbx resolves the workspace and target roots through Cargo metadata.
-2. It starts an in-process cache agent and creates a rustc shim for the build.
-3. Cargo runs normally with the shim set as `RUSTC_WRAPPER`.
-4. The shim analyzes each rustc invocation and derives a content-addressed action key.
+2. It starts an in-process cache agent and creates shims for the build.
+3. Cargo runs normally with the rustc shim set as `RUSTC_WRAPPER`, and build
+   scripts inherit a `HOST_CC` and `HOST_CXX` pointing at the C and C++ shims.
+4. Each shim analyzes its compiler invocation and derives a content-addressed action key.
 5. A hit restores the action's outputs; a miss runs the real compiler and publishes the result.
 6. The agent exits with the build, draining any remote uploads it still owes.
    There is no persistent daemon.
 
 Every mbx command works this way; there is no separate mode to turn on and no
 component to keep up to date.
+
+## Build-script C and C++
+
+Cargo has no `CC_WRAPPER`, so the shims arrive as compiler variables
+themselves, resolved to the platform compilers when the session starts. They
+are set as `HOST_CC` and `HOST_CXX` rather than `CC` and `CXX`: the `cc` crate
+consults the host pair only when it is not cross-compiling, and these shims
+wrap the host compiler, so a `cargo build --target` keeps the cross compiler it
+would have found on its own. A build that already chose a compiler through any
+of those variables is left alone, and `MBX_CC=0` turns the shims off
+entirely.
+
+Unlike rustc, a C compile leaves no dependency record behind for a later build
+to read, and publishing one would add a file the uncached build never produced.
+So the shim asks for its own dependency list, keeps it private, and keys the
+compilation on the files that list names. A cold compilation therefore has no
+key to look up yet — it is stored after compiling and warms the next build. The
+directories the compile searched also contribute a manifest of the names in
+them that could answer an `#include`, so a header appearing where it would
+*shadow* one that was read changes the key even though every file that was read
+is unchanged. Objects and dependency files are not counted: they cannot shadow
+an include, and a build writes them into the very directory a generated header
+lives in.
+
+Those manifests are taken once before the compiler runs and again before
+publishing. A header that appeared while the compilation was in flight is one
+the compiler never saw, so recording it would claim a state that did not
+produce this object.
 
 ## Portable keys
 

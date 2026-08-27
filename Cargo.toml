@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "crates/mbx",
+  "crates/mbx-cache-cc",
   "crates/mbx-cache-core",
   "crates/mbx-cache-cargo",
   "crates/mbx-cache-protocol",

@@ -27,6 +27,7 @@ Every value below is optional; these are shown set explicitly.
 cache_dir = "/var/cache/mbx"
 incremental = false
 share_out_dir = false
+cc = true
 savings = "quips"        # or "plain", "off"
 
 [gc]
@@ -55,18 +56,31 @@ retries = 3
 
 ## Workspace policy
 
-A repository may check in a `.mbx.toml` containing only the two build-policy
+A repository may check in a `.mbx.toml` containing only the three build-policy
 switches below:
 
 ```toml
 incremental = false
 share_out_dir = false
+cc = true
 ```
 
 Environment variables still win. Machine paths, remote-cache configuration,
 credentials, diagnostics, target placement, and garbage collection are not
 accepted from a repository-owned file. mbx reports an error instead of applying
 an unsafe or misspelled workspace setting.
+
+## Build-script C and C++
+
+`cc = true` (`MBX_CC`, on by default) points build scripts at a caching
+compiler for the duration of an mbx command, so the C that sys-crates compile
+is cached alongside their Rust. A build that already chose a compiler through
+`CC`, `CXX`, `HOST_CC`, `HOST_CXX`, `TARGET_CC`, or `TARGET_CXX` keeps it and
+is left alone.
+
+The shims never change a compilation: anything mbx cannot model exactly runs
+the real compiler and publishes nothing. See [limits](/limits) for what is
+admitted, and `mbx explain` for what a particular build bypassed.
 
 ## Verify mode
 

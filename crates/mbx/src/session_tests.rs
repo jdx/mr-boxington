@@ -8,6 +8,7 @@ fn test_config(cache_dir: &Path) -> Config {
         incremental: false,
         share_out_dir: false,
         events: false,
+        cc: false,
         remote: Default::default(),
         http: Default::default(),
         gc: Default::default(),
@@ -349,4 +350,52 @@ fn a_relative_target_is_resolved_before_it_is_linked() {
         std::fs::canonicalize(&shim).unwrap(),
         std::fs::canonicalize("Cargo.toml").unwrap()
     );
+}
+
+/// An image with a C compiler and no C++ one is ordinary, and it must not cost
+/// a C-only sys-crate its caching.
+#[test]
+fn a_missing_cpp_compiler_still_leaves_c_compilations_cached() {
+    let shims = CcShims {
+        cc: Some((
+            PathBuf::from("/session/mbx-cc"),
+            PathBuf::from("/usr/bin/cc"),
+        )),
+        cxx: None,
+    };
+    let mut environment = BTreeMap::new();
+    shims.apply_to(&mut environment);
+
+    assert_eq!(
+        environment.get("HOST_CC").map(String::as_str),
+        Some("/session/mbx-cc")
+    );
+    assert_eq!(
+        environment.get("MBX_REAL_CC").map(String::as_str),
+        Some("/usr/bin/cc")
+    );
+    // Nothing is claimed for the language that has no compiler, so the `cc`
+    // crate keeps whatever it would have chosen for C++.
+    assert!(!environment.contains_key("HOST_CXX"));
+    assert!(!environment.contains_key("MBX_REAL_CXX"));
+}
+
+/// Both present is the ordinary case, and both get pointed at their shim.
+#[test]
+fn both_compilers_present_are_both_redirected() {
+    let shims = CcShims {
+        cc: Some((
+            PathBuf::from("/session/mbx-cc"),
+            PathBuf::from("/usr/bin/cc"),
+        )),
+        cxx: Some((
+            PathBuf::from("/session/mbx-cxx"),
+            PathBuf::from("/usr/bin/c++"),
+        )),
+    };
+    let mut environment = BTreeMap::new();
+    shims.apply_to(&mut environment);
+    for name in ["HOST_CC", "HOST_CXX", "MBX_REAL_CC", "MBX_REAL_CXX"] {
+        assert!(environment.contains_key(name), "{name} should be set");
+    }
 }

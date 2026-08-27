@@ -6,6 +6,9 @@ fn main() -> ExitCode {
     if mbx::session::is_rustc_shim() {
         return mbx::session::run_rustc_shim();
     }
+    if let Some(language) = mbx::session::is_cc_shim() {
+        return mbx::session::run_cc_shim(language);
+    }
 
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("MBX_LOG", "info"))
         .format_target(false)

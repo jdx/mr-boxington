@@ -1397,6 +1397,7 @@ dependencies = [
  "libc",
  "log",
  "mbx-cache-cargo",
+ "mbx-cache-cc",
  "mbx-cache-core",
  "mbx-cache-rustc",
  "mbx-cache-store",
@@ -1426,6 +1427,19 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml",
+]
+
+[[package]]
+name = "mbx-cache-cc"
+version = "0.1.0"
+dependencies = [
+ "mbx-cache-core",
+ "mbx-cache-rustc",
+ "serde",
+ "serde_json",
+ "strum",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

@@ -2,8 +2,8 @@ use mbx_cache_core::{
     ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE, AGENT_PROTOCOL_VERSION,
     ActionPrediction, AgentRequest, AgentResponse, BLOB_MEDIA_TYPE, BLOB_PACK_MEDIA_TYPE,
     BLOB_PACK_RECEIPT_MEDIA_TYPE, CLIENT_METADATA_MEDIA_TYPE, CacheDigest, CacheDirectory,
-    CacheFileNode, DIRECTORY_MEDIA_TYPE, PROTOCOL_VERSION, RemoteActionResult, RestoreStats,
-    RustcMetadata, TASK_ACTION_MANIFEST_MEDIA_TYPE, canonical_json,
+    CacheFileNode, CcMetadata, DIRECTORY_MEDIA_TYPE, PROTOCOL_VERSION, RemoteActionResult,
+    RestoreStats, RustcMetadata, TASK_ACTION_MANIFEST_MEDIA_TYPE, canonical_json,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -367,6 +367,16 @@ fn agent_protocol_v3_shapes_match_the_conformance_fixture() {
         &RustcMetadata {
             version: 1,
             kind: "rustc".into(),
+            stdout: digest(),
+            stderr: digest(),
+        },
+    );
+    assert_fixture(
+        &mut expected,
+        "record.cc_metadata",
+        &CcMetadata {
+            version: 1,
+            kind: "cc".into(),
             stdout: digest(),
             stderr: digest(),
         },

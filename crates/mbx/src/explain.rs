@@ -137,6 +137,33 @@ fn guidance(kind: &str) -> &'static str {
         "input-read" | "input-changed" | "input-modified-during-compilation" => {
             "An input was unavailable or changed while rustc ran. Stabilize generated inputs before retrying."
         }
+        "cc-not-a-compile" | "cc-non-object-output" | "cc-compiler-query" => {
+            "Expected: a build script asked the C compiler to link, preprocess, or describe itself, which is not a cacheable compilation."
+        }
+        "cc-unknown-flag" | "cc-tool-passthrough" => {
+            "A build script passed a C compiler option this mbx adapter does not model. Check for a newer mbx release before reporting it."
+        }
+        "cc-unsupported-language" => {
+            "mbx caches C and C++ compilations; assembly, Objective-C, and precompiled headers still compile normally."
+        }
+        "cc-embedded-timestamp-macro" => {
+            "A source or header expands `__DATE__`, `__TIME__`, or `__TIMESTAMP__`, so its object is not a function of its inputs and cannot be reused."
+        }
+        "cc-unsupported-environment" => {
+            "An include-path or sub-tool environment variable changes the compilation in a way the argv model cannot see. Unset it to make these compilations cacheable."
+        }
+        "cc-search-path-modified-during-compilation" => {
+            "An include directory gained or lost a header while the compiler was running, so what it read cannot be established. Avoid writing headers into a search directory during a build."
+        }
+        "cc-local-cpu-target" => {
+            "A build script compiles for the machine's own processor (`-march=native` or similar), so the object it produces is not a function of anything the cache key names. Name the architecture explicitly to make these compilations cacheable."
+        }
+        "cc-unsupported-compiler-driver" => {
+            "mbx models gcc-style and clang-style drivers. Other compilers, including MSVC, compile normally without caching."
+        }
+        "cc-unmapped-absolute-path" => {
+            "A build script's compilation reads a path outside the mapped and system roots, so mbx cannot key it portably."
+        }
         "other" => {
             "The cache adapter failed outside a recognized conservative bypass. The detail below should be included in a bug report."
         }

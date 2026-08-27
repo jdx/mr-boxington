@@ -193,7 +193,21 @@ fn build_with(
         // Same reason: a test asserting the default cross-checkout behaviour
         // must not read an answer out of the developer's environment.
         .env_remove("MBX_SHARE_OUT_DIR")
-        .env_remove("MBX_LEARNED_INCREMENTAL");
+        .env_remove("MBX_LEARNED_INCREMENTAL")
+        // The C shims are on by default; a test that says nothing about them
+        // must not inherit a different answer from the developer's shell. The
+        // compiler variables matter just as much: this suite is itself run
+        // through mbx, so without this a fixture would inherit the outer
+        // session's shims and every build here would stand aside.
+        .env_remove("MBX_CC")
+        .env_remove("CC")
+        .env_remove("CXX")
+        .env_remove("HOST_CC")
+        .env_remove("HOST_CXX")
+        .env_remove("TARGET_CC")
+        .env_remove("TARGET_CXX")
+        .env_remove("MBX_REAL_CC")
+        .env_remove("MBX_REAL_CXX");
     for (name, value) in settings {
         command.env(name, value);
     }
@@ -1554,4 +1568,474 @@ fn verification_is_clean_across_target_directories() {
         0,
         "a restore into another target directory diverged: {reported}"
     );
+}
+/// Write a fixture whose build script compiles C through `$CC`.
+///
+/// Deliberately hand-rolled rather than using the `cc` crate: this suite
+/// resolves offline and takes no dependencies, and what is under test is the
+/// shim the build script inherits, not the crate that would call it.
+#[cfg(unix)]
+fn write_c_project(directory: &Path) {
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::create_dir_all(directory.join("include")).unwrap();
+    std::fs::write(
+        directory.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("include/hello.h"),
+        "int hello_value(void);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("src/hello.c"),
+        "#include \"hello.h\"\nint hello_value(void) { return 7; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("build.rs"),
+        r#"use std::{env, path::PathBuf, process::Command};
+
+fn main() {
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    // The `cc` crate reads HOST_CC before CC when host and target agree, and
+    // that is the variable mbx sets; mirroring its precedence is what makes
+    // this fixture exercise the same path a real build script takes.
+    let compiler = env::var("HOST_CC")
+        .or_else(|_| env::var("CC"))
+        .unwrap_or_else(|_| "cc".into());
+    let status = Command::new(&compiler)
+        .arg("-O2")
+        .arg("-Iinclude")
+        .arg("-c")
+        .arg("-o")
+        .arg(out.join("hello.o"))
+        .arg("src/hello.c")
+        .status()
+        .expect("the C compiler should run");
+    assert!(status.success(), "the fixture's C should compile");
+    println!("cargo:rerun-if-changed=src/hello.c");
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("src/lib.rs"),
+        "pub fn value() -> u32 { 7 }\n",
+    )
+    .unwrap();
+    let status = Command::new(cargo())
+        .current_dir(directory)
+        .args(["generate-lockfile", "--offline"])
+        .status()
+        .expect("cargo should run");
+    assert!(status.success(), "the fixture should resolve offline");
+}
+
+/// Whether a C compiler is available to compile the fixture at all.
+#[cfg(unix)]
+fn has_c_compiler() -> bool {
+    // Deliberately a real compilation rather than `cc -v`, which is what the
+    // adapter's own identity probe runs. Sharing that signal would mean a
+    // regression in the probe skipped these tests instead of failing them --
+    // the feature would go dead and the suite would stay green.
+    let Ok(directory) = tempfile::tempdir() else {
+        return false;
+    };
+    let source = directory.path().join("probe.c");
+    if std::fs::write(&source, "int probe(void) { return 0; }\n").is_err() {
+        return false;
+    }
+    Command::new("cc")
+        .arg("-c")
+        .arg("-o")
+        .arg(directory.path().join("probe.o"))
+        .arg(&source)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// Build the fixture in two fresh checkouts sharing one store, and report how
+/// much the second one reused.
+///
+/// The hit count is the measure: a C compilation that crosses checkouts is one
+/// more cached action than the same build without it. Compiler statistics are
+/// keyed by outcome rather than by what was compiled, so they cannot tell the
+/// C compile apart from the Rust one.
+#[cfg(unix)]
+fn warm_checkout_hits(settings: &[(&str, &str)]) -> u64 {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    write_c_project(first.path());
+    write_c_project(second.path());
+
+    build_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+        settings,
+    );
+    let (warm, _) = build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+        settings,
+    );
+    count(&warm, "hits")
+}
+
+/// A build script's C compilation is cached, and a second checkout restores it
+/// rather than compiling again.
+#[cfg(unix)]
+#[test]
+fn a_build_script_c_compilation_crosses_checkouts() {
+    if !has_c_compiler() {
+        return;
+    }
+    let cached = warm_checkout_hits(&[]);
+    let uncached = warm_checkout_hits(&[("MBX_CC", "0")]);
+    assert_eq!(
+        cached,
+        uncached + 1,
+        "the C compilation should be exactly one more restored action"
+    );
+}
+
+/// Write a fixture whose build script generates a header into `OUT_DIR` and
+/// compiles several objects into that same directory.
+///
+/// This is the shape that a manifest counting every filename gets wrong: the
+/// objects land beside the generated header, so what the key recorded depended
+/// on how many sibling compilations had finished.
+#[cfg(unix)]
+fn write_generated_header_project(directory: &Path) {
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::write(
+        directory.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    for name in ["a", "b", "c"] {
+        std::fs::write(
+            directory.join(format!("src/{name}.c")),
+            format!("#include \"config.h\"\nint {name}(void) {{ return CONFIG_V; }}\n"),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        directory.join("build.rs"),
+        r##"use std::{env, fs, path::PathBuf, process::Command};
+
+fn main() {
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    fs::write(out.join("config.h"), "#define CONFIG_V 7
+").unwrap();
+    let compiler = env::var("HOST_CC")
+        .or_else(|_| env::var("CC"))
+        .unwrap_or_else(|_| "cc".into());
+    for name in ["a", "b", "c"] {
+        let status = Command::new(&compiler)
+            .arg(format!("-I{}", out.display()))
+            .arg("-c")
+            .arg("-o")
+            .arg(out.join(format!("{name}.o")))
+            .arg(format!("src/{name}.c"))
+            .status()
+            .expect("the C compiler should run");
+        assert!(status.success());
+    }
+}
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("src/lib.rs"),
+        "pub fn value() -> u32 { 7 }\n",
+    )
+    .unwrap();
+    let status = Command::new(cargo())
+        .current_dir(directory)
+        .args(["generate-lockfile", "--offline"])
+        .status()
+        .expect("cargo should run");
+    assert!(status.success(), "the fixture should resolve offline");
+}
+
+/// A header generated into `OUT_DIR` is cached like any other, even though the
+/// build writes its objects into that same directory.
+#[cfg(unix)]
+#[test]
+fn objects_landing_beside_a_generated_header_still_cross_checkouts() {
+    if !has_c_compiler() {
+        return;
+    }
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    write_generated_header_project(first.path());
+    write_generated_header_project(second.path());
+
+    build_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+        &[],
+    );
+    let (warm, _) = build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("warm.json"),
+        &[],
+    );
+    assert_eq!(
+        count(&warm, "hits"),
+        4,
+        "all three C compilations and the Rust one should be restored: {warm}"
+    );
+}
+
+/// A cached C warning names the checkout it is replayed in, not the one that
+/// published it.
+///
+/// A compiler diagnostic names the file it is about, and a generated source
+/// lives at an absolute path that differs per checkout, so replaying the stored
+/// bytes verbatim would point the reader at somebody else's tree.
+#[cfg(unix)]
+#[test]
+fn a_restored_c_diagnostic_names_the_checkout_it_is_replayed_in() {
+    if !has_c_compiler() {
+        return;
+    }
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    write_warning_project(first.path());
+    write_warning_project(second.path());
+
+    build_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+        &[],
+    );
+    let (warm, stderr) = build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("warm.json"),
+        &[],
+    );
+    assert!(
+        count(&warm, "hits") > 0,
+        "the second checkout should have restored the compilation: {warm}"
+    );
+    let diagnostic = stderr
+        .lines()
+        .find(|line| line.contains("CCWARN>>>"))
+        .unwrap_or_default();
+    assert!(
+        !diagnostic.contains(&first.path().display().to_string()),
+        "a replayed warning must not name the checkout that published it: {diagnostic}"
+    );
+}
+
+/// A fixture whose build script compiles a generated source that warns, so the
+/// diagnostic carries an absolute path.
+#[cfg(unix)]
+fn write_warning_project(directory: &Path) {
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::write(
+        directory.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("build.rs"),
+        r##"use std::{env, fs, path::PathBuf, process::Command};
+
+fn main() {
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let source = out.join("gen.c");
+    fs::write(&source, "int value(void) { int unused = 1; return 7; }
+").unwrap();
+    let compiler = env::var("HOST_CC")
+        .or_else(|_| env::var("CC"))
+        .unwrap_or_else(|_| "cc".into());
+    let output = Command::new(&compiler)
+        .arg("-Wall")
+        .arg("-c")
+        .arg("-o")
+        .arg(out.join("gen.o"))
+        .arg(&source)
+        .output()
+        .expect("the C compiler should run");
+    for line in String::from_utf8_lossy(&output.stderr).lines() {
+        println!("cargo:warning=CCWARN>>>{line}");
+    }
+    assert!(output.status.success());
+}
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("src/lib.rs"),
+        "pub fn value() -> u32 { 7 }\n",
+    )
+    .unwrap();
+    let status = Command::new(cargo())
+        .current_dir(directory)
+        .args(["generate-lockfile", "--offline"])
+        .status()
+        .expect("cargo should run");
+    assert!(status.success(), "the fixture should resolve offline");
+}
+
+/// A prediction that no longer describes the tree must not strand the
+/// compilation.
+///
+/// This adapter has no second way to build a key, so a stale prediction that
+/// aborted the cache path would fail identically on every later build. The
+/// recovery is what the test pins: compile, republish, and hit next time.
+#[cfg(unix)]
+#[test]
+fn a_stale_prediction_recovers_instead_of_stranding_the_compilation() {
+    if !has_c_compiler() {
+        return;
+    }
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_c_project(project.path());
+
+    // Record a prediction that names the header.
+    build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+        &[],
+    );
+
+    // Delete the header and stop including it. The command line is untouched,
+    // so the invocation still resolves to the same prediction -- one that now
+    // names a file that is gone.
+    std::fs::remove_file(project.path().join("include/hello.h")).unwrap();
+    std::fs::write(
+        project.path().join("src/hello.c"),
+        "int hello_value(void) { return 7; }\n",
+    )
+    .unwrap();
+
+    let (recovered, _) = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("recover.json"),
+        &[],
+    );
+    assert_eq!(
+        recovered["bypasses"].get("cc-input-read"),
+        None,
+        "a stale prediction is not a bypass: {recovered}"
+    );
+
+    // A second checkout of the same modified sources shares the store but none
+    // of the outputs, so what it restores is what the recovery republished.
+    let second = tempfile::tempdir().unwrap();
+    write_c_project(second.path());
+    std::fs::remove_file(second.path().join("include/hello.h")).unwrap();
+    std::fs::write(
+        second.path().join("src/hello.c"),
+        "int hello_value(void) { return 7; }\n",
+    )
+    .unwrap();
+    let (warm, _) = build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("warm.json"),
+        &[],
+    );
+    assert_eq!(
+        count(&warm, "hits"),
+        2,
+        "both the Rust and the C compilation should be restored: {warm}"
+    );
+}
+
+/// A build that chose its own compiler keeps it.
+///
+/// `CC` is commonly exported machine-wide, so the shim standing aside is the
+/// difference between redirecting a build the user configured and leaving it
+/// alone.
+#[cfg(unix)]
+#[test]
+fn an_existing_cc_setting_is_left_alone() {
+    if !has_c_compiler() {
+        return;
+    }
+    let chosen = which::which("cc").expect("cc should resolve");
+    let preset = warm_checkout_hits(&[("HOST_CC", chosen.to_str().unwrap())]);
+    let uncached = warm_checkout_hits(&[("MBX_CC", "0")]);
+    assert_eq!(
+        preset, uncached,
+        "mbx should not have intercepted a compiler the build chose"
+    );
+}
+
+/// The object a cache hit restores is the object the compiler produced.
+#[cfg(unix)]
+#[test]
+fn a_restored_object_is_byte_identical_to_a_compiled_one() {
+    if !has_c_compiler() {
+        return;
+    }
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    write_c_project(first.path());
+    write_c_project(second.path());
+
+    build_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+        &[],
+    );
+    build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+        &[],
+    );
+
+    let compiled = find_object(first.path()).expect("the first checkout should have an object");
+    let restored = find_object(second.path()).expect("the second checkout should have an object");
+    assert_eq!(
+        std::fs::read(&compiled).unwrap(),
+        std::fs::read(&restored).unwrap(),
+        "a restored object must match the one that was compiled"
+    );
+}
+
+/// Find the fixture's object file beneath a checkout's target directory.
+#[cfg(unix)]
+fn find_object(project: &Path) -> Option<std::path::PathBuf> {
+    let target = project.join("target");
+    let root = std::fs::read_link(&target).unwrap_or(target);
+    let mut pending = vec![root];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).ok()? {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().is_some_and(|name| name == "hello.o") {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
