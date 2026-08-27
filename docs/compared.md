@@ -79,14 +79,14 @@ not offer today. The differences are in the mechanics:
   platform cache; see [fork PRs](/cookbook/fork-prs).
 - **How the C and C++ shims arrive.** Both put shims on `PATH`, and cover
   make, CMake, or anything else that resolves its compiler there. kache
-  installs them persistently alongside its service, so every build on the
-  machine finds them. mbx places them for the duration of one
-  [`mbx exec`](/standalone-builds) command and removes them with the
-  session — the no-daemon tradeoff in miniature: nothing stays installed,
-  and nothing is cached unless a command asked for it. mbx also shims only
-  the plain driver names (`cc`, `c++`, `gcc`, `g++`, `clang`, `clang++`) on
-  Unix, leaving a versioned or cross toolchain to the build that chose it;
-  kache covers Windows as well.
+  installs them alongside its service, so every build on the machine finds
+  them. mbx keeps its shim directory in the cache, but puts it on `PATH` for
+  one [`mbx exec`](/standalone-builds) command at a time: a build is cached
+  when it asks to be and untouched otherwise, and a shim reached through a
+  path some configure step recorded runs the real compiler and stands aside.
+  mbx also shims only the plain driver names (`cc`, `c++`, `gcc`, `g++`,
+  `clang`, `clang++`) on Unix, leaving a versioned or cross toolchain to the
+  build that chose it; kache covers Windows as well.
 - **Executable caching.** Both cache linked binaries on Linux and macOS. In
   mbx it is opt-in (`MBX_CACHE_LINKS=1`) and experimental, and the key
   includes the resolved linker, startup objects, libc, and SDK rather than

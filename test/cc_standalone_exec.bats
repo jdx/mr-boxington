@@ -75,6 +75,48 @@ EOF
   "$second/hello"
 }
 
+@test "a double dash reaches the command" {
+  local project="$BATS_TEST_TMPDIR/dashes"
+  write_project "$project"
+  cd "$project"
+
+  # `cmake --build build -- -j8` passes -j8 to the underlying tool, so a
+  # delimiter the argument parser swallowed would change what ran.
+  run "$MBX_BIN" exec /bin/echo a -- b
+  assert_success
+  assert_line 'a -- b'
+}
+
+@test "a configured build directory outlives the session that configured it" {
+  if ! command -v cmake >/dev/null 2>&1; then
+    skip "cmake is not available"
+  fi
+  local project="$BATS_TEST_TMPDIR/configured"
+  mkdir -p "$project"
+  cat >"$project/CMakeLists.txt" <<'EOF'
+cmake_minimum_required(VERSION 3.20)
+project(probe C)
+add_executable(probe main.c)
+EOF
+  echo 'int main(void) { return 0; }' >"$project/main.c"
+  cd "$project"
+
+  run "$MBX_BIN" exec cmake -S . -B build
+  assert_success
+
+  # CMake records the compiler it resolved by absolute path. A shim directory
+  # belonging to the session would leave this naming one that is already gone.
+  local recorded
+  recorded="$(grep -E '^CMAKE_C_COMPILER:' build/CMakeCache.txt | cut -d= -f2)"
+  assert_file_exists "$recorded"
+
+  # And that recorded path still builds when nothing runs it under mbx.
+  touch main.c
+  run cmake --build build
+  assert_success
+  assert_file_exists build/probe
+}
+
 @test "a failing command's exit code passes through" {
   local project="$BATS_TEST_TMPDIR/failing"
   write_project "$project"

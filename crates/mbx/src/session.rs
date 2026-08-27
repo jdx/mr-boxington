@@ -943,24 +943,29 @@ pub struct PathShims {
 /// Install a shim under every plain compiler name that resolves on `PATH`.
 ///
 /// Resolution happens here rather than in the shim so the whole build agrees
-/// on one compiler per name, and skips the running binary so a stale shim
-/// directory an outer session left on `PATH` cannot become its own compiler.
-/// A machine with none of the names simply gets no shim directory.
-pub fn install_path_shims(session_dir: &Path) -> Result<Option<PathShims>> {
+/// on one compiler per name, and skips the running binary so a shim directory
+/// already on `PATH` cannot become its own compiler. A machine with none of
+/// the names simply gets no shim directory.
+///
+/// `directory` outlives the session on purpose. A configure step records the
+/// compiler it found by absolute path -- CMake writes it into `CMakeCache.txt`,
+/// autoconf into the generated makefiles -- and a session-local directory would
+/// leave that build permanently naming a path that no longer exists. A stable
+/// one keeps the recorded path resolvable, and keeps a later `cmake --build`
+/// running through the cache rather than around it. Nothing is added to any
+/// `PATH` but the one handed to a single `mbx exec` command.
+pub fn install_path_shims(directory: &Path) -> Result<Option<PathShims>> {
     if !cfg!(unix) {
         return Ok(None);
     }
     let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
-    let directory = session_dir.join("cc-path");
-    std::fs::create_dir(&directory)?;
+    std::fs::create_dir_all(directory)?;
     let mut compilers = BTreeMap::new();
     for (name, _) in PATH_SHIM_NAMES {
         let Some(real) = resolve_on_path_excluding(name, &executable) else {
             continue;
         };
-        // Tracking, like the session shims: on macOS a hard link taken while
-        // the binary is replaced can be killed at exec.
-        install_shim_named(&executable, &directory, name, ShimLink::Tracking)?;
+        link_path_shim(&executable, &directory.join(name))?;
         compilers.insert((*name).to_string(), real);
     }
     if compilers.is_empty() {
@@ -968,9 +973,44 @@ pub fn install_path_shims(session_dir: &Path) -> Result<Option<PathShims>> {
         return Ok(None);
     }
     Ok(Some(PathShims {
-        directory,
+        directory: directory.to_path_buf(),
         compilers,
     }))
+}
+
+/// Point one compiler name at this binary, replacing a stale link in place.
+///
+/// A symlink rather than a hard link so an upgraded mbx is picked up without
+/// reinstalling, and because on macOS a hard link taken while the binary is
+/// replaced can be killed at exec.
+///
+/// The replacement goes through a temporary name and a rename because this
+/// directory is shared: another build may be executing the very name being
+/// replaced, and `rename` leaves it resolvable at every instant where removing
+/// and recreating would not.
+#[cfg(unix)]
+fn link_path_shim(executable: &Path, destination: &Path) -> Result<()> {
+    if std::fs::read_link(destination).is_ok_and(|target| target == executable) {
+        return Ok(());
+    }
+    let staging = destination.with_file_name(format!(
+        ".{}.{}",
+        destination
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy(),
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&staging);
+    std::os::unix::fs::symlink(executable, &staging)?;
+    std::fs::rename(&staging, destination)
+        .wrap_err_with(|| format!("failed to install the shim {}", destination.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn link_path_shim(_executable: &Path, _destination: &Path) -> Result<()> {
+    eyre::bail!("PATH shims are not supported on this platform")
 }
 
 fn resolve_on_path_excluding(name: &str, this_binary: &Path) -> Option<PathBuf> {
@@ -1463,6 +1503,13 @@ pub fn run_cc_shim(language: CcLanguage) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    // A shim reached outside a session has no agent to ask, and this is the
+    // ordinary way a persisted compiler path is invoked: a build configured
+    // under `mbx exec` and then built without it. Stand aside before probing
+    // anything, so that costs one exec rather than a compiler query first.
+    if std::env::var_os(SOCKET_ENV).is_none() {
+        return run_transparent_cc(compiler, arguments);
+    }
     match crate::cc::compile(&compiler, &arguments, language) {
         Ok(exit_code) => return exit_code,
         Err(error) => {

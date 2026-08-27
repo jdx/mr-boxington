@@ -9,14 +9,31 @@ mbx exec make -j8
 mbx exec cmake --build build
 ```
 
-For the command's duration, a session-local directory holding shims named
-`cc`, `c++`, `gcc`, `g++`, `clang`, and `clang++` sits first on `PATH`. Each
-shim stands in for the real compiler of the same name, resolved once when the
-session starts, so `make`'s default `CC = cc` and an explicit `CC=gcc` both
-reach a shim that chains to the compiler the build would have used anyway.
-The session starts with the command and exits with it — the same no-daemon
-lifecycle as a cargo build, with the same store, remote cache, per-build
-statistics, and [CI write policy](/remote-cache#read-and-write-policy).
+For the command's duration, a directory holding shims named `cc`, `c++`,
+`gcc`, `g++`, `clang`, and `clang++` sits first on `PATH`. Each shim stands in
+for the real compiler of the same name, resolved once when the session starts,
+so `make`'s default `CC = cc` and an explicit `CC=gcc` both reach a shim that
+chains to the compiler the build would have used anyway. The session starts
+with the command and exits with it — the same no-daemon lifecycle as a cargo
+build, with the same store, remote cache, per-build statistics, and
+[CI write policy](/remote-cache#read-and-write-policy).
+
+## Build systems that record their compiler
+
+A configure step resolves the compiler once and writes down where it found
+it: CMake stores an absolute `CMAKE_C_COMPILER` in `CMakeCache.txt`, and
+autoconf bakes `CC` into the makefiles it generates. What it records is the
+shim.
+
+The shim directory therefore lives in the cache directory rather than beside
+the session, and stays where it is between commands, so a recorded path keeps
+resolving. Configure once under `mbx exec` and every later
+`mbx exec cmake --build build` compiles through the cache. A build run
+*without* `mbx exec` still works: the shim finds no session to consult, runs
+the real compiler, and gets out of the way — that build is simply not cached.
+
+Nothing is added to any `PATH` except the one handed to a single `mbx exec`
+command, so a build that never asks for the cache never meets a shim.
 
 ## What is cached
 

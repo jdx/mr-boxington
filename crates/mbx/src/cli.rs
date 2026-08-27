@@ -204,6 +204,9 @@ pub fn run() -> Result<ExitCode> {
     if let Commands::Prefetch(args) = &mut cli.command {
         args.cargo_args = original_prefetch_arguments(&original)?;
     }
+    if let Commands::Exec(args) = &mut cli.command {
+        args.command = original_exec_arguments(&original)?;
+    }
     if let Commands::Doctor(args) = &cli.command {
         return crate::doctor::run_loaded(Config::load(), args.json);
     }
@@ -254,6 +257,34 @@ pub fn run() -> Result<ExitCode> {
     }
 }
 
+/// Recover `mbx exec`'s command exactly as it was typed.
+///
+/// The usage parser consumes a `--` delimiter, and a build command may need one
+/// of its own -- `cmake --build build -- -j8` passes `-j8` to the underlying
+/// tool, not to cmake. Only the raw argv still holds it, so the command is
+/// taken from there, past exec's own options.
+fn original_exec_arguments(arguments: &[std::ffi::OsString]) -> Result<Vec<String>> {
+    let Some(index) = arguments
+        .iter()
+        .position(|argument| argument == std::ffi::OsStr::new("exec"))
+    else {
+        eyre::bail!("could not recover exec arguments");
+    };
+    let mut rest = &arguments[index + 1..];
+    // exec's own options precede the command, so anything the parser would
+    // have taken for itself is skipped rather than run.
+    while let Some(first) = rest.first().and_then(|argument| argument.to_str()) {
+        if first == "--project-root" {
+            rest = rest.get(2..).unwrap_or_default();
+        } else if first.starts_with("--project-root=") {
+            rest = &rest[1..];
+        } else {
+            break;
+        }
+    }
+    strings(rest)
+}
+
 fn original_prefetch_arguments(arguments: &[std::ffi::OsString]) -> Result<Vec<String>> {
     let Some(index) = arguments
         .iter()
@@ -261,7 +292,11 @@ fn original_prefetch_arguments(arguments: &[std::ffi::OsString]) -> Result<Vec<S
     else {
         eyre::bail!("could not recover prefetch arguments");
     };
-    arguments[index + 1..]
+    strings(&arguments[index + 1..])
+}
+
+fn strings(arguments: &[std::ffi::OsString]) -> Result<Vec<String>> {
+    arguments
         .iter()
         .map(|argument| {
             argument
@@ -752,7 +787,10 @@ fn exec(config: &Config, settings: &CliSettings, args: &ExecArgs) -> Result<Exit
         .enable_all()
         .build()?;
     let session_outcome = runtime.block_on(async {
-        let Some(shims) = session::install_path_shims(session_dir.path())? else {
+        // Outside the session directory, and outside the store the collector
+        // sweeps: a configure step records these paths and expects to find
+        // them on the next build.
+        let Some(shims) = session::install_path_shims(&config.cache_dir.join("shims"))? else {
             log::warn!("no C or C++ compiler was found on PATH, so this command is not cached");
             return Ok((run_cargo(&program, arguments, BTreeMap::new()), None));
         };
