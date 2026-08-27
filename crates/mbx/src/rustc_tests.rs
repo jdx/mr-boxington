@@ -689,3 +689,29 @@ fn a_sibling_sharing_a_prefix_is_left_alone() {
         "the root itself was not rewritten: {normalized}"
     );
 }
+
+/// A root arrives however its environment variable was written, and a
+/// trailing separator must not stop the rewrite: the byte after the match
+/// would then be a child's first letter rather than the separator before it.
+#[test]
+fn a_root_written_with_a_trailing_separator_still_rewrites() {
+    let plain = vec![PathMapping::new("/work/target", "target")];
+    let trailing = vec![PathMapping::new("/work/target/", "target")];
+    let original = "/work/target/deps/lib.rlib: src/lib.rs\n";
+
+    let from_trailing = normalize_output_text(original.as_bytes(), &trailing);
+    assert!(
+        !String::from_utf8_lossy(&from_trailing).contains("/work/target/deps"),
+        "a trailing separator left the path unrewritten: {}",
+        String::from_utf8_lossy(&from_trailing)
+    );
+    assert_eq!(
+        from_trailing,
+        normalize_output_text(original.as_bytes(), &plain),
+        "how the root was written should not change what is stored"
+    );
+    assert_eq!(
+        denormalize_output_text(&from_trailing, &trailing),
+        original.as_bytes()
+    );
+}

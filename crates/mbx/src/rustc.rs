@@ -1606,6 +1606,17 @@ fn root_spellings(mappings: &[PathMapping]) -> Vec<(String, String)> {
         let Some(root) = mapping.root.to_str() else {
             continue;
         };
+        // A root arrives however its environment variable was written, and
+        // `CARGO_TARGET_DIR=/work/target/` is as valid as the same path
+        // without. Trailing separators are dropped so the boundary check sees
+        // the separator before a child rather than the child's first letter,
+        // which would otherwise reject every path under such a root and leave
+        // it in the publishing checkout's spelling. A Windows drive root like
+        // `C:\` trims to `C:`, which its own separator then follows.
+        let root = root.trim_end_matches(['/', '\\']);
+        if root.is_empty() {
+            continue;
+        }
         // The literal spelling first, so a platform whose separator needs no
         // escaping keeps the plain placeholder rather than an escaped one that
         // means the same thing.
