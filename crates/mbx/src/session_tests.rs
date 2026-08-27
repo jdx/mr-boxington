@@ -304,3 +304,35 @@ fn the_installed_wrapper_pins_the_bytes_it_was_made_from() {
         std::fs::metadata(&executable).unwrap().len()
     );
 }
+
+/// No shim is ever installed as a link to nothing.
+///
+/// A symlink can name a target that does not exist, so the tracking path has to
+/// decline one; the hard link it falls back to then fails where the mistake was
+/// made rather than when cargo execs the wrapper.
+#[cfg(unix)]
+#[test]
+fn a_shim_is_never_installed_as_a_link_to_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    for missing in [directory.path().join("gone"), PathBuf::from("relative/mbx")] {
+        assert!(
+            install_shim(&missing, directory.path(), ShimLink::Tracking).is_err(),
+            "{} should not install a shim",
+            missing.display()
+        );
+    }
+}
+
+/// A relative target is not a symlink's to interpret.
+///
+/// It would resolve from the shim's directory rather than the working directory
+/// a hard link reads it from, which is a different file whenever the two differ.
+#[cfg(unix)]
+#[test]
+fn a_relative_target_is_left_to_the_hard_link() {
+    let directory = tempfile::tempdir().unwrap();
+    assert!(!symlink_shim(
+        Path::new("relative/mbx"),
+        &directory.path().join(RUSTC_SHIM_STEM)
+    ));
+}
