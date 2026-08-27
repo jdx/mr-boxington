@@ -22,22 +22,41 @@ use std::process::Command;
 /// Environment that selects what the probes below report.
 const IDENTITY_ENVIRONMENT: &[&str] = &["SDKROOT", "MACOSX_DEPLOYMENT_TARGET"];
 
-/// The object that starts a program. One of these must resolve, or nothing
-/// pins what the link began with.
-#[cfg(target_os = "linux")]
-const STARTUP_PROBES: &[&str] = &["Scrt1.o", "crt1.o"];
+/// What the driver is asked to place, and which of it a key cannot do without.
+///
+/// The names are platform knowledge; the rule about them is not, so the two are
+/// separated and only the names are chosen by `cfg`. A host this build cannot
+/// run on is still a host whose logic can be tested here.
+struct FileProbes {
+    /// The object that starts a program. One of these must resolve, or nothing
+    /// pins what the link began with.
+    startup: &'static [&'static str],
+    /// Names a libc goes by, across the C libraries and linkage modes this
+    /// tier admits. One must resolve too: libc is the input a statically
+    /// linked program carries inside it, so a key that does not pin it lets
+    /// one distribution's binary restore onto another's.
+    libc: &'static [&'static str],
+    /// Everything else a link pulls in. Individually optional -- a toolchain
+    /// that does not use one is not thereby unidentifiable.
+    rest: &'static [&'static str],
+}
 
-/// Names a libc goes by, across the C libraries and linkage modes this tier
-/// admits. One of these must resolve too: libc is the input a statically
-/// linked program carries inside it, so a key that does not pin it is a key
-/// that lets one distribution's binary restore onto another's.
+/// GNU-style hosts link against loose objects the driver can place.
 #[cfg(target_os = "linux")]
-const LIBC_PROBES: &[&str] = &["libc.so.6", "libc.so", "libc.a", "libc.musl-x86_64.so.1"];
+const FILE_PROBES: FileProbes = FileProbes {
+    startup: &["Scrt1.o", "crt1.o"],
+    libc: &["libc.so.6", "libc.so", "libc.a", "libc.musl-x86_64.so.1"],
+    rest: &["crti.o", "crtn.o", "crtbeginS.o", "crtendS.o"],
+};
 
-/// Everything else a GNU-style link pulls in. Individually optional -- a
-/// toolchain that does not use one is not thereby unidentifiable.
-#[cfg(target_os = "linux")]
-const CRT_PROBES: &[&str] = &["crti.o", "crtn.o", "crtbeginS.o", "crtendS.o"];
+/// macOS links against the SDK rather than loose objects, and the SDK identity
+/// below covers what those would have pinned.
+#[cfg(not(target_os = "linux"))]
+const FILE_PROBES: FileProbes = FileProbes {
+    startup: &[],
+    libc: &[],
+    rest: &[],
+};
 
 /// Describe the linker rustc will use for a native link on this host.
 ///
@@ -141,35 +160,37 @@ fn linker_version(driver: &Path) -> Result<String> {
 /// what that probe stood for. So the inputs a link cannot be described without
 /// -- a startup object and a libc -- have to resolve, and a host where neither
 /// does gets no identity and no cached link.
-#[cfg(target_os = "linux")]
 fn crt_objects(driver: &Path) -> Result<BTreeMap<String, CacheDigest>> {
-    let resolved = STARTUP_PROBES
+    probe_files(&FILE_PROBES, |name| {
+        let resolved = run(driver, &[&format!("-print-file-name={name}")]).ok()?;
+        let path = PathBuf::from(resolved.trim());
+        // The driver echoes the name back when it cannot place it.
+        path.is_absolute().then_some(path)
+    })
+}
+
+/// Resolve each probe, hash what came back, and insist on the ones a key
+/// cannot describe a link without.
+fn probe_files(
+    probes: &FileProbes,
+    place: impl Fn(&str) -> Option<PathBuf>,
+) -> Result<BTreeMap<String, CacheDigest>> {
+    let resolved = probes
+        .startup
         .iter()
-        .chain(LIBC_PROBES)
-        .chain(CRT_PROBES)
+        .chain(probes.libc)
+        .chain(probes.rest)
         .filter_map(|name| {
-            let resolved = run(driver, &[&format!("-print-file-name={name}")]).ok()?;
-            let path = PathBuf::from(resolved.trim());
-            // The driver echoes the name back when it cannot place it.
-            let digest = path
-                .is_absolute()
-                .then(|| CacheDigest::blake3_file(&path))?;
-            Some(((*name).to_owned(), digest.ok()?))
+            let digest = CacheDigest::blake3_file(&place(name)?).ok()?;
+            Some(((*name).to_owned(), digest))
         })
         .collect::<BTreeMap<_, _>>();
-    for (probes, what) in [(STARTUP_PROBES, "startup object"), (LIBC_PROBES, "libc")] {
-        if !probes.iter().any(|name| resolved.contains_key(*name)) {
+    for (required, what) in [(probes.startup, "startup object"), (probes.libc, "libc")] {
+        if !required.is_empty() && !required.iter().any(|name| resolved.contains_key(*name)) {
             bail!("the linker driver resolved no {what}, so its links cannot be identified");
         }
     }
     Ok(resolved)
-}
-
-/// macOS links against the SDK rather than loose startup objects, and the SDK
-/// identity below covers it.
-#[cfg(not(target_os = "linux"))]
-fn crt_objects(_driver: &Path) -> Result<BTreeMap<String, CacheDigest>> {
-    Ok(BTreeMap::new())
 }
 
 /// Identity of the SDK a link builds against, where the platform has one.

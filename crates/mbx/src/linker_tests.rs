@@ -76,3 +76,67 @@ fn identity_without_agent() -> Result<LinkerIdentity> {
     let driver = which::which("cc")?;
     probe(&driver)
 }
+
+/// The probe names are platform knowledge, but the rule about them is not:
+/// what a key cannot describe a link without has to be present, whatever host
+/// this test runs on.
+#[test]
+fn a_link_is_only_identified_once_its_essentials_resolve() {
+    let directory = tempfile::tempdir().unwrap();
+    let placed = |name: &str| {
+        let path = directory.path().join(name);
+        std::fs::write(&path, name).unwrap();
+        path
+    };
+    let probes = FileProbes {
+        startup: &["Scrt1.o", "crt1.o"],
+        libc: &["libc.so.6", "libc.a"],
+        rest: &["crti.o"],
+    };
+
+    // One of each essential is enough, and the optional one is not required.
+    let resolved = probe_files(&probes, |name| {
+        matches!(name, "crt1.o" | "libc.a").then(|| placed(name))
+    })
+    .unwrap();
+    assert_eq!(
+        resolved.keys().collect::<Vec<_>>(),
+        ["crt1.o", "libc.a"],
+        "only what resolved belongs in the key"
+    );
+
+    // A host whose libc the driver cannot place is a host whose links cannot
+    // be told apart from another's.
+    assert!(
+        probe_files(&probes, |name| (name == "crt1.o").then(|| placed(name))).is_err(),
+        "no libc should refuse"
+    );
+    assert!(
+        probe_files(&probes, |name| (name == "libc.a").then(|| placed(name))).is_err(),
+        "no startup object should refuse"
+    );
+    assert!(
+        probe_files(&probes, |_| None).is_err(),
+        "nothing should refuse"
+    );
+
+    // Two hosts placing different libcs cannot agree on a key.
+    let glibc = probe_files(&probes, |name| {
+        matches!(name, "crt1.o" | "libc.so.6").then(|| placed(name))
+    })
+    .unwrap();
+    assert_ne!(glibc, resolved);
+}
+
+/// A platform with no loose objects to place -- macOS, whose SDK identity
+/// covers what they would have pinned -- is not thereby unidentifiable.
+#[test]
+fn a_platform_that_places_nothing_is_still_identified() {
+    let probes = FileProbes {
+        startup: &[],
+        libc: &[],
+        rest: &[],
+    };
+
+    assert!(probe_files(&probes, |_| None).unwrap().is_empty());
+}
