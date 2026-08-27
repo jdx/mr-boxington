@@ -11,8 +11,12 @@ hand.
    to crates.io, and creates the GitHub release **as a draft**.
 3. `release.yml` builds a binary per target and attaches the archives plus
    `SHA256SUMS` to that draft.
-4. `publish-release` undrafts it. A release is therefore never visible without
-   its assets.
+4. While the binaries build, Communiqué rewrites the draft's raw changelog into
+   release notes informed by the commits, pull requests, and diffs. If that
+   optional enhancement fails, the original release-plz notes remain in place.
+5. `publish-release` waits for both paths, then undrafts it. A release is
+   therefore never visible without its assets, and no asset upload runs after
+   immutable releases lock the tag and asset set.
 
 `release_always = false`, so a push to `main` that merely carries a version
 bump does not release — only merging a release PR does.
@@ -54,6 +58,10 @@ successful releases:
 - **`RELEASE_PLZ_TOKEN`** — a PAT with `contents: write` and
   `pull-requests: write`. The default `GITHUB_TOKEN` cannot be used: pushes made
   with it do not trigger workflows, so the release PR would never run CI.
+- **`ANTHROPIC_API_KEY`** — optional, used by Communiqué to replace the draft's
+  release-plz changelog with editorialized release notes. Without it (or when
+  generation fails), publishing continues with the original notes. Communiqué
+  is locked in `mise.lock`; update that pin deliberately with `mise lock`.
 - **`CERTIFICATES_P12`** and **`CERTIFICATES_P12_PASS`** — the base64-encoded
   Developer ID Application certificate and its password used by the other
   jdx.dev CLI release workflows. The macOS jobs import the certificate and sign
