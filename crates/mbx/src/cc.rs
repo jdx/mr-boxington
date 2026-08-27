@@ -379,12 +379,16 @@ fn record_prediction(
 
 /// Task identity for a compilation's predictions.
 ///
-/// A build script's compiles are not part of cargo's own action manifest, so
-/// they are sharded by their invocation fingerprint instead: predictions stay
-/// findable without one manifest growing a thousand entries.
+/// Inside a build this is the session's own run, the same manifest the rustc
+/// shim records into: it is the one the session loads before the build and
+/// commits after it, so a prediction written by one checkout is there to be
+/// found by the next. A shim running outside a session falls back to sharding
+/// by the invocation fingerprint, which keeps each manifest bounded.
 fn prediction_task(invocation: &CacheDigest) -> String {
-    let shard = &invocation.hash[..2.min(invocation.hash.len())];
-    CacheDigest::blake3(format!("cc-prediction-shard:{shard}").as_bytes()).hash
+    std::env::var(session::BUILD_ENV).unwrap_or_else(|_| {
+        let shard = invocation.hash.get(..2).unwrap_or(&invocation.hash);
+        CacheDigest::blake3(format!("cc-standalone-predictions-v1\0{shard}").as_bytes()).hash
+    })
 }
 
 fn restore_result(

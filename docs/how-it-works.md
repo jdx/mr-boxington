@@ -5,15 +5,33 @@ through it: `mbx build`, `mbx test`, `mbx clippy`, or any installed Cargo
 subcommand.
 
 1. mbx resolves the workspace and target roots through Cargo metadata.
-2. It starts an in-process cache agent and creates a rustc shim for the build.
-3. Cargo runs normally with the shim set as `RUSTC_WRAPPER`.
-4. The shim analyzes each rustc invocation and derives a content-addressed action key.
+2. It starts an in-process cache agent and creates shims for the build.
+3. Cargo runs normally with the rustc shim set as `RUSTC_WRAPPER`, and build
+   scripts inherit a `CC` and `CXX` pointing at the C and C++ shims.
+4. Each shim analyzes its compiler invocation and derives a content-addressed action key.
 5. A hit restores the action's outputs; a miss runs the real compiler and publishes the result.
 6. The agent exits with the build, draining any remote uploads it still owes.
    There is no persistent daemon.
 
 Every mbx command works this way; there is no separate mode to turn on and no
 component to keep up to date.
+
+## Build-script C and C++
+
+Cargo has no `CC_WRAPPER`, so the C and C++ shims arrive as `CC` and `CXX`
+themselves, resolved to the platform compilers when the session starts. A build
+that already sets `CC`, `CXX`, or a target-specific variant has chosen its own
+compiler, and mbx leaves it alone rather than redirecting it; `MBX_CC=0` turns
+the shims off entirely.
+
+Unlike rustc, a C compile leaves no dependency record behind for a later build
+to read, and publishing one would add a file the uncached build never produced.
+So the shim asks for its own dependency list, keeps it private, and keys the
+compilation on the files that list names. A cold compilation therefore has no
+key to look up yet — it is stored after compiling and warms the next build. The
+directories the compile searched also contribute a manifest of their file
+names, so a header that appears where it would *shadow* one that was read
+changes the key even though every file that was read is unchanged.
 
 ## Portable keys
 

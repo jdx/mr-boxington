@@ -94,6 +94,10 @@ The usual causes, roughly in the order they show up:
 - **Build-script output paths.** A crate that embeds its `OUT_DIR` produces
   checkout-specific inputs for its dependents. `MBX_SHARE_OUT_DIR=1` remaps
   it; see [limits](/limits#out_dir-sharing-is-opt-in).
+- **A build chose its own C compiler.** Setting `CC` or `CXX` leaves that
+  build's C and C++ compilations uncached, and bypass kinds beginning `cc-`
+  report anything the C adapter declined to model. See
+  [limits](/limits#c-and-c-caching-covers-build-script-compiles-only).
 - **CI restored nothing.** On GitHub Actions, check that the cache step
   actually restored an entry — a changed `cache-generation` or a fresh
   repository starts empty by design. With a remote cache configured, check the

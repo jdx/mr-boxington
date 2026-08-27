@@ -1,0 +1,3 @@
+entropy.o: lib/entropy.c \
+  lib/entropy.h \
+  /usr/include/stdio.h

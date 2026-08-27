@@ -221,6 +221,8 @@ jobs:
       - name: Smoke-test fuzz targets
         run: |
           cargo +nightly-2026-08-02 fuzz run blob_pack -- -runs=1000
+          cargo +nightly-2026-08-02 fuzz run cc_depfile -- -runs=1000
+          cargo +nightly-2026-08-02 fuzz run cc_invocation -- -runs=1000
           cargo +nightly-2026-08-02 fuzz run dep_info -- -runs=1000
           cargo +nightly-2026-08-02 fuzz run rustc_paths -- -runs=1000
 

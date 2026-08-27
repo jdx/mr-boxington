@@ -33,6 +33,14 @@ Cache root.
 
 Cache natively linked test binaries and executables. Experimental: qualify it on your own workload with MBX_VERIFY=1 before relying on it.
 
+### `cc`
+
+- **Type:** `bool`
+- **Default:** `true`
+- **Set with:** `MBX_CC`
+
+Cache C and C++ compilations run by build scripts.
+
 ### `events`
 
 - **Type:** `bool`

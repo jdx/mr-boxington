@@ -16,10 +16,11 @@ git_release_draft = true
 # `jdx/mbx-cache` server depends on it and nothing else). Neither should be
 # forced to a major bump by the other, which is what sharing a number would do.
 #
-# `mbx-cache-core` and `mbx-cache-rustc` are internals with no promise to keep.
-# They share a group so a release moves them together, and they stay on 0.x so
-# semver itself says a minor bump may break them. They cannot hold the CLI's
-# number without making every refactor inside them a major mbx release.
+# `mbx-cache-core`, `mbx-cache-rustc`, and `mbx-cache-cc` are internals with no
+# promise to keep. They share a group so a release moves them together, and they
+# stay on 0.x so semver itself says a minor bump may break them. They cannot
+# hold the CLI's number without making every refactor inside them a major mbx
+# release.
 [[package]]
 name = "mbx"
 publish = true
@@ -50,6 +51,12 @@ git_release_enable = false
 
 [[package]]
 name = "mbx-cache-cargo"
+publish = true
+git_release_enable = false
+
+[[package]]
+name = "mbx-cache-cc"
+version_group = "mbx-internals"
 publish = true
 git_release_enable = false
 

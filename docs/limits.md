@@ -72,6 +72,23 @@ Neither changes what the artifact does. Both are visible to `MBX_VERIFY=1`,
 which compares bytes: a divergence it reports for a compilation restored from
 another checkout, or on Windows from another target directory, is that
 difference rather than a fault.
+## C and C++ caching covers build-script compiles only
+
+mbx caches the C and C++ a cargo build script compiles through `CC` and `CXX`,
+which is what the `cc` crate uses. Standalone C projects driven by make or
+CMake are outside a cargo build and are not reached.
+
+Only a plain single-source `-c` compile through a gcc-style or clang-style
+driver is admitted. Linking, preprocessing, assembly, Objective-C, precompiled
+headers, coverage instrumentation, compiler plugins, options forwarded to a
+sub-tool with `-Wp,`/`-Wa,`/`-Wl,`/`-Xclang`, response files, and MSVC all
+bypass, as does any flag the adapter does not model. A source or header that
+expands `__DATE__`, `__TIME__`, or `__TIMESTAMP__` bypasses too: its object is
+not a function of its inputs.
+
+The shims are only installed when the build has not chosen its own compiler.
+Setting `CC`, `CXX`, `TARGET_CC`, or `TARGET_CXX` leaves that build's C
+compilations uncached, and `MBX_CC=0` disables the feature.
 
 ## `OUT_DIR` sharing is opt-in
 

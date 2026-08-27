@@ -193,7 +193,10 @@ fn build_with(
         // Same reason: a test asserting the default cross-checkout behaviour
         // must not read an answer out of the developer's environment.
         .env_remove("MBX_SHARE_OUT_DIR")
-        .env_remove("MBX_LEARNED_INCREMENTAL");
+        .env_remove("MBX_LEARNED_INCREMENTAL")
+        // The C shims are on by default; a test that says nothing about them
+        // must not inherit a different answer from the developer's shell.
+        .env_remove("MBX_CC");
     for (name, value) in settings {
         command.env(name, value);
     }
@@ -1554,4 +1557,195 @@ fn verification_is_clean_across_target_directories() {
         0,
         "a restore into another target directory diverged: {reported}"
     );
+}
+/// Write a fixture whose build script compiles C through `$CC`.
+///
+/// Deliberately hand-rolled rather than using the `cc` crate: this suite
+/// resolves offline and takes no dependencies, and what is under test is the
+/// shim the build script inherits, not the crate that would call it.
+#[cfg(unix)]
+fn write_c_project(directory: &Path) {
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::create_dir_all(directory.join("include")).unwrap();
+    std::fs::write(
+        directory.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("include/hello.h"),
+        "int hello_value(void);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("src/hello.c"),
+        "#include \"hello.h\"\nint hello_value(void) { return 7; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("build.rs"),
+        r#"use std::{env, path::PathBuf, process::Command};
+
+fn main() {
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let compiler = env::var("CC").unwrap_or_else(|_| "cc".into());
+    let status = Command::new(&compiler)
+        .arg("-O2")
+        .arg("-Iinclude")
+        .arg("-c")
+        .arg("-o")
+        .arg(out.join("hello.o"))
+        .arg("src/hello.c")
+        .status()
+        .expect("the C compiler should run");
+    assert!(status.success(), "the fixture's C should compile");
+    println!("cargo:rerun-if-changed=src/hello.c");
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("src/lib.rs"),
+        "pub fn value() -> u32 { 7 }\n",
+    )
+    .unwrap();
+    let status = Command::new(cargo())
+        .current_dir(directory)
+        .args(["generate-lockfile", "--offline"])
+        .status()
+        .expect("cargo should run");
+    assert!(status.success(), "the fixture should resolve offline");
+}
+
+/// Whether a C compiler is available to compile the fixture at all.
+#[cfg(unix)]
+fn has_c_compiler() -> bool {
+    Command::new("cc")
+        .arg("-v")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// Build the fixture in two fresh checkouts sharing one store, and report how
+/// much the second one reused.
+///
+/// The hit count is the measure: a C compilation that crosses checkouts is one
+/// more cached action than the same build without it. Compiler statistics are
+/// keyed by outcome rather than by what was compiled, so they cannot tell the
+/// C compile apart from the Rust one.
+#[cfg(unix)]
+fn warm_checkout_hits(settings: &[(&str, &str)]) -> u64 {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    write_c_project(first.path());
+    write_c_project(second.path());
+
+    build_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+        settings,
+    );
+    let (warm, _) = build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+        settings,
+    );
+    count(&warm, "hits")
+}
+
+/// A build script's C compilation is cached, and a second checkout restores it
+/// rather than compiling again.
+#[cfg(unix)]
+#[test]
+fn a_build_script_c_compilation_crosses_checkouts() {
+    if !has_c_compiler() {
+        return;
+    }
+    let cached = warm_checkout_hits(&[]);
+    let uncached = warm_checkout_hits(&[("MBX_CC", "0")]);
+    assert_eq!(
+        cached,
+        uncached + 1,
+        "the C compilation should be exactly one more restored action"
+    );
+}
+
+/// A build that chose its own compiler keeps it.
+///
+/// `CC` is commonly exported machine-wide, so the shim standing aside is the
+/// difference between redirecting a build the user configured and leaving it
+/// alone.
+#[cfg(unix)]
+#[test]
+fn an_existing_cc_setting_is_left_alone() {
+    if !has_c_compiler() {
+        return;
+    }
+    let chosen = which::which("cc").expect("cc should resolve");
+    let preset = warm_checkout_hits(&[("CC", chosen.to_str().unwrap())]);
+    let uncached = warm_checkout_hits(&[("MBX_CC", "0")]);
+    assert_eq!(
+        preset, uncached,
+        "mbx should not have intercepted a compiler the build chose"
+    );
+}
+
+/// The object a cache hit restores is the object the compiler produced.
+#[cfg(unix)]
+#[test]
+fn a_restored_object_is_byte_identical_to_a_compiled_one() {
+    if !has_c_compiler() {
+        return;
+    }
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    write_c_project(first.path());
+    write_c_project(second.path());
+
+    build_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+        &[],
+    );
+    build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+        &[],
+    );
+
+    let compiled = find_object(first.path()).expect("the first checkout should have an object");
+    let restored = find_object(second.path()).expect("the second checkout should have an object");
+    assert_eq!(
+        std::fs::read(&compiled).unwrap(),
+        std::fs::read(&restored).unwrap(),
+        "a restored object must match the one that was compiled"
+    );
+}
+
+/// Find the fixture's object file beneath a checkout's target directory.
+#[cfg(unix)]
+fn find_object(project: &Path) -> Option<std::path::PathBuf> {
+    let target = project.join("target");
+    let root = std::fs::read_link(&target).unwrap_or(target);
+    let mut pending = vec![root];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).ok()? {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().is_some_and(|name| name == "hello.o") {
+                return Some(path);
+            }
+        }
+    }
+    None
 }

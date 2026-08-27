@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+mbx-cache-cc = { path = "../crates/mbx-cache-cc", default-features = false, features = ["rustls"] }
 mbx-cache-core = { path = "../crates/mbx-cache-core", default-features = false, features = ["fuzzing", "rustls"] }
 mbx-cache-rustc = { path = "../crates/mbx-cache-rustc", default-features = false, features = ["rustls"] }
 tempfile = "3"
@@ -17,6 +18,20 @@ tokio = { version = "1", features = ["rt"] }
 [[bin]]
 name = "blob_pack"
 path = "fuzz_targets/blob_pack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cc_depfile"
+path = "fuzz_targets/cc_depfile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cc_invocation"
+path = "fuzz_targets/cc_invocation.rs"
 test = false
 doc = false
 bench = false
