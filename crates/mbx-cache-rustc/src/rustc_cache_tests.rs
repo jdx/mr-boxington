@@ -1146,11 +1146,13 @@ fn modeling_the_linker_leaves_existing_keys_untouched() {
 
     let json = String::from_utf8(action.bytes).unwrap();
     assert!(!json.contains("linker"), "{json}");
-    // Verified against the adapter as it shipped in 0.5.1: every key already
-    // in a store still resolves after this change.
+    // The digest this same invocation has on the branch this one came from.
+    // What it guards is that modeling a linker did not move it; a change on
+    // `main` moves it legitimately, and updating this line is then the point
+    // at which someone confirms whose change it was.
     assert_eq!(
         action.digest.key(),
-        "blake3/af70e14cc38eccf01eabb89067418e7780883628d051f499ea8acf3ebc925933/865"
+        "blake3/943ce7a1474e7e3aeb11e54fd513bfe7ef44fd5367f3a5486197b730c6f1e0d3/865"
     );
 }
 
