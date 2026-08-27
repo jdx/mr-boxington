@@ -1,11 +1,13 @@
 //! Store inspection and garbage collection.
 //!
-//! The store holds four trees: `cas/v1` for content-addressed objects,
+//! The store holds five trees: `cas/v1` for content-addressed objects,
 //! `action-results/v1` for the results that reference them, `task-manifests/v1`
-//! for the prediction index, and `checkouts/v1` for the checkouts that have
-//! built each identity. Only the first two are collected for size; manifests
-//! are small and are what makes a cold build fast, and a checkout record is
-//! dropped when its checkout is gone rather than when the store is full.
+//! for the prediction index, `checkouts/v1` for the checkouts that have built
+//! each identity, and `sessions/v1` for the per-build event streams `mbx tui`
+//! reads. Only the first two are collected for size; manifests are small and
+//! are what makes a cold build fast, a checkout record is dropped when its
+//! checkout is gone rather than when the store is full, and a session stream
+//! goes on age and count because it is history rather than cache content.
 
 use eyre::{Context, Result};
 use mbx_cache_core::{
