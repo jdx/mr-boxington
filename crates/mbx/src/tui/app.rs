@@ -42,6 +42,20 @@ impl Tab {
     }
 }
 
+/// The first item to draw so that `selected` lands inside a `height`-row window.
+///
+/// A list taller than its pane would otherwise always draw from the top, and a
+/// selection past the last visible row would be invisible while the pane below
+/// described it.
+pub(crate) fn window_start(len: usize, selected: usize, height: usize) -> usize {
+    if height == 0 || len <= height {
+        return 0;
+    }
+    let last_full_start = len - height;
+    // Keep the selection on screen by scrolling only as far as it needs.
+    selected.saturating_sub(height - 1).min(last_full_start)
+}
+
 /// One action, as a row.
 #[derive(Debug, Clone)]
 pub(crate) struct Row {
@@ -173,7 +187,12 @@ pub(crate) struct App {
     store: PathBuf,
     tails: Vec<(SessionTail, Session)>,
     pub tab: Tab,
-    pub selected: usize,
+    /// The session being watched, held by id rather than by position.
+    ///
+    /// Position is not stable: a build starting or finishing re-sorts the list,
+    /// and an index would then point at a different build than the one the
+    /// reader chose.
+    selected_id: Option<String>,
     pub scroll: usize,
     pub paused: bool,
     pub store_stats: Option<crate::store::StoreStats>,
@@ -186,7 +205,7 @@ impl App {
             store: store.to_path_buf(),
             tails: Vec::new(),
             tab: Tab::Live,
-            selected: 0,
+            selected_id: None,
             scroll: 0,
             paused: false,
             store_stats: None,
@@ -204,6 +223,10 @@ impl App {
             return;
         }
         self.discover(limit);
+        // A stream the collector removed while this was watching has nothing
+        // left to say, and keeping its tail would go on probing a path that is
+        // gone.
+        self.tails.retain(|(tail, _)| tail.exists());
         for (tail, session) in &mut self.tails {
             for event in tail.read() {
                 session.apply(event);
@@ -218,7 +241,12 @@ impl App {
                 std::cmp::Reverse(tail.id().to_string()),
             )
         });
-        self.selected = self.selected.min(self.tails.len().saturating_sub(1));
+        // The chosen build may have been collected out from under the selection.
+        if let Some(id) = &self.selected_id
+            && !self.tails.iter().any(|(tail, _)| tail.id() == id)
+        {
+            self.selected_id = None;
+        }
     }
 
     fn discover(&mut self, limit: usize) {
@@ -232,6 +260,21 @@ impl App {
             };
             self.tails.push((tail, session));
         }
+    }
+
+    /// Where the selected build currently sits in the list.
+    ///
+    /// With nothing explicitly chosen this is the top of the list, which is the
+    /// build most likely to be running.
+    pub(crate) fn selected(&self) -> usize {
+        self.selected_id
+            .as_ref()
+            .and_then(|id| {
+                self.tails
+                    .iter()
+                    .position(|(tail, _)| tail.id() == id.as_str())
+            })
+            .unwrap_or(0)
     }
 
     pub(crate) fn refresh_store(&mut self) {
@@ -248,7 +291,7 @@ impl App {
     }
 
     pub(crate) fn selected_session(&self) -> Option<&Session> {
-        self.tails.get(self.selected).map(|(_, session)| session)
+        self.tails.get(self.selected()).map(|(_, session)| session)
     }
 
     pub(crate) fn store_dir(&self) -> &Path {
@@ -267,8 +310,7 @@ impl App {
 
     pub(crate) fn select_next(&mut self) {
         if self.tab == Tab::Live {
-            self.selected = (self.selected + 1).min(self.tails.len().saturating_sub(1));
-            self.scroll = 0;
+            self.select((self.selected() + 1).min(self.tails.len().saturating_sub(1)));
         } else {
             self.scroll = self.scroll.saturating_add(1);
         }
@@ -276,11 +318,16 @@ impl App {
 
     pub(crate) fn select_previous(&mut self) {
         if self.tab == Tab::Live {
-            self.selected = self.selected.saturating_sub(1);
-            self.scroll = 0;
+            self.select(self.selected().saturating_sub(1));
         } else {
             self.scroll = self.scroll.saturating_sub(1);
         }
+    }
+
+    /// Choose the build at `index`, remembering which one that is.
+    fn select(&mut self, index: usize) {
+        self.selected_id = self.tails.get(index).map(|(tail, _)| tail.id().to_string());
+        self.scroll = 0;
     }
 
     pub(crate) fn toggle_pause(&mut self) {

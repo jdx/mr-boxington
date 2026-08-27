@@ -110,11 +110,18 @@ fn live(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn session_list(frame: &mut Frame, area: Rect, app: &App) {
+    // Two rows go to the border and one to the header, leaving this many for
+    // builds; the window scrolls so the selected build is always one of them.
+    let height = area.height.saturating_sub(3) as usize;
+    let selected = app.selected();
+    let start = super::app::window_start(app.sessions().count(), selected, height);
     let rows: Vec<TableRow> = app
         .sessions()
         .enumerate()
+        .skip(start)
+        .take(height)
         .map(|(index, session)| {
-            let marker = if index == app.selected { "▸" } else { " " };
+            let marker = if index == selected { "▸" } else { " " };
             let hit_rate = session
                 .hit_rate()
                 .map(|rate| format!("{rate:.0}%"))
@@ -180,7 +187,16 @@ fn session_list(frame: &mut Frame, area: Rect, app: &App) {
         ])
         .style(Style::new().bold()),
     )
-    .block(Block::default().borders(Borders::ALL).title(" builds "));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            // Say the count when the list does not all fit, so a reader knows
+            // there is more above or below the window.
+            .title(match app.sessions().count() > height {
+                true => format!(" builds ({} of {}) ", selected + 1, app.sessions().count()),
+                false => " builds ".to_string(),
+            }),
+    );
     frame.render_widget(table, area);
 }
 

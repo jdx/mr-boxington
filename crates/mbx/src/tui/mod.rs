@@ -13,6 +13,10 @@
 mod app;
 mod ui;
 
+#[cfg(test)]
+#[path = "ui_tests.rs"]
+mod ui_tests;
+
 use crate::config::Config;
 use app::{App, Tab};
 use eyre::{Context, Result};
@@ -80,7 +84,21 @@ type Terminal = ratatui::Terminal<CrosstermBackend<io::Stdout>>;
 
 fn enter() -> Result<Terminal> {
     enable_raw_mode().wrap_err("failed to put the terminal in raw mode")?;
-    let mut stdout = io::stdout();
+    // From here on the terminal is modified, so every failure has to undo it
+    // before returning. Leaving a shell in raw mode with no echo costs the user
+    // a `reset` to notice and recover from, which is far worse than the error
+    // that caused it.
+    match start(io::stdout()) {
+        Ok(terminal) => Ok(terminal),
+        Err(error) => {
+            let _ = execute!(io::stdout(), LeaveAlternateScreen);
+            let _ = disable_raw_mode();
+            Err(error)
+        }
+    }
+}
+
+fn start(mut stdout: io::Stdout) -> Result<Terminal> {
     execute!(stdout, EnterAlternateScreen).wrap_err("failed to switch screens")?;
     // A panic in drawing would otherwise leave the alternate screen up and raw
     // mode on, with the backtrace invisible.

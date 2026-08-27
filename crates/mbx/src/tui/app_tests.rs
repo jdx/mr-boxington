@@ -217,8 +217,89 @@ fn selection_stays_inside_the_list() {
     // One session: moving either way keeps the selection on it rather than
     // running off the end.
     app.select_next();
-    assert_eq!(app.selected, 0);
+    assert_eq!(app.selected(), 0);
     app.select_previous();
-    assert_eq!(app.selected, 0);
+    assert_eq!(app.selected(), 0);
     assert!(app.selected_session().is_some());
+}
+
+#[test]
+fn the_watched_build_stays_watched_when_another_one_starts() {
+    let store = tempfile::tempdir().unwrap();
+    let first = writer(store.path());
+    first.action(
+        ActionOutcome::Hit,
+        Some("first".into()),
+        1,
+        ActionDetail::default(),
+    );
+    // Finished, so a build that starts later sorts above it.
+    first.finished(serde_json::json!({ "hits": 1 }));
+    drop(first);
+
+    let mut app = App::new(store.path(), 10);
+    app.tick(10);
+    app.select_next();
+    let watched = app.selected_session().unwrap().id.clone();
+
+    // Another build starts and takes the top of the list.
+    let second = writer(store.path());
+    second.action(
+        ActionOutcome::Miss,
+        Some("second".into()),
+        1,
+        ActionDetail::default(),
+    );
+    app.tick(10);
+
+    assert_eq!(
+        app.selected_session().unwrap().id,
+        watched,
+        "a build starting elsewhere must not steal the selection"
+    );
+}
+
+#[test]
+fn a_collected_stream_is_dropped_rather_than_followed() {
+    let store = tempfile::tempdir().unwrap();
+    let build = writer(store.path());
+    build.action(ActionOutcome::Hit, None, 1, ActionDetail::default());
+    build.finished(serde_json::json!({ "hits": 1 }));
+    let paths = crate::events::session_paths(store.path(), build.id());
+    drop(build);
+
+    let mut app = App::new(store.path(), 10);
+    app.tick(10);
+    assert_eq!(app.sessions().count(), 1);
+
+    // Collection removes the stream while the dashboard is watching it.
+    std::fs::remove_file(&paths.events).unwrap();
+    std::fs::remove_file(&paths.lock).unwrap();
+    app.tick(10);
+
+    assert!(app.is_empty(), "a stream that is gone should be dropped");
+    // The probe must not put the lock back, or collection and the dashboard
+    // would undo each other on every tick.
+    assert!(!paths.lock.exists(), "probing must not recreate the lock");
+}
+
+#[test]
+fn the_build_window_scrolls_to_keep_the_selection_visible() {
+    // Shorter than the pane: never scrolled.
+    assert_eq!(window_start(3, 0, 5), 0);
+    assert_eq!(window_start(3, 2, 5), 0);
+
+    // Longer than the pane: the top holds until the selection reaches the
+    // bottom row, then follows it.
+    assert_eq!(window_start(10, 0, 4), 0);
+    assert_eq!(window_start(10, 3, 4), 0);
+    assert_eq!(window_start(10, 4, 4), 1);
+    assert_eq!(window_start(10, 9, 4), 6);
+
+    // The last window is full rather than running past the end.
+    assert_eq!(window_start(10, 9, 4) + 4, 10);
+
+    // Degenerate panes do not panic.
+    assert_eq!(window_start(10, 5, 0), 0);
+    assert_eq!(window_start(0, 0, 4), 0);
 }

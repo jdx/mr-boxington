@@ -454,6 +454,15 @@ impl SessionTail {
         }
     }
 
+    /// Whether the stream this follows is still in the store.
+    ///
+    /// A reader outlives what it reads: collection may drop a stream while a
+    /// dashboard is watching, and a tail of a file that no longer exists has
+    /// nothing left to say.
+    pub(crate) fn exists(&self) -> bool {
+        self.paths_events.exists()
+    }
+
     /// Consume and return whatever has been appended since the last read.
     pub(crate) fn read(&mut self) -> Vec<SessionEvent> {
         use std::io::{Read, Seek, SeekFrom};
@@ -496,6 +505,12 @@ impl SessionTail {
 /// gone, whether it finished or was killed, because the OS releases the lock
 /// either way. Nothing waits on this lock, so a probe never blocks a build.
 fn locked(lock: &Path) -> bool {
+    // `LockFile::open` creates what it opens, and a probe must not. Without
+    // this, watching a stream the collector has just removed would put its lock
+    // back on every tick, and the two would undo each other forever.
+    if !lock.exists() {
+        return false;
+    }
     match fslock::LockFile::open(lock) {
         Ok(mut lock) => match lock.try_lock() {
             // Taking it means nobody else had it. Released again at once: this
