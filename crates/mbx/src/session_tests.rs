@@ -525,6 +525,16 @@ fn only_the_cc_crates_target_variables_name_a_cross_compiler() {
         ("CC_", None),
         ("CCACHE_DIR", None),
         ("CXXFLAGS", None),
+        // The `cc` crate hangs its own controls off the same prefix, and
+        // autotools adds one of its own. Redirecting any of them would answer
+        // a question the build asked with a compiler path.
+        ("CC_FORCE_DISABLE", None),
+        ("CC_KNOWN_WRAPPER_CUSTOM", None),
+        ("CC_ENABLE_DEBUG_OUTPUT", None),
+        ("CC_FOR_BUILD", None),
+        ("CXX_FOR_BUILD", None),
+        // A bare word is not a triple either.
+        ("CC_gcc", None),
     ] {
         assert_eq!(
             targeted_compiler_language(variable).map(|l| format!("{l:?}")),
@@ -532,6 +542,37 @@ fn only_the_cc_crates_target_variables_name_a_cross_compiler() {
             "{variable}"
         );
     }
+}
+
+/// A cross image is entitled to ship the driver it cross-compiles with and no
+/// host `cc` at all, and that build is exactly the one this wrapping exists
+/// for.
+#[test]
+fn a_cross_only_image_still_gets_its_named_compiler_wrapped() {
+    let shims = CcShims {
+        cc: None,
+        cxx: None,
+        targeted: vec![TargetedCompiler {
+            variable: "CC_aarch64-unknown-linux-musl".into(),
+            shim_name: "mbx-cc-cc_aarch64-unknown-linux-musl".into(),
+            shim: PathBuf::from("/session/mbx-cc-cc_aarch64-unknown-linux-musl"),
+            real: PathBuf::from("/usr/bin/aarch64-linux-musl-gcc"),
+        }],
+    };
+    let mut environment = BTreeMap::new();
+    shims.apply_host(&mut environment);
+    shims.apply_targeted(&mut environment);
+
+    // Nothing is claimed for a host compiler that is not there...
+    assert!(!environment.contains_key("HOST_CC"));
+    // ...and the cross one is still wrapped.
+    assert_eq!(
+        environment
+            .get("CC_aarch64-unknown-linux-musl")
+            .map(String::as_str),
+        Some("/session/mbx-cc-cc_aarch64-unknown-linux-musl")
+    );
+    assert!(!shims.pins().is_empty());
 }
 
 /// A value that is a command rather than a path is left alone: wrapping it

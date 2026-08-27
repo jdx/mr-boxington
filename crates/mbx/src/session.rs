@@ -940,15 +940,31 @@ fn targeted_compiler_language(variable: &str) -> Option<CcLanguage> {
     // round invites the mistake.
     for (prefix, language) in [("CXX_", CcLanguage::Cxx), ("CC_", CcLanguage::C)] {
         if let Some(target) = variable.strip_prefix(prefix)
-            && !target.is_empty()
-            && target
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            && is_target_triple(target)
         {
             return Some(language);
         }
     }
     None
+}
+
+/// Whether a variable suffix spells a target triple rather than something else
+/// that happens to start with `CC_`.
+///
+/// The `cc` crate hangs its own controls off that prefix -- `CC_FORCE_DISABLE`,
+/// `CC_KNOWN_WRAPPER_CUSTOM`, `CC_ENABLE_DEBUG_OUTPUT` -- and autotools adds
+/// `CC_FOR_BUILD`. Redirecting one of those would not miss a cache hit, it
+/// would answer a question the build asked with a compiler path.
+///
+/// Case is what separates them: a target triple is lowercase and those knobs
+/// are not. A triple also always has at least two components, which a bare word
+/// does not.
+fn is_target_triple(suffix: &str) -> bool {
+    !suffix.is_empty()
+        && suffix.contains(['-', '_'])
+        && suffix.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+        })
 }
 
 /// Variables the `cc` crate consults before falling back to the platform
@@ -970,7 +986,11 @@ fn install_cc_shims(session_dir: &Path) -> Result<Option<CcShims>> {
     // ordinary, and it must not cost a C-only sys-crate its caching.
     let real_cc = resolve_on_path(CcLanguage::C.default_driver());
     let real_cxx = resolve_on_path(CcLanguage::Cxx.default_driver());
-    if real_cc.is_none() && real_cxx.is_none() {
+    // Wrapped first, because a cross image is entitled to ship the driver it
+    // cross-compiles with and no host `cc` at all. Deciding there is nothing to
+    // do before looking would leave exactly that build uncached.
+    let targeted = wrap_targeted_compilers(&executable, session_dir)?;
+    if real_cc.is_none() && real_cxx.is_none() && targeted.is_empty() {
         debug!("no C or C++ compiler was found on PATH; build script compiles are not cached");
         return Ok(None);
     }
@@ -985,7 +1005,7 @@ fn install_cc_shims(session_dir: &Path) -> Result<Option<CcShims>> {
     let mut installed = CcShims {
         cc: None,
         cxx: None,
-        targeted: wrap_targeted_compilers(&executable, session_dir)?,
+        targeted,
     };
     if let Some(real) = real_cc {
         installed.cc = Some((shim(CcLanguage::C)?, real));
