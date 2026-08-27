@@ -1636,8 +1636,22 @@ fn main() {
 /// Whether a C compiler is available to compile the fixture at all.
 #[cfg(unix)]
 fn has_c_compiler() -> bool {
+    // Deliberately a real compilation rather than `cc -v`, which is what the
+    // adapter's own identity probe runs. Sharing that signal would mean a
+    // regression in the probe skipped these tests instead of failing them --
+    // the feature would go dead and the suite would stay green.
+    let Ok(directory) = tempfile::tempdir() else {
+        return false;
+    };
+    let source = directory.path().join("probe.c");
+    if std::fs::write(&source, "int probe(void) { return 0; }\n").is_err() {
+        return false;
+    }
     Command::new("cc")
-        .arg("-v")
+        .arg("-c")
+        .arg("-o")
+        .arg(directory.path().join("probe.o"))
+        .arg(&source)
         .output()
         .is_ok_and(|output| output.status.success())
 }

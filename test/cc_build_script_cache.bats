@@ -13,7 +13,11 @@ setup() {
   unset CC CXX HOST_CC HOST_CXX TARGET_CC TARGET_CXX MBX_REAL_CC MBX_REAL_CXX
   export MBX_CACHE_DIR="$BATS_TEST_TMPDIR/store"
 
-  if ! cc -v >/dev/null 2>&1; then
+  # A real compilation, not `cc -v`: that is what the adapter's identity probe
+  # runs, and sharing the signal would let a regression there skip these tests
+  # rather than fail them.
+  printf 'int probe(void) { return 0; }\n' >"$BATS_TEST_TMPDIR/probe.c"
+  if ! cc -c -o "$BATS_TEST_TMPDIR/probe.o" "$BATS_TEST_TMPDIR/probe.c" 2>/dev/null; then
     skip "no C compiler is available"
   fi
 
