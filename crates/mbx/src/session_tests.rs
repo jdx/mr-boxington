@@ -187,16 +187,31 @@ fn exec_identity_falls_back_to_the_directory_name() {
 
 #[cfg(unix)]
 #[test]
-fn a_hard_linked_shim_is_recognized_as_this_binary() {
+fn a_hard_linked_shim_is_recognized_as_the_same_binary() {
+    // Both files are created here rather than linked from the running test
+    // binary: a hard link needs one filesystem, and a temporary directory is
+    // on a different one from the build directory often enough that CI proves
+    // it. `install_shim_named` falls back to a copy in that case, which would
+    // test the fallback rather than the recognition below.
     let directory = tempfile::tempdir().unwrap();
-    let executable = std::env::current_exe().unwrap();
-    let shim = install_shim_named(&executable, directory.path(), "cc", ShimLink::Pinned).unwrap();
-    assert!(is_same_binary(&shim, Some(&executable)));
-    std::fs::write(directory.path().join("other"), b"#!/bin/sh\n").unwrap();
-    assert!(!is_same_binary(
-        &directory.path().join("other"),
-        Some(&executable)
-    ));
+    let binary = directory.path().join("mbx");
+    std::fs::write(&binary, b"#!/bin/sh\n").unwrap();
+    let shim_dir = directory.path().join("cc-path");
+    std::fs::create_dir(&shim_dir).unwrap();
+
+    // The case a path comparison cannot see: a shim directory an outer
+    // session left on PATH, holding a link to the same binary under a
+    // compiler's name.
+    let linked = shim_dir.join("cc");
+    std::fs::hard_link(&binary, &linked).unwrap();
+    assert!(is_same_binary(&linked, Some(&binary)));
+
+    // A copy is a different file, and saying so is correct: the shim resolves
+    // its own name away by path first, so recognition here only has to cover
+    // the links that share an inode.
+    let copied = shim_dir.join("c++");
+    std::fs::copy(&binary, &copied).unwrap();
+    assert!(!is_same_binary(&copied, Some(&binary)));
 }
 
 #[test]
