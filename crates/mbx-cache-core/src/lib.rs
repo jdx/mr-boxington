@@ -88,6 +88,8 @@ const MAX_STAGED_BLOB_PACK_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_STAGED_BLOB_PACK_ITEMS: usize = 2 * 1024;
 const BLOB_PACK_TIMEOUT_BYTES_PER_UNIT: u64 = MAX_STAGED_BLOB_PACK_BYTES / 4;
 const BLOB_PACK_TIMEOUT_ITEMS_PER_UNIT: usize = MAX_STAGED_BLOB_PACK_ITEMS / 4;
+/// Bytes read from one pack member before the next chunk is yielded.
+const PACK_STREAM_CHUNK_BYTES: usize = 64 * 1024;
 /// Actions looked up in one batched request.
 ///
 /// A prefetch wants its first results back while the rest are still being
@@ -1022,10 +1024,10 @@ impl RemoteCacheClient {
                 .header(BLOB_PACK_BYTES_HEADER, payload_bytes);
             // Each attempt reads the sources again, so the pack is rebuilt here
             // rather than buffered once and held in memory.
-            let reader = blob_pack_reader(uploads).await?;
+            let stream = blob_pack_stream(blob_pack_members(uploads)?);
             let request = if compress {
                 let encoder = async_compression::tokio::bufread::ZstdEncoder::new(
-                    tokio::io::BufReader::new(reader),
+                    tokio::io::BufReader::new(tokio_util::io::StreamReader::new(stream)),
                 );
                 request
                     .header(CONTENT_ENCODING, "zstd")
@@ -1035,9 +1037,7 @@ impl RemoteCacheClient {
             } else {
                 request
                     .header(CONTENT_LENGTH, framed_bytes)
-                    .body(reqwest::Body::wrap_stream(
-                        tokio_util::io::ReaderStream::new(reader),
-                    ))
+                    .body(reqwest::Body::wrap_stream(stream))
             };
             let response = request.send().await?;
             if matches!(
@@ -1161,23 +1161,116 @@ fn blob_pack_download_timeout(base: Duration, digests: &[CacheDigest]) -> Durati
 ///
 /// The frames mirror what [`decode_blob_pack_reader`] accepts, so both
 /// directions of the extension agree on the format by construction.
-async fn blob_pack_reader(
-    uploads: &[BlobUpload],
-) -> Result<Box<dyn AsyncRead + Send + Sync + Unpin>> {
-    use tokio::io::AsyncReadExt as _;
+/// One member of a pack, described rather than opened.
+///
+/// A pack can hold thousands of objects. Opening them all before the first byte
+/// is sent would spend a file descriptor on each for the length of the request,
+/// so a member is opened only when the stream reaches it and closed when it is
+/// past.
+struct PackMemberSource {
+    header: Vec<u8>,
+    source: PackPayloadSource,
+}
 
-    let mut reader: Box<dyn AsyncRead + Send + Sync + Unpin> =
-        Box::new(std::io::Cursor::new(BLOB_PACK_MAGIC.to_vec()));
-    for upload in uploads {
-        let header = blob_pack_frame_header(&upload.digest)?;
-        let payload: Box<dyn AsyncRead + Send + Sync + Unpin> = match &upload.source {
-            BlobSource::Bytes(bytes) => Box::new(std::io::Cursor::new(bytes.clone())),
-            BlobSource::File(file) => Box::new(tokio::fs::File::open(file.path()).await?),
-            BlobSource::Path(path) => Box::new(tokio::fs::File::open(path).await?),
-        };
-        reader = Box::new(reader.chain(std::io::Cursor::new(header)).chain(payload));
-    }
-    Ok(reader)
+enum PackPayloadSource {
+    Bytes(Vec<u8>),
+    Path(PathBuf),
+}
+
+enum PackStreamState {
+    Magic,
+    Header(usize),
+    Payload(usize, Box<dyn AsyncRead + Send + Sync + Unpin>),
+    Done,
+}
+
+/// Frame blobs into one `MBXPACK1` stream, read on demand rather than buffered.
+///
+/// The frames mirror what [`decode_blob_pack_reader`] accepts, so both
+/// directions of the extension agree on the format by construction.
+fn blob_pack_stream(
+    members: Vec<PackMemberSource>,
+) -> impl futures_util::Stream<Item = std::io::Result<bytes::Bytes>> + Send + 'static {
+    futures_util::stream::unfold(
+        (PackStreamState::Magic, members),
+        |(state, members)| async move {
+            let mut state = state;
+            loop {
+                match state {
+                    PackStreamState::Magic => {
+                        return Some((
+                            Ok(bytes::Bytes::from_static(BLOB_PACK_MAGIC)),
+                            (PackStreamState::Header(0), members),
+                        ));
+                    }
+                    PackStreamState::Header(index) => {
+                        let Some(member) = members.get(index) else {
+                            state = PackStreamState::Done;
+                            continue;
+                        };
+                        let payload: Box<dyn AsyncRead + Send + Sync + Unpin> = match &member.source
+                        {
+                            PackPayloadSource::Bytes(bytes) => {
+                                Box::new(std::io::Cursor::new(bytes.clone()))
+                            }
+                            PackPayloadSource::Path(path) => {
+                                match tokio::fs::File::open(path).await {
+                                    Ok(file) => Box::new(file),
+                                    Err(error) => {
+                                        return Some((
+                                            Err(error),
+                                            (PackStreamState::Done, members),
+                                        ));
+                                    }
+                                }
+                            }
+                        };
+                        return Some((
+                            Ok(bytes::Bytes::from(member.header.clone())),
+                            (PackStreamState::Payload(index, payload), members),
+                        ));
+                    }
+                    PackStreamState::Payload(index, mut payload) => {
+                        let mut chunk = vec![0; PACK_STREAM_CHUNK_BYTES];
+                        match payload.read(&mut chunk).await {
+                            // The member is finished, so its handle is dropped
+                            // here rather than held for the whole request.
+                            Ok(0) => {
+                                state = PackStreamState::Header(index + 1);
+                            }
+                            Ok(read) => {
+                                chunk.truncate(read);
+                                return Some((
+                                    Ok(bytes::Bytes::from(chunk)),
+                                    (PackStreamState::Payload(index, payload), members),
+                                ));
+                            }
+                            Err(error) => {
+                                return Some((Err(error), (PackStreamState::Done, members)));
+                            }
+                        }
+                    }
+                    PackStreamState::Done => return None,
+                }
+            }
+        },
+    )
+}
+
+fn blob_pack_members(uploads: &[BlobUpload]) -> Result<Vec<PackMemberSource>> {
+    uploads
+        .iter()
+        .map(|upload| {
+            Ok(PackMemberSource {
+                header: blob_pack_frame_header(&upload.digest)?,
+                source: match &upload.source {
+                    BlobSource::Bytes(bytes) => PackPayloadSource::Bytes(bytes.clone()),
+                    BlobSource::File(file) => PackPayloadSource::Path(file.path().to_path_buf()),
+                    BlobSource::Path(path) => PackPayloadSource::Path(path.clone()),
+                },
+            })
+        })
+        .collect()
 }
 
 fn blob_pack_frame_header(digest: &CacheDigest) -> Result<Vec<u8>> {

@@ -959,6 +959,68 @@ async fn rejects_action_batch_results_that_were_not_requested() {
     assert!(error.to_string().contains("unrequested action"));
 }
 
+/// A pack holds as many objects as a build compiles, and each one is opened
+/// only while the stream is on it -- so a large pack neither spends a file
+/// descriptor per member for the length of the request nor nests a frame per
+/// member before the first byte is sent.
+#[tokio::test]
+async fn streams_a_pack_of_many_members_from_files() {
+    let mut server = mockito::Server::new_async().await;
+    server
+        .mock("GET", "/v1/capabilities")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            serde_json::json!({
+                "protocol":{"major":1},
+                "features":{"blob_pack_uploads":true},
+                "limits":{"max_batch_items":1000,"max_pack_bytes":1048576}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut uploads = Vec::new();
+    let mut expected = Vec::new();
+    let mut payload_bytes = 0;
+    for index in 0..200 {
+        let bytes = format!("packed member {index}").into_bytes();
+        let digest = CacheDigest::blake3(&bytes);
+        let path = directory.path().join(format!("member-{index}"));
+        fs::write(&path, &bytes).unwrap();
+        payload_bytes += digest.size;
+        expected.push((format!("blake3:{}", digest.hash), digest.size, bytes));
+        uploads.push(BlobUpload {
+            digest,
+            source: BlobSource::Path(path),
+        });
+    }
+    let upload = server
+        .mock("POST", "/v1/blobs:pack-upload")
+        .match_header(BLOB_PACK_BLOBS_HEADER, "200")
+        .match_request(move |request| decode_blob_pack_frames(request.body().unwrap()) == expected)
+        .with_status(200)
+        .with_body(serde_json::json!({"created":200,"existing":0}).to_string())
+        .expect(1)
+        .create_async()
+        .await;
+    let client = test_client(&server);
+
+    let receipt = client
+        .put_blob_pack(&uploads)
+        .await
+        .unwrap()
+        .expect("the server advertised packed uploads");
+
+    assert_eq!(receipt.created, 200);
+    assert_eq!(
+        payload_bytes,
+        uploads.iter().map(|upload| upload.digest.size).sum::<u64>()
+    );
+    upload.assert_async().await;
+}
+
 #[tokio::test]
 async fn uploads_negotiated_blob_packs() {
     let mut server = mockito::Server::new_async().await;
