@@ -1591,28 +1591,51 @@ fn denormalize_output_text(bytes: &[u8], mappings: &[PathMapping]) -> Vec<u8> {
 /// Every spelling a root can take in these outputs, paired with the
 /// placeholder that stands for it.
 ///
-/// The dep-info writes a path literally, but stderr is JSON, where a Windows
-/// separator arrives doubled. Matching only the literal spelling would leave
-/// every artifact notification on Windows carrying the publishing checkout's
-/// path, so each root is looked for both ways and each way gets its own
-/// placeholder -- otherwise a restore could not tell which spelling to write
-/// back.
+/// rustc writes a path with the platform separator in some places and forward
+/// slashes in others -- the reason [`carries`] searches both -- and stderr is
+/// JSON, where a Windows separator arrives doubled. A spelling missed here is
+/// a path from the publishing checkout left in place, so each is looked for,
+/// and each gets its own placeholder because a restore has to know which one
+/// to write back.
 ///
 /// Deepest root first, so a target directory inside a workspace wins over the
-/// workspace, and the escaped spelling before the literal one it contains.
+/// workspace, and within a root the doubled spelling before the single one.
 fn root_spellings(mappings: &[PathMapping]) -> Vec<(String, String)> {
     let mut spellings = Vec::new();
     for mapping in PathMapping::ordered(mappings) {
         let Some(root) = mapping.root.to_str() else {
             continue;
         };
-        let escaped = root.replace('\\', "\\\\");
-        if escaped != root {
-            spellings.push((escaped, format!("${{{}:escaped}}", mapping.placeholder)));
+        // The literal spelling first, so a platform whose separator needs no
+        // escaping keeps the plain placeholder rather than an escaped one that
+        // means the same thing.
+        for (spelling, suffix) in [
+            (root.to_string(), ""),
+            (root.replace('\\', "\\\\"), ":escaped"),
+            (root.replace('\\', "/"), ":slash"),
+        ] {
+            if spellings.iter().any(|(existing, _)| existing == &spelling) {
+                continue;
+            }
+            spellings.push((spelling, format!("${{{}{suffix}}}", mapping.placeholder)));
         }
-        spellings.push((root.to_string(), format!("${{{}}}", mapping.placeholder)));
     }
     spellings
+}
+
+/// Whether a root matched at `end` stops there rather than running into a
+/// longer name.
+///
+/// `/work/target` is not a prefix of `/work/target-backup` in any sense that
+/// matters, but a plain substring search cannot tell them apart, and rewriting
+/// the second would hand a restore a directory that never existed.
+/// [`normalize_mapped_path`] gets this from comparing components; here the
+/// following byte has to say it.
+fn ends_at_boundary(haystack: &[u8], end: usize) -> bool {
+    match haystack.get(end) {
+        None => true,
+        Some(byte) => !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
+    }
 }
 
 fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
@@ -1622,7 +1645,9 @@ fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> 
     let mut out = Vec::with_capacity(haystack.len());
     let mut index = 0;
     while index <= haystack.len() - needle.len() {
-        if &haystack[index..index + needle.len()] == needle {
+        if &haystack[index..index + needle.len()] == needle
+            && ends_at_boundary(haystack, index + needle.len())
+        {
             out.extend_from_slice(replacement);
             index += needle.len();
         } else {

@@ -616,3 +616,76 @@ fn a_placeholder_is_rewritten_into_the_restoring_checkouts_root() {
         "restore still names the publishing root: {restored}"
     );
 }
+
+/// rustc writes a path with the platform separator in some places and forward
+/// slashes in others, which is why `carries` searches both, and stderr is JSON
+/// where a Windows separator arrives doubled. A spelling missed here is a path
+/// from the publishing checkout left in place.
+///
+/// The root is spelled the Windows way whatever this platform is, because a
+/// unix root has only one spelling and the test would prove nothing there.
+#[test]
+fn every_spelling_of_a_root_is_normalized() {
+    let mappings = vec![PathMapping::new(r"D:\work\target", "target")];
+    let root = r"D:\work\target";
+    let spellings = [
+        root.to_string(),
+        root.replace('\\', r"\\"),
+        root.replace('\\', "/"),
+    ];
+    assert_eq!(
+        spellings
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3,
+        "the fixture should exercise three distinct spellings"
+    );
+
+    for spelling in &spellings {
+        let original = format!("{spelling}/deps/lib.rlib: src/lib.rs\n");
+        let normalized = normalize_output_text(original.as_bytes(), &mappings);
+        assert!(
+            !String::from_utf8_lossy(&normalized).contains(spelling.as_str()),
+            "{spelling} survived normalization: {}",
+            String::from_utf8_lossy(&normalized)
+        );
+        assert_eq!(
+            denormalize_output_text(&normalized, &mappings),
+            original.as_bytes(),
+            "{spelling} did not come back as it went in"
+        );
+    }
+}
+
+/// A root is a directory, not a text prefix. `/work/target` has nothing to do
+/// with `/work/target-backup`, and rewriting the second would hand a restore a
+/// directory that never existed.
+#[test]
+fn a_sibling_sharing_a_prefix_is_left_alone() {
+    let mappings = vec![PathMapping::new(
+        if cfg!(windows) {
+            r"D:\work\target"
+        } else {
+            "/work/target"
+        },
+        "target",
+    )];
+    let root = mappings[0].root.to_str().unwrap().to_string();
+    let separator = if cfg!(windows) { '\\' } else { '/' };
+    let sibling = format!("{root}-backup{separator}keep.rlib");
+    let inside = format!("{root}{separator}deps{separator}lib.rlib");
+
+    let original = format!("{sibling}\n{inside}\n");
+    let normalized = normalize_output_text(original.as_bytes(), &mappings);
+    let normalized = String::from_utf8_lossy(&normalized).into_owned();
+
+    assert!(
+        normalized.contains(&sibling),
+        "the sibling directory was rewritten: {normalized}"
+    );
+    assert!(
+        !normalized.contains(&inside),
+        "the root itself was not rewritten: {normalized}"
+    );
+}
