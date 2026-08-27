@@ -732,6 +732,41 @@ pub struct ActionContext {
     pub portable_environment: BTreeSet<String>,
     /// Complete set of direct and discovered file inputs.
     pub inputs: Vec<ActionInput>,
+    /// Identity of the linker, for an invocation that links a native program.
+    ///
+    /// Required by [`RustcInvocation::action`] whenever
+    /// [`RustcInvocation::links_natively`] holds: the linker, its CRT objects,
+    /// and the platform SDK are inputs that rustc dep-info does not enumerate,
+    /// so a key without them would claim more than it can support.
+    pub linker: Option<LinkerIdentity>,
+}
+
+/// What produced a linked native program, beyond the compiler itself.
+///
+/// The fields are identity rather than content wherever a compiler's own
+/// identity is: a driver's version output names its toolchain more cheaply than
+/// hashing a hundred megabytes of it, and matches how rustc is identified. The
+/// CRT objects are hashed, because nothing else pins the libc a link resolves
+/// against. Nothing here is placeholder-mapped -- these paths are host
+/// locations rather than checkout locations, and two hosts that differ should
+/// miss rather than share.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LinkerIdentity {
+    /// Resolved absolute path of the linker driver rustc will invoke.
+    pub driver: String,
+    /// Version output of that driver.
+    pub driver_version: String,
+    /// Version of the linker the driver selects.
+    pub linker_version: String,
+    /// Startup objects and libc the driver resolves, by probe name.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub crt_objects: BTreeMap<String, CacheDigest>,
+    /// Platform SDK identity, where the platform has one.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sdk: Option<String>,
+    /// Deployment target the link was made against, where one applies.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub deployment_target: Option<String>,
 }
 
 /// Canonical action descriptor and its content digest.
@@ -829,6 +864,10 @@ struct ActionDescriptor {
     arguments: Vec<String>,
     environment: BTreeMap<String, Option<String>>,
     inputs: Vec<InputDescriptor>,
+    /// Omitted entirely unless the invocation links natively, so every key
+    /// written before this field existed still serializes to the same bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    linker: Option<LinkerIdentity>,
 }
 
 #[derive(Serialize)]
@@ -1440,6 +1479,13 @@ impl<'a> ActionBuilder<'a> {
             .into_iter()
             .map(|(path, digest)| InputDescriptor { path, digest })
             .collect();
+        // A native link without a linker identity would be keyed as though the
+        // host did not matter. Refuse rather than publish that claim.
+        if self.invocation.links_natively() && self.context.linker.is_none() {
+            return Err(BypassReason::UnportableNativeLink(
+                "linker identity is unknown".into(),
+            ));
+        }
         let descriptor = ActionDescriptor {
             version: ACTION_SCHEMA_VERSION,
             kind: "rustc",
@@ -1448,6 +1494,7 @@ impl<'a> ActionBuilder<'a> {
             arguments: invocation.arguments,
             environment,
             inputs,
+            linker: self.context.linker.clone(),
         };
         let bytes = canonical_json(&descriptor)
             .map_err(|error| BypassReason::Serialization(error.to_string()))?;

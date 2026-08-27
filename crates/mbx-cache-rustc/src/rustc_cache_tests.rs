@@ -97,6 +97,7 @@ fn context(inputs: &[(&str, &str)]) -> ActionContext {
                 digest: digest(contents),
             })
             .collect(),
+        linker: None,
     }
 }
 
@@ -615,6 +616,7 @@ fn predicts_inputs_without_reusing_stale_contents() {
         environment: BTreeMap::new(),
         portable_environment: BTreeSet::new(),
         inputs: Vec::new(),
+        linker: None,
     };
     let dep_info = RustcDepInfo {
         files: vec!["src/lib.rs".into()],
@@ -1108,5 +1110,102 @@ fn native_libraries_bypass_even_for_admitted_links() {
     assert_eq!(
         RustcInvocation::parse_with(&arguments, native_links()),
         Err(BypassReason::NativeLibrary)
+    );
+}
+
+/// The linker field must be absent, not null, for everything that does not link
+/// natively -- otherwise adding it would invalidate every key already in every
+/// store, for a property those compilations never depended on.
+#[test]
+fn modeling_the_linker_leaves_existing_keys_untouched() {
+    let invocation = common_invocation();
+    let inputs = &[
+        ("src/lib.rs", "source"),
+        ("target/debug/deps/libserde.rlib", "serde"),
+    ];
+
+    let action = invocation.action(context(inputs)).unwrap();
+
+    let json = String::from_utf8(action.bytes).unwrap();
+    assert!(!json.contains("linker"), "{json}");
+    // Verified against the adapter as it shipped in 0.5.1: every key already
+    // in a store still resolves after this change.
+    assert_eq!(
+        action.digest.key(),
+        "blake3/af70e14cc38eccf01eabb89067418e7780883628d051f499ea8acf3ebc925933/865"
+    );
+}
+
+/// A native link keyed without one would claim the host does not matter.
+#[test]
+fn a_native_link_without_a_linker_identity_is_refused() {
+    let invocation = RustcInvocation::parse_with(
+        &args(&[
+            "--crate-name=widget",
+            "--test",
+            "--emit=dep-info,link",
+            "--out-dir=target/debug/deps",
+            "src/lib.rs",
+        ]),
+        native_links(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        invocation.action(context(&[("src/lib.rs", "source")])),
+        Err(BypassReason::UnportableNativeLink(
+            "linker identity is unknown".into()
+        ))
+    );
+
+    let identified = ActionContext {
+        linker: Some(test_linker()),
+        ..context(&[("src/lib.rs", "source")])
+    };
+    let action = invocation.action(identified).unwrap();
+    let json = String::from_utf8(action.bytes).unwrap();
+    assert!(json.contains(r#""linker":{"#), "{json}");
+}
+
+fn test_linker() -> LinkerIdentity {
+    LinkerIdentity {
+        driver: "/usr/bin/cc".into(),
+        driver_version: "Apple clang version 17.0.0".into(),
+        linker_version: "ld64-1200".into(),
+        crt_objects: BTreeMap::new(),
+        sdk: Some("MacOSX15.0.sdk (24A335)".into()),
+        deployment_target: None,
+    }
+}
+
+/// Two hosts whose linkers differ must key differently rather than share.
+#[test]
+fn the_linker_identity_changes_the_action_key() {
+    let invocation = RustcInvocation::parse_with(
+        &args(&[
+            "--crate-name=widget",
+            "--test",
+            "--emit=dep-info,link",
+            "--out-dir=target/debug/deps",
+            "src/lib.rs",
+        ]),
+        native_links(),
+    )
+    .unwrap();
+    let first = ActionContext {
+        linker: Some(test_linker()),
+        ..context(&[("src/lib.rs", "source")])
+    };
+    let second = ActionContext {
+        linker: Some(LinkerIdentity {
+            driver_version: "Apple clang version 18.0.0".into(),
+            ..test_linker()
+        }),
+        ..context(&[("src/lib.rs", "source")])
+    };
+
+    assert_ne!(
+        invocation.action(first).unwrap().digest,
+        invocation.action(second).unwrap().digest
     );
 }

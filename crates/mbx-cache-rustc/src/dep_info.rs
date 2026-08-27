@@ -697,6 +697,7 @@ mod tests {
             environment: BTreeMap::new(),
             portable_environment: BTreeSet::new(),
             inputs: Vec::new(),
+            linker: None,
         };
         discovered.clone().apply_to(&mut context).unwrap();
         let action = invocation.action(context).unwrap();

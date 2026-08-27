@@ -678,6 +678,7 @@ fn base_action_context(
         environment: BTreeMap::new(),
         portable_environment: portable.names.clone(),
         inputs: Vec::new(),
+        linker: None,
     })
 }
 
