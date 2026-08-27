@@ -4,8 +4,10 @@
 
 [sccache](https://github.com/mozilla/sccache) is the established compiler
 cache, and it aims wider: it caches C, C++, and CUDA alongside Rust and can
-distribute compilation across machines. mbx only caches rustc, and spends that
-narrower scope on problems sccache does not attempt:
+distribute compilation across machines. mbx caches only what a cargo build
+runs — rustc, the C and C++ its build scripts compile, and optionally its
+native links — and spends that narrower scope on problems sccache does not
+attempt:
 
 - **No daemon.** sccache runs a background server that builds talk to. mbx
   starts an in-process agent for each command and exits with it; there is
@@ -24,9 +26,56 @@ narrower scope on problems sccache does not attempt:
   from pull requests, unprotected branches, and tag builds, on top of whatever
   the server enforces.
 
-If you need C/C++ caching or distributed compilation, sccache is the right
-tool. Both wrap rustc through `RUSTC_WRAPPER`, so they cannot be combined for
-the same build.
+If you need C/C++ caching outside cargo builds, CUDA, or distributed
+compilation, sccache is the right tool. Both wrap rustc through
+`RUSTC_WRAPPER`, so they cannot be combined for the same build.
+
+## kache
+
+[kache](https://github.com/kunobi-ninja/kache) is the closest tool to mbx,
+and the comparison comes with a debt: parts of mbx's design were inspired by
+kache. No code is shared between the projects, but the influence is real and
+worth acknowledging. Like mbx, it is a content-addressed `RUSTC_WRAPPER`
+cache built for sharing compilations across worktrees, with C/C++ compiler
+shims, S3-compatible remotes, and executable caching on Linux and macOS. It
+also publishes a scheduled benchmark workflow that builds Firefox, LLVM, and
+other large projects cold and warm — a level of public verification mbx does
+not offer today. The differences are in the mechanics:
+
+- **No daemon.** `kache init` installs an OS service by default (there is a
+  `--no-service` opt-out). mbx starts an in-process agent for each command
+  and exits with it; there is nothing to install, restart, or leave running.
+- **Managed `target/` vs. deduplicated `target/`.** kache hardlinks outputs
+  into place, so each checkout's `target/` shares disk with the store but
+  stays where it is, pruned by `kache gc`. mbx owns the directories it
+  creates: outputs live once in the store, appear in each checkout by
+  reflink, and directories whose checkout is gone are collected
+  automatically.
+- **Restores never hardlink.** A hardlinked output shares an inode with the
+  cache — the two names are the same file. mbx restores by reflink, a
+  copy-on-write clone that diverges on first write, and falls back to a
+  plain byte copy where the filesystem cannot clone, never to a hardlink.
+- **CI write policy and remote auth.** kache's remotes are S3-compatible
+  buckets reached through the standard AWS credential chain, and its README
+  states no policy on what may publish from pull requests — whatever the
+  credentials allow, any build can write. mbx's client refuses to publish
+  from pull requests and unprotected branches and disables caching entirely
+  on tag builds, and its remote is a namespaced protocol server with
+  deny-by-default token and OIDC grants rather than a bucket the build
+  writes to directly.
+- **C/C++ scope.** kache's shims sit on `PATH`, so C/C++ built outside cargo
+  (CMake, for example) is in scope. mbx caches the C and C++ that cargo
+  build scripts compile through the `cc` crate — it follows the cargo build
+  rather than the compiler, so a standalone C project is out of scope.
+- **Executable caching.** Both cache linked binaries on Linux and macOS. In
+  mbx it is opt-in (`MBX_CACHE_LINKS=1`) and experimental, and the key
+  includes the resolved linker, startup objects, libc, and SDK rather than
+  dep-info alone.
+
+If your repository mixes cargo with substantial C/C++ under other build
+systems, or you want published benchmark numbers to check claims against,
+kache is worth evaluating. Both tools wrap rustc through `RUSTC_WRAPPER`, so
+they cannot be combined for the same build.
 
 ## Tarball CI caches
 
