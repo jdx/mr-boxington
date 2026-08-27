@@ -1171,6 +1171,7 @@ fn blob_pack_download_timeout(base: Duration, digests: &[CacheDigest]) -> Durati
 /// past.
 struct PackMemberSource {
     header: Vec<u8>,
+    payload_bytes: u64,
     source: PackPayloadSource,
 }
 
@@ -1182,7 +1183,7 @@ enum PackPayloadSource {
 enum PackStreamState {
     Magic,
     Header(usize),
-    Payload(usize, Box<dyn AsyncRead + Send + Sync + Unpin>),
+    Payload(usize, u64, Box<dyn AsyncRead + Send + Sync + Unpin>),
     Done,
 }
 
@@ -1229,22 +1230,44 @@ fn blob_pack_stream(
                         };
                         return Some((
                             Ok(bytes::Bytes::from(member.header.clone())),
-                            (PackStreamState::Payload(index, payload), members),
+                            (
+                                PackStreamState::Payload(index, member.payload_bytes, payload),
+                                members,
+                            ),
                         ));
                     }
-                    PackStreamState::Payload(index, mut payload) => {
-                        let mut chunk = vec![0; PACK_STREAM_CHUNK_BYTES];
+                    PackStreamState::Payload(index, remaining, mut payload) => {
+                        if remaining == 0 {
+                            // The declared frame length, rather than EOF, is the
+                            // boundary between adjacent members.
+                            state = PackStreamState::Header(index + 1);
+                            continue;
+                        }
+                        let chunk_bytes =
+                            usize::try_from(remaining.min(PACK_STREAM_CHUNK_BYTES as u64)).unwrap();
+                        let mut chunk = vec![0; chunk_bytes];
                         match payload.read(&mut chunk).await {
-                            // The member is finished, so its handle is dropped
-                            // here rather than held for the whole request.
                             Ok(0) => {
-                                state = PackStreamState::Header(index + 1);
+                                let error = std::io::Error::new(
+                                    std::io::ErrorKind::UnexpectedEof,
+                                    format!(
+                                        "blob pack member {index} ended with {remaining} bytes remaining"
+                                    ),
+                                );
+                                return Some((Err(error), (PackStreamState::Done, members)));
                             }
                             Ok(read) => {
                                 chunk.truncate(read);
                                 return Some((
                                     Ok(bytes::Bytes::from(chunk)),
-                                    (PackStreamState::Payload(index, payload), members),
+                                    (
+                                        PackStreamState::Payload(
+                                            index,
+                                            remaining - read as u64,
+                                            payload,
+                                        ),
+                                        members,
+                                    ),
                                 ));
                             }
                             Err(error) => {
@@ -1265,6 +1288,7 @@ fn blob_pack_members(uploads: &[BlobUpload]) -> Result<Vec<PackMemberSource>> {
         .map(|upload| {
             Ok(PackMemberSource {
                 header: blob_pack_frame_header(&upload.digest)?,
+                payload_bytes: upload.digest.size,
                 source: match &upload.source {
                     BlobSource::Bytes(bytes) => PackPayloadSource::Bytes(bytes.clone()),
                     BlobSource::File(file) => PackPayloadSource::Path(file.path().to_path_buf()),

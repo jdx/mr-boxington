@@ -1022,6 +1022,76 @@ async fn streams_a_pack_of_many_members_from_files() {
 }
 
 #[tokio::test]
+async fn pack_stream_stops_each_member_at_its_declared_size() {
+    let directory = tempfile::tempdir().unwrap();
+    let first_bytes = b"first packed blob";
+    let second_bytes = b"second packed blob";
+    let first = CacheDigest::blake3(first_bytes);
+    let second = CacheDigest::blake3(second_bytes);
+    let first_path = directory.path().join("first");
+    let second_path = directory.path().join("second");
+    fs::write(
+        &first_path,
+        [first_bytes.as_slice(), b"trailing bytes"].concat(),
+    )
+    .unwrap();
+    fs::write(&second_path, second_bytes).unwrap();
+    let uploads = [
+        BlobUpload {
+            digest: first.clone(),
+            source: BlobSource::Path(first_path),
+        },
+        BlobUpload {
+            digest: second.clone(),
+            source: BlobSource::Path(second_path),
+        },
+    ];
+
+    let chunks = blob_pack_stream(blob_pack_members(&uploads).unwrap())
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let pack = chunks.concat();
+
+    assert_eq!(
+        decode_blob_pack_frames(&pack),
+        vec![
+            (
+                format!("blake3:{}", first.hash),
+                first.size,
+                first_bytes.to_vec(),
+            ),
+            (
+                format!("blake3:{}", second.hash),
+                second.size,
+                second_bytes.to_vec(),
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn pack_stream_rejects_members_shorter_than_their_declared_size() {
+    let directory = tempfile::tempdir().unwrap();
+    let complete = b"complete packed blob";
+    let digest = CacheDigest::blake3(complete);
+    let path = directory.path().join("truncated");
+    fs::write(&path, &complete[..complete.len() - 1]).unwrap();
+    let uploads = [BlobUpload {
+        digest,
+        source: BlobSource::Path(path),
+    }];
+
+    let error = blob_pack_stream(blob_pack_members(&uploads).unwrap())
+        .try_collect::<Vec<_>>()
+        .await
+        .expect_err("a short member was accepted");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    assert!(error.to_string().contains("1 bytes remaining"));
+}
+
+#[tokio::test]
 async fn uploads_negotiated_blob_packs() {
     let mut server = mockito::Server::new_async().await;
     mock_capabilities(
