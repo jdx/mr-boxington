@@ -735,6 +735,158 @@ fn deleting_a_checkout_releases_what_only_it_used() {
     );
 }
 
+/// The per-compilation stream `mbx tui` reads.
+mod session_events {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Where session streams live, beside the rest of the store's bookkeeping.
+    fn sessions_dir(store: &Path) -> PathBuf {
+        store.join("actions/sessions/v1")
+    }
+
+    /// The events of the one session `store` recorded, in order.
+    fn stream(store: &Path) -> Vec<serde_json::Value> {
+        let directory = sessions_dir(store);
+        let mut streams: Vec<PathBuf> = std::fs::read_dir(&directory)
+            .expect("a session directory should exist")
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "jsonl")
+            })
+            .collect();
+        assert_eq!(
+            streams.len(),
+            1,
+            "one build should record exactly one stream, found {streams:?}"
+        );
+        let contents = std::fs::read_to_string(streams.pop().unwrap()).unwrap();
+        contents
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("every line should be JSON"))
+            .collect()
+    }
+
+    fn outcomes(events: &[serde_json::Value], kind: &str) -> usize {
+        events
+            .iter()
+            .filter(|event| event["type"] == "action" && event["outcome"]["kind"] == kind)
+            .count()
+    }
+
+    #[test]
+    fn a_build_records_its_compilations_between_a_start_and_its_totals() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(project.path());
+
+        let cold = build(
+            project.path(),
+            store.path(),
+            &reports.path().join("cold.json"),
+        );
+
+        let events = stream(store.path());
+        assert_eq!(events.first().unwrap()["type"], "session_started");
+        assert_eq!(
+            events.first().unwrap()["command"],
+            serde_json::json!(["build", "--offline"])
+        );
+        let last = events.last().unwrap();
+        assert_eq!(last["type"], "session_finished");
+        // The stream's own totals are the summary's totals, so a reader of a
+        // finished session never has to re-derive them from the rows.
+        assert_eq!(last["stats"]["unconsulted"], cold["unconsulted"]);
+        assert_eq!(last["stats"]["hits"], cold["hits"]);
+        // A cold build compiles without a key to look up, and every one of
+        // those compilations should appear as a row.
+        assert_eq!(
+            outcomes(&events, "unconsulted") as u64,
+            count(&cold, "unconsulted"),
+            "every unconsulted compilation should have a row: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_warm_build_records_a_row_per_hit_naming_its_crate() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(project.path());
+
+        build(
+            project.path(),
+            store.path(),
+            &reports.path().join("cold.json"),
+        );
+        // Load-bearing, not cleanup: without the wipe cargo finds the cold
+        // build's outputs and the warm build has nothing to restore.
+        wipe_target(project.path());
+        let warm = build(
+            project.path(),
+            store.path(),
+            &reports.path().join("warm.json"),
+        );
+
+        // Two builds, two streams; this reads the newest.
+        let directory = sessions_dir(store.path());
+        let mut streams: Vec<PathBuf> = std::fs::read_dir(&directory)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "jsonl")
+            })
+            .collect();
+        streams.sort();
+        let contents = std::fs::read_to_string(streams.last().unwrap()).unwrap();
+        let events: Vec<serde_json::Value> = contents
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+
+        let hits = count(&warm, "hits");
+        assert!(hits > 0, "the warm build should hit: {warm}");
+        assert_eq!(
+            outcomes(&events, "hit") as u64,
+            hits,
+            "every hit should have a row: {events:?}"
+        );
+        // The crate name is what the protocol bump was for: a row that cannot
+        // say which crate it restored is not worth showing.
+        assert!(
+            events.iter().any(|event| {
+                event["outcome"]["kind"] == "hit" && event["crate_name"] == "fixture"
+            }),
+            "a hit row should name the crate it restored: {events:?}"
+        );
+    }
+
+    #[test]
+    fn recording_can_be_turned_off() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(project.path());
+
+        build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("cold.json"),
+            &[("MBX_EVENTS", "0")],
+        );
+
+        assert!(
+            !sessions_dir(store.path()).exists(),
+            "a build that records nothing should leave no session directory"
+        );
+    }
+}
+
 /// Managed target directories rest on a symlink standing in for `target`, and
 /// Windows only lets a privileged or developer-mode process create one, so mbx
 /// leaves the target directory where cargo put it there. These cover the

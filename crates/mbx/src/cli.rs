@@ -45,10 +45,19 @@ enum Commands {
     Gc(GcArgs),
     /// Inspect the local store.
     Cache(CacheArgs),
+    /// Watch cache activity across every build on this machine.
+    Tui(TuiArgs),
     /// Download predicted remote artifacts without running Cargo.
     Prefetch(PrefetchArgs),
     #[usage(external_subcommand)]
     Cargo(Vec<String>),
+}
+
+#[derive(usage::Args)]
+struct TuiArgs {
+    /// Print one plain-text snapshot instead of taking over the terminal.
+    #[usage(long)]
+    once: bool,
 }
 
 #[derive(usage::Args)]
@@ -223,6 +232,7 @@ pub fn run() -> Result<ExitCode> {
                 cache_remove(&config, &args.workspace).map(|()| ExitCode::SUCCESS)
             }
         },
+        Commands::Tui(args) => crate::tui::run(&config, args.once),
         Commands::Prefetch(args) => prefetch(&config, &args.cargo_args),
         Commands::Cargo(arguments) => cargo(&config, &settings, &arguments),
     }
@@ -901,6 +911,7 @@ fn gc(
                 removed_objects: outcome.removed_objects,
                 removed_action_results: outcome.removed_action_results,
                 removed_checkout_records: outcome.removed_checkout_records,
+                removed_session_streams: outcome.removed_session_streams,
                 removed_bytes: outcome.removed_bytes,
                 remaining_bytes: outcome.remaining_bytes,
             },
@@ -943,6 +954,12 @@ fn print_gc_store_outcome(outcome: &store::GcOutcome, dry_run: bool) {
         println!(
             "{prefix}dropped {} stale checkout records",
             outcome.removed_checkout_records
+        );
+    }
+    if outcome.removed_session_streams > 0 {
+        println!(
+            "{prefix}dropped {} session event streams",
+            outcome.removed_session_streams
         );
     }
 }
@@ -1159,6 +1176,7 @@ struct GcActionStoreReport {
     removed_objects: u64,
     removed_action_results: u64,
     removed_checkout_records: u64,
+    removed_session_streams: u64,
     removed_bytes: u64,
     remaining_bytes: u64,
 }

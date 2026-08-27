@@ -25,6 +25,7 @@ run.
 mbx build                  # cargo build, with caching
 mbx test --all-features    # cargo test --all-features, with caching
 mbx clippy --workspace     # cargo clippy --workspace, with caching
+mbx tui                    # watch every build's cache activity live
 mbx gc --dry-run           # preview what cleanup would reclaim
 ```
 
@@ -45,7 +46,8 @@ is pruned to, and when a `target/` directory becomes collectable.
   and teammates. Pull requests never publish remote objects.
 - **See the whole result.** mbx reports hits, misses, actions it could not look
   up, and actions it deliberately bypassed. A high hit rate cannot hide work
-  that never entered the cache.
+  that never entered the cache. `mbx tui` shows the same outcomes as they
+  happen, for every build on the machine at once.
 
 ## Install
 
@@ -163,6 +165,7 @@ Incremental compilations bypass the cache. Correctness comes before hit rate.
 - [Remote cache](https://mr-boxington.jdx.dev/remote-cache)
 - [Protocol compatibility](https://mr-boxington.jdx.dev/protocol-compatibility)
 - [Cache results](https://mr-boxington.jdx.dev/cache-results)
+- [Watching builds](https://mr-boxington.jdx.dev/tui)
 - [CLI reference](https://mr-boxington.jdx.dev/cli)
 - [Current limits](https://mr-boxington.jdx.dev/limits)
 

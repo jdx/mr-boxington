@@ -23,6 +23,7 @@
 - [`mbx cache largest [--limit <LIMIT>]`](/cli/cache/largest.md)
 - [`mbx cache verify`](/cli/cache/verify.md)
 - [`mbx cache remove <WORKSPACE>`](/cli/cache/remove.md)
+- [`mbx tui [--once]`](/cli/tui.md)
 - [`mbx prefetch <CARGO_ARGS>…`](/cli/prefetch.md)
 
 ## Configuration

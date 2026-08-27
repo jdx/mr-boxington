@@ -24,6 +24,20 @@ const SWEEP_STAMP: &str = "gc/v1/last-sweep";
 const SWEEP_LOCK: &str = "gc/v1/sweep.lock";
 const CHECKOUT_RECORD_VERSION: u8 = 1;
 
+/// How long a finished build's event stream is kept.
+///
+/// Streams are history for `mbx tui` to show, not cache content: nothing keys
+/// on them and losing one costs a row in a list. A week covers "what did my
+/// builds do lately" without letting a busy machine accumulate them forever.
+const SESSION_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// How many streams are kept regardless of age.
+///
+/// The age bound alone would let a day of heavy building leave thousands of
+/// files the TUI has to list. This is the second half of the bound, and the
+/// tighter one in practice.
+const MAX_SESSIONS: usize = 256;
+
 /// How long a checkout's claim outlives the last build that renewed it.
 ///
 /// Existence alone is not enough to keep a claim alive. An identity covers one
@@ -60,6 +74,10 @@ pub struct GcOutcome {
     pub removed_objects: u64,
     pub removed_action_results: u64,
     pub removed_checkout_records: u64,
+    /// Event streams dropped on age or count. Their bytes are counted in
+    /// `removed_bytes` but never in `remaining_bytes`: a stream is not cache
+    /// content, so it is not weighed against the store's budget.
+    pub removed_session_streams: u64,
     pub removed_bytes: u64,
     pub remaining_bytes: u64,
 }
@@ -392,8 +410,62 @@ fn gc_with_mode(store: &Path, max_bytes: u64, dry_run: bool) -> Result<GcOutcome
         }
     }
 
+    let sessions = prune_sessions(store, dry_run)?;
+    outcome.removed_session_streams += sessions.removed_streams;
+    outcome.removed_bytes += sessions.removed_bytes;
+
     outcome.remaining_bytes = live_bytes;
     Ok(outcome)
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SessionPrune {
+    removed_streams: u64,
+    removed_bytes: u64,
+}
+
+/// Drop the event streams that are too old or too many.
+///
+/// A stream a build is still writing is never touched: it holds its lock, and a
+/// running build's history is the one thing `mbx tui` exists to show. Age comes
+/// from the file's own timestamp, as it does everywhere else here; surplus comes
+/// from the ids, which sort oldest-first because they begin with a start time.
+fn prune_sessions(store: &Path, dry_run: bool) -> Result<SessionPrune> {
+    let mut prune = SessionPrune::default();
+    let ids = crate::events::session_ids(store);
+    // Everything past the newest MAX_SESSIONS is surplus however new it is.
+    let surplus = ids.len().saturating_sub(MAX_SESSIONS);
+    for (index, id) in ids.iter().enumerate() {
+        let paths = crate::events::session_paths(store, id);
+        let metadata = match std::fs::metadata(&paths.events) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        let stale = metadata
+            .modified()
+            .ok()
+            .and_then(|at| SystemTime::now().duration_since(at).ok())
+            .is_some_and(|age| age > SESSION_RETENTION);
+        if index >= surplus && !stale {
+            continue;
+        }
+        if crate::events::session_is_live(store, id) {
+            continue;
+        }
+        if dry_run {
+            prune.removed_streams += 1;
+            prune.removed_bytes += metadata.len();
+            continue;
+        }
+        if matches!(remove(&paths.events)?, Removal::Removed) {
+            prune.removed_streams += 1;
+            prune.removed_bytes += metadata.len();
+            // The lock outlives the stream it named, and nothing else refers to
+            // it once the stream is gone.
+            let _ = std::fs::remove_file(&paths.lock);
+        }
+    }
+    Ok(prune)
 }
 
 /// Sweep the store if `interval` has passed since the last attempt.
