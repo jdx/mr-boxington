@@ -35,7 +35,14 @@ compilation, sccache is the right tool. Both wrap rustc through
 [kache](https://github.com/kunobi-ninja/kache) is the closest tool to mbx,
 and the comparison comes with a debt: parts of mbx's design were inspired by
 kache. No code is shared between the projects, but the influence is real and
-worth acknowledging. Like mbx, it is a content-addressed `RUSTC_WRAPPER`
+worth acknowledging. mbx has a lineage of its own: it began as the Rust task
+cache inside the [mise](https://github.com/jdx/mise) task runner and was
+later extracted into a standalone CLI, on the theory that a dedicated tool
+could improve the day-to-day experience, be simpler to operate, and be safe
+for public repositories that take fork pull requests. Most of the
+differences below trace back to those three goals.
+
+Like mbx, kache is a content-addressed `RUSTC_WRAPPER`
 cache built for sharing compilations across worktrees, with C/C++ compiler
 shims, S3-compatible remotes, and executable caching on Linux and macOS. It
 also publishes a scheduled benchmark workflow that builds Firefox, LLVM, and
@@ -55,14 +62,21 @@ not offer today. The differences are in the mechanics:
   cache — the two names are the same file. mbx restores by reflink, a
   copy-on-write clone that diverges on first write, and falls back to a
   plain byte copy where the filesystem cannot clone, never to a hardlink.
-- **CI write policy and remote auth.** kache's remotes are S3-compatible
-  buckets reached through the standard AWS credential chain, and its README
-  states no policy on what may publish from pull requests — whatever the
-  credentials allow, any build can write. mbx's client refuses to publish
-  from pull requests and unprotected branches and disables caching entirely
-  on tag builds, and its remote is a namespaced protocol server with
-  deny-by-default token and OIDC grants rather than a bucket the build
-  writes to directly.
+- **CI write policy.** kache's README states no policy on what may publish
+  from pull requests — whatever the credentials allow, any build can write.
+  mbx's client refuses to publish from pull requests and unprotected
+  branches and disables caching entirely on tag builds, before the server
+  enforces anything.
+- **A server, not a bucket.** kache's remotes are S3-compatible buckets
+  reached through the standard AWS credential chain. mbx's remote is a
+  namespaced protocol server with guardrails a bucket cannot express:
+  deny-by-default grants with separate read and write namespace patterns,
+  OIDC rules that pin a repository and its immutable numeric owner ID and
+  can narrow to a `ref` or `environment`, immutable blobs with atomic
+  action commits, and no deletion endpoint — a credentialed writer can add
+  results but never rewrite or remove what an earlier build published. Fork
+  pull requests hold no credentials at all and fall back to a read-only
+  platform cache; see [fork PRs](/cookbook/fork-prs).
 - **C/C++ scope.** kache's shims sit on `PATH`, so C/C++ built outside cargo
   (CMake, for example) is in scope. mbx caches the C and C++ that cargo
   build scripts compile through the `cc` crate — it follows the cargo build
@@ -71,11 +85,11 @@ not offer today. The differences are in the mechanics:
   mbx it is opt-in (`MBX_CACHE_LINKS=1`) and experimental, and the key
   includes the resolved linker, startup objects, libc, and SDK rather than
   dep-info alone.
-- **A store other tools embed.** mbx's cache crates also power Rust task
-  caching in the [mise](https://github.com/jdx/mise) task runner: a task run
-  through mise and a direct mbx build fill and hit the same shared action
-  store and speak the same remote protocol, so each warms the other. kache's
-  integration points are its compiler wrappers and its GitHub Action.
+- **A store other tools embed.** The extraction from mise went both ways:
+  mise now embeds mbx's cache crates, so a task run through mise and a
+  direct mbx build fill and hit the same shared action store and speak the
+  same remote protocol, each warming the other. kache's integration points
+  are its compiler wrappers and its GitHub Action.
 
 If your repository mixes cargo with substantial C/C++ under other build
 systems, or you want published benchmark numbers to check claims against,
