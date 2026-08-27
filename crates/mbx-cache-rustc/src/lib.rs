@@ -1387,6 +1387,11 @@ impl Parser<'_> {
     /// cargo omits it for host builds anyway.
     fn links_a_native_program(&self) -> bool {
         self.target.is_none()
+            // A compilation that emits no linked artifact did not link, so it
+            // needs no linker to describe it. `cargo check --tests` asks for
+            // metadata alone, and reading that as a link would send it looking
+            // for a linker identity and refusing flags no linker ever saw.
+            && self.emits.iter().any(|emit| emit.kind == "link")
             && ((self.test && self.crate_types.is_empty())
                 || matches!(self.crate_types.as_slice(), [kind] if kind == "bin"))
     }

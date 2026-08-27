@@ -1260,3 +1260,38 @@ fn a_program_named_like_a_library_is_not_cacheable() {
             .is_ok()
     );
 }
+
+/// `cargo check --tests` asks for metadata and never links. Reading that as a
+/// native link would send it looking for a linker identity and refusing flags
+/// no linker ever saw.
+#[test]
+fn a_compilation_that_never_links_is_not_a_link() {
+    let checked = args(&[
+        "--crate-name=widget",
+        "--test",
+        "--emit=dep-info,metadata",
+        "--out-dir=target/debug/deps",
+        "src/lib.rs",
+    ]);
+
+    // Whatever this is, it is not something a linker has an opinion about, so
+    // the answer is the one it gets with the option off.
+    assert_eq!(
+        RustcInvocation::parse_with(&checked, native_links()),
+        RustcInvocation::parse(&checked)
+    );
+
+    // And a flag that would make a *link* unportable says nothing here.
+    let with_debug = args(&[
+        "--crate-name=widget",
+        "--test",
+        "--emit=dep-info,metadata",
+        "--out-dir=target/debug/deps",
+        "-Cdebuginfo=2",
+        "src/lib.rs",
+    ]);
+    assert_eq!(
+        RustcInvocation::parse_with(&with_debug, native_links()),
+        Err(BypassReason::UnsupportedCrateType("test".into()))
+    );
+}

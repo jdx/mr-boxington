@@ -216,15 +216,27 @@ fn probe_files(
 /// the same reason as the probe tables: code only one platform compiles is
 /// code only that platform's CI can find a mistake in.
 fn sdk_identity() -> Result<Option<String>> {
+    sdk_identity_for(std::env::var("SDKROOT").ok())
+}
+
+/// Split from the environment it usually reads so that a test can ask about an
+/// SDK without setting a variable every other test in the process would see.
+fn sdk_identity_for(root: Option<String>) -> Result<Option<String>> {
     if !cfg!(target_os = "macos") {
         return Ok(None);
     }
     let describe = || {
-        let version = xcrun(&["--sdk", "macosx", "--show-sdk-version"])?;
-        let build = xcrun(&["--sdk", "macosx", "--show-sdk-build-version"])?;
-        let path = std::env::var("SDKROOT")
-            .ok()
-            .or_else(|| xcrun(&["--sdk", "macosx", "--show-sdk-path"]))?;
+        // Every question is asked of the SDK the link will actually use, which
+        // `SDKROOT` names when it is set. Asking for `macosx` regardless would
+        // report the default SDK's version beside another SDK's path, so the
+        // key would describe an SDK no link was made against.
+        let sdk = root.as_deref().unwrap_or("macosx");
+        let version = xcrun(&["--sdk", sdk, "--show-sdk-version"])?;
+        let build = xcrun(&["--sdk", sdk, "--show-sdk-build-version"])?;
+        let path = match &root {
+            Some(root) => root.clone(),
+            None => xcrun(&["--sdk", sdk, "--show-sdk-path"])?,
+        };
         Some(format!("{path} {version} ({build})"))
     };
     describe().map(Some).ok_or_else(|| {

@@ -139,3 +139,25 @@ fn a_platform_that_places_nothing_is_still_identified() {
 
     assert!(probe_files(&probes, |_| None).unwrap().is_empty());
 }
+
+/// `SDKROOT` names the SDK a link is made against, so it has to be the SDK
+/// every part of the identity describes. Reporting the default SDK's version
+/// beside another SDK's path would put an SDK nothing was built against in the
+/// key.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_sdk_identity_follows_sdkroot() {
+    let Ok(Some(_)) = sdk_identity_for(None) else {
+        // No usable SDK on this machine; there is nothing to describe.
+        return;
+    };
+
+    // An SDK that is not there cannot be described, so it is refused rather
+    // than quietly reported as the default one.
+    let overridden = sdk_identity_for(Some("/nonexistent.sdk".into()));
+
+    assert!(
+        overridden.is_err(),
+        "an unusable SDKROOT must not report the default SDK: {overridden:?}"
+    );
+}
