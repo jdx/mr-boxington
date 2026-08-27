@@ -192,24 +192,31 @@ impl S3RemoteCache {
             && !self.conditionals_disabled.load(Ordering::Relaxed)
     }
 
-    /// Note that a store has refused conditional writes, if that is allowed.
+    /// Whether the same write may be tried again without its condition.
     ///
-    /// Returns whether the caller should try the same write unconditionally.
-    /// Under `required` it never is: a caller that asked for the guarantee gets
+    /// Under `required` it never may: a caller that asked for the guarantee gets
     /// an error rather than a silent downgrade.
-    fn degrade_conditionals(&self, what: &str) -> bool {
-        if self.conditional_writes != S3ConditionalWrites::Auto {
-            return false;
-        }
+    fn may_drop_conditionals(&self) -> bool {
+        self.conditional_writes == S3ConditionalWrites::Auto
+    }
+
+    /// Record that this store does not implement conditional writes.
+    ///
+    /// Called only once an unconditional write has actually succeeded, which is
+    /// what distinguishes a store that refuses conditions from one that refused
+    /// this request for some other reason and would have refused it anyway. A
+    /// `501` from an intermediary is not evidence about the store, and latching
+    /// on it would quietly turn every later manifest update into a
+    /// last-writer-wins one.
+    fn note_conditionals_unsupported(&self) {
         if !self.conditionals_disabled.swap(true, Ordering::Relaxed) {
             warn!(
-                "the remote object store does not implement conditional writes ({what}); \
+                "the remote object store does not implement conditional writes; \
                  continuing without them. Blobs and action results are content-addressed, so \
                  this is safe; concurrent task manifest updates can now lose predictions, \
                  which costs prefetch coverage on later builds"
             );
         }
-        true
     }
 
     pub(crate) async fn check_connection(&self) -> Result<()> {
@@ -223,10 +230,15 @@ impl S3RemoteCache {
                 // The bucket answered and authorized the request. Whether this
                 // one key exists is beside the point.
                 StatusCode::OK | StatusCode::NOT_FOUND => Ok(()),
+                // S3 answers 403 rather than 404 for a key that is not there
+                // when the caller may not list the bucket, so this cannot be
+                // read as proof that the credentials are wrong.
                 StatusCode::FORBIDDEN => bail!(
-                    "the remote object store rejected these credentials for {url}; \
-                     check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, that the key may \
-                     read the bucket, and that this machine's clock is correct"
+                    "the remote object store refused to read {url}. Grant s3:ListBucket on \
+                     the bucket -- without it S3 answers 403 for an absent key rather than \
+                     404, and every cache miss looks like this. Otherwise check \
+                     AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, that the key may read the \
+                     bucket, and that this machine's clock is correct"
                 ),
                 StatusCode::MOVED_PERMANENTLY | StatusCode::TEMPORARY_REDIRECT => {
                     let region = response
@@ -402,8 +414,11 @@ impl S3RemoteCache {
         let body = bytes.to_vec();
         let expected_etag = expected_etag.map(quoted_etag).transpose()?;
         retry_async("PUT", &url, self.retries, || async {
+            // Set once the store has refused a condition and the same write is
+            // being tried without one, so that success can be attributed.
+            let mut dropped_condition = false;
             let outcome = loop {
-                let conditional = self.conditionals_enabled();
+                let conditional = self.conditionals_enabled() && !dropped_condition;
                 let mut request = self
                     .signed(reqwest::Method::PUT, &url, &PayloadHash::of(&body))?
                     .header(CONTENT_LENGTH, body.len())
@@ -417,9 +432,12 @@ impl S3RemoteCache {
                 let response = request.send().await?;
                 let status = response.status();
                 if status.is_success() {
+                    if dropped_condition {
+                        self.note_conditionals_unsupported();
+                    }
                     break ManifestPutOutcome::Stored;
                 }
-                if status == StatusCode::PRECONDITION_FAILED {
+                if conditional && status == StatusCode::PRECONDITION_FAILED {
                     // Either the manifest moved under us or, for a create, one
                     // already exists. Both mean re-reading and merging.
                     break ManifestPutOutcome::PreconditionFailed;
@@ -432,7 +450,8 @@ impl S3RemoteCache {
                 }
                 let failure = FailedRequest::read(response).await;
                 if conditional && failure.is_not_implemented() {
-                    if self.degrade_conditionals("rejected a conditional write") {
+                    if self.may_drop_conditionals() {
+                        dropped_condition = true;
                         continue;
                     }
                     return Err(failure.report("update", &url).wrap_err(
@@ -464,8 +483,9 @@ impl S3RemoteCache {
     /// Returns whether this request is what created the object; an object that
     /// was already there is success, since its key names these exact bytes.
     async fn put_create(&self, url: &Url, body: &[u8]) -> Result<bool> {
+        let mut dropped_condition = false;
         loop {
-            let conditional = self.conditionals_enabled();
+            let conditional = self.conditionals_enabled() && !dropped_condition;
             let mut request = self
                 .signed(reqwest::Method::PUT, url, &PayloadHash::of(body))?
                 .header(CONTENT_LENGTH, body.len())
@@ -477,8 +497,13 @@ impl S3RemoteCache {
                 .finish_create(url, request.send().await?, conditional)
                 .await?
             {
-                Some(created) => return Ok(created),
-                None => continue,
+                Some(created) => {
+                    if dropped_condition {
+                        self.note_conditionals_unsupported();
+                    }
+                    return Ok(created);
+                }
+                None => dropped_condition = true,
             }
         }
     }
@@ -490,8 +515,9 @@ impl S3RemoteCache {
     /// artifact is not read twice just to compute a hash TLS and the content
     /// address already stand behind.
     async fn put_create_file(&self, url: &Url, path: &Path) -> Result<()> {
+        let mut dropped_condition = false;
         loop {
-            let conditional = self.conditionals_enabled();
+            let conditional = self.conditionals_enabled() && !dropped_condition;
             let file = tokio::fs::File::open(path).await?;
             let length = file.metadata().await?.len();
             let mut request = self
@@ -507,8 +533,13 @@ impl S3RemoteCache {
                 .finish_create(url, request.send().await?, conditional)
                 .await?
             {
-                Some(_) => return Ok(()),
-                None => continue,
+                Some(_) => {
+                    if dropped_condition {
+                        self.note_conditionals_unsupported();
+                    }
+                    return Ok(());
+                }
+                None => dropped_condition = true,
             }
         }
     }
@@ -516,7 +547,7 @@ impl S3RemoteCache {
     /// Interpret the response to a create-only write.
     ///
     /// `None` asks the caller to send the same request again without its
-    /// conditional header, having just learned the store does not support one.
+    /// conditional header, the store having just refused one.
     async fn finish_create(
         &self,
         url: &Url,
@@ -527,7 +558,10 @@ impl S3RemoteCache {
         if status.is_success() {
             return Ok(Some(true));
         }
-        if status == StatusCode::PRECONDITION_FAILED {
+        // Only a condition this request actually carried can have failed. A 412
+        // against an unconditional write means something else refused it, and
+        // reporting that as a stored object would lose the write silently.
+        if conditional && status == StatusCode::PRECONDITION_FAILED {
             return Ok(Some(false));
         }
         if status == StatusCode::CONFLICT {
@@ -535,7 +569,7 @@ impl S3RemoteCache {
         }
         let failure = FailedRequest::read(response).await;
         if conditional && failure.is_not_implemented() {
-            if self.degrade_conditionals("rejected a create-only write") {
+            if self.may_drop_conditionals() {
                 return Ok(None);
             }
             return Err(failure.report("store", url).wrap_err(
@@ -640,11 +674,30 @@ impl FailedRequest {
                 && self.code.as_deref() == Some("NotImplemented"))
     }
 
+    /// Whether the store is asking to be tried again.
+    ///
+    /// `500` and `503` are how S3 reports an internal error and a prefix under
+    /// too much load, and it documents both as the client's to retry. `501` is
+    /// deliberately absent: a store that does not implement something will not
+    /// implement it a moment later.
+    fn is_retryable(&self) -> bool {
+        matches!(self.status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504)
+    }
+
     fn report(&self, verb: &str, url: &Url) -> eyre::Report {
-        match &self.code {
-            Some(code) => eyre!("failed to {verb} {url}: {} ({code})", self.status),
-            None => eyre!("failed to {verb} {url}: {}", self.status),
+        let detail = match &self.code {
+            Some(code) => format!("failed to {verb} {url}: {} ({code})", self.status),
+            None => format!("failed to {verb} {url}: {}", self.status),
+        };
+        if self.is_retryable() {
+            // The protocol client gets this for free: `error_for_status` hands
+            // `is_transient` a `reqwest::Error` carrying the status. Nothing
+            // here produces one, so a retryable status has to say so itself,
+            // or a `503` under load would fail a build that asked for retries.
+            return eyre::Report::new(TransientRequest("the store asked to be retried"))
+                .wrap_err(detail);
         }
+        eyre!(detail)
     }
 }
 
@@ -740,7 +793,10 @@ fn base_url(config: &S3RemoteCacheConfig) -> Result<Url> {
             .host_str()
             .ok_or_else(|| eyre!("an S3 endpoint must have a host"))?;
         url.set_host(Some(&format!("{bucket}.{host}")))?;
-        url.set_path("/");
+        // An endpoint may carry a path, and moving the bucket into the host is
+        // no reason to drop it: a gateway at /s3 still wants to be asked at /s3.
+        let path = url.path().trim_end_matches('/').to_string();
+        url.set_path(&format!("{path}/"));
     }
     Ok(url)
 }

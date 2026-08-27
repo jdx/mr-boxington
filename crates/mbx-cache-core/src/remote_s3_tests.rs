@@ -385,6 +385,69 @@ async fn a_first_manifest_is_written_create_only() {
 }
 
 #[tokio::test]
+async fn a_retryable_status_is_retried() {
+    let mut server = mockito::Server::new_async().await;
+    let contents = b"an object the store was too busy for";
+    let digest = CacheDigest::blake3(contents);
+    // S3 answers 503 SlowDown for a prefix under load and asks the client to
+    // try again. The protocol backend retries these; so must this one.
+    let busy = server
+        .mock("PUT", blob_path(&digest).as_str())
+        .with_status(503)
+        .with_body(s3_error_body("SlowDown"))
+        .expect(1)
+        .create_async()
+        .await;
+    let stored = server
+        .mock("PUT", blob_path(&digest).as_str())
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let mut settings = config(&server);
+    settings.retries = 1;
+
+    S3RemoteCache::new(settings)
+        .unwrap()
+        .put_blob(&BlobUpload {
+            digest,
+            source: BlobSource::Bytes(contents.to_vec()),
+        })
+        .await
+        .unwrap();
+
+    busy.assert_async().await;
+    stored.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_store_that_does_not_implement_something_else_is_not_retried_forever() {
+    let mut server = mockito::Server::new_async().await;
+    let key = CacheDigest::blake3(b"a task");
+    // 501 is not transient: a store that does not implement something will not
+    // implement it a moment later.
+    let refusals = server
+        .mock("PUT", manifest_path(&key).as_str())
+        .with_status(501)
+        .with_body(s3_error_body("NotImplemented"))
+        .expect(2)
+        .create_async()
+        .await;
+    let mut settings = config(&server);
+    settings.retries = 3;
+
+    let error = S3RemoteCache::new(settings)
+        .unwrap()
+        .put_action_manifest(&key, b"{}", None)
+        .await
+        .unwrap_err();
+
+    // One conditional attempt, one unconditional retry, and no more.
+    refusals.assert_async().await;
+    assert!(error.to_string().contains("failed to update"));
+}
+
+#[tokio::test]
 async fn a_store_without_conditional_writes_is_used_without_them() {
     let mut server = mockito::Server::new_async().await;
     let key = CacheDigest::blake3(b"a task");
@@ -418,6 +481,28 @@ async fn a_store_without_conditional_writes_is_used_without_them() {
 
     refused.assert_async().await;
     unconditional.assert_async().await;
+}
+
+#[tokio::test]
+async fn conditionals_stay_on_when_dropping_them_does_not_help() {
+    let mut server = mockito::Server::new_async().await;
+    let key = CacheDigest::blake3(b"a task");
+    // An intermediary answers 501 for a reason that has nothing to do with the
+    // condition, so the unconditional retry fails too. Concluding the store
+    // cannot do conditional writes would turn every later manifest update into
+    // a last-writer-wins one on no evidence.
+    server
+        .mock("PUT", manifest_path(&key).as_str())
+        .with_status(501)
+        .with_body(s3_error_body("NotImplemented"))
+        .expect_at_least(2)
+        .create_async()
+        .await;
+    let store = test_store(&server);
+
+    assert!(store.put_action_manifest(&key, b"{}", None).await.is_err());
+
+    assert!(store.conditionals_enabled());
 }
 
 #[tokio::test]
@@ -635,6 +720,15 @@ fn buckets_are_addressed_by_host_on_aws_and_by_path_elsewhere() {
     assert_eq!(
         addressed("cache", Some("https://store.example.com"), Some(false)),
         "https://cache.store.example.com/"
+    );
+    // An endpoint's own path survives being addressed by host.
+    assert_eq!(
+        addressed("cache", Some("https://gateway.example.com/s3"), Some(false)),
+        "https://cache.gateway.example.com/s3/"
+    );
+    assert_eq!(
+        addressed("cache", Some("https://gateway.example.com/s3"), None),
+        "https://gateway.example.com/s3/cache/"
     );
 }
 
