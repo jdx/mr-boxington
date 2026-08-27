@@ -66,9 +66,17 @@ fn manifest_directories_skip_system_roots_and_include_header_parents() {
 /// toolchains share an entry whose object bytes they do not agree on.
 #[test]
 fn only_an_absolute_answer_from_the_driver_names_the_assembler() {
+    // Spelled per platform: `/toolchain/bin/as` is not an absolute path on
+    // Windows, and a test that quietly took the fallback branch there would
+    // assert nothing.
+    let absolute = if cfg!(windows) {
+        r"C:\toolchain\bin\as.exe"
+    } else {
+        "/toolchain/bin/as"
+    };
     assert_eq!(
-        named_assembler("/toolchain/bin/as\n"),
-        Some(PathBuf::from("/toolchain/bin/as"))
+        named_assembler(&format!("{absolute}\n")),
+        Some(PathBuf::from(absolute))
     );
     // A driver that cannot resolve the tool echoes the bare name back, which is
     // its way of saying "search PATH" -- so the caller must fall back, not
@@ -82,11 +90,15 @@ fn only_an_absolute_answer_from_the_driver_names_the_assembler() {
     }
 }
 
-/// Pins the flag itself: a real driver answers `-print-prog-name=as` with a
-/// path, which is what makes asking it better than reading `PATH`.
+/// Pins the flag against a real driver: whatever it prints has to be one of the
+/// two shapes the caller handles.
+///
+/// Not every installation resolves the tool -- a macOS box with only the
+/// command line tools can echo the bare name back -- so the absolute answer is
+/// asserted where it appears rather than demanded.
 #[cfg(unix)]
 #[test]
-fn a_real_driver_names_its_assembler_by_absolute_path() {
+fn a_real_driver_names_its_assembler_or_defers_to_the_path() {
     let Ok(output) = std::process::Command::new("cc")
         .arg("-print-prog-name=as")
         .output()
@@ -97,8 +109,14 @@ fn a_real_driver_names_its_assembler_by_absolute_path() {
         return;
     }
     let printed = String::from_utf8_lossy(&output.stdout).into_owned();
-    assert!(
-        named_assembler(&printed).is_some(),
-        "the driver should name its assembler by path, said {printed:?}"
-    );
+    match named_assembler(&printed) {
+        // The driver knows where its assembler is, and the identity records
+        // that path rather than whatever `PATH` happens to resolve.
+        Some(assembler) => assert_eq!(assembler, PathBuf::from(printed.trim())),
+        // It does not, and searching `PATH` is what the driver would do too.
+        None => assert!(
+            !printed.trim().contains('/'),
+            "an unresolved answer should be a bare name, got {printed:?}"
+        ),
+    }
 }

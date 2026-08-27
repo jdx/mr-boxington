@@ -286,6 +286,9 @@ impl Config {
             incremental: false,
             share_out_dir: false,
             events: false,
+            // Off like the rest: a test that says nothing about C compilation
+            // should not have compiler shims installed underneath it.
+            cc: false,
             remote: Default::default(),
             http: Default::default(),
             gc: Default::default(),
