@@ -97,7 +97,6 @@ fn context(inputs: &[(&str, &str)]) -> ActionContext {
                 digest: digest(contents),
             })
             .collect(),
-        linker: None,
     }
 }
 
@@ -326,7 +325,6 @@ fn resolves_cargo_library_outputs() {
                 working_dir.join("target/debug/deps/libwidget-abc123.rlib"),
                 working_dir.join("target/debug/deps/libwidget-abc123.rmeta"),
             ],
-            executables: Vec::new(),
             dep_info: working_dir.join("target/debug/deps/widget-abc123.d"),
         }
     );
@@ -352,8 +350,7 @@ fn resolves_a_compiler_linked_wasm_binary() {
         invocation.outputs(&working_dir).unwrap(),
         RustcOutputs {
             directory: working_dir.join("target/wasm32-unknown-unknown/debug/deps"),
-            files: vec![executable.clone()],
-            executables: vec![executable],
+            files: vec![executable],
             dep_info: working_dir.join("target/wasm32-unknown-unknown/debug/deps/widget-abc123.d"),
         }
     );
@@ -524,7 +521,6 @@ fn resolves_an_output_file_when_every_emit_names_its_path() {
                 working_dir.join("target/widget.rlib"),
                 working_dir.join("target/widget.rmeta"),
             ],
-            executables: Vec::new(),
             dep_info: working_dir.join("target/widget.d"),
         }
     );
@@ -616,7 +612,6 @@ fn predicts_inputs_without_reusing_stale_contents() {
         environment: BTreeMap::new(),
         portable_environment: BTreeSet::new(),
         inputs: Vec::new(),
-        linker: None,
     };
     let dep_info = RustcDepInfo {
         files: vec!["src/lib.rs".into()],
@@ -1001,7 +996,6 @@ fn a_native_program_is_named_without_an_extension() {
     let outputs = invocation.outputs(&working_dir).unwrap();
 
     assert_eq!(outputs.files, vec![linked.clone()]);
-    assert_eq!(outputs.executables, vec![linked.clone()]);
     assert!(outputs.is_executable(&linked));
     assert!(invocation.links_natively());
 }
@@ -1178,11 +1172,9 @@ fn a_native_link_without_a_linker_identity_is_refused() {
         ))
     );
 
-    let identified = ActionContext {
-        linker: Some(test_linker()),
-        ..context(&[("src/lib.rs", "source")])
-    };
-    let action = invocation.action(identified).unwrap();
+    let action = invocation
+        .action_linked_by(context(&[("src/lib.rs", "source")]), Some(test_linker()))
+        .unwrap();
     let json = String::from_utf8(action.bytes).unwrap();
     assert!(json.contains(r#""linker":{"#), "{json}");
 }
@@ -1212,20 +1204,18 @@ fn the_linker_identity_changes_the_action_key() {
         native_links(),
     )
     .unwrap();
-    let first = ActionContext {
-        linker: Some(test_linker()),
-        ..context(&[("src/lib.rs", "source")])
-    };
-    let second = ActionContext {
-        linker: Some(LinkerIdentity {
-            driver_version: "Apple clang version 18.0.0".into(),
-            ..test_linker()
-        }),
-        ..context(&[("src/lib.rs", "source")])
+    let keyed = |linker| {
+        invocation
+            .action_linked_by(context(&[("src/lib.rs", "source")]), Some(linker))
+            .unwrap()
+            .digest
     };
 
     assert_ne!(
-        invocation.action(first).unwrap().digest,
-        invocation.action(second).unwrap().digest
+        keyed(test_linker()),
+        keyed(LinkerIdentity {
+            driver_version: "Apple clang version 18.0.0".into(),
+            ..test_linker()
+        })
     );
 }

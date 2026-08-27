@@ -328,8 +328,6 @@ pub struct RustcOutputs {
     pub directory: PathBuf,
     /// Cacheable library, metadata, and/or linked program files.
     pub files: Vec<PathBuf>,
-    /// Outputs whose executable permission is part of the declared contract.
-    pub executables: Vec<PathBuf>,
     /// Dep-info file used for precise input discovery.
     pub dep_info: PathBuf,
 }
@@ -449,7 +447,6 @@ impl RustcInvocation {
             return Err(BypassReason::ImplicitEmitWithOutputFile(output.clone()));
         }
         let mut files = BTreeSet::new();
-        let mut executables = BTreeSet::new();
         let mut dep_info = None;
         for emit in &self.emits {
             if emit.kind == "dep-info" {
@@ -498,14 +495,6 @@ impl RustcInvocation {
             if path.parent() != Some(output_directory.as_path()) {
                 return Err(BypassReason::SplitOutputDirectories);
             }
-            if emit.kind == "link"
-                && matches!(
-                    self.link_output,
-                    LinkOutput::WasmExecutable | LinkOutput::NativeExecutable
-                )
-            {
-                executables.insert(path.clone());
-            }
             files.insert(path);
         }
         let dep_info = dep_info.ok_or(BypassReason::NoDepInfo)?;
@@ -515,7 +504,6 @@ impl RustcInvocation {
         Ok(RustcOutputs {
             directory: output_directory,
             files: files.into_iter().collect(),
-            executables: executables.into_iter().collect(),
             dep_info,
         })
     }
@@ -526,7 +514,23 @@ impl RustcInvocation {
     /// every additional source or environment-generated input discovered from
     /// dep-info.
     pub fn action(&self, context: ActionContext) -> Result<RustcAction, BypassReason> {
-        ActionBuilder::new(self, context).build()
+        self.action_linked_by(context, None)
+    }
+
+    /// Build canonical action bytes for an invocation that links a native
+    /// program.
+    ///
+    /// A `linker` is required whenever [`RustcInvocation::links_natively`]
+    /// holds: the linker, its startup objects, and the platform SDK are inputs
+    /// rustc dep-info does not enumerate, so a key without them would claim
+    /// more than it can support. Passing one for anything else is ignored,
+    /// since nothing else depends on a linker.
+    pub fn action_linked_by(
+        &self,
+        context: ActionContext,
+        linker: Option<LinkerIdentity>,
+    ) -> Result<RustcAction, BypassReason> {
+        ActionBuilder::new(self, context).linked_by(linker).build()
     }
 
     /// Fingerprint the modeled invocation before dependency contents are known.
@@ -576,8 +580,17 @@ impl RustcInvocation {
 impl RustcOutputs {
     /// Whether `path` is a linked program whose executable permission is part
     /// of the declared output contract.
+    /// A program is whatever this invocation emitted that is not a library
+    /// artifact. Every tier the adapter admits distinguishes the two by
+    /// extension -- `rlib` and `rmeta` are the compiler's own, and a linked
+    /// program carries either the target's (`wasm`) or none at all -- so the
+    /// name is enough and no separate list has to be carried alongside.
     pub fn is_executable(&self, path: &Path) -> bool {
-        self.executables.iter().any(|output| output == path)
+        self.files.iter().any(|output| output == path)
+            && !matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("rlib" | "rmeta")
+            )
     }
 }
 
@@ -741,13 +754,6 @@ pub struct ActionContext {
     pub portable_environment: BTreeSet<String>,
     /// Complete set of direct and discovered file inputs.
     pub inputs: Vec<ActionInput>,
-    /// Identity of the linker, for an invocation that links a native program.
-    ///
-    /// Required by [`RustcInvocation::action`] whenever
-    /// [`RustcInvocation::links_natively`] holds: the linker, its CRT objects,
-    /// and the platform SDK are inputs that rustc dep-info does not enumerate,
-    /// so a key without them would claim more than it can support.
-    pub linker: Option<LinkerIdentity>,
 }
 
 /// What produced a linked native program, beyond the compiler itself.
@@ -1451,6 +1457,7 @@ struct ActionBuilder<'a> {
     invocation: &'a RustcInvocation,
     context: ActionContext,
     mappings: Vec<PathMapping>,
+    linker: Option<LinkerIdentity>,
 }
 
 impl<'a> ActionBuilder<'a> {
@@ -1465,10 +1472,16 @@ impl<'a> ActionBuilder<'a> {
             })
             .collect();
         Self {
+            linker: None,
             invocation,
             mappings,
             context,
         }
+    }
+
+    fn linked_by(mut self, linker: Option<LinkerIdentity>) -> Self {
+        self.linker = linker;
+        self
     }
 
     fn build(self) -> Result<RustcAction, BypassReason> {
@@ -1505,7 +1518,7 @@ impl<'a> ActionBuilder<'a> {
             .collect();
         // A native link without a linker identity would be keyed as though the
         // host did not matter. Refuse rather than publish that claim.
-        if self.invocation.links_natively() && self.context.linker.is_none() {
+        if self.invocation.links_natively() && self.linker.is_none() {
             return Err(BypassReason::UnportableNativeLink(
                 "linker identity is unknown".into(),
             ));
@@ -1518,7 +1531,7 @@ impl<'a> ActionBuilder<'a> {
             arguments: invocation.arguments,
             environment,
             inputs,
-            linker: self.context.linker.clone(),
+            linker: self.linker.clone(),
         };
         let bytes = canonical_json(&descriptor)
             .map_err(|error| BypassReason::Serialization(error.to_string()))?;

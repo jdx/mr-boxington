@@ -5,8 +5,9 @@ use mbx_cache_core::{
     RemoteActionResult, RestoreStats, RustcMetadata, canonical_json,
 };
 use mbx_cache_rustc::{
-    ActionContext, CompilerIdentity, DiscoveredInputs, ParseOptions, PathMapping, RustcAction,
-    RustcDepInfo, RustcInputPrediction, RustcInvocation, RustcOutputs, normalize_mapped_path,
+    ActionContext, CompilerIdentity, DiscoveredInputs, LinkerIdentity, ParseOptions, PathMapping,
+    RustcAction, RustcDepInfo, RustcInputPrediction, RustcInvocation, RustcOutputs,
+    normalize_mapped_path,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -417,7 +418,6 @@ fn plan_learned_reuse(
         let sources = compilation.invocation.source_fingerprint(discovered);
         let context = base_action_context(
             compilation.rustc,
-            compilation.invocation,
             compilation.working_dir,
             compilation.portable,
         )?;
@@ -493,12 +493,7 @@ fn restore_predicted_result(
         portable,
         ..
     } = compilation;
-    let mut context = base_action_context(
-        compilation.rustc,
-        compilation.invocation,
-        working_dir,
-        portable,
-    )?;
+    let mut context = base_action_context(compilation.rustc, working_dir, portable)?;
     let invocation_digest = invocation.invocation_digest(&context)?;
     let task = prediction_task(&invocation_digest);
     let responses = session::request_agent(&[AgentRequest::FindActionPrediction {
@@ -576,6 +571,7 @@ struct ActionCandidates {
 
 impl ActionCandidates {
     fn build(invocation: &RustcInvocation, context: ActionContext) -> Result<Self> {
+        let linker = linker_for(invocation)?;
         // Only worth a second key if a portable name is actually an input here.
         // Crates that never read one keep the key they always had.
         let applies = context
@@ -587,8 +583,10 @@ impl ActionCandidates {
             ..context.clone()
         };
         Ok(Self {
-            portable: applies.then(|| invocation.action(context)).transpose()?,
-            literal: invocation.action(literal_context)?,
+            portable: applies
+                .then(|| invocation.action_linked_by(context, linker.clone()))
+                .transpose()?,
+            literal: invocation.action_linked_by(literal_context, linker)?,
         })
     }
 
@@ -667,7 +665,7 @@ fn action_from_parsed_dep_info(
 ) -> Result<(ActionCandidates, DiscoveredInputs)> {
     let discovered =
         invocation.discover_inputs_with_mappings(dep_info, working_dir, &portable.mappings)?;
-    let mut context = base_action_context(rustc, invocation, working_dir, portable)?;
+    let mut context = base_action_context(rustc, working_dir, portable)?;
     discovered.clone().apply_to(&mut context)?;
     let candidates = ActionCandidates::build(invocation, context)?;
     Ok((candidates, discovered))
@@ -675,16 +673,9 @@ fn action_from_parsed_dep_info(
 
 fn base_action_context(
     rustc: &OsStr,
-    invocation: &RustcInvocation,
     working_dir: &Path,
     portable: &Portable,
 ) -> Result<ActionContext> {
-    // Only a native link needs it, and probing costs several processes on the
-    // first one, so nothing else pays for it.
-    let linker = invocation
-        .links_natively()
-        .then(crate::linker::identity)
-        .transpose()?;
     Ok(ActionContext {
         compiler: compiler_identity(rustc)?,
         working_dir: working_dir.to_path_buf(),
@@ -692,8 +683,18 @@ fn base_action_context(
         environment: BTreeMap::new(),
         portable_environment: portable.names.clone(),
         inputs: Vec::new(),
-        linker,
     })
+}
+
+/// Identify the linker, for the invocations whose key has to describe it.
+///
+/// Only a native link needs one, and probing costs several processes on the
+/// first one, so nothing else pays for it.
+fn linker_for(invocation: &RustcInvocation) -> Result<Option<LinkerIdentity>> {
+    invocation
+        .links_natively()
+        .then(crate::linker::identity)
+        .transpose()
 }
 
 fn record_prediction(
@@ -706,7 +707,6 @@ fn record_prediction(
         let invocation = compilation.invocation;
         let context = base_action_context(
             compilation.rustc,
-            invocation,
             compilation.working_dir,
             compilation.portable,
         )?;
@@ -727,7 +727,6 @@ fn record_prediction(
 fn prediction_timing(compilation: &Compilation<'_>) -> Result<CompileTiming> {
     let context = base_action_context(
         compilation.rustc,
-        compilation.invocation,
         compilation.working_dir,
         compilation.portable,
     )?;

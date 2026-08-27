@@ -169,7 +169,6 @@ fn test_outputs(root: &Path) -> RustcOutputs {
     let directory = root.join("out");
     RustcOutputs {
         files: vec![directory.join("libdemo.rlib")],
-        executables: Vec::new(),
         dep_info: directory.join("demo.d"),
         directory,
     }
@@ -351,9 +350,7 @@ fn rejects_executable_rustc_outputs() {
 fn accepts_wasm_executable_rustc_outputs() {
     let root = tempfile::tempdir().unwrap();
     let mut outputs = test_outputs(root.path());
-    let linked = outputs.directory.join("demo.wasm");
-    outputs.files = vec![linked.clone()];
-    outputs.executables = vec![linked];
+    outputs.files = vec![outputs.directory.join("demo.wasm")];
     let mut file = test_file("demo.wasm");
     file.executable = true;
 
@@ -366,19 +363,17 @@ fn accepts_wasm_executable_rustc_outputs() {
 fn accepts_native_executable_rustc_outputs() {
     let root = tempfile::tempdir().unwrap();
     let mut outputs = test_outputs(root.path());
-    let linked = outputs.directory.join("demo-abc123");
-    outputs.files = vec![linked.clone()];
-    outputs.executables = vec![linked];
+    outputs.files = vec![outputs.directory.join("demo-abc123")];
     let mut file = test_file("demo-abc123");
     file.executable = true;
 
     assert!(validated_outputs(test_output_directory(file), &outputs).is_ok());
 
-    // The same name, undeclared, is still refused.
-    outputs.executables.clear();
-    let mut undeclared = test_file("demo-abc123");
-    undeclared.executable = true;
-    assert!(validated_outputs(test_output_directory(undeclared), &outputs).is_err());
+    // A library artifact under the same roof is still not a program.
+    outputs.files = vec![outputs.directory.join("libdemo.rlib")];
+    let mut library = test_file("libdemo.rlib");
+    library.executable = true;
+    assert!(validated_outputs(test_output_directory(library), &outputs).is_err());
 }
 
 #[cfg(unix)]
