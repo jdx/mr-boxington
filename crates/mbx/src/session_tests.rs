@@ -323,16 +323,30 @@ fn a_shim_is_never_installed_as_a_link_to_nothing() {
     }
 }
 
-/// A relative target is not a symlink's to interpret.
+/// A relative target is resolved before it is linked, not after.
 ///
-/// It would resolve from the shim's directory rather than the working directory
-/// a hard link reads it from, which is a different file whenever the two differ.
+/// A symlink resolves its target from the shim's own directory, and the session
+/// shim's directory is a temporary one that shares nothing with the caller's, so
+/// the relative target a hard link would have read from the working directory
+/// has to be resolved against that directory here. `Cargo.toml` stands in for
+/// the binary: under test is how the path is read, not what it points at.
 #[cfg(unix)]
 #[test]
-fn a_relative_target_is_left_to_the_hard_link() {
+fn a_relative_target_is_resolved_before_it_is_linked() {
     let directory = tempfile::tempdir().unwrap();
-    assert!(!symlink_shim(
-        Path::new("relative/mbx"),
-        &directory.path().join(RUSTC_SHIM_STEM)
-    ));
+    let shim = directory.path().join(RUSTC_SHIM_STEM);
+    assert!(symlink_shim(Path::new("Cargo.toml"), &shim));
+
+    let target = std::fs::read_link(&shim).unwrap();
+    assert!(
+        target.is_absolute(),
+        "{} should be absolute",
+        target.display()
+    );
+    // Resolves through the link, which it could not if the target had been left
+    // relative: the shim's own directory holds no `Cargo.toml`.
+    assert_eq!(
+        std::fs::canonicalize(&shim).unwrap(),
+        std::fs::canonicalize("Cargo.toml").unwrap()
+    );
 }

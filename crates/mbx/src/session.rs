@@ -758,18 +758,24 @@ pub fn install_shim(executable: &Path, directory: &Path, link: ShimLink) -> Resu
 /// every shim was before, so the only thing lost is the race described on
 /// [`install_shim`].
 ///
-/// Declined for a target a symlink would name differently than a hard link
-/// would. `link(2)` and `copy` read a relative target from the caller's working
-/// directory and refuse one that is not there; a symlink stores the string and
-/// resolves it from the shim's own directory, so either input would install a
-/// wrapper pointing at nothing and leave cargo to discover it. Handing those
-/// back to the hard link keeps one answer for what the argument means, and the
-/// missing case fails where it happened instead of inside the build.
+/// The target is absolutized first, because the two kinds of link do not read a
+/// relative one the same way: `link(2)` and `copy` resolve it from the caller's
+/// working directory, while a symlink resolves it from the shim's own directory
+/// -- a temporary one that shares nothing with the caller's. Resolving it here
+/// gives the argument one meaning. Absolutizing rather than declining, because a
+/// relative target must still get a symlink: `current_exe()` has been absolute
+/// on every platform mbx runs on, but nothing in its contract promises that, and
+/// a shim that quietly stopped tracking would put the kill back.
+///
+/// A target that is not there gets no symlink at all. A hard link and a copy
+/// both refuse one, and a symlink would instead name it and leave cargo to
+/// discover the dangling wrapper mid-build.
 #[cfg(unix)]
 fn symlink_shim(executable: &Path, shim: &Path) -> bool {
-    executable.is_absolute()
-        && executable.exists()
-        && std::os::unix::fs::symlink(executable, shim).is_ok()
+    let Ok(target) = std::path::absolute(executable) else {
+        return false;
+    };
+    target.exists() && std::os::unix::fs::symlink(&target, shim).is_ok()
 }
 
 /// Windows has no shim symlinks: creating one needs a privilege ordinary
