@@ -1198,8 +1198,14 @@ pub fn cache_links_supported() -> bool {
 
 /// Whether the shim may cache a natively linked program. Read the same way as
 /// verify mode.
+///
+/// The platform is checked here rather than trusted from whoever set the
+/// variable: a shim installed by `mbx setup` is driven by plain cargo, with no
+/// session to have applied the gate, so the value it reads is whatever the
+/// developer exported.
 pub(crate) fn cache_links_requested() -> bool {
-    std::env::var_os(CACHE_LINKS_ENV).is_some_and(|value| !value.is_empty() && value != "0")
+    cache_links_supported()
+        && std::env::var_os(CACHE_LINKS_ENV).is_some_and(|value| !value.is_empty() && value != "0")
 }
 
 /// Whether the shim may make a compilation independent of its `OUT_DIR` so two

@@ -161,3 +161,18 @@ fn the_sdk_identity_follows_sdkroot() {
         "an unusable SDKROOT must not report the default SDK: {overridden:?}"
     );
 }
+
+/// A shim installed by `mbx setup` is driven by plain cargo, with no session
+/// to have applied the platform gate, so the shim applies it itself rather
+/// than trusting the variable it was handed.
+#[test]
+fn the_platform_gate_does_not_depend_on_who_set_the_variable() {
+    assert_eq!(
+        crate::session::cache_links_supported(),
+        cfg!(any(target_os = "linux", target_os = "macos"))
+    );
+    // Whatever the environment says, an unsupported host never admits links.
+    if !crate::session::cache_links_supported() {
+        assert!(!crate::session::cache_links_requested());
+    }
+}

@@ -46,7 +46,20 @@ struct FileProbes {
 const GNU_PROBES: FileProbes = FileProbes {
     startup: &["Scrt1.o", "crt1.o"],
     libc: &["libc.so.6", "libc.so", "libc.a", "libc.musl-x86_64.so.1"],
-    rest: &["crti.o", "crtn.o", "crtbeginS.o", "crtendS.o"],
+    // Both spellings of the constructor objects: GNU drivers place the `S`
+    // variants for shared and position-independent links and the plain or `T`
+    // ones for static and non-PIE links. Naming only the first pair would
+    // leave a static link's own CRT out of the key, so changing it would not
+    // change the key.
+    rest: &[
+        "crti.o",
+        "crtn.o",
+        "crtbegin.o",
+        "crtbeginS.o",
+        "crtbeginT.o",
+        "crtend.o",
+        "crtendS.o",
+    ],
 };
 
 /// macOS links against the SDK rather than loose objects, and the SDK identity
