@@ -177,6 +177,9 @@ pub enum BypassReason {
     /// Native-library lookup is not modeled as a precise input.
     #[error("native library lookup is not cacheable yet")]
     NativeLibrary,
+    /// A native link would embed something no other checkout can reproduce.
+    #[error("native link is not reproducible across checkouts: {0}")]
+    UnportableNativeLink(String),
     /// A library search-path kind is not modeled.
     #[error("rustc search path kind is not cacheable yet: {0}")]
     UnsupportedSearchPath(String),
@@ -293,6 +296,20 @@ pub struct RustcInvocation {
 enum LinkOutput {
     Library,
     WasmExecutable,
+    NativeExecutable,
+}
+
+/// What the caller is prepared to model beyond the default tier.
+///
+/// The parser itself stays pure: whether the host can describe its linker
+/// precisely enough to key a native link is the caller's question, and the
+/// answer arrives here rather than being read out of the environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct ParseOptions {
+    /// Admit natively linked test binaries and executables, given a linker
+    /// identity in the action key. Off by default.
+    pub cache_native_links: bool,
 }
 
 /// The cacheable files and dependency manifest produced by a rustc invocation.
@@ -300,8 +317,10 @@ enum LinkOutput {
 pub struct RustcOutputs {
     /// Common directory containing all modeled outputs.
     pub directory: PathBuf,
-    /// Cacheable library, metadata, and/or compiler-linked wasm files.
+    /// Cacheable library, metadata, and/or linked program files.
     pub files: Vec<PathBuf>,
+    /// Outputs whose executable permission is part of the declared contract.
+    pub executables: Vec<PathBuf>,
     /// Dep-info file used for precise input discovery.
     pub dep_info: PathBuf,
 }
@@ -315,8 +334,20 @@ impl RustcInvocation {
     /// rlib/rmeta tier plus binaries linked by compiler-bundled WebAssembly
     /// toolchains.
     pub fn parse(arguments: &[OsString]) -> Result<Self, BypassReason> {
+        Self::parse_with(arguments, ParseOptions::default())
+    }
+
+    /// Parse as [`RustcInvocation::parse`] does, admitting what `options`
+    /// says the caller can model.
+    pub fn parse_with(arguments: &[OsString], options: ParseOptions) -> Result<Self, BypassReason> {
         let expanded = expand_response_files(arguments)?;
-        Parser::new(&expanded.arguments).parse()
+        Parser::new(&expanded.arguments, options).parse()
+    }
+
+    /// Whether this invocation links a native program, whose key must therefore
+    /// describe the linker that produced it.
+    pub fn links_natively(&self) -> bool {
+        self.link_output == LinkOutput::NativeExecutable
     }
 
     /// Return the source input passed to rustc.
@@ -409,6 +440,7 @@ impl RustcInvocation {
             return Err(BypassReason::ImplicitEmitWithOutputFile(output.clone()));
         }
         let mut files = BTreeSet::new();
+        let mut executables = BTreeSet::new();
         let mut dep_info = None;
         for emit in &self.emits {
             if emit.kind == "dep-info" {
@@ -434,6 +466,9 @@ impl RustcInvocation {
                 "link" => match self.link_output {
                     LinkOutput::Library => ("lib", "rlib"),
                     LinkOutput::WasmExecutable => ("", "wasm"),
+                    // A linked native program has no extension of its own on
+                    // the platforms this tier admits.
+                    LinkOutput::NativeExecutable => ("", ""),
                 },
                 "metadata" => ("lib", "rmeta"),
                 _ => continue,
@@ -441,16 +476,26 @@ impl RustcInvocation {
             let path = if let Some(path) = &emit.path {
                 absolute_path(path, working_dir)
             } else {
-                output_directory.join(format!(
-                    "{prefix}{}{}.{}",
-                    self.crate_name, self.extra_filename, extension
-                ))
+                let name = format!("{prefix}{}{}", self.crate_name, self.extra_filename);
+                output_directory.join(if extension.is_empty() {
+                    name
+                } else {
+                    format!("{name}.{extension}")
+                })
             };
             if path.file_name().is_none() {
                 return Err(BypassReason::InvalidOutputPath(path));
             }
             if path.parent() != Some(output_directory.as_path()) {
                 return Err(BypassReason::SplitOutputDirectories);
+            }
+            if emit.kind == "link"
+                && matches!(
+                    self.link_output,
+                    LinkOutput::WasmExecutable | LinkOutput::NativeExecutable
+                )
+            {
+                executables.insert(path.clone());
             }
             files.insert(path);
         }
@@ -461,6 +506,7 @@ impl RustcInvocation {
         Ok(RustcOutputs {
             directory: output_directory,
             files: files.into_iter().collect(),
+            executables: executables.into_iter().collect(),
             dep_info,
         })
     }
@@ -522,10 +568,7 @@ impl RustcOutputs {
     /// Whether `path` is a linked program whose executable permission is part
     /// of the declared output contract.
     pub fn is_executable(&self, path: &Path) -> bool {
-        self.files.iter().any(|output| output == path)
-            && path
-                .extension()
-                .is_some_and(|extension| extension == "wasm")
+        self.executables.iter().any(|output| output == path)
     }
 }
 
@@ -825,6 +868,7 @@ struct Parser<'a> {
     out_dir: Option<PathBuf>,
     explicit_output: Option<PathBuf>,
     target: Option<String>,
+    options: ParseOptions,
 }
 
 struct ExpandedArguments {
@@ -895,9 +939,10 @@ fn expand_response_files(arguments: &[OsString]) -> Result<ExpandedArguments, By
 }
 
 impl<'a> Parser<'a> {
-    fn new(arguments: &'a [OsString]) -> Self {
+    fn new(arguments: &'a [OsString], options: ParseOptions) -> Self {
         Self {
             arguments,
+            options,
             index: 0,
             parsed: Vec::new(),
             source: None,
@@ -1224,6 +1269,9 @@ impl<'a> Parser<'a> {
             // and libc shipped in the Rust toolchain. Unlike native linking,
             // there are no implicit host inputs outside compiler identity.
             LinkOutput::WasmExecutable
+        } else if self.options.cache_native_links && self.links_a_native_program() {
+            self.check_native_link_is_portable()?;
+            LinkOutput::NativeExecutable
         } else if self.test {
             return Err(BypassReason::UnsupportedCrateType("test".into()));
         } else {
@@ -1256,6 +1304,64 @@ impl<'a> Parser<'a> {
             return Err(BypassReason::NoCacheableOutput);
         }
         Ok(link_output)
+    }
+}
+
+impl Parser<'_> {
+    /// Whether this invocation links a program for the host.
+    ///
+    /// An explicit `--target` bypasses even when it spells the host triple:
+    /// rustc without one links for the host by construction, which is the
+    /// cheapest description of "the linker this adapter can identify", and
+    /// cargo omits it for host builds anyway.
+    fn links_a_native_program(&self) -> bool {
+        self.target.is_none()
+            && ((self.test && self.crate_types.is_empty())
+                || matches!(self.crate_types.as_slice(), [kind] if kind == "bin"))
+    }
+
+    /// Reject a native link whose result depends on something the key cannot
+    /// describe, or that leaves artifacts beside the ones mbx would store.
+    ///
+    /// Each check names a value rather than a flag: an option absent from the
+    /// invocation keeps rustc's default, which the compiler identity already
+    /// pins, while any other spelling is refused rather than guessed at.
+    fn check_native_link_is_portable(&self) -> Result<(), BypassReason> {
+        for argument in &self.parsed {
+            let Argument::Plain(value) = argument else {
+                continue;
+            };
+            let Some((name, value)) = value
+                .strip_prefix("--codegen=")
+                .and_then(|option| option.split_once('='))
+            else {
+                continue;
+            };
+            let unportable = match name {
+                // Packed debug info leaves a .dSYM bundle or .dwp file beside
+                // the binary, and mbx stores neither.
+                "split-debuginfo" => value != "off",
+                // ld64 records absolute object paths and their timestamps in
+                // the binary's debug map, so the same source links to
+                // different bytes in another checkout -- or the same one
+                // twice.
+                "debuginfo" if cfg!(target_os = "macos") => !matches!(value, "0" | "none"),
+                // Both embed this checkout's absolute target directory.
+                "rpath" | "prefer-dynamic" => {
+                    matches!(value, "y" | "yes" | "on" | "true")
+                }
+                // The CRT objects a self-contained link uses come from
+                // somewhere other than where the driver reports.
+                "link-self-contained" => true,
+                _ => false,
+            };
+            if unportable {
+                return Err(BypassReason::UnportableNativeLink(format!(
+                    "{name}={value}"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 

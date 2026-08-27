@@ -16,6 +16,10 @@ fn bypass_kinds_are_stable_and_field_independent() {
         BypassReason::UnsupportedCrateType("bin".into()).kind(),
         "unsupported-crate-type"
     );
+    assert_eq!(
+        BypassReason::UnportableNativeLink("rpath=yes".into()).kind(),
+        "unportable-native-link"
+    );
     // Two reasons of one kind group together despite differing fields.
     assert_eq!(
         BypassReason::UnmappedAbsolutePath(PathBuf::from("/a")).kind(),
@@ -321,6 +325,7 @@ fn resolves_cargo_library_outputs() {
                 working_dir.join("target/debug/deps/libwidget-abc123.rlib"),
                 working_dir.join("target/debug/deps/libwidget-abc123.rmeta"),
             ],
+            executables: Vec::new(),
             dep_info: working_dir.join("target/debug/deps/widget-abc123.d"),
         }
     );
@@ -346,7 +351,8 @@ fn resolves_a_compiler_linked_wasm_binary() {
         invocation.outputs(&working_dir).unwrap(),
         RustcOutputs {
             directory: working_dir.join("target/wasm32-unknown-unknown/debug/deps"),
-            files: vec![executable],
+            files: vec![executable.clone()],
+            executables: vec![executable],
             dep_info: working_dir.join("target/wasm32-unknown-unknown/debug/deps/widget-abc123.d"),
         }
     );
@@ -517,6 +523,7 @@ fn resolves_an_output_file_when_every_emit_names_its_path() {
                 working_dir.join("target/widget.rlib"),
                 working_dir.join("target/widget.rmeta"),
             ],
+            executables: Vec::new(),
             dep_info: working_dir.join("target/widget.d"),
         }
     );
@@ -945,4 +952,161 @@ fn a_rebuilt_dependency_does_not_move_the_source_fingerprint() {
     // The crate itself changed.
     std::fs::write(working_dir.join("src.rs"), "pub fn value() -> u32 { 1 }\n").unwrap();
     assert_ne!(fingerprint(), before);
+
+fn native_links() -> ParseOptions {
+    ParseOptions {
+        cache_native_links: true,
+    }
+}
+
+/// Off, a native link stays outside the cacheable tier exactly as before: the
+/// option is what admits it, never the invocation alone.
+#[test]
+fn native_links_are_admitted_only_when_the_caller_models_them() {
+    let test_binary = args(&["--test", "--emit=dep-info,link", "src/lib.rs"]);
+    assert_eq!(
+        RustcInvocation::parse(&test_binary),
+        Err(BypassReason::UnsupportedCrateType("test".into()))
+    );
+    assert!(RustcInvocation::parse_with(&test_binary, native_links()).is_ok());
+
+    let binary = args(&["--crate-type=bin", "--emit=dep-info,link", "src/main.rs"]);
+    assert_eq!(
+        RustcInvocation::parse(&binary),
+        Err(BypassReason::UnsupportedCrateType("bin".into()))
+    );
+    assert!(RustcInvocation::parse_with(&binary, native_links()).is_ok());
+}
+
+/// A linked program has no extension, and its executable bit is part of what
+/// the cache promises to restore.
+#[test]
+fn a_native_program_is_named_without_an_extension() {
+    let working_dir = workspace();
+    let invocation = RustcInvocation::parse_with(
+        &args(&[
+            "--crate-name=widget",
+            "--test",
+            "--emit=dep-info,link",
+            "--out-dir=target/debug/deps",
+            "-Cextra-filename=-abc123",
+            "src/lib.rs",
+        ]),
+        native_links(),
+    )
+    .unwrap();
+    let linked = working_dir.join("target/debug/deps/widget-abc123");
+
+    let outputs = invocation.outputs(&working_dir).unwrap();
+
+    assert_eq!(outputs.files, vec![linked.clone()]);
+    assert_eq!(outputs.executables, vec![linked.clone()]);
+    assert!(outputs.is_executable(&linked));
+    assert!(invocation.links_natively());
+}
+
+/// rustc without `--target` links for the host by construction, which is the
+/// only linker this adapter can identify. Naming the host triple explicitly is
+/// not the same statement, so it is not assumed to be one.
+#[test]
+fn an_explicit_target_is_never_a_native_link() {
+    let arguments = args(&[
+        "--test",
+        "--emit=dep-info,link",
+        "--target=x86_64-unknown-linux-gnu",
+        "src/lib.rs",
+    ]);
+
+    assert_eq!(
+        RustcInvocation::parse_with(&arguments, native_links()),
+        Err(BypassReason::UnsupportedCrateType("test".into()))
+    );
+}
+
+/// Everything here would either embed a path this checkout owns, depend on a
+/// linker the key does not describe, or leave a file beside the binary that
+/// mbx does not store.
+#[test]
+fn unportable_native_links_still_bypass() {
+    for (flag, expected) in [
+        (
+            "-Csplit-debuginfo=packed",
+            BypassReason::UnportableNativeLink("split-debuginfo=packed".into()),
+        ),
+        (
+            "-Crpath=yes",
+            BypassReason::UnportableNativeLink("rpath=yes".into()),
+        ),
+        (
+            "-Cprefer-dynamic=yes",
+            BypassReason::UnportableNativeLink("prefer-dynamic=yes".into()),
+        ),
+        (
+            "-Clink-self-contained=yes",
+            BypassReason::UnportableNativeLink("link-self-contained=yes".into()),
+        ),
+        // Not modeled at all, so it never reaches the portability question.
+        (
+            "-Clinker=/usr/bin/false",
+            BypassReason::UnknownCodegenOption("linker".into()),
+        ),
+    ] {
+        let arguments = args(&["--test", "--emit=dep-info,link", flag, "src/lib.rs"]);
+        assert_eq!(
+            RustcInvocation::parse_with(&arguments, native_links()),
+            Err(expected),
+            "{flag} should not be cacheable"
+        );
+    }
+
+    // Absent or affirmatively off is the default the compiler identity pins.
+    for flag in ["-Csplit-debuginfo=off", "-Crpath=no"] {
+        let arguments = args(&["--test", "--emit=dep-info,link", flag, "src/lib.rs"]);
+        assert!(
+            RustcInvocation::parse_with(&arguments, native_links()).is_ok(),
+            "{flag} should still be cacheable"
+        );
+    }
+}
+
+/// ld64 writes absolute object paths and their timestamps into the binary's
+/// debug map, so the same source links to different bytes in another checkout.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_debug_info_makes_a_native_link_unportable() {
+    let arguments = args(&[
+        "--test",
+        "--emit=dep-info,link",
+        "-Cdebuginfo=2",
+        "src/lib.rs",
+    ]);
+
+    assert_eq!(
+        RustcInvocation::parse_with(&arguments, native_links()),
+        Err(BypassReason::UnportableNativeLink("debuginfo=2".into()))
+    );
+
+    let none = args(&[
+        "--test",
+        "--emit=dep-info,link",
+        "-Cdebuginfo=0",
+        "src/lib.rs",
+    ]);
+    assert!(RustcInvocation::parse_with(&none, native_links()).is_ok());
+}
+
+/// A native library is still not a precise input, whoever is asking.
+#[test]
+fn native_libraries_bypass_even_for_admitted_links() {
+    let arguments = args(&[
+        "--test",
+        "--emit=dep-info,link",
+        "-lstatic=fixture",
+        "src/lib.rs",
+    ]);
+
+    assert_eq!(
+        RustcInvocation::parse_with(&arguments, native_links()),
+        Err(BypassReason::NativeLibrary)
+    );
 }
