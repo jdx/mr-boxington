@@ -1,0 +1,702 @@
+use super::*;
+use crate::*;
+
+/// An S3 error document, as a store would send one.
+fn s3_error_body(code: &str) -> String {
+    format!("<?xml version=\"1.0\"?><Error><Code>{code}</Code><Message>no</Message></Error>")
+}
+
+fn credentials() -> S3Credentials {
+    S3Credentials {
+        access_key_id: "AKIDEXAMPLE".into(),
+        secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into(),
+        session_token: None,
+    }
+}
+
+fn config(server: &mockito::ServerGuard) -> S3RemoteCacheConfig {
+    S3RemoteCacheConfig {
+        bucket: "cache-bucket".into(),
+        prefix: String::new(),
+        namespace: "acme".into(),
+        region: "us-east-1".into(),
+        endpoint: Some(server.url().parse().unwrap()),
+        force_path_style: None,
+        conditional_writes: S3ConditionalWrites::Auto,
+        credentials: credentials(),
+        connect_timeout: Duration::from_secs(1),
+        read_timeout: Duration::from_secs(1),
+        download_timeout: Duration::from_secs(1),
+        retries: 0,
+    }
+}
+
+fn test_store(server: &mockito::ServerGuard) -> S3RemoteCache {
+    S3RemoteCache::new(config(server)).unwrap()
+}
+
+/// The key a blob of these bytes lands on, under the test configuration.
+fn blob_path(digest: &CacheDigest) -> String {
+    format!(
+        "/cache-bucket/acme/v1/blobs/{}/{}/{}",
+        digest.algorithm, digest.hash, digest.size
+    )
+}
+
+#[tokio::test]
+async fn a_blob_round_trips_through_its_content_addressed_key() {
+    let mut server = mockito::Server::new_async().await;
+    let contents = b"a cached object file";
+    let digest = CacheDigest::blake3(contents);
+    let request = server
+        .mock("GET", blob_path(&digest).as_str())
+        .match_header("x-amz-content-sha256", mockito::Matcher::Any)
+        .match_header("x-amz-date", mockito::Matcher::Any)
+        .match_header(
+            "authorization",
+            mockito::Matcher::Regex(
+                "^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/[0-9]{8}/us-east-1/s3/aws4_request, \
+                 SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=[0-9a-f]{64}$"
+                    .into(),
+            ),
+        )
+        .with_status(200)
+        .with_body(contents)
+        .expect(1)
+        .create_async()
+        .await;
+    let staging = tempfile::tempdir().unwrap();
+
+    let file = test_store(&server)
+        .get_blob_file(&digest, staging.path())
+        .await
+        .unwrap();
+
+    assert_eq!(fs::read(file.path()).unwrap(), contents);
+    request.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_blob_that_fails_verification_is_refused() {
+    let mut server = mockito::Server::new_async().await;
+    let digest = CacheDigest::blake3(b"what was asked for");
+    // The same length as what was asked for, so the size guard cannot reject it
+    // first and verification is what does.
+    server
+        .mock("GET", blob_path(&digest).as_str())
+        .with_status(200)
+        .with_body(b"something else!!!!")
+        .create_async()
+        .await;
+    let staging = tempfile::tempdir().unwrap();
+
+    let error = test_store(&server)
+        .get_blob_file(&digest, staging.path())
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("failed digest verification"));
+}
+
+#[tokio::test]
+async fn a_blob_larger_than_its_digest_stops_being_read() {
+    let mut server = mockito::Server::new_async().await;
+    let digest = CacheDigest::blake3(b"small");
+    server
+        .mock("GET", blob_path(&digest).as_str())
+        .with_status(200)
+        .with_body(vec![b'x'; 4096])
+        .create_async()
+        .await;
+    let staging = tempfile::tempdir().unwrap();
+
+    let error = test_store(&server)
+        .get_blob_file(&digest, staging.path())
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("exceeded the size of its digest")
+    );
+}
+
+#[tokio::test]
+async fn storing_a_blob_writes_it_create_only() {
+    let mut server = mockito::Server::new_async().await;
+    let contents = b"a published object";
+    let digest = CacheDigest::blake3(contents);
+    let request = server
+        .mock("PUT", blob_path(&digest).as_str())
+        .match_header("if-none-match", "*")
+        .match_body(contents.to_vec())
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+
+    test_store(&server)
+        .put_blob(&BlobUpload {
+            digest,
+            source: BlobSource::Bytes(contents.to_vec()),
+        })
+        .await
+        .unwrap();
+
+    request.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_blob_the_store_already_holds_is_not_an_error() {
+    let mut server = mockito::Server::new_async().await;
+    let contents = b"already stored";
+    let digest = CacheDigest::blake3(contents);
+    server
+        .mock("PUT", blob_path(&digest).as_str())
+        .with_status(412)
+        .with_body(s3_error_body("PreconditionFailed"))
+        .create_async()
+        .await;
+
+    // The key is the content address of these bytes, so an object already
+    // sitting there holds exactly what this upload would have written.
+    test_store(&server)
+        .put_blob(&BlobUpload {
+            digest,
+            source: BlobSource::Bytes(contents.to_vec()),
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_conflicting_conditional_write_is_retried() {
+    let mut server = mockito::Server::new_async().await;
+    let contents = b"contended object";
+    let digest = CacheDigest::blake3(contents);
+    let conflict = server
+        .mock("PUT", blob_path(&digest).as_str())
+        .with_status(409)
+        .with_body(s3_error_body("ConditionalRequestConflict"))
+        .expect(1)
+        .create_async()
+        .await;
+    let stored = server
+        .mock("PUT", blob_path(&digest).as_str())
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let mut settings = config(&server);
+    settings.retries = 1;
+
+    S3RemoteCache::new(settings)
+        .unwrap()
+        .put_blob(&BlobUpload {
+            digest,
+            source: BlobSource::Bytes(contents.to_vec()),
+        })
+        .await
+        .unwrap();
+
+    conflict.assert_async().await;
+    stored.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_file_backed_blob_is_streamed_with_its_length() {
+    let mut server = mockito::Server::new_async().await;
+    let contents = vec![b'z'; 128 * 1024];
+    let digest = CacheDigest::blake3(&contents);
+    let request = server
+        .mock("PUT", blob_path(&digest).as_str())
+        .match_header("content-length", contents.len().to_string().as_str())
+        // A streamed body is not hashed, so the signature covers everything
+        // about the request except bytes TLS and the content address stand
+        // behind.
+        .match_header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
+        .match_body(contents.to_vec())
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let file = tempfile::NamedTempFile::new().unwrap();
+    fs::write(file.path(), &contents).unwrap();
+
+    test_store(&server)
+        .put_blob(&BlobUpload {
+            digest,
+            source: BlobSource::Path(file.path().to_path_buf()),
+        })
+        .await
+        .unwrap();
+
+    request.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_missing_action_result_is_a_miss_rather_than_an_error() {
+    let mut server = mockito::Server::new_async().await;
+    let action = CacheDigest::blake3(b"an action");
+    server
+        .mock(
+            "GET",
+            format!(
+                "/cache-bucket/acme/v1/action-results/blake3/{}/{}",
+                action.hash, action.size
+            )
+            .as_str(),
+        )
+        .with_status(404)
+        .with_body(s3_error_body("NoSuchKey"))
+        .create_async()
+        .await;
+
+    assert!(
+        test_store(&server)
+            .get_action_result(&action)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn an_action_result_naming_another_action_is_refused() {
+    let mut server = mockito::Server::new_async().await;
+    let action = CacheDigest::blake3(b"an action");
+    let other = CacheDigest::blake3(b"a different action");
+    server
+        .mock(
+            "GET",
+            format!(
+                "/cache-bucket/acme/v1/action-results/blake3/{}/{}",
+                action.hash, action.size
+            )
+            .as_str(),
+        )
+        .with_status(200)
+        .with_body(
+            serde_json::to_vec(&RemoteActionResult {
+                action: other,
+                metadata: None,
+                output_root: None,
+                version: 1,
+            })
+            .unwrap(),
+        )
+        .create_async()
+        .await;
+
+    let error = test_store(&server)
+        .get_action_result(&action)
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("does not match requested action")
+    );
+}
+
+/// The key a task action manifest lands on.
+fn manifest_path(key: &CacheDigest) -> String {
+    format!(
+        "/cache-bucket/acme/v1/action-manifests/blake3/{}/{}",
+        key.hash, key.size
+    )
+}
+
+#[tokio::test]
+async fn a_manifest_carries_the_entity_tag_its_update_must_send_back() {
+    let mut server = mockito::Server::new_async().await;
+    let key = CacheDigest::blake3(b"a task");
+    server
+        .mock("GET", manifest_path(&key).as_str())
+        .with_status(200)
+        .with_header("etag", "\"d41d8cd98f00b204e9800998ecf8427e\"")
+        .with_body("{}")
+        .create_async()
+        .await;
+    let update = server
+        .mock("PUT", manifest_path(&key).as_str())
+        .match_header("if-match", "\"d41d8cd98f00b204e9800998ecf8427e\"")
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let store = test_store(&server);
+
+    let manifest = store.get_action_manifest(&key).await.unwrap().unwrap();
+    assert_eq!(manifest.etag, "d41d8cd98f00b204e9800998ecf8427e");
+
+    let outcome = store
+        .put_action_manifest(&key, b"{}", Some(&manifest.etag))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, ManifestPutOutcome::Stored);
+    update.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_manifest_that_moved_reports_a_precondition_failure() {
+    let mut server = mockito::Server::new_async().await;
+    let key = CacheDigest::blake3(b"a contended task");
+    server
+        .mock("PUT", manifest_path(&key).as_str())
+        .match_header("if-match", "\"stale\"")
+        .with_status(412)
+        .with_body(s3_error_body("PreconditionFailed"))
+        .create_async()
+        .await;
+
+    let outcome = test_store(&server)
+        .put_action_manifest(&key, b"{}", Some("stale"))
+        .await
+        .unwrap();
+
+    // The agent answers this by re-reading, merging, and trying again, which is
+    // what keeps a concurrent writer's predictions.
+    assert_eq!(outcome, ManifestPutOutcome::PreconditionFailed);
+}
+
+#[tokio::test]
+async fn a_first_manifest_is_written_create_only() {
+    let mut server = mockito::Server::new_async().await;
+    let key = CacheDigest::blake3(b"a new task");
+    let request = server
+        .mock("PUT", manifest_path(&key).as_str())
+        .match_header("if-none-match", "*")
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let outcome = test_store(&server)
+        .put_action_manifest(&key, b"{}", None)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, ManifestPutOutcome::Stored);
+    request.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_store_without_conditional_writes_is_used_without_them() {
+    let mut server = mockito::Server::new_async().await;
+    let key = CacheDigest::blake3(b"a task");
+    let refused = server
+        .mock("PUT", manifest_path(&key).as_str())
+        .match_header("if-none-match", "*")
+        .with_status(501)
+        .with_body(s3_error_body("NotImplemented"))
+        .expect(1)
+        .create_async()
+        .await;
+    let unconditional = server
+        .mock("PUT", manifest_path(&key).as_str())
+        .match_header("if-none-match", mockito::Matcher::Missing)
+        .with_status(200)
+        .expect(2)
+        .create_async()
+        .await;
+    let store = test_store(&server);
+
+    assert_eq!(
+        store.put_action_manifest(&key, b"{}", None).await.unwrap(),
+        ManifestPutOutcome::Stored
+    );
+    // Having learned it once, the store stops asking for the rest of the
+    // session rather than spending a refused round trip on every write.
+    assert_eq!(
+        store.put_action_manifest(&key, b"{}", None).await.unwrap(),
+        ManifestPutOutcome::Stored
+    );
+
+    refused.assert_async().await;
+    unconditional.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_store_that_dislikes_a_request_is_not_mistaken_for_one_without_conditionals() {
+    let mut server = mockito::Server::new_async().await;
+    let key = CacheDigest::blake3(b"a task");
+    server
+        .mock("PUT", manifest_path(&key).as_str())
+        .with_status(400)
+        .with_body(s3_error_body("InvalidRequest"))
+        .create_async()
+        .await;
+    let store = test_store(&server);
+
+    let error = store
+        .put_action_manifest(&key, b"{}", None)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("InvalidRequest"));
+    assert!(store.conditionals_enabled());
+}
+
+#[tokio::test]
+async fn requiring_conditional_writes_refuses_a_store_without_them() {
+    let mut server = mockito::Server::new_async().await;
+    let key = CacheDigest::blake3(b"a task");
+    server
+        .mock("PUT", manifest_path(&key).as_str())
+        .with_status(501)
+        .with_body(s3_error_body("NotImplemented"))
+        .create_async()
+        .await;
+    let mut settings = config(&server);
+    settings.conditional_writes = S3ConditionalWrites::Required;
+
+    let error = S3RemoteCache::new(settings)
+        .unwrap()
+        .put_action_manifest(&key, b"{}", None)
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("conditional writes are required")
+    );
+}
+
+#[tokio::test]
+async fn a_reachable_bucket_passes_the_connection_probe() {
+    let mut server = mockito::Server::new_async().await;
+    let request = server
+        .mock("HEAD", "/cache-bucket/acme/v1/connectivity-probe")
+        .with_status(404)
+        .expect(1)
+        .create_async()
+        .await;
+
+    // A bucket that answers at all has proved the endpoint, the credentials,
+    // and its own existence. Whether this key is present says nothing.
+    test_store(&server).check_connection().await.unwrap();
+
+    request.assert_async().await;
+}
+
+#[tokio::test]
+async fn rejected_credentials_are_named_in_the_connection_probe() {
+    let mut server = mockito::Server::new_async().await;
+    server
+        .mock("HEAD", "/cache-bucket/acme/v1/connectivity-probe")
+        .with_status(403)
+        .create_async()
+        .await;
+
+    let error = test_store(&server).check_connection().await.unwrap_err();
+
+    assert!(error.to_string().contains("AWS_ACCESS_KEY_ID"));
+}
+
+#[tokio::test]
+async fn a_bucket_in_another_region_says_which_one() {
+    let mut server = mockito::Server::new_async().await;
+    server
+        .mock("HEAD", "/cache-bucket/acme/v1/connectivity-probe")
+        .with_status(301)
+        .with_header("x-amz-bucket-region", "eu-west-1")
+        .create_async()
+        .await;
+
+    let error = test_store(&server).check_connection().await.unwrap_err();
+
+    assert!(error.to_string().contains("eu-west-1"));
+}
+
+#[tokio::test]
+async fn temporary_credentials_send_their_session_token() {
+    let mut server = mockito::Server::new_async().await;
+    let request = server
+        .mock("HEAD", "/cache-bucket/acme/v1/connectivity-probe")
+        .match_header("x-amz-security-token", "session-token")
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let mut settings = config(&server);
+    settings.credentials.session_token = Some("session-token".into());
+
+    S3RemoteCache::new(settings)
+        .unwrap()
+        .check_connection()
+        .await
+        .unwrap();
+
+    request.assert_async().await;
+}
+
+#[tokio::test]
+async fn extensions_a_bucket_cannot_serve_report_themselves_absent() {
+    let server = mockito::Server::new_async().await;
+    let store = test_store(&server);
+    let digest = CacheDigest::blake3(b"anything");
+    let staging = tempfile::tempdir().unwrap();
+
+    // Reporting absence is what routes the agent and the upload queue to the
+    // per-object requests every version of the protocol has made.
+    assert!(store.action_batch_limit().await.unwrap().is_none());
+    assert!(store.blob_pack_upload_limits().await.unwrap().is_none());
+    assert!(
+        store
+            .get_action_results(std::slice::from_ref(&digest))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_blob_pack(std::slice::from_ref(&digest), staging.path())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .put_blob_pack(&[BlobUpload {
+                digest,
+                source: BlobSource::Bytes(Vec::new()),
+            }])
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // An empty request is answered rather than declined, matching the protocol
+    // client, so a caller with nothing to do does not fall back for no reason.
+    assert_eq!(
+        store.get_action_results(&[]).await.unwrap(),
+        Some(Vec::new())
+    );
+    assert!(store.put_blob_pack(&[]).await.unwrap().is_some());
+}
+
+#[test]
+fn buckets_are_addressed_by_host_on_aws_and_by_path_elsewhere() {
+    let addressed = |bucket: &str, endpoint: Option<&str>, force: Option<bool>| {
+        base_url(&S3RemoteCacheConfig {
+            bucket: bucket.into(),
+            endpoint: endpoint.map(|endpoint| endpoint.parse().unwrap()),
+            force_path_style: force,
+            ..S3RemoteCacheConfig {
+                bucket: bucket.into(),
+                prefix: String::new(),
+                namespace: "acme".into(),
+                region: "us-west-2".into(),
+                endpoint: None,
+                force_path_style: None,
+                conditional_writes: S3ConditionalWrites::Auto,
+                credentials: credentials(),
+                connect_timeout: Duration::from_secs(1),
+                read_timeout: Duration::from_secs(1),
+                download_timeout: Duration::from_secs(1),
+                retries: 0,
+            }
+        })
+        .unwrap()
+        .to_string()
+    };
+
+    assert_eq!(
+        addressed("cache", None, None),
+        "https://cache.s3.us-west-2.amazonaws.com/"
+    );
+    // A dot in the name is not covered by the wildcard certificate that makes
+    // host addressing work, so such a bucket is addressed by path.
+    assert_eq!(
+        addressed("cache.example.com", None, None),
+        "https://s3.us-west-2.amazonaws.com/cache.example.com/"
+    );
+    assert_eq!(
+        addressed("cache", None, Some(true)),
+        "https://s3.us-west-2.amazonaws.com/cache/"
+    );
+    assert_eq!(
+        addressed("cache", Some("http://127.0.0.1:9000"), None),
+        "http://127.0.0.1:9000/cache/"
+    );
+    assert_eq!(
+        addressed(
+            "cache",
+            Some("https://account.r2.cloudflarestorage.com"),
+            None
+        ),
+        "https://account.r2.cloudflarestorage.com/cache/"
+    );
+    assert_eq!(
+        addressed("cache", Some("https://store.example.com"), Some(false)),
+        "https://cache.store.example.com/"
+    );
+}
+
+#[test]
+fn keys_are_laid_out_under_the_prefix_namespace_and_layout_version() {
+    let server = mockito::Server::new();
+    let mut settings = config(&server);
+    settings.prefix = "/teams/backend/".into();
+    let store = S3RemoteCache::new(settings).unwrap();
+    let digest = CacheDigest {
+        algorithm: "blake3".into(),
+        hash: "a".repeat(64),
+        size: 7,
+    };
+
+    assert!(
+        store
+            .object_url(ObjectKind::Blob, &digest)
+            .unwrap()
+            .path()
+            .ends_with(&format!(
+                "/cache-bucket/teams/backend/acme/v1/blobs/blake3/{}/7",
+                digest.hash
+            ))
+    );
+}
+
+#[test]
+fn a_namespace_that_could_escape_its_prefix_is_refused() {
+    let server = mockito::Server::new();
+    let refused = |namespace: &str| {
+        let mut settings = config(&server);
+        settings.namespace = namespace.into();
+        match S3RemoteCache::new(settings) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("namespace {namespace:?} should have been refused"),
+        }
+    };
+
+    // The protocol carries the namespace in a header a server interprets. In a
+    // bucket it is part of the key, so it has to stay inside its own prefix.
+    assert!(refused("../other").contains("relative path segment"));
+    assert!(refused("acme//backend").contains("empty path segment"));
+    assert!(refused("/acme").contains("must not start or end with a slash"));
+    assert!(refused("").contains("must not be empty"));
+    assert!(refused("acme backend").contains("must use only letters"));
+    // A namespace naming more than one level is ordinary and stays allowed.
+    let mut settings = config(&server);
+    settings.namespace = "acme/backend".into();
+    assert!(S3RemoteCache::new(settings).map(drop).is_ok());
+}
+
+#[test]
+fn error_codes_are_read_out_of_an_s3_error_document() {
+    assert_eq!(error_code(&s3_error_body("NoSuchKey")), Some("NoSuchKey"));
+    assert_eq!(error_code("not xml at all"), None);
+    assert_eq!(error_code("<Error><Code></Code></Error>"), None);
+    // A code at the very end of the document is still found: nothing may trim
+    // the tail off a body before scanning it.
+    assert_eq!(
+        error_code("<Code>AccessDenied</Code>"),
+        Some("AccessDenied")
+    );
+    assert_eq!(error_code(&"é".repeat(16 * 1024)), None);
+}

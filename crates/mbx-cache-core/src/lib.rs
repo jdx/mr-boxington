@@ -40,6 +40,8 @@ mod agent;
 mod client;
 mod local;
 mod remote_http;
+mod remote_s3;
+mod sigv4;
 mod uploads;
 
 pub use agent::{
@@ -65,6 +67,9 @@ use remote_http::HttpRemoteCache;
 #[doc(hidden)]
 pub use remote_http::fuzz_decode_blob_pack;
 pub(crate) use remote_http::{BlobPackLimits, blob_pack_chunk};
+use remote_s3::S3RemoteCache;
+pub use remote_s3::{S3ConditionalWrites, S3RemoteCacheConfig};
+pub use sigv4::S3Credentials;
 /// Cap the JSON bodies a remote cache can hand back. Blob downloads are bounded
 /// by the size their digest promises, but action results and manifests carry no
 /// such claim, so without an explicit ceiling a hostile or broken server can
@@ -245,6 +250,7 @@ pub struct RemoteCacheClient {
 /// work around that would buy nothing here.
 enum Backend {
     Http(HttpRemoteCache),
+    S3(S3RemoteCache),
 }
 
 impl RemoteCacheClient {
@@ -252,6 +258,16 @@ impl RemoteCacheClient {
     pub fn new(config: RemoteCacheConfig) -> Result<Self> {
         Ok(Self {
             backend: Backend::Http(HttpRemoteCache::new(config)?),
+        })
+    }
+
+    /// Construct a client backed directly by an S3-compatible object store.
+    ///
+    /// The store answers the same lookups a cache server does, without the
+    /// extensions built on top of the protocol. See [`S3RemoteCacheConfig`].
+    pub fn new_s3(config: S3RemoteCacheConfig) -> Result<Self> {
+        Ok(Self {
+            backend: Backend::S3(S3RemoteCache::new(config)?),
         })
     }
 
@@ -263,6 +279,7 @@ impl RemoteCacheClient {
     pub async fn check_connection(&self) -> Result<()> {
         match &self.backend {
             Backend::Http(client) => client.check_connection().await,
+            Backend::S3(store) => store.check_connection().await,
         }
     }
 
@@ -278,6 +295,7 @@ impl RemoteCacheClient {
     ) -> Result<Option<RemoteBlobPack>> {
         match &self.backend {
             Backend::Http(client) => client.get_blob_pack(digests, staging_dir).await,
+            Backend::S3(store) => store.get_blob_pack(digests, staging_dir).await,
         }
     }
 
@@ -293,6 +311,11 @@ impl RemoteCacheClient {
                     .get_blob_pack_with_limit(digests, staging_dir, max_bytes)
                     .await
             }
+            Backend::S3(store) => {
+                store
+                    .get_blob_pack_with_limit(digests, staging_dir, max_bytes)
+                    .await
+            }
         }
     }
 
@@ -303,6 +326,7 @@ impl RemoteCacheClient {
     ) -> Result<Option<RemoteActionResult>> {
         match &self.backend {
             Backend::Http(client) => client.get_action_result(action).await,
+            Backend::S3(store) => store.get_action_result(action).await,
         }
     }
 
@@ -312,6 +336,7 @@ impl RemoteCacheClient {
     pub(crate) async fn action_batch_limit(&self) -> Result<Option<usize>> {
         match &self.backend {
             Backend::Http(client) => client.action_batch_limit().await,
+            Backend::S3(store) => store.action_batch_limit().await,
         }
     }
 
@@ -327,6 +352,7 @@ impl RemoteCacheClient {
     ) -> Result<Option<Vec<RemoteActionResult>>> {
         match &self.backend {
             Backend::Http(client) => client.get_action_results(actions).await,
+            Backend::S3(store) => store.get_action_results(actions).await,
         }
     }
 
@@ -334,6 +360,7 @@ impl RemoteCacheClient {
     pub async fn put_action_result(&self, result: &RemoteActionResult) -> Result<()> {
         match &self.backend {
             Backend::Http(client) => client.put_action_result(result).await,
+            Backend::S3(store) => store.put_action_result(result).await,
         }
     }
 
@@ -344,6 +371,7 @@ impl RemoteCacheClient {
     ) -> Result<Option<RemoteActionManifest>> {
         match &self.backend {
             Backend::Http(client) => client.get_action_manifest(key).await,
+            Backend::S3(store) => store.get_action_manifest(key).await,
         }
     }
 
@@ -356,6 +384,7 @@ impl RemoteCacheClient {
     ) -> Result<ManifestPutOutcome> {
         match &self.backend {
             Backend::Http(client) => client.put_action_manifest(key, bytes, expected_etag).await,
+            Backend::S3(store) => store.put_action_manifest(key, bytes, expected_etag).await,
         }
     }
 
@@ -367,6 +396,7 @@ impl RemoteCacheClient {
     ) -> Result<Vec<u8>> {
         match &self.backend {
             Backend::Http(client) => client.get_blob(digest, media_type).await,
+            Backend::S3(store) => store.get_blob(digest, media_type).await,
         }
     }
 
@@ -378,6 +408,7 @@ impl RemoteCacheClient {
     ) -> Result<tempfile::NamedTempFile> {
         match &self.backend {
             Backend::Http(client) => client.get_blob_file(digest, staging_dir).await,
+            Backend::S3(store) => store.get_blob_file(digest, staging_dir).await,
         }
     }
 
@@ -387,6 +418,7 @@ impl RemoteCacheClient {
     pub(crate) async fn blob_pack_upload_limits(&self) -> Result<Option<BlobPackLimits>> {
         match &self.backend {
             Backend::Http(client) => client.blob_pack_upload_limits().await,
+            Backend::S3(store) => store.blob_pack_upload_limits().await,
         }
     }
 
@@ -400,6 +432,7 @@ impl RemoteCacheClient {
     pub async fn put_blob_pack(&self, uploads: &[BlobUpload]) -> Result<Option<BlobPackReceipt>> {
         match &self.backend {
             Backend::Http(client) => client.put_blob_pack(uploads).await,
+            Backend::S3(store) => store.put_blob_pack(uploads).await,
         }
     }
 
@@ -407,6 +440,7 @@ impl RemoteCacheClient {
     pub async fn put_blob(&self, upload: &BlobUpload) -> Result<()> {
         match &self.backend {
             Backend::Http(client) => client.put_blob(upload).await,
+            Backend::S3(store) => store.put_blob(upload).await,
         }
     }
 }
@@ -503,6 +537,23 @@ fn is_dns_error(error: &(dyn std::error::Error + 'static)) -> bool {
     false
 }
 
+/// A failure a backend has identified as worth retrying.
+///
+/// [`is_transient`] recognizes the statuses that are transient for any HTTP
+/// service. A backend that knows one of its own -- S3 answers `409` while a
+/// concurrent conditional write to the same key is in flight, and asks that it
+/// be retried -- attaches this instead of teaching that function about it.
+#[derive(Debug)]
+pub(crate) struct TransientRequest(pub(crate) &'static str);
+
+impl std::fmt::Display for TransientRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for TransientRequest {}
+
 fn is_transient(error: &eyre::Report) -> bool {
     // An unavailable hostname is a deterministic configuration error. reqwest
     // categorizes it as a connect error, but retrying only delays the diagnosis.
@@ -510,6 +561,9 @@ fn is_transient(error: &eyre::Report) -> bool {
         return false;
     }
     error.chain().any(|source| {
+        if source.downcast_ref::<TransientRequest>().is_some() {
+            return true;
+        }
         let Some(error) = source.downcast_ref::<reqwest::Error>() else {
             return false;
         };
