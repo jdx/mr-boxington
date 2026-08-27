@@ -49,10 +49,17 @@ one bucket between projects. Keys are laid out under
 `<prefix>/<namespace>/v1/`, so a bucket policy can scope a writer to its own
 prefix.
 
-An IAM policy needs `s3:GetObject` and `s3:PutObject` on that prefix, and
-`s3:ListBucket` on the bucket. mbx never lists anything, but without that
-permission S3 answers `403` instead of `404` for an object that is not there —
-and then every cache miss looks like a failure rather than a miss.
+An IAM policy needs `s3:GetObject` and `s3:PutObject` on that prefix. Add
+`s3:ListBucket` on the bucket if you can: mbx never lists anything, but AWS
+answers `403` rather than `404` for an object that is not there unless the
+caller holds it, and that permission is what lets a miss be told apart from a
+refusal.
+
+Without it mbx still works — a refused read is treated as a miss, and it says
+so once — but a credential that genuinely cannot read the cache then looks the
+same as a cold one, and only the warning distinguishes them. Credentials that
+S3 itself rejects, such as a wrong secret or an expired token, are always
+reported as errors either way.
 
 ### Cloudflare R2 and MinIO
 

@@ -113,6 +113,9 @@ pub(crate) struct S3RemoteCache {
     /// Latched once a store has told us it does not implement conditional
     /// writes, so the rest of the session stops asking.
     conditionals_disabled: AtomicBool,
+    /// Latched once a read has been refused where an absent object would have
+    /// been, so the explanation is offered once rather than per lookup.
+    absence_is_ambiguous: AtomicBool,
     download_timeout: Duration,
     retries: i64,
 }
@@ -138,6 +141,7 @@ impl S3RemoteCache {
             credentials: config.credentials,
             conditional_writes: config.conditional_writes,
             conditionals_disabled: AtomicBool::new(false),
+            absence_is_ambiguous: AtomicBool::new(false),
             download_timeout: config.download_timeout,
             retries: config.retries,
         })
@@ -221,25 +225,42 @@ impl S3RemoteCache {
 
     pub(crate) async fn check_connection(&self) -> Result<()> {
         let url = self.key_url(CONNECTIVITY_PROBE_KEY)?;
-        retry_async("HEAD", &url, self.retries, || async {
+        // A GET rather than a HEAD, because S3 explains a refusal in the
+        // response body and a HEAD has none. The key is never written, so the
+        // expected answer is a 404 carrying an error document.
+        retry_async("GET", &url, self.retries, || async {
             let response = self
-                .signed(reqwest::Method::HEAD, &url, &PayloadHash::empty())?
+                .signed(reqwest::Method::GET, &url, &PayloadHash::empty())?
                 .send()
                 .await?;
             match response.status() {
                 // The bucket answered and authorized the request. Whether this
                 // one key exists is beside the point.
                 StatusCode::OK | StatusCode::NOT_FOUND => Ok(()),
-                // S3 answers 403 rather than 404 for a key that is not there
-                // when the caller may not list the bucket, so this cannot be
-                // read as proof that the credentials are wrong.
-                StatusCode::FORBIDDEN => bail!(
-                    "the remote object store refused to read {url}. Grant s3:ListBucket on \
-                     the bucket -- without it S3 answers 403 for an absent key rather than \
-                     404, and every cache miss looks like this. Otherwise check \
-                     AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, that the key may read the \
-                     bucket, and that this machine's clock is correct"
-                ),
+                StatusCode::FORBIDDEN => {
+                    let failure = FailedRequest::read(response).await;
+                    if failure.is_credentials_rejected() {
+                        bail!(
+                            "the remote object store rejected these credentials for {url}: {}. \
+                             Check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, and that this \
+                             machine's clock is correct",
+                            failure.code.as_deref().unwrap_or("forbidden")
+                        );
+                    }
+                    // The signature was accepted; something declined this one
+                    // object. The probe key is never written, so without
+                    // s3:ListBucket that is exactly what a working
+                    // configuration looks like -- and it is also what a
+                    // credential with no access to the prefix looks like.
+                    warn!(
+                        "the remote object store did not confirm access to {url}. That is \
+                         expected without s3:ListBucket on the bucket, where S3 refuses a \
+                         read rather than reporting the object absent; grant it to tell the \
+                         two apart. If the cache never hits, these credentials may not be \
+                         allowed to read the prefix"
+                    );
+                    Ok(())
+                }
                 StatusCode::MOVED_PERMANENTLY | StatusCode::TEMPORARY_REDIRECT => {
                     let region = response
                         .headers()
@@ -342,6 +363,34 @@ impl S3RemoteCache {
         }
     }
 
+    /// Whether a failed read should be treated as the object not being there.
+    ///
+    /// S3 answers `403` rather than `404` for an absent object when the caller
+    /// may not list the bucket, so a miss under a least-privilege policy is
+    /// indistinguishable from a denial by status alone. The error code does
+    /// distinguish the one case that matters: credentials S3 itself rejected.
+    /// Anything else is treated as a miss, since reporting every cold lookup as
+    /// a failure would make such a policy unusable, and a warning explains it
+    /// once.
+    fn reads_as_absent(&self, failure: &FailedRequest) -> bool {
+        if failure.status == StatusCode::NOT_FOUND {
+            return true;
+        }
+        if failure.status != StatusCode::FORBIDDEN || failure.is_credentials_rejected() {
+            return false;
+        }
+        if !self.absence_is_ambiguous.swap(true, Ordering::Relaxed) {
+            warn!(
+                "the remote object store refused a read instead of reporting the object \
+                 absent, which is what S3 does without s3:ListBucket on the bucket. \
+                 Treating it as a cache miss. Grant s3:ListBucket so a miss is a miss; \
+                 if the cache never hits, these credentials may simply not be allowed to \
+                 read it"
+            );
+        }
+        true
+    }
+
     pub(crate) async fn get_action_result(
         &self,
         action: &CacheDigest,
@@ -352,11 +401,13 @@ impl S3RemoteCache {
                 .signed(reqwest::Method::GET, &url, &PayloadHash::empty())?
                 .send()
                 .await?;
-            if response.status() == StatusCode::NOT_FOUND {
-                return Ok(None);
-            }
             if !response.status().is_success() {
-                return Err(FailedRequest::read(response).await.report("read", &url));
+                let failure = FailedRequest::read(response).await;
+                return if self.reads_as_absent(&failure) {
+                    Ok(None)
+                } else {
+                    Err(failure.report("read", &url))
+                };
             }
             let bytes = read_bounded_json(response, "action result").await?;
             Ok(Some(serde_json::from_slice::<RemoteActionResult>(&bytes)?))
@@ -391,11 +442,13 @@ impl S3RemoteCache {
                 .signed(reqwest::Method::GET, &url, &PayloadHash::empty())?
                 .send()
                 .await?;
-            if response.status() == StatusCode::NOT_FOUND {
-                return Ok(None);
-            }
             if !response.status().is_success() {
-                return Err(FailedRequest::read(response).await.report("read", &url));
+                let failure = FailedRequest::read(response).await;
+                return if self.reads_as_absent(&failure) {
+                    Ok(None)
+                } else {
+                    Err(failure.report("read", &url))
+                };
             }
             let etag = parse_strong_etag(response.headers().get(ETAG))?;
             let bytes = read_bounded_json(response, "action manifest").await?;
@@ -672,6 +725,27 @@ impl FailedRequest {
         self.status == StatusCode::NOT_IMPLEMENTED
             || (self.status == StatusCode::BAD_REQUEST
                 && self.code.as_deref() == Some("NotImplemented"))
+    }
+
+    /// Whether S3 rejected the credentials themselves, rather than declining
+    /// this one object.
+    ///
+    /// These codes say the request never authenticated, which no bucket policy
+    /// can explain away. `AccessDenied` deliberately is not among them: it is
+    /// what an absent object looks like without `s3:ListBucket`.
+    fn is_credentials_rejected(&self) -> bool {
+        self.status == StatusCode::FORBIDDEN
+            && matches!(
+                self.code.as_deref(),
+                Some(
+                    "SignatureDoesNotMatch"
+                        | "InvalidAccessKeyId"
+                        | "InvalidSecurity"
+                        | "ExpiredToken"
+                        | "TokenRefreshRequired"
+                        | "RequestTimeTooSkewed"
+                )
+            )
     }
 
     /// Whether the store is asking to be tried again.

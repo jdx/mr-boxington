@@ -556,7 +556,7 @@ async fn requiring_conditional_writes_refuses_a_store_without_them() {
 async fn a_reachable_bucket_passes_the_connection_probe() {
     let mut server = mockito::Server::new_async().await;
     let request = server
-        .mock("HEAD", "/cache-bucket/acme/v1/connectivity-probe")
+        .mock("GET", "/cache-bucket/acme/v1/connectivity-probe")
         .with_status(404)
         .expect(1)
         .create_async()
@@ -573,8 +573,9 @@ async fn a_reachable_bucket_passes_the_connection_probe() {
 async fn rejected_credentials_are_named_in_the_connection_probe() {
     let mut server = mockito::Server::new_async().await;
     server
-        .mock("HEAD", "/cache-bucket/acme/v1/connectivity-probe")
+        .mock("GET", "/cache-bucket/acme/v1/connectivity-probe")
         .with_status(403)
+        .with_body(s3_error_body("SignatureDoesNotMatch"))
         .create_async()
         .await;
 
@@ -584,10 +585,77 @@ async fn rejected_credentials_are_named_in_the_connection_probe() {
 }
 
 #[tokio::test]
+async fn a_least_privilege_policy_still_passes_the_connection_probe() {
+    let mut server = mockito::Server::new_async().await;
+    // Without s3:ListBucket, S3 refuses a read of an absent object rather than
+    // reporting it absent -- and the probe key is never written. A working
+    // configuration must not be reported as broken credentials.
+    server
+        .mock("GET", "/cache-bucket/acme/v1/connectivity-probe")
+        .with_status(403)
+        .with_body(s3_error_body("AccessDenied"))
+        .create_async()
+        .await;
+
+    test_store(&server).check_connection().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_refused_read_is_a_miss_rather_than_a_failed_build() {
+    let mut server = mockito::Server::new_async().await;
+    let action = CacheDigest::blake3(b"an action");
+    let path = format!(
+        "/cache-bucket/acme/v1/action-results/blake3/{}/{}",
+        action.hash, action.size
+    );
+    server
+        .mock("GET", path.as_str())
+        .with_status(403)
+        .with_body(s3_error_body("AccessDenied"))
+        .create_async()
+        .await;
+
+    // Every cold lookup under a least-privilege policy arrives this way, so
+    // reporting them as errors would make such a policy unusable.
+    assert!(
+        test_store(&server)
+            .get_action_result(&action)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn credentials_s3_itself_rejected_are_not_mistaken_for_a_miss() {
+    let mut server = mockito::Server::new_async().await;
+    let action = CacheDigest::blake3(b"an action");
+    let path = format!(
+        "/cache-bucket/acme/v1/action-results/blake3/{}/{}",
+        action.hash, action.size
+    );
+    server
+        .mock("GET", path.as_str())
+        .with_status(403)
+        .with_body(s3_error_body("InvalidAccessKeyId"))
+        .create_async()
+        .await;
+
+    // A request that never authenticated says nothing about the object, and
+    // swallowing it would leave a permanently cold cache with no explanation.
+    let error = test_store(&server)
+        .get_action_result(&action)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("InvalidAccessKeyId"));
+}
+
+#[tokio::test]
 async fn a_bucket_in_another_region_says_which_one() {
     let mut server = mockito::Server::new_async().await;
     server
-        .mock("HEAD", "/cache-bucket/acme/v1/connectivity-probe")
+        .mock("GET", "/cache-bucket/acme/v1/connectivity-probe")
         .with_status(301)
         .with_header("x-amz-bucket-region", "eu-west-1")
         .create_async()
@@ -602,7 +670,7 @@ async fn a_bucket_in_another_region_says_which_one() {
 async fn temporary_credentials_send_their_session_token() {
     let mut server = mockito::Server::new_async().await;
     let request = server
-        .mock("HEAD", "/cache-bucket/acme/v1/connectivity-probe")
+        .mock("GET", "/cache-bucket/acme/v1/connectivity-probe")
         .match_header("x-amz-security-token", "session-token")
         .with_status(200)
         .expect(1)
