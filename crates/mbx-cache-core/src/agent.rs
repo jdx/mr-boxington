@@ -25,6 +25,9 @@ const MAX_TASK_ACTION_PREDICTIONS: usize = 16 * 1024;
 const MAX_REMOTE_TRANSFERS: usize = 64;
 const MAX_PREFETCH_TRANSFERS: usize = 48;
 const MAX_PREFETCH_ACTION_BATCH: usize = 256;
+/// Batched action lookups issued at once, well inside the transfer budget: each
+/// asks about hundreds of actions, so a handful covers a large workspace.
+const MAX_PREFETCH_BATCH_LOOKUPS: usize = 4;
 const PREFETCH_ACTION_BATCH_DELAY: Duration = Duration::from_millis(5);
 const MAX_PREFETCH_DIRECTORY_OBJECTS: usize = 100_000;
 const MAX_PREFETCH_OBJECTS_PER_WAVE: usize = 100_000;
@@ -331,6 +334,10 @@ pub struct AgentStats {
     /// Queued uploads that did not publish, having been reported and recovered
     /// from.
     pub background_upload_failures: u64,
+    /// Framed requests that published several blobs at once.
+    pub remote_blob_pack_uploads: u64,
+    /// Blobs published through those framed requests.
+    pub remote_blob_pack_upload_blobs: u64,
     /// Time the session spent waiting for queued uploads once the build ended.
     pub upload_drain_duration_ns: u64,
     /// Complete actions staged before an adapter requested them.
@@ -426,6 +433,8 @@ struct AtomicAgentStats {
     uploaded_bytes: AtomicU64,
     background_uploads: AtomicU64,
     background_upload_failures: AtomicU64,
+    remote_blob_pack_uploads: AtomicU64,
+    remote_blob_pack_upload_blobs: AtomicU64,
     upload_drain_duration_ns: AtomicU64,
     prefetched_actions: AtomicU64,
     remote_failures: AtomicU64,
@@ -571,6 +580,15 @@ impl UploadSink for AgentUploadSink {
         self.stats
             .background_uploads
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_blob_pack_uploaded(&self, blobs: u64) {
+        self.stats
+            .remote_blob_pack_uploads
+            .fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .remote_blob_pack_upload_blobs
+            .fetch_add(blobs, Ordering::Relaxed);
     }
 
     fn record_upload_failure(&self) {
@@ -1151,6 +1169,11 @@ impl CacheAgent {
                 .stats
                 .background_upload_failures
                 .load(Ordering::Relaxed),
+            remote_blob_pack_uploads: self.stats.remote_blob_pack_uploads.load(Ordering::Relaxed),
+            remote_blob_pack_upload_blobs: self
+                .stats
+                .remote_blob_pack_upload_blobs
+                .load(Ordering::Relaxed),
             upload_drain_duration_ns: self.stats.upload_drain_duration_ns.load(Ordering::Relaxed),
             prefetched_actions: self.stats.prefetched_actions.load(Ordering::Relaxed),
             bypasses: self.stats.bypasses.lock().unwrap().clone(),
@@ -1263,6 +1286,16 @@ impl CacheAgent {
                 .entry(prediction.action.clone())
                 .or_insert_with(|| prediction.adapter.clone());
         }
+        // One request per predicted action is the bulk of a prefetch's latency on
+        // a large workspace, so ask for them together where the server allows it.
+        match self.prefetch_action_batches(&actions).await {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                self.note_remote_failure();
+                warn!("remote action batch lookup failed: {error}");
+            }
+        }
         let mut actions = actions.into_iter();
         let mut tasks = tokio::task::JoinSet::new();
         for _ in 0..MAX_PREFETCH_TRANSFERS {
@@ -1313,6 +1346,101 @@ impl CacheAgent {
         if !resolved.is_empty() {
             self.prefetch_resolved_actions(resolved).await;
         }
+    }
+
+    /// Resolve predicted actions in batched lookups, staging what comes back.
+    ///
+    /// Returns whether the batch extension answered. A server without it, or one
+    /// that stops answering part way through, leaves the per-action path to
+    /// resolve whatever is left -- the results already staged here are memoized,
+    /// so nothing is looked up twice.
+    async fn prefetch_action_batches(
+        &self,
+        actions: &BTreeMap<CacheDigest, String>,
+    ) -> Result<bool> {
+        let Some(remote) = self.remote.as_deref() else {
+            return Ok(false);
+        };
+        let Some(limit) = remote.action_batch_limit().await? else {
+            return Ok(false);
+        };
+        let wanted: Vec<CacheDigest> = actions
+            .keys()
+            .filter(|action| !self.action_is_staged(action))
+            .cloned()
+            .collect();
+        if wanted.is_empty() {
+            return Ok(true);
+        }
+        let mut chunks: Vec<Vec<CacheDigest>> = Vec::new();
+        for chunk in wanted.chunks(limit) {
+            chunks.push(chunk.to_vec());
+        }
+        let mut lookups = stream::iter(chunks)
+            .map(|chunk| async move {
+                let _prefetch_permit = self.prefetch_transfers.acquire().await?;
+                let _permit = self.remote_transfers.acquire().await?;
+                self.stats
+                    .remote_action_lookups
+                    .fetch_add(1, Ordering::Relaxed);
+                let _timer =
+                    AtomicDurationTimer::start(&self.stats.remote_action_lookup_duration_ns);
+                remote.get_action_results(&chunk).await
+            })
+            .buffer_unordered(MAX_PREFETCH_BATCH_LOOKUPS);
+        let mut answered = true;
+        while let Some(lookup) = lookups.next().await {
+            let results = match lookup {
+                Ok(Some(results)) => results,
+                // Advertised but unavailable. What is left falls back.
+                Ok(None) => {
+                    answered = false;
+                    continue;
+                }
+                Err(error) => {
+                    self.note_remote_failure();
+                    warn!("remote action batch lookup failed: {error}");
+                    answered = false;
+                    continue;
+                }
+            };
+            let mut resolved = Vec::with_capacity(results.len());
+            for result in results {
+                let Some(adapter) = actions.get(&result.action).cloned() else {
+                    continue;
+                };
+                let lock = self.action_lock(&result.action);
+                let _guard = lock.lock().await;
+                if self.actions.find(&result.action)?.is_some() {
+                    continue;
+                }
+                self.pending_remote_actions
+                    .lock()
+                    .unwrap()
+                    .insert(result.action.clone(), result.clone());
+                resolved.push(PrefetchedAction { adapter, result });
+            }
+            while !resolved.is_empty() {
+                let wave = resolved
+                    .drain(..resolved.len().min(MAX_PREFETCH_ACTION_BATCH))
+                    .collect();
+                self.prefetch_resolved_actions(wave).await;
+            }
+        }
+        Ok(answered)
+    }
+
+    /// Whether an action's result is already local or already looked up.
+    fn action_is_staged(&self, action: &CacheDigest) -> bool {
+        if self
+            .pending_remote_actions
+            .lock()
+            .unwrap()
+            .contains_key(action)
+        {
+            return true;
+        }
+        self.actions.find(action).is_ok_and(|found| found.is_some())
     }
 
     #[cfg(test)]

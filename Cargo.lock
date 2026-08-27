@@ -1420,6 +1420,7 @@ dependencies = [
  "async-compression",
  "base64 0.23.1",
  "blake3",
+ "bytes",
  "eyre",
  "fslock",
  "futures-util",

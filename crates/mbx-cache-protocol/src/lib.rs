@@ -34,6 +34,15 @@ pub const BLOB_MEDIA_TYPE: &str = "application/octet-stream";
 pub const BLOB_PACK_MEDIA_TYPE: &str = "application/vnd.mbx.cache-blob-pack.v1";
 /// Media type for a JSON list of digests.
 pub const DIGEST_LIST_MEDIA_TYPE: &str = "application/vnd.mbx.cache-digests.v1+json";
+/// Media type for a JSON batch of [`ActionResult`] records.
+///
+/// Each record names the action it belongs to, so the batch is unordered and
+/// carries only the results a service actually holds.
+pub const ACTION_RESULT_BATCH_MEDIA_TYPE: &str =
+    "application/vnd.mbx.cache-action-result-batch.v1+json";
+/// Media type for the receipt describing an accepted blob-pack upload.
+pub const BLOB_PACK_RECEIPT_MEDIA_TYPE: &str =
+    "application/vnd.mbx.cache-blob-pack-receipt.v1+json";
 /// Header declaring the number of blobs in a blob pack.
 pub const BLOB_PACK_BLOBS_HEADER: &str = "mbx-cache-pack-blobs";
 /// Header declaring the total payload bytes in a blob pack.
@@ -450,9 +459,19 @@ pub struct CapabilityFeatures {
     /// Missing-blob batch queries are available.
     #[serde(default)]
     pub batch: bool,
+    /// Batched action-result lookups are available.
+    ///
+    /// Distinct from [`Self::batch`], which covers missing-blob queries only. A
+    /// service that answered those before this feature existed advertises
+    /// `batch` without implementing the action-result endpoint.
+    #[serde(default)]
+    pub action_batch: bool,
     /// Framed blob-pack downloads are available.
     #[serde(default)]
     pub blob_packs: bool,
+    /// Framed blob-pack uploads are available.
+    #[serde(default)]
+    pub blob_pack_uploads: bool,
     /// Resumable uploads are available.
     #[serde(default)]
     pub resumable_uploads: bool,

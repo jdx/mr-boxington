@@ -16,6 +16,7 @@ all-features = true
 
 [dependencies]
 base64 = "0.23"
+bytes = "1"
 blake3 = "1"
 eyre = "0.6"
 fslock = "0.2"
