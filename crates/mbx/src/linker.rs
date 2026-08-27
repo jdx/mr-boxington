@@ -110,9 +110,12 @@ fn probe(driver: &Path) -> Result<LinkerIdentity> {
 /// are read; only the first line is kept, since later ones list supported
 /// emulations that say nothing about the version.
 fn linker_version(driver: &Path) -> Result<String> {
-    let linker = run(driver, &["-print-prog-name=ld"])
-        .map(|path| PathBuf::from(path.trim()))
-        .unwrap_or_else(|_| PathBuf::from("ld"));
+    // Asked of the driver rather than resolved from PATH: the `ld` a shell
+    // would find is not necessarily the one this driver invokes, and a key
+    // naming the wrong linker is worse than no key at all.
+    let linker = PathBuf::from(
+        run(driver, &["-print-prog-name=ld"]).wrap_err("the linker driver named no linker")?,
+    );
     let output = Command::new(&linker)
         .arg("-v")
         .output()
@@ -123,7 +126,11 @@ fn linker_version(driver: &Path) -> Result<String> {
         output.stdout
     };
     let text = String::from_utf8_lossy(&combined);
-    Ok(text.lines().next().unwrap_or_default().trim().to_owned())
+    let version = text.lines().next().unwrap_or_default().trim();
+    if version.is_empty() {
+        bail!("{} reported no version", linker.display());
+    }
+    Ok(version.to_owned())
 }
 
 /// Hash the startup objects and libc the driver resolves.
@@ -214,7 +221,14 @@ fn run(program: &Path, arguments: &[&str]) -> Result<String> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    let reported = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    // A probe that answers with nothing describes nothing. Letting it through
+    // would put an empty string in the key, which every host that failed the
+    // same way would agree on.
+    if reported.is_empty() {
+        bail!("{} {arguments:?} reported nothing", program.display());
+    }
+    Ok(reported)
 }
 
 #[cfg(test)]

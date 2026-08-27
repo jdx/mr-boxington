@@ -493,8 +493,12 @@ fn restore_predicted_result(
         portable,
         ..
     } = compilation;
-    let mut context =
-        base_action_context(compilation.rustc, compilation.invocation, working_dir, portable)?;
+    let mut context = base_action_context(
+        compilation.rustc,
+        compilation.invocation,
+        working_dir,
+        portable,
+    )?;
     let invocation_digest = invocation.invocation_digest(&context)?;
     let task = prediction_task(&invocation_digest);
     let responses = session::request_agent(&[AgentRequest::FindActionPrediction {

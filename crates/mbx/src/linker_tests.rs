@@ -12,7 +12,14 @@ fn the_probe_describes_this_host() {
     };
 
     assert!(Path::new(&identity.driver).is_absolute());
+    // Nothing in the key may be blank: every host whose probe answered with
+    // nothing would otherwise agree on the same empty value.
     assert!(!identity.driver_version.is_empty());
+    assert!(!identity.linker_version.is_empty());
+    assert!(
+        identity.crt_objects.values().all(|d| !d.key().is_empty()),
+        "{identity:?}"
+    );
     // One line, not the driver's whole banner: the rest lists emulations and
     // search paths that say nothing about which linker this is.
     assert!(!identity.driver_version.contains('\n') || identity.driver_version.lines().count() > 1);
