@@ -52,10 +52,6 @@ enum Commands {
     /// Download predicted remote artifacts without running Cargo.
     Prefetch(PrefetchArgs),
     /// Run a build command outside cargo with its C and C++ compiles cached.
-    ///
-    /// Shims for cc, c++, gcc, g++, clang, and clang++ are placed first on
-    /// PATH for the command's duration, so make and CMake builds share the
-    /// same store, remote cache, and write policy as cargo builds.
     Exec(ExecArgs),
     #[usage(external_subcommand)]
     Cargo(Vec<String>),
@@ -64,8 +60,7 @@ enum Commands {
 #[derive(usage::Args)]
 #[usage(unknown_flags = "value", dont_delimit_trailing_values = true)]
 struct ExecArgs {
-    /// Directory that identifies the project across worktrees; defaults to
-    /// the enclosing git checkout, or the current directory outside one.
+    /// Directory that identifies the project across worktrees.
     #[usage(long, value_name = "DIR")]
     project_root: Option<String>,
     /// Build command and its arguments.

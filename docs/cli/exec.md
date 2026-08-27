@@ -5,11 +5,9 @@
 
 Run a build command outside cargo with its C and C++ compiles cached.
 
-Shims for cc, c++, gcc, g++, clang, and clang++ are placed first on PATH for the command's duration, so make and CMake builds share the same store, remote cache, and write policy as cargo builds.
-
 ## Arguments
 - **`<COMMAND>…`** — Build command and its arguments.
 
 ## Flags
-- **`--project-root <DIR>`** — Directory that identifies the project across worktrees; defaults to the enclosing git checkout, or the current directory outside one.
+- **`--project-root <DIR>`** — Directory that identifies the project across worktrees.
 - **`-h --help`** — Print help
