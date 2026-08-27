@@ -1431,7 +1431,12 @@ mod target_views {
 
 /// Build `project` into an explicit target directory, so two builds of the
 /// same checkout differ only in where their outputs land.
-fn build_into_target(project: &Path, store: &Path, target: &Path, settings: &[(&str, &str)]) {
+fn build_into_target(
+    project: &Path,
+    store: &Path,
+    target: &Path,
+    settings: &[(&str, &str)],
+) -> String {
     let mut command = Command::new(env!("CARGO_BIN_EXE_mbx"));
     command
         .current_dir(project)
@@ -1452,6 +1457,7 @@ fn build_into_target(project: &Path, store: &Path, target: &Path, settings: &[(&
         "build failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
 /// Read the dep-info rustc wrote for the fixture's library.
@@ -1511,7 +1517,7 @@ fn verification_is_clean_across_target_directories() {
 
     build_into_target(project.path(), store.path(), first.path(), &[]);
     let report = reports.path().join("verify.json");
-    build_into_target(
+    let stderr = build_into_target(
         project.path(),
         store.path(),
         second.path(),
@@ -1520,6 +1526,11 @@ fn verification_is_clean_across_target_directories() {
             ("MBX_STATS_REPORT", report.to_str().unwrap()),
         ],
     );
+    let reported = stderr
+        .lines()
+        .filter(|line| line.contains("diverged"))
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let stats: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&report).expect("a report should be written"))
@@ -1531,6 +1542,6 @@ fn verification_is_clean_across_target_directories() {
     assert_eq!(
         count(&stats, "divergences"),
         0,
-        "a restore into another target directory diverged: {stats}"
+        "a restore into another target directory diverged: {reported}"
     );
 }
