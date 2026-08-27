@@ -164,6 +164,31 @@ mod tests {
         assert!(guidance("incremental").contains("MBX_INCREMENTAL=0"));
     }
 
+    /// A kind with nothing specific to say falls back to a sentence that
+    /// amounts to "look at the reason below", which is what `mbx explain`
+    /// exists to save someone from. Every kind the adapter can report should
+    /// therefore say something of its own.
+    #[test]
+    fn every_reported_kind_says_something_of_its_own() {
+        let generic = guidance("a kind nobody wrote guidance for");
+        for kind in [
+            "compiler-query",
+            "standard-input",
+            "incremental",
+            "response-file",
+            "unsupported-crate-type",
+            "unsupported-search-path",
+            "native-library",
+            "unportable-native-link",
+            "ambiguous-output-name",
+            "unknown-flag",
+            "unknown-codegen-option",
+            "unmapped-absolute-path",
+        ] {
+            assert_ne!(guidance(kind), generic, "{kind} has no guidance of its own");
+        }
+    }
+
     #[test]
     fn rejects_partial_records_instead_of_guessing() {
         let error = parse_records("missing a tab\n").unwrap_err();

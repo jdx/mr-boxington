@@ -27,6 +27,7 @@ const IDENTITY_ENVIRONMENT: &[&str] = &["SDKROOT", "MACOSX_DEPLOYMENT_TARGET"];
 /// The names are platform knowledge; the rule about them is not, so the two are
 /// separated and only the names are chosen by `cfg`. A host this build cannot
 /// run on is still a host whose logic can be tested here.
+#[derive(Clone, Copy)]
 struct FileProbes {
     /// The object that starts a program. One of these must resolve, or nothing
     /// pins what the link began with.
@@ -42,8 +43,7 @@ struct FileProbes {
 }
 
 /// GNU-style hosts link against loose objects the driver can place.
-#[cfg(target_os = "linux")]
-const FILE_PROBES: FileProbes = FileProbes {
+const GNU_PROBES: FileProbes = FileProbes {
     startup: &["Scrt1.o", "crt1.o"],
     libc: &["libc.so.6", "libc.so", "libc.a", "libc.musl-x86_64.so.1"],
     rest: &["crti.o", "crtn.o", "crtbeginS.o", "crtendS.o"],
@@ -51,12 +51,24 @@ const FILE_PROBES: FileProbes = FileProbes {
 
 /// macOS links against the SDK rather than loose objects, and the SDK identity
 /// below covers what those would have pinned.
-#[cfg(not(target_os = "linux"))]
-const FILE_PROBES: FileProbes = FileProbes {
+const NO_PROBES: FileProbes = FileProbes {
     startup: &[],
     libc: &[],
     rest: &[],
 };
+
+/// What this platform asks the driver to place.
+///
+/// Chosen with `cfg!` rather than `#[cfg]` so that both tables are compiled
+/// wherever this builds. A table only one platform compiles is a table only
+/// that platform's CI can find a mistake in.
+fn file_probes() -> FileProbes {
+    if cfg!(target_os = "linux") {
+        GNU_PROBES
+    } else {
+        NO_PROBES
+    }
+}
 
 /// Describe the linker rustc will use for a native link on this host.
 ///
@@ -161,7 +173,7 @@ fn linker_version(driver: &Path) -> Result<String> {
 /// -- a startup object and a libc -- have to resolve, and a host where neither
 /// does gets no identity and no cached link.
 fn crt_objects(driver: &Path) -> Result<BTreeMap<String, CacheDigest>> {
-    probe_files(&FILE_PROBES, |name| {
+    probe_files(&file_probes(), |name| {
         let resolved = run(driver, &[&format!("-print-file-name={name}")]).ok()?;
         let path = PathBuf::from(resolved.trim());
         // The driver echoes the name back when it cannot place it.
@@ -200,8 +212,13 @@ fn probe_files(
 /// cannot report it gets no identity rather than one that omits the SDK: two
 /// such hosts would otherwise agree on a key while linking against different
 /// system libraries.
-#[cfg(target_os = "macos")]
+/// Written for every platform and gated with `cfg!` rather than `#[cfg]`, for
+/// the same reason as the probe tables: code only one platform compiles is
+/// code only that platform's CI can find a mistake in.
 fn sdk_identity() -> Result<Option<String>> {
+    if !cfg!(target_os = "macos") {
+        return Ok(None);
+    }
     let describe = || {
         let version = xcrun(&["--sdk", "macosx", "--show-sdk-version"])?;
         let build = xcrun(&["--sdk", "macosx", "--show-sdk-build-version"])?;
@@ -215,7 +232,6 @@ fn sdk_identity() -> Result<Option<String>> {
     })
 }
 
-#[cfg(target_os = "macos")]
 fn xcrun(arguments: &[&str]) -> Option<String> {
     let output = Command::new("xcrun").args(arguments).output().ok()?;
     output
@@ -223,11 +239,6 @@ fn xcrun(arguments: &[&str]) -> Option<String> {
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
         .filter(|value| !value.is_empty())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn sdk_identity() -> Result<Option<String>> {
-    Ok(None)
 }
 
 fn run(program: &Path, arguments: &[&str]) -> Result<String> {

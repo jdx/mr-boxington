@@ -27,20 +27,19 @@ fn the_probe_describes_this_host() {
     // Whatever the probes could not place is absent from the key, so the
     // inputs a link cannot be described without have to be present -- two
     // hosts failing the same probe would otherwise agree on a key without
-    // either of them having pinned what it stood for.
-    #[cfg(target_os = "linux")]
-    {
+    // either of them having pinned what it stood for. Written against whatever
+    // this platform asks for rather than behind a `cfg`, so that the host this
+    // does not run on still compiles it.
+    for (required, what) in [
+        (file_probes().startup, "what the link starts with"),
+        (file_probes().libc, "the libc"),
+    ] {
         assert!(
-            STARTUP_PROBES
-                .iter()
-                .any(|name| identity.crt_objects.contains_key(*name)),
-            "a resolved identity must pin what the link starts with: {identity:?}"
-        );
-        assert!(
-            LIBC_PROBES
-                .iter()
-                .any(|name| identity.crt_objects.contains_key(*name)),
-            "a resolved identity must pin the libc: {identity:?}"
+            required.is_empty()
+                || required
+                    .iter()
+                    .any(|name| identity.crt_objects.contains_key(*name)),
+            "a resolved identity must pin {what}: {identity:?}"
         );
     }
     if cfg!(target_os = "macos") {
