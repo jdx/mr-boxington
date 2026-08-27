@@ -422,7 +422,11 @@ fn setup_at_action(
     if let Some(configured) = configured {
         if owns_configuration {
             std::fs::create_dir_all(install_dir)?;
-            crate::session::install_shim(executable, install_dir)?;
+            crate::session::install_shim(
+                executable,
+                install_dir,
+                crate::session::ShimLink::Pinned,
+            )?;
             let verb = if action == SetupAction::Update {
                 "updated"
             } else {
@@ -440,7 +444,8 @@ fn setup_at_action(
     }
 
     std::fs::create_dir_all(install_dir)?;
-    let shim = crate::session::install_shim(executable, install_dir)?;
+    let shim =
+        crate::session::install_shim(executable, install_dir, crate::session::ShimLink::Pinned)?;
     document["build"]["rustc-wrapper"] = toml_edit::value(shim.to_string_lossy().into_owned());
     let parent = config_path
         .parent()

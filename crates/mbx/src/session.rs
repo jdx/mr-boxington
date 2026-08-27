@@ -687,14 +687,51 @@ fn cache_misses(stats: &AgentStats) -> u64 {
 
 fn install_session_shim(session_dir: &Path) -> Result<PathBuf> {
     let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
-    install_shim(&executable, session_dir)
+    install_shim(&executable, session_dir, ShimLink::Tracking)
+}
+
+/// How an installed shim refers to the mbx binary behind it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShimLink {
+    /// A symlink: the shim is whatever binary that path holds when it runs.
+    Tracking,
+    /// A hard link, or a copy where the filesystem cannot link: the bytes that
+    /// were there on the day the shim was installed.
+    Pinned,
 }
 
 /// Install a rustc shim into `directory` as a link to `executable`.
 ///
-/// The shim must be the same binary as the agent: the handshake requires an
-/// exact version match, which a hard link guarantees for free.
-pub fn install_shim(executable: &Path, directory: &Path) -> Result<PathBuf> {
+/// The shim must be the same binary as the agent -- the handshake requires an
+/// exact version match -- so it is a link to the running binary rather than an
+/// independently built copy.
+///
+/// Which kind of link matters more than it looks. On macOS, exec of a path that
+/// `link(2)` created moments ago is intermittently killed outright: SIGKILL, no
+/// output, no crash report, nothing in the system log. Measured on macOS 26.6
+/// (Apple silicon) at about one exec in eight hundred under heavy parallel
+/// load, against a binary nothing was writing, and far more readily for a large
+/// image -- the 50 MB debug build of mbx died where a 500 KB one never did,
+/// which is the shape a race in per-page signature validation would have. The
+/// window closes about half a second after the link appears, and the same path
+/// then runs fine forever. Exec of the original path never fails, and neither
+/// does exec of a symlink to it -- the kernel resolves that to a file whose
+/// signature it validated long ago. Reading the new link through first,
+/// fsyncing it and its directory, and taking the first exec ourselves to spend
+/// the race were all tried, and none of them helped.
+///
+/// So [`ShimLink::Tracking`] is for the session shim, which cargo execs a few
+/// milliseconds after it is installed to ask `rustc -vV` what compiler it has.
+/// [`ShimLink::Pinned`] is for the plain-cargo wrapper `mbx setup` installs,
+/// where nothing execs the shim for as long as it takes to type another command
+/// and a hard link keeps working even if the binary it was made from is deleted.
+///
+/// The one thing tracking gives up: replace the mbx binary underneath a running
+/// build and the session shim follows it, so cargo either execs nothing (the
+/// path is gone, and the build stops with a plain error) or execs a version the
+/// agent will not shake hands with, which bypasses the cache for the rest of the
+/// build. Both are loud and self-inflicted, unlike the kill they replace.
+pub fn install_shim(executable: &Path, directory: &Path, link: ShimLink) -> Result<PathBuf> {
     let filename = if cfg!(windows) {
         format!("{RUSTC_SHIM_STEM}.exe")
     } else {
@@ -702,6 +739,9 @@ pub fn install_shim(executable: &Path, directory: &Path) -> Result<PathBuf> {
     };
     let shim = directory.join(filename);
     let _ = std::fs::remove_file(&shim);
+    if link == ShimLink::Tracking && symlink_shim(executable, &shim) {
+        return Ok(shim);
+    }
     if let Err(link_error) = std::fs::hard_link(executable, &shim) {
         std::fs::copy(executable, &shim).wrap_err_with(|| {
             format!("failed to install the rustc shim by hard link ({link_error}) or copy")
@@ -719,6 +759,40 @@ pub fn install_shim(executable: &Path, directory: &Path) -> Result<PathBuf> {
         std::fs::set_permissions(&shim, permissions)?;
     }
     Ok(shim)
+}
+
+/// Point `shim` at `executable` by symlink, reporting whether that worked.
+///
+/// A failure is not an error: the hard link the caller falls back to is what
+/// every shim was before, so the only thing lost is the race described on
+/// [`install_shim`].
+///
+/// The target is absolutized first, because the two kinds of link do not read a
+/// relative one the same way: `link(2)` and `copy` resolve it from the caller's
+/// working directory, while a symlink resolves it from the shim's own directory
+/// -- a temporary one that shares nothing with the caller's. Resolving it here
+/// gives the argument one meaning. Absolutizing rather than declining, because a
+/// relative target must still get a symlink: `current_exe()` has been absolute
+/// on every platform mbx runs on, but nothing in its contract promises that, and
+/// a shim that quietly stopped tracking would put the kill back.
+///
+/// A target that is not there gets no symlink at all. A hard link and a copy
+/// both refuse one, and a symlink would instead name it and leave cargo to
+/// discover the dangling wrapper mid-build.
+#[cfg(unix)]
+fn symlink_shim(executable: &Path, shim: &Path) -> bool {
+    let Ok(target) = std::path::absolute(executable) else {
+        return false;
+    };
+    target.exists() && std::os::unix::fs::symlink(&target, shim).is_ok()
+}
+
+/// Windows has no shim symlinks: creating one needs a privilege ordinary
+/// accounts lack, and the code-signature race they exist to avoid is a macOS
+/// kernel behaviour with no Windows counterpart.
+#[cfg(windows)]
+fn symlink_shim(_executable: &Path, _shim: &Path) -> bool {
+    false
 }
 
 #[cfg(unix)]
