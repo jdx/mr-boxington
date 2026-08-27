@@ -60,6 +60,7 @@ export default defineConfig({
           { text: "Remote cache", link: "/remote-cache" },
           { text: "Cache server", link: "/cache-server" },
           { text: "Managed targets", link: "/managed-targets" },
+          { text: "Standalone C and C++", link: "/standalone-builds" },
           { text: "Watching builds", link: "/tui" },
         ],
       },

@@ -25,6 +25,7 @@
 - [`mbx cache remove <WORKSPACE>`](/cli/cache/remove.md)
 - [`mbx tui [--once]`](/cli/tui.md)
 - [`mbx prefetch <CARGO_ARGS>…`](/cli/prefetch.md)
+- [`mbx exec [--project-root <DIR>] <COMMAND>…`](/cli/exec.md)
 
 ## Configuration
 

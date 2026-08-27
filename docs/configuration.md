@@ -82,6 +82,10 @@ The shims never change a compilation: anything mbx cannot model exactly runs
 the real compiler and publishes nothing. See [limits](/limits) for what is
 admitted, and `mbx explain` for what a particular build bypassed.
 
+The same cache serves builds outside cargo — make, CMake, and anything else
+that finds its compiler on `PATH` — through `mbx exec`; see
+[standalone C and C++ builds](/standalone-builds).
+
 ## Verify mode
 
 `MBX_VERIFY=1` compiles and consults the cache side by side and compares the

@@ -131,6 +131,19 @@ pub fn stats(store: &Path) -> Result<StoreStats> {
     })
 }
 
+/// Size the target tree a checkout record names, if it names one.
+///
+/// A build with no target directory of its own -- one driven by make or CMake,
+/// which writes wherever it was told -- records the checkout in that field
+/// rather than inventing a directory. Walking it would report the whole source
+/// tree, `.git` included, as though it were build output.
+fn checkout_target_bytes(sizes: &mut BTreeMap<PathBuf, u64>, record: &CheckoutRecord) -> u64 {
+    if record.target_dir == record.workspace_root {
+        return 0;
+    }
+    cached_tree_bytes(sizes, &record.target_dir)
+}
+
 /// Attribute cache and target bytes to each recorded workspace.
 ///
 /// Shared objects are counted for every workspace that can reach them. That
@@ -156,7 +169,7 @@ pub fn projects(store: &Path) -> Result<Vec<ProjectUsage>> {
             }
             project.2 = project
                 .2
-                .max(cached_tree_bytes(&mut target_sizes, &record.target_dir));
+                .max(checkout_target_bytes(&mut target_sizes, &record));
         }
     }
     let action_cache = mbx_cache_core::LocalActionCache::new(store);
@@ -278,6 +291,9 @@ pub fn remove_project(store: &Path, workspace_root: &Path) -> Result<RemoveProje
 /// file per checkout rather than merging a list into one keeps concurrent
 /// builds out of each other's way -- there is nothing to merge, so there is no
 /// lock and no lost update.
+///
+/// A build with no target directory of its own passes `workspace_root` for
+/// `target_dir`, which reads as "none" rather than as a tree to measure.
 pub fn record_checkout(
     store: &Path,
     identity: &str,

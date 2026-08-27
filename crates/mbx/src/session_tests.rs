@@ -143,6 +143,78 @@ fn identity_falls_back_to_the_directory_name() {
 }
 
 #[test]
+fn path_shim_names_select_their_language() {
+    assert_eq!(path_shim_language("cc"), Some(CcLanguage::C));
+    assert_eq!(path_shim_language("gcc"), Some(CcLanguage::C));
+    assert_eq!(path_shim_language("clang"), Some(CcLanguage::C));
+    assert_eq!(path_shim_language("c++"), Some(CcLanguage::Cxx));
+    assert_eq!(path_shim_language("g++"), Some(CcLanguage::Cxx));
+    assert_eq!(path_shim_language("clang++"), Some(CcLanguage::Cxx));
+    // A versioned driver was chosen deliberately and is never intercepted.
+    assert_eq!(path_shim_language("gcc-13"), None);
+    assert_eq!(path_shim_language("mbx"), None);
+}
+
+#[test]
+fn exec_identity_is_shared_across_checkouts_with_one_lockfile() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    std::fs::write(first.path().join("Cargo.lock"), "version = 4\n").unwrap();
+    std::fs::write(second.path().join("Cargo.lock"), "version = 4\n").unwrap();
+    let command = ["make".to_string()];
+
+    assert_eq!(
+        exec_identity(first.path(), &command),
+        exec_identity(second.path(), &command),
+        "worktrees of one project must share a manifest for predictions to travel"
+    );
+    assert_ne!(
+        exec_identity(first.path(), &command),
+        exec_identity(first.path(), &["make".to_string(), "-j8".to_string()]),
+    );
+}
+
+#[test]
+fn exec_identity_falls_back_to_the_directory_name() {
+    let directory = tempfile::tempdir().unwrap();
+    let command = ["make".to_string()];
+    assert_eq!(
+        exec_identity(directory.path(), &command).len(),
+        64,
+        "a project with no lockfile and no git origin still gets an identity"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hard_linked_shim_is_recognized_as_the_same_binary() {
+    // Both files are created here rather than linked from the running test
+    // binary: a hard link needs one filesystem, and a temporary directory is
+    // on a different one from the build directory often enough that CI proves
+    // it. `install_shim_named` falls back to a copy in that case, which would
+    // test the fallback rather than the recognition below.
+    let directory = tempfile::tempdir().unwrap();
+    let binary = directory.path().join("mbx");
+    std::fs::write(&binary, b"#!/bin/sh\n").unwrap();
+    let shim_dir = directory.path().join("cc-path");
+    std::fs::create_dir(&shim_dir).unwrap();
+
+    // The case a path comparison cannot see: a shim directory an outer
+    // session left on PATH, holding a link to the same binary under a
+    // compiler's name.
+    let linked = shim_dir.join("cc");
+    std::fs::hard_link(&binary, &linked).unwrap();
+    assert!(is_same_binary(&linked, Some(&binary)));
+
+    // A copy is a different file, and saying so is correct: the shim resolves
+    // its own name away by path first, so recognition here only has to cover
+    // the links that share an inode.
+    let copied = shim_dir.join("c++");
+    std::fs::copy(&binary, &copied).unwrap();
+    assert!(!is_same_binary(&copied, Some(&binary)));
+}
+
+#[test]
 fn handshake_rejects_version_skew() {
     let response = serde_json::to_string(&AgentResponse::Hello {
         protocol: AGENT_PROTOCOL_VERSION,

@@ -3,11 +3,11 @@
 ## sccache
 
 [sccache](https://github.com/mozilla/sccache) is the established compiler
-cache, and it aims wider: it caches C, C++, and CUDA alongside Rust and can
-distribute compilation across machines. mbx caches only what a cargo build
-runs — rustc, the C and C++ its build scripts compile, and optionally its
-native links — and spends that narrower scope on problems sccache does not
-attempt:
+cache, and it aims wider: it caches CUDA alongside Rust, C, and C++, and can
+distribute compilation across machines. mbx caches rustc, the C and C++ that
+cargo build scripts compile, the C and C++ of builds outside cargo through
+[`mbx exec`](/standalone-builds), and optionally native links. It spends a
+scope still narrower than sccache's on problems sccache does not attempt:
 
 - **No daemon.** sccache runs a background server that builds talk to. mbx
   starts an in-process agent for each command and exits with it; there is
@@ -26,9 +26,9 @@ attempt:
   from pull requests, unprotected branches, and tag builds, on top of whatever
   the server enforces.
 
-If you need C/C++ caching outside cargo builds, CUDA, or distributed
-compilation, sccache is the right tool. Both wrap rustc through
-`RUSTC_WRAPPER`, so they cannot be combined for the same build.
+If you need CUDA, distributed compilation, or C and C++ on Windows and MSVC,
+sccache is the right tool. Both wrap rustc through `RUSTC_WRAPPER`, so they
+cannot be combined for the same build.
 
 ## kache
 
@@ -77,10 +77,16 @@ not offer today. The differences are in the mechanics:
   results but never rewrite or remove what an earlier build published. Fork
   pull requests hold no credentials at all and fall back to a read-only
   platform cache; see [fork PRs](/cookbook/fork-prs).
-- **C/C++ scope.** kache's shims sit on `PATH`, so C/C++ built outside cargo
-  (CMake, for example) is in scope. mbx caches the C and C++ that cargo
-  build scripts compile through the `cc` crate — it follows the cargo build
-  rather than the compiler, so a standalone C project is out of scope.
+- **How the C and C++ shims arrive.** Both put shims on `PATH`, and cover
+  make, CMake, or anything else that resolves its compiler there. kache
+  installs them alongside its service, so every build on the machine finds
+  them. mbx keeps its shim directory in the cache, but puts it on `PATH` for
+  one [`mbx exec`](/standalone-builds) command at a time: a build is cached
+  when it asks to be and untouched otherwise, and a shim reached through a
+  path some configure step recorded runs the real compiler and stands aside.
+  mbx also shims only the plain driver names (`cc`, `c++`, `gcc`, `g++`,
+  `clang`, `clang++`) on Unix, leaving a versioned or cross toolchain to the
+  build that chose it; kache covers Windows as well.
 - **Executable caching.** Both cache linked binaries on Linux and macOS. In
   mbx it is opt-in (`MBX_CACHE_LINKS=1`) and experimental, and the key
   includes the resolved linker, startup objects, libc, and SDK rather than
@@ -91,10 +97,10 @@ not offer today. The differences are in the mechanics:
   same remote protocol, each warming the other. kache's integration points
   are its compiler wrappers and its GitHub Action.
 
-If your repository mixes cargo with substantial C/C++ under other build
-systems, or you want published benchmark numbers to check claims against,
-kache is worth evaluating. Both tools wrap rustc through `RUSTC_WRAPPER`, so
-they cannot be combined for the same build.
+If you build on Windows, want the C and C++ shims installed once rather than
+wrapping the commands that should use them, or want published benchmark
+numbers to check claims against, kache is worth evaluating. Both tools wrap
+rustc through `RUSTC_WRAPPER`, so they cannot be combined for the same build.
 
 ## Tarball CI caches
 

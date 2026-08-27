@@ -74,13 +74,19 @@ Neither changes what the artifact does. Both are visible to `MBX_VERIFY=1`,
 which compares bytes: a divergence it reports for a compilation restored from
 another checkout, or on Windows from another target directory, is that
 difference rather than a fault.
-## C and C++ caching covers build-script compiles only
+
+## C and C++ caching covers the host compiles mbx drives
 
 mbx caches the C and C++ a cargo build script compiles for the host through
-the `cc` crate. Standalone C projects driven by make or CMake are outside a
-cargo build and are not reached, and neither are cross compilations: the shims
-are installed as `HOST_CC` and `HOST_CXX`, which the `cc` crate consults only
-when host and target agree.
+the `cc` crate, and the C and C++ of a command run under
+[`mbx exec`](/standalone-builds), which puts shims for the plain driver names
+on `PATH` for that command alone. A compile mbx never stood in for — one
+outside both paths, or on Windows, where no shims are installed — is not
+reached. Neither are cross compilations: a cargo build installs the shims as
+`HOST_CC` and `HOST_CXX`, which the `cc` crate consults only when host and
+target agree, and `mbx exec` shims only `cc`, `c++`, `gcc`, `g++`, `clang`,
+and `clang++`, leaving a versioned or cross toolchain to the build that
+chose it.
 
 Only a plain single-source `-c` compile through a gcc-style or clang-style
 driver is admitted. Linking, preprocessing, assembly, Objective-C, precompiled

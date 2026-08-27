@@ -244,6 +244,22 @@ fn project_usage_follows_a_recorded_target_symlink() {
 }
 
 #[test]
+fn a_checkout_with_no_target_directory_of_its_own_reports_none() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    std::fs::write(workspace.join("src/main.c"), vec![0_u8; 4096]).unwrap();
+    record_checkout(directory.path(), &"a".repeat(64), &workspace, &workspace).unwrap();
+
+    let projects = projects(directory.path()).unwrap();
+
+    assert_eq!(
+        projects[0].target_bytes, 0,
+        "a source tree is not build output, however large it is"
+    );
+}
+
+#[test]
 fn target_sizes_are_cached_by_recorded_path() {
     let directory = tempfile::tempdir().unwrap();
     let target = directory.path().join("target");
