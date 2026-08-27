@@ -323,7 +323,7 @@ fn session_path(name: &str) -> Option<PathBuf> {
 /// the compiler just to ask its version.
 fn compiler_identity(compiler: &OsStr, language: CcLanguage) -> Result<CcCompilerIdentity> {
     let executable = resolve_executable(compiler)?;
-    let probe = probe_executable(&executable, &["-v"])?;
+    let probe = probe_executable(&executable, &["-v"], &executable)?;
     let family = CcCompilerFamily::classify(&probe)?;
     let target = probe
         .lines()
@@ -331,7 +331,7 @@ fn compiler_identity(compiler: &OsStr, language: CcLanguage) -> Result<CcCompile
         .unwrap_or_default()
         .to_string();
     let assembler = if family.uses_external_assembler() {
-        assembler_identity()
+        assembler_identity(&executable)
     } else {
         String::new()
     };
@@ -344,29 +344,61 @@ fn compiler_identity(compiler: &OsStr, language: CcLanguage) -> Result<CcCompile
     })
 }
 
+/// The assembler path a driver named, if it named one at all.
+///
+/// `-print-prog-name` echoes the bare name back when the driver cannot resolve
+/// the tool, which is not a path and means the driver would search `PATH` for
+/// it -- so the caller does the same.
+fn named_assembler(printed: &str) -> Option<PathBuf> {
+    let trimmed = printed.trim();
+    Path::new(trimmed)
+        .is_absolute()
+        .then(|| PathBuf::from(trimmed))
+}
+
 /// The assembler gcc will hand objects to.
 ///
 /// Its version changes object bytes without changing anything `gcc -v` prints,
-/// so it belongs in the identity. An assembler that cannot be resolved yields
-/// an empty marker rather than a bypass: the compile still happens, and the
-/// resulting key is simply less specific than it could have been, which the
-/// unresolvable-assembler case shares with every other machine in that state.
-fn assembler_identity() -> String {
-    let Ok(assembler) = resolve_executable(OsStr::new("as")) else {
-        return "unresolved".into();
+/// so it belongs in the identity.
+///
+/// The driver is asked which assembler it will run rather than the first `as`
+/// on `PATH`: gcc resolves the tool through its own exec prefix and whatever it
+/// was configured with, so a toolchain shipping its own binutils runs one
+/// assembler while `PATH` names another. Keying the wrong one would let two
+/// toolchains share an entry whose object bytes they do not agree on.
+///
+/// An assembler that cannot be resolved yields a marker rather than a bypass:
+/// the compile still happens, and the key is simply less specific than it could
+/// have been -- which every machine in that state shares.
+fn assembler_identity(compiler: &Path) -> String {
+    // A driver that cannot resolve the tool echoes the bare name back, and then
+    // searching PATH is exactly what it does itself.
+    let named = probe_executable(compiler, &["-print-prog-name=as"], &compiler.join("as"))
+        .unwrap_or_default();
+    let assembler = match named_assembler(&named) {
+        Some(assembler) => assembler,
+        None => match resolve_executable(OsStr::new("as")) {
+            Ok(found) => found,
+            Err(_) => return "unresolved".into(),
+        },
     };
-    let version = probe_executable(&assembler, &["--version"])
+    let version = probe_executable(&assembler, &["--version"], &assembler)
         .ok()
         .and_then(|probe| probe.lines().next().map(ToOwned::to_owned))
         .unwrap_or_default();
     format!("{}; {version}", assembler.display())
 }
 
-/// Run a version probe once per session, memoized by the agent.
-fn probe_executable(executable: &Path, arguments: &[&str]) -> Result<String> {
-    let key = executable.to_path_buf();
-    // No environment variable changes what a C driver prints for `-v`, so the
-    // memo is keyed by the resolved binary alone.
+/// Run a probe once per session, memoized by the agent.
+///
+/// `memo` is the key the answer is stored under. The agent keys an executable
+/// identity by path alone, so two probes of the same binary would otherwise
+/// return each other's output; a caller asking a compiler something other than
+/// its version passes a key that cannot collide with a real path.
+fn probe_executable(executable: &Path, arguments: &[&str], memo: &Path) -> Result<String> {
+    let key = memo.to_path_buf();
+    // No environment variable changes what a C driver prints for these, so the
+    // memo needs nothing beyond the key.
     let environment = BTreeMap::new();
     let responses = session::request_agent(&[AgentRequest::FindExecutableIdentity {
         executable: key.clone(),

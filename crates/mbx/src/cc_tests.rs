@@ -60,3 +60,45 @@ fn manifest_directories_skip_system_roots_and_include_header_parents() {
         "system roots are covered by digests, not by enumerating an SDK"
     );
 }
+
+/// GCC resolves its assembler through its own exec prefix, so the first `as` on
+/// `PATH` is often not the one it runs. Keying the wrong one would let two
+/// toolchains share an entry whose object bytes they do not agree on.
+#[test]
+fn only_an_absolute_answer_from_the_driver_names_the_assembler() {
+    assert_eq!(
+        named_assembler("/toolchain/bin/as\n"),
+        Some(PathBuf::from("/toolchain/bin/as"))
+    );
+    // A driver that cannot resolve the tool echoes the bare name back, which is
+    // its way of saying "search PATH" -- so the caller must fall back, not
+    // record a relative name.
+    for unresolved in ["as", "as\n", "", "   "] {
+        assert_eq!(
+            named_assembler(unresolved),
+            None,
+            "{unresolved:?} does not name an assembler"
+        );
+    }
+}
+
+/// Pins the flag itself: a real driver answers `-print-prog-name=as` with a
+/// path, which is what makes asking it better than reading `PATH`.
+#[cfg(unix)]
+#[test]
+fn a_real_driver_names_its_assembler_by_absolute_path() {
+    let Ok(output) = std::process::Command::new("cc")
+        .arg("-print-prog-name=as")
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let printed = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        named_assembler(&printed).is_some(),
+        "the driver should name its assembler by path, said {printed:?}"
+    );
+}
