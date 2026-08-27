@@ -467,9 +467,10 @@ fn a_missing_cpp_compiler_still_leaves_c_compilations_cached() {
             PathBuf::from("/usr/bin/cc"),
         )),
         cxx: None,
+        targeted: Vec::new(),
     };
     let mut environment = BTreeMap::new();
-    shims.apply_to(&mut environment);
+    shims.apply_host(&mut environment);
 
     assert_eq!(
         environment.get("HOST_CC").map(String::as_str),
@@ -497,10 +498,105 @@ fn both_compilers_present_are_both_redirected() {
             PathBuf::from("/session/mbx-cxx"),
             PathBuf::from("/usr/bin/c++"),
         )),
+        targeted: Vec::new(),
     };
     let mut environment = BTreeMap::new();
-    shims.apply_to(&mut environment);
+    shims.apply_host(&mut environment);
     for name in ["HOST_CC", "HOST_CXX", "MBX_REAL_CC", "MBX_REAL_CXX"] {
         assert!(environment.contains_key(name), "{name} should be set");
+    }
+}
+
+/// The `cc` crate names a compiler for a target in four ways, and only those
+/// four should be wrapped -- `CCACHE_DIR` and friends merely start with the
+/// same letters.
+#[test]
+fn only_the_cc_crates_target_variables_name_a_cross_compiler() {
+    use CcLanguage::{C, Cxx};
+    for (variable, expected) in [
+        ("TARGET_CC", Some(C)),
+        ("TARGET_CXX", Some(Cxx)),
+        ("CC_aarch64-unknown-linux-musl", Some(C)),
+        ("CC_aarch64_unknown_linux_musl", Some(C)),
+        ("CXX_aarch64-unknown-linux-musl", Some(Cxx)),
+        ("CC", None),
+        ("CXX", None),
+        ("HOST_CC", None),
+        ("CC_", None),
+        ("CCACHE_DIR", None),
+        ("CXXFLAGS", None),
+    ] {
+        assert_eq!(
+            targeted_compiler_language(variable).map(|l| format!("{l:?}")),
+            expected.map(|l| format!("{l:?}")),
+            "{variable}"
+        );
+    }
+}
+
+/// A value that is a command rather than a path is left alone: wrapping it
+/// would mean running the first word and dropping the rest.
+#[test]
+fn a_compiler_named_as_a_command_is_not_wrapped() {
+    let executable = std::env::current_exe().expect("current exe");
+    for value in ["ccache gcc", "", "   ", "cc -m32"] {
+        assert_eq!(
+            resolve_named_compiler(value, &executable),
+            None,
+            "{value:?} is not a single executable"
+        );
+    }
+}
+
+/// A build that named its own cross compiler still gets it wrapped, even
+/// though it named its host compiler too and mbx stood aside for that one.
+#[test]
+fn naming_a_host_compiler_does_not_cost_the_cross_one_its_shim() {
+    let shims = CcShims {
+        cc: Some((
+            PathBuf::from("/session/mbx-cc"),
+            PathBuf::from("/usr/bin/cc"),
+        )),
+        cxx: None,
+        targeted: vec![TargetedCompiler {
+            variable: "CC_aarch64-unknown-linux-musl".into(),
+            shim_name: "mbx-cc-cc_aarch64-unknown-linux-musl".into(),
+            shim: PathBuf::from("/session/mbx-cc-cc_aarch64-unknown-linux-musl"),
+            real: PathBuf::from("/usr/bin/aarch64-linux-musl-gcc"),
+        }],
+    };
+    let mut environment = BTreeMap::new();
+    shims.apply_targeted(&mut environment);
+
+    assert_eq!(
+        environment
+            .get("CC_aarch64-unknown-linux-musl")
+            .map(String::as_str),
+        Some("/session/mbx-cc-cc_aarch64-unknown-linux-musl")
+    );
+    // Standing aside for the host pair must not have been applied here.
+    assert!(!environment.contains_key("HOST_CC"));
+    // The shim finds its compiler by the name it is invoked under.
+    assert_eq!(
+        shims.pins().get("mbx-cc-cc_aarch64-unknown-linux-musl"),
+        Some(&PathBuf::from("/usr/bin/aarch64-linux-musl-gcc"))
+    );
+}
+
+/// A targeted shim has to be recognised as one, or it would exec nothing.
+#[test]
+fn targeted_shim_names_dispatch_to_their_language() {
+    for (stem, expected) in [
+        ("mbx-cc-cc_aarch64-unknown-linux-musl", "C"),
+        ("mbx-cxx-cxx_aarch64-unknown-linux-musl", "Cxx"),
+        ("mbx-cc-target_cc", "C"),
+        ("mbx-cxx-target_cxx", "Cxx"),
+    ] {
+        let language = if stem.starts_with("mbx-cxx-") {
+            CcLanguage::Cxx
+        } else {
+            CcLanguage::C
+        };
+        assert_eq!(format!("{language:?}"), expected, "{stem}");
     }
 }

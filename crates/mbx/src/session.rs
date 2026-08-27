@@ -219,22 +219,36 @@ impl CacheSession {
         let Some(shims) = &self.cc_shims else {
             return;
         };
-        if let Some(name) = CC_CRATE_ENV
+        // A build that named its own host compiler keeps it. This does not
+        // stand in the way of the targeted shims below: those wrap a compiler
+        // the build named rather than replacing one it chose, and the `cc`
+        // crate reads the host and target variables in different builds.
+        let host_chosen = CC_CRATE_ENV
             .iter()
-            .find(|name| environment.contains_key(**name) || std::env::var_os(name).is_some())
-        {
-            debug!("{name} is already set; C and C++ compilations are not cached");
-            return;
+            .find(|name| environment.contains_key(**name) || std::env::var_os(name).is_some());
+        match host_chosen {
+            Some(name) => {
+                debug!("{name} is already set; host C and C++ compilations are not cached");
+            }
+            // `HOST_CC` rather than `CC`, because of where each sits in the
+            // `cc` crate's lookup order: it reads `CC_<target>`, then
+            // `HOST_CC` or `TARGET_CC` depending on whether it is
+            // cross-compiling, and only then plain `CC`. Setting `CC` would
+            // capture cross compiles too, and these shims wrap the *host*
+            // compiler -- a `cargo build --target` would silently build target
+            // objects with the host driver.
+            None => shims.apply_host(environment),
         }
-        // `HOST_CC` rather than `CC`, because of where each sits in the `cc`
-        // crate's lookup order: it reads `CC_<target>`, then `HOST_CC` or
-        // `TARGET_CC` depending on whether it is cross-compiling, and only then
-        // plain `CC`. Setting `CC` would capture cross compiles too, and these
-        // shims wrap the *host* compiler -- a `cargo build --target` would
-        // silently build target objects with the host driver. `HOST_CC` is
-        // consulted only when host and target agree, which is exactly the
-        // compilation these shims can stand in for.
-        shims.apply_to(environment);
+        shims.apply_targeted(environment);
+        // Each targeted shim finds the compiler it stands in for through this
+        // map, keyed by the name it is invoked under -- the same mechanism the
+        // standalone shims use.
+        let pins = shims.pins();
+        if !pins.is_empty()
+            && let Ok(encoded) = serde_json::to_string(&pins)
+        {
+            environment.insert(PATH_SHIMS_ENV.into(), encoded);
+        }
     }
 
     /// Begin a standalone build's action run and return the environment it
@@ -855,6 +869,20 @@ struct CcShims {
     cc: Option<(PathBuf, PathBuf)>,
     /// The same for C++.
     cxx: Option<(PathBuf, PathBuf)>,
+    /// Target-specific compilers the build named, each behind its own shim.
+    targeted: Vec<TargetedCompiler>,
+}
+
+/// A compiler a cross build asked for by name, and the shim standing in for it.
+struct TargetedCompiler {
+    /// The `cc` crate variable that named it, such as `CC_aarch64-linux-musl`.
+    variable: String,
+    /// File name of the shim installed for it, which is also its pin key.
+    shim_name: String,
+    /// Absolute path to the shim.
+    shim: PathBuf,
+    /// The compiler the build chose, which the shim execs.
+    real: PathBuf,
 }
 
 impl CcShims {
@@ -862,7 +890,7 @@ impl CcShims {
     ///
     /// A language with no compiler on the machine contributes nothing, so a C
     /// build on an image without a C++ compiler still gets its caching.
-    fn apply_to(&self, environment: &mut BTreeMap<String, String>) {
+    fn apply_host(&self, environment: &mut BTreeMap<String, String>) {
         for (installed, host, real) in [
             (&self.cc, "HOST_CC", REAL_CC_ENV),
             (&self.cxx, "HOST_CXX", REAL_CXX_ENV),
@@ -873,19 +901,60 @@ impl CcShims {
             }
         }
     }
+
+    /// Point each variable that named a cross compiler at its own shim.
+    fn apply_targeted(&self, environment: &mut BTreeMap<String, String>) {
+        for targeted in &self.targeted {
+            environment.insert(
+                targeted.variable.clone(),
+                targeted.shim.to_string_lossy().into_owned(),
+            );
+        }
+    }
+
+    /// Pins for the shims that stand in for a named cross compiler.
+    ///
+    /// They share the map the standalone shims use, which is what lets one
+    /// shim binary serve several compilers: it looks itself up by the name it
+    /// was invoked under.
+    fn pins(&self) -> BTreeMap<String, PathBuf> {
+        self.targeted
+            .iter()
+            .map(|targeted| (targeted.shim_name.clone(), targeted.real.clone()))
+            .collect()
+    }
+}
+
+/// Whether an environment variable is how the `cc` crate names a compiler for
+/// a particular target.
+///
+/// `TARGET_CC` and `TARGET_CXX` apply to whatever the build is cross-compiling
+/// for; `CC_<target>` and `CXX_<target>` name one triple outright.
+fn targeted_compiler_language(variable: &str) -> Option<CcLanguage> {
+    match variable {
+        "TARGET_CC" => return Some(CcLanguage::C),
+        "TARGET_CXX" => return Some(CcLanguage::Cxx),
+        _ => {}
+    }
+    // `CXX_` first: `CC_` is not a prefix of it, but reading it the other way
+    // round invites the mistake.
+    for (prefix, language) in [("CXX_", CcLanguage::Cxx), ("CC_", CcLanguage::C)] {
+        if let Some(target) = variable.strip_prefix(prefix)
+            && !target.is_empty()
+            && target
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Some(language);
+        }
+    }
+    None
 }
 
 /// Variables the `cc` crate consults before falling back to the platform
 /// default. A build that sets any of them has chosen its own compiler, and mbx
 /// stands aside rather than redirecting it.
-const CC_CRATE_ENV: &[&str] = &[
-    "CC",
-    "CXX",
-    "HOST_CC",
-    "HOST_CXX",
-    "TARGET_CC",
-    "TARGET_CXX",
-];
+const CC_CRATE_ENV: &[&str] = &["CC", "CXX", "HOST_CC", "HOST_CXX"];
 
 /// Install the C and C++ shims, resolving the compilers they will run.
 ///
@@ -916,6 +985,7 @@ fn install_cc_shims(session_dir: &Path) -> Result<Option<CcShims>> {
     let mut installed = CcShims {
         cc: None,
         cxx: None,
+        targeted: wrap_targeted_compilers(&executable, session_dir)?,
     };
     if let Some(real) = real_cc {
         installed.cc = Some((shim(CcLanguage::C)?, real));
@@ -924,6 +994,60 @@ fn install_cc_shims(session_dir: &Path) -> Result<Option<CcShims>> {
         installed.cxx = Some((shim(CcLanguage::Cxx)?, real));
     }
     Ok(Some(installed))
+}
+
+/// Put a shim in front of every cross compiler the build named for itself.
+///
+/// Deriving one is not an option: which compiler a target implies lives in the
+/// `cc` crate's own tables, and guessing wrong would not cost a cache hit, it
+/// would build the object with the wrong compiler. So only a compiler the build
+/// asked for by name is wrapped, and only when the name resolves to a single
+/// executable -- a value like `ccache gcc` is a command, not a path, and is
+/// left alone.
+fn wrap_targeted_compilers(executable: &Path, session_dir: &Path) -> Result<Vec<TargetedCompiler>> {
+    let mut wrapped = Vec::new();
+    for (variable, value) in std::env::vars() {
+        let Some(language) = targeted_compiler_language(&variable) else {
+            continue;
+        };
+        let Some(real) = resolve_named_compiler(&value, executable) else {
+            debug!("{variable} does not name a single executable; it is left as it is");
+            continue;
+        };
+        // Named for the variable so one shim binary can serve several
+        // compilers, telling them apart by the name it was invoked under.
+        let shim_name = format!(
+            "{}-{}",
+            language.shim_stem(),
+            variable.to_ascii_lowercase().replace(['.', '/'], "_")
+        );
+        let shim = install_shim_named(executable, session_dir, &shim_name, ShimLink::Tracking)?;
+        wrapped.push(TargetedCompiler {
+            variable,
+            shim_name,
+            shim,
+            real,
+        });
+    }
+    wrapped.sort_by(|left, right| left.variable.cmp(&right.variable));
+    Ok(wrapped)
+}
+
+/// Resolve a compiler a build named, rejecting anything that is not one path.
+fn resolve_named_compiler(value: &str, executable: &Path) -> Option<PathBuf> {
+    let value = value.trim();
+    if value.is_empty() || value.split_whitespace().count() != 1 {
+        return None;
+    }
+    let candidate = Path::new(value);
+    let resolved = if candidate.is_absolute() {
+        candidate.is_file().then(|| candidate.to_path_buf())
+    } else {
+        resolve_on_path_excluding(value, executable)
+    }?;
+    // A build already pointed at a shim from an outer session would otherwise
+    // be wrapped a second time.
+    (!is_same_binary(&resolved, Some(executable))).then_some(resolved)
 }
 
 fn resolve_on_path(name: &str) -> Option<PathBuf> {
@@ -1511,6 +1635,10 @@ pub fn is_cc_shim() -> Option<CcLanguage> {
     match stem.as_str() {
         CC_SHIM_STEM => Some(CcLanguage::C),
         CXX_SHIM_STEM => Some(CcLanguage::Cxx),
+        // `mbx-cxx-...` is tested first: `mbx-cc-` is not a prefix of it, but
+        // reading it the other way round invites the mistake.
+        other if other.starts_with(&format!("{CXX_SHIM_STEM}-")) => Some(CcLanguage::Cxx),
+        other if other.starts_with(&format!("{CC_SHIM_STEM}-")) => Some(CcLanguage::C),
         other => path_shim_language(other),
     }
 }
