@@ -618,6 +618,7 @@ fn managed_target_config(root: &Path) -> Config {
         incremental: false,
         share_out_dir: false,
         events: false,
+        cc: false,
         remote: Default::default(),
         http: Default::default(),
         gc: Default::default(),

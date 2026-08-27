@@ -1,4 +1,6 @@
 use super::*;
+use crate::materialize::{apply_file_mode, make_owner_writable};
+use std::io::Write as _;
 
 fn portable_for(values: &[&str]) -> Portable {
     Portable {

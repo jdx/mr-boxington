@@ -111,6 +111,9 @@ pub(crate) struct RawConfig {
     /// Record a per-compilation event stream for `mbx tui` to watch.
     #[usage(env = "MBX_EVENTS", default = true)]
     events: bool,
+    /// Cache C and C++ compilations run by build scripts.
+    #[usage(env = "MBX_CC", default = true)]
+    cc: bool,
     /// How the savings line after a build reads.
     #[usage(
         env = "MBX_SAVINGS",
@@ -260,6 +263,11 @@ pub struct Config {
     /// no flush of its own, against a compile or restore measured in
     /// milliseconds. Turn it off to keep the store free of build history.
     pub events: bool,
+    /// Point build scripts at a caching `CC` and `CXX`.
+    ///
+    /// On by default: the shim never changes the compilation, and anything it
+    /// cannot model exactly bypasses to the real compiler.
+    pub cc: bool,
     pub remote: RemoteSettings,
     pub http: HttpSettings,
     pub gc: GcSettings,
@@ -558,6 +566,7 @@ impl Config {
             incremental: raw.incremental,
             share_out_dir: raw.share_out_dir,
             events: raw.events,
+            cc: raw.cc,
             remote: RemoteSettings {
                 url: raw.remote.url,
                 namespace: raw.remote.namespace,
@@ -607,9 +616,9 @@ impl Config {
             .wrap_err_with(|| format!("failed to parse {}", path.display()))?;
 
         for (key, value) in document.iter() {
-            if !matches!(key, "incremental" | "share_out_dir") {
+            if !matches!(key, "incremental" | "share_out_dir" | "cc") {
                 bail!(
-                    "{} contains unsupported workspace setting {key:?}; only incremental and share_out_dir are allowed",
+                    "{} contains unsupported workspace setting {key:?}; only incremental, share_out_dir, and cc are allowed",
                     path.display()
                 );
             }
@@ -623,7 +632,10 @@ impl Config {
                 "share_out_dir" if !environment_contains("MBX_SHARE_OUT_DIR") => {
                     self.share_out_dir = value;
                 }
-                "incremental" | "share_out_dir" => {}
+                "cc" if !environment_contains("MBX_CC") => {
+                    self.cc = value;
+                }
+                "incremental" | "share_out_dir" | "cc" => {}
                 _ => unreachable!("workspace policy keys were validated above"),
             }
         }

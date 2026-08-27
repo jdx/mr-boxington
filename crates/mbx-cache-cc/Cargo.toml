@@ -15,8 +15,8 @@ readme.workspace = true
 all-features = true
 
 [dependencies]
-mbx-cache-core = { path = "../mbx-cache-core", version = "0.5.1", default-features = false }
-mbx-cache-rustc = { path = "../mbx-cache-rustc", version = "0.5.1", default-features = false }
+mbx-cache-core = { path = "../mbx-cache-core", version = "0.7.0", default-features = false }
+mbx-cache-rustc = { path = "../mbx-cache-rustc", version = "0.7.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 strum = { version = "0.28", features = ["derive"] }
 thiserror = "2"

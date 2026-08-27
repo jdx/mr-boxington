@@ -1396,8 +1396,11 @@ dependencies = [
  "fslock",
  "libc",
  "log",
+ "mbx-cache-cargo",
+ "mbx-cache-cc",
  "mbx-cache-core",
  "mbx-cache-rustc",
+ "mbx-cache-store",
  "rand 0.10.2",
  "ratatui",
  "reflink-copy",
@@ -1415,6 +1418,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mbx-cache-cargo"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "mbx-cache-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "mbx-cache-cc"
 version = "0.1.0"
 dependencies = [
@@ -1429,11 +1444,12 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-compression",
  "base64 0.23.1",
  "blake3",
+ "bytes",
  "eyre",
  "fslock",
  "futures-util",
@@ -1470,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-rustc"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "mbx-cache-core",
  "serde",
@@ -1479,6 +1495,20 @@ dependencies = [
  "strum",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "mbx-cache-store"
+version = "0.1.0"
+dependencies = [
+ "eyre",
+ "filetime",
+ "fslock",
+ "log",
+ "mbx-cache-core",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

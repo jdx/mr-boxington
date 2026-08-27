@@ -7,6 +7,7 @@ use crate::util::{duration_ns, format_duration, write_atomic};
 use bytesize::ByteSize;
 use eyre::{Context, Result, bail};
 use log::{debug, warn};
+use mbx_cache_cc::CcLanguage;
 use mbx_cache_core::{
     AGENT_PROTOCOL_VERSION, AgentEvent, AgentEventObserver, AgentRemoteCache, AgentRequest,
     AgentResponse, AgentStats, CacheAgent,
@@ -25,7 +26,11 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 pub const RUSTC_SHIM_STEM: &str = "mbx-rustc";
+pub const CC_SHIM_STEM: &str = "mbx-cc";
+pub const CXX_SHIM_STEM: &str = "mbx-cxx";
 const SOCKET_ENV: &str = "MBX_SOCKET";
+pub(crate) const REAL_CC_ENV: &str = "MBX_REAL_CC";
+pub(crate) const REAL_CXX_ENV: &str = "MBX_REAL_CXX";
 pub(crate) const STAGING_ENV: &str = "MBX_STAGING_DIR";
 pub(crate) const BUILD_ENV: &str = "MBX_BUILD";
 pub(crate) const VERIFY_ENV: &str = "MBX_VERIFY";
@@ -42,6 +47,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub struct CacheSession {
     socket: String,
     rustc_shim: PathBuf,
+    cc_shims: Option<CcShims>,
     staging: PathBuf,
     verify: bool,
     incremental: bool,
@@ -62,6 +68,11 @@ impl CacheSession {
     /// expected to be a temporary directory owned by the caller.
     pub async fn start(session_dir: &Path, config: &Config) -> Result<Self> {
         let shim = install_session_shim(session_dir)?;
+        let cc_shims = if config.cc {
+            install_cc_shims(session_dir)?
+        } else {
+            None
+        };
         let staging = session_dir.join("staging");
         std::fs::create_dir(&staging)?;
         let store = config.store_dir();
@@ -88,6 +99,7 @@ impl CacheSession {
         Ok(Self {
             socket,
             rustc_shim: shim,
+            cc_shims,
             staging,
             verify: config.verify,
             incremental: config.incremental,
@@ -180,6 +192,7 @@ impl CacheSession {
             );
             environment.insert(PREVIOUS_RUSTC_WRAPPER_ENV.into(), previous);
         }
+        self.begin_cc(environment);
         if self.incremental {
             // Hand the decision back to cargo, which compiles local packages
             // incrementally in dev profiles and never in release. Not
@@ -192,6 +205,36 @@ impl CacheSession {
             environment.insert("CARGO_INCREMENTAL".into(), "0".into());
         }
         action_run
+    }
+
+    /// Point build scripts at the C and C++ shims.
+    ///
+    /// A build that already chose its compiler keeps it. Unlike `RUSTC_WRAPPER`,
+    /// `CC` is commonly exported machine-wide for reasons that have nothing to
+    /// do with this build, so standing aside is unremarkable and is logged
+    /// rather than warned about; the session summary already reports how much
+    /// of the build the cache covered.
+    fn begin_cc(&self, environment: &mut BTreeMap<String, String>) {
+        let Some(shims) = &self.cc_shims else {
+            return;
+        };
+        if let Some(name) = CC_CRATE_ENV
+            .iter()
+            .find(|name| environment.contains_key(**name) || std::env::var_os(name).is_some())
+        {
+            debug!("{name} is already set; C and C++ compilations are not cached");
+            return;
+        }
+        environment.insert("CC".into(), shims.cc_shim.to_string_lossy().into_owned());
+        environment.insert("CXX".into(), shims.cxx_shim.to_string_lossy().into_owned());
+        environment.insert(
+            REAL_CC_ENV.into(),
+            shims.real_cc.to_string_lossy().into_owned(),
+        );
+        environment.insert(
+            REAL_CXX_ENV.into(),
+            shims.real_cxx.to_string_lossy().into_owned(),
+        );
     }
 
     /// Warm the recorded actions for a Cargo command without running Cargo.
@@ -678,6 +721,51 @@ fn cache_misses(stats: &AgentStats) -> u64 {
         .saturating_sub(stats.verifications)
 }
 
+/// Installed C and C++ shims, and the compilers they stand in for.
+struct CcShims {
+    cc_shim: PathBuf,
+    cxx_shim: PathBuf,
+    real_cc: PathBuf,
+    real_cxx: PathBuf,
+}
+
+/// Variables the `cc` crate consults before falling back to the platform
+/// default. A build that sets any of them has chosen its own compiler, and mbx
+/// stands aside rather than redirecting it.
+const CC_CRATE_ENV: &[&str] = &["CC", "CXX", "TARGET_CC", "TARGET_CXX"];
+
+/// Install the C and C++ shims, resolving the compilers they will run.
+///
+/// Resolution happens here rather than in the shim so the whole build agrees on
+/// one compiler, and so a machine with no C compiler simply gets no shims
+/// instead of a build script that fails differently than it would have.
+fn install_cc_shims(session_dir: &Path) -> Result<Option<CcShims>> {
+    if !cfg!(unix) {
+        return Ok(None);
+    }
+    let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
+    let (Some(real_cc), Some(real_cxx)) = (
+        resolve_on_path(CcLanguage::C.default_driver()),
+        resolve_on_path(CcLanguage::Cxx.default_driver()),
+    ) else {
+        debug!("no C and C++ compilers were found on PATH; build script compiles are not cached");
+        return Ok(None);
+    };
+    Ok(Some(CcShims {
+        cc_shim: install_shim_named(&executable, session_dir, CC_SHIM_STEM, ShimLink::Tracking)?,
+        cxx_shim: install_shim_named(&executable, session_dir, CXX_SHIM_STEM, ShimLink::Tracking)?,
+        real_cc,
+        real_cxx,
+    }))
+}
+
+fn resolve_on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
 fn install_session_shim(session_dir: &Path) -> Result<PathBuf> {
     let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
     install_shim(&executable, session_dir, ShimLink::Tracking)
@@ -691,6 +779,15 @@ pub enum ShimLink {
     /// A hard link, or a copy where the filesystem cannot link: the bytes that
     /// were there on the day the shim was installed.
     Pinned,
+}
+
+/// File name a shim with this stem is installed under.
+pub fn shim_file_name(stem: &str) -> String {
+    if cfg!(windows) {
+        format!("{stem}.exe")
+    } else {
+        stem.into()
+    }
 }
 
 /// Install a rustc shim into `directory` as a link to `executable`.
@@ -725,19 +822,28 @@ pub enum ShimLink {
 /// agent will not shake hands with, which bypasses the cache for the rest of the
 /// build. Both are loud and self-inflicted, unlike the kill they replace.
 pub fn install_shim(executable: &Path, directory: &Path, link: ShimLink) -> Result<PathBuf> {
-    let filename = if cfg!(windows) {
-        format!("{RUSTC_SHIM_STEM}.exe")
-    } else {
-        RUSTC_SHIM_STEM.into()
-    };
-    let shim = directory.join(filename);
+    install_shim_named(executable, directory, RUSTC_SHIM_STEM, link)
+}
+
+/// Install a shim for one compiler into `directory` as a link to `executable`.
+///
+/// Every shim is the same binary under a different name; the name is what tells
+/// it which compiler it stands in for. Everything [`install_shim`] documents
+/// about which kind of link is used applies here too.
+pub fn install_shim_named(
+    executable: &Path,
+    directory: &Path,
+    stem: &str,
+    link: ShimLink,
+) -> Result<PathBuf> {
+    let shim = directory.join(shim_file_name(stem));
     let _ = std::fs::remove_file(&shim);
     if link == ShimLink::Tracking && symlink_shim(executable, &shim) {
         return Ok(shim);
     }
     if let Err(link_error) = std::fs::hard_link(executable, &shim) {
         std::fs::copy(executable, &shim).wrap_err_with(|| {
-            format!("failed to install the rustc shim by hard link ({link_error}) or copy")
+            format!("failed to install the {stem} shim by hard link ({link_error}) or copy")
         })?;
     }
     #[cfg(unix)]
@@ -1074,6 +1180,109 @@ pub fn is_rustc_shim() -> bool {
         .is_some_and(|stem| stem == OsStr::new(RUSTC_SHIM_STEM))
 }
 
+/// Which compiler this process was invoked as a shim for, if any.
+pub fn is_cc_shim() -> Option<CcLanguage> {
+    let stem = std::env::args_os()
+        .next()
+        .as_deref()
+        .map(Path::new)
+        .and_then(Path::file_stem)?
+        .to_str()?
+        .to_string();
+    match stem.as_str() {
+        CC_SHIM_STEM => Some(CcLanguage::C),
+        CXX_SHIM_STEM => Some(CcLanguage::Cxx),
+        _ => None,
+    }
+}
+
+/// Ultra-early argv0 path used by the `CC` and `CXX` build scripts inherit.
+///
+/// Unlike `RUSTC_WRAPPER`, there is no convention that hands the shim the real
+/// compiler: the build script calls `$CC` and every argument is the
+/// compilation's own. The compiler to run therefore arrives out of band, and a
+/// shim that cannot find one falls back to the platform default rather than
+/// failing a build it was only meant to observe.
+pub fn run_cc_shim(language: CcLanguage) -> ExitCode {
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let compiler = match real_compiler(language) {
+        Ok(compiler) => compiler,
+        Err(error) => {
+            eprintln!(
+                "mbx[error]: the {} shim found no compiler to run: {error:#}",
+                language.shim_stem()
+            );
+            return ExitCode::from(1);
+        }
+    };
+    match crate::cc::compile(&compiler, &arguments, language) {
+        Ok(exit_code) => return exit_code,
+        Err(error) => {
+            record_cc_bypass(&error);
+            #[cfg(debug_assertions)]
+            eprintln!("mbx[warning]: cc cache bypassed: {error:#}");
+        }
+    }
+    run_transparent_cc(compiler, arguments)
+}
+
+/// The compiler a cc shim stands in for.
+///
+/// The session pins this when it installs the shims. A shim invoked with that
+/// variable missing searches `PATH` for the platform default, skipping any
+/// candidate that is this binary, so an inherited `CC` cannot make the shim
+/// call itself.
+fn real_compiler(language: CcLanguage) -> Result<OsString> {
+    let pinned = match language {
+        CcLanguage::C => REAL_CC_ENV,
+        CcLanguage::Cxx => REAL_CXX_ENV,
+    };
+    if let Some(compiler) = std::env::var_os(pinned).filter(|value| !value.is_empty()) {
+        return Ok(compiler);
+    }
+    let current = std::env::current_exe()
+        .ok()
+        .and_then(|path| std::fs::canonicalize(&path).ok().or(Some(path)));
+    let name = language.default_driver();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join(name);
+        if !candidate.is_file() {
+            continue;
+        }
+        let resolved = std::fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+        if current.as_deref() == Some(resolved.as_path()) {
+            continue;
+        }
+        return Ok(candidate.into_os_string());
+    }
+    eyre::bail!("no {name} was found on PATH")
+}
+
+fn run_transparent_cc(compiler: OsString, arguments: Vec<OsString>) -> ExitCode {
+    let mut command = Command::new(&compiler);
+    command.args(&arguments);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+
+        let error = command.exec();
+        eprintln!("mbx[error]: the cc shim failed to execute {compiler:?}: {error}");
+        ExitCode::from(1)
+    }
+    #[cfg(not(unix))]
+    {
+        match command.status() {
+            Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
+            Err(error) => {
+                eprintln!("mbx[error]: the cc shim failed to execute {compiler:?}: {error}");
+                ExitCode::from(1)
+            }
+        }
+    }
+}
+
 /// Ultra-early argv0 path used by cargo's `RUSTC_WRAPPER` integration.
 ///
 /// Cargo invokes this thousands of times per build, so it runs before any
@@ -1232,6 +1441,22 @@ fn record_bypass(error: &eyre::Report) {
     append_bypass_log(kind, error);
     // A shim running outside a session has nowhere to report, which is fine.
     let _ = request_agent(&[AgentRequest::RecordBypass { kind: kind.into() }]);
+}
+
+/// Tell the session that a C or C++ compilation was not cacheable.
+///
+/// Kinds are prefixed so that a reason the two adapters share by name, such as
+/// an unmodeled flag, does not merge into one statistic covering both.
+fn record_cc_bypass(error: &eyre::Report) {
+    let kind = error
+        .downcast_ref::<mbx_cache_cc::CcBypassReason>()
+        .map_or_else(
+            || "cc-other".to_string(),
+            |reason| format!("cc-{}", reason.kind()),
+        );
+    append_bypass_log(&kind, error);
+    // A shim running outside a session has nowhere to report, which is fine.
+    let _ = request_agent(&[AgentRequest::RecordBypass { kind }]);
 }
 
 /// Record a compilation the cache had no key to look up with.
