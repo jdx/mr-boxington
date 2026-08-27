@@ -1506,6 +1506,16 @@ fn a_restored_dep_info_names_the_target_directory_it_was_restored_into() {
 
 /// The same compilation restored into a different target directory is what a
 /// fresh compilation there would have produced.
+///
+/// Unix only, and the reason is worth stating. On Windows the compiled
+/// artifact itself is not byte-identical between two target directories: with
+/// everything else held constant -- one checkout, one set of sources,
+/// incremental off -- the rlib still differs, because the debug information
+/// records where the compilation wrote its objects. Nothing this fix does can
+/// change that, and rewriting inside a compiled artifact would be corruption
+/// rather than translation, so verification there reports a difference that is
+/// real.
+#[cfg(unix)]
 #[test]
 fn verification_is_clean_across_target_directories() {
     let store = tempfile::tempdir().unwrap();

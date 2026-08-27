@@ -31,6 +31,24 @@ identity. Native targets, custom target specifications, external WebAssembly
 toolchains, native libraries, custom linkers, disabled WASI CRT bundling, and
 non-affirmative `link-self-contained` modes remain uncached.
 
+## Restored artifacts are equivalent, not always identical
+
+A restore writes this checkout's spelling of the outputs that describe where a
+compilation ran -- its dep-info and its diagnostics -- so the files cargo reads
+name the directory it is building into.
+
+The compiled artifacts are reused as they were produced, and two things can
+make them differ from what a fresh compilation here would have written. rustc
+records absolute source paths in metadata and debug information, so artifacts
+built from two checkouts differ even when the sources are identical. On
+Windows they differ between two target directories as well, because the debug
+information also records where the objects were written.
+
+Neither changes what the artifact does. Both are visible to `MBX_VERIFY=1`,
+which compares bytes: a divergence it reports for a compilation restored from
+another checkout, or on Windows from another target directory, is that
+difference rather than a fault.
+
 ## `OUT_DIR` sharing is opt-in
 
 A generated source path can contain an absolute checkout-specific `OUT_DIR`.
