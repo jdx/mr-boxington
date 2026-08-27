@@ -158,8 +158,12 @@ impl UploadQueue {
 
     /// Queue a blob held in the local CAS, returning the ticket for its upload.
     ///
-    /// A digest already queued in this session returns the existing ticket
-    /// instead of uploading the same bytes again.
+    /// A digest still in flight, or already published, returns the existing
+    /// ticket rather than sending the same bytes twice. One that finished
+    /// without publishing is queued again: many compilations share a blob --
+    /// every empty stdout is the same object -- so handing a settled failure to
+    /// later requests would let one transient error withhold every action result
+    /// after it.
     pub(crate) fn queue_blob(
         &self,
         digest: &CacheDigest,
@@ -168,17 +172,21 @@ impl UploadQueue {
     ) {
         let ticket = {
             let mut tickets = self.inner.blob_tickets.lock().unwrap();
-            if let Some(ticket) = tickets.get(digest) {
-                ticket.clone()
-            } else {
-                let (done, ticket) = ticket_channel();
-                tickets.insert(digest.clone(), ticket.clone());
-                self.push(QueuedUpload::Blob {
-                    digest: digest.clone(),
-                    path,
-                    done,
-                });
-                ticket
+            match tickets
+                .get(digest)
+                .map(|ticket| (ticket.clone(), ticket.peek().copied()))
+            {
+                Some((ticket, None | Some(UploadOutcome::Uploaded))) => ticket,
+                _ => {
+                    let (done, ticket) = ticket_channel();
+                    tickets.insert(digest.clone(), ticket.clone());
+                    self.push(QueuedUpload::Blob {
+                        digest: digest.clone(),
+                        path,
+                        done,
+                    });
+                    ticket
+                }
             }
         };
         connection.record(ticket);

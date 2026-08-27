@@ -2017,6 +2017,101 @@ async fn a_blob_that_fails_to_upload_withholds_its_action_result() {
     assert!(stats.remote_failures > 0);
 }
 
+/// A blob that failed once must not withhold everything that follows.
+///
+/// Compilations share blobs -- every empty stdout is the same object -- so a
+/// settled failure reused for the rest of the session would let one transient
+/// error suppress every action result after it.
+#[tokio::test]
+async fn a_blob_that_failed_is_uploaded_again_for_a_later_result() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let shared_bytes = b"shared across compilations".to_vec();
+    let shared = CacheDigest::blake3(&shared_bytes);
+    let second_action = CacheDigest::blake3(b"the compilation after the failure");
+    let failed = server
+        .mock("PUT", blob_path(&shared).as_str())
+        .with_status(500)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().join("writer"),
+        RemoteCacheMode::WriteOnly,
+    );
+    let store_shared = |index: usize| {
+        let source = directory.path().join(format!("source-{index}"));
+        fs::write(&source, &shared_bytes).unwrap();
+        AgentRequest::StoreBlob {
+            digest: shared.clone(),
+            source,
+        }
+    };
+
+    // The first compilation's upload of the shared blob fails, so its result is
+    // withheld.
+    agent
+        .handle_requests([
+            store_shared(0),
+            AgentRequest::StoreActionResult {
+                result: RemoteActionResult {
+                    action: shared.clone(),
+                    metadata: None,
+                    output_root: None,
+                    version: 1,
+                },
+            },
+        ])
+        .await;
+    agent.wait_for_uploads().await;
+    failed.assert_async().await;
+
+    // A later compilation stores the same bytes and must get its own attempt.
+    let retried = server
+        .mock("PUT", blob_path(&shared).as_str())
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let second_blob = server
+        .mock("PUT", blob_path(&second_action).as_str())
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let second_result = server
+        .mock("PUT", action_path(&second_action).as_str())
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let source = directory.path().join("second-action");
+    fs::write(&source, b"the compilation after the failure").unwrap();
+    agent
+        .handle_requests([
+            store_shared(1),
+            AgentRequest::StoreBlob {
+                digest: second_action.clone(),
+                source,
+            },
+            AgentRequest::StoreActionResult {
+                result: RemoteActionResult {
+                    action: second_action.clone(),
+                    metadata: None,
+                    output_root: None,
+                    version: 1,
+                },
+            },
+        ])
+        .await;
+    agent.wait_for_uploads().await;
+
+    retried.assert_async().await;
+    second_blob.assert_async().await;
+    second_result.assert_async().await;
+}
+
 #[tokio::test]
 async fn a_repeated_blob_is_uploaded_once() {
     let directory = tempfile::tempdir().unwrap();
