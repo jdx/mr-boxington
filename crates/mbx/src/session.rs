@@ -1187,14 +1187,19 @@ pub(crate) fn verify_requested() -> bool {
     std::env::var_os(VERIFY_ENV).is_some_and(|value| !value.is_empty() && value != "0")
 }
 
-/// Whether the shim may cache a natively linked program.
+/// Whether this build may cache natively linked programs.
 ///
-/// Restricted to platforms whose linker this build knows how to identify: a
-/// host mbx cannot describe would otherwise key a link as though the linker
-/// did not matter. Read the same way as verify mode.
-pub(crate) fn cache_links_requested() -> bool {
+/// Restricted to platforms whose linker mbx knows how to identify: a host it
+/// cannot describe would otherwise key a link as though the linker did not
+/// matter.
+pub fn cache_links_supported() -> bool {
     cfg!(any(target_os = "linux", target_os = "macos"))
-        && std::env::var_os(CACHE_LINKS_ENV).is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+/// Whether the shim may cache a natively linked program. Read the same way as
+/// verify mode.
+pub(crate) fn cache_links_requested() -> bool {
+    std::env::var_os(CACHE_LINKS_ENV).is_some_and(|value| !value.is_empty() && value != "0")
 }
 
 /// Whether the shim may make a compilation independent of its `OUT_DIR` so two

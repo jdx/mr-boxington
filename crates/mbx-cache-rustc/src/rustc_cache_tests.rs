@@ -1046,6 +1046,20 @@ fn unportable_native_links_still_bypass() {
             "-Clink-self-contained=yes",
             BypassReason::UnportableNativeLink("link-self-contained=yes".into()),
         ),
+        // Valueless is how cargo actually spells these, and rustc reads the
+        // flag itself as the request.
+        (
+            "-Crpath",
+            BypassReason::UnportableNativeLink("rpath".into()),
+        ),
+        (
+            "-Cprefer-dynamic",
+            BypassReason::UnportableNativeLink("prefer-dynamic".into()),
+        ),
+        (
+            "-Clink-self-contained",
+            BypassReason::UnportableNativeLink("link-self-contained".into()),
+        ),
         // Not modeled at all, so it never reaches the portability question.
         (
             "-Clinker=/usr/bin/false",
@@ -1061,7 +1075,7 @@ fn unportable_native_links_still_bypass() {
     }
 
     // Absent or affirmatively off is the default the compiler identity pins.
-    for flag in ["-Csplit-debuginfo=off", "-Crpath=no"] {
+    for flag in ["-Csplit-debuginfo=off", "-Crpath=no", "-Cprefer-dynamic=no"] {
         let arguments = args(&["--test", "--emit=dep-info,link", flag, "src/lib.rs"]);
         assert!(
             RustcInvocation::parse_with(&arguments, native_links()).is_ok(),
@@ -1084,6 +1098,13 @@ fn macos_debug_info_makes_a_native_link_unportable() {
 
     assert_eq!(
         RustcInvocation::parse_with(&arguments, native_links()),
+        Err(BypassReason::UnportableNativeLink("debuginfo=2".into()))
+    );
+
+    // `-g` is the same request under another name.
+    let shorthand = args(&["--test", "--emit=dep-info,link", "-g", "src/lib.rs"]);
+    assert_eq!(
+        RustcInvocation::parse_with(&shorthand, native_links()),
         Err(BypassReason::UnportableNativeLink("debuginfo=2".into()))
     );
 

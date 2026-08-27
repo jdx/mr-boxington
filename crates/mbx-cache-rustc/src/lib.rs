@@ -1380,38 +1380,52 @@ impl Parser<'_> {
             let Argument::Plain(value) = argument else {
                 continue;
             };
-            let Some((name, value)) = value
-                .strip_prefix("--codegen=")
-                .and_then(|option| option.split_once('='))
-            else {
+            // `-g` is rustc's shorthand for debug info, and arrives as itself
+            // rather than as a codegen option.
+            let (name, value) = if value == "-g" {
+                ("debuginfo", Some("2"))
+            } else if let Some(option) = value.strip_prefix("--codegen=") {
+                match option.split_once('=') {
+                    Some((name, value)) => (name, Some(value)),
+                    // A codegen flag with no value asks for its enabled form,
+                    // which is what cargo passes for `-Crpath`. Reading it as
+                    // "nothing to check" is how these slipped through.
+                    None => (option, None),
+                }
+            } else {
                 continue;
             };
             let unportable = match name {
                 // Packed debug info leaves a .dSYM bundle or .dwp file beside
                 // the binary, and mbx stores neither.
-                "split-debuginfo" => value != "off",
+                "split-debuginfo" => value != Some("off"),
                 // ld64 records absolute object paths and their timestamps in
                 // the binary's debug map, so the same source links to
                 // different bytes in another checkout -- or the same one
                 // twice.
-                "debuginfo" if cfg!(target_os = "macos") => !matches!(value, "0" | "none"),
+                "debuginfo" if cfg!(target_os = "macos") => !matches!(value, Some("0" | "none")),
                 // Both embed this checkout's absolute target directory.
-                "rpath" | "prefer-dynamic" => {
-                    matches!(value, "y" | "yes" | "on" | "true")
-                }
+                "rpath" | "prefer-dynamic" => is_enabled(value),
                 // The CRT objects a self-contained link uses come from
                 // somewhere other than where the driver reports.
                 "link-self-contained" => true,
                 _ => false,
             };
             if unportable {
-                return Err(BypassReason::UnportableNativeLink(format!(
-                    "{name}={value}"
-                )));
+                return Err(BypassReason::UnportableNativeLink(match value {
+                    Some(value) => format!("{name}={value}"),
+                    None => name.to_owned(),
+                }));
             }
         }
         Ok(())
     }
+}
+
+/// Whether a boolean codegen option is asking for its enabled form. Absent a
+/// value, rustc reads the flag itself as the request.
+fn is_enabled(value: Option<&str>) -> bool {
+    matches!(value, None | Some("y" | "yes" | "on" | "true"))
 }
 
 fn compiler_bundled_wasm_target(target: &str) -> bool {
