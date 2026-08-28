@@ -214,14 +214,12 @@ async fn handshake_and_blob_round_trip() {
     );
 }
 
-/// A remembered blob passed full content verification this session, and CAS
-/// blobs are immutable once published, so later lookups check only that the
-/// file still exists at its declared size. Rehashing on every lookup would
-/// read each large artifact once per compilation that links it; the restore
-/// path already trusts session verification (`stage_verified_cached_output`),
-/// so per-lookup hashing bought detection of nothing mbx itself can cause.
+/// A remembered blob is revalidated by file identity rather than by rehashing
+/// it, so an overwrite that preserves the length is still caught: writing the
+/// file moves its modification time. The modification time is set explicitly
+/// here so the test does not depend on the filesystem's timestamp resolution.
 #[test]
-fn remembered_blobs_are_trusted_at_their_declared_size() {
+fn remembered_blobs_reject_same_size_corruption() {
     let directory = tempfile::tempdir().unwrap();
     let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
     let digest = CacheDigest::blake3(b"cached object");
@@ -231,9 +229,16 @@ fn remembered_blobs_are_trusted_at_their_declared_size() {
         Some(path.clone())
     );
 
-    std::fs::write(&path, b"broken object").unwrap();
+    let corrupted = b"broken object";
+    assert_eq!(corrupted.len() as u64, digest.size);
+    let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    std::io::Write::write_all(&mut file, corrupted).unwrap();
+    file.set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1))
+        .unwrap();
+    drop(file);
 
-    assert_eq!(agent.find_verified_blob(&digest).unwrap(), Some(path));
+    assert!(agent.find_verified_blob(&digest).is_err());
+    assert!(!agent.verified_blobs.lock().unwrap().contains_key(&digest));
 }
 
 #[test]
