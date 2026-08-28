@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.7.1...mbx-cache-rustc-v0.8.0) - 2026-08-28
+
+### Fixed
+
+- *(cache-rustc)* key inert native search directories by path ([#153](https://github.com/jdx/mr-boxington/pull/153))
+
 ## [0.7.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.7.0...mbx-cache-rustc-v0.7.1) - 2026-08-28
 
 ### Added
