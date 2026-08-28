@@ -5,7 +5,7 @@ use crate::policy;
 use eyre::{Context, Result};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, ExitStatus};
+use std::process::{Command, ExitCode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -187,7 +187,12 @@ fn command_check(name: &'static str, command: &OsStr, toolchain: Option<&str>) -
 /// reason a toolchain query fails — most often that the toolchain is not
 /// installed — is on stderr. Reporting the exit status alone leaves the reader
 /// with a diagnostic that diagnoses nothing.
-fn failure_detail(arguments: &[String], status: ExitStatus, stderr: &[u8]) -> String {
+///
+/// The status is taken as anything printable rather than as an `ExitStatus`,
+/// which has no portable constructor: a test would otherwise have to spawn a
+/// process that fails on every platform this runs on to reach one line of
+/// formatting.
+fn failure_detail(arguments: &[String], status: impl std::fmt::Display, stderr: &[u8]) -> String {
     let stderr = String::from_utf8_lossy(stderr);
     let reason = stderr
         .lines()
@@ -397,7 +402,7 @@ mod tests {
     #[test]
     fn a_failed_version_query_reports_what_it_asked_and_why_it_failed() {
         let arguments = version_arguments(Some("1.91"));
-        let status = std::process::Command::new("false").status().unwrap();
+        let status = "exit status: 1";
 
         let detail = failure_detail(
             &arguments,
@@ -405,18 +410,16 @@ mod tests {
             b"error: toolchain '1.91' is not installed\nnote: run rustup\n",
         );
 
-        assert!(
-            detail.starts_with("+1.91 --version exited with"),
-            "{detail}"
-        );
-        assert!(
-            detail.ends_with(": error: toolchain '1.91' is not installed"),
-            "{detail}"
+        assert_eq!(
+            detail,
+            "+1.91 --version exited with exit status: 1: error: toolchain '1.91' is not installed"
         );
         // Nothing on stderr leaves the status to end the line, rather than a
         // dangling separator.
-        let quiet = failure_detail(&arguments, status, b"  \n");
-        assert!(quiet.ends_with(&status.to_string()), "{quiet}");
+        assert_eq!(
+            failure_detail(&arguments, status, b"  \n"),
+            "+1.91 --version exited with exit status: 1"
+        );
     }
 
     #[test]
