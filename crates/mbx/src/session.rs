@@ -70,7 +70,10 @@ impl CacheSession {
     pub async fn start(session_dir: &Path, config: &Config) -> Result<Self> {
         let shim = install_session_shim(session_dir)?;
         let cc_shims = if config.cc {
-            install_cc_shims(session_dir)?
+            // Build systems such as CMake persist HOST_CC as an absolute
+            // compiler path. Keep the C/C++ shims outside the temporary
+            // session so that path remains executable on the next mbx run.
+            install_cc_shims(&config.cache_dir.join("shims"))?
         } else {
             None
         };
@@ -977,7 +980,7 @@ const CC_CRATE_ENV: &[&str] = &["CC", "CXX", "HOST_CC", "HOST_CXX"];
 /// Resolution happens here rather than in the shim so the whole build agrees on
 /// one compiler, and so a machine with no C compiler simply gets no shims
 /// instead of a build script that fails differently than it would have.
-fn install_cc_shims(session_dir: &Path) -> Result<Option<CcShims>> {
+fn install_cc_shims(shims_dir: &Path) -> Result<Option<CcShims>> {
     if !cfg!(unix) {
         return Ok(None);
     }
@@ -989,18 +992,16 @@ fn install_cc_shims(session_dir: &Path) -> Result<Option<CcShims>> {
     // Wrapped first, because a cross image is entitled to ship the driver it
     // cross-compiles with and no host `cc` at all. Deciding there is nothing to
     // do before looking would leave exactly that build uncached.
-    let targeted = wrap_targeted_compilers(&executable, session_dir)?;
+    std::fs::create_dir_all(shims_dir)?;
+    let targeted = wrap_targeted_compilers(&executable, shims_dir)?;
     if real_cc.is_none() && real_cxx.is_none() && targeted.is_empty() {
         debug!("no C or C++ compiler was found on PATH; build script compiles are not cached");
         return Ok(None);
     }
     let shim = |language: CcLanguage| -> Result<PathBuf> {
-        install_shim_named(
-            &executable,
-            session_dir,
-            language.shim_stem(),
-            ShimLink::Tracking,
-        )
+        let destination = shims_dir.join(shim_file_name(language.shim_stem()));
+        link_path_shim(&executable, &destination)?;
+        Ok(destination)
     };
     let mut installed = CcShims {
         cc: None,
@@ -1024,13 +1025,13 @@ fn install_cc_shims(session_dir: &Path) -> Result<Option<CcShims>> {
 /// asked for by name is wrapped, and only when the name resolves to a single
 /// executable -- a value like `ccache gcc` is a command, not a path, and is
 /// left alone.
-fn wrap_targeted_compilers(executable: &Path, session_dir: &Path) -> Result<Vec<TargetedCompiler>> {
+fn wrap_targeted_compilers(executable: &Path, shims_dir: &Path) -> Result<Vec<TargetedCompiler>> {
     let mut wrapped = Vec::new();
     for (variable, value) in std::env::vars() {
         let Some(language) = targeted_compiler_language(&variable) else {
             continue;
         };
-        let Some(real) = resolve_named_compiler(&value, executable, session_dir) else {
+        let Some(real) = resolve_named_compiler(&value, executable, shims_dir) else {
             debug!("{variable} does not name a single executable; it is left as it is");
             continue;
         };
@@ -1041,7 +1042,8 @@ fn wrap_targeted_compilers(executable: &Path, session_dir: &Path) -> Result<Vec<
             language.shim_stem(),
             variable.to_ascii_lowercase().replace(['.', '/'], "_")
         );
-        let shim = install_shim_named(executable, session_dir, &shim_name, ShimLink::Tracking)?;
+        let shim = shims_dir.join(shim_file_name(&shim_name));
+        link_path_shim(executable, &shim)?;
         wrapped.push(TargetedCompiler {
             variable,
             shim_name,

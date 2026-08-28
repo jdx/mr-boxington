@@ -52,6 +52,56 @@ async fn session_environment_directs_cargo_at_the_shim() {
     session.finish().await.unwrap();
 }
 
+/// Build scripts may hand HOST_CC to CMake, which records its absolute path in
+/// CMakeCache.txt and reuses it on later cargo invocations. That path must
+/// therefore outlive the temporary mbx session that first configured CMake.
+#[cfg(unix)]
+#[tokio::test]
+async fn cc_shim_path_survives_and_is_reused_across_sessions() {
+    if resolve_on_path(CcLanguage::C.default_driver()).is_none() {
+        return;
+    }
+    let cache = tempfile::tempdir().unwrap();
+    let mut config = test_config(cache.path());
+    config.cc = true;
+
+    let first_path = {
+        let session_dir = tempfile::tempdir().unwrap();
+        let session = CacheSession::start(session_dir.path(), &config)
+            .await
+            .unwrap();
+        let path = session
+            .cc_shims
+            .as_ref()
+            .and_then(|shims| shims.cc.as_ref())
+            .map(|(shim, _)| shim.clone())
+            .unwrap();
+        session.finish().await.unwrap();
+        path
+    };
+
+    assert!(
+        first_path.is_file(),
+        "the compiler path cached by a build system must survive its mbx session"
+    );
+
+    let second_dir = tempfile::tempdir().unwrap();
+    let second = CacheSession::start(second_dir.path(), &config)
+        .await
+        .unwrap();
+    let second_path = second
+        .cc_shims
+        .as_ref()
+        .and_then(|shims| shims.cc.as_ref())
+        .map(|(shim, _)| shim.as_path())
+        .unwrap();
+    assert_eq!(
+        second_path, first_path,
+        "later sessions must reuse the compiler path a build system cached"
+    );
+    second.finish().await.unwrap();
+}
+
 #[tokio::test]
 async fn incremental_builds_leave_cargo_incremental_alone() {
     let cache = tempfile::tempdir().unwrap();
