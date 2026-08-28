@@ -3,7 +3,7 @@
 
 **Usage:** `mbx <SUBCOMMAND>`
 
-**Version:** 0.5.3
+**Version:** 0.5.4
 
 - **Usage:** `mbx <SUBCOMMAND>`
 
