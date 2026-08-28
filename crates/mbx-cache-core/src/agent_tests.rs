@@ -537,6 +537,40 @@ async fn coalesces_repeated_remote_action_lookups() {
 }
 
 #[tokio::test]
+async fn begin_task_reports_how_many_predictions_were_loaded() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let task = "b".repeat(64);
+
+    let seed = CacheAgent::new(&cache, "test-version");
+    let run = seed.begin_task(&task).await.unwrap();
+    assert_eq!(seed.stats().predictions_loaded, 0);
+    for name in ["first", "second"] {
+        assert!(matches!(
+            seed.respond(AgentRequest::RecordActionPrediction {
+                task: run.clone(),
+                prediction: ActionPrediction {
+                    invocation: CacheDigest::blake3(name.as_bytes()),
+                    action: CacheDigest::blake3(name.as_bytes()),
+                    adapter: "rustc".into(),
+                    payload: "{}".into(),
+                },
+            })
+            .await,
+            AgentResponse::ActionPredictionRecorded
+        ));
+    }
+    seed.commit_task(&run).await.unwrap();
+
+    // What was loaded, not what was recorded: this is the baseline a session
+    // had available to match against.
+    assert_eq!(seed.stats().predictions_loaded, 0);
+    let reader = CacheAgent::new(&cache, "test-version");
+    reader.begin_task(&task).await.unwrap();
+    assert_eq!(reader.stats().predictions_loaded, 2);
+}
+
+#[tokio::test]
 async fn publishes_only_successfully_committed_task_action_manifests() {
     let directory = tempfile::tempdir().unwrap();
     let cache = directory.path().join("cache");

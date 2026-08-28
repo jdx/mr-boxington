@@ -313,6 +313,18 @@ impl RustcInvocation {
                 } else {
                     working_dir.join(path)
                 };
+                // An inert directory outside every mapped root enters the key
+                // by its literal path in the arguments, not by its contents --
+                // predictions skip it under the same rule, so both discovery
+                // paths agree on the action key.
+                if self.native_search_is_inert()
+                    && matches!(
+                        super::normalize_mapped_path(&directory, &working_dir, path_mappings),
+                        Err(BypassReason::UnmappedAbsolutePath(_))
+                    )
+                {
+                    continue;
+                }
                 collect_native_directory(
                     &directory,
                     &admitted_roots,
@@ -607,6 +619,116 @@ mod tests {
         assert_eq!(
             discovered.verify_not_modified_since(modified),
             Err(BypassReason::InputModifiedDuringCompilation(source))
+        );
+    }
+
+    /// The MSVC toolset directories `cc`-built dependencies hand to every
+    /// downstream compile on Windows: absolute, version-stamped, and outside
+    /// every mapped root.
+    fn toolchain_native_directory(version: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!(r"C:\Program Files\MSVC\{version}\lib\x64"))
+        } else {
+            PathBuf::from(format!("/opt/msvc/{version}/lib/x64"))
+        }
+    }
+
+    fn library_with_native_search(source: &Path, directory: &Path) -> RustcInvocation {
+        RustcInvocation::parse(&[
+            "--crate-name=widget".into(),
+            "--crate-type=lib".into(),
+            "--emit=metadata,link".into(),
+            format!("-Lnative={}", directory.display()).into(),
+            source.to_path_buf().into_os_string(),
+        ])
+        .unwrap()
+    }
+
+    fn library_context(root: &Path, mappings: Vec<PathMapping>) -> ActionContext {
+        ActionContext {
+            compiler: crate::CompilerIdentity {
+                toolchain: "core:rust@test".into(),
+                rustc_version: "test".into(),
+                host: std::env::consts::ARCH.into(),
+            },
+            working_dir: root.to_path_buf(),
+            path_mappings: mappings,
+            environment: BTreeMap::new(),
+            portable_environment: BTreeSet::new(),
+            inputs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn unmapped_native_directory_is_keyed_by_path_for_library_emits() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let source = root.join("lib.rs");
+        std::fs::write(&source, "pub fn library() {}\n").unwrap();
+        let toolchain = toolchain_native_directory("14.51.36231");
+        let invocation = library_with_native_search(&source, &toolchain);
+        let mappings = vec![PathMapping::new(root, "workspace")];
+        let dep_info = RustcDepInfo::parse(&format!("output: {}\n", source.display())).unwrap();
+
+        // The directory does not even exist: its contents are not inputs.
+        let discovered = invocation
+            .discover_inputs_with_mappings(&dep_info, root, &mappings)
+            .unwrap();
+        assert_eq!(discovered.inputs.len(), 1);
+        assert_eq!(discovered.inputs[0].path, source);
+
+        // The literal path is key material, so a toolset update misses.
+        let context = library_context(root, mappings.clone());
+        let digest = invocation.invocation_digest(&context).unwrap();
+        let updated = library_with_native_search(&source, &toolchain_native_directory("14.52.0"));
+        assert_ne!(digest, updated.invocation_digest(&context).unwrap());
+
+        // The prediction skips the directory the same way discovery does, so a
+        // build that replays it derives the action key dep-info would have.
+        let mut recorded = context.clone();
+        discovered.clone().apply_to(&mut recorded).unwrap();
+        let action = invocation.action(recorded).unwrap();
+        let prediction = invocation.prediction(&context, &discovered).unwrap();
+        let replayed = prediction.discover(root, &context.path_mappings).unwrap();
+        let mut replay_context = context.clone();
+        replayed.apply_to(&mut replay_context).unwrap();
+        assert_eq!(
+            invocation.action(replay_context).unwrap().digest,
+            action.digest
+        );
+    }
+
+    #[test]
+    fn unmapped_native_directory_still_refuses_a_native_link() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let source = root.join("main.rs");
+        std::fs::write(&source, "fn main() {}\n").unwrap();
+        let toolchain = toolchain_native_directory("14.51.36231");
+        let invocation = RustcInvocation::parse_with(
+            &[
+                "--crate-name=app".into(),
+                "--crate-type=bin".into(),
+                "--emit=link".into(),
+                format!("-Lnative={}", toolchain.display()).into(),
+                source.clone().into_os_string(),
+            ],
+            crate::ParseOptions::caching_native_links(true),
+        )
+        .unwrap();
+        let mappings = vec![PathMapping::new(root, "workspace")];
+
+        // A linker reads those directories, so their contents stay inputs the
+        // key must account for, and an unmapped one stays a bypass.
+        let context = library_context(root, mappings.clone());
+        assert!(matches!(
+            invocation.invocation_digest(&context),
+            Err(BypassReason::UnmappedAbsolutePath(_))
+        ));
+        let dep_info = RustcDepInfo::parse(&format!("output: {}\n", source.display())).unwrap();
+        assert_eq!(
+            invocation.discover_inputs_with_mappings(&dep_info, root, &mappings),
+            Err(BypassReason::UnsupportedSearchPath("native".into()))
         );
     }
 

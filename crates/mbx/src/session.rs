@@ -562,6 +562,7 @@ struct StatsReport {
     verifications: u64,
     divergences: u64,
     prefetched_actions: u64,
+    predictions_loaded: u64,
     prefetch_runs: u64,
     bypasses: BTreeMap<String, u64>,
     downloaded_bytes: u64,
@@ -638,6 +639,7 @@ impl From<&AgentStats> for StatsReport {
             verifications: stats.verifications,
             divergences: stats.divergences,
             prefetched_actions: stats.prefetched_actions,
+            predictions_loaded: stats.predictions_loaded,
             prefetch_runs: stats.prefetch_runs,
             bypasses: stats.bypasses.clone(),
             downloaded_bytes: stats.downloaded_bytes,
@@ -712,6 +714,9 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
             "mbx[cache]: could not look up {} compilations: no usable dep-info from an earlier build and no prediction to derive an action key from",
             stats.unconsulted,
         ));
+        if let Some(explanation) = stale_manifest_note(stats) {
+            note(&explanation);
+        }
     }
     if !stats.bypasses.is_empty() {
         let total: u64 = stats.bypasses.values().sum();
@@ -811,6 +816,22 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
             stats.verifications, stats.divergences,
         ));
     }
+}
+
+/// Explain a session that loaded a full manifest and matched none of it.
+///
+/// "No prediction to derive an action key from" reads as an empty store, and
+/// for a warm store that just watched its compiler change underneath it -- a
+/// CI runner image updating its preinstalled toolchain is the common way --
+/// that reading sends people hunting for restore failures. The distinction is
+/// observable: predictions were loaded, and not one lookup was ever made.
+fn stale_manifest_note(stats: &AgentStats) -> Option<String> {
+    (stats.unconsulted > 0 && stats.lookups == 0 && stats.predictions_loaded > 0).then(|| {
+        format!(
+            "mbx[cache]: a manifest predicting {} compilations was loaded, but none matched this build; the compiler or its flags changed since they were recorded (a toolchain update does this)",
+            stats.predictions_loaded,
+        )
+    })
 }
 
 /// Whether the cache took part in this build at all.

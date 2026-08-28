@@ -359,6 +359,15 @@ pub struct AgentStats {
     pub upload_drain_duration_ns: u64,
     /// Complete actions staged before an adapter requested them.
     pub prefetched_actions: u64,
+    /// Predictions carried by the task manifest this session loaded.
+    ///
+    /// Zero means no earlier build left a manifest behind -- a genuinely cold
+    /// start. Together with `lookups`, this is what tells a session that loaded
+    /// hundreds of predictions and matched none of them apart from one that had
+    /// nothing to match against; the first means the invocations changed (a
+    /// compiler update does this to every one of them at once), the second that
+    /// the store was empty.
+    pub predictions_loaded: u64,
     /// Compilations that were not cacheable, counted by reason.
     pub bypasses: BTreeMap<String, u64>,
     /// Estimated compiler time avoided by restored action hits.
@@ -454,6 +463,7 @@ struct AtomicAgentStats {
     remote_blob_pack_upload_blobs: AtomicU64,
     upload_drain_duration_ns: AtomicU64,
     prefetched_actions: AtomicU64,
+    predictions_loaded: AtomicU64,
     remote_failures: AtomicU64,
     remote_manifest_lookups: AtomicU64,
     remote_manifest_lookup_duration_ns: AtomicU64,
@@ -932,6 +942,13 @@ impl CacheAgent {
         let run =
             CacheDigest::blake3(format!("{task}\0{}\0{sequence}", std::process::id()).as_bytes())
                 .hash;
+        // The largest baseline rather than a sum: beginning the same task again
+        // in one session reloads the same manifest, and counting it twice would
+        // overstate what there was to match.
+        self.stats.predictions_loaded.fetch_max(
+            state.predictions.len().try_into().unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
         let predictions = state.predictions.values().cloned().collect();
         self.task_actions.lock().unwrap().insert(run.clone(), state);
         self.spawn_prefetch_predictions(predictions);
@@ -1226,6 +1243,7 @@ impl CacheAgent {
                 .load(Ordering::Relaxed),
             upload_drain_duration_ns: self.stats.upload_drain_duration_ns.load(Ordering::Relaxed),
             prefetched_actions: self.stats.prefetched_actions.load(Ordering::Relaxed),
+            predictions_loaded: self.stats.predictions_loaded.load(Ordering::Relaxed),
             bypasses: self.stats.bypasses.lock().unwrap().clone(),
             avoided_compiler_duration_ns: self
                 .stats
