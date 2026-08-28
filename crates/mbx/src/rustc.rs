@@ -752,16 +752,26 @@ fn refresh_prediction(
         Some(stored) => decode_prediction_timing(stored, &invocation_digest)?,
         None => CompileTiming::default(),
     };
-    let mut prediction = compilation.invocation.prediction(&context, discovered)?;
-    prediction.version = prediction.version.max(2);
-    prediction.compiler_duration_ns = timing.duration_ns;
-    prediction.crate_name.clone_from(&timing.crate_name);
-    let payload = String::from_utf8(canonical_json(&prediction)?)?;
-    let unchanged = stored
-        .as_ref()
-        .is_some_and(|stored| stored.action == *action && stored.payload == payload);
-    if !unchanged {
-        record_prediction_value(invocation_digest, action.clone(), payload);
+    // Recording stays best-effort and separate from the timing, which the
+    // caller credits to this hit either way. A prediction that cannot be
+    // rebuilt costs the next build a lookup; it does not make the time this
+    // build just saved any less real.
+    let recorded = (|| {
+        let mut prediction = compilation.invocation.prediction(&context, discovered)?;
+        prediction.version = prediction.version.max(2);
+        prediction.compiler_duration_ns = timing.duration_ns;
+        prediction.crate_name.clone_from(&timing.crate_name);
+        let payload = String::from_utf8(canonical_json(&prediction)?)?;
+        let unchanged = stored
+            .as_ref()
+            .is_some_and(|stored| stored.action == *action && stored.payload == payload);
+        if !unchanged {
+            record_prediction_value(invocation_digest, action.clone(), payload);
+        }
+        Result::<()>::Ok(())
+    })();
+    if let Err(error) = recorded {
+        eprintln!("mbx[warning]: action prediction was not recorded: {error:#}");
     }
     Ok(timing)
 }
