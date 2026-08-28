@@ -30,6 +30,8 @@ fn restore() -> RestoreStats {
         output_bytes: 13,
         reflinked_output_bytes: 15,
         reflinked_output_files: 14,
+        reused_output_files: 18,
+        reused_output_bytes: 19,
     }
 }
 

@@ -234,6 +234,11 @@ pub struct RestoreStats {
     pub copied_output_files: u64,
     /// Declared size of restored outputs that required a byte-for-byte copy.
     pub copied_output_bytes: u64,
+    /// Number of output files already in place with the cached contents, kept
+    /// rather than rewritten.
+    pub reused_output_files: u64,
+    /// Declared size of outputs kept in place rather than rewritten.
+    pub reused_output_bytes: u64,
 }
 
 /// One accounted cache decision, as it happens.
@@ -484,6 +489,10 @@ pub struct AgentStats {
     pub copied_output_files: u64,
     /// Declared size of outputs materialized by copying their bytes.
     pub copied_output_bytes: u64,
+    /// Number of output files kept in place, already holding the cached bytes.
+    pub reused_output_files: u64,
+    /// Declared size of outputs kept in place.
+    pub reused_output_bytes: u64,
 }
 
 /// Count and cumulative wall time for one compiler-invocation outcome.
@@ -551,6 +560,8 @@ struct AtomicAgentStats {
     reflinked_output_bytes: AtomicU64,
     copied_output_files: AtomicU64,
     copied_output_bytes: AtomicU64,
+    reused_output_files: AtomicU64,
+    reused_output_bytes: AtomicU64,
 }
 
 struct AtomicDurationTimer<'a> {
@@ -1457,6 +1468,8 @@ impl CacheAgent {
             reflinked_output_bytes: self.stats.reflinked_output_bytes.load(Ordering::Relaxed),
             copied_output_files: self.stats.copied_output_files.load(Ordering::Relaxed),
             copied_output_bytes: self.stats.copied_output_bytes.load(Ordering::Relaxed),
+            reused_output_files: self.stats.reused_output_files.load(Ordering::Relaxed),
+            reused_output_bytes: self.stats.reused_output_bytes.load(Ordering::Relaxed),
         }
     }
 
@@ -2646,6 +2659,8 @@ impl CacheAgent {
         );
         atomic_saturating_add(&self.stats.copied_output_files, restore.copied_output_files);
         atomic_saturating_add(&self.stats.copied_output_bytes, restore.copied_output_bytes);
+        atomic_saturating_add(&self.stats.reused_output_files, restore.reused_output_files);
+        atomic_saturating_add(&self.stats.reused_output_bytes, restore.reused_output_bytes);
     }
 
     fn record_compiler_invocation(

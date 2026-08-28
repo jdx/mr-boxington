@@ -791,3 +791,100 @@ fn the_shim_appends_an_oso_prefix_for_cached_links() {
         &OsString::from("-Clink-arg=-Wl,-oso_prefix,/work/target/debug/deps/"),
     );
 }
+
+fn in_place_node(bytes: &[u8], executable: bool) -> CacheFileNode {
+    CacheFileNode {
+        digest: CacheDigest::blake3(bytes),
+        executable,
+        mode: if executable { 0o755 } else { 0o644 },
+        name: "libdep.rlib".into(),
+    }
+}
+
+#[test]
+fn an_output_holding_the_cached_bytes_is_already_in_place() {
+    use mbx_cache_core::NoFileDigestCache;
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("libdep.rlib");
+    let bytes = b"cached artifact bytes";
+    std::fs::write(&destination, bytes).unwrap();
+
+    assert!(output_already_in_place(
+        &in_place_node(bytes, false),
+        &destination,
+        &NoFileDigestCache,
+    ));
+    assert!(
+        !output_already_in_place(
+            &in_place_node(b"different artifact bytes!", false),
+            &destination,
+            &NoFileDigestCache,
+        ),
+        "content that hashes differently must be rewritten"
+    );
+    assert!(
+        !output_already_in_place(
+            &in_place_node(b"cached artifact byte", false),
+            &destination,
+            &NoFileDigestCache,
+        ),
+        "a length mismatch must refuse before reading"
+    );
+    assert!(
+        !output_already_in_place(
+            &in_place_node(bytes, false),
+            &directory.path().join("absent.rlib"),
+            &NoFileDigestCache,
+        ),
+        "a missing output must be materialized"
+    );
+    #[cfg(unix)]
+    assert!(
+        !output_already_in_place(
+            &in_place_node(bytes, true),
+            &destination,
+            &NoFileDigestCache
+        ),
+        "an executable node must not keep a non-executable file"
+    );
+}
+
+#[test]
+fn a_ledger_answer_decides_in_place_without_reading() {
+    use mbx_cache_core::{FileDigestCache, FileDigestScope, FileIdentity, RecordedFileDigest};
+
+    /// Vouches one digest for every identity it is asked about.
+    struct FixedLedger(CacheDigest);
+    impl FileDigestCache for FixedLedger {
+        fn find(
+            &self,
+            _scope: FileDigestScope,
+            files: &[FileIdentity],
+        ) -> Vec<Option<CacheDigest>> {
+            vec![Some(self.0.clone()); files.len()]
+        }
+        fn record(&self, _scope: FileDigestScope, _entries: Vec<RecordedFileDigest>) {}
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("libdep.rlib");
+    let bytes = b"cached artifact bytes";
+    std::fs::write(&destination, bytes).unwrap();
+    let node = in_place_node(bytes, false);
+
+    assert!(output_already_in_place(
+        &node,
+        &destination,
+        &FixedLedger(node.digest.clone()),
+    ));
+    // A ledger that names other bytes of the same length refuses the keep
+    // without falling back to a read that would say otherwise: the recorded
+    // identity is the fresher claim about what is on disk.
+    let mut other = CacheDigest::blake3(b"other bytes entirely here");
+    other.size = node.digest.size;
+    assert!(!output_already_in_place(
+        &node,
+        &destination,
+        &FixedLedger(other),
+    ));
+}

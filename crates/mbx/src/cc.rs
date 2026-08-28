@@ -599,21 +599,33 @@ fn restore_result(
         output_bytes: node.digest.size,
         ..RestoreStats::default()
     };
-    let (temporary, materialization) =
-        stage_verified_cached_output(staging.path(), 0, &blobs[2], &node)?;
-    match materialization {
-        Materialization::Reflink => {
-            restore.reflinked_output_files = 1;
-            restore.reflinked_output_bytes = node.digest.size;
+    // An object already holding these bytes is kept, not rewritten: the
+    // rewrite would only refresh its modification time, which is what keeps
+    // downstream freshness checks re-dirtying whatever reads it.
+    let mut staged_files = Vec::new();
+    if restore_outputs
+        && crate::rustc::output_already_in_place(&node, &destination, session::file_digest_cache())
+    {
+        restore.reused_output_files = 1;
+        restore.reused_output_bytes = node.digest.size;
+    } else {
+        let (temporary, materialization) =
+            stage_verified_cached_output(staging.path(), 0, &blobs[2], &node)?;
+        match materialization {
+            Materialization::Reflink => {
+                restore.reflinked_output_files = 1;
+                restore.reflinked_output_bytes = node.digest.size;
+            }
+            Materialization::Copy => {
+                restore.copied_output_files = 1;
+                restore.copied_output_bytes = node.digest.size;
+            }
         }
-        Materialization::Copy => {
-            restore.copied_output_files = 1;
-            restore.copied_output_bytes = node.digest.size;
-        }
+        staged_files.push((temporary, destination.clone()));
     }
     let staged = StagedOutputs {
         directory: staging,
-        files: vec![(temporary, destination.clone())],
+        files: staged_files,
     };
 
     // Re-check the inputs after staging: a header rewritten while the lookup
