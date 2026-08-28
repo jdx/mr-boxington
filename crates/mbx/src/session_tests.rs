@@ -438,12 +438,16 @@ fn writes_versioned_stats_report() {
         stats.remote_blob_pack_requests = 2;
         stats.remote_blob_pack_blobs = 100;
         stats.materialization_duration_ns = 9;
+        stats.predictions_loaded = 11;
     });
 
     write_stats_report(&path, &stats).unwrap();
     let report: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
 
-    assert_eq!(report["version"], 2);
+    // Bumped whenever the report grows a field, so a reader can tell from the
+    // version alone which ones it may expect.
+    assert_eq!(report["version"], 3);
+    assert_eq!(report["predictions_loaded"], 11);
     assert_eq!(report["session_duration_ns"], 42);
     assert_eq!(report["hits"], 2);
     assert_eq!(report["misses"], 2);

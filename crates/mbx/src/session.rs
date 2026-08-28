@@ -608,7 +608,7 @@ struct SlowCompilationReport {
 impl From<&AgentStats> for StatsReport {
     fn from(stats: &AgentStats) -> Self {
         Self {
-            version: 2,
+            version: 3,
             session_duration_ns: stats.session_duration_ns,
             lookups: stats.lookups,
             hits: stats.hits,
