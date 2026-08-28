@@ -173,10 +173,10 @@ pub(crate) fn persist_outputs(staged: StagedOutputs) -> Result<()> {
                 match std::fs::remove_file(destination) {
                     Ok(()) => {}
                     Err(remove_error) if remove_error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(remove_error) => eprintln!(
-                        "mbx[warning]: failed to roll back {}: {remove_error}",
+                    Err(remove_error) => session::report_shim_warning(&format!(
+                        "failed to roll back {}: {remove_error}",
                         destination.display()
-                    ),
+                    )),
                 }
             }
             return Err(error);
@@ -233,11 +233,11 @@ pub(crate) fn record_action_hit(action: &CacheDigest, restore: RestoreStats, cra
     match responses.map(|responses| responses.into_iter().next()) {
         Ok(Some(AgentResponse::ActionHitRecorded)) => {}
         Ok(Some(AgentResponse::Error { message })) => {
-            eprintln!("mbx[warning]: hit was not recorded: {message}");
+            session::report_shim_warning(&format!("hit was not recorded: {message}"));
         }
-        Ok(_) => eprintln!("mbx[warning]: hit was not recorded"),
+        Ok(_) => session::report_shim_warning("hit was not recorded"),
         Err(error) => {
-            eprintln!("mbx[warning]: hit was not recorded: {error:#}");
+            session::report_shim_warning(&format!("hit was not recorded: {error:#}"));
         }
     }
 }
@@ -249,11 +249,11 @@ pub(crate) fn record_verification(matched: bool, restore: RestoreStats) {
     match responses.map(|responses| responses.into_iter().next()) {
         Ok(Some(AgentResponse::ActionVerificationRecorded)) => {}
         Ok(Some(AgentResponse::Error { message })) => {
-            eprintln!("mbx[warning]: verification was not recorded: {message}");
+            session::report_shim_warning(&format!("verification was not recorded: {message}"));
         }
-        Ok(_) => eprintln!("mbx[warning]: verification was not recorded"),
+        Ok(_) => session::report_shim_warning("verification was not recorded"),
         Err(error) => {
-            eprintln!("mbx[warning]: verification was not recorded: {error:#}");
+            session::report_shim_warning(&format!("verification was not recorded: {error:#}"));
         }
     }
 }

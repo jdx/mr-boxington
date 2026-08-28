@@ -14,16 +14,19 @@ the handshake and do not exchange cache requests. Adding, removing, or changing
 a request or response therefore requires incrementing `AGENT_PROTOCOL_VERSION`.
 
 `crates/mbx-cache-core/tests/agent_protocol.rs` exercises every request and
-response variant against `tests/fixtures/agent-protocol-v3.jsonl`. Its exhaustive
+response variant against `tests/fixtures/agent-protocol-v4.jsonl`. Its exhaustive
 matches make a newly added variant fail to compile until the fixture and the
 protocol-version decision are reviewed together.
 
 Agent protocol v2 added compiler-duration accounting to hits and real compiler
 invocations. v3 adds the crate name to a recorded hit plus `begin_task` and
 `commit_task`, allowing an embedded Cargo shim to create one prediction manifest
-for each real Cargo invocation. The client and agent still require exact
-protocol and application-version equality, including when different
-applications ship them.
+for each real Cargo invocation. v4 adds `record_warning`, which is how a shim
+reports a diagnostic at all: a C or C++ shim stands in for a compiler whose
+stderr its caller reads as an answer, so it cannot write there itself, and the
+agent prints each distinct message once from the process that owns the build.
+The client and agent still require exact protocol and application-version
+equality, including when different applications ship them.
 
 ## Remote cache protocol
 

@@ -121,6 +121,88 @@ async fn records_compiler_time_by_outcome_and_crate() {
 }
 
 #[tokio::test]
+async fn surfaces_each_shim_warning_once() {
+    struct Collected(Mutex<Vec<String>>);
+    impl AgentEventObserver for Collected {
+        fn event(&self, event: AgentEvent) {
+            if let AgentEvent::Warning { message } = event {
+                self.0.lock().unwrap().push(message);
+            }
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let observer = Arc::new(Collected(Mutex::new(Vec::new())));
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version")
+        .with_observer(observer.clone());
+
+    for _ in 0..3 {
+        let response = agent
+            .respond(AgentRequest::RecordWarning {
+                message: "cc result was not restored: blob missing".into(),
+            })
+            .await;
+        assert!(matches!(response, AgentResponse::WarningRecorded));
+    }
+    // A different message is its own diagnostic, not a repeat.
+    agent
+        .respond(AgentRequest::RecordWarning {
+            message: "verification was not recorded".into(),
+        })
+        .await;
+
+    assert_eq!(
+        *observer.0.lock().unwrap(),
+        vec![
+            "cc result was not restored: blob missing".to_string(),
+            "verification was not recorded".to_string(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn rejects_malformed_shim_warnings() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    for message in [
+        String::new(),
+        "two\nlines".into(),
+        "wide".repeat(MAX_WARNING_BYTES),
+    ] {
+        let response = agent.respond(AgentRequest::RecordWarning { message }).await;
+        assert!(matches!(response, AgentResponse::Error { .. }));
+    }
+}
+
+#[tokio::test]
+async fn stops_surfacing_shim_warnings_at_the_cap() {
+    struct Counter(AtomicU64);
+    impl AgentEventObserver for Counter {
+        fn event(&self, event: AgentEvent) {
+            if matches!(event, AgentEvent::Warning { .. }) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let observer = Arc::new(Counter(AtomicU64::new(0)));
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version")
+        .with_observer(observer.clone());
+
+    for index in 0..MAX_WARNINGS + 10 {
+        agent
+            .respond(AgentRequest::RecordWarning {
+                message: format!("unique failure {index}"),
+            })
+            .await;
+    }
+
+    assert_eq!(
+        observer.0.load(Ordering::Relaxed),
+        u64::try_from(MAX_WARNINGS).unwrap()
+    );
+}
+
+#[tokio::test]
 async fn counts_bypasses_by_reason() {
     let directory = tempfile::tempdir().unwrap();
     let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
