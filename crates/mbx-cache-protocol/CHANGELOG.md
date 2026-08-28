@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.5.1...mbx-cache-protocol-v0.5.2) - 2026-08-28
+
+### Added
+
+- add Windows ARM64 support ([#147](https://github.com/jdx/mr-boxington/pull/147))
+
 ## [0.5.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.5.0...mbx-cache-protocol-v0.5.1) - 2026-08-27
 
 ### Added

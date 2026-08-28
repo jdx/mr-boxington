@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3](https://github.com/jdx/mr-boxington/compare/v0.5.2...v0.5.3) - 2026-08-28
+
+### Added
+
+- add Windows ARM64 support ([#147](https://github.com/jdx/mr-boxington/pull/147))
+
+### Fixed
+
+- *(exec)* never let a shim stand in for the compiler it shims ([#144](https://github.com/jdx/mr-boxington/pull/144))
+
+### Other
+
+- hand the shim search a PATH instead of setting one ([#146](https://github.com/jdx/mr-boxington/pull/146))
+
 ## [0.5.2](https://github.com/jdx/mr-boxington/compare/v0.5.1...v0.5.2) - 2026-08-27
 
 ### Added
