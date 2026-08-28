@@ -75,7 +75,8 @@ grep "  $archive$" SHA256SUMS | sha256sum --check --strict -
 tar -xzf "$archive" -C ~/.local/bin
 ```
 
-Release archives also cover Linux ARM64, Apple Silicon, and Windows x86-64.
+Release archives also cover Linux ARM64, Apple Silicon, and Windows x86-64 and
+ARM64.
 Every release includes `SHA256SUMS`.
 
 [See all installation options →](https://mr-boxington.jdx.dev/getting-started)

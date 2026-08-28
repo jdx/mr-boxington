@@ -47,10 +47,26 @@ grep "  $archive$" SHA256SUMS | shasum -a 256 --check --strict -
 tar -xzf "$archive" -C ~/.local/bin
 ```
 
-== Windows
+== Windows x86-64
 
 ```powershell
 $archive = "mbx-x86_64-pc-windows-msvc.zip"
+$release = "https://github.com/jdx/mr-boxington/releases/latest/download"
+Invoke-WebRequest "$release/$archive" -OutFile $archive
+Invoke-WebRequest "$release/SHA256SUMS" -OutFile SHA256SUMS
+$expected = (Select-String -Path SHA256SUMS -Pattern $archive).Line.Split(" ")[0]
+if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $expected.ToUpper()) {
+  throw "checksum mismatch"
+}
+Expand-Archive $archive -DestinationPath "$env:LOCALAPPDATA\Programs\mbx"
+```
+
+Add `%LOCALAPPDATA%\Programs\mbx` to `PATH`.
+
+== Windows ARM64
+
+```powershell
+$archive = "mbx-aarch64-pc-windows-msvc.zip"
 $release = "https://github.com/jdx/mr-boxington/releases/latest/download"
 Invoke-WebRequest "$release/$archive" -OutFile $archive
 Invoke-WebRequest "$release/SHA256SUMS" -OutFile SHA256SUMS
@@ -80,7 +96,7 @@ Release binaries cover:
 
 - Linux x86-64 and ARM64 (static musl builds)
 - macOS on Apple Silicon
-- Windows x86-64
+- Windows x86-64 and ARM64
 
 Other platforms with a Rust toolchain can build from source with
 `cargo install mbx`. mbx wraps whichever Cargo and rustc are active, including
