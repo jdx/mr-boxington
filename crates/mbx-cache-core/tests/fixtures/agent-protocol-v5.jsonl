@@ -1,4 +1,4 @@
-request.hello	{"client_version":"0.3.0","protocol":4,"type":"hello"}
+request.hello	{"client_version":"0.3.0","protocol":5,"type":"hello"}
 request.begin_task	{"task":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","type":"begin_task"}
 request.commit_task	{"run":"task-run","type":"commit_task"}
 request.find_blob	{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"type":"find_blob"}
@@ -16,7 +16,9 @@ request.find_action_prediction	{"invocation":{"algorithm":"blake3","hash":"aaaaa
 request.record_action_prediction	{"prediction":{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"adapter":"rustc","invocation":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"payload":"{}"},"task":"task-id","type":"record_action_prediction"}
 request.find_executable_identity	{"environment":{"RUSTFLAGS":"-Cdebuginfo=1","UNSET":null},"executable":"bin/rustc","type":"find_executable_identity"}
 request.store_executable_identity	{"environment":{"RUSTFLAGS":"-Cdebuginfo=1","UNSET":null},"executable":"bin/rustc","stdout":[114,117,115,116,99],"type":"store_executable_identity"}
-response.hello	{"agent_version":"0.3.0","protocol":4,"type":"hello"}
+request.find_file_digests	{"files":[{"len":7,"modified":{"nanos_since_epoch":21,"secs_since_epoch":1700000000},"path":"target/debug/deps/libserde.rlib"}],"scope":"content","type":"find_file_digests"}
+request.record_file_digests	{"entries":[{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"file":{"len":7,"modified":{"nanos_since_epoch":21,"secs_since_epoch":1700000000},"path":"target/debug/deps/libserde.rlib"}}],"scope":"cc_input","type":"record_file_digests"}
+response.hello	{"agent_version":"0.3.0","protocol":5,"type":"hello"}
 response.task_begun	{"run":"task-run","type":"task_begun"}
 response.task_committed	{"type":"task_committed"}
 response.blob	{"path":"cache/blob","type":"blob"}
@@ -38,6 +40,8 @@ response.action_prediction_recorded	{"type":"action_prediction_recorded"}
 response.executable_identity	{"stdout":[114,117,115,116,99],"type":"executable_identity"}
 response.executable_identity_missing	{"stdout":null,"type":"executable_identity"}
 response.error	{"message":"incompatible protocol","type":"error"}
+response.file_digests	{"digests":[{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},null],"type":"file_digests"}
+response.file_digests_recorded	{"type":"file_digests_recorded"}
 record.action_result	{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"metadata":null,"output_root":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"version":1}
 record.directory	{"directories":[],"files":[{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"executable":false,"mode":420,"name":"lib.rlib"}],"symlinks":[],"version":1}
 record.rustc_metadata	{"kind":"rustc","stderr":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"stdout":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"version":1}

@@ -28,7 +28,7 @@
 //! ```
 #![deny(missing_docs)]
 
-use mbx_cache_core::{CacheDigest, canonical_json};
+use mbx_cache_core::{CacheDigest, FileDigestCache, canonical_json};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -884,6 +884,7 @@ impl RustcInputPrediction {
         &self,
         working_dir: &Path,
         path_mappings: &[PathMapping],
+        digests: &dyn FileDigestCache,
     ) -> Result<DiscoveredInputs, BypassReason> {
         if !matches!(self.version, 1..=3) {
             return Err(BypassReason::UnsupportedPrediction);
@@ -926,7 +927,7 @@ impl RustcInputPrediction {
                 Ok((name.clone(), value))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
-        DiscoveredInputs::from_paths(working_dir, paths, environment)
+        DiscoveredInputs::from_paths(working_dir, paths, environment, digests)
     }
 }
 

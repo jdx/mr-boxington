@@ -46,7 +46,8 @@ mod uploads;
 
 pub use agent::{
     AGENT_PROTOCOL_VERSION, AgentEvent, AgentEventObserver, AgentRemoteCache, AgentRequest,
-    AgentResponse, AgentStats, CacheAgent, CompilerStats, RestoreStats, is_task_identity,
+    AgentResponse, AgentStats, CacheAgent, CompilerStats, FileDigestCache, FileDigestScope,
+    FileIdentity, NoFileDigestCache, RecordedFileDigest, RestoreStats, is_task_identity,
     task_manifest_actions,
 };
 pub use client::BlockingAgentClient;

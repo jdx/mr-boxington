@@ -697,7 +697,11 @@ fn a_prediction_from_a_future_schema_bypasses() {
     };
     assert_eq!(
         prediction
-            .discover(Path::new("/work/one"), &[])
+            .discover(
+                Path::new("/work/one"),
+                &[],
+                &mbx_cache_core::NoFileDigestCache
+            )
             .unwrap_err()
             .kind(),
         "unsupported-prediction"

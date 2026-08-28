@@ -9,7 +9,8 @@ use crate::{session, util::workspace_root};
 use eyre::{Context, Result, bail};
 use mbx_cache_core::{
     ActionPrediction, AgentRequest, AgentResponse, CacheDigest, CacheDirectory, CacheFileNode,
-    RemoteActionResult, RestoreStats, RustcMetadata, canonical_json,
+    FileDigestScope, FileIdentity, RecordedFileDigest, RemoteActionResult, RestoreStats,
+    RustcMetadata, canonical_json,
 };
 use mbx_cache_rustc::{
     ActionContext, BypassReason, CompilerIdentity, DiscoveredInputs, LinkerIdentity, ParseOptions,
@@ -503,7 +504,11 @@ fn restore_predicted_result(
     if String::from_utf8(canonical_json(&input_prediction)?)? != prediction.payload {
         bail!("cache agent returned a non-canonical rustc action prediction");
     }
-    let discovered = input_prediction.discover(working_dir, &context.path_mappings)?;
+    let discovered = input_prediction.discover(
+        working_dir,
+        &context.path_mappings,
+        session::file_digest_cache(),
+    )?;
     discovered.clone().apply_to(&mut context)?;
     let candidates = ActionCandidates::build(invocation, context, compilation.linker.clone())?;
     // From this point onward, every return follows at least one action-result
@@ -650,8 +655,12 @@ fn action_from_parsed_dep_info(
         portable,
         ..
     } = compilation;
-    let discovered =
-        invocation.discover_inputs_with_mappings(dep_info, working_dir, &portable.mappings)?;
+    let discovered = invocation.discover_inputs_with_mappings(
+        dep_info,
+        working_dir,
+        &portable.mappings,
+        session::file_digest_cache(),
+    )?;
     let mut context = base_action_context(compilation.rustc, working_dir, portable)?;
     discovered.clone().apply_to(&mut context)?;
     let candidates = ActionCandidates::build(invocation, context, compilation.linker.clone())?;
@@ -1012,6 +1021,9 @@ fn restore_result(
     // most of the restore.
     verify_environment(&discovered.environment)?;
     finalize_restored_outputs(staged, restore_outputs)?;
+    if restore_outputs {
+        record_output_digests(&cached_outputs);
+    }
     restore.duration_ns = materialization_started
         .elapsed()
         .as_nanos()
@@ -1023,6 +1035,33 @@ fn restore_result(
         outputs: cached_outputs,
         restore,
     }))
+}
+
+/// Enter restored outputs into the session file-digest ledger.
+///
+/// The digests were verified when the blobs entered the store, and the rename
+/// that placed each file fixed the identity being recorded; a crate that links
+/// one of these artifacts can then key it without reading it back. Best-effort
+/// throughout: a file that cannot be described is simply not recorded.
+fn record_output_digests(outputs: &[CachedOutput]) {
+    let entries = outputs
+        .iter()
+        .filter_map(|output| {
+            let metadata = std::fs::metadata(&output.path).ok()?;
+            if metadata.len() != output.digest.size {
+                return None;
+            }
+            Some(RecordedFileDigest {
+                file: FileIdentity {
+                    path: output.path.clone(),
+                    len: metadata.len(),
+                    modified: metadata.modified().ok()?,
+                },
+                digest: output.digest.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    session::record_file_digests(FileDigestScope::Content, entries);
 }
 
 fn finalize_restored_outputs(staged: StagedOutputs, restore_outputs: bool) -> Result<()> {
@@ -1486,6 +1525,7 @@ fn publish_result(
         .iter()
         .chain(std::iter::once(&outputs.dep_info));
     let mut files = Vec::with_capacity(outputs.files.len() + 1);
+    let mut hashed_outputs = Vec::with_capacity(outputs.files.len());
     for path in output_paths {
         let metadata = std::fs::metadata(path)
             .wrap_err_with(|| format!("failed to inspect rustc output {}", path.display()))?;
@@ -1503,6 +1543,21 @@ fn publish_result(
         } else {
             let digest = CacheDigest::blake3_file(path)?;
             blobs.push((digest.clone(), path.clone()));
+            // Freshly compiled artifacts enter the ledger too: on a cold
+            // build these are exactly the rlibs every dependent is about to
+            // key, and this hash is the read that ledger entries stand in
+            // for. The dep-info stays out -- its stored digest describes the
+            // placeholder form, not what is on disk.
+            if let (Ok(modified), true) = (metadata.modified(), metadata.len() == digest.size) {
+                hashed_outputs.push(RecordedFileDigest {
+                    file: FileIdentity {
+                        path: path.clone(),
+                        len: metadata.len(),
+                        modified,
+                    },
+                    digest: digest.clone(),
+                });
+            }
             digest
         };
         files.push(CacheFileNode {
@@ -1517,6 +1572,7 @@ fn publish_result(
         });
     }
     files.sort_by(|left, right| left.name.cmp(&right.name));
+    session::record_file_digests(FileDigestScope::Content, hashed_outputs);
 
     let metadata = canonical_json(&RustcMetadata {
         version: 1,

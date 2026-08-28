@@ -10,7 +10,8 @@ use log::{debug, warn};
 use mbx_cache_cc::CcLanguage;
 use mbx_cache_core::{
     AGENT_PROTOCOL_VERSION, AgentEvent, AgentEventObserver, AgentRemoteCache, AgentRequest,
-    AgentResponse, AgentStats, CacheAgent, CacheDigest, canonical_json,
+    AgentResponse, AgentStats, CacheAgent, CacheDigest, FileDigestCache, FileDigestScope,
+    FileIdentity, NoFileDigestCache, RecordedFileDigest, canonical_json,
 };
 use serde::Serialize;
 use std::cell::RefCell;
@@ -2000,6 +2001,58 @@ fn crate_name_argument(arguments: &[OsString]) -> Option<String> {
 /// that an explicit disable cannot be mistaken for an enable.
 pub(crate) fn verify_requested() -> bool {
     std::env::var_os(VERIFY_ENV).is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+/// The session file-digest ledger, answered by the cache agent.
+///
+/// Both directions are best-effort: a lookup that cannot reach the agent
+/// reports misses and the caller hashes as it always did, and a record that
+/// fails is dropped -- the ledger is a shortcut, never a dependency.
+struct AgentFileDigestCache;
+
+impl FileDigestCache for AgentFileDigestCache {
+    fn find(&self, scope: FileDigestScope, files: &[FileIdentity]) -> Vec<Option<CacheDigest>> {
+        if files.is_empty() {
+            return Vec::new();
+        }
+        let response = request_agent(&[AgentRequest::FindFileDigests {
+            scope,
+            files: files.to_vec(),
+        }]);
+        match response.map(|responses| responses.into_iter().next()) {
+            Ok(Some(AgentResponse::FileDigests { digests })) if digests.len() == files.len() => {
+                digests
+            }
+            _ => vec![None; files.len()],
+        }
+    }
+
+    fn record(&self, scope: FileDigestScope, entries: Vec<RecordedFileDigest>) {
+        if entries.is_empty() {
+            return;
+        }
+        let _ = request_agent(&[AgentRequest::RecordFileDigests { scope, entries }]);
+    }
+}
+
+/// The file-digest ledger this shim may consult, or none under verification.
+///
+/// Verification exists to qualify the whole cached path end to end, so it
+/// rehashes every input the way a first encounter would rather than trusting
+/// what this same session recorded.
+pub(crate) fn file_digest_cache() -> &'static dyn FileDigestCache {
+    if verify_requested() {
+        &NoFileDigestCache
+    } else {
+        &AgentFileDigestCache
+    }
+}
+
+/// Record file digests in the session ledger, best-effort.
+pub(crate) fn record_file_digests(scope: FileDigestScope, entries: Vec<RecordedFileDigest>) {
+    if !verify_requested() {
+        AgentFileDigestCache.record(scope, entries);
+    }
 }
 
 /// Whether this build may cache natively linked programs.

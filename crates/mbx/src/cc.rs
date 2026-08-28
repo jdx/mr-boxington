@@ -25,7 +25,8 @@ use mbx_cache_cc::{
 };
 use mbx_cache_core::{
     ActionPrediction, AgentRequest, AgentResponse, CacheDigest, CacheDirectory, CacheFileNode,
-    CcMetadata, RemoteActionResult, RestoreStats, canonical_json,
+    CcMetadata, FileDigestScope, FileIdentity, RecordedFileDigest, RemoteActionResult,
+    RestoreStats, canonical_json,
 };
 use mbx_cache_rustc::PathMapping;
 use std::collections::{BTreeMap, BTreeSet};
@@ -66,7 +67,11 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     // Falling through compiles and republishes, which replaces it.
     let usable = find_prediction(&task, &invocation_digest)?.and_then(|prediction| {
         prediction
-            .discover(&working_dir, &context.path_mappings)
+            .discover(
+                &working_dir,
+                &context.path_mappings,
+                session::file_digest_cache(),
+            )
             .ok()
     });
     // Whether an action lookup actually ran. A cold compilation has no
@@ -219,6 +224,7 @@ fn discover(
         &context.working_dir,
         files.clone(),
         manifest_directories(invocation, context, &files),
+        session::file_digest_cache(),
     )?)
 }
 
@@ -615,6 +621,25 @@ fn restore_result(
     discovered.verify()?;
     if restore_outputs {
         persist_outputs(staged)?;
+        // The restored object is what a later native link hashes as an input,
+        // so its digest enters the content ledger the moment its identity is
+        // fixed by the rename.
+        if let Ok(metadata) = std::fs::metadata(&destination)
+            && metadata.len() == node.digest.size
+            && let Ok(modified) = metadata.modified()
+        {
+            session::record_file_digests(
+                FileDigestScope::Content,
+                vec![RecordedFileDigest {
+                    file: FileIdentity {
+                        path: destination.clone(),
+                        len: metadata.len(),
+                        modified,
+                    },
+                    digest: node.digest.clone(),
+                }],
+            );
+        }
     }
     restore.duration_ns = duration_ns(materialization_started.elapsed());
     Ok(Some(CachedCompilation {
@@ -679,6 +704,23 @@ fn publish_result(
 
     let digest = CacheDigest::blake3_file(object)?;
     blobs.push((digest.clone(), object.to_path_buf()));
+    // A freshly compiled object is a future native-link input; the hash just
+    // taken is the read a ledger entry stands in for.
+    if metadata.len() == digest.size
+        && let Ok(modified) = metadata.modified()
+    {
+        session::record_file_digests(
+            FileDigestScope::Content,
+            vec![RecordedFileDigest {
+                file: FileIdentity {
+                    path: object.to_path_buf(),
+                    len: metadata.len(),
+                    modified,
+                },
+                digest: digest.clone(),
+            }],
+        );
+    }
     let files = vec![CacheFileNode {
         digest,
         // An object file is never executable, which is what makes the mode

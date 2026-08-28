@@ -30,6 +30,13 @@ const MAX_WARNING_BYTES: usize = 4 * 1024;
 /// message, which deduplication already collapses; the cap only guards
 /// against a message that embeds something unique per compilation.
 const MAX_WARNINGS: usize = 128;
+/// Most file identities one digest lookup or record may carry.
+const MAX_FILE_DIGEST_BATCH: usize = 16 * 1024;
+/// Most recorded file digests one session retains across every scope.
+///
+/// Roughly two orders of magnitude above the largest workspace measured; the
+/// cap exists so a pathological build bounds the agent instead of growing it.
+const MAX_FILE_DIGEST_ENTRIES: usize = 1024 * 1024;
 const MAX_REMOTE_TRANSFERS: usize = 64;
 const MAX_PREFETCH_TRANSFERS: usize = 48;
 const MAX_PREFETCH_ACTION_BATCH: usize = 256;
@@ -52,7 +59,7 @@ pub struct AgentRemoteCache {
 }
 
 /// Wire protocol version used between an in-process cache agent and its shims.
-pub const AGENT_PROTOCOL_VERSION: u8 = 4;
+pub const AGENT_PROTOCOL_VERSION: u8 = 5;
 /// Largest single protocol request the agent will read.
 ///
 /// Requests are small JSON objects; the largest legitimate ones carry an output
@@ -188,6 +195,21 @@ pub enum AgentRequest {
     RecordWarning {
         /// Human-readable single-line diagnostic.
         message: String,
+    },
+    /// Find session-recorded digests for files with these identities.
+    FindFileDigests {
+        /// What the recorded digests may stand in for.
+        scope: FileDigestScope,
+        /// File identities to resolve, preserving request order in the
+        /// response.
+        files: Vec<FileIdentity>,
+    },
+    /// Record digests of files a shim hashed or wrote this session.
+    RecordFileDigests {
+        /// What the recorded digests may stand in for.
+        scope: FileDigestScope,
+        /// Hashed files and the identities their digests describe.
+        entries: Vec<RecordedFileDigest>,
     },
 }
 
@@ -342,6 +364,13 @@ pub enum AgentResponse {
     /// last: anywhere earlier renumbers the variants below it. New variants go
     /// here.
     WarningRecorded,
+    /// Digests recorded earlier for the requested file identities.
+    FileDigests {
+        /// Recorded digests or misses, in request order.
+        digests: Vec<Option<CacheDigest>>,
+    },
+    /// File digests were recorded.
+    FileDigestsRecorded,
 }
 
 /// Aggregate cache activity for one task session.
@@ -622,6 +651,9 @@ pub struct CacheAgent {
     /// Distinct shim diagnostics already surfaced, so a warning that fires
     /// once per compilation is printed once per session.
     warnings: Arc<Mutex<BTreeSet<String>>>,
+    /// Digests of files shims hashed or wrote this session, keyed by scope and
+    /// path, each entry standing while its recorded identity matches the disk.
+    file_digests: Arc<Mutex<BTreeMap<(FileDigestScope, PathBuf), RecordedFileDigest>>>,
     /// Deferred remote publication, present only when the session may write.
     uploads: Option<UploadQueue>,
 }
@@ -662,6 +694,74 @@ impl UploadSink for AgentUploadSink {
             .fetch_add(1, Ordering::Relaxed);
         self.stats.remote_failures.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// The on-disk identity a recorded file digest describes.
+///
+/// The same trade [`VerifiedBlob`] makes for CAS reads, offered to shims for
+/// the files they hash: an overwrite moves the modification time and a
+/// truncation changes the length, so a digest recorded against both stands
+/// until either does. Only a replacement that reproduces both goes unnoticed,
+/// which is the freshness model the surrounding build tool already lives on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileIdentity {
+    /// Absolute path of the file.
+    pub path: PathBuf,
+    /// Length of the file in bytes.
+    pub len: u64,
+    /// Modification time of the file.
+    pub modified: SystemTime,
+}
+
+/// A file digest recorded against the identity it was read under.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordedFileDigest {
+    /// Identity of the file when its contents were hashed.
+    pub file: FileIdentity,
+    /// Digest of those contents.
+    pub digest: CacheDigest,
+}
+
+/// What a recorded file digest may stand in for.
+///
+/// Adapters prove different things when they read a file: the cc adapter's
+/// input scan also establishes that a source embeds no timestamp macro, which
+/// a digest recorded by the rustc adapter never checked. Scoping the ledger
+/// keeps one adapter's shortcut from resting on a property another adapter
+/// never established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileDigestScope {
+    /// The digest describes the file's contents and nothing more.
+    Content,
+    /// The digest describes a cc compiler input that also passed the
+    /// timestamp-macro scan.
+    CcInput,
+}
+
+/// Recorded digests a session may consult instead of rehashing a file.
+///
+/// The agent's file-digest ledger answers through this everywhere a caller
+/// holds one; the no-op implementation stands in where reuse must not happen,
+/// such as under verification.
+pub trait FileDigestCache: Send + Sync {
+    /// Recorded digests for these identities, in request order.
+    fn find(&self, scope: FileDigestScope, files: &[FileIdentity]) -> Vec<Option<CacheDigest>>;
+    /// Record digests for files read under these identities.
+    fn record(&self, scope: FileDigestScope, entries: Vec<RecordedFileDigest>);
+}
+
+/// A [`FileDigestCache`] that remembers nothing and finds nothing.
+pub struct NoFileDigestCache;
+
+impl FileDigestCache for NoFileDigestCache {
+    fn find(&self, _scope: FileDigestScope, files: &[FileIdentity]) -> Vec<Option<CacheDigest>> {
+        vec![None; files.len()]
+    }
+
+    fn record(&self, _scope: FileDigestScope, _entries: Vec<RecordedFileDigest>) {}
 }
 
 /// A CAS blob whose contents this session hashed, and the file identity that
@@ -833,6 +933,7 @@ impl CacheAgent {
             prefetch_transfers: Arc::new(tokio::sync::Semaphore::new(MAX_PREFETCH_TRANSFERS)),
             prefetch_tasks: Arc::new(Mutex::new(Vec::new())),
             warnings: Arc::new(Mutex::new(BTreeSet::new())),
+            file_digests: Arc::new(Mutex::new(BTreeMap::new())),
             uploads,
         }
     }
@@ -2226,6 +2327,10 @@ impl CacheAgent {
                 Ok(AgentResponse::UnconsultedRecorded)
             }
             AgentRequest::RecordWarning { message } => self.record_warning(message),
+            AgentRequest::FindFileDigests { scope, files } => self.find_file_digests(scope, files),
+            AgentRequest::RecordFileDigests { scope, entries } => {
+                self.record_file_digests(scope, entries)
+            }
             AgentRequest::RecordCompilerInvocation {
                 outcome,
                 crate_name,
@@ -2572,6 +2677,65 @@ impl CacheAgent {
             warnings.insert(message);
         }
         Ok(AgentResponse::WarningRecorded)
+    }
+
+    /// Answer file-digest lookups from the session ledger.
+    ///
+    /// A recorded digest is returned only when the requested identity matches
+    /// the recorded one exactly. The caller statted the file to build the
+    /// identity, so this is the [`VerifiedBlob`] freshness check with the
+    /// stat moved to the side that was already making it.
+    fn find_file_digests(
+        &self,
+        scope: FileDigestScope,
+        files: Vec<FileIdentity>,
+    ) -> Result<AgentResponse> {
+        if files.len() > MAX_FILE_DIGEST_BATCH {
+            bail!("too many file-digest lookups in one request");
+        }
+        let ledger = self.file_digests.lock().unwrap();
+        let digests = files
+            .into_iter()
+            .map(|file| {
+                let recorded = ledger.get(&(scope, file.path.clone()))?;
+                (recorded.file == file).then(|| recorded.digest.clone())
+            })
+            .collect();
+        Ok(AgentResponse::FileDigests { digests })
+    }
+
+    /// Record digests of files a shim read in full, for later reuse.
+    ///
+    /// Capped rather than evicted: a session that outgrows the cap loses the
+    /// shortcut for the overflow and nothing else, and no workload observed so
+    /// far comes near it.
+    fn record_file_digests(
+        &self,
+        scope: FileDigestScope,
+        entries: Vec<RecordedFileDigest>,
+    ) -> Result<AgentResponse> {
+        if entries.len() > MAX_FILE_DIGEST_BATCH {
+            bail!("too many file-digest records in one request");
+        }
+        for entry in &entries {
+            if !entry.file.path.is_absolute() {
+                bail!("file-digest records need absolute paths");
+            }
+            entry.digest.validate()?;
+            if entry.file.len != entry.digest.size {
+                bail!("file-digest record length does not match its digest");
+            }
+        }
+        let mut ledger = self.file_digests.lock().unwrap();
+        for entry in entries {
+            if ledger.len() >= MAX_FILE_DIGEST_ENTRIES
+                && !ledger.contains_key(&(scope, entry.file.path.clone()))
+            {
+                break;
+            }
+            ledger.insert((scope, entry.file.path.clone()), entry);
+        }
+        Ok(AgentResponse::FileDigestsRecorded)
     }
 
     fn find_action_prediction(

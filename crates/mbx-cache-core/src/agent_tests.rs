@@ -3356,3 +3356,128 @@ fn recognizes_only_well_formed_task_identities() {
     assert!(!is_task_identity(&"a".repeat(63)));
     assert!(!is_task_identity(""));
 }
+
+fn ledger_identity(path: &str, len: u64, nanos: u32) -> FileIdentity {
+    FileIdentity {
+        path: PathBuf::from(path),
+        len,
+        modified: SystemTime::UNIX_EPOCH + Duration::new(1_700_000_000, nanos),
+    }
+}
+
+fn ledger_digest(len: u64) -> CacheDigest {
+    CacheDigest {
+        algorithm: "blake3".into(),
+        hash: "b".repeat(64),
+        size: len,
+    }
+}
+
+#[tokio::test]
+async fn file_digest_ledger_answers_only_matching_identities() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path(), "test-version");
+    let file = ledger_identity("/work/target/libserde.rlib", 7, 21);
+
+    let response = agent
+        .respond(AgentRequest::RecordFileDigests {
+            scope: FileDigestScope::Content,
+            entries: vec![RecordedFileDigest {
+                file: file.clone(),
+                digest: ledger_digest(7),
+            }],
+        })
+        .await;
+    assert!(matches!(response, AgentResponse::FileDigestsRecorded));
+
+    // The exact identity answers; a touched or truncated file does not.
+    let response = agent
+        .respond(AgentRequest::FindFileDigests {
+            scope: FileDigestScope::Content,
+            files: vec![
+                file.clone(),
+                ledger_identity("/work/target/libserde.rlib", 7, 22),
+                ledger_identity("/work/target/libserde.rlib", 8, 21),
+                ledger_identity("/work/target/absent.rlib", 7, 21),
+            ],
+        })
+        .await;
+    let AgentResponse::FileDigests { digests } = response else {
+        panic!("expected file digests");
+    };
+    assert_eq!(
+        digests,
+        vec![Some(ledger_digest(7)), None, None, None],
+        "only the recorded identity may answer"
+    );
+}
+
+#[tokio::test]
+async fn file_digest_ledger_scopes_do_not_answer_for_each_other() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path(), "test-version");
+    let file = ledger_identity("/work/vendor/header.h", 7, 21);
+
+    agent
+        .respond(AgentRequest::RecordFileDigests {
+            scope: FileDigestScope::Content,
+            entries: vec![RecordedFileDigest {
+                file: file.clone(),
+                digest: ledger_digest(7),
+            }],
+        })
+        .await;
+
+    // A content digest never vouches for the cc input scan.
+    let response = agent
+        .respond(AgentRequest::FindFileDigests {
+            scope: FileDigestScope::CcInput,
+            files: vec![file.clone()],
+        })
+        .await;
+    assert!(
+        matches!(response, AgentResponse::FileDigests { digests } if digests == vec![None]),
+        "scopes must not answer for each other"
+    );
+
+    let response = agent
+        .respond(AgentRequest::FindFileDigests {
+            scope: FileDigestScope::Content,
+            files: vec![file],
+        })
+        .await;
+    assert!(
+        matches!(response, AgentResponse::FileDigests { digests } if digests == vec![Some(ledger_digest(7))])
+    );
+}
+
+#[tokio::test]
+async fn file_digest_records_are_validated() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path(), "test-version");
+
+    let response = agent
+        .respond(AgentRequest::RecordFileDigests {
+            scope: FileDigestScope::Content,
+            entries: vec![RecordedFileDigest {
+                file: ledger_identity("relative/libserde.rlib", 7, 21),
+                digest: ledger_digest(7),
+            }],
+        })
+        .await;
+    assert!(matches!(response, AgentResponse::Error { .. }));
+
+    let response = agent
+        .respond(AgentRequest::RecordFileDigests {
+            scope: FileDigestScope::Content,
+            entries: vec![RecordedFileDigest {
+                file: ledger_identity("/work/libserde.rlib", 8, 21),
+                digest: ledger_digest(7),
+            }],
+        })
+        .await;
+    assert!(
+        matches!(response, AgentResponse::Error { .. }),
+        "a length that disagrees with the digest must be refused"
+    );
+}
