@@ -5,7 +5,7 @@ use crate::policy;
 use eyre::{Context, Result};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, ExitStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -164,19 +164,41 @@ fn version_arguments(toolchain: Option<&str>) -> Vec<String> {
 }
 
 fn command_check(name: &'static str, command: &OsStr, toolchain: Option<&str>) -> Check {
-    match Command::new(command)
-        .args(version_arguments(toolchain))
-        .output()
-    {
+    let arguments = version_arguments(toolchain);
+    match Command::new(command).args(&arguments).output() {
         Ok(output) if output.status.success() => Check::pass(
             name,
             String::from_utf8_lossy(&output.stdout).trim().to_string(),
         ),
-        Ok(output) => Check::fail(name, format!("--version exited with {}", output.status)),
+        Ok(output) => Check::fail(
+            name,
+            failure_detail(&arguments, output.status, &output.stderr),
+        ),
         Err(error) => Check::fail(
             name,
             format!("could not execute {}: {error}", command.to_string_lossy()),
         ),
+    }
+}
+
+/// Why a version query failed, in one line.
+///
+/// The arguments are named because a named toolchain is among them, and the
+/// reason a toolchain query fails — most often that the toolchain is not
+/// installed — is on stderr. Reporting the exit status alone leaves the reader
+/// with a diagnostic that diagnoses nothing.
+fn failure_detail(arguments: &[String], status: ExitStatus, stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let reason = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let arguments = arguments.join(" ");
+    if reason.is_empty() {
+        format!("{arguments} exited with {status}")
+    } else {
+        format!("{arguments} exited with {status}: {reason}")
     }
 }
 
@@ -370,6 +392,31 @@ mod tests {
     fn a_named_toolchain_is_the_one_the_version_checks_ask() {
         assert_eq!(version_arguments(None), ["--version"]);
         assert_eq!(version_arguments(Some("1.91")), ["+1.91", "--version"]);
+    }
+
+    #[test]
+    fn a_failed_version_query_reports_what_it_asked_and_why_it_failed() {
+        let arguments = version_arguments(Some("1.91"));
+        let status = std::process::Command::new("false").status().unwrap();
+
+        let detail = failure_detail(
+            &arguments,
+            status,
+            b"error: toolchain '1.91' is not installed\nnote: run rustup\n",
+        );
+
+        assert!(
+            detail.starts_with("+1.91 --version exited with"),
+            "{detail}"
+        );
+        assert!(
+            detail.ends_with(": error: toolchain '1.91' is not installed"),
+            "{detail}"
+        );
+        // Nothing on stderr leaves the status to end the line, rather than a
+        // dangling separator.
+        let quiet = failure_detail(&arguments, status, b"  \n");
+        assert!(quiet.ends_with(&status.to_string()), "{quiet}");
     }
 
     #[test]

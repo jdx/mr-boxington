@@ -498,6 +498,35 @@ fn a_toolchain_selects_one_for_every_command_that_reaches_a_compiler() {
 }
 
 #[test]
+fn the_words_before_the_subcommand_are_mbx_s_with_a_toolchain_or_without() {
+    // mbx reads what comes before the subcommand, so `mbx -q build` has always
+    // been an unknown flag rather than a quiet cargo build. A toolchain used to
+    // switch that off by accident — `+stable` matched no command mbx knew, so
+    // the rest of the line went to cargo unexamined — and now it does not.
+    // Cargo's own globals still work where cargo takes them after the
+    // subcommand, as `mbx build -q` does.
+    for argv in [
+        vec!["mbx", "-q", "build"],
+        vec!["mbx", "+stable", "-q", "build"],
+        vec!["mbx", "--offline", "build"],
+        vec!["mbx", "+stable", "--offline", "build"],
+    ] {
+        let owned = argv.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>();
+        assert!(
+            Cli::try_parse_from(&owned).is_err(),
+            "{argv:?} should be read by mbx, not handed over whole"
+        );
+    }
+
+    let owned = ["mbx", "build", "-q"].map(std::ffi::OsStr::new);
+    let cli = Cli::try_parse_from(&owned).unwrap();
+    let Commands::Cargo(arguments) = cli.command else {
+        panic!("build should be a cargo subcommand");
+    };
+    assert_eq!(arguments, ["build", "-q"]);
+}
+
+#[test]
 fn a_toolchain_is_refused_where_no_compiler_would_see_it() {
     for (argv, command) in [
         (vec!["mbx", "+1.91", "gc"], "gc"),
