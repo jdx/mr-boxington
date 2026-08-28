@@ -467,9 +467,10 @@ fn a_missing_cpp_compiler_still_leaves_c_compilations_cached() {
             PathBuf::from("/usr/bin/cc"),
         )),
         cxx: None,
+        targeted: Vec::new(),
     };
     let mut environment = BTreeMap::new();
-    shims.apply_to(&mut environment);
+    shims.apply_host(&mut environment);
 
     assert_eq!(
         environment.get("HOST_CC").map(String::as_str),
@@ -497,10 +498,164 @@ fn both_compilers_present_are_both_redirected() {
             PathBuf::from("/session/mbx-cxx"),
             PathBuf::from("/usr/bin/c++"),
         )),
+        targeted: Vec::new(),
     };
     let mut environment = BTreeMap::new();
-    shims.apply_to(&mut environment);
+    shims.apply_host(&mut environment);
     for name in ["HOST_CC", "HOST_CXX", "MBX_REAL_CC", "MBX_REAL_CXX"] {
         assert!(environment.contains_key(name), "{name} should be set");
+    }
+}
+
+/// The `cc` crate names a compiler for a target in four ways, and only those
+/// four should be wrapped -- `CCACHE_DIR` and friends merely start with the
+/// same letters.
+#[test]
+fn only_the_cc_crates_target_variables_name_a_cross_compiler() {
+    use CcLanguage::{C, Cxx};
+    for (variable, expected) in [
+        ("TARGET_CC", Some(C)),
+        ("TARGET_CXX", Some(Cxx)),
+        ("CC_aarch64-unknown-linux-musl", Some(C)),
+        ("CC_aarch64_unknown_linux_musl", Some(C)),
+        ("CXX_aarch64-unknown-linux-musl", Some(Cxx)),
+        ("CC", None),
+        ("CXX", None),
+        ("HOST_CC", None),
+        ("CC_", None),
+        ("CCACHE_DIR", None),
+        ("CXXFLAGS", None),
+        // The `cc` crate hangs its own controls off the same prefix, and
+        // autotools adds one of its own. Redirecting any of them would answer
+        // a question the build asked with a compiler path.
+        ("CC_FORCE_DISABLE", None),
+        ("CC_KNOWN_WRAPPER_CUSTOM", None),
+        ("CC_ENABLE_DEBUG_OUTPUT", None),
+        ("CC_FOR_BUILD", None),
+        ("CXX_FOR_BUILD", None),
+        // A bare word is not a triple either.
+        ("CC_gcc", None),
+    ] {
+        assert_eq!(
+            targeted_compiler_language(variable).map(|l| format!("{l:?}")),
+            expected.map(|l| format!("{l:?}")),
+            "{variable}"
+        );
+    }
+}
+
+/// A build already pointed at a shim -- an outer session's, or this one's --
+/// must not have a second shim put in front of it, or the inner one execs
+/// itself.
+#[test]
+fn a_compiler_that_is_already_a_shim_is_not_wrapped_again() {
+    let executable = std::env::current_exe().expect("current exe");
+    let shims = tempfile::tempdir().expect("tempdir");
+    let planted = shims.path().join("aarch64-linux-musl-gcc");
+    std::fs::write(&planted, "#!/bin/sh\nexit 0\n").expect("write shim");
+
+    assert_eq!(
+        resolve_named_compiler(&planted.display().to_string(), &executable, shims.path()),
+        None,
+        "a compiler inside the shim directory is a shim, not a compiler"
+    );
+}
+
+/// A cross image is entitled to ship the driver it cross-compiles with and no
+/// host `cc` at all, and that build is exactly the one this wrapping exists
+/// for.
+#[test]
+fn a_cross_only_image_still_gets_its_named_compiler_wrapped() {
+    let shims = CcShims {
+        cc: None,
+        cxx: None,
+        targeted: vec![TargetedCompiler {
+            variable: "CC_aarch64-unknown-linux-musl".into(),
+            shim_name: "mbx-cc-cc_aarch64-unknown-linux-musl".into(),
+            shim: PathBuf::from("/session/mbx-cc-cc_aarch64-unknown-linux-musl"),
+            real: PathBuf::from("/usr/bin/aarch64-linux-musl-gcc"),
+        }],
+    };
+    let mut environment = BTreeMap::new();
+    shims.apply_host(&mut environment);
+    shims.apply_targeted(&mut environment);
+
+    // Nothing is claimed for a host compiler that is not there...
+    assert!(!environment.contains_key("HOST_CC"));
+    // ...and the cross one is still wrapped.
+    assert_eq!(
+        environment
+            .get("CC_aarch64-unknown-linux-musl")
+            .map(String::as_str),
+        Some("/session/mbx-cc-cc_aarch64-unknown-linux-musl")
+    );
+    assert!(!shims.pins().is_empty());
+}
+
+/// A value that is a command rather than a path is left alone: wrapping it
+/// would mean running the first word and dropping the rest.
+#[test]
+fn a_compiler_named_as_a_command_is_not_wrapped() {
+    let executable = std::env::current_exe().expect("current exe");
+    let shims = tempfile::tempdir().expect("tempdir");
+    for value in ["ccache gcc", "", "   ", "cc -m32"] {
+        assert_eq!(
+            resolve_named_compiler(value, &executable, shims.path()),
+            None,
+            "{value:?} is not a single executable"
+        );
+    }
+}
+
+/// A build that named its own cross compiler still gets it wrapped, even
+/// though it named its host compiler too and mbx stood aside for that one.
+#[test]
+fn naming_a_host_compiler_does_not_cost_the_cross_one_its_shim() {
+    let shims = CcShims {
+        cc: Some((
+            PathBuf::from("/session/mbx-cc"),
+            PathBuf::from("/usr/bin/cc"),
+        )),
+        cxx: None,
+        targeted: vec![TargetedCompiler {
+            variable: "CC_aarch64-unknown-linux-musl".into(),
+            shim_name: "mbx-cc-cc_aarch64-unknown-linux-musl".into(),
+            shim: PathBuf::from("/session/mbx-cc-cc_aarch64-unknown-linux-musl"),
+            real: PathBuf::from("/usr/bin/aarch64-linux-musl-gcc"),
+        }],
+    };
+    let mut environment = BTreeMap::new();
+    shims.apply_targeted(&mut environment);
+
+    assert_eq!(
+        environment
+            .get("CC_aarch64-unknown-linux-musl")
+            .map(String::as_str),
+        Some("/session/mbx-cc-cc_aarch64-unknown-linux-musl")
+    );
+    // Standing aside for the host pair must not have been applied here.
+    assert!(!environment.contains_key("HOST_CC"));
+    // The shim finds its compiler by the name it is invoked under.
+    assert_eq!(
+        shims.pins().get("mbx-cc-cc_aarch64-unknown-linux-musl"),
+        Some(&PathBuf::from("/usr/bin/aarch64-linux-musl-gcc"))
+    );
+}
+
+/// A targeted shim has to be recognised as one, or it would exec nothing.
+#[test]
+fn targeted_shim_names_dispatch_to_their_language() {
+    for (stem, expected) in [
+        ("mbx-cc-cc_aarch64-unknown-linux-musl", "C"),
+        ("mbx-cxx-cxx_aarch64-unknown-linux-musl", "Cxx"),
+        ("mbx-cc-target_cc", "C"),
+        ("mbx-cxx-target_cxx", "Cxx"),
+    ] {
+        let language = if stem.starts_with("mbx-cxx-") {
+            CcLanguage::Cxx
+        } else {
+            CcLanguage::C
+        };
+        assert_eq!(format!("{language:?}"), expected, "{stem}");
     }
 }

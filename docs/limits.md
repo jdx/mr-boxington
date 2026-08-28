@@ -85,8 +85,15 @@ outside both paths, or on Windows, where no shims are installed — is not
 reached. Neither are cross compilations: a cargo build installs the shims as
 `HOST_CC` and `HOST_CXX`, which the `cc` crate consults only when host and
 target agree, and `mbx exec` shims only `cc`, `c++`, `gcc`, `g++`, `clang`,
-and `clang++`, leaving a versioned or cross toolchain to the build that
-chose it.
+and `clang++`, leaving a versioned toolchain to the build that chose it.
+
+A cross compile is cached when the build names its own compiler, through
+`CC_<target>`, `CXX_<target>`, `TARGET_CC`, or `TARGET_CXX`: mbx wraps what
+was named rather than replacing it. A cross build that names nothing is left
+alone, because which compiler a target implies lives in the `cc` crate's own
+tables -- guessing wrong would not cost a cache hit, it would build the object
+with the wrong compiler. A value that is a command rather than a path, such as
+`ccache gcc`, is left alone for the same reason.
 
 Only a plain single-source `-c` compile through a gcc-style or clang-style
 driver is admitted. Linking, preprocessing, assembly, Objective-C, precompiled
