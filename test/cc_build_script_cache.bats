@@ -103,6 +103,66 @@ object_in() {
   assert_success
 }
 
+@test "a bypassed compile leaves the stderr a build script reads empty" {
+  # cc-rs decides whether a flag is supported by running the compiler and
+  # checking that it wrote nothing to stderr. The shim stands in for that
+  # compiler, so anything the shim prints there is read as the compiler's
+  # answer: the flag is dropped, every later compilation carries different
+  # arguments than the build that populated the cache, and none of them match
+  # a stored key again. `-Wp,` is the trigger with the fewest moving parts --
+  # the real compiler takes it silently, and mbx bypasses rather than model
+  # what it forwards.
+  local probe_project="$BATS_TEST_TMPDIR/probe"
+  mkdir -p "$probe_project/src"
+  cat >"$probe_project/Cargo.toml" <<'EOF'
+[package]
+name = "probe-fixture"
+version = "0.1.0"
+edition = "2021"
+EOF
+  cat >"$probe_project/build.rs" <<'EOF'
+use std::{env, path::PathBuf, process::Command};
+
+fn main() {
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let compiler = env::var("HOST_CC")
+        .or_else(|_| env::var("CC"))
+        .unwrap_or_else(|_| "cc".into());
+    let source = out.join("flag_check.c");
+    std::fs::write(&source, "int main(void) { return 0; }").expect("probe source");
+    let output = Command::new(&compiler)
+        .arg("-Wp,-DMBX_PROBE=1")
+        .arg("-c")
+        .arg("-o")
+        .arg(out.join("flag_check.o"))
+        .arg(&source)
+        .output()
+        .expect("the C compiler should run");
+    assert!(output.status.success(), "the probe compile failed");
+    assert!(
+        output.stderr.is_empty(),
+        "the compiler wrote to stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+EOF
+  echo 'pub fn value() -> u32 { 7 }' >"$probe_project/src/lib.rs"
+  run cargo generate-lockfile --offline --manifest-path "$probe_project/Cargo.toml"
+  assert_success
+
+  local report="$BATS_TEST_TMPDIR/probe.json"
+  run env \
+    CARGO_TARGET_DIR="$BATS_TEST_TMPDIR/probe-target" \
+    MBX_STATS_REPORT="$report" \
+    "$MBX_BIN" build --offline --manifest-path "$probe_project/Cargo.toml"
+  assert_success
+
+  # Guard the guard: a fixture that stopped bypassing would pass this test
+  # without ever exercising the path that used to print.
+  run grep -F 'cc-tool-passthrough' "$report"
+  assert_success
+}
+
 @test "MBX_CC=0 leaves the build script's compiler alone" {
   local first_target="$BATS_TEST_TMPDIR/off-first"
   local second_target="$BATS_TEST_TMPDIR/off-second"

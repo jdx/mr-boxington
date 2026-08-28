@@ -22,6 +22,14 @@ const MAX_EXECUTABLE_IDENTITY_SIZE: usize = 64 * 1024;
 const MAX_EXECUTABLE_IDENTITY_BYTES: usize = 256 * 1024;
 const TASK_ACTION_MANIFEST_VERSION: u8 = 1;
 const MAX_TASK_ACTION_PREDICTIONS: usize = 16 * 1024;
+/// Longest shim diagnostic the agent accepts, in bytes.
+const MAX_WARNING_BYTES: usize = 4 * 1024;
+/// Most distinct shim diagnostics one session surfaces before going quiet.
+///
+/// A failure mode that repeats across a build tends to repeat with the same
+/// message, which deduplication already collapses; the cap only guards
+/// against a message that embeds something unique per compilation.
+const MAX_WARNINGS: usize = 128;
 const MAX_REMOTE_TRANSFERS: usize = 64;
 const MAX_PREFETCH_TRANSFERS: usize = 48;
 const MAX_PREFETCH_ACTION_BATCH: usize = 256;
@@ -44,7 +52,7 @@ pub struct AgentRemoteCache {
 }
 
 /// Wire protocol version used between an in-process cache agent and its shims.
-pub const AGENT_PROTOCOL_VERSION: u8 = 3;
+pub const AGENT_PROTOCOL_VERSION: u8 = 4;
 /// Largest single protocol request the agent will read.
 ///
 /// Requests are small JSON objects; the largest legitimate ones carry an output
@@ -165,6 +173,22 @@ pub enum AgentRequest {
         /// Captured identity-command standard output.
         stdout: Vec<u8>,
     },
+    /// Surface a shim diagnostic through the session that owns the build.
+    ///
+    /// A shim must not print diagnostics itself: its stderr belongs to the
+    /// compiler it stands in for, and build scripts read that stream as part
+    /// of the compiler's answer -- cc-rs treats any stderr output from a flag
+    /// probe as "unsupported", which changes the flags of every compilation
+    /// that follows and, with them, every action key the build produces.
+    ///
+    /// Appended rather than grouped with the other `Record*` requests it
+    /// belongs beside: these variants carry no `repr`, so inserting one moves
+    /// the discriminant of every variant after it, and a break nobody asked
+    /// for is worth less than the grouping. New variants go here.
+    RecordWarning {
+        /// Human-readable single-line diagnostic.
+        message: String,
+    },
 }
 
 /// Local output restoration work performed by one action-cache adapter hit.
@@ -228,6 +252,11 @@ pub enum AgentEvent {
         matched: bool,
         /// Restoration work performed before rebuilding.
         restore: RestoreStats,
+    },
+    /// A shim reported a diagnostic for the session to surface.
+    Warning {
+        /// Human-readable single-line diagnostic.
+        message: String,
     },
 }
 
@@ -307,6 +336,12 @@ pub enum AgentResponse {
         /// Human-readable failure description.
         message: String,
     },
+    /// A shim diagnostic was accepted for the session to surface.
+    ///
+    /// Sits past `Error` for the reason [`AgentRequest::RecordWarning`] sits
+    /// last: anywhere earlier renumbers the variants below it. New variants go
+    /// here.
+    WarningRecorded,
 }
 
 /// Aggregate cache activity for one task session.
@@ -584,6 +619,9 @@ pub struct CacheAgent {
     remote_transfers: Arc<tokio::sync::Semaphore>,
     prefetch_transfers: Arc<tokio::sync::Semaphore>,
     prefetch_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    /// Distinct shim diagnostics already surfaced, so a warning that fires
+    /// once per compilation is printed once per session.
+    warnings: Arc<Mutex<BTreeSet<String>>>,
     /// Deferred remote publication, present only when the session may write.
     uploads: Option<UploadQueue>,
 }
@@ -794,6 +832,7 @@ impl CacheAgent {
             remote_transfers,
             prefetch_transfers: Arc::new(tokio::sync::Semaphore::new(MAX_PREFETCH_TRANSFERS)),
             prefetch_tasks: Arc::new(Mutex::new(Vec::new())),
+            warnings: Arc::new(Mutex::new(BTreeSet::new())),
             uploads,
         }
     }
@@ -2186,6 +2225,7 @@ impl CacheAgent {
                 self.emit(|| AgentEvent::Unconsulted);
                 Ok(AgentResponse::UnconsultedRecorded)
             }
+            AgentRequest::RecordWarning { message } => self.record_warning(message),
             AgentRequest::RecordCompilerInvocation {
                 outcome,
                 crate_name,
@@ -2506,6 +2546,32 @@ impl CacheAgent {
 
     fn record_materialization(&self, restore: RestoreStats) {
         atomic_saturating_add(&self.stats.materialization_duration_ns, restore.duration_ns);
+    }
+
+    /// Surface a shim diagnostic on this process's stderr.
+    ///
+    /// The agent lives in the process that owns the session, so printing here
+    /// reaches the terminal running the build rather than the stderr of the
+    /// compilation the shim stands in for -- which build scripts read as part
+    /// of the compiler's answer. Deduplicated because one cause tends to fire
+    /// once per compilation, and capped so a message unique per compilation
+    /// cannot scroll the build away.
+    fn record_warning(&self, message: String) -> Result<AgentResponse> {
+        if message.is_empty()
+            || message.len() > MAX_WARNING_BYTES
+            || message.contains(['\n', '\r', '\0'])
+        {
+            bail!("invalid shim warning");
+        }
+        let mut warnings = self.warnings.lock().unwrap();
+        if !warnings.contains(&message) && warnings.len() < MAX_WARNINGS {
+            eprintln!("mbx[warning]: {message}");
+            self.emit(|| AgentEvent::Warning {
+                message: message.clone(),
+            });
+            warnings.insert(message);
+        }
+        Ok(AgentResponse::WarningRecorded)
     }
 
     fn find_action_prediction(

@@ -867,6 +867,49 @@ pub(crate) fn note(message: &str) {
     let _ = writeln!(std::io::stderr(), "{message}");
 }
 
+/// Whether this process's stderr belongs to the compiler it stands in for.
+///
+/// Set once at cc-shim entry. Build scripts read an intercepted compiler's
+/// stderr as part of its answer -- cc-rs marks a probed flag unsupported the
+/// moment anything lands there -- so one printed warning changes the flags of
+/// every compilation the build script produces afterwards, and with them
+/// every action key, orphaning the whole build's predictions.
+static STDERR_RESERVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Declare that this process replays compiler output on stderr and must not
+/// mix its own diagnostics into it.
+pub(crate) fn reserve_stderr_for_compiler() {
+    STDERR_RESERVED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Report a shim diagnostic without polluting a reserved stderr.
+///
+/// Delivered to the session's agent, which prints it from the process that
+/// owns the build. When the agent cannot take it, the message falls back to
+/// this process's stderr only where that stream is not the compiler's --
+/// losing a diagnostic costs a little visibility, while poisoning a configure
+/// probe costs the build its cache keys.
+pub(crate) fn report_shim_warning(message: &str) {
+    let mut message = message.replace(['\n', '\r'], "; ");
+    // Stay under the agent's acceptance limit rather than losing the whole
+    // diagnostic to it; the start of an error chain names the failure.
+    if message.len() > 2048 {
+        let end = (0..=2048).rfind(|&index| message.is_char_boundary(index));
+        message.truncate(end.unwrap_or_default());
+        message.push_str("...");
+    }
+    let delivered = matches!(
+        request_agent(&[AgentRequest::RecordWarning {
+            message: message.clone(),
+        }])
+        .map(|responses| responses.into_iter().next()),
+        Ok(Some(AgentResponse::WarningRecorded))
+    );
+    if !delivered && !STDERR_RESERVED.load(std::sync::atomic::Ordering::Relaxed) {
+        note(&format!("mbx[warning]: {message}"));
+    }
+}
+
 fn write_stats_report(path: &Path, stats: &AgentStats) -> Result<()> {
     let mut report = serde_json::to_vec_pretty(&StatsReport::from(stats))?;
     report.push(b'\n');
@@ -1715,6 +1758,10 @@ fn shim_invocation_name() -> Option<String> {
 /// shim that cannot find one falls back to the platform default rather than
 /// failing a build it was only meant to observe.
 pub fn run_cc_shim(language: CcLanguage) -> ExitCode {
+    // From here on, stderr carries only what the real compiler would have
+    // written: build scripts probe compilers by running them and reading that
+    // stream, and a diagnostic mixed into it changes what they decide.
+    reserve_stderr_for_compiler();
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let compiler = match real_compiler(language) {
         Ok(compiler) => compiler,
@@ -1730,7 +1777,7 @@ pub fn run_cc_shim(language: CcLanguage) -> ExitCode {
     // ordinary way a persisted compiler path is invoked: a build configured
     // under `mbx exec` and then built without it. Stand aside before probing
     // anything, so that costs one exec rather than a compiler query first.
-    if std::env::var_os(SOCKET_ENV).is_none() {
+    if session_socket().is_none() {
         return run_transparent_cc(compiler, arguments);
     }
     match crate::cc::compile(&compiler, &arguments, language) {
@@ -1738,7 +1785,7 @@ pub fn run_cc_shim(language: CcLanguage) -> ExitCode {
         Err(error) => {
             record_cc_bypass(&error);
             #[cfg(debug_assertions)]
-            eprintln!("mbx[warning]: cc cache bypassed: {error:#}");
+            report_shim_warning(&format!("cc cache bypassed: {error:#}"));
         }
     }
     run_transparent_cc(compiler, arguments)
@@ -2076,10 +2123,21 @@ fn append_line(path: &OsString, line: &str) -> std::io::Result<()> {
 }
 
 pub(crate) fn request_agent(requests: &[AgentRequest]) -> Result<Vec<AgentResponse>> {
-    match std::env::var_os(SOCKET_ENV).filter(|socket| !socket.is_empty()) {
+    match session_socket() {
         Some(socket) => request_agent_at(&socket, requests),
         None => request_standalone_agent(requests),
     }
+}
+
+/// The session socket a shim should ask, if a session named one.
+///
+/// An empty value means the same as an absent one: there is no session to
+/// reach. Everything that asks whether this process has a session has to
+/// agree on that, because the alternatives are not equivalent for a cc shim
+/// -- a standalone agent runs in the shim itself and writes to the stderr the
+/// compiler owns, which is what [`report_shim_warning`] exists to avoid.
+fn session_socket() -> Option<OsString> {
+    std::env::var_os(SOCKET_ENV).filter(|socket| !socket.is_empty())
 }
 
 /// Serve a persistent Cargo wrapper directly from the local store.

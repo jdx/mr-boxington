@@ -91,7 +91,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         ) {
             Ok(restored) => restored,
             Err(error) => {
-                eprintln!("mbx[warning]: cc result was not restored: {error:#}");
+                session::report_shim_warning(&format!("cc result was not restored: {error:#}"));
                 None
             }
         };
@@ -143,7 +143,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         let matched = cached_matches(&cached, &output);
         record_verification(matched, cached.restore);
         if !matched {
-            eprintln!("mbx[warning]: shadow verification diverged from cached output");
+            session::report_shim_warning("shadow verification diverged from cached output");
         }
     }
 
@@ -166,7 +166,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         before,
     ) {
         #[cfg(debug_assertions)]
-        eprintln!("mbx[warning]: cc result was not published: {error:#}");
+        session::report_shim_warning(&format!("cc result was not published: {error:#}"));
         #[cfg(not(debug_assertions))]
         let _ = error;
     }

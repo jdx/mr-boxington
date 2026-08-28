@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v3.jsonl");
+const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v4.jsonl");
 
 fn digest() -> CacheDigest {
     CacheDigest {
@@ -84,7 +84,7 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
         (
             "request.hello",
             AgentRequest::Hello {
-                protocol: 3,
+                protocol: 4,
                 client_version: "0.3.0".into(),
             },
         ),
@@ -138,6 +138,12 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
         (
             "request.record_unconsulted",
             AgentRequest::RecordUnconsulted,
+        ),
+        (
+            "request.record_warning",
+            AgentRequest::RecordWarning {
+                message: "cc result was not restored: blob missing".into(),
+            },
         ),
         (
             "request.record_compiler_invocation",
@@ -195,7 +201,7 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
         (
             "response.hello",
             AgentResponse::Hello {
-                protocol: 3,
+                protocol: 4,
                 agent_version: "0.3.0".into(),
             },
         ),
@@ -248,6 +254,7 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
             "response.unconsulted_recorded",
             AgentResponse::UnconsultedRecorded,
         ),
+        ("response.warning_recorded", AgentResponse::WarningRecorded),
         (
             "response.compiler_invocation_recorded",
             AgentResponse::CompilerInvocationRecorded,
@@ -389,7 +396,7 @@ fn agent_protocol_v3_shapes_match_the_conformance_fixture() {
 
 #[test]
 fn protocol_constants_match_the_contract() {
-    assert_eq!(AGENT_PROTOCOL_VERSION, 3);
+    assert_eq!(AGENT_PROTOCOL_VERSION, 4);
     assert_eq!(PROTOCOL_VERSION, 1);
     assert_eq!(
         ACTION_RESULT_MEDIA_TYPE,
@@ -433,6 +440,7 @@ define_variant_coverage!(request_variant_name, EXPECTED_REQUEST_VARIANTS, AgentR
     AgentRequest::RecordActionHit { .. } => "record_action_hit",
     AgentRequest::RecordBypass { .. } => "record_bypass",
     AgentRequest::RecordUnconsulted => "record_unconsulted",
+    AgentRequest::RecordWarning { .. } => "record_warning",
     AgentRequest::RecordCompilerInvocation { .. } => "record_compiler_invocation",
     AgentRequest::RecordActionVerification { .. } => "record_action_verification",
     AgentRequest::StoreActionResult { .. } => "store_action_result",
@@ -454,6 +462,7 @@ define_variant_coverage!(response_variant_name, EXPECTED_RESPONSE_VARIANTS, Agen
     AgentResponse::ActionVerificationRecorded => "action_verification_recorded",
     AgentResponse::BypassRecorded => "bypass_recorded",
     AgentResponse::UnconsultedRecorded => "unconsulted_recorded",
+    AgentResponse::WarningRecorded => "warning_recorded",
     AgentResponse::CompilerInvocationRecorded => "compiler_invocation_recorded",
     AgentResponse::ActionStored { .. } => "action_stored",
     AgentResponse::ActionPrediction { .. } => "action_prediction",
