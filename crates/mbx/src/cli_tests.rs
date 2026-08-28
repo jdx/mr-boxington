@@ -421,6 +421,100 @@ fn all_non_reserved_subcommands_are_forwarded_directly() {
 }
 
 #[test]
+fn a_toolchain_in_front_reaches_cargo_as_it_was_typed() {
+    let argv = ["mbx", "+1.91", "check", "--locked"].map(std::ffi::OsStr::new);
+
+    let cli = Cli::try_parse_from(&argv).unwrap();
+
+    assert_eq!(cli.toolchain.as_deref(), Some("1.91"));
+    let Commands::Cargo(arguments) = cli.command else {
+        panic!("check should still be a cargo subcommand");
+    };
+    // Read by mbx, and then handed back: cargo is the rustup shim, and the
+    // command line is how it is told which toolchain to run.
+    assert_eq!(arguments, ["check", "--locked"]);
+    assert_eq!(
+        with_toolchain(Some("1.91"), arguments),
+        ["+1.91", "check", "--locked"]
+    );
+}
+
+#[test]
+fn a_command_that_names_no_toolchain_is_forwarded_untouched() {
+    let argv = ["mbx", "check", "--locked"].map(std::ffi::OsStr::new);
+
+    let cli = Cli::try_parse_from(&argv).unwrap();
+
+    assert_eq!(cli.toolchain, None);
+    let Commands::Cargo(arguments) = cli.command else {
+        panic!("check should still be a cargo subcommand");
+    };
+    assert_eq!(with_toolchain(None, arguments), ["check", "--locked"]);
+}
+
+#[test]
+fn a_plus_word_inside_a_cargo_command_belongs_to_cargo() {
+    // The sigil classifies the word in front of the command. Past that point the
+    // line is the cargo command's own, and a `+` in it means whatever cargo says
+    // it means — including one held by a flag, or handed to the built program.
+    for argv in [
+        ["mbx", "test", "+weird", "--lib"],
+        ["mbx", "build", "--features", "+simd"],
+        ["mbx", "run", "--", "+5"],
+    ] {
+        let owned = argv.map(std::ffi::OsStr::new);
+        let cli = Cli::try_parse_from(&owned).unwrap();
+        assert_eq!(cli.toolchain, None, "{argv:?} names no toolchain to mbx");
+        let Commands::Cargo(arguments) = cli.command else {
+            panic!("{argv:?} should be a cargo subcommand");
+        };
+        assert_eq!(arguments, argv[1..]);
+    }
+}
+
+#[test]
+fn a_toolchain_selects_one_for_every_command_that_reaches_a_compiler() {
+    let explain = ["mbx", "+nightly", "explain", "clippy"].map(std::ffi::OsStr::new);
+
+    for argv in [
+        vec!["mbx", "+nightly", "build"],
+        vec!["mbx", "+nightly", "explain", "clippy"],
+        vec!["mbx", "+nightly", "doctor"],
+    ] {
+        let owned = argv.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>();
+        let cli = Cli::try_parse_from(&owned).unwrap();
+        assert_eq!(cli.toolchain.as_deref(), Some("nightly"), "{argv:?}");
+        assert_eq!(compiles_nothing(&cli.command), None, "{argv:?}");
+    }
+
+    let cli = Cli::try_parse_from(&explain).unwrap();
+    let Commands::Explain(args) = cli.command else {
+        panic!("explain should be reserved by mbx");
+    };
+    assert_eq!(
+        with_toolchain(Some("nightly"), args.arguments()),
+        ["+nightly", "clippy"]
+    );
+}
+
+#[test]
+fn a_toolchain_is_refused_where_no_compiler_would_see_it() {
+    for (argv, command) in [
+        (vec!["mbx", "+1.91", "gc"], "gc"),
+        (vec!["mbx", "+1.91", "cache", "dir"], "cache"),
+        (vec!["mbx", "+1.91", "tui"], "tui"),
+        (vec!["mbx", "+1.91", "exec", "make"], "exec"),
+        (vec!["mbx", "+1.91", "setup"], "setup"),
+    ] {
+        let owned = argv.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>();
+        let cli = Cli::try_parse_from(&owned).unwrap();
+        // Refused rather than ignored: naming a toolchain for a command that
+        // compiles nothing is a misunderstanding worth reporting.
+        assert_eq!(compiles_nothing(&cli.command), Some(command), "{argv:?}");
+    }
+}
+
+#[test]
 fn mbx_commands_still_take_precedence() {
     let argv = ["mbx", "gc", "--max-size", "1GiB"].map(std::ffi::OsStr::new);
     let cli = Cli::try_parse_from(&argv).unwrap();
@@ -500,6 +594,10 @@ fn cli_exposes_its_usage_spec() {
     assert!(
         spec.contains("hide=#true"),
         "setup should be hidden from help: {spec}"
+    );
+    assert!(
+        spec.contains("sigil=+"),
+        "the toolchain argument should be classified by its sigil: {spec}"
     );
     assert!(spec.contains("cmd explain"));
     assert!(spec.contains("cmd doctor"));

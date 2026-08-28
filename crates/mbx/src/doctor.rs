@@ -50,14 +50,18 @@ impl Check {
 
 /// Run all diagnostics and fail only when mbx cannot operate as configured.
 pub fn run(config: &Config) -> Result<ExitCode> {
-    run_formatted(config, false)
+    run_formatted(config, false, None)
 }
 
-pub(crate) fn run_formatted(config: &Config, json: bool) -> Result<ExitCode> {
+pub(crate) fn run_formatted(
+    config: &Config,
+    json: bool,
+    toolchain: Option<&str>,
+) -> Result<ExitCode> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let checks = runtime.block_on(check(config));
+    let checks = runtime.block_on(check(config, toolchain));
     render(&checks, json)
 }
 
@@ -98,9 +102,13 @@ fn render(checks: &[Check], json: bool) -> Result<ExitCode> {
     })
 }
 
-pub(crate) fn run_loaded(config: Result<Config>, json: bool) -> Result<ExitCode> {
+pub(crate) fn run_loaded(
+    config: Result<Config>,
+    json: bool,
+    toolchain: Option<&str>,
+) -> Result<ExitCode> {
     match config {
-        Ok(config) => run_formatted(&config, json),
+        Ok(config) => run_formatted(&config, json, toolchain),
         Err(error) => render(&[Check::fail("config", format!("{error:#}"))], json),
     }
 }
@@ -113,12 +121,12 @@ struct DoctorReport<'a> {
     warnings: usize,
 }
 
-async fn check(config: &Config) -> Vec<Check> {
+async fn check(config: &Config, toolchain: Option<&str>) -> Vec<Check> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
     let mut checks = vec![
-        command_check("cargo", &cargo),
-        command_check("rustc", &rustc),
+        command_check("cargo", &cargo, toolchain),
+        command_check("rustc", &rustc, toolchain),
     ];
     checks.push(cache_check(&config.cache_dir));
     checks.push(Check::pass(
@@ -141,8 +149,25 @@ fn enabled(value: bool) -> &'static str {
     if value { "enabled" } else { "disabled" }
 }
 
-fn command_check(name: &'static str, command: &OsStr) -> Check {
-    match Command::new(command).arg("--version").output() {
+/// The arguments that ask a command for its version, under a toolchain when one
+/// was named.
+///
+/// `mbx +1.91 doctor` is a question about 1.91, so the answer has to come from
+/// 1.91's compiler rather than from whichever one the shim resolves by default.
+/// A `CARGO` or `RUSTC` that is not a rustup shim rejects the `+`, and the
+/// check reports that failure rather than quietly describing another toolchain.
+fn version_arguments(toolchain: Option<&str>) -> Vec<String> {
+    match toolchain {
+        Some(toolchain) => vec![format!("+{toolchain}"), "--version".into()],
+        None => vec!["--version".into()],
+    }
+}
+
+fn command_check(name: &'static str, command: &OsStr, toolchain: Option<&str>) -> Check {
+    match Command::new(command)
+        .args(version_arguments(toolchain))
+        .output()
+    {
         Ok(output) if output.status.success() => Check::pass(
             name,
             String::from_utf8_lossy(&output.stdout).trim().to_string(),
@@ -339,6 +364,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         assert_eq!(cache_check(directory.path()).severity, Severity::Pass);
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_named_toolchain_is_the_one_the_version_checks_ask() {
+        assert_eq!(version_arguments(None), ["--version"]);
+        assert_eq!(version_arguments(Some("1.91")), ["+1.91", "--version"]);
     }
 
     #[test]

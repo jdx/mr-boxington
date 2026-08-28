@@ -31,6 +31,25 @@ setup() {
   assert_output --partial "0 failures"
 }
 
+@test "a toolchain in front of a Cargo command still selects one" {
+  cargo init --lib --vcs none toolchain-project
+  cd toolchain-project
+
+  run "$MBX_BIN" +not-a-real-toolchain check
+
+  # Whoever answers — rustup, or a Cargo that is not its shim — names the
+  # toolchain that was asked for, which is the proof it was handed over.
+  assert_failure
+  assert_output --partial "not-a-real-toolchain"
+}
+
+@test "a toolchain is refused in front of a command that compiles nothing" {
+  run "$MBX_BIN" +1.91 gc
+
+  assert_failure
+  assert_output --partial "compiles nothing"
+}
+
 @test "an isolated store starts empty" {
   run "$MBX_BIN" cache stats
 

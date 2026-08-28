@@ -125,6 +125,17 @@ dependency resolution, feature unification, build planning, and linking. mbx
 also forwards Cargo aliases and installed subcommands. Nothing goes into
 Cargo's configuration, and there is nothing to tune before the first build.
 
+A toolchain goes where rustup expects it, in front of the command:
+
+```sh
+mbx +1.91 check --workspace
+```
+
+mbx reads that word rather than passing it along unexamined, so it means the
+same thing in front of mbx's own commands: `mbx +1.91 doctor` reports on 1.91,
+and `mbx +1.91 explain check` diagnoses a build under it. Commands that never
+reach a compiler, such as `mbx gc`, refuse a toolchain instead of ignoring one.
+
 ## The first build
 
 The first build on a machine prints what it set up:
