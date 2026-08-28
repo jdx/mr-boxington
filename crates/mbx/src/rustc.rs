@@ -21,6 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output};
+use std::sync::OnceLock;
 use std::time::{Instant, SystemTime};
 
 #[derive(Clone, Debug, Default)]
@@ -163,10 +164,9 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             &portable.mappings,
         ) {
             Ok(Some((action, mut cached))) => {
-                match prediction_timing(&compilation) {
+                match refresh_prediction(&compilation, &action, &discovered) {
                     Ok(timing) => {
                         cached.restore.avoided_compiler_duration_ns = timing.duration_ns;
-                        record_prediction(&compilation, &action, &discovered, &timing);
                     }
                     Err(error) => {
                         eprintln!("mbx[warning]: compiler timing was not refreshed: {error:#}");
@@ -522,7 +522,13 @@ fn restore_predicted_result(
             if restore_outputs {
                 record_action_hit(&action, cached.restore, invocation.crate_name());
             }
-            record_prediction_value(invocation_digest, action, prediction.payload);
+            // The payload being recorded is the one just fetched, so the only
+            // news a rewrite could carry is a different action digest -- the
+            // other candidate key hit. An identical record is inherited by the
+            // committed manifest without being re-sent.
+            if prediction.action != action {
+                record_prediction_value(invocation_digest, action, prediction.payload);
+            }
             Ok(Some(cached))
         }
         None => {
@@ -711,7 +717,18 @@ fn record_prediction(
     }
 }
 
-fn prediction_timing(compilation: &Compilation<'_>) -> Result<CompileTiming> {
+/// Refresh the stored prediction behind a hit and recover the timing it holds.
+///
+/// One fetch serves both needs: the stored payload carries the compiler time
+/// this hit avoided, and comparing it against the freshly built payload says
+/// whether anything needs rewriting. On a warm hit nothing does -- the inputs
+/// that produced the key are the inputs the prediction already names -- so the
+/// rewrite, the largest request a hit sends, is skipped.
+fn refresh_prediction(
+    compilation: &Compilation<'_>,
+    action: &CacheDigest,
+    discovered: &DiscoveredInputs,
+) -> Result<CompileTiming> {
     let context = base_action_context(
         compilation.rustc,
         compilation.working_dir,
@@ -726,17 +743,37 @@ fn prediction_timing(compilation: &Compilation<'_>) -> Result<CompileTiming> {
     let Some(response) = responses.into_iter().next() else {
         bail!("cache agent did not return an action prediction response");
     };
-    let prediction = match response {
-        AgentResponse::ActionPrediction {
-            prediction: Some(prediction),
-        } => prediction,
-        AgentResponse::ActionPrediction { prediction: None } => {
-            return Ok(CompileTiming::default());
-        }
+    let stored = match response {
+        AgentResponse::ActionPrediction { prediction } => prediction,
         AgentResponse::Error { message } => bail!(message),
         _ => bail!("cache agent returned an unexpected action prediction response"),
     };
-    decode_prediction_timing(&prediction, &invocation_digest)
+    let timing = match &stored {
+        Some(stored) => decode_prediction_timing(stored, &invocation_digest)?,
+        None => CompileTiming::default(),
+    };
+    // Recording stays best-effort and separate from the timing, which the
+    // caller credits to this hit either way. A prediction that cannot be
+    // rebuilt costs the next build a lookup; it does not make the time this
+    // build just saved any less real.
+    let recorded = (|| {
+        let mut prediction = compilation.invocation.prediction(&context, discovered)?;
+        prediction.version = prediction.version.max(2);
+        prediction.compiler_duration_ns = timing.duration_ns;
+        prediction.crate_name.clone_from(&timing.crate_name);
+        let payload = String::from_utf8(canonical_json(&prediction)?)?;
+        let unchanged = stored
+            .as_ref()
+            .is_some_and(|stored| stored.action == *action && stored.payload == payload);
+        if !unchanged {
+            record_prediction_value(invocation_digest, action.clone(), payload);
+        }
+        Result::<()>::Ok(())
+    })();
+    if let Err(error) = recorded {
+        eprintln!("mbx[warning]: action prediction was not recorded: {error:#}");
+    }
+    Ok(timing)
 }
 
 fn decode_prediction_timing(
@@ -939,7 +976,13 @@ fn restore_result(
         files: staged,
     };
 
-    discovered.verify()?;
+    // The inputs were hashed moments ago in this same process to build the
+    // action key, and nothing is published here, so rehashing them
+    // (`discovered.verify()`) guards nothing: an input changing mid-restore is
+    // the same width of race a real compile has with cargo's own freshness
+    // check, and the next build degrades it to a miss. On a warm build that
+    // second pass re-reads every source and upstream rlib per hit, which is
+    // most of the restore.
     verify_environment(&discovered.environment)?;
     finalize_restored_outputs(staged, restore_outputs)?;
     restore.duration_ns = materialization_started
@@ -1043,6 +1086,21 @@ fn validated_outputs(
 }
 
 fn compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
+    // One shim process serves one compiler, but several steps of one
+    // compilation each build an action context. Asking the agent every time
+    // turns one identity into several round trips per compilation.
+    static IDENTITY: OnceLock<(OsString, CompilerIdentity)> = OnceLock::new();
+    if let Some((known, identity)) = IDENTITY.get()
+        && known.as_os_str() == rustc
+    {
+        return Ok(identity.clone());
+    }
+    let identity = query_compiler_identity(rustc)?;
+    let _ = IDENTITY.set((rustc.to_os_string(), identity.clone()));
+    Ok(identity)
+}
+
+fn query_compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
     let executable = resolve_executable(rustc)?;
     let environment = ["RUSTUP_HOME", "RUSTUP_TOOLCHAIN"]
         .into_iter()

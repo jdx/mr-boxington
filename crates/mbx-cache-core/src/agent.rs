@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 const MAX_EXECUTABLE_IDENTITIES: usize = 64;
@@ -554,7 +554,7 @@ fn queue_prefetch_directory(
 pub struct CacheAgent {
     cas: LocalCas,
     actions: LocalActionCache,
-    verified_blobs: Arc<Mutex<BTreeMap<CacheDigest, PathBuf>>>,
+    verified_blobs: Arc<Mutex<BTreeMap<CacheDigest, VerifiedBlob>>>,
     version: Arc<str>,
     write_locks: Arc<Mutex<BTreeMap<CacheDigest, Weak<tokio::sync::Mutex<()>>>>>,
     action_locks: Arc<Mutex<BTreeMap<CacheDigest, Weak<tokio::sync::Mutex<()>>>>>,
@@ -613,6 +613,39 @@ impl UploadSink for AgentUploadSink {
             .background_upload_failures
             .fetch_add(1, Ordering::Relaxed);
         self.stats.remote_failures.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// A CAS blob whose contents this session hashed, and the file identity that
+/// says the hash still describes what is on disk.
+///
+/// Length alone would miss an overwrite that keeps the size; the modification
+/// time is what makes a rewrite visible without reading the bytes again.
+#[derive(Debug, Clone)]
+struct VerifiedBlob {
+    path: PathBuf,
+    len: u64,
+    modified: SystemTime,
+}
+
+impl VerifiedBlob {
+    /// Describe a file that was just verified, or nothing when the filesystem
+    /// will not report a modification time to compare against later.
+    fn describe(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(Self {
+            path: path.to_path_buf(),
+            len: metadata.len(),
+            modified: metadata.modified().ok()?,
+        })
+    }
+
+    /// Whether the file still has the identity it had when it was verified.
+    fn is_unchanged(&self) -> bool {
+        let Ok(metadata) = std::fs::metadata(&self.path) else {
+            return false;
+        };
+        metadata.len() == self.len && metadata.modified().is_ok_and(|now| now == self.modified)
     }
 }
 
@@ -2258,9 +2291,19 @@ impl CacheAgent {
 
     fn find_verified_blob(&self, digest: &CacheDigest) -> Result<Option<PathBuf>> {
         let remembered = self.verified_blobs.lock().unwrap().get(digest).cloned();
-        if let Some(path) = remembered {
-            if digest.matches_file(&path).unwrap_or(false) {
-                return Ok(Some(path));
+        if let Some(remembered) = remembered {
+            // The contents behind this digest were hashed in full when the
+            // session first reached for them. Hashing again on every later
+            // lookup would re-read each dependency's rlib once per crate that
+            // links it, so what is rechecked here is that the file has not
+            // been written since: an overwrite moves the modification time,
+            // and truncation or eviction changes the length or removes it.
+            // Only a replacement that reproduces both -- which no writer in
+            // the store does, since blobs are published by rename under a
+            // content-derived name -- would go unnoticed until `mbx cache
+            // verify` reads the store back in full.
+            if remembered.is_unchanged() {
+                return Ok(Some(remembered.path));
             }
             self.verified_blobs.lock().unwrap().remove(digest);
         }
@@ -2272,10 +2315,16 @@ impl CacheAgent {
     }
 
     fn remember_verified_blob(&self, digest: &CacheDigest, path: &Path) {
+        let Some(verified) = VerifiedBlob::describe(path) else {
+            // Without an identity to compare against there is nothing to
+            // shortcut safely, so the digest stays unremembered and every
+            // lookup re-reads it.
+            return;
+        };
         self.verified_blobs
             .lock()
             .unwrap()
-            .insert(digest.clone(), path.to_path_buf());
+            .insert(digest.clone(), verified);
     }
 
     async fn find_action_result(&self, action: &CacheDigest) -> Result<AgentResponse> {
