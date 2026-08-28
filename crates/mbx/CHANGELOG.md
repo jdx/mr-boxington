@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/jdx/mr-boxington/compare/v0.5.4...v0.6.0) - 2026-08-28
+
+### Fixed
+
+- *(cc)* [**breaking**] keep shim diagnostics off the intercepted compiler's stderr ([#154](https://github.com/jdx/mr-boxington/pull/154))
+- *(mbx)* bump the stats report version for the new field ([#157](https://github.com/jdx/mr-boxington/pull/157))
+- *(cache-rustc)* key inert native search directories by path ([#153](https://github.com/jdx/mr-boxington/pull/153))
+
+### Other
+
+- stop rereading cached artifacts on warm hits ([#152](https://github.com/jdx/mr-boxington/pull/152))
+
 ## [0.5.4](https://github.com/jdx/mr-boxington/compare/v0.5.3...v0.5.4) - 2026-08-28
 
 ### Fixed
