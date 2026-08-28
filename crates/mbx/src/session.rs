@@ -2153,13 +2153,34 @@ struct StandaloneAgent {
 
 #[cfg(unix)]
 fn request_agent_at(socket: &OsString, requests: &[AgentRequest]) -> Result<Vec<AgentResponse>> {
-    let mut stream = std::os::unix::net::UnixStream::connect(Path::new(socket))
-        .wrap_err("failed to connect to the cache session")?;
-    sync_handshake(&mut stream)?;
-    requests
-        .iter()
-        .map(|request| sync_request(&mut stream, request))
-        .collect()
+    // One compilation asks the agent several separate questions, and paying a
+    // connect plus a handshake round trip for each adds up across a warm
+    // build. The protocol is strict request-response, so a connection held for
+    // the life of this shim process serves them all.
+    thread_local! {
+        static CONNECTION: RefCell<Option<(OsString, std::os::unix::net::UnixStream)>> =
+            const { RefCell::new(None) };
+    }
+    CONNECTION.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_none_or(|(known, _)| known != socket) {
+            let mut stream = std::os::unix::net::UnixStream::connect(Path::new(socket))
+                .wrap_err("failed to connect to the cache session")?;
+            sync_handshake(&mut stream)?;
+            *slot = Some((socket.clone(), stream));
+        }
+        let (_, stream) = slot.as_mut().expect("the connection was just established");
+        let responses = requests
+            .iter()
+            .map(|request| sync_request(stream, request))
+            .collect::<Result<Vec<_>>>();
+        if responses.is_err() {
+            // A failed exchange leaves the stream in an unknown protocol
+            // state, so the next request starts over on a fresh connection.
+            *slot = None;
+        }
+        responses
+    })
 }
 
 #[cfg(windows)]
@@ -2234,9 +2255,7 @@ fn sync_handshake(stream: &mut (impl std::io::Read + Write)) -> Result<()> {
         protocol: AGENT_PROTOCOL_VERSION,
         client_version: VERSION.into(),
     };
-    serde_json::to_writer(&mut *stream, &request)?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
+    write_request_line(stream, &request)?;
     let mut response = String::new();
     BufReader::new(&mut *stream).read_line(&mut response)?;
     validate_handshake_response(&response)
@@ -2247,12 +2266,24 @@ fn sync_request(
     stream: &mut (impl std::io::Read + Write),
     request: &AgentRequest,
 ) -> Result<AgentResponse> {
-    serde_json::to_writer(&mut *stream, request)?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
+    write_request_line(stream, request)?;
     let mut response = String::new();
     BufReader::new(&mut *stream).read_line(&mut response)?;
     Ok(serde_json::from_str(&response)?)
+}
+
+/// Send one request as a single write.
+///
+/// Serializing straight onto the socket emits a syscall per JSON fragment,
+/// and a prediction payload has thousands of them, each waking the agent's
+/// reader. The encoded line is assembled first so the kernel sees it once.
+#[cfg(unix)]
+fn write_request_line(stream: &mut impl Write, request: &AgentRequest) -> Result<()> {
+    let mut encoded = serde_json::to_vec(request)?;
+    encoded.push(b'\n');
+    stream.write_all(&encoded)?;
+    stream.flush()?;
+    Ok(())
 }
 
 fn validate_handshake_response(response: &str) -> Result<()> {

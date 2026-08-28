@@ -2259,10 +2259,18 @@ impl CacheAgent {
     fn find_verified_blob(&self, digest: &CacheDigest) -> Result<Option<PathBuf>> {
         let remembered = self.verified_blobs.lock().unwrap().get(digest).cloned();
         if let Some(path) = remembered {
-            if digest.matches_file(&path).unwrap_or(false) {
-                return Ok(Some(path));
+            // A remembered path already passed full content verification this
+            // session, and CAS blobs are immutable once published, so only its
+            // continued existence is in question -- eviction or truncation,
+            // both of which the size betrays. Rehashing here would read every
+            // large artifact once per compilation that links it instead of
+            // once per session.
+            match std::fs::metadata(&path) {
+                Ok(metadata) if metadata.len() == digest.size => return Ok(Some(path)),
+                _ => {
+                    self.verified_blobs.lock().unwrap().remove(digest);
+                }
             }
-            self.verified_blobs.lock().unwrap().remove(digest);
         }
         let path = self.cas.find(digest)?;
         if let Some(path) = &path {

@@ -214,8 +214,14 @@ async fn handshake_and_blob_round_trip() {
     );
 }
 
+/// A remembered blob passed full content verification this session, and CAS
+/// blobs are immutable once published, so later lookups check only that the
+/// file still exists at its declared size. Rehashing on every lookup would
+/// read each large artifact once per compilation that links it; the restore
+/// path already trusts session verification (`stage_verified_cached_output`),
+/// so per-lookup hashing bought detection of nothing mbx itself can cause.
 #[test]
-fn remembered_blobs_reject_same_size_corruption() {
+fn remembered_blobs_are_trusted_at_their_declared_size() {
     let directory = tempfile::tempdir().unwrap();
     let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
     let digest = CacheDigest::blake3(b"cached object");
@@ -227,7 +233,40 @@ fn remembered_blobs_reject_same_size_corruption() {
 
     std::fs::write(&path, b"broken object").unwrap();
 
+    assert_eq!(agent.find_verified_blob(&digest).unwrap(), Some(path));
+}
+
+#[test]
+fn remembered_blobs_reject_truncation() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    let digest = CacheDigest::blake3(b"cached object");
+    let path = agent.cas.store_bytes(&digest, b"cached object").unwrap();
+    assert_eq!(
+        agent.find_verified_blob(&digest).unwrap(),
+        Some(path.clone())
+    );
+
+    std::fs::write(&path, b"torn").unwrap();
+
     assert!(agent.find_verified_blob(&digest).is_err());
+    assert!(!agent.verified_blobs.lock().unwrap().contains_key(&digest));
+}
+
+#[test]
+fn remembered_blobs_notice_eviction() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    let digest = CacheDigest::blake3(b"cached object");
+    let path = agent.cas.store_bytes(&digest, b"cached object").unwrap();
+    assert_eq!(
+        agent.find_verified_blob(&digest).unwrap(),
+        Some(path.clone())
+    );
+
+    std::fs::remove_file(&path).unwrap();
+
+    assert_eq!(agent.find_verified_blob(&digest).unwrap(), None);
     assert!(!agent.verified_blobs.lock().unwrap().contains_key(&digest));
 }
 
