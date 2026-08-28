@@ -74,6 +74,10 @@ jobs:
             os: windows-latest
             runner: windows-latest
             bin: mbx.exe
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            runner: windows-11-arm
+            bin: mbx.exe
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -232,7 +236,7 @@ jobs:
 
   attach:
     name: Attach to release
-    # Needs every target: a release carrying three of four archives is worse
+    # Needs every target: a release carrying only some of its archives is worse
     # than one that arrives late, and the draft stays unpublished either way.
     needs: build
     runs-on: namespace-profile-endev-linux-amd64
