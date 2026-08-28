@@ -3358,12 +3358,14 @@ fn recognizes_only_well_formed_task_identities() {
 }
 
 fn ledger_identity(path: &str, len: u64, nanos: u32) -> FileIdentity {
-    // Rooted per platform so `is_absolute` holds on both.
+    // Rooted per platform so `is_absolute` holds on both, and timed in
+    // multiples of 100ns so Windows file-time resolution keeps two distinct
+    // nanos values distinct.
     let root = if cfg!(windows) { "C:\\" } else { "/" };
     FileIdentity {
         path: PathBuf::from(format!("{root}{path}")),
         len,
-        modified: SystemTime::UNIX_EPOCH + Duration::new(1_700_000_000, nanos),
+        modified: SystemTime::UNIX_EPOCH + Duration::new(1_700_000_000, nanos * 100),
         changed: Some((1_700_000_000, nanos.into())),
     }
 }
