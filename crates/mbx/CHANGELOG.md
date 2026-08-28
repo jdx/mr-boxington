@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4](https://github.com/jdx/mr-boxington/compare/v0.5.3...v0.5.4) - 2026-08-28
+
+### Fixed
+
+- *(cc)* keep compiler shims stable across sessions ([#150](https://github.com/jdx/mr-boxington/pull/150))
+
+### Other
+
+- release ([#149](https://github.com/jdx/mr-boxington/pull/149))
+
 ## [0.5.3](https://github.com/jdx/mr-boxington/compare/v0.5.2...v0.5.3) - 2026-08-28
 
 ### Added
