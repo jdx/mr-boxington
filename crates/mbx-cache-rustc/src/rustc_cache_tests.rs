@@ -21,6 +21,10 @@ fn bypass_kinds_are_stable_and_field_independent() {
         "unportable-native-link"
     );
     assert_eq!(
+        BypassReason::UnmodeledLinkArgument("link-arg=-Tlink.x".into()).kind(),
+        "unmodeled-link-argument"
+    );
+    assert_eq!(
         BypassReason::AmbiguousOutputName(PathBuf::from("a.rlib")).kind(),
         "ambiguous-output-name"
     );
@@ -1296,4 +1300,95 @@ fn a_compilation_that_never_links_is_not_a_link() {
         RustcInvocation::parse_with(&with_debug, native_links()),
         Err(BypassReason::UnsupportedCrateType("test".into()))
     );
+}
+
+/// A `rustflags` entry in `.cargo/config.toml` reaches every compilation the
+/// target has, and nearly all of them build an rlib or an rmeta. Refusing the
+/// option outright is what left mise's Windows CI bypassing 1092 of its 1109
+/// compilations over a stack size only the linker would ever read.
+#[test]
+fn a_library_keeps_compiling_with_a_link_argument_it_never_uses() {
+    let library = |flag: &str| {
+        args(&[
+            "--crate-name=widget",
+            "--crate-type=lib",
+            "--emit=dep-info,metadata,link",
+            "--out-dir=target/debug/deps",
+            flag,
+            "src/lib.rs",
+        ])
+    };
+    let RustcAction { digest, bytes } =
+        RustcInvocation::parse(&library("-Clink-arg=/STACK:8000000"))
+            .unwrap()
+            .action(context(&[("src/lib.rs", "source")]))
+            .unwrap();
+    let json = String::from_utf8(bytes).unwrap();
+    assert!(
+        json.contains(r#""--codegen=link-arg=/STACK:8000000""#),
+        "the link argument belongs in the key: {json}"
+    );
+
+    // Inert here, but still keyed: the descriptor says what the command line
+    // said, and an argument dropped from it would have to be one this adapter
+    // can prove no output ever depends on.
+    let smaller_stack = RustcInvocation::parse(&library("-Clink-arg=/STACK:4000000"))
+        .unwrap()
+        .action(context(&[("src/lib.rs", "source")]))
+        .unwrap();
+    assert_ne!(digest, smaller_stack.digest);
+
+    // The plural spelling and a separated value are the same option.
+    for arguments in [
+        library("-Clink-args=-Wl,-z,now"),
+        args(&[
+            "--crate-name=widget",
+            "--crate-type=lib",
+            "--emit=dep-info,metadata",
+            "--out-dir=target/debug/deps",
+            "-C",
+            "link-arg=/STACK:8000000",
+            "src/lib.rs",
+        ]),
+    ] {
+        assert!(
+            RustcInvocation::parse(&arguments).is_ok(),
+            "{arguments:?} should be cacheable"
+        );
+    }
+}
+
+/// Nothing in a link argument says whether it names a file, and the key never
+/// hashes one. `-Tlink.x` is a linker script found off the search path,
+/// `-fuse-ld=lld` replaces the linker the key describes, and both look exactly
+/// like the stack size that is safe to key.
+#[test]
+fn link_arguments_bypass_whatever_actually_links() {
+    for flag in ["-Clink-arg=--import-memory", "-Clink-args=-Tlink.x"] {
+        let wasm = args(&[
+            "--crate-type=bin",
+            "--emit=dep-info,link",
+            "--target=wasm32-unknown-unknown",
+            flag,
+            "src/main.rs",
+        ]);
+        assert_eq!(
+            RustcInvocation::parse(&wasm),
+            Err(BypassReason::UnmodeledLinkArgument(
+                flag.strip_prefix("-C").unwrap().into()
+            )),
+            "{flag} should not be cacheable on a wasm link"
+        );
+    }
+
+    for flag in ["-Clink-arg=-fuse-ld=lld", "-Clink-arg=/STACK:8000000"] {
+        let native = args(&["--test", "--emit=dep-info,link", flag, "src/lib.rs"]);
+        assert_eq!(
+            RustcInvocation::parse_with(&native, native_links()),
+            Err(BypassReason::UnmodeledLinkArgument(
+                flag.strip_prefix("-C").unwrap().into()
+            )),
+            "{flag} should not be cacheable on a native link"
+        );
+    }
 }
