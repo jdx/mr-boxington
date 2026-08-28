@@ -58,9 +58,9 @@ pub use mbx_cache_protocol::{
     BLOB_PACK_RECEIPT_MEDIA_TYPE, CLIENT_METADATA_MEDIA_TYPE, Capabilities, CapabilityFeatures,
     CapabilityLimits, CapabilityProtocol, CcMetadata, DIGEST_LIST_MEDIA_TYPE, DIRECTORY_MEDIA_TYPE,
     Digest as CacheDigest, DigestAlgorithm, Directory as CacheDirectory,
-    DirectoryNode as CacheDirectoryNode, FileNode as CacheFileNode, NAMESPACE_HEADER,
-    PROTOCOL_HEADER, PROTOCOL_VERSION, RustcMetadata, SymlinkNode as CacheSymlinkNode,
-    TASK_ACTION_MANIFEST_MEDIA_TYPE, TaskActionManifest,
+    DirectoryNode as CacheDirectoryNode, FileNode as CacheFileNode, MAX_ACTION_PREDICTION_PAYLOAD,
+    NAMESPACE_HEADER, PROTOCOL_HEADER, PROTOCOL_VERSION, RustcMetadata,
+    SymlinkNode as CacheSymlinkNode, TASK_ACTION_MANIFEST_MEDIA_TYPE, TaskActionManifest,
 };
 use remote_http::HttpRemoteCache;
 #[cfg(feature = "fuzzing")]

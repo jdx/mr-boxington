@@ -381,7 +381,7 @@ impl TaskActionManifest {
             && valid_task_identity(&self.task)
             && self.predictions.len() <= MAX_TASK_ACTION_PREDICTIONS
             && self.predictions.iter().all(|prediction| {
-                prediction.validate() && invocations.insert(&prediction.invocation)
+                prediction.validate().is_ok() && invocations.insert(&prediction.invocation)
             })
     }
 
@@ -408,19 +408,53 @@ impl TaskActionManifest {
 }
 
 impl ActionPrediction {
-    /// Whether the prediction satisfies the version-one wire invariants.
-    pub fn validate(&self) -> bool {
-        self.action.algorithm == DigestAlgorithm::Blake3.as_str()
-            && self.action.validate().is_ok()
-            && self.invocation.algorithm == DigestAlgorithm::Blake3.as_str()
-            && self.invocation.validate().is_ok()
-            && !self.adapter.is_empty()
-            && self
-                .adapter
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-            && self.payload.len() <= MAX_ACTION_PREDICTION_PAYLOAD
-            && serde_json::from_str::<serde_json::Value>(&self.payload).is_ok()
+    /// Check the version-one wire invariants, naming the one that fails.
+    ///
+    /// A rejected prediction is only ever reported to someone working out why
+    /// a build stopped predicting, and "invalid" on its own tells them nothing
+    /// about which of these constraints to go looking at. The message stands on
+    /// its own because the agent sends callers `Display`, not the error chain.
+    pub fn validate(&self) -> eyre::Result<()> {
+        match self.constraint_violation() {
+            Some(reason) => eyre::bail!("invalid action prediction: {reason}"),
+            None => Ok(()),
+        }
+    }
+
+    fn constraint_violation(&self) -> Option<String> {
+        if self.action.algorithm != DigestAlgorithm::Blake3.as_str()
+            || self.action.validate().is_err()
+        {
+            return Some("action digest is not a valid blake3 digest".into());
+        }
+        if self.invocation.algorithm != DigestAlgorithm::Blake3.as_str()
+            || self.invocation.validate().is_err()
+        {
+            return Some("invocation digest is not a valid blake3 digest".into());
+        }
+        if self.adapter.is_empty() {
+            return Some("adapter name is empty".into());
+        }
+        if !self
+            .adapter
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Some(format!(
+                "adapter name {:?} is not alphanumeric, '-', or '_'",
+                self.adapter
+            ));
+        }
+        if self.payload.len() > MAX_ACTION_PREDICTION_PAYLOAD {
+            return Some(format!(
+                "payload is {} bytes, over the {MAX_ACTION_PREDICTION_PAYLOAD} byte limit",
+                self.payload.len()
+            ));
+        }
+        if serde_json::from_str::<serde_json::Value>(&self.payload).is_err() {
+            return Some("payload is not valid JSON".into());
+        }
+        None
     }
 }
 
@@ -589,6 +623,63 @@ mod tests {
             }
             .validate()
             .is_err()
+        );
+    }
+
+    #[test]
+    fn a_rejected_prediction_names_the_constraint_it_violated() {
+        let digest = Digest::blake3(b"action");
+        let prediction = ActionPrediction {
+            invocation: digest.clone(),
+            action: digest,
+            adapter: "rustc".into(),
+            payload: "{}".into(),
+        };
+        assert!(prediction.validate().is_ok());
+
+        let reason = |prediction: ActionPrediction| {
+            prediction
+                .validate()
+                .expect_err("the prediction violates a constraint")
+                .to_string()
+        };
+        let oversized = ActionPrediction {
+            payload: format!("\"{}\"", "p".repeat(MAX_ACTION_PREDICTION_PAYLOAD)),
+            ..prediction.clone()
+        };
+        let oversized_len = oversized.payload.len();
+        let message = reason(oversized);
+        assert!(
+            message.contains(&oversized_len.to_string())
+                && message.contains(&MAX_ACTION_PREDICTION_PAYLOAD.to_string()),
+            "the message must carry both sizes so a build log says how far over it went: {message}"
+        );
+
+        // Every message stands alone, because the agent sends callers the
+        // outermost `Display` rather than the error chain.
+        assert_eq!(
+            reason(ActionPrediction {
+                adapter: "rust c".into(),
+                ..prediction.clone()
+            }),
+            r#"invalid action prediction: adapter name "rust c" is not alphanumeric, '-', or '_'"#
+        );
+        assert_eq!(
+            reason(ActionPrediction {
+                payload: "not json".into(),
+                ..prediction.clone()
+            }),
+            "invalid action prediction: payload is not valid JSON"
+        );
+        assert_eq!(
+            reason(ActionPrediction {
+                action: Digest {
+                    algorithm: DigestAlgorithm::Sha256.into(),
+                    ..prediction.action.clone()
+                },
+                ..prediction
+            }),
+            "invalid action prediction: action digest is not a valid blake3 digest"
         );
     }
 

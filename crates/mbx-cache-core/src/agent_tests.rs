@@ -1,5 +1,8 @@
 use super::*;
-use crate::{ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE, BLOB_PACK_BLOBS_HEADER};
+use crate::{
+    ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE, BLOB_PACK_BLOBS_HEADER,
+    MAX_ACTION_PREDICTION_PAYLOAD,
+};
 use std::time::Duration;
 
 #[test]
@@ -650,6 +653,41 @@ async fn begin_task_reports_how_many_predictions_were_loaded() {
     let reader = CacheAgent::new(&cache, "test-version");
     reader.begin_task(&task).await.unwrap();
     assert_eq!(reader.stats().predictions_loaded, 2);
+}
+
+#[tokio::test]
+async fn a_refused_prediction_reports_the_constraint_the_shim_should_print() {
+    // The shim prints whatever this error says. "invalid action prediction"
+    // on its own left an oversized payload from one crate looking identical
+    // to a malformed one, in a build log with nothing else to go on.
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    let task = agent.begin_task(&"c".repeat(64)).await.unwrap();
+    let digest = CacheDigest::blake3(b"invocation");
+    let payload = format!("\"{}\"", "p".repeat(MAX_ACTION_PREDICTION_PAYLOAD));
+    let payload_len = payload.len();
+
+    let response = agent
+        .respond(AgentRequest::RecordActionPrediction {
+            task,
+            prediction: ActionPrediction {
+                invocation: digest.clone(),
+                action: digest,
+                adapter: "rustc".into(),
+                payload,
+            },
+        })
+        .await;
+    let AgentResponse::Error { message } = response else {
+        panic!("an oversized payload must be refused, got {response:?}");
+    };
+    assert_eq!(
+        message,
+        format!(
+            "invalid action prediction: payload is {payload_len} bytes, \
+             over the {MAX_ACTION_PREDICTION_PAYLOAD} byte limit"
+        )
+    );
 }
 
 #[tokio::test]

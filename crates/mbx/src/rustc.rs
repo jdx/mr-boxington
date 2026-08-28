@@ -527,7 +527,12 @@ fn restore_predicted_result(
             // other candidate key hit. An identical record is inherited by the
             // committed manifest without being re-sent.
             if prediction.action != action {
-                record_prediction_value(invocation_digest, action, prediction.payload);
+                record_prediction_value(
+                    invocation_digest,
+                    action,
+                    prediction.payload,
+                    invocation.crate_name(),
+                );
             }
             Ok(Some(cached))
         }
@@ -709,11 +714,16 @@ fn record_prediction(
         prediction.compiler_duration_ns = timing.duration_ns;
         prediction.crate_name.clone_from(&timing.crate_name);
         let payload = String::from_utf8(canonical_json(&prediction)?)?;
-        record_prediction_value(invocation_digest, action.clone(), payload);
+        record_prediction_value(
+            invocation_digest,
+            action.clone(),
+            payload,
+            invocation.crate_name(),
+        );
         Result::<()>::Ok(())
     })();
     if let Err(error) = result {
-        eprintln!("mbx[warning]: action prediction was not recorded: {error:#}");
+        warn_prediction_not_recorded(compilation.invocation.crate_name(), &error);
     }
 }
 
@@ -766,12 +776,17 @@ fn refresh_prediction(
             .as_ref()
             .is_some_and(|stored| stored.action == *action && stored.payload == payload);
         if !unchanged {
-            record_prediction_value(invocation_digest, action.clone(), payload);
+            record_prediction_value(
+                invocation_digest,
+                action.clone(),
+                payload,
+                compilation.invocation.crate_name(),
+            );
         }
         Result::<()>::Ok(())
     })();
     if let Err(error) = recorded {
-        eprintln!("mbx[warning]: action prediction was not recorded: {error:#}");
+        warn_prediction_not_recorded(compilation.invocation.crate_name(), &error);
     }
     Ok(timing)
 }
@@ -797,7 +812,12 @@ fn decode_prediction_timing(
     })
 }
 
-fn record_prediction_value(invocation: CacheDigest, action: CacheDigest, payload: String) {
+fn record_prediction_value(
+    invocation: CacheDigest,
+    action: CacheDigest,
+    payload: String,
+    crate_name: &str,
+) {
     let result = (|| {
         let task = prediction_task(&invocation);
         let responses = session::request_agent(&[AgentRequest::RecordActionPrediction {
@@ -816,8 +836,15 @@ fn record_prediction_value(invocation: CacheDigest, action: CacheDigest, payload
         }
     })();
     if let Err(error) = result {
-        eprintln!("mbx[warning]: action prediction was not recorded: {error:#}");
+        warn_prediction_not_recorded(crate_name, &error);
     }
+}
+
+/// Name the crate whose prediction was lost. Without it the warning says only
+/// that one compilation out of thousands failed to record, which is not enough
+/// to reproduce or to tell whether the same crate fails on every build.
+fn warn_prediction_not_recorded(crate_name: &str, error: &eyre::Report) {
+    eprintln!("mbx[warning]: action prediction for {crate_name} was not recorded: {error:#}");
 }
 
 /// Select the session run, or a bounded persistent-manifest shard when this

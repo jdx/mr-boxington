@@ -587,20 +587,14 @@ impl RustcInvocation {
     ) -> Result<RustcInputPrediction, BypassReason> {
         let builder = ActionBuilder::new(self, context.clone());
         builder.validate_mappings()?;
-        let mut inputs = discovered
-            .inputs
-            .iter()
-            .map(|input| builder.normalize_path(&input.path))
-            .collect::<Result<BTreeSet<_>, _>>()?;
-        let mut has_native_directory = false;
+        let mut native_directories = BTreeSet::new();
         for argument in &self.arguments {
             if let Argument::SearchPath { kind, path } = argument
                 && kind == "native"
             {
                 match builder.normalize_path(path) {
                     Ok(normalized) => {
-                        has_native_directory = true;
-                        inputs.insert(format!("{NATIVE_DIRECTORY_PREDICTION_PREFIX}{normalized}"));
+                        native_directories.insert(normalized);
                     }
                     // Inert and outside every mapped root: the directory
                     // contributes no content inputs, so the prediction has
@@ -613,6 +607,25 @@ impl RustcInvocation {
                 }
             }
         }
+        // A file beneath a recorded directory is rediscovered by walking that
+        // directory, so naming it as well only makes the payload grow with the
+        // object tree a C dependency leaves in its `OUT_DIR`. `aws-lc-sys`
+        // leaves thousands of files there, which was enough to push the
+        // serialized prediction past the protocol's payload limit and lose the
+        // prediction entirely for the crate that most needed one.
+        let mut inputs = BTreeSet::new();
+        for input in &discovered.inputs {
+            let normalized = builder.normalize_path(&input.path)?;
+            if !under_any_directory(&normalized, &native_directories) {
+                inputs.insert(normalized);
+            }
+        }
+        let has_native_directory = !native_directories.is_empty();
+        inputs.extend(
+            native_directories
+                .into_iter()
+                .map(|directory| format!("{NATIVE_DIRECTORY_PREDICTION_PREFIX}{directory}")),
+        );
         Ok(RustcInputPrediction {
             version: if has_native_directory { 3 } else { 1 },
             inputs: inputs.into_iter().collect(),
@@ -1750,6 +1763,17 @@ impl<'a> ActionBuilder<'a> {
     fn normalize_path(&self, path: &Path) -> Result<String, BypassReason> {
         normalize_resolved_mapped_path(path, &self.context.working_dir, &self.mappings)
     }
+}
+
+/// Whether a normalized path names something strictly beneath one of
+/// `directories`, which are normalized the same way and so share its `/`
+/// separator regardless of platform.
+fn under_any_directory(path: &str, directories: &BTreeSet<String>) -> bool {
+    directories.iter().any(|directory| {
+        path.len() > directory.len()
+            && path.as_bytes()[directory.len()] == b'/'
+            && path.starts_with(directory)
+    })
 }
 
 fn denormalize_path(value: &str, mappings: &[PathMapping]) -> Result<PathBuf, BypassReason> {
