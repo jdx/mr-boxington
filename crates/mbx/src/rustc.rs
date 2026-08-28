@@ -714,6 +714,13 @@ fn with_oso_prefix(arguments: &[OsString], cache_links: bool) -> Cow<'_, [OsStri
         if argument.contains("-oso_prefix,") {
             return Cow::Borrowed(arguments);
         }
+        // Only a host link is ld64's to read. An explicit `--target` never
+        // classifies as one -- wasm links in particular stay cacheable -- and
+        // handing those invocations this flag would turn it into the
+        // unmodeled link argument that bypasses them.
+        if argument == "--target" || argument.starts_with("--target=") {
+            return Cow::Borrowed(arguments);
+        }
         if argument == "--out-dir" {
             out_dir = arguments.get(index + 1).map(PathBuf::from);
         } else if let Some(value) = argument.strip_prefix("--out-dir=") {

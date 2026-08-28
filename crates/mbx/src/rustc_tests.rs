@@ -762,6 +762,27 @@ fn the_shim_appends_an_oso_prefix_for_cached_links() {
     assert_eq!(with_oso_prefix(&chosen, true).len(), chosen.len());
     let query = arguments(&["--print=cfg"]);
     assert_eq!(with_oso_prefix(&query, true).len(), query.len());
+    // An explicit `--target` is never a host link, so nothing is appended:
+    // handing a wasm link this flag would bypass it as unmodeled.
+    let wasm = arguments(&[
+        "--crate-type=bin",
+        "--emit=dep-info,link",
+        "--target=wasm32-unknown-unknown",
+        "--out-dir",
+        "/work/target/wasm32-unknown-unknown/debug/deps",
+        "src/main.rs",
+    ]);
+    assert_eq!(with_oso_prefix(&wasm, true).len(), wasm.len());
+    let split_target = arguments(&[
+        "--target",
+        "wasm32-unknown-unknown",
+        "--out-dir=/work/target/debug/deps",
+        "src/main.rs",
+    ]);
+    assert_eq!(
+        with_oso_prefix(&split_target, true).len(),
+        split_target.len()
+    );
     let relative = arguments(&["--out-dir", "target/debug/deps", "src/main.rs"]);
     assert_eq!(with_oso_prefix(&relative, true).len(), relative.len());
     let split = arguments(&["--out-dir=/work/target/debug/deps", "src/main.rs"]);
