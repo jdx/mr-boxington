@@ -70,6 +70,8 @@ const SUPPORTED_CODEGEN_OPTIONS: &[&str] = &[
     "force-frame-pointers",
     "force-unwind-tables",
     "instrument-coverage",
+    "link-arg",
+    "link-args",
     "link-dead-code",
     "link-self-contained",
     "lto",
@@ -183,6 +185,9 @@ pub enum BypassReason {
     /// A native link would embed something no other checkout can reproduce.
     #[error("native link is not reproducible across checkouts: {0}")]
     UnportableNativeLink(String),
+    /// A linked output was given an argument to pass on to its linker.
+    #[error("rustc link argument is not modeled by the cache adapter: {0}")]
+    UnmodeledLinkArgument(String),
     /// A library search-path kind is not modeled.
     #[error("rustc search path kind is not cacheable yet: {0}")]
     UnsupportedSearchPath(String),
@@ -1379,6 +1384,19 @@ impl<'a> Parser<'a> {
                     .unwrap_or_else(|| "bin".into()),
             ));
         };
+        // A link argument is handed to the linker verbatim, and its text is all
+        // the adapter has to go on. `-Clink-arg=-Tlink.x` names a linker script
+        // resolved off the search path, `-Clink-arg=-fuse-ld=lld` replaces the
+        // linker the identity in the key describes, and neither is told apart
+        // from `/STACK:8000000` by any rule short of knowing the linker's own
+        // grammar. Where nothing links there is nothing to tell apart: an rlib
+        // or an rmeta is produced without a linker invocation, so the option is
+        // inert and the key carries its text like any other codegen option.
+        if link_output != LinkOutput::Library
+            && let Some(option) = self.first_link_argument()
+        {
+            return Err(BypassReason::UnmodeledLinkArgument(option.to_owned()));
+        }
         if let Some(name) = self.parsed.iter().find_map(|argument| match argument {
             Argument::Extern { name, path: None } if name != "proc_macro" => Some(name),
             _ => None,
@@ -1404,6 +1422,19 @@ impl<'a> Parser<'a> {
 }
 
 impl Parser<'_> {
+    /// The first `-C link-arg` or `-C link-args` option in the invocation,
+    /// rendered as it appears in the action key.
+    fn first_link_argument(&self) -> Option<&str> {
+        self.parsed.iter().find_map(|argument| {
+            let Argument::Plain(value) = argument else {
+                return None;
+            };
+            let option = value.strip_prefix("--codegen=")?;
+            let name = option.split_once('=').map_or(option, |(name, _)| name);
+            matches!(name, "link-arg" | "link-args").then_some(option)
+        })
+    }
+
     /// Whether this invocation links a program for the host.
     ///
     /// An explicit `--target` bypasses even when it spells the host triple:
