@@ -2597,7 +2597,7 @@ impl CacheAgent {
         prediction: ActionPrediction,
     ) -> Result<AgentResponse> {
         validate_task_identity(task)?;
-        validate_action_prediction(&prediction)?;
+        prediction.validate()?;
         let mut tasks = self.task_actions.lock().unwrap();
         let state = tasks.entry(task.to_string()).or_default();
         if !state.predictions.contains_key(&prediction.invocation)
@@ -2835,13 +2835,6 @@ pub fn task_manifest_actions(store: &Path, task: &str) -> Result<Vec<CacheDigest
         .into_iter()
         .map(|prediction| prediction.action)
         .collect())
-}
-
-fn validate_action_prediction(prediction: &ActionPrediction) -> Result<()> {
-    match prediction.invalid_reason() {
-        Some(reason) => bail!("invalid action prediction: {reason}"),
-        None => Ok(()),
-    }
 }
 
 fn validate_task_manifest(manifest: &TaskActionManifest, task: &str) -> Result<()> {

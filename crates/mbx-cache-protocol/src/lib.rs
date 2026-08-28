@@ -381,7 +381,7 @@ impl TaskActionManifest {
             && valid_task_identity(&self.task)
             && self.predictions.len() <= MAX_TASK_ACTION_PREDICTIONS
             && self.predictions.iter().all(|prediction| {
-                prediction.validate() && invocations.insert(&prediction.invocation)
+                prediction.validate().is_ok() && invocations.insert(&prediction.invocation)
             })
     }
 
@@ -408,17 +408,20 @@ impl TaskActionManifest {
 }
 
 impl ActionPrediction {
-    /// Whether the prediction satisfies the version-one wire invariants.
-    pub fn validate(&self) -> bool {
-        self.invalid_reason().is_none()
+    /// Check the version-one wire invariants, naming the one that fails.
+    ///
+    /// A rejected prediction is only ever reported to someone working out why
+    /// a build stopped predicting, and "invalid" on its own tells them nothing
+    /// about which of these constraints to go looking at. The message stands on
+    /// its own because the agent sends callers `Display`, not the error chain.
+    pub fn validate(&self) -> eyre::Result<()> {
+        match self.constraint_violation() {
+            Some(reason) => eyre::bail!("invalid action prediction: {reason}"),
+            None => Ok(()),
+        }
     }
 
-    /// Describe the first version-one wire invariant this prediction violates.
-    ///
-    /// A rejected prediction is only ever reported to someone trying to work
-    /// out why a build stopped predicting, and "invalid" on its own tells them
-    /// nothing about which of these constraints to go looking at.
-    pub fn invalid_reason(&self) -> Option<String> {
+    fn constraint_violation(&self) -> Option<String> {
         if self.action.algorithm != DigestAlgorithm::Blake3.as_str()
             || self.action.validate().is_err()
         {
@@ -632,48 +635,51 @@ mod tests {
             adapter: "rustc".into(),
             payload: "{}".into(),
         };
-        assert_eq!(prediction.invalid_reason(), None);
+        assert!(prediction.validate().is_ok());
 
+        let reason = |prediction: ActionPrediction| {
+            prediction
+                .validate()
+                .expect_err("the prediction violates a constraint")
+                .to_string()
+        };
         let oversized = ActionPrediction {
             payload: format!("\"{}\"", "p".repeat(MAX_ACTION_PREDICTION_PAYLOAD)),
             ..prediction.clone()
         };
-        let reason = oversized
-            .invalid_reason()
-            .expect("payload is over the limit");
+        let oversized_len = oversized.payload.len();
+        let message = reason(oversized);
         assert!(
-            reason.contains(&oversized.payload.len().to_string())
-                && reason.contains(&MAX_ACTION_PREDICTION_PAYLOAD.to_string()),
-            "the reason must carry both sizes so a build log says how far over it went: {reason}"
+            message.contains(&oversized_len.to_string())
+                && message.contains(&MAX_ACTION_PREDICTION_PAYLOAD.to_string()),
+            "the message must carry both sizes so a build log says how far over it went: {message}"
         );
-        assert!(!oversized.validate());
 
+        // Every message stands alone, because the agent sends callers the
+        // outermost `Display` rather than the error chain.
         assert_eq!(
-            ActionPrediction {
+            reason(ActionPrediction {
                 adapter: "rust c".into(),
                 ..prediction.clone()
-            }
-            .invalid_reason(),
-            Some(r#"adapter name "rust c" is not alphanumeric, '-', or '_'"#.into())
+            }),
+            r#"invalid action prediction: adapter name "rust c" is not alphanumeric, '-', or '_'"#
         );
         assert_eq!(
-            ActionPrediction {
+            reason(ActionPrediction {
                 payload: "not json".into(),
                 ..prediction.clone()
-            }
-            .invalid_reason(),
-            Some("payload is not valid JSON".into())
+            }),
+            "invalid action prediction: payload is not valid JSON"
         );
         assert_eq!(
-            ActionPrediction {
+            reason(ActionPrediction {
                 action: Digest {
                     algorithm: DigestAlgorithm::Sha256.into(),
                     ..prediction.action.clone()
                 },
                 ..prediction
-            }
-            .invalid_reason(),
-            Some("action digest is not a valid blake3 digest".into())
+            }),
+            "invalid action prediction: action digest is not a valid blake3 digest"
         );
     }
 
