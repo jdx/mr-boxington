@@ -1030,7 +1030,7 @@ fn wrap_targeted_compilers(executable: &Path, session_dir: &Path) -> Result<Vec<
         let Some(language) = targeted_compiler_language(&variable) else {
             continue;
         };
-        let Some(real) = resolve_named_compiler(&value, executable) else {
+        let Some(real) = resolve_named_compiler(&value, executable, session_dir) else {
             debug!("{variable} does not name a single executable; it is left as it is");
             continue;
         };
@@ -1054,7 +1054,7 @@ fn wrap_targeted_compilers(executable: &Path, session_dir: &Path) -> Result<Vec<
 }
 
 /// Resolve a compiler a build named, rejecting anything that is not one path.
-fn resolve_named_compiler(value: &str, executable: &Path) -> Option<PathBuf> {
+fn resolve_named_compiler(value: &str, executable: &Path, shims: &Path) -> Option<PathBuf> {
     let value = value.trim();
     if value.is_empty() || value.split_whitespace().count() != 1 {
         return None;
@@ -1063,11 +1063,16 @@ fn resolve_named_compiler(value: &str, executable: &Path) -> Option<PathBuf> {
     let resolved = if candidate.is_absolute() {
         candidate.is_file().then(|| candidate.to_path_buf())
     } else {
-        resolve_on_path_excluding(value, executable)
+        resolve_on_path_excluding(value, executable, shims)
     }?;
-    // A build already pointed at a shim from an outer session would otherwise
-    // be wrapped a second time.
-    (!is_same_binary(&resolved, Some(executable))).then_some(resolved)
+    // A build already pointed at a shim -- this session's, or one an outer
+    // session left in the environment -- would otherwise be wrapped a second
+    // time, and the inner shim would exec itself. Comparing the directory as
+    // well as the binary catches the link that does not compare equal.
+    let inside_shims = resolved
+        .parent()
+        .is_some_and(|parent| canonical(parent) == canonical(shims));
+    (!inside_shims && !is_same_binary(&resolved, Some(executable))).then_some(resolved)
 }
 
 fn resolve_on_path(name: &str) -> Option<PathBuf> {

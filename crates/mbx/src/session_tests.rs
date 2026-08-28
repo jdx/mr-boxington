@@ -544,6 +544,23 @@ fn only_the_cc_crates_target_variables_name_a_cross_compiler() {
     }
 }
 
+/// A build already pointed at a shim -- an outer session's, or this one's --
+/// must not have a second shim put in front of it, or the inner one execs
+/// itself.
+#[test]
+fn a_compiler_that_is_already_a_shim_is_not_wrapped_again() {
+    let executable = std::env::current_exe().expect("current exe");
+    let shims = tempfile::tempdir().expect("tempdir");
+    let planted = shims.path().join("aarch64-linux-musl-gcc");
+    std::fs::write(&planted, "#!/bin/sh\nexit 0\n").expect("write shim");
+
+    assert_eq!(
+        resolve_named_compiler(&planted.display().to_string(), &executable, shims.path()),
+        None,
+        "a compiler inside the shim directory is a shim, not a compiler"
+    );
+}
+
 /// A cross image is entitled to ship the driver it cross-compiles with and no
 /// host `cc` at all, and that build is exactly the one this wrapping exists
 /// for.
@@ -580,9 +597,10 @@ fn a_cross_only_image_still_gets_its_named_compiler_wrapped() {
 #[test]
 fn a_compiler_named_as_a_command_is_not_wrapped() {
     let executable = std::env::current_exe().expect("current exe");
+    let shims = tempfile::tempdir().expect("tempdir");
     for value in ["ccache gcc", "", "   ", "cc -m32"] {
         assert_eq!(
-            resolve_named_compiler(value, &executable),
+            resolve_named_compiler(value, &executable, shims.path()),
             None,
             "{value:?} is not a single executable"
         );
