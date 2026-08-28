@@ -17,6 +17,7 @@ use mbx_cache_rustc::{
     normalize_mapped_path,
 };
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -122,6 +123,11 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     // has no parent session, so first parse just enough of the invocation to
     // learn its output directory and use that as the stable target mapping.
     let options = ParseOptions::caching_native_links(session::cache_links_requested());
+    // Appended before anything parses: the debug-map rule inside the parser is
+    // exactly what this flag satisfies, so an invocation that would bypass
+    // without it has to carry it going in.
+    let arguments = with_oso_prefix(arguments, session::cache_links_requested());
+    let arguments = arguments.as_ref();
     let initial_invocation = RustcInvocation::parse_with(arguments, options)?;
     let initial_outputs = initial_invocation.outputs(&working_dir)?;
     let portable = Portable::detect(
@@ -682,6 +688,46 @@ fn base_action_context(
 /// failure: not knowing the linker is a reason this compilation cannot be
 /// cached, which is what a bypass is, and reporting it as anything else leaves
 /// it out of the summary and out of `mbx explain`.
+/// Ask ld64 to strip this build's output directory from the debug map.
+///
+/// On macOS a linked binary records the absolute path and timestamp of every
+/// object behind it, which is what makes a debug-info link unportable across
+/// checkouts. The output directory is where all of them live, and only the
+/// shim sees its managed, hashed spelling on every invocation -- so when
+/// native links are being cached on this platform, the shim appends the
+/// prefix itself rather than asking anyone to discover it. An invocation that
+/// already carries one keeps what its caller chose, and an invocation without
+/// an output directory has no linker to hand this to.
+///
+/// Read straight off the argument list, because this runs before anything
+/// parses: the parser's own debug-map rule is exactly what the flag
+/// satisfies, so it has to be present going in.
+fn with_oso_prefix(arguments: &[OsString], cache_links: bool) -> Cow<'_, [OsString]> {
+    if !cfg!(target_os = "macos") || !cache_links {
+        return Cow::Borrowed(arguments);
+    }
+    let mut out_dir = None;
+    for (index, argument) in arguments.iter().enumerate() {
+        let Some(argument) = argument.to_str() else {
+            continue;
+        };
+        if argument.contains("-oso_prefix,") {
+            return Cow::Borrowed(arguments);
+        }
+        if argument == "--out-dir" {
+            out_dir = arguments.get(index + 1).map(PathBuf::from);
+        } else if let Some(value) = argument.strip_prefix("--out-dir=") {
+            out_dir = Some(PathBuf::from(value));
+        }
+    }
+    let Some(out_dir) = out_dir.filter(|out_dir| out_dir.is_absolute()) else {
+        return Cow::Borrowed(arguments);
+    };
+    let mut extended = arguments.to_vec();
+    extended.push(format!("-Clink-arg=-Wl,-oso_prefix,{}/", out_dir.display()).into());
+    Cow::Owned(extended)
+}
+
 fn linker_for(invocation: &RustcInvocation) -> Result<Option<LinkerIdentity>> {
     if !invocation.links_natively() {
         return Ok(None);

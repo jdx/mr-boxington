@@ -1483,3 +1483,99 @@ fn link_arguments_bypass_whatever_actually_links() {
         );
     }
 }
+
+/// The one link argument the adapter models: ld64's `-oso_prefix` names a
+/// checkout-specific path, so its value normalizes like every other path in
+/// the key instead of pinning the key to one checkout's spelling.
+#[test]
+fn an_oso_prefix_normalizes_into_the_key() {
+    let workspace_prefix = format!(
+        "-Clink-arg=-Wl,-oso_prefix,{}/",
+        workspace().to_str().unwrap()
+    );
+    let library = args(&[
+        "--crate-name=widget",
+        "--crate-type=lib",
+        "--emit=dep-info,metadata,link",
+        "--out-dir=target/debug/deps",
+        &workspace_prefix,
+        "src/lib.rs",
+    ]);
+    let RustcAction { bytes, .. } = RustcInvocation::parse(&library)
+        .unwrap()
+        .action(context(&[("src/lib.rs", "source")]))
+        .unwrap();
+    let json = String::from_utf8(bytes).unwrap();
+    assert!(
+        json.contains(r#""--codegen=link-arg=-Wl,-oso_prefix,${workspace}/""#),
+        "the prefix must enter the key by its placeholder: {json}"
+    );
+}
+
+/// ld64 is the only linker that reads `-oso_prefix`, so anywhere but a native
+/// link the option stays what every other link argument is: unmodeled.
+#[test]
+fn an_oso_prefix_is_unmodeled_where_ld64_never_links() {
+    let wasm = args(&[
+        "--crate-type=bin",
+        "--emit=dep-info,link",
+        "--target=wasm32-unknown-unknown",
+        "-Clink-arg=-Wl,-oso_prefix,/work/project/",
+        "src/main.rs",
+    ]);
+    assert_eq!(
+        RustcInvocation::parse(&wasm),
+        Err(BypassReason::UnmodeledLinkArgument(
+            "link-arg=-Wl,-oso_prefix".into()
+        )),
+    );
+}
+
+/// On macOS the debug map is what makes a debug-info link unportable, and a
+/// prefix covering the output directory is what strips the debug map back to
+/// spellings every checkout shares.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_covering_oso_prefix_makes_a_debug_link_portable() {
+    let binary = |extra: &[&str]| {
+        let mut all = vec![
+            "--crate-name=widget",
+            "--crate-type=bin",
+            "--emit=dep-info,link",
+            "-Cdebuginfo=2",
+        ];
+        all.extend_from_slice(extra);
+        all.extend_from_slice(&["src/main.rs"]);
+        args(&all)
+    };
+    let out_dir = format!(
+        "--out-dir={}",
+        workspace().join("target/debug/deps").display()
+    );
+    let covering = format!(
+        "-Clink-arg=-Wl,-oso_prefix,{}/",
+        workspace().to_str().unwrap()
+    );
+    let elsewhere = "-Clink-arg=-Wl,-oso_prefix,/somewhere/else/";
+
+    // Without a prefix the debug map pins the checkout, as before.
+    assert_eq!(
+        RustcInvocation::parse_with(&binary(&[&out_dir]), native_links()),
+        Err(BypassReason::UnportableNativeLink("debuginfo=2".into())),
+    );
+    // A prefix covering the output directory lifts exactly that.
+    assert!(RustcInvocation::parse_with(&binary(&[&out_dir, &covering]), native_links()).is_ok());
+    // One covering something else does not.
+    assert_eq!(
+        RustcInvocation::parse_with(&binary(&[&out_dir, elsewhere]), native_links()),
+        Err(BypassReason::UnportableNativeLink("debuginfo=2".into())),
+    );
+    // And a relative output directory pins nothing a prefix could cover.
+    assert_eq!(
+        RustcInvocation::parse_with(
+            &binary(&["--out-dir=target/debug/deps", &covering]),
+            native_links()
+        ),
+        Err(BypassReason::UnportableNativeLink("debuginfo=2".into())),
+    );
+}

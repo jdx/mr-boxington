@@ -736,3 +736,37 @@ fn a_root_written_with_a_trailing_separator_still_rewrites() {
         original.as_bytes()
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_shim_appends_an_oso_prefix_for_cached_links() {
+    let arguments = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+    let base = arguments(&[
+        "--crate-name=app",
+        "--crate-type=bin",
+        "--emit=dep-info,link",
+        "--out-dir",
+        "/work/target/debug/deps",
+        "src/main.rs",
+    ]);
+    let extended = with_oso_prefix(&base, true);
+    assert_eq!(
+        extended.last().unwrap(),
+        &OsString::from("-Clink-arg=-Wl,-oso_prefix,/work/target/debug/deps/"),
+    );
+    // Off when links are not cached, when the caller chose a prefix, and when
+    // there is no output directory to cover.
+    assert_eq!(with_oso_prefix(&base, false).len(), base.len());
+    let mut chosen = base.clone();
+    chosen.push("-Clink-arg=-Wl,-oso_prefix,/elsewhere/".into());
+    assert_eq!(with_oso_prefix(&chosen, true).len(), chosen.len());
+    let query = arguments(&["--print=cfg"]);
+    assert_eq!(with_oso_prefix(&query, true).len(), query.len());
+    let relative = arguments(&["--out-dir", "target/debug/deps", "src/main.rs"]);
+    assert_eq!(with_oso_prefix(&relative, true).len(), relative.len());
+    let split = arguments(&["--out-dir=/work/target/debug/deps", "src/main.rs"]);
+    assert_eq!(
+        with_oso_prefix(&split, true).last().unwrap(),
+        &OsString::from("-Clink-arg=-Wl,-oso_prefix,/work/target/debug/deps/"),
+    );
+}
