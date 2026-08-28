@@ -206,15 +206,10 @@ fn a_shim_directory_never_supplies_the_real_compiler() {
 
     let running = directory.path().join("mbx");
     std::fs::write(&running, b"#!/bin/sh\n").unwrap();
+    // Handed in rather than set: `PATH` is process global and these tests run
+    // on a thread pool, so writing it would race whatever else reads one.
     let path = std::env::join_paths([shims.as_path(), real_dir.as_path()]).unwrap();
-    // SAFETY: single-threaded test, and the value is restored below.
-    let previous = std::env::var_os("PATH");
-    unsafe { std::env::set_var("PATH", &path) };
-    let resolved = resolve_on_path_excluding("cc", &running, &shims);
-    match previous {
-        Some(value) => unsafe { std::env::set_var("PATH", value) },
-        None => unsafe { std::env::remove_var("PATH") },
-    }
+    let resolved = resolve_in_path(&path, "cc", &running, &shims);
 
     assert_eq!(
         resolved.map(|path| std::fs::canonicalize(path).unwrap()),
