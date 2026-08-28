@@ -16,8 +16,8 @@ request.find_action_prediction	{"invocation":{"algorithm":"blake3","hash":"aaaaa
 request.record_action_prediction	{"prediction":{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"adapter":"rustc","invocation":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"payload":"{}"},"task":"task-id","type":"record_action_prediction"}
 request.find_executable_identity	{"environment":{"RUSTFLAGS":"-Cdebuginfo=1","UNSET":null},"executable":"bin/rustc","type":"find_executable_identity"}
 request.store_executable_identity	{"environment":{"RUSTFLAGS":"-Cdebuginfo=1","UNSET":null},"executable":"bin/rustc","stdout":[114,117,115,116,99],"type":"store_executable_identity"}
-request.find_file_digests	{"files":[{"len":7,"modified":{"nanos_since_epoch":21,"secs_since_epoch":1700000000},"path":"target/debug/deps/libserde.rlib"}],"scope":"content","type":"find_file_digests"}
-request.record_file_digests	{"entries":[{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"file":{"len":7,"modified":{"nanos_since_epoch":21,"secs_since_epoch":1700000000},"path":"target/debug/deps/libserde.rlib"}}],"scope":"cc_input","type":"record_file_digests"}
+request.find_file_digests	{"files":[{"changed":[1700000000,21],"len":7,"modified":{"nanos_since_epoch":21,"secs_since_epoch":1700000000},"path":"target/debug/deps/libserde.rlib"}],"scope":"content","type":"find_file_digests"}
+request.record_file_digests	{"entries":[{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"file":{"changed":[1700000000,21],"len":7,"modified":{"nanos_since_epoch":21,"secs_since_epoch":1700000000},"path":"target/debug/deps/libserde.rlib"}}],"scope":"cc_input","type":"record_file_digests"}
 response.hello	{"agent_version":"0.3.0","protocol":5,"type":"hello"}
 response.task_begun	{"run":"task-run","type":"task_begun"}
 response.task_committed	{"type":"task_committed"}

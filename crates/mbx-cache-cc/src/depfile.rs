@@ -188,11 +188,7 @@ impl CcDiscoveredInputs {
             if total_bytes > MAX_INPUT_BYTES {
                 return Err(CcBypassReason::TooManyInputs);
             }
-            let identity = metadata.modified().ok().map(|modified| FileIdentity {
-                path: path.clone(),
-                len: metadata.len(),
-                modified,
-            });
+            let identity = FileIdentity::describe(&path, &metadata);
             identified.push((path, identity));
         }
         let queries = identified

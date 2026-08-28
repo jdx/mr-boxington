@@ -3358,10 +3358,13 @@ fn recognizes_only_well_formed_task_identities() {
 }
 
 fn ledger_identity(path: &str, len: u64, nanos: u32) -> FileIdentity {
+    // Rooted per platform so `is_absolute` holds on both.
+    let root = if cfg!(windows) { "C:\\" } else { "/" };
     FileIdentity {
-        path: PathBuf::from(path),
+        path: PathBuf::from(format!("{root}{path}")),
         len,
         modified: SystemTime::UNIX_EPOCH + Duration::new(1_700_000_000, nanos),
+        changed: Some((1_700_000_000, nanos.into())),
     }
 }
 
@@ -3377,7 +3380,7 @@ fn ledger_digest(len: u64) -> CacheDigest {
 async fn file_digest_ledger_answers_only_matching_identities() {
     let directory = tempfile::tempdir().unwrap();
     let agent = CacheAgent::new(directory.path(), "test-version");
-    let file = ledger_identity("/work/target/libserde.rlib", 7, 21);
+    let file = ledger_identity("work/target/libserde.rlib", 7, 21);
 
     let response = agent
         .respond(AgentRequest::RecordFileDigests {
@@ -3396,9 +3399,9 @@ async fn file_digest_ledger_answers_only_matching_identities() {
             scope: FileDigestScope::Content,
             files: vec![
                 file.clone(),
-                ledger_identity("/work/target/libserde.rlib", 7, 22),
-                ledger_identity("/work/target/libserde.rlib", 8, 21),
-                ledger_identity("/work/target/absent.rlib", 7, 21),
+                ledger_identity("work/target/libserde.rlib", 7, 22),
+                ledger_identity("work/target/libserde.rlib", 8, 21),
+                ledger_identity("work/target/absent.rlib", 7, 21),
             ],
         })
         .await;
@@ -3416,7 +3419,7 @@ async fn file_digest_ledger_answers_only_matching_identities() {
 async fn file_digest_ledger_scopes_do_not_answer_for_each_other() {
     let directory = tempfile::tempdir().unwrap();
     let agent = CacheAgent::new(directory.path(), "test-version");
-    let file = ledger_identity("/work/vendor/header.h", 7, 21);
+    let file = ledger_identity("work/vendor/header.h", 7, 21);
 
     agent
         .respond(AgentRequest::RecordFileDigests {
@@ -3460,7 +3463,10 @@ async fn file_digest_records_are_validated() {
         .respond(AgentRequest::RecordFileDigests {
             scope: FileDigestScope::Content,
             entries: vec![RecordedFileDigest {
-                file: ledger_identity("relative/libserde.rlib", 7, 21),
+                file: FileIdentity {
+                    path: PathBuf::from("relative/libserde.rlib"),
+                    ..ledger_identity("work/libserde.rlib", 7, 21)
+                },
                 digest: ledger_digest(7),
             }],
         })
@@ -3471,7 +3477,7 @@ async fn file_digest_records_are_validated() {
         .respond(AgentRequest::RecordFileDigests {
             scope: FileDigestScope::Content,
             entries: vec![RecordedFileDigest {
-                file: ledger_identity("/work/libserde.rlib", 8, 21),
+                file: ledger_identity("work/libserde.rlib", 8, 21),
                 digest: ledger_digest(7),
             }],
         })

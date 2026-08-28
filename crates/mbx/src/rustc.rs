@@ -1052,11 +1052,7 @@ fn record_output_digests(outputs: &[CachedOutput]) {
                 return None;
             }
             Some(RecordedFileDigest {
-                file: FileIdentity {
-                    path: output.path.clone(),
-                    len: metadata.len(),
-                    modified: metadata.modified().ok()?,
-                },
+                file: FileIdentity::describe(&output.path, &metadata)?,
                 digest: output.digest.clone(),
             })
         })
@@ -1548,13 +1544,11 @@ fn publish_result(
             // key, and this hash is the read that ledger entries stand in
             // for. The dep-info stays out -- its stored digest describes the
             // placeholder form, not what is on disk.
-            if let (Ok(modified), true) = (metadata.modified(), metadata.len() == digest.size) {
+            if metadata.len() == digest.size
+                && let Some(file) = FileIdentity::describe(path, &metadata)
+            {
                 hashed_outputs.push(RecordedFileDigest {
-                    file: FileIdentity {
-                        path: path.clone(),
-                        len: metadata.len(),
-                        modified,
-                    },
+                    file,
                     digest: digest.clone(),
                 });
             }

@@ -701,8 +701,11 @@ impl UploadSink for AgentUploadSink {
 /// The same trade [`VerifiedBlob`] makes for CAS reads, offered to shims for
 /// the files they hash: an overwrite moves the modification time and a
 /// truncation changes the length, so a digest recorded against both stands
-/// until either does. Only a replacement that reproduces both goes unnoticed,
-/// which is the freshness model the surrounding build tool already lives on.
+/// until either does. Where the platform reports a metadata-change time the
+/// identity carries that too, and it is the part a writer cannot restore: a
+/// rewrite that puts the modification time back still moves the change time,
+/// so only filesystems without one fall back to the freshness model the
+/// surrounding build tool already lives on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileIdentity {
@@ -712,6 +715,35 @@ pub struct FileIdentity {
     pub len: u64,
     /// Modification time of the file.
     pub modified: SystemTime,
+    /// Platform metadata-change token, where one exists.
+    pub changed: Option<(i64, i64)>,
+}
+
+impl FileIdentity {
+    /// Describe a file from metadata already in hand, or nothing when the
+    /// filesystem reports no modification time to compare against later.
+    pub fn describe(path: &Path, metadata: &std::fs::Metadata) -> Option<Self> {
+        Some(Self {
+            path: path.to_path_buf(),
+            len: metadata.len(),
+            modified: metadata.modified().ok()?,
+            changed: change_token(metadata),
+        })
+    }
+}
+
+/// The metadata-change time as an opaque token, where the platform has one.
+#[cfg(unix)]
+fn change_token(metadata: &std::fs::Metadata) -> Option<(i64, i64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((metadata.ctime(), metadata.ctime_nsec()))
+}
+
+/// Windows reports creation rather than metadata-change time, which a rewrite
+/// does not move, so no token is better than a misleading one.
+#[cfg(not(unix))]
+fn change_token(_metadata: &std::fs::Metadata) -> Option<(i64, i64)> {
+    None
 }
 
 /// A file digest recorded against the identity it was read under.

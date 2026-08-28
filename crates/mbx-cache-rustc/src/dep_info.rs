@@ -168,11 +168,7 @@ impl DiscoveredInputs {
                     message: "input is not a regular file".into(),
                 });
             }
-            let identity = metadata.modified().ok().map(|modified| FileIdentity {
-                path: path.clone(),
-                len: metadata.len(),
-                modified,
-            });
+            let identity = FileIdentity::describe(&path, &metadata);
             identified.push((path, identity));
         }
         let queries = identified
@@ -948,11 +944,7 @@ mod tests {
             size: metadata.len(),
         };
         let ledger = SentinelLedger {
-            known: FileIdentity {
-                path: known_path.clone(),
-                len: metadata.len(),
-                modified: metadata.modified().unwrap(),
-            },
+            known: FileIdentity::describe(&known_path, &metadata).unwrap(),
             digest: sentinel.clone(),
             recorded: std::sync::Mutex::new(Vec::new()),
         };
@@ -988,5 +980,57 @@ mod tests {
         assert_eq!(recorded.len(), 1, "only the fresh hash is recorded");
         assert_eq!(recorded[0].file.path, fresh_path);
         assert_eq!(recorded[0].digest, by_path(&fresh_path));
+    }
+
+    /// A rewrite that restores length and modification time must still be
+    /// hashed: the platform change token moves with every write, so the
+    /// identity the ledger recorded no longer describes the file.
+    #[cfg(unix)]
+    #[test]
+    fn a_disguised_rewrite_is_not_answered_from_the_ledger() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let path = root.join("lib.rs");
+        std::fs::write(&path, b"fn lib() -> u8 { 1 }").unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        let identity = FileIdentity::describe(&path, &before).unwrap();
+
+        // Same length, modification time put back: only the change token can
+        // tell this file has new contents.
+        std::fs::write(&path, b"fn lib() -> u8 { 2 }").unwrap();
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(before.modified().unwrap()))
+            .unwrap();
+        drop(file);
+        let after = std::fs::metadata(&path).unwrap();
+        let disguised = FileIdentity::describe(&path, &after).unwrap();
+        assert_eq!(disguised.len, identity.len);
+        assert_eq!(disguised.modified, identity.modified);
+        assert_ne!(
+            disguised, identity,
+            "the change token must expose the rewrite"
+        );
+
+        let ledger = SentinelLedger {
+            known: identity,
+            digest: CacheDigest {
+                algorithm: "blake3".into(),
+                hash: "e".repeat(64),
+                size: after.len(),
+            },
+            recorded: std::sync::Mutex::new(Vec::new()),
+        };
+        let discovered = DiscoveredInputs::from_paths(
+            root,
+            BTreeSet::from([path.clone()]),
+            BTreeMap::new(),
+            &ledger,
+        )
+        .unwrap();
+        assert_eq!(
+            discovered.inputs[0].digest,
+            CacheDigest::blake3_file(&path).unwrap(),
+            "the disguised rewrite is hashed, not answered from the ledger"
+        );
     }
 }

@@ -626,16 +626,12 @@ fn restore_result(
         // fixed by the rename.
         if let Ok(metadata) = std::fs::metadata(&destination)
             && metadata.len() == node.digest.size
-            && let Ok(modified) = metadata.modified()
+            && let Some(file) = FileIdentity::describe(&destination, &metadata)
         {
             session::record_file_digests(
                 FileDigestScope::Content,
                 vec![RecordedFileDigest {
-                    file: FileIdentity {
-                        path: destination.clone(),
-                        len: metadata.len(),
-                        modified,
-                    },
+                    file,
                     digest: node.digest.clone(),
                 }],
             );
@@ -707,16 +703,12 @@ fn publish_result(
     // A freshly compiled object is a future native-link input; the hash just
     // taken is the read a ledger entry stands in for.
     if metadata.len() == digest.size
-        && let Ok(modified) = metadata.modified()
+        && let Some(file) = FileIdentity::describe(object, &metadata)
     {
         session::record_file_digests(
             FileDigestScope::Content,
             vec![RecordedFileDigest {
-                file: FileIdentity {
-                    path: object.to_path_buf(),
-                    len: metadata.len(),
-                    modified,
-                },
+                file,
                 digest: digest.clone(),
             }],
         );

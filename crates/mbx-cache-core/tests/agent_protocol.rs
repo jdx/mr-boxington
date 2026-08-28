@@ -56,6 +56,7 @@ fn file_identity() -> FileIdentity {
         path: PathBuf::from("target/debug/deps/libserde.rlib"),
         len: 7,
         modified: std::time::SystemTime::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 21),
+        changed: Some((1_700_000_000, 21)),
     }
 }
 

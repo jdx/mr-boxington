@@ -373,11 +373,7 @@ fn a_vouched_cc_input_skips_the_scan_it_already_passed() {
         size: metadata.len(),
     };
     let ledger = VouchingLedger {
-        known: mbx_cache_core::FileIdentity {
-            path: source.clone(),
-            len: metadata.len(),
-            modified: metadata.modified().expect("mtime"),
-        },
+        known: mbx_cache_core::FileIdentity::describe(&source, &metadata).expect("identity"),
         digest: digest.clone(),
     };
 
