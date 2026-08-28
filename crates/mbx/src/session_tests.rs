@@ -370,6 +370,30 @@ fn qualification_results_are_not_reported_as_misses() {
 }
 
 #[test]
+fn a_loaded_manifest_that_matched_nothing_is_called_out() {
+    // The shape a toolchain update leaves behind: a warm store, a manifest
+    // full of predictions, and not one lookup all build.
+    let unmatched = agent_stats(|stats| {
+        stats.unconsulted = 255;
+        stats.predictions_loaded = 257;
+    });
+    assert!(stale_manifest_note(&unmatched).unwrap().contains("257"));
+
+    // A genuinely cold store has nothing to explain.
+    let cold = agent_stats(|stats| stats.unconsulted = 255);
+    assert_eq!(stale_manifest_note(&cold), None);
+
+    // A session whose lookups happened was matching its manifest fine; the
+    // stragglers are ordinary cold units, not a stale baseline.
+    let live = agent_stats(|stats| {
+        stats.unconsulted = 2;
+        stats.lookups = 253;
+        stats.predictions_loaded = 257;
+    });
+    assert_eq!(stale_manifest_note(&live), None);
+}
+
+#[test]
 fn compiler_only_sessions_are_reportable() {
     let stats = agent_stats(|stats| {
         stats.compiler =
