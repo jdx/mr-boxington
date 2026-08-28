@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(cc)* cache the C and C++ a cross build compiles ([#143](https://github.com/jdx/mr-boxington/pull/143))
 - add Windows ARM64 support ([#147](https://github.com/jdx/mr-boxington/pull/147))
 
 ### Fixed
