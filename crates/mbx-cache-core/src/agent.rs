@@ -2838,10 +2838,9 @@ pub fn task_manifest_actions(store: &Path, task: &str) -> Result<Vec<CacheDigest
 }
 
 fn validate_action_prediction(prediction: &ActionPrediction) -> Result<()> {
-    if prediction.validate() {
-        Ok(())
-    } else {
-        bail!("invalid action prediction")
+    match prediction.invalid_reason() {
+        Some(reason) => bail!("invalid action prediction: {reason}"),
+        None => Ok(()),
     }
 }
 

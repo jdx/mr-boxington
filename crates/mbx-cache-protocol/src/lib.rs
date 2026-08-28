@@ -410,17 +410,48 @@ impl TaskActionManifest {
 impl ActionPrediction {
     /// Whether the prediction satisfies the version-one wire invariants.
     pub fn validate(&self) -> bool {
-        self.action.algorithm == DigestAlgorithm::Blake3.as_str()
-            && self.action.validate().is_ok()
-            && self.invocation.algorithm == DigestAlgorithm::Blake3.as_str()
-            && self.invocation.validate().is_ok()
-            && !self.adapter.is_empty()
-            && self
-                .adapter
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-            && self.payload.len() <= MAX_ACTION_PREDICTION_PAYLOAD
-            && serde_json::from_str::<serde_json::Value>(&self.payload).is_ok()
+        self.invalid_reason().is_none()
+    }
+
+    /// Describe the first version-one wire invariant this prediction violates.
+    ///
+    /// A rejected prediction is only ever reported to someone trying to work
+    /// out why a build stopped predicting, and "invalid" on its own tells them
+    /// nothing about which of these constraints to go looking at.
+    pub fn invalid_reason(&self) -> Option<String> {
+        if self.action.algorithm != DigestAlgorithm::Blake3.as_str()
+            || self.action.validate().is_err()
+        {
+            return Some("action digest is not a valid blake3 digest".into());
+        }
+        if self.invocation.algorithm != DigestAlgorithm::Blake3.as_str()
+            || self.invocation.validate().is_err()
+        {
+            return Some("invocation digest is not a valid blake3 digest".into());
+        }
+        if self.adapter.is_empty() {
+            return Some("adapter name is empty".into());
+        }
+        if !self
+            .adapter
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Some(format!(
+                "adapter name {:?} is not alphanumeric, '-', or '_'",
+                self.adapter
+            ));
+        }
+        if self.payload.len() > MAX_ACTION_PREDICTION_PAYLOAD {
+            return Some(format!(
+                "payload is {} bytes, over the {MAX_ACTION_PREDICTION_PAYLOAD} byte limit",
+                self.payload.len()
+            ));
+        }
+        if serde_json::from_str::<serde_json::Value>(&self.payload).is_err() {
+            return Some("payload is not valid JSON".into());
+        }
+        None
     }
 }
 
@@ -589,6 +620,60 @@ mod tests {
             }
             .validate()
             .is_err()
+        );
+    }
+
+    #[test]
+    fn a_rejected_prediction_names_the_constraint_it_violated() {
+        let digest = Digest::blake3(b"action");
+        let prediction = ActionPrediction {
+            invocation: digest.clone(),
+            action: digest,
+            adapter: "rustc".into(),
+            payload: "{}".into(),
+        };
+        assert_eq!(prediction.invalid_reason(), None);
+
+        let oversized = ActionPrediction {
+            payload: format!("\"{}\"", "p".repeat(MAX_ACTION_PREDICTION_PAYLOAD)),
+            ..prediction.clone()
+        };
+        let reason = oversized
+            .invalid_reason()
+            .expect("payload is over the limit");
+        assert!(
+            reason.contains(&oversized.payload.len().to_string())
+                && reason.contains(&MAX_ACTION_PREDICTION_PAYLOAD.to_string()),
+            "the reason must carry both sizes so a build log says how far over it went: {reason}"
+        );
+        assert!(!oversized.validate());
+
+        assert_eq!(
+            ActionPrediction {
+                adapter: "rust c".into(),
+                ..prediction.clone()
+            }
+            .invalid_reason(),
+            Some(r#"adapter name "rust c" is not alphanumeric, '-', or '_'"#.into())
+        );
+        assert_eq!(
+            ActionPrediction {
+                payload: "not json".into(),
+                ..prediction.clone()
+            }
+            .invalid_reason(),
+            Some("payload is not valid JSON".into())
+        );
+        assert_eq!(
+            ActionPrediction {
+                action: Digest {
+                    algorithm: DigestAlgorithm::Sha256.into(),
+                    ..prediction.action.clone()
+                },
+                ..prediction
+            }
+            .invalid_reason(),
+            Some("action digest is not a valid blake3 digest".into())
         );
     }
 

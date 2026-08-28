@@ -650,6 +650,97 @@ fn predicts_inputs_without_reusing_stale_contents() {
 }
 
 #[test]
+fn a_native_search_directory_is_predicted_by_name_not_by_its_contents() {
+    // A C dependency leaves its whole object tree in the directory it asks
+    // rustc to search: `aws-lc-sys` leaves thousands of files there. Naming
+    // each one alongside the directory that already rediscovers them pushed
+    // the serialized prediction past MAX_ACTION_PREDICTION_PAYLOAD, and the
+    // agent rejected every prediction that crate recorded.
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().canonicalize().unwrap();
+    let native = workspace.join("target/native");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    std::fs::create_dir_all(&native).unwrap();
+    std::fs::write(workspace.join("src/lib.rs"), "pub fn value() {}\n").unwrap();
+    for index in 0..1_200 {
+        // Object files a CMake build leaves behind carry paths this long.
+        std::fs::write(native.join(format!("{index:0>230}.o")), "object").unwrap();
+    }
+
+    let native_argument = format!("-Lnative={}", native.display());
+    let invocation = RustcInvocation::parse(&args(&[
+        "--crate-name=widget",
+        "--crate-type=lib",
+        "--emit=dep-info,metadata,link",
+        "--out-dir=target/debug/deps",
+        &native_argument,
+        "src/lib.rs",
+    ]))
+    .unwrap();
+    let mappings = vec![
+        PathMapping::new(workspace.join("target"), "target"),
+        PathMapping::new(&workspace, "workspace"),
+    ];
+    let context = ActionContext {
+        working_dir: workspace.clone(),
+        path_mappings: mappings.clone(),
+        ..context(&[])
+    };
+    let dep_info = RustcDepInfo {
+        files: vec!["src/lib.rs".into()],
+        environment: BTreeMap::new(),
+    };
+    let discovered = invocation
+        .discover_inputs_with_mappings(&dep_info, &workspace, &mappings)
+        .unwrap();
+    assert_eq!(discovered.inputs.len(), 1_201);
+
+    let prediction = invocation.prediction(&context, &discovered).unwrap();
+    // Counted rather than compared, so a regression reports how much of the
+    // object tree leaked into the payload instead of printing all of it.
+    assert_eq!(
+        prediction
+            .inputs
+            .iter()
+            .filter(|input| input.ends_with(".o"))
+            .count(),
+        0,
+        "the directory stands for its contents"
+    );
+    assert_eq!(
+        prediction.inputs,
+        [
+            "${workspace}/src/lib.rs",
+            "@native-directory:${target}/native",
+        ]
+    );
+    let payload = canonical_json(&prediction).unwrap();
+    assert!(
+        payload.len() <= mbx_cache_core::MAX_ACTION_PREDICTION_PAYLOAD,
+        "a recordable prediction must fit the protocol payload limit, got {} bytes",
+        payload.len()
+    );
+
+    // Dropping the covered inputs may not change the key the prediction
+    // replays to, which is the whole point of recording one.
+    let mut discovered_context = context.clone();
+    discovered
+        .clone()
+        .apply_to(&mut discovered_context)
+        .unwrap();
+    let mut predicted_context = context.clone();
+    prediction
+        .discover(&workspace, &mappings)
+        .unwrap()
+        .apply_to(&mut predicted_context)
+        .unwrap();
+    assert_eq!(
+        invocation.action(predicted_context).unwrap().digest,
+        invocation.action(discovered_context).unwrap().digest
+    );
+}
+
+#[test]
 fn reads_prediction_v1_without_timing_hints() {
     let payload = r#"{"environment":[],"inputs":[],"version":1}"#;
     let prediction: RustcInputPrediction = serde_json::from_str(payload).unwrap();
