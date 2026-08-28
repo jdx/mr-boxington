@@ -20,6 +20,8 @@ use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+#[cfg(unix)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::oneshot;
@@ -43,6 +45,8 @@ pub(crate) const TARGET_DIR_ENV: &str = "MBX_TARGET_DIR";
 const PREVIOUS_RUSTC_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WRAPPER";
 pub(crate) const BYPASS_LOG_ENV: &str = "MBX_BYPASS_LOG";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+#[cfg(unix)]
+static SHIM_STAGING_NONCE: AtomicU64 = AtomicU64::new(0);
 
 /// A cache session: the agent, its listener, and the shim cargo will invoke.
 pub struct CacheSession {
@@ -1159,12 +1163,13 @@ fn link_path_shim(executable: &Path, destination: &Path) -> Result<()> {
         return Ok(());
     }
     let staging = destination.with_file_name(format!(
-        ".{}.{}",
+        ".{}.{}.{}",
         destination
             .file_name()
             .unwrap_or_default()
             .to_string_lossy(),
-        std::process::id()
+        std::process::id(),
+        SHIM_STAGING_NONCE.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = std::fs::remove_file(&staging);
     std::os::unix::fs::symlink(&target, &staging)?;
