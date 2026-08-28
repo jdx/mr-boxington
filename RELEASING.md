@@ -7,19 +7,44 @@ hand.
 
 1. Commits land on `main`. `release-plz-pr` opens (or updates) a release PR
    that bumps versions and writes `CHANGELOG.md`.
-2. Merging that PR runs `release-plz-release`, which tags, publishes the crates
+2. The same job then pushes a `docs: update generated CLI reference` commit onto
+   that branch, because `docs/cli/index.md` carries the `mbx` version and a bump
+   leaves it stale. **Wait for it before merging** — see [Merging the release
+   PR](#merging-the-release-pr).
+3. Merging that PR runs `release-plz-release`, which tags, publishes the crates
    to crates.io, and creates the GitHub release **as a draft**.
-3. `release.yml` builds a binary per target and attaches the archives plus
+4. `release.yml` builds a binary per target and attaches the archives plus
    `SHA256SUMS` to that draft.
-4. While the binaries build, Communiqué rewrites the draft's raw changelog into
+5. While the binaries build, Communiqué rewrites the draft's raw changelog into
    release notes informed by the commits, pull requests, and diffs. If that
    optional enhancement fails, the original release-plz notes remain in place.
-5. `publish-release` waits for both paths, then undrafts it. A release is
+6. `publish-release` waits for both paths, then undrafts it. A release is
    therefore never visible without its assets, and no asset upload runs after
    immutable releases lock the tag and asset set.
 
 `release_always = false`, so a push to `main` that merely carries a version
 bump does not release — only merging a release PR does.
+
+## Merging the release PR
+
+A release PR is not complete the moment it appears. `release-plz-pr` pushes a
+second commit regenerating `docs/cli`, and that push has nowhere to land once
+the PR is merged — the branch is gone and release-plz never revisits a merged
+PR. Merging early therefore ships a reference that names the previous version,
+and `check:docs` then fails on `main` and on every pull request opened against
+it until someone regenerates by hand.
+
+That is not hypothetical: v0.5.4 was merged 37 seconds after its PR opened,
+while the render was still compiling, and `main` went red with a `0.5.3`
+reference. The job now warms the Rust cache and builds `mbx` *before* it asks
+release-plz to open the PR, so the docs commit follows within seconds rather
+than a minute. The window is small, not zero — wait for the second commit, and
+for the PR's own CI, rather than merging on sight.
+
+Requiring the `docs` check on `main` closes the rest of the gap, since the
+release PR's CI cannot be green until the regenerated reference is on the
+branch. That is a branch-protection setting, not something this repository can
+assert for itself.
 
 ## Versions
 
