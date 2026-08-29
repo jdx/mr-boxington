@@ -71,30 +71,26 @@
           Run multiple Cargo builds at the same time.
         </h2>
         <p class="lede">
-          Cargo bounds only the compilers it starts itself. mbx gives every
-          build on the machine one CPU and memory budget, and when two builds
-          reach the same cold compilation, one compiles it and the rest
-          restore it.
-        </p>
-        <div class="proof" aria-label="Measured performance improvement">
-          <strong>Up to 44.9%</strong>
-          <span>less lint wall time on an xlarge CI runner</span>
-        </div>
-        <p class="validation">
-          Two cold, order-reversed A/B trials compared the same Clippy
-          commands sequentially and in parallel.
+          Start several Cargo commands at once — two lint configurations, say,
+          or tests alongside clippy. Left alone, each one tries to fill the
+          machine, and together they overload it. mbx gives them a single
+          shared CPU and memory budget instead, so they run in parallel
+          without oversubscribing the machine. We saw mise's lint job finish
+          up to 45% sooner this way.
         </p>
         <div class="links">
           <a class="primary" href="/github-action#parallel-cargo-steps">
             Copy the workflow
           </a>
-          <a href="/benchmarks#contention">See the benchmark →</a>
+          <a href="/configuration#machine-wide-compile-scheduling">
+            Tune the budget →
+          </a>
         </div>
       </div>
 
       <div
         class="diagram"
-        aria-label="Two Cargo lint builds sharing one mbx permit pool"
+        aria-label="Two Cargo lint builds sharing one CPU and memory budget"
       >
         <div class="job">
           <span class="label">default features</span>
@@ -109,8 +105,8 @@
           <span></span>
         </div>
         <div class="pool">
-          <span class="pool-title">one mbx permit pool</span>
-          <span>CPU · memory · in-flight work</span>
+          <span class="pool-title">one shared budget</span>
+          <span>CPU · memory</span>
         </div>
       </div>
     </section>
