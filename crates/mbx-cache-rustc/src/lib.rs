@@ -363,9 +363,10 @@ impl RustcInvocation {
     /// the first argument to `RUSTC_WRAPPER`.
     ///
     /// Any flag whose cache semantics are not modeled returns a bypass reason
-    /// instead of guessing. A successful parse only admits the initial
-    /// rlib/rmeta tier plus binaries linked by compiler-bundled WebAssembly
-    /// toolchains.
+    /// instead of guessing. A successful parse admits the rlib/rmeta tier,
+    /// every compilation that links nothing at all -- what `cargo check` and
+    /// clippy run, whatever the crate type -- and binaries linked by
+    /// compiler-bundled WebAssembly toolchains.
     pub fn parse(arguments: &[OsString]) -> Result<Self, BypassReason> {
         Self::parse_with(arguments, ParseOptions::default())
     }
@@ -1377,13 +1378,22 @@ impl<'a> Parser<'a> {
     }
 
     fn classify(&self) -> Result<LinkOutput, BypassReason> {
-        let link_output = if !self.test
+        // A compilation that emits no `link` produces exactly what an rlib's
+        // metadata emit does -- dep-info and `lib<name>.rmeta` -- whatever it
+        // calls its crate type. `cargo check` and clippy compile every binary
+        // and test target this way, and those were bypassing as an
+        // unsupported crate type for a linked artifact none of them asked
+        // for. No linker runs, so nothing downstream needs a linker identity
+        // to describe, and rustc names the metadata the same way for every
+        // crate type.
+        let never_links = !self.emits.iter().any(|emit| emit.kind == "link");
+        let builds_a_library = !self.test
             && !self.crate_types.is_empty()
             && self
                 .crate_types
                 .iter()
-                .all(|crate_type| matches!(crate_type.as_str(), "lib" | "rlib"))
-        {
+                .all(|crate_type| matches!(crate_type.as_str(), "lib" | "rlib"));
+        let link_output = if never_links || builds_a_library {
             LinkOutput::Library
         } else if self
             .target
