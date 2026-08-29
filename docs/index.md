@@ -22,8 +22,3 @@ hero:
       text: Benchmarks
       link: /benchmarks
 ---
-
-mbx relies on [Cargo](https://github.com/rust-lang/cargo) and follows earlier
-compiler-cache work in [sccache](https://github.com/mozilla/sccache) and
-[kache](https://github.com/kunobi-ninja/kache), which directly inspired its
-design — [read the acknowledgements](/acknowledgements).
