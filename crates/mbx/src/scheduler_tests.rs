@@ -295,6 +295,17 @@ fn plans_weigh_history_links_and_nothing() {
         "history above the link floor wins"
     );
 
+    // A link the pool has measured is weighted by what it used, not by the
+    // guess it was charged before anyone had seen it: the floor exists for
+    // unmeasured links, and a measurement retires it in either direction.
+    pool.record_peak("light-link", 700).unwrap();
+    let (weight, predicted) = pool.plan(&Demand::new("light-link", true));
+    assert_eq!(
+        (weight, predicted),
+        (1, Some(700)),
+        "history below the link floor also wins"
+    );
+
     let (weight, _) = pool.plan(&Demand::new("enormous", false));
     assert_eq!(weight, 8, "weights clamp to the capacity");
 
@@ -314,9 +325,11 @@ fn the_ledger_only_remembers_what_matters_and_never_shrinks_a_peak() {
     let pool = pool_at(directory.path(), 4, 1000);
 
     // Under one permit's worth of memory: not worth a ledger entry.
-    assert_eq!(ledger_peak(900, false, 1000), None);
+    assert_eq!(ledger_peak(900, false, false, 1000), None);
     // Over it: recorded as measured.
-    assert_eq!(ledger_peak(1500, false, 1000), Some(1500));
+    assert_eq!(ledger_peak(1500, false, false, 1000), Some(1500));
+    // A link is recorded even light, because that is what retires its floor.
+    assert_eq!(ledger_peak(900, false, true, 1000), Some(900));
 
     pool.record_peak("crate", 1500).unwrap();
     pool.record_peak("crate", 1200).unwrap();
@@ -336,9 +349,11 @@ fn the_ledger_only_remembers_what_matters_and_never_shrinks_a_peak() {
 #[test]
 fn an_oom_kill_escalates_past_what_was_measured() {
     // The killer stopped it at 1500; the record says it needs more than that.
-    assert_eq!(ledger_peak(1500, true, 1000), Some(3000));
+    assert_eq!(ledger_peak(1500, true, false, 1000), Some(3000));
     // Even a tiny measurement escalates past one permit, so the weight rises.
-    assert_eq!(ledger_peak(10, true, 1000), Some(1001));
+    assert_eq!(ledger_peak(10, true, false, 1000), Some(1001));
+    // A killed link escalates too, rather than recording what it reached.
+    assert_eq!(ledger_peak(1500, true, true, 1000), Some(3000));
 }
 
 #[test]
@@ -358,6 +373,36 @@ fn the_ledger_drops_its_smallest_entries_at_the_cap() {
     );
     let largest = format!("crate-{}", MAX_LEDGER_ENTRIES + 9);
     assert!(ledger.crates.contains_key(&largest));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_released_permit_wakes_a_waiter_rather_than_leaving_it_to_time_out() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 1, 0);
+    let held = pool.try_admit(1, None).unwrap().expect("the only permit");
+
+    let wake = ReleaseWake::new(&directory.path().join(LEASES_DIR)).expect("a watch");
+    let releasing = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        drop(held);
+    });
+
+    // A timeout far longer than the release it is waiting for: returning
+    // early is only possible if the watch saw the lease disappear.
+    let started = Instant::now();
+    wake.wait(Duration::from_secs(10));
+    let waited = started.elapsed();
+    releasing.join().unwrap();
+
+    assert!(
+        waited < Duration::from_secs(5),
+        "the release woke the waiter after {waited:?} rather than at the timeout"
+    );
+    assert!(
+        pool.try_admit(1, None).unwrap().is_some(),
+        "the permit really was free by the time the waiter woke"
+    );
 }
 
 #[test]

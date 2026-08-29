@@ -118,11 +118,14 @@ for everything that is not a compiler; `"none"` keeps plain CPU permits). In a
 container, "physical memory" means the cgroup's limit rather than the host's
 RAM — a build in a 4GiB container on a large machine is budgeted by the 4GiB,
 because the rest was never its to spend.
-Native links start at two permits, and crates whose compilations have measured
-memory-heavy are weighted by what they actually used, so the predicted memory
-of everything running stays inside the budget. A compilation the Linux OOM
-killer stops is recorded heavier than it measured, so its retry runs with more
-room instead of repeating the crash.
+Native links start at two permits, and every compilation is thereafter
+weighted by what it actually used, so the predicted memory of everything
+running stays inside the budget. The two-permit start is a guess for links
+nobody has measured yet, and the first measurement replaces it in either
+direction: a link that turns out to fit in one permit stops being charged for
+two, which is what keeps the link-heavy tail of a build from running at half
+concurrency. A compilation the Linux OOM killer stops is recorded heavier than
+it measured, so its retry runs with more room instead of repeating the crash.
 
 `priority = "low"` (`MBX_SCHEDULER_PRIORITY`) is for builds nobody is sitting
 at — CI on a shared box, an editor's background check. While a normal-priority
