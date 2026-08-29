@@ -263,9 +263,10 @@ jobs:
 
       # The ARM64 GNU artifact is cross-compiled on the AMD64 release runner;
       # let cross provide its matching execution environment for the smoke test.
+      # cross 0.2.5 consumes a trailing --version instead of forwarding it.
       - name: Check the GNU binary runs
         if: ${{ matrix.cross && !matrix.pgo }}
-        run: cross run --release --locked --package mbx --target ${{ matrix.target }} -- --version
+        run: cross run --release --locked --package mbx --target ${{ matrix.target }} -- --help
 
       # The archive is flat and holds only the binary, so extracting it
       # straight into a directory on PATH is the whole install. Names carry no
