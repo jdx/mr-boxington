@@ -134,11 +134,10 @@ server to authorize anything, make IAM agree: scope the role's trust policy to
 the branches allowed to assume it, and give pull request jobs a role that can
 only read. See [remote cache](/remote-cache#who-may-publish).
 
-::: warning Do not cache production releases
-A production release should run Cargo directly, without `mbx`, because published
-artifacts must not depend on any cache being correct. Release jobs should also
-avoid restoring `target/` through `actions/cache` or rust-cache and should not
-use any other compiler cache.
+::: warning Do not use remote caches for production releases
+A production release may still use `mbx` and its local cache, but should not use
+a remote cache. Release jobs should also avoid restoring or saving the mbx store
+through `actions/cache`.
 :::
 
 For a repository that combines both backends — the server for trusted runs, the
