@@ -436,6 +436,7 @@ mod tests {
             remote: Default::default(),
             http: Default::default(),
             gc: Default::default(),
+            scheduler: Default::default(),
             target: crate::config::TargetSettings {
                 views: true,
                 root: directory.path().join("targets"),
@@ -473,6 +474,7 @@ mod tests {
             remote: Default::default(),
             http: Default::default(),
             gc: Default::default(),
+            scheduler: Default::default(),
             target: crate::config::TargetSettings {
                 views: true,
                 root: directory.path().join("targets"),

@@ -195,6 +195,235 @@ fn disk_total_bytes_at(path: &Path) -> Option<u64> {
     }
 }
 
+/// Physical memory installed in this machine, when it can be measured.
+#[cfg(target_vendor = "apple")]
+pub fn memory_total_bytes() -> Option<u64> {
+    let mut mib = [libc::CTL_HW, libc::HW_MEMSIZE];
+    let mut total = 0_u64;
+    let mut length = size_of::<u64>();
+    // SAFETY: the MIB names a u64 sysctl, `total` is a valid u64 out buffer of
+    // exactly `length` bytes, and no new value is being set.
+    let ok = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            (&raw mut total).cast(),
+            &raw mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (ok == 0).then_some(total).filter(|total| *total > 0)
+}
+
+/// Memory this process may actually use, when it can be measured.
+///
+/// The container's limit, where there is one, rather than the host's RAM. A
+/// build inside a 4GiB container on a 128GiB machine is budgeted by the 4GiB,
+/// because the other 124GiB are not its to spend and reaching for them is an
+/// out-of-memory kill rather than a slow build.
+#[cfg(target_os = "linux")]
+pub fn memory_total_bytes() -> Option<u64> {
+    // SAFETY: `sysinfo` only writes into the zeroed struct it is given.
+    let info = unsafe {
+        let mut info = std::mem::zeroed::<libc::sysinfo>();
+        if libc::sysinfo(&mut info) != 0 {
+            return None;
+        }
+        info
+    };
+    // `mem_unit` narrows from u32 and `totalram` is u64 on 64-bit glibc but
+    // u32 on 32-bit targets; the conversions let one body compile everywhere.
+    #[allow(clippy::useless_conversion)]
+    let unit = u64::from(info.mem_unit);
+    #[allow(clippy::useless_conversion)]
+    let total = u64::try_from(info.totalram).ok()?;
+    let physical = total.checked_mul(unit).filter(|total| *total > 0)?;
+    Some(match cgroup_memory_limit() {
+        Some(limit) => physical.min(limit),
+        None => physical,
+    })
+}
+
+/// The memory ceiling this process's cgroup imposes, if it imposes one.
+///
+/// Read at the root of the cgroup filesystem, which is what a container sees
+/// of its own limit through a cgroup namespace -- the ordinary Docker,
+/// Podman, and Kubernetes arrangement. A process placed in a nested cgroup
+/// *without* such a namespace reads the root's limit instead and is budgeted
+/// as though the nesting were not there; that is the same answer it had
+/// before any of this, so it loses nothing.
+#[cfg(target_os = "linux")]
+fn cgroup_memory_limit() -> Option<u64> {
+    // v2 states "max" for unlimited; v1 states a number so large it means the
+    // same thing, so anything at or above the host's addressable range is
+    // treated as no limit rather than as a budget.
+    read_cgroup_value("/sys/fs/cgroup/memory.max")
+        .or_else(|| read_cgroup_value("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
+}
+
+/// Memory the cgroup is holding that the kernel would not simply reclaim.
+///
+/// Not `memory.current`, which counts the page cache. A build fills that
+/// immediately -- every source it reads and every artifact it writes lands
+/// there -- and nearly all of it is evictable, so a container that had merely
+/// compiled something would look as though it were out of memory. Subtracting
+/// the inactive file pages leaves the working set, which is the same figure
+/// Kubernetes reports for a container and the one worth comparing a
+/// compilation's appetite against.
+#[cfg(target_os = "linux")]
+fn cgroup_memory_usage() -> Option<u64> {
+    let current = read_cgroup_amount("/sys/fs/cgroup/memory.current")
+        .or_else(|| read_cgroup_amount("/sys/fs/cgroup/memory/memory.usage_in_bytes"))?;
+    // Absent or unreadable stats leave the page cache counted, which errs
+    // toward deferring a compilation rather than toward an OOM kill.
+    let reclaimable = read_cgroup_stat("/sys/fs/cgroup/memory.stat", "inactive_file")
+        .or_else(|| read_cgroup_stat("/sys/fs/cgroup/memory/memory.stat", "total_inactive_file"))
+        .unwrap_or(0);
+    Some(current.saturating_sub(reclaimable))
+}
+
+/// One cgroup limit, or `None` for absent, unparseable, or "no limit".
+#[cfg(target_os = "linux")]
+fn read_cgroup_value(path: &str) -> Option<u64> {
+    read_cgroup_text(&std::fs::read_to_string(path).ok()?)
+}
+
+/// One plain cgroup number, where zero is a reading rather than an absence.
+#[cfg(target_os = "linux")]
+fn read_cgroup_amount(path: &str) -> Option<u64> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// One field of a cgroup `memory.stat`, which is `name value` per line.
+#[cfg(target_os = "linux")]
+fn read_cgroup_stat(path: &str, field: &str) -> Option<u64> {
+    parse_cgroup_stat(&std::fs::read_to_string(path).ok()?, field)
+}
+
+/// The parsing half, separated so it can be tested without a cgroup mount.
+#[cfg(any(target_os = "linux", test))]
+fn parse_cgroup_stat(contents: &str, field: &str) -> Option<u64> {
+    contents.lines().find_map(|line| {
+        let (name, value) = line.split_once(' ')?;
+        (name == field).then(|| value.trim().parse().ok())?
+    })
+}
+
+/// The parsing half, separated so it can be tested without a cgroup mount.
+#[cfg(any(target_os = "linux", test))]
+fn read_cgroup_text(contents: &str) -> Option<u64> {
+    let value = contents.trim();
+    if value == "max" {
+        return None;
+    }
+    // cgroup v1 spells "unlimited" as a page-aligned number near i64::MAX
+    // rather than in words. The largest machines built hold tens of
+    // tebibytes, so anything past a pebibyte is that idiom rather than a
+    // budget worth dividing into permits.
+    const NO_LIMIT: u64 = 1 << 50;
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|bytes| *bytes > 0 && *bytes < NO_LIMIT)
+}
+
+/// Physical memory installed in this machine, when it can be measured.
+#[cfg(windows)]
+pub fn memory_total_bytes() -> Option<u64> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    // SAFETY: the struct is a valid out parameter with its length declared,
+    // which is all the API requires.
+    let status = unsafe {
+        let mut status = std::mem::zeroed::<MEMORYSTATUSEX>();
+        status.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
+        if GlobalMemoryStatusEx(&mut status) == 0 {
+            return None;
+        }
+        status
+    };
+    Some(status.ullTotalPhys).filter(|total| *total > 0)
+}
+
+/// Fallback for hosts with no supported probe.
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", windows)))]
+pub fn memory_total_bytes() -> Option<u64> {
+    None
+}
+
+/// Memory the machine could hand a new process right now, when measurable.
+///
+/// "Available" deliberately counts reclaimable memory rather than free pages
+/// alone: a machine whose RAM is full of page cache is not out of memory, and
+/// treating it as such would defer compilations that were going to run fine.
+#[cfg(target_os = "linux")]
+pub fn memory_available_bytes() -> Option<u64> {
+    // `MemAvailable` is the kernel's own estimate of exactly this question,
+    // accounting for reclaimable caches; summing fields by hand would just
+    // reimplement it worse. It describes the host, though -- `/proc/meminfo`
+    // is not namespaced -- so a container's own headroom bounds it below.
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix("MemAvailable:"))?;
+    let kibibytes = line
+        .trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    let host = kibibytes.checked_mul(1024)?;
+    let available = match (cgroup_memory_limit(), cgroup_memory_usage()) {
+        (Some(limit), Some(used)) => host.min(limit.saturating_sub(used)),
+        (Some(limit), None) => host.min(limit),
+        _ => host,
+    };
+    // Zero is a real answer here -- a cgroup at its limit has nothing left --
+    // and the caller has to be able to tell it from "cannot measure".
+    Some(available)
+}
+
+/// Memory the machine could hand a new process right now, when measurable.
+//
+// libc deprecates its Mach bindings in favor of the `mach2` crate, but these
+// four symbols are stable kernel ABI and not worth a dependency that exists
+// to re-export them.
+#[allow(deprecated)]
+#[cfg(target_vendor = "apple")]
+pub fn memory_available_bytes() -> Option<u64> {
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    // SAFETY: the buffer is a zeroed `vm_statistics64` and `count` declares
+    // its size in `integer_t` units, which is what the call requires.
+    let stats = unsafe {
+        let mut stats = std::mem::zeroed::<libc::vm_statistics64>();
+        if libc::host_statistics64(
+            libc::mach_host_self(),
+            libc::HOST_VM_INFO64,
+            (&raw mut stats).cast(),
+            &mut count,
+        ) != libc::KERN_SUCCESS
+        {
+            return None;
+        }
+        stats
+    };
+    // Free plus what the kernel can take back without swapping: inactive pages
+    // and purgeable memory. Speculative pages are already inside `free_count`.
+    // SAFETY: reading a kernel-exported integer.
+    let page_size = unsafe { libc::vm_page_size } as u64;
+    let pages = u64::from(stats.free_count)
+        .checked_add(u64::from(stats.inactive_count))?
+        .checked_add(u64::from(stats.purgeable_count))?;
+    pages.checked_mul(page_size).filter(|bytes| *bytes > 0)
+}
+
+/// Fallback for hosts with no supported probe.
+#[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
+pub fn memory_available_bytes() -> Option<u64> {
+    None
+}
+
 /// Whether a reflink from inside `source_dir` can land inside
 /// `destination_dir`.
 ///
@@ -240,6 +469,36 @@ pub fn random_string(length: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cgroup_usage_discounts_the_page_cache() {
+        // The shape of a real `memory.stat`: the field wanted is neither
+        // first nor last, and a prefix of its name must not match it.
+        let stat = "anon 1000\nfile 8000\nkernel 12\ninactive_file 7000\nslab 40\n";
+        assert_eq!(parse_cgroup_stat(stat, "inactive_file"), Some(7000));
+        assert_eq!(parse_cgroup_stat(stat, "anon"), Some(1000));
+        // `file` must not be answered by `inactive_file`.
+        assert_eq!(parse_cgroup_stat(stat, "file"), Some(8000));
+        assert_eq!(parse_cgroup_stat(stat, "absent"), None);
+        assert_eq!(parse_cgroup_stat("malformed\n", "anon"), None);
+    }
+
+    #[test]
+    fn cgroup_limits_are_read_and_no_limit_is_recognized() {
+        assert_eq!(
+            read_cgroup_text("4294967296\n"),
+            Some(4 * 1024 * 1024 * 1024)
+        );
+        // cgroup v2 spells "unlimited" in words.
+        assert_eq!(read_cgroup_text("max\n"), None);
+        // cgroup v1 spells it as a number nothing real could reach. Budgeting
+        // permits out of it would be the same as having no limit, but with
+        // arithmetic in between.
+        assert_eq!(read_cgroup_text("9223372036854771712"), None);
+        assert_eq!(read_cgroup_text("0"), None);
+        assert_eq!(read_cgroup_text("not a number"), None);
+        assert_eq!(read_cgroup_text(""), None);
+    }
 
     #[test]
     fn writes_files_atomically() {

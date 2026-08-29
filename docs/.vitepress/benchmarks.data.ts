@@ -8,6 +8,12 @@ const resultsPath = resolve(configDir, "../../benchmarks/results.json");
 export interface BenchmarkCell {
   tool: string;
   wall_duration_ns: number;
+  /** Contention only: most real compilers seen running at once, machine-wide. */
+  peak_compilers?: number;
+  /** Contention only: lowest memory the machine had left, where reported. */
+  min_available_bytes?: number | null;
+  /** Contention only: the bound the scheduled cell was given, else null. */
+  permits?: number | null;
   stats?: {
     lookups?: number;
     hits?: number;
@@ -21,6 +27,12 @@ export interface BenchmarkScenario {
   description: string;
   /** False for the compiler-change guard, which asserts rather than races. */
   timed: boolean;
+  /**
+   * "build" times one build per tool; "contention" runs several at once and
+   * reports what the machine did. Absent on runs published before the
+   * contention scenario existed, which are all "build".
+   */
+  kind?: "build" | "contention";
   results: BenchmarkCell[];
   skipped: string[];
 }

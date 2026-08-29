@@ -61,6 +61,8 @@ pub struct CacheSession {
     agent: CacheAgent,
     /// The stream `mbx tui` watches, when event recording is on.
     events: Option<EventStream>,
+    /// What the shims need to draw compile permits from the machine-wide pool.
+    scheduler_env: Vec<(String, String)>,
     store: PathBuf,
     started: Instant,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
@@ -115,6 +117,7 @@ impl CacheSession {
             share_out_dir: config.share_out_dir,
             agent,
             events,
+            scheduler_env: crate::scheduler::session_environment(config),
             store,
             started: Instant::now(),
             shutdown: Mutex::new(Some(shutdown_tx)),
@@ -190,6 +193,9 @@ impl CacheSession {
             SHARE_OUT_DIR_ENV.into(),
             if self.share_out_dir { "1" } else { "0" }.into(),
         );
+        for (name, value) in &self.scheduler_env {
+            environment.insert(name.clone(), value.clone());
+        }
         if let Some(previous) = environment.insert("RUSTC_WRAPPER".into(), shim.clone())
             && previous != shim
         {
@@ -312,6 +318,9 @@ impl CacheSession {
             VERIFY_ENV.into(),
             if self.verify { "1" } else { "0" }.into(),
         );
+        for (name, value) in &self.scheduler_env {
+            environment.insert(name.clone(), value.clone());
+        }
         if let Ok(pins) = serde_json::to_string(&shims.compilers) {
             environment.insert(PATH_SHIMS_ENV.into(), pins);
         }
@@ -1924,9 +1933,30 @@ pub fn run_rustc_shim() -> ExitCode {
 }
 
 fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode {
-    #[cfg(windows)]
     let crate_name = crate_name_argument(&arguments);
-    #[cfg(windows)]
+    // A bypassed compilation is still a real compiler process the machine has
+    // to pay for. Probe invocations pass through unscheduled: cargo runs them
+    // to learn about the compiler before it plans anything, so making one wait
+    // for a permit would stall a build's startup behind its siblings' permits.
+    // Most probes carry no --crate-name; the target-info queries carry the
+    // placeholder name `___` alongside `--print`, and compile nothing.
+    let is_query = arguments.iter().any(|argument| {
+        argument == "-"
+            || argument
+                .to_str()
+                .is_some_and(|argument| argument.starts_with("--print"))
+    });
+    let demand = crate_name
+        .as_deref()
+        .filter(|_| !is_query)
+        .map(|name| crate::scheduler::Demand::new(name, links_natively(&arguments)));
+    let permit = demand
+        .as_ref()
+        .and_then(|demand| crate::scheduler::pool().and_then(|pool| pool.admit(demand)));
+    // Started after admission, matching the cached paths: waiting for the
+    // machine is not time this compilation cost, and reporting it as compiler
+    // time would make the jobs that wait longest -- bypassed links -- look
+    // like the slowest crates in the build.
     let started = Instant::now();
     let mut command = if let Some(wrapper) = std::env::var_os(PREVIOUS_RUSTC_WRAPPER_ENV) {
         let mut command = Command::new(wrapper);
@@ -1942,9 +1972,32 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
     {
         use std::os::unix::process::CommandExt as _;
 
-        let error = command.exec();
-        eprintln!("mbx[error]: the rustc shim failed to execute rustc: {error}");
-        ExitCode::from(1)
+        if permit.is_none() {
+            let error = command.exec();
+            eprintln!("mbx[error]: the rustc shim failed to execute rustc: {error}");
+            return ExitCode::from(1);
+        }
+        // A held permit must be released when the compiler finishes, and its
+        // lease lock is close-on-exec, so this process has to outlive the
+        // compiler rather than become it.
+        match command.status() {
+            Ok(status) => {
+                drop(permit);
+                if let Some(demand) = &demand {
+                    crate::scheduler::record_compiler_memory(demand, &status);
+                }
+                record_compiler_invocation(
+                    "bypass",
+                    crate_name.as_deref(),
+                    duration_ns(started.elapsed()),
+                );
+                crate::materialize::exit_code(status)
+            }
+            Err(error) => {
+                eprintln!("mbx[error]: the rustc shim failed to execute rustc: {error}");
+                ExitCode::from(1)
+            }
+        }
     }
     #[cfg(windows)]
     {
@@ -1952,7 +2005,7 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
         use windows_sys::Win32::System::Threading::GetExitCodeProcess;
 
         match command.spawn().and_then(|mut child| {
-            child.wait()?;
+            let status = child.wait()?;
             let mut exit_code = 1;
             // SAFETY: the child owns a valid process handle until it is
             // dropped, and `exit_code` is a valid out pointer.
@@ -1960,10 +2013,14 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
             {
                 Err(std::io::Error::last_os_error())
             } else {
-                Ok(exit_code)
+                Ok((exit_code, status))
             }
         }) {
-            Ok(exit_code) => {
+            Ok((exit_code, status)) => {
+                drop(permit);
+                if let Some(demand) = &demand {
+                    crate::scheduler::record_compiler_memory(demand, &status);
+                }
                 record_compiler_invocation(
                     "bypass",
                     crate_name.as_deref(),
@@ -1982,7 +2039,63 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
     }
 }
 
-#[cfg(any(windows, test))]
+/// Whether a bypassed invocation will run a linker.
+///
+/// Read off the raw arguments because there is no parsed invocation here: this
+/// is the path a compilation takes when the cache could not model it, and
+/// native links are exactly that path today -- they bypass by default. They
+/// are also the compilations that run a machine out of memory, so the
+/// scheduler has to recognize one without the parser's help.
+///
+/// A test harness links a program whatever its crate type says, which is why
+/// `--test` counts on its own -- but only once the emit says a linker runs at
+/// all. `cargo check` and `clippy --all-targets` compile those very same
+/// binary and test targets with `--emit=metadata`, and charging a check the
+/// link weight would make the cheapest stage the heaviest thing queued.
+fn links_natively(arguments: &[OsString]) -> bool {
+    let mut produces_program = false;
+    // No `--emit` at all is rustc's default, which is `link`. Cargo always
+    // passes one; something driving rustc by hand may not.
+    let mut emits_link = true;
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        let Some(argument) = argument.to_str() else {
+            continue;
+        };
+        if argument == "--test" {
+            produces_program = true;
+        }
+        let kinds = if argument == "--crate-type" {
+            arguments.next().and_then(|kinds| kinds.to_str())
+        } else {
+            argument.strip_prefix("--crate-type=")
+        };
+        // rustc accepts them comma-separated, and any one of them links.
+        if kinds.is_some_and(|kinds| {
+            kinds.split(',').any(|kind| {
+                matches!(
+                    kind,
+                    "bin" | "cdylib" | "dylib" | "proc-macro" | "staticlib"
+                )
+            })
+        }) {
+            produces_program = true;
+        }
+        let emits = if argument == "--emit" {
+            arguments.next().and_then(|emits| emits.to_str())
+        } else {
+            argument.strip_prefix("--emit=")
+        };
+        if let Some(emits) = emits {
+            // Each kind may carry a path of its own, as `link=/some/where`.
+            emits_link = emits
+                .split(',')
+                .any(|emit| emit.split('=').next() == Some("link"));
+        }
+    }
+    produces_program && emits_link
+}
+
 fn crate_name_argument(arguments: &[OsString]) -> Option<String> {
     let mut arguments = arguments.iter();
     while let Some(argument) = arguments.next() {

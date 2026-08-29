@@ -1118,6 +1118,12 @@ fn gc(
     let store_budget = retention.max_total_bytes.map_or(max_bytes, |total| {
         max_bytes.min(total.saturating_sub(projected_target_bytes))
     });
+    // Small and never load-bearing: a swept flight costs at most one
+    // compilation that would have been a hit, so it is not part of the
+    // budget arithmetic or the dry run's accounting.
+    if !dry_run {
+        crate::scheduler::prune_flights(&config.cache_dir);
+    }
     let outcome = if dry_run {
         store::gc_dry_run(&store, store_budget)
     } else {
@@ -1266,6 +1272,7 @@ fn sweep_store(config: &Config, retention: &RetentionSettings) -> crate::savings
                     });
                     config.gc.max_bytes.min(total.saturating_sub(target_bytes))
                 });
+            crate::scheduler::prune_flights(&config.cache_dir);
             let outcome = match store::gc(&config.store_dir(), store_budget) {
                 Ok(outcome) => outcome,
                 Err(error) => {

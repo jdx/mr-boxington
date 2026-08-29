@@ -17,6 +17,34 @@
         {{ scenario.results[0].stats?.lookups ?? 0 }} — the ones that do not
         depend on rustc at all.
       </p>
+      <table
+        v-else-if="scenario.kind === 'contention' && scenario.results.length"
+        class="mbx-bench-table"
+      >
+        <thead>
+          <tr>
+            <th scope="col">Tool</th>
+            <th scope="col">Batch time</th>
+            <th scope="col" class="mbx-bench-numeric">Peak compilers</th>
+            <th scope="col" class="mbx-bench-numeric">Lowest free memory</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="cell in contentionRows(scenario)" :key="cell.tool">
+            <th scope="row">{{ cell.tool }}</th>
+            <td>
+              <span
+                class="mbx-bench-bar"
+                :class="{ 'is-subject': cell.tool === 'mbx' }"
+                :style="{ width: `${cell.width}%` }"
+              />
+              <span class="mbx-bench-seconds">{{ cell.seconds }}</span>
+            </td>
+            <td class="mbx-bench-numeric">{{ cell.compilers }}</td>
+            <td class="mbx-bench-numeric">{{ cell.memory }}</td>
+          </tr>
+        </tbody>
+      </table>
       <table v-else-if="scenario.results.length" class="mbx-bench-table">
         <thead>
           <tr>
@@ -103,6 +131,40 @@ function rows(scenario: BenchmarkScenario) {
           ? "—"
           : `${(baseline.wall_duration_ns / cell.wall_duration_ns).toFixed(2)}×`,
       hits: cell.stats?.hits ?? "—",
+    };
+  });
+}
+
+// The contention scenario asks a different question than the others -- not
+// which tool finished first, but what the machine looked like while four jobs
+// ran on it at once -- so it gets its own columns rather than a "hits" column
+// that would say nothing about the crowding.
+function contentionRows(scenario: BenchmarkScenario) {
+  const slowest = Math.max(
+    ...scenario.results.map((cell) => cell.wall_duration_ns),
+    1,
+  );
+  return scenario.results.map((cell) => {
+    const seconds = cell.wall_duration_ns / 1e9;
+    const available = cell.min_available_bytes;
+    return {
+      tool: cell.tool,
+      seconds:
+        seconds >= 60
+          ? `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`
+          : `${seconds.toFixed(1)}s`,
+      width: Math.max(2, (cell.wall_duration_ns / slowest) * 100),
+      compilers: cell.permits
+        ? `${cell.peak_compilers ?? 0} / ${cell.permits} permits`
+        : `${cell.peak_compilers ?? 0}`,
+      // Only Linux reports it, and only Linux runs the published benchmark.
+      // Zero is a real reading -- a machine that ran itself out -- and it is
+      // the single most interesting cell on the page, so it must not be
+      // rounded away into the same dash that means "never measured".
+      memory:
+        available === null || available === undefined
+          ? "—"
+          : `${(available / 1e9).toFixed(1)} GB`,
     };
   });
 }

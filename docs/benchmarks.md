@@ -7,11 +7,13 @@ was written without the cache in mind. So the subject here is
 [jdx/hk](https://github.com/jdx/hk) — a mid-size Rust CLI with C dependencies,
 pinned to a fixed commit — and every scenario is one CI actually hits.
 
-Each scenario runs the same `cargo build --locked` three ways: plain cargo,
+Most scenarios run the same `cargo build --locked` three ways: plain cargo,
 [mbx](/), and [kache](https://github.com/kunobi-ninja/kache). Timings are wall
 clock around one build. Every row is compared against one number — what plain
 cargo costs with nothing cached — because that is the build a cache is
 replacing, and it is the only scenario where running cargo says anything new.
+The last scenario is the exception: it runs four builds at once and measures
+the machine rather than the cache.
 
 <BenchmarkResults />
 
@@ -49,6 +51,25 @@ It also pins down the diagnosis for the opposite surprise. A warm build that
 reports no hits after a runner image rolled a new Rust looks like a broken
 store and is not one; it is this.
 
+**contention** — four CI jobs at once on one machine, from a cold store:
+`clippy --all-targets`, `check --all-targets`, `test --no-run`, and `build`.
+This is the lint stage of a real pipeline, and it is the one scenario that is
+not about cache hits. Cargo bounds the compilers *it* starts and knows nothing
+about the job beside it, so four of them oversubscribe the machine by four
+times — which is what runs a linker into an out-of-memory kill. The columns
+are what the machine did, sampled from outside every build: the most real
+compilers alive at once, and the least memory it had left.
+
+The `mbx` and `mbx-unscheduled` rows are the same binary with its
+[machine-wide scheduler](/configuration#machine-wide-compile-scheduling) on
+and off, which is the only way to compare the scheduler rather than two
+different caches. Two things separate the rows. The peak shows the bound: the
+pool holds the machine at its permit count while the unscheduled batch runs
+everything at once. The clock and the hits show the deduplication: four jobs
+building one commit reach the same compilations, and under the scheduler each
+runs once and is restored everywhere else, so the scheduled batch finishes
+ahead of the unscheduled one rather than merely no slower.
+
 ## How the comparison is kept fair
 
 - **The registry is fetched once**, before any timed build, into a shared
@@ -77,7 +98,10 @@ because its numbers still render. The run fails, and nothing publishes, unless:
 - each warm build beat its own cold build;
 - the toolchain-change build loaded predictions and then looked up almost
   none of them — and that it ran at all, because a guard that was skipped is
-  not a guard that passed.
+  not a guard that passed;
+- the contention run sampled the machine, saw compilers running, and kept the
+  scheduled batch inside its permits — *and* that the unscheduled batch went
+  past them, because a bound nothing pushed against proves nothing.
 
 A run that fails these is not rendered here at all — the page shows its empty
 state rather than numbers it cannot stand behind.

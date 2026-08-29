@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -44,7 +45,25 @@ SUBJECTS: dict[str, dict[str, object]] = {
     },
 }
 
-TOOLS = ("cargo", "mbx", "kache")
+TOOLS = ("cargo", "mbx", "mbx-unscheduled", "kache")
+
+# Both run the same binary. "mbx-unscheduled" turns the machine-wide compile
+# scheduler off, which is the comparison the contention scenario exists to
+# make; everywhere else it would just be mbx measured twice.
+MBX_TOOLS = ("mbx", "mbx-unscheduled")
+
+# One CI lint job's worth of work, as several commands that land on the
+# machine at once. These are the shapes a Rust CI job actually runs in
+# parallel, and between them they cover the compilations that behave
+# differently under a cache: clippy runs a different driver, `check` emits
+# metadata only, `test --no-run` links test binaries, and `build` links the
+# program. Each gets its own target directory, the way separate CI jobs do.
+CONTENTION_JOBS: tuple[tuple[str, list[str]], ...] = (
+    ("clippy", ["clippy", "--all-targets", "--locked"]),
+    ("check", ["check", "--all-targets", "--locked"]),
+    ("test", ["test", "--no-run", "--locked"]),
+    ("build", ["build", "--locked"]),
+)
 
 # Which tools each scenario asks for. cargo appears only where a no-cache
 # baseline is meaningful: "warm" and "worktree" describe a cache being reused,
@@ -71,6 +90,14 @@ SCENARIOS: dict[str, dict[str, object]] = {
         "description": "store warmed on the pinned toolchain, rebuild on another",
         "timed": False,
     },
+    "contention": {
+        "tools": ("cargo", "mbx-unscheduled", "mbx"),
+        "description": (
+            "four CI jobs at once -- clippy, check, test --no-run, build -- "
+            "on one machine, from a cold store"
+        ),
+        "kind": "contention",
+    },
 }
 
 
@@ -82,6 +109,94 @@ TOOLCHAIN_SURVIVOR_LIMIT = 0.05
 
 class Skipped(Exception):
     """A cell could not run for a reason that is not a benchmark failure."""
+
+
+class MachineSampler:
+    """What the whole machine was doing while a batch of builds ran.
+
+    Cargo bounds the compilers *it* starts; nothing bounds the compilers of
+    the job next to it, which is the problem the machine-wide scheduler
+    exists to solve. So the measurement has to be taken from outside every
+    build -- how many real compilers existed at once, and how close the
+    machine came to running out of memory while they did.
+    """
+
+    INTERVAL = 0.05
+
+    def __init__(self) -> None:
+        self.peak_compilers = 0
+        self.min_available_bytes: int | None = None
+        self.samples = 0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._sample, daemon=True)
+
+    def __enter__(self) -> MachineSampler:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
+
+    def _sample(self) -> None:
+        while not self._stop.is_set():
+            compilers = count_compilers()
+            if compilers is not None:
+                self.peak_compilers = max(self.peak_compilers, compilers)
+            available = available_memory_bytes()
+            if available is not None:
+                self.min_available_bytes = (
+                    available
+                    if self.min_available_bytes is None
+                    else min(self.min_available_bytes, available)
+                )
+            self.samples += 1
+            self._stop.wait(self.INTERVAL)
+
+
+def count_compilers() -> int | None:
+    """Real compiler processes running anywhere on this machine, or None.
+
+    Counted by what the process actually is rather than by what started it:
+    a shim is invoked under its own name and execs nothing, so matching the
+    `rustc` executable itself is what separates the compilations from the
+    wrappers in front of them. Cargo's target-info queries carry
+    `--crate-name` too and compile nothing, so `--print` is excluded.
+    """
+    try:
+        listing = subprocess.run(
+            ["ps", "-Ao", "args="], text=True, capture_output=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listing.returncode != 0:
+        return None
+    count = 0
+    for line in listing.stdout.splitlines():
+        if "--crate-name" not in line or "--print" in line:
+            continue
+        executable = line.split(maxsplit=1)[0]
+        if Path(executable).name in ("rustc", "rustc.exe"):
+            count += 1
+    return count
+
+
+def available_memory_bytes() -> int | None:
+    """Memory the machine could still hand out, on hosts that report it.
+
+    `MemAvailable` counts reclaimable memory rather than free pages alone,
+    which is the number that says whether another compiler would fit. Only
+    Linux publishes it, and Linux is what CI runs; elsewhere the scenario
+    reports concurrency without the memory column rather than guessing.
+    """
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as meminfo:
+            for line in meminfo:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        return None
+    return None
 
 
 def tool_version(command: str, toolchain: str | None = None) -> str | None:
@@ -154,39 +269,47 @@ class Runner:
             environment.pop(variable, None)
         return environment
 
-    def run(
+    def invocation(
         self,
         *,
         tool: str,
         cell: str,
         subject: dict[str, object],
-        checkout: Path,
         target: Path,
         store: Path,
+        args: list[str] | None = None,
         toolchain: str | None = None,
-    ) -> dict[str, object]:
-        """Run one build and return its timing plus whatever the tool reported."""
-        shutil.rmtree(target, ignore_errors=True)
+    ) -> tuple[list[str], dict[str, str]]:
+        """The command and environment one cell runs the subject under.
+
+        Shared by the single-build scenarios and the contention batch, so a
+        parallel job is launched exactly the way a lone one is -- otherwise the
+        two shapes could drift and the comparison between them would stop
+        meaning anything.
+        """
         environment = self.base_environment(subject, target)
         if toolchain is not None:
             environment["RUSTUP_TOOLCHAIN"] = toolchain
-        args = list(subject["args"])  # type: ignore[arg-type]
-        extra: dict[str, object] = {}
+        args = list(subject["args"]) if args is None else args  # type: ignore[arg-type]
 
         if tool == "cargo":
-            command = ["cargo", *args]
-        elif tool == "mbx":
+            return ["cargo", *args], environment
+        if tool in MBX_TOOLS:
             if self.mbx is None:
                 raise Skipped("no mbx binary was given (--mbx)")
-            report = self.output / f"{cell}-stats.json"
             environment.update(
                 {
                     "MBX_CACHE_DIR": str(store),
-                    "MBX_STATS_REPORT": str(report),
+                    "MBX_STATS_REPORT": str(self.output / f"{cell}-stats.json"),
                 }
             )
-            command = [str(self.mbx), *args]
-        elif tool == "kache":
+            # The scheduler is on by default, so the unscheduled variant is
+            # the one that has to say so. Both name it explicitly: an
+            # inherited MBX_SCHEDULER would otherwise decide the comparison
+            # the scenario exists to make.
+            environment["MBX_SCHEDULER"] = "0" if tool == "mbx-unscheduled" else "1"
+            return [str(self.mbx), *args], environment
+        if tool == "kache":
             kache = shutil.which("kache")
             if kache is None:
                 raise Skipped("kache is not on PATH")
@@ -200,9 +323,31 @@ class Runner:
                     "KACHE_LOCAL_ONLY": "1",
                 }
             )
-            command = ["cargo", *args]
-        else:
-            raise ValueError(f"unknown tool {tool}")
+            return ["cargo", *args], environment
+        raise ValueError(f"unknown tool {tool}")
+
+    def run(
+        self,
+        *,
+        tool: str,
+        cell: str,
+        subject: dict[str, object],
+        checkout: Path,
+        target: Path,
+        store: Path,
+        toolchain: str | None = None,
+    ) -> dict[str, object]:
+        """Run one build and return its timing plus whatever the tool reported."""
+        shutil.rmtree(target, ignore_errors=True)
+        extra: dict[str, object] = {}
+        command, environment = self.invocation(
+            tool=tool,
+            cell=cell,
+            subject=subject,
+            target=target,
+            store=store,
+            toolchain=toolchain,
+        )
 
         started = time.perf_counter_ns()
         completed = subprocess.run(
@@ -222,7 +367,7 @@ class Runner:
         if completed.returncode != 0:
             raise RuntimeError(f"{cell}/{tool} build failed; see {log}")
 
-        if tool == "mbx":
+        if tool in MBX_TOOLS:
             report = self.output / f"{cell}-stats.json"
             if report.is_file():
                 extra["stats"] = json.loads(report.read_text(encoding="utf-8"))
@@ -253,6 +398,102 @@ class Runner:
 
         return {"tool": tool, "wall_duration_ns": duration_ns, **extra}
 
+    def run_batch(
+        self,
+        *,
+        tool: str,
+        cell: str,
+        subject: dict[str, object],
+        checkout: Path,
+        work: Path,
+        store: Path,
+        permits: int,
+    ) -> dict[str, object]:
+        """Start every CI job at once and measure what the machine did.
+
+        The batch is timed end to end rather than per job: what a developer
+        waiting on CI experiences is when the last one finishes, and what the
+        machine experiences is all of them at their overlap.
+        """
+        jobs = []
+        for name, args in CONTENTION_JOBS:
+            target = work / f"target-{cell}-{name}"
+            shutil.rmtree(target, ignore_errors=True)
+            command, environment = self.invocation(
+                tool=tool,
+                cell=f"{cell}-{name}",
+                subject=subject,
+                target=target,
+                store=store,
+                args=args,
+            )
+            if tool in MBX_TOOLS:
+                # Stated rather than left to the default, so the bound the
+                # scenario checks is the bound it asked for -- mbx counts the
+                # CPUs it can actually use, which a container may limit.
+                environment["MBX_SCHEDULER_CPUS"] = str(permits)
+            jobs.append((name, command, environment))
+
+        # Straight to files rather than pipes. A pipe holds 64KiB, and these
+        # jobs are only read after they are all started, so a chatty one would
+        # block on a full buffer instead of compiling -- which would land in
+        # the timing as though the machine had been busy.
+        logs = {name: self.output / f"{cell}-{name}.log" for name, _ in CONTENTION_JOBS}
+        started = time.perf_counter_ns()
+        with MachineSampler() as sampler:
+            running = []
+            for name, command, environment in jobs:
+                handle = logs[name].open("w", encoding="utf-8")
+                handle.write(f"$ {' '.join(command)}\n\n")
+                handle.flush()
+                running.append(
+                    (
+                        name,
+                        subprocess.Popen(
+                            command,
+                            cwd=checkout,
+                            env=environment,
+                            stdout=handle,
+                            stderr=subprocess.STDOUT,
+                        ),
+                        handle,
+                    )
+                )
+            finished = []
+            for name, process, handle in running:
+                returncode = process.wait()
+                handle.close()
+                finished.append((name, returncode))
+        duration_ns = time.perf_counter_ns() - started
+
+        job_results = []
+        for name, returncode in finished:
+            if returncode != 0:
+                raise RuntimeError(f"{cell}/{tool} job {name} failed; see {logs[name]}")
+            job_results.append({"job": name})
+
+        result: dict[str, object] = {
+            "tool": tool,
+            "wall_duration_ns": duration_ns,
+            "jobs": job_results,
+            "peak_compilers": sampler.peak_compilers,
+            "min_available_bytes": sampler.min_available_bytes,
+            "permits": permits if tool == "mbx" else None,
+            "samples": sampler.samples,
+        }
+        if tool in MBX_TOOLS:
+            # One report per job; the batch's hits are their sum, since the
+            # jobs shared a store and each one's hits are real restorations.
+            total = 0
+            for name, _ in CONTENTION_JOBS:
+                report = self.output / f"{cell}-{name}-stats.json"
+                if report.is_file():
+                    total += int(
+                        json.loads(report.read_text(encoding="utf-8")).get("hits", 0)
+                    )
+            result["stats"] = {"hits": total}
+        return result
+
 
 # What the checked-in results file keeps from each mbx stats report. The full
 # report is in the run's own output directory; the published file is reviewed
@@ -268,6 +509,10 @@ PUBLISHED_STATS = (
     "restored_output_bytes",
 )
 
+# What a contention cell publishes beyond its timing: the machine measurements
+# are the point of that scenario, not a detail of it.
+PUBLISHED_CONTENTION = ("peak_compilers", "min_available_bytes", "permits")
+
 
 def publishable(result: dict[str, object]) -> dict[str, object]:
     """Strip a run down to what the documentation site publishes."""
@@ -279,6 +524,9 @@ def publishable(result: dict[str, object]) -> dict[str, object]:
                 "tool": cell["tool"],
                 "wall_duration_ns": cell["wall_duration_ns"],
             }
+            for field in PUBLISHED_CONTENTION:
+                if field in cell:
+                    trimmed[field] = cell[field]
             stats = cell.get("stats")
             if isinstance(stats, dict):
                 trimmed["stats"] = {
@@ -437,6 +685,20 @@ def run_scenario(
                         toolchain=alternate,
                     )
                 )
+            elif scenario == "contention":
+                checkout = work / f"checkout-{cell}"
+                clone(subject, str(subject["child"]), checkout)
+                results.append(
+                    runner.run_batch(
+                        tool=tool,
+                        cell=cell,
+                        subject=subject,
+                        checkout=checkout,
+                        work=work,
+                        store=store,
+                        permits=contention_permits(),
+                    )
+                )
             else:
                 raise ValueError(f"unknown scenario {scenario}")
         except Skipped as skip:
@@ -446,9 +708,19 @@ def run_scenario(
         "scenario": scenario,
         "description": SCENARIOS[scenario]["description"],
         "timed": SCENARIOS[scenario].get("timed", True),
+        "kind": SCENARIOS[scenario].get("kind", "build"),
         "results": results,
         "skipped": notes,
     }
+
+
+def contention_permits() -> int:
+    """Permits the scheduled cell is given: what an unconfigured machine gets.
+
+    The scenario is about the default anyone would actually run under, so this
+    is the CPU count rather than a number chosen to make the bound look tight.
+    """
+    return os.cpu_count() or 1
 
 
 def validate(scenarios: list[dict[str, object]]) -> list[str]:
@@ -479,6 +751,40 @@ def validate(scenarios: list[dict[str, object]]) -> list[str]:
             if baseline and cell["wall_duration_ns"] >= baseline["wall_duration_ns"]:
                 failures.append(
                     f"warm: {cell['tool']} was no faster than its own cold build"
+                )
+
+    contention = by_name.get("contention")
+    if contention:
+        cells = {cell["tool"]: cell for cell in contention["results"]}  # type: ignore[index]
+        scheduled = cells.get("mbx")
+        unscheduled = cells.get("mbx-unscheduled")
+        if scheduled is not None:
+            permits = int(scheduled.get("permits") or 0)
+            peak = int(scheduled.get("peak_compilers") or 0)
+            if not scheduled.get("samples"):
+                failures.append(
+                    "contention: the machine was never sampled, so no bound was observed"
+                )
+            elif peak <= 0:
+                failures.append(
+                    "contention: no compiler was ever seen running, so the sampler "
+                    "measured something other than the builds"
+                )
+            elif permits and peak > permits:
+                failures.append(
+                    f"contention: {peak} compilers ran at once against {permits} permits, "
+                    "so the pool did not bound the machine"
+                )
+        if scheduled is not None and unscheduled is not None:
+            # Without this the scenario could "pass" on a machine too small,
+            # or too fast, for the jobs to ever overlap -- and a bound nothing
+            # pushed against proves nothing about the bound.
+            baseline = int(unscheduled.get("peak_compilers") or 0)
+            permits = int(scheduled.get("permits") or 0)
+            if permits and baseline <= permits:
+                failures.append(
+                    f"contention: unscheduled builds peaked at {baseline} compilers, within "
+                    f"the {permits} permits, so this run never actually contended"
                 )
 
     toolchain = by_name.get("toolchain")
@@ -534,6 +840,32 @@ def summarize(result: dict[str, object]) -> str:
             "",
             f"{scenario['description']}",
             "",
+        ]
+        if scenario.get("kind") == "contention":
+            lines += [
+                "| Tool | Batch wall time | Peak compilers | Lowest free memory | Hits |",
+                "| :--- | ---: | ---: | ---: | ---: |",
+            ]
+            for cell in scenario["results"]:
+                permits = cell.get("permits")
+                peak = f"{cell.get('peak_compilers', 0)}"
+                if permits:
+                    peak += f" / {permits} permits"
+                # Zero is a reading, not a missing one: it says the machine
+                # ran itself out, which is the whole point of the column.
+                available = cell.get("min_available_bytes")
+                memory = "-" if available is None else f"{available / 1e9:.1f} GB"
+                lines.append(
+                    f"| {cell['tool']} | {cell['wall_duration_ns'] / 1e9:.1f} s | {peak} "
+                    f"| {memory} | {hits(cell)} |"
+                )
+            lines.append("")
+            for note in scenario["skipped"]:
+                lines.append(f"- skipped {note}")
+            if scenario["skipped"]:
+                lines.append("")
+            continue
+        lines += [
             "| Tool | Wall time | Hits | Restored files |"
             if scenario["timed"]
             else "| Tool | Ran for | Hits | Restored files |",

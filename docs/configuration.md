@@ -52,6 +52,12 @@ mode = "read-write"
 timeout = "30s"
 download_timeout = "10m"
 retries = 3
+
+[scheduler]
+enabled = true
+cpus = 16                # default: logical CPUs
+memory = "24GiB"         # default: 85% of physical memory
+priority = "normal"      # or "low"
 ```
 
 ## Workspace policy
@@ -85,6 +91,47 @@ admitted, and `mbx explain` for what a particular build bypassed.
 The same cache serves builds outside cargo — make, CMake, and anything else
 that finds its compiler on `PATH` — through `mbx exec`; see
 [standalone C and C++ builds](/standalone-builds).
+
+## Machine-wide compile scheduling
+
+Cargo plans one build at a time: three simultaneous worktree builds each
+believe they own the machine and multiply `-j`. mbx's shims sit in front of
+every real compiler process across all of them, so concurrent builds share the
+machine through one permit pool under the cache directory (on by default;
+`MBX_SCHEDULER=0` turns it off). Cache hits never wait, Cargo keeps its own
+dependency scheduling, and permits are released by the kernel if a process
+dies, so a crashed build cannot wedge its siblings.
+
+Concurrent builds do not just take turns, they stop repeating each other.
+Four CI jobs building one commit compile the same dependency graph four
+times; under the scheduler, a compilation identical to one already running
+anywhere on the machine waits for that one to finish and restores its result
+from the cache instead of burning a core on it. The finished compilation also
+leaves its input list behind, so a job arriving after it is already done can
+build the cache key it would otherwise lack and hit where it would have
+compiled cold. Both paths rehash every input before trusting anything, so
+the worst a stale record can do is fall back to compiling.
+
+The pool is memory-aware. `scheduler.cpus` permits (default: logical CPUs)
+divide `scheduler.memory` (default: 85% of physical memory, leaving headroom
+for everything that is not a compiler; `"none"` keeps plain CPU permits). In a
+container, "physical memory" means the cgroup's limit rather than the host's
+RAM — a build in a 4GiB container on a large machine is budgeted by the 4GiB,
+because the rest was never its to spend.
+Native links start at two permits, and crates whose compilations have measured
+memory-heavy are weighted by what they actually used, so the predicted memory
+of everything running stays inside the budget. A compilation the Linux OOM
+killer stops is recorded heavier than it measured, so its retry runs with more
+room instead of repeating the crash.
+
+`priority = "low"` (`MBX_SCHEDULER_PRIORITY`) is for builds nobody is sitting
+at — CI on a shared box, an editor's background check. While a normal-priority
+build is waiting for permits, low-priority builds leave a quarter of the pool
+free for it.
+
+Two limits are worth knowing: a single compilation larger than the machine is
+still too large when it runs alone, and crates that have never been measured
+start at one permit until the pool has seen them once.
 
 ## Verify mode
 
