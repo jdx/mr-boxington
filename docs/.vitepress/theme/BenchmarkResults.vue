@@ -16,8 +16,15 @@
       :key="scenario.scenario"
       class="mbx-bench-scenario"
     >
-      <h3 :id="scenario.scenario">{{ scenario.scenario }}</h3>
-      <p class="mbx-bench-caption">{{ scenario.description }}</p>
+      <header class="mbx-bench-header">
+        <div>
+          <h3 :id="scenario.scenario">{{ scenario.scenario }}</h3>
+          <p class="mbx-bench-caption">{{ scenario.description }}</p>
+        </div>
+        <span v-if="scenario.timed" class="mbx-bench-direction">
+          lower is better
+        </span>
+      </header>
       <p
         v-if="!scenario.timed && scenario.results.length"
         class="mbx-bench-guard"
@@ -28,61 +35,69 @@
         {{ scenario.results[0].stats?.lookups ?? 0 }} — the ones that do not
         depend on rustc at all.
       </p>
-      <table
+      <div
         v-else-if="scenario.kind === 'contention' && scenario.results.length"
-        class="mbx-bench-table"
+        class="mbx-bench-chart"
+        role="list"
+        aria-label="Contention benchmark results"
       >
-        <thead>
-          <tr>
-            <th scope="col">Tool</th>
-            <th scope="col">Batch time</th>
-            <th scope="col" class="mbx-bench-numeric">vs. sequential</th>
-            <th scope="col" class="mbx-bench-numeric">Peak compilers</th>
-            <th scope="col" class="mbx-bench-numeric">Lowest free memory</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="cell in contentionRows(scenario)" :key="cell.tool">
-            <th scope="row">{{ cell.tool }}</th>
-            <td>
-              <span
-                class="mbx-bench-bar"
-                :class="{ 'is-subject': cell.tool === 'mbx' }"
-                :style="{ width: `${cell.width}%` }"
-              />
-              <span class="mbx-bench-seconds">{{ cell.seconds }}</span>
-            </td>
-            <td class="mbx-bench-numeric">{{ cell.relative }}</td>
-            <td class="mbx-bench-numeric">{{ cell.compilers }}</td>
-            <td class="mbx-bench-numeric">{{ cell.memory }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <table v-else-if="scenario.results.length" class="mbx-bench-table">
-        <thead>
-          <tr>
-            <th scope="col">Tool</th>
-            <th scope="col">Build time</th>
-            <th scope="col" class="mbx-bench-numeric">vs. cold cargo</th>
-            <th scope="col" class="mbx-bench-numeric">Hits</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="cell in rows(scenario)" :key="cell.tool">
-            <th scope="row">{{ cell.tool }}</th>
-            <td>
-              <span
-                class="mbx-bench-bar"
-                :class="{ 'is-subject': cell.tool === 'mbx' }"
-                :style="{ width: `${cell.width}%` }"
-              />
-              <span class="mbx-bench-seconds">{{ cell.seconds }}</span>
-            </td>
-            <td class="mbx-bench-numeric">{{ cell.relative }}</td>
-            <td class="mbx-bench-numeric">{{ cell.hits }}</td>
-          </tr>
-        </tbody>
-      </table>
+        <div
+          v-for="cell in contentionRows(scenario)"
+          :key="cell.tool"
+          class="mbx-bench-row"
+          :class="{ 'is-subject': cell.tool === 'mbx' }"
+          role="listitem"
+        >
+          <div class="mbx-bench-tool">
+            <code>{{ cell.tool }}</code>
+            <span v-if="cell.fastest" class="mbx-bench-fastest">fastest</span>
+          </div>
+          <div class="mbx-bench-bar-track" aria-hidden="true">
+            <span
+              class="mbx-bench-bar"
+              :class="{ 'is-subject': cell.tool === 'mbx' }"
+              :style="{ width: `${cell.width}%` }"
+            />
+          </div>
+          <strong class="mbx-bench-seconds">{{ cell.seconds }}</strong>
+          <div class="mbx-bench-meta">
+            <span v-if="cell.relative !== '—'">{{ cell.relative }} vs. sequential</span>
+            <span>{{ cell.compilers }}</span>
+            <span>{{ cell.memory }} free</span>
+          </div>
+        </div>
+      </div>
+      <div
+        v-else-if="scenario.results.length"
+        class="mbx-bench-chart"
+        role="list"
+        :aria-label="`${scenario.scenario} benchmark results`"
+      >
+        <div
+          v-for="cell in rows(scenario)"
+          :key="cell.tool"
+          class="mbx-bench-row"
+          :class="{ 'is-subject': cell.tool === 'mbx' }"
+          role="listitem"
+        >
+          <div class="mbx-bench-tool">
+            <code>{{ cell.tool }}</code>
+            <span v-if="cell.fastest" class="mbx-bench-fastest">fastest</span>
+          </div>
+          <div class="mbx-bench-bar-track" aria-hidden="true">
+            <span
+              class="mbx-bench-bar"
+              :class="{ 'is-subject': cell.tool === 'mbx' }"
+              :style="{ width: `${cell.width}%` }"
+            />
+          </div>
+          <strong class="mbx-bench-seconds">{{ cell.seconds }}</strong>
+          <div class="mbx-bench-meta">
+            <span v-if="cell.comparison">{{ cell.comparison }}</span>
+            <span v-if="cell.hits !== '—'">{{ cell.hits }} cache hits</span>
+          </div>
+        </div>
+      </div>
       <p v-if="scenario.skipped.length" class="mbx-bench-skipped">
         Not measured: {{ scenario.skipped.join("; ") }}
       </p>
@@ -108,42 +123,47 @@ import { computed } from "vue";
 import { data } from "../benchmarks.data";
 import type { BenchmarkScenario } from "../benchmarks.data";
 
-// Every scenario compares against the same number: what plain cargo costs
-// with nothing cached. Only the cold scenario runs cargo -- with a wiped
-// target/ the others would just repeat it -- so a per-scenario baseline would
-// leave the warm and cross-worktree rows with nothing to compare to, which is
-// exactly the comparison a reader wants.
-const coldCargo = computed(
-  () =>
-    data?.scenarios
-      .find((scenario) => scenario.scenario === "cold")
-      ?.results.find((cell) => cell.tool === "cargo") ?? null,
-);
-
-// Bars are scaled within a scenario, never across them: each table answers
+// Bars are scaled within a scenario, never across them: each card answers
 // which tool was faster on that workload, not how the workloads compare to
-// each other.
+// each other. The bar has its own fixed-width track beside the duration label,
+// so the slowest result fills the track and every other result is proportional.
+function barWidth(duration: number, slowest: number) {
+  return Math.max(2, (duration / slowest) * 100);
+}
+
 function rows(scenario: BenchmarkScenario) {
   const slowest = Math.max(
     ...scenario.results.map((cell) => cell.wall_duration_ns),
     1,
   );
-  const baseline = coldCargo.value;
+  const fastest = Math.min(
+    ...scenario.results.map((cell) => cell.wall_duration_ns),
+  );
+  // A Cargo result is meaningful only inside the scenario that measured it.
+  // In the commit case it is deliberately an uncached control: Cargo has no
+  // portable store to seed from the parent commit, and its target is fresh.
+  const baseline = scenario.results.find((cell) => cell.tool === "cargo");
   return scenario.results.map((cell) => {
     const seconds = cell.wall_duration_ns / 1e9;
+    const ratio = baseline
+      ? baseline.wall_duration_ns / cell.wall_duration_ns
+      : null;
     return {
       tool: cell.tool,
+      fastest: cell.wall_duration_ns === fastest,
       seconds:
         seconds >= 60
           ? `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`
           : `${seconds.toFixed(1)}s`,
-      width: Math.max(2, (cell.wall_duration_ns / slowest) * 100),
-      relative:
-        // Two decimals: a cache that costs 3% on a cold build rounds to
-        // "1.0x" at one, which reads as free.
-        !baseline || cell === baseline
-          ? "—"
-          : `${(baseline.wall_duration_ns / cell.wall_duration_ns).toFixed(2)}×`,
+      width: barWidth(cell.wall_duration_ns, slowest),
+      comparison:
+        !baseline
+          ? null
+          : cell === baseline
+            ? "uncached baseline"
+            : ratio! >= 1
+              ? `${ratio!.toFixed(2)}× faster than cargo`
+              : `${(1 / ratio!).toFixed(2)}× slower than cargo`,
       hits: cell.stats?.hits ?? "—",
     };
   });
@@ -158,6 +178,9 @@ function contentionRows(scenario: BenchmarkScenario) {
     ...scenario.results.map((cell) => cell.wall_duration_ns),
     1,
   );
+  const fastest = Math.min(
+    ...scenario.results.map((cell) => cell.wall_duration_ns),
+  );
   const baseline = scenario.results.find(
     (cell) => cell.tool === "mbx-sequential",
   );
@@ -166,18 +189,19 @@ function contentionRows(scenario: BenchmarkScenario) {
     const available = cell.min_available_bytes;
     return {
       tool: cell.tool,
+      fastest: cell.wall_duration_ns === fastest,
       seconds:
         seconds >= 60
           ? `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`
           : `${seconds.toFixed(1)}s`,
-      width: Math.max(2, (cell.wall_duration_ns / slowest) * 100),
+      width: barWidth(cell.wall_duration_ns, slowest),
       relative:
         !baseline || cell === baseline
           ? "—"
           : `${(baseline.wall_duration_ns / cell.wall_duration_ns).toFixed(2)}×`,
       compilers: cell.permits
-        ? `${cell.peak_compilers ?? 0} / ${cell.permits} permits`
-        : `${cell.peak_compilers ?? 0}`,
+        ? `${cell.peak_compilers ?? 0} peak / ${cell.permits} permits`
+        : `${cell.peak_compilers ?? 0} peak compilers`,
       // Only Linux reports it, and only Linux runs the published benchmark.
       // Zero is a real reading -- a machine that ran itself out -- and it is
       // the single most interesting cell on the page, so it must not be
@@ -206,46 +230,141 @@ const versionList = computed(() => {
 
 <style scoped>
 .mbx-bench-scenario {
-  margin: 32px 0;
+  background:
+    linear-gradient(
+      145deg,
+      color-mix(in srgb, var(--vp-c-bg-soft) 96%, var(--vp-c-brand-1) 4%),
+      var(--vp-c-bg-soft)
+    );
+  border: 1px solid color-mix(in srgb, var(--vp-c-divider) 80%, var(--vp-c-brand-1) 20%);
+  border-radius: 14px;
+  margin: 28px 0;
+  overflow: hidden;
+}
+.mbx-bench-header {
+  align-items: flex-start;
+  display: flex;
+  gap: 20px;
+  justify-content: space-between;
+  padding: 20px 22px 18px;
+}
+.mbx-bench-header h3 {
+  border: 0;
+  margin: 0;
+  padding: 0;
 }
 .mbx-bench-caption {
   color: var(--vp-c-text-2);
   font-size: 14px;
-  margin-top: -8px;
+  line-height: 1.5;
+  margin: 5px 0 0;
 }
-.mbx-bench-table {
-  display: table;
+.mbx-bench-direction {
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 999px;
+  color: var(--vp-c-text-2);
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  padding: 6px 9px;
+  text-transform: uppercase;
+}
+.mbx-bench-chart {
+  border-top: 1px solid var(--vp-c-divider);
+}
+.mbx-bench-row {
+  align-items: center;
+  display: grid;
+  gap: 8px 18px;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(180px, 2fr) auto;
+  padding: 16px 22px;
+}
+.mbx-bench-row + .mbx-bench-row {
+  border-top: 1px solid var(--vp-c-divider);
+}
+.mbx-bench-row.is-subject {
+  background: color-mix(in srgb, var(--vp-c-brand-soft) 58%, transparent);
+}
+.mbx-bench-tool {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.mbx-bench-tool code {
+  background: transparent;
+  color: var(--vp-c-text-1);
+  font-size: 14px;
+  font-weight: 650;
+  padding: 0;
+}
+.mbx-bench-fastest {
+  background: color-mix(in srgb, var(--vp-c-brand-1) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vp-c-brand-1) 32%, transparent);
+  border-radius: 999px;
+  color: var(--vp-c-brand-1);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  padding: 4px 6px;
+  text-transform: uppercase;
+}
+.mbx-bench-bar-track {
+  background: color-mix(in srgb, var(--vp-c-divider) 58%, transparent);
+  border-radius: 999px;
+  display: block;
+  height: 12px;
+  overflow: hidden;
   width: 100%;
 }
-.mbx-bench-table th[scope="row"] {
-  font-family: var(--vp-font-family-mono);
-  font-weight: 500;
-}
-.mbx-bench-numeric {
-  text-align: right;
-}
 .mbx-bench-bar {
-  background: var(--vp-c-divider);
-  border-radius: 3px;
-  display: inline-block;
-  height: 10px;
-  margin-right: 8px;
-  max-width: 60%;
-  vertical-align: middle;
+  background: var(--vp-c-text-3);
+  border-radius: inherit;
+  display: block;
+  height: 100%;
+  min-width: 3px;
 }
 .mbx-bench-bar.is-subject {
-  background: var(--vp-c-brand-1);
+  background: linear-gradient(90deg, var(--vp-c-brand-2), var(--vp-c-brand-1));
+  box-shadow: 0 0 14px color-mix(in srgb, var(--vp-c-brand-1) 32%, transparent);
 }
 .mbx-bench-seconds {
+  color: var(--vp-c-text-1);
   font-family: var(--vp-font-family-mono);
-  font-size: 13px;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  justify-self: end;
   white-space: nowrap;
+}
+.mbx-bench-meta {
+  color: var(--vp-c-text-2);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 11px;
+  gap: 6px;
+  grid-column: 2 / 4;
+}
+.mbx-bench-meta span {
+  background: color-mix(in srgb, var(--vp-c-bg) 72%, transparent);
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 999px;
+  line-height: 1;
+  padding: 5px 7px;
 }
 .mbx-bench-guard,
 .mbx-bench-skipped,
 .mbx-bench-provenance {
   color: var(--vp-c-text-2);
   font-size: 13px;
+}
+.mbx-bench-guard,
+.mbx-bench-skipped {
+  border-top: 1px solid var(--vp-c-divider);
+  margin: 0;
+  padding: 16px 22px;
 }
 .mbx-bench-empty {
   border: 1px solid var(--vp-c-divider);
@@ -254,5 +373,37 @@ const versionList = computed(() => {
 }
 .mbx-bench-empty p {
   margin: 0;
+}
+@media (max-width: 640px) {
+  .mbx-bench-header {
+    display: block;
+    padding: 18px 16px 16px;
+  }
+  .mbx-bench-direction {
+    display: inline-block;
+    margin-top: 12px;
+  }
+  .mbx-bench-row {
+    gap: 10px 14px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding: 15px 16px;
+  }
+  .mbx-bench-tool {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .mbx-bench-seconds {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .mbx-bench-bar-track {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+  .mbx-bench-meta {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    margin-top: -2px;
+  }
 }
 </style>
