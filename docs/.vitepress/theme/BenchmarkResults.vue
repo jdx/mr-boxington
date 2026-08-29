@@ -105,7 +105,10 @@
       <p v-if="scenario.skipped.length" class="mbx-bench-skipped">
         Not measured: {{ scenario.skipped.join("; ") }}
       </p>
-      <p v-if="scenario.workflow_run" class="mbx-bench-scenario-provenance">
+      <p
+        v-if="scenario.workflow_run && scenario.runner"
+        class="mbx-bench-scenario-provenance"
+      >
         Measured separately on {{ scenario.runner }}.
         <a
           :href="`https://github.com/jdx/mr-boxington/actions/runs/${scenario.workflow_run}`"
