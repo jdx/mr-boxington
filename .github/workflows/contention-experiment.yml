@@ -21,7 +21,7 @@ jobs:
     # This executes PR code on a private runner. Keep the experiment limited to
     # jdx's same-repository branch; fork PRs must never reach this machine.
     if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'jdx'
-    runs-on: bamboo-perf
+    runs-on: namespace-profile-endev-linux-amd64-xlarge
     timeout-minutes: 60
     permissions:
       contents: read
