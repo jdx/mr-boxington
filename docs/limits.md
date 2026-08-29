@@ -73,12 +73,16 @@ object compiled with debug information does the same, recording the directory
 the compiler ran in.
 
 A C or C++ object also records the absolute include directories it was given,
-so an object differs between two *target* directories -- not only two
-checkouts -- when a build script generates headers into `OUT_DIR` and compiles
-against them. That is the ordinary shape of a `-sys` crate, and it is why a
-qualification run over one reports a divergence for every object it builds.
-The object path alone does not do this on Linux or macOS; on Windows it does,
-because the debug information records where the object was written as well.
+which is how a `-sys` crate whose build script generates headers into
+`OUT_DIR` used to produce a different object in every target directory. With
+[`OUT_DIR` sharing](/configuration#out-dir-sharing) on -- the default -- mbx
+passes the compiler `-fdebug-prefix-map` for that directory, so the object
+records the same placeholder the key does and two target directories produce
+the same bytes. An object that keeps the path anyway, in a string the source
+holds rather than in debug information, is not published at all rather than
+shared under a key that says the path does not matter. The object path alone
+never did this on Linux or macOS; on Windows it does, because the debug
+information records where the object was written as well.
 
 None of these changes what the artifact does. All of them are visible to
 `MBX_VERIFY=1`, which compares bytes: a divergence it reports for a
@@ -148,6 +152,13 @@ generated sources then appear in debug info under a placeholder path. It cannot
 detect a value derived from the path without embedding the path itself. Set
 `MBX_SHARE_OUT_DIR=0` to keep generated source paths literal at the cost of
 cross-checkout cache sharing for their dependent crates.
+
+This covers C and C++ as well as Rust. A build script that generates headers
+into `OUT_DIR` passes that directory to its own compilations, which record it
+in debug information, so the same remapping applies -- rustc is told
+`--remap-path-prefix` and the C compiler `-fdebug-prefix-map`, and in both
+cases an output that kept the literal path is left uncached rather than
+shared. `MBX_SHARE_OUT_DIR=0` turns both off together.
 
 ## Incremental output reduces sharing
 
