@@ -6,7 +6,8 @@
 
 <p align="center">
   <strong>fix <code>target/</code></strong><br>
-  Put mbx in front of any cargo command. One cache warms every worktree and CI run; one scheduler lets Cargo jobs safely run at once.
+  Put mbx in front of any cargo command. One cache warms every worktree and CI run, and prunes itself to a size budget.<br>
+  Run multiple Cargo builds at the same time.
 </p>
 
 <p align="center">
@@ -44,9 +45,9 @@ is pruned to, and when a `target/` directory becomes collectable.
 - **Warm CI safely.** GitHub Actions cache can warm fork pull requests from a
   cache built on `main`, while a self-hosted remote can serve trusted runners
   and teammates. Pull requests never publish remote objects.
-- **Parallelize the pipeline, not the pain.** Concurrent Cargo commands share
-  one machine-wide CPU and memory budget. Identical cold compilations already
-  running are compiled once and restored into every other job.
+- **Run multiple Cargo builds at the same time.** They share one machine-wide
+  CPU and memory budget. Identical cold compilations already running are
+  compiled once and restored into every other build.
 - **See the whole result.** mbx reports hits, misses, actions it could not look
   up, and actions it deliberately bypassed. A high hit rate cannot hide work
   that never entered the cache. `mbx tui` shows the same outcomes as they

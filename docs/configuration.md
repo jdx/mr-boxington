@@ -101,13 +101,14 @@ that finds its compiler on `PATH` — through `mbx exec`; see
 
 Cargo plans one build at a time: three simultaneous worktree builds each
 believe they own the machine and multiply `-j`. mbx's shims sit in front of
-every real compiler process across all of them, so concurrent builds share the
-machine through one permit pool under the cache directory (on by default;
-`MBX_SCHEDULER=0` turns it off). Cache hits never wait, Cargo keeps its own
-dependency scheduling, and permits are released by the kernel if a process
-dies, so a crashed build cannot wedge its siblings.
+every real compiler process across all of them, so multiple Cargo builds
+running at the same time share the machine through one permit pool under the
+cache directory (on by default; `MBX_SCHEDULER=0` turns it off). Cache hits
+never wait, Cargo keeps its own dependency scheduling, and permits are released
+by the kernel if a process dies, so a crashed build cannot wedge its siblings.
 
-Concurrent builds do not just take turns, they stop repeating each other.
+Builds running at the same time do not just take turns, they stop repeating
+each other.
 Four CI jobs building one commit compile the same dependency graph four
 times; under the scheduler, a compilation identical to one already running
 anywhere on the machine waits for that one to finish and restores its result

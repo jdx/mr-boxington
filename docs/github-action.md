@@ -22,9 +22,9 @@ steps:
 
 ## Parallel Cargo steps
 
-Independent lint or test configurations do not have to queue behind each
-other. GitHub Actions can start them together, while mbx gives every compiler
-they launch one machine-wide CPU and memory budget:
+Run multiple Cargo builds at the same time by starting independent lint or
+test configurations together. mbx gives every compiler they launch one
+machine-wide CPU and memory budget:
 
 ```yaml
 steps:

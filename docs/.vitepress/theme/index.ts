@@ -15,6 +15,12 @@ export default {
   extends: DefaultTheme,
   Layout() {
     return h(DefaultTheme.Layout, null, {
+      "home-hero-info-after": () =>
+        h(
+          "p",
+          { class: "MbxHeroConcurrency" },
+          "Run multiple Cargo builds at the same time.",
+        ),
       "home-hero-after": () => h(HomeTerminal),
       "home-features-after": () => h(HomeConcurrency),
       "layout-bottom": () => [h(EndevSponsors), h(EndevFooter)],

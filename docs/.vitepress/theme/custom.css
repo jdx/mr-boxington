@@ -156,6 +156,21 @@ body::after {
   max-width: 34rem;
 }
 
+.MbxHeroConcurrency {
+  color: var(--mbx-amber-bright);
+  font-family: var(--mbx-display);
+  font-size: 18px;
+  font-weight: 600;
+  margin: 16px 0 0;
+}
+
+@media (max-width: 959px) {
+  .MbxHeroConcurrency {
+    margin-left: auto;
+    margin-right: auto;
+  }
+}
+
 @media (min-width: 960px) {
   .VPHero .name {
     font-size: 64px;

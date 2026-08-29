@@ -127,10 +127,10 @@ dependency resolution, feature unification, build planning, and linking. mbx
 also forwards Cargo aliases and installed subcommands. Nothing goes into
 Cargo's configuration, and there is nothing to tune before the first build.
 
-## Run builds together
+## Run multiple Cargo builds at the same time
 
-Any task runner can start several mbx commands at once. For example, mise runs
-these two lint configurations concurrently:
+Any task runner can start multiple mbx commands at the same time. For example,
+mise runs these two lint configurations together:
 
 ```toml
 # mise.toml
@@ -283,5 +283,5 @@ rather than a public thread; see
 - Tune local behavior in [Configuration](/configuration).
 - Warm pull requests with [GitHub Actions cache](/github-action).
 - Run independent tasks together through
-  [mise or GitHub Actions](#run-builds-together).
+  [mise or GitHub Actions](#run-multiple-cargo-builds-at-the-same-time).
 - Learn what enters a key in [How it works](/how-it-works).

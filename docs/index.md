@@ -4,7 +4,7 @@ layout: home
 hero:
   name: "mr boxington"
   text: "fix <code>target/</code>"
-  tagline: Put mbx in front of any cargo command. One cache warms every worktree and CI run; one scheduler lets Cargo jobs safely run at once.
+  tagline: Put mbx in front of any cargo command. One cache warms every worktree and CI run, and prunes itself to a size budget.
   image:
     src: /logo.svg
     alt: Mr Boxington, a friendly cache box
@@ -52,9 +52,9 @@ features:
       alt: Parallel build lanes joining one shared pool
       width: 64
       height: 64
-    title: Run Cargo jobs together
-    details: Start independent CI checks at once. mbx coordinates every compiler through one machine-wide CPU and memory budget.
-    link: /getting-started#run-builds-together
+    title: Run multiple Cargo builds
+    details: Run independent CI checks at the same time. mbx gives their compilers one shared CPU and memory budget.
+    link: /getting-started#run-multiple-cargo-builds-at-the-same-time
   - icon:
       src: /features/benchmarks.svg
       alt: A stopwatch with a rising performance line

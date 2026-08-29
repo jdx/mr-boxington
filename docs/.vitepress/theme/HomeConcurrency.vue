@@ -6,9 +6,9 @@
         Run multiple Cargo builds at the same time.
       </h2>
       <p class="lede">
-        Cargo limits only the compilers in its own process. mbx coordinates
-        every Cargo process through one CPU and memory budget, and identical
-        work already running is compiled once and restored everywhere else.
+        Cargo limits only the compilers in its own process. mbx gives multiple
+        Cargo builds one shared CPU and memory budget, and identical work
+        already running is compiled once and restored everywhere else.
       </p>
       <div class="proof" aria-label="Measured performance improvement">
         <strong>Up to 44.9%</strong>
@@ -28,7 +28,7 @@
 
     <div
       class="diagram"
-      aria-label="Two concurrent lint commands coordinated by mbx"
+      aria-label="Two Cargo lint builds sharing one mbx permit pool"
     >
       <div class="job">
         <span class="label">default features</span>
