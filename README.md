@@ -21,14 +21,6 @@ supported compilations it has seen before. There is nothing to configure and
 nothing to install into Cargo: put `mbx` in front of the command you already
 run.
 
-> [!NOTE]
-> mbx stands on [Cargo](https://github.com/rust-lang/cargo), follows the
-> compiler-caching trail established by
-> [sccache](https://github.com/mozilla/sccache), and is deeply inspired by
-> [kache](https://github.com/kunobi-ninja/kache). kache has also been around
-> longer and is the more proven choice today.
-> [Read the full acknowledgement](https://mr-boxington.jdx.dev/acknowledgements).
-
 ```sh
 mbx build                  # cargo build, with caching
 mbx test --all-features    # cargo test --all-features, with caching
@@ -190,6 +182,13 @@ comes before hit rate.
 - [Watching builds](https://mr-boxington.jdx.dev/tui)
 - [CLI reference](https://mr-boxington.jdx.dev/cli)
 - [Current limits](https://mr-boxington.jdx.dev/limits)
+
+> [!NOTE]
+> mbx relies on [Cargo](https://github.com/rust-lang/cargo) and follows earlier
+> compiler-cache work in [sccache](https://github.com/mozilla/sccache) and
+> [kache](https://github.com/kunobi-ninja/kache). kache directly inspired mbx
+> and has the longer production track record.
+> [Read the acknowledgements](https://mr-boxington.jdx.dev/acknowledgements).
 
 ## License
 
