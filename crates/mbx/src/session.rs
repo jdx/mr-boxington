@@ -580,6 +580,8 @@ struct StatsReport {
     reflinked_output_bytes: u64,
     copied_output_files: u64,
     copied_output_bytes: u64,
+    reused_output_files: u64,
+    reused_output_bytes: u64,
     remote_failures: u64,
     remote_manifest_lookups: u64,
     remote_action_lookups: u64,
@@ -609,7 +611,7 @@ struct SlowCompilationReport {
 impl From<&AgentStats> for StatsReport {
     fn from(stats: &AgentStats) -> Self {
         Self {
-            version: 3,
+            version: 4,
             session_duration_ns: stats.session_duration_ns,
             lookups: stats.lookups,
             hits: stats.hits,
@@ -657,6 +659,8 @@ impl From<&AgentStats> for StatsReport {
             reflinked_output_bytes: stats.reflinked_output_bytes,
             copied_output_files: stats.copied_output_files,
             copied_output_bytes: stats.copied_output_bytes,
+            reused_output_files: stats.reused_output_files,
+            reused_output_bytes: stats.reused_output_bytes,
             remote_failures: stats.remote_failures,
             remote_manifest_lookups: stats.remote_manifest_lookups,
             remote_action_lookups: stats.remote_action_lookups,
@@ -804,11 +808,13 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
     }
     if stats.restored_output_files > 0 {
         note(&format!(
-            "mbx[cache]: materialization: {} outputs ({}) reflinked, {} outputs ({}) copied",
+            "mbx[cache]: materialization: {} outputs ({}) reflinked, {} outputs ({}) copied, {} outputs ({}) already in place",
             stats.reflinked_output_files,
             ByteSize::b(stats.reflinked_output_bytes).display().iec(),
             stats.copied_output_files,
             ByteSize::b(stats.copied_output_bytes).display().iec(),
+            stats.reused_output_files,
+            ByteSize::b(stats.reused_output_bytes).display().iec(),
         ));
     }
     if stats.verifications > 0 {

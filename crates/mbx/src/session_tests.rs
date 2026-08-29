@@ -446,7 +446,7 @@ fn writes_versioned_stats_report() {
 
     // Bumped whenever the report grows a field, so a reader can tell from the
     // version alone which ones it may expect.
-    assert_eq!(report["version"], 3);
+    assert_eq!(report["version"], 4);
     assert_eq!(report["predictions_loaded"], 11);
     assert_eq!(report["session_duration_ns"], 42);
     assert_eq!(report["hits"], 2);

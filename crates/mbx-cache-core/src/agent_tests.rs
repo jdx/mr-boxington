@@ -503,6 +503,8 @@ async fn publishes_a_complete_action_result() {
                     reflinked_output_bytes: 7,
                     copied_output_files: 1,
                     copied_output_bytes: 4,
+                    reused_output_files: 1,
+                    reused_output_bytes: 2,
                 },
                 crate_name: None,
             })
@@ -519,6 +521,8 @@ async fn publishes_a_complete_action_result() {
             restored_output_bytes: 11,
             reflinked_output_files: 1,
             reflinked_output_bytes: 7,
+            reused_output_files: 1,
+            reused_output_bytes: 2,
             copied_output_files: 1,
             copied_output_bytes: 4,
             avoided_compiler_duration_ns: 13,

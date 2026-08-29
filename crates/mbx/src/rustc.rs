@@ -1020,6 +1020,24 @@ fn restore_result(
                 &read_verified_blob(source, &node.digest, "dep-info")?,
                 mappings,
             );
+            let digest = CacheDigest::blake3(&bytes);
+            cached_outputs.push(CachedOutput {
+                path: destination.clone(),
+                digest: digest.clone(),
+                executable: node.executable,
+                mode: node.mode,
+            });
+            // A dep-info already spelling exactly this stays in place for the
+            // same reason a matching artifact does below.
+            if restore_outputs
+                && std::fs::read(&destination).is_ok_and(|existing| existing == bytes)
+            {
+                restore.reused_output_files = restore.reused_output_files.saturating_add(1);
+                restore.reused_output_bytes = restore
+                    .reused_output_bytes
+                    .saturating_add(bytes.len().try_into().unwrap_or(u64::MAX));
+                continue;
+            }
             let temporary = staging.path().join(format!("output-{index}"));
             std::fs::write(&temporary, &bytes)?;
             let temporary = tempfile::TempPath::try_from_path(temporary)?;
@@ -1028,12 +1046,6 @@ fn restore_result(
             restore.copied_output_bytes = restore
                 .copied_output_bytes
                 .saturating_add(bytes.len().try_into().unwrap_or(u64::MAX));
-            cached_outputs.push(CachedOutput {
-                path: destination.clone(),
-                digest: CacheDigest::blake3(&bytes),
-                executable: node.executable,
-                mode: node.mode,
-            });
             staged.push((temporary, destination));
             continue;
         }
@@ -1043,6 +1055,20 @@ fn restore_result(
             executable: node.executable,
             mode: node.mode,
         });
+        // An output that already holds these bytes is kept, not rewritten.
+        // What the rewrite would change is only the modification time, and
+        // that change is what makes cargo's next freshness pass re-dirty
+        // every dependent of this unit -- a rebuild loop that never settles.
+        // Keeping the file settles it: once nothing rewrites, nothing is
+        // newer than what depends on it, and the next build is a no-op.
+        if restore_outputs
+            && output_already_in_place(&node, &destination, session::file_digest_cache())
+        {
+            restore.reused_output_files = restore.reused_output_files.saturating_add(1);
+            restore.reused_output_bytes =
+                restore.reused_output_bytes.saturating_add(node.digest.size);
+            continue;
+        }
         let (temporary, materialization) =
             stage_verified_cached_output(staging.path(), index, source, &node)?;
         match materialization {
@@ -1088,6 +1114,39 @@ fn restore_result(
         outputs: cached_outputs,
         restore,
     }))
+}
+
+/// Whether the destination already holds exactly the bytes this hit would
+/// place there.
+///
+/// The session ledger answers without a read when it can; otherwise the file
+/// is read once and hashed, which costs what the copy it replaces would have
+/// cost and buys an unchanged modification time. A ledger entry whose digest
+/// disagrees is a content difference already proven, so it refuses without
+/// reading either.
+pub(crate) fn output_already_in_place(
+    node: &CacheFileNode,
+    destination: &Path,
+    digests: &dyn mbx_cache_core::FileDigestCache,
+) -> bool {
+    let Ok(metadata) = std::fs::metadata(destination) else {
+        return false;
+    };
+    if !metadata.is_file()
+        || metadata.len() != node.digest.size
+        || !executable_mode_matches(&metadata, node.executable)
+    {
+        return false;
+    }
+    if let Some(identity) = FileIdentity::describe(destination, &metadata)
+        && let Some(recorded) = digests
+            .find(FileDigestScope::Content, &[identity])
+            .pop()
+            .flatten()
+    {
+        return recorded == node.digest;
+    }
+    CacheDigest::blake3_file(destination).is_ok_and(|digest| digest == node.digest)
 }
 
 /// Enter restored outputs into the session file-digest ledger.
