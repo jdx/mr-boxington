@@ -90,19 +90,24 @@ headers reach both.
 
 ## Build-script C and C++
 
-`cc = true` (`MBX_CC`, on by default) points build scripts at a caching
-compiler for the duration of an mbx command, so the C that sys-crates compile
-is cached alongside their Rust. A build that already chose a compiler through
-`CC`, `CXX`, `HOST_CC`, `HOST_CXX`, `TARGET_CC`, or `TARGET_CXX` keeps it and
-is left alone.
+`cc = true` (`MBX_CC`, on by default) caches host C and C++ compiled by Cargo
+build scripts, such as the native code built by `*-sys` crates. No project
+changes are required: for the duration of the mbx command, build scripts use
+mbx's compiler wrappers.
 
-The shims never change a compilation: anything mbx cannot model exactly runs
-the real compiler and publishes nothing. See [limits](/limits) for what is
-admitted, and `mbx explain` for what a particular build bypassed.
+mbx preserves a host compiler selected with `CC`, `CXX`, `HOST_CC`, or
+`HOST_CXX`, and does not cache those compiles. For a cross-compile, mbx does
+not guess the target toolchain. It caches only when the build names a compiler
+with `CC_<target>`, `CXX_<target>`, `TARGET_CC`, or `TARGET_CXX`; mbx wraps
+that compiler without replacing the build's choice.
 
-The same cache serves builds outside cargo — make, CMake, and anything else
-that finds its compiler on `PATH` — through `mbx exec`; see
-[standalone C and C++ builds](/standalone-builds).
+If mbx cannot safely model a compiler call, it runs the real compiler without
+caching that call. Use `mbx explain` to see why a build bypassed the cache, or
+read the
+[full C and C++ limits](/limits#c-and-c-caching-covers-the-host-compiles-mbx-drives).
+
+To cache C and C++ builds that run outside Cargo, put the build command after
+`mbx exec`. See [cache C and C++ builds outside Cargo](/standalone-builds).
 
 ## Machine-wide compile scheduling
 

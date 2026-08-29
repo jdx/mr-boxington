@@ -1,72 +1,102 @@
-# Standalone C and C++ builds
+# Cache C and C++ builds outside Cargo
 
-`mbx exec` runs a build command that is not a cargo build — make, CMake, or
-any tool that finds its compiler on `PATH` — with mbx's C and C++ cache
-around it:
+Use `mbx exec` to cache compiler calls made by make, CMake, and other build
+tools:
 
 ```sh
 mbx exec make -j8
+```
+
+For CMake, run the configure step through `mbx exec` too. CMake chooses a
+compiler while configuring and reuses that choice when it builds.
+
+```sh
+mbx exec cmake -S . -B build
 mbx exec cmake --build build
 ```
 
-For the command's duration, a directory holding shims named `cc`, `c++`,
-`gcc`, `g++`, `clang`, and `clang++` sits first on `PATH`. Each shim stands in
-for the real compiler of the same name, resolved once when the session starts,
-so `make`'s default `CC = cc` and an explicit `CC=gcc` both reach a shim that
-chains to the compiler the build would have used anyway. The session starts
-with the command and exits with it — the same no-daemon lifecycle as a cargo
-build, with the same store, remote cache, per-build statistics, and
-[CI write policy](/remote-cache#read-and-write-policy).
+Only the command after `mbx exec` is affected. There is no daemon to start and
+nothing is installed globally.
 
-## Build systems that record their compiler
+## What `mbx exec` does
 
-A configure step resolves the compiler once and writes down where it found
-it: CMake stores an absolute `CMAKE_C_COMPILER` in `CMakeCache.txt`, and
-autoconf bakes `CC` into the makefiles it generates. What it records is the
-shim.
+While the command runs, mbx puts wrappers for the common Unix compiler names
+at the front of `PATH`:
 
-The shim directory therefore lives in the cache directory rather than beside
-the session, and stays where it is between commands, so a recorded path keeps
-resolving. Configure once under `mbx exec` and every later
-`mbx exec cmake --build build` compiles through the cache. A build run
-*without* `mbx exec` still works: the shim finds no session to consult, runs
-the real compiler, and gets out of the way — that build is simply not cached.
+```text
+cc  c++  gcc  g++  clang  clang++
+```
 
-Nothing is added to any `PATH` except the one handed to a single `mbx exec`
-command, so a build that never asks for the cache never meets a shim.
+When the build tool calls one of those names, mbx checks the cache first. On a
+hit, it restores the object file. On a miss, it runs the compiler that would
+normally have been found on `PATH` and saves the result.
 
-## What is cached
+The wrappers use the same local and remote cache as Cargo builds. The command's
+exit status and compiler output are passed through unchanged, and the wrappers
+go away from `PATH` when the command finishes.
 
-The same compilations the
-[build-script cache](/configuration#build-script-c-and-c) admits: a plain single-source `-c` compile through a gcc-style or clang-style
-driver. Anything else — linking, multi-source invocations, unmodeled flags —
-bypasses to the real compiler transparently and is reported with a `cc-`
-prefixed reason in the session summary. Outputs land wherever the build's
-`-o` pointed; unlike a cargo build there is no managed output directory,
-because the build system owns its own.
+## CMake and other configured builds
 
-Only the plain driver names above are shimmed. A build that selects
-`gcc-13`, an absolute compiler path, or a cross toolchain chose that compiler
-deliberately, and mbx stands aside rather than intercepting it.
+Some build systems save the compiler's absolute path during configuration.
+CMake writes it to `CMakeCache.txt`; autoconf may write it into generated
+makefiles. If configuration happens outside `mbx exec`, the saved path points
+straight to the compiler and later `mbx exec` builds cannot intercept it.
 
-## Sharing across checkouts
+Configure once through `mbx exec` so the build system records mbx's wrapper.
+That path remains valid across later commands. You should still use `mbx exec`
+for each build you want cached:
 
-Compilation keys map the project root to a placeholder, so equivalent
-checkouts share objects even when their absolute paths differ. The project
-root is the enclosing Git or Jujutsu checkout (or the working directory
-outside one); `--project-root` overrides it.
+```sh
+# Configure once.
+mbx exec cmake -S . -B build
 
-Warm lookups travel between checkouts through the build's manifest, and the
-manifest's identity must therefore name the *project*, not the checkout. It
-is derived from, in order: the `Cargo.lock` digest where one exists, the Git or
-Jujutsu `origin` remote URL, and the directory name as a last resort. A project
-with none of the first two still caches within each checkout; give worktrees
-the same directory name or pass `--project-root` through a stable path to
-share across them.
+# Build as often as needed.
+mbx exec cmake --build build
+```
 
-## Turning it off
+Running `cmake --build build` without `mbx exec` still works, but it calls the
+real compiler without using the cache.
 
-`MBX_CC=0` disables the C and C++ cache, which is all `mbx exec` caches, so
-the command runs plainly. Production releases may still use this local cache,
-but should not configure a remote cache so a cache-poisoning attack cannot
-influence published artifacts.
+## What gets cached
+
+mbx caches ordinary gcc- and clang-style compile commands that compile one C
+or C++ source file into an object with `-c`. It does not cache links,
+multi-source compiler calls, or commands whose behavior it cannot model
+safely. Those commands still run normally; the session summary reports why
+they bypassed the cache.
+
+`mbx exec` only intercepts the six unversioned compiler names listed above. It
+leaves commands such as `gcc-13`, absolute compiler paths, and explicitly
+selected cross-compilers alone.
+
+See [limits](/limits#c-and-c-caching-covers-the-host-compiles-mbx-drives) for
+the complete list of supported and bypassed invocations.
+
+## Sharing results across checkouts
+
+mbx removes the checkout's absolute path from compilation keys, so equivalent
+checkouts can share cached objects. It normally treats the enclosing Git or
+Jujutsu checkout as the project root. Outside a checkout, it uses the working
+directory. Override that choice with `--project-root`:
+
+```sh
+mbx exec --project-root /path/to/project make -j8
+```
+
+To find the same project in another checkout, mbx uses the `Cargo.lock` digest
+when one exists, then the Git or Jujutsu `origin` URL, and finally the directory
+name. If only the directory name is available, matching directory names are
+required for cross-checkout hits.
+
+## Disabling the cache
+
+Set `MBX_CC=0` to run the command without C or C++ caching:
+
+```sh
+MBX_CC=0 mbx exec make
+```
+
+Because C and C++ compilation is the only work cached by `mbx exec`, this makes
+the command equivalent to running it directly. Production release builds may
+use the local cache, but should not use a remote cache; this prevents remote
+cache poisoning from affecting published artifacts.
