@@ -31,7 +31,7 @@ Cache root.
 - **Scope:** only from the environment or the command line
 - **Set with:** `MBX_CACHE_LINKS`
 
-Cache natively linked test binaries and executables. On macOS this also passes ld64 `-oso_prefix` so a debug-info link's debug map stops naming this checkout, which is what lets it cache. Linux and macOS only, and a link mbx cannot describe exactly still links normally.
+Cache natively linked test binaries, executables, and proc macros. On macOS this also passes ld64 `-oso_prefix` so a debug-info link's debug map stops naming this checkout, which is what lets it cache. Linux and macOS only, and a link mbx cannot describe exactly still links normally.
 
 ### `cc`
 
