@@ -45,11 +45,13 @@
           <tr v-for="cell in contentionRows(scenario)" :key="cell.tool">
             <th scope="row">{{ cell.tool }}</th>
             <td>
-              <span
-                class="mbx-bench-bar"
-                :class="{ 'is-subject': cell.tool === 'mbx' }"
-                :style="{ width: `${cell.width}%` }"
-              />
+              <span class="mbx-bench-bar-track" aria-hidden="true">
+                <span
+                  class="mbx-bench-bar"
+                  :class="{ 'is-subject': cell.tool === 'mbx' }"
+                  :style="{ width: `${cell.width}%` }"
+                />
+              </span>
               <span class="mbx-bench-seconds">{{ cell.seconds }}</span>
             </td>
             <td class="mbx-bench-numeric">{{ cell.relative }}</td>
@@ -71,11 +73,13 @@
           <tr v-for="cell in rows(scenario)" :key="cell.tool">
             <th scope="row">{{ cell.tool }}</th>
             <td>
-              <span
-                class="mbx-bench-bar"
-                :class="{ 'is-subject': cell.tool === 'mbx' }"
-                :style="{ width: `${cell.width}%` }"
-              />
+              <span class="mbx-bench-bar-track" aria-hidden="true">
+                <span
+                  class="mbx-bench-bar"
+                  :class="{ 'is-subject': cell.tool === 'mbx' }"
+                  :style="{ width: `${cell.width}%` }"
+                />
+              </span>
               <span class="mbx-bench-seconds">{{ cell.seconds }}</span>
             </td>
             <td class="mbx-bench-numeric">{{ cell.relative }}</td>
@@ -122,7 +126,12 @@ const coldCargo = computed(
 
 // Bars are scaled within a scenario, never across them: each table answers
 // which tool was faster on that workload, not how the workloads compare to
-// each other.
+// each other. The bar has its own fixed-width track beside the duration label,
+// so the slowest result fills the track and every other result is proportional.
+function barWidth(duration: number, slowest: number) {
+  return Math.max(2, (duration / slowest) * 100);
+}
+
 function rows(scenario: BenchmarkScenario) {
   const slowest = Math.max(
     ...scenario.results.map((cell) => cell.wall_duration_ns),
@@ -137,7 +146,7 @@ function rows(scenario: BenchmarkScenario) {
         seconds >= 60
           ? `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`
           : `${seconds.toFixed(1)}s`,
-      width: Math.max(2, (cell.wall_duration_ns / slowest) * 100),
+      width: barWidth(cell.wall_duration_ns, slowest),
       relative:
         // Two decimals: a cache that costs 3% on a cold build rounds to
         // "1.0x" at one, which reads as free.
@@ -170,7 +179,7 @@ function contentionRows(scenario: BenchmarkScenario) {
         seconds >= 60
           ? `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`
           : `${seconds.toFixed(1)}s`,
-      width: Math.max(2, (cell.wall_duration_ns / slowest) * 100),
+      width: barWidth(cell.wall_duration_ns, slowest),
       relative:
         !baseline || cell === baseline
           ? "—"
@@ -224,14 +233,19 @@ const versionList = computed(() => {
 .mbx-bench-numeric {
   text-align: right;
 }
-.mbx-bench-bar {
-  background: var(--vp-c-divider);
+.mbx-bench-bar-track {
   border-radius: 3px;
   display: inline-block;
   height: 10px;
   margin-right: 8px;
-  max-width: 60%;
   vertical-align: middle;
+  width: 60%;
+}
+.mbx-bench-bar {
+  background: var(--vp-c-divider);
+  border-radius: inherit;
+  display: block;
+  height: 100%;
 }
 .mbx-bench-bar.is-subject {
   background: var(--vp-c-brand-1);
