@@ -27,7 +27,7 @@
           thrown away unless that second checkout reports hits and restored
           files. Budgets scale with the disk — 10% for managed target
           directories, 5% for the store — and the directory you are working in
-          is never the one collected.
+          is never the one collected to meet them.
         </p>
         <div class="links">
           <a class="primary" href="/how-it-works#portable-keys">
