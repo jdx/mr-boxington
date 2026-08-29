@@ -1,0 +1,198 @@
+name: bench-refresh
+
+on:
+  schedule:
+    # Weekly, away from the top of the hour. A real-world benchmark is an hour
+    # of runner time per pass; nightly would buy churn rather than signal.
+    - cron: "41 4 * * 2"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rerun the benchmark even when mbx's version has not changed
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+# Two refreshes would race the force-push to the shared `bench-refresh`
+# branch. A manual dispatch supersedes an in-flight scheduled run.
+concurrency:
+  group: bench-refresh
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Only benchmark when the mbx that produced the published numbers is older
+  # than the one on main. A docs or chore push does not invalidate a timing,
+  # and rerunning anyway would republish noise as though it were a change.
+  check:
+    name: Check version drift
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      drift: ${{ steps.drift.outputs.drift }}
+      workspace: ${{ steps.drift.outputs.workspace }}
+      bench: ${{ steps.drift.outputs.bench }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare workspace against published benchmark
+        id: drift
+        env:
+          FORCE_REFRESH: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+        run: |
+          # `mbx` states its own version literally; release-plz writes it. That
+          # is cheaper and more reliable here than resolving a dependency graph.
+          WORKSPACE=$(sed -n '/^\[package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' crates/mbx/Cargo.toml)
+          # Absent until the first refresh lands, which is itself drift.
+          BENCH=$(jq -r '.versions.mbx // empty' benchmarks/results.json 2>/dev/null || true)
+          if [ -z "$WORKSPACE" ]; then
+            echo "::error::Could not read the mbx version from crates/mbx/Cargo.toml"
+            exit 1
+          fi
+          echo "workspace=$WORKSPACE" >> "$GITHUB_OUTPUT"
+          echo "bench=$BENCH" >> "$GITHUB_OUTPUT"
+          if [ "$FORCE_REFRESH" = "true" ] || [ "$BENCH" != "$WORKSPACE" ]; then
+            echo "drift=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "drift=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  refresh:
+    name: Refresh benchmarks
+    needs: check
+    if: needs.check.outputs.drift == 'true'
+    # A shared GitHub runner is noisy enough that a 10% move means little. The
+    # numbers are still comparable within one run, which is what the site
+    # publishes; point this at a dedicated runner to make them comparable
+    # across runs too.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4.2.5
+        with:
+          cache: false
+      # Pinned: the comparison is only fair while both caches are the versions
+      # the published numbers name.
+      - name: Install kache
+        run: cargo install kache --locked --version 0.16.0
+      # The compiler-change guard needs a second Rust to switch to. `stable`
+      # is whatever the runner image ships; the benchmark skips the guard,
+      # loudly, if that ever resolves to the subject's own pin.
+      - name: Install the alternate toolchain
+        run: rustup toolchain install --profile minimal stable
+      - name: Refresh benchmarks
+        env:
+          MBX_BENCH_ALTERNATE_TOOLCHAIN: stable
+        run: mise run bench:refresh
+      - name: Publish job summary
+        if: always()
+        run: cat target/benchmarks/real-world.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mbx-real-world-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/benchmarks
+          if-no-files-found: error
+          retention-days: 90
+      - name: Upload refreshed results
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: results-json-${{ github.run_id }}-${{ github.run_attempt }}
+          path: benchmarks/results.json
+          if-no-files-found: error
+
+  # Opening the pull request is a separate job so the benchmark itself never
+  # holds write permission, and so a benchmark whose numbers are invalid can
+  # never reach the site.
+  propose:
+    name: Propose the refreshed numbers
+    needs: [check, refresh]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: results-json-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/refreshed
+      - name: Stage the refreshed results
+        run: cp "$RUNNER_TEMP/refreshed/results.json" benchmarks/results.json
+      - name: Check for a diff
+        id: dirty
+        run: |
+          if git diff --quiet -- benchmarks/results.json \
+            && [ -z "$(git status --porcelain -- benchmarks/results.json)" ]; then
+            echo "dirty=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "dirty=true" >> "$GITHUB_OUTPUT"
+          fi
+      # One reused branch, always force-pushed: the previous numbers are
+      # superseded by these, never added to. Reusing it preserves the PR.
+      - name: Force-push the bench-refresh branch
+        if: steps.dirty.outputs.dirty == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.BENCH_REFRESH_TOKEN || secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B bench-refresh
+          git add benchmarks/results.json
+          git commit -m "chore: refresh real-world benchmarks"
+          # persist-credentials: false means the push has to authenticate
+          # explicitly. Re-point origin rather than pushing to a one-shot URL,
+          # so --force-with-lease has a remote-tracking ref to compare with.
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPOSITORY}.git"
+          git fetch origin bench-refresh || true
+          git push --force-with-lease -u origin HEAD:refs/heads/bench-refresh
+      - name: Create or update the pull request
+        if: steps.dirty.outputs.dirty == 'true'
+        env:
+          # Falls back to the default token, whose pull requests do not start
+          # CI and need the repository to allow Actions to open them.
+          GITHUB_TOKEN: ${{ secrets.BENCH_REFRESH_TOKEN || secrets.GITHUB_TOKEN }}
+          WORKSPACE: ${{ needs.check.outputs.workspace }}
+          BENCH: ${{ needs.check.outputs.bench }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          cat > "$RUNNER_TEMP/body.md" <<EOF
+          ## Refreshed real-world benchmarks
+
+          \`benchmarks/results.json\` was measured with \`${BENCH:-no previous run}\`; the workspace is now \`mbx ${WORKSPACE}\`. Re-ran \`mise run bench:refresh\` on a shared \`ubuntu-24.04\` runner: a pinned checkout of jdx/hk built under raw cargo, mbx, and kache across the cold, warm, next-commit, cross-worktree, and toolchain-change scenarios.
+
+          The [run summary](${RUN_URL}) has the table these numbers came from, and the run's artifacts have the per-build logs.
+
+          **Read the numbers before merging.** They publish to https://mr-boxington.jdx.dev/benchmarks on merge. Shared runners are noisy, so treat a small move as noise; a scenario that swapped places is worth investigating before it goes on the site.
+
+          ---
+          Generated by the \`bench-refresh\` workflow.
+          EOF
+          EXISTING=$(gh pr list --state open --head bench-refresh --json number --jq '.[0].number // empty')
+          TITLE="chore: refresh real-world benchmarks for mbx v${WORKSPACE}"
+          if [ -n "$EXISTING" ]; then
+            gh pr edit "$EXISTING" --title "$TITLE" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh pr create --base main --head bench-refresh \
+              --title "$TITLE" --body-file "$RUNNER_TEMP/body.md"
+          fi

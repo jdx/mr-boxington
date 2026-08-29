@@ -46,8 +46,9 @@ Like mbx, kache is a content-addressed `RUSTC_WRAPPER`
 cache built for sharing compilations across worktrees, with C/C++ compiler
 shims, S3-compatible remotes, and executable caching on Linux and macOS. It
 also publishes a scheduled benchmark workflow that builds Firefox, LLVM, and
-other large projects cold and warm — a level of public verification mbx does
-not offer today. The differences are in the mechanics:
+other large projects cold and warm, at a scale mbx's own
+[benchmarks](/benchmarks) — one mid-size project, across the situations CI
+hits — do not match. The differences are in the mechanics:
 
 - **No daemon.** `kache init` installs an OS service by default (there is a
   `--no-service` opt-out). mbx starts an in-process agent for each command
@@ -98,8 +99,8 @@ not offer today. The differences are in the mechanics:
   are its compiler wrappers and its GitHub Action.
 
 If you build on Windows, want the C and C++ shims installed once rather than
-wrapping the commands that should use them, or want published benchmark
-numbers to check claims against, kache is worth evaluating. Both tools wrap
+wrapping the commands that should use them, or want benchmark numbers on
+projects the size of Firefox and LLVM, kache is worth evaluating. Both tools wrap
 rustc through `RUSTC_WRAPPER`, so they cannot be combined for the same build.
 
 ## Tarball CI caches

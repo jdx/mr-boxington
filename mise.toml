@@ -116,6 +116,32 @@ description = "Measure instruction-counted performance benchmarks"
 depends = ["perf:prepare"]
 run = "tak run"
 
+# Real-world comparison against raw cargo and kache, on a pinned third-party
+# project. Long-running by nature: every cell is a full build of somebody
+# else's workspace. See benchmarks/README.md.
+[tasks.bench]
+description = "Compare cargo, mbx, and kache on a pinned real-world project"
+depends = ["perf:prepare"]
+run = """
+python3 benchmarks/real_world.py \
+  --mbx target/release/mbx \
+  --scenarios cold,warm,commit \
+  --output target/benchmarks
+"""
+
+# What CI runs. Adds the scenarios that need a second checkout or a second
+# toolchain, and rewrites the results file the documentation site reads.
+[tasks."bench:refresh"]
+description = "Rerun the real-world benchmark and rewrite benchmarks/results.json"
+depends = ["perf:prepare"]
+run = """
+python3 benchmarks/real_world.py \
+  --mbx target/release/mbx \
+  --scenarios cold,warm,commit,worktree,toolchain \
+  --output target/benchmarks \
+  --write-results benchmarks/results.json
+"""
+
 [tasks."perf:record"]
 description = "Record performance benchmarks in local git notes"
 depends = ["perf:prepare"]

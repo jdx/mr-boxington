@@ -21,3 +21,30 @@ statistics reports and build logs. The large target and cache working trees
 are temporary and are not retained. CI uploads the correctness measurements
 and a `tak history` snapshot as artifacts; trusted main-branch runs publish the
 shared performance series to `refs/notes/tak`.
+
+`real_world.py` measures somebody else's project instead of this one. It
+clones a pinned checkout of [jdx/hk](https://github.com/jdx/hk) and runs the
+same `cargo build --locked` under raw cargo, mbx, and kache across the
+situations CI actually hits: a cold store, a warm store with a fresh target,
+the next commit on the branch, a second checkout at a different path, and a
+compiler change. The last of those is a correctness cell rather than a timing
+-- it fails unless a different rustc leaves almost every predicted compilation
+unlooked-up, which is the shape the hk benchmark hit when a runner image
+rolled a new Rust. Not zero hits: actions that do not depend on rustc, such as
+a build script's C objects, legitimately survive a Rust change.
+
+The comparison is kept fair by fetching the registry once outside every timed
+build, pinning the toolchain (hk does not pin one itself), giving each cell
+its own store and target, clearing any inherited `RUSTC_WRAPPER`, and running
+both caches local-only. Validity gates reject a run whose warm builds restored
+nothing or were no faster than cold, because those numbers would still render.
+
+`mise run bench` runs the everyday subset; `mise run bench:refresh` runs
+everything and rewrites `results.json`, which the documentation site reads.
+The refresh needs `MBX_BENCH_ALTERNATE_TOOLCHAIN` set to a second installed
+Rust, and fails without it: a skipped guard is not a passed guard, and a run
+that could not check compiler invalidation must not publish as though it had.
+kache is used when it is on `PATH` and skipped with a note otherwise. The
+[bench-refresh workflow](../.github/workflows/bench-refresh.yml) runs it
+weekly, only when the published numbers predate the mbx on `main`, and opens a
+pull request rather than publishing directly.

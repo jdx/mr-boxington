@@ -3,6 +3,7 @@ import type { Theme } from "vitepress";
 import { enhanceAppWithTabs } from "vitepress-plugin-tabs/client";
 import { h, onMounted, onUnmounted } from "vue";
 import { data as starsData } from "../stars.data";
+import BenchmarkResults from "./BenchmarkResults.vue";
 import EndevFooter from "./EndevFooter.vue";
 import EndevSponsors from "./EndevSponsors.vue";
 import HomeTerminal from "./HomeTerminal.vue";
@@ -19,6 +20,7 @@ export default {
   },
   enhanceApp({ app }) {
     enhanceAppWithTabs(app);
+    app.component("BenchmarkResults", BenchmarkResults);
     initBanner();
   },
   setup() {
