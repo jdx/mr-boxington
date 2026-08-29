@@ -16,6 +16,15 @@ subcommand.
 Every mbx command works this way; there is no separate mode to turn on and no
 component to keep up to date.
 
+That wrapper boundary also covers multiple Cargo builds running at the same
+time. Their compiler shims share a machine-wide permit pool and an
+in-flight-work registry, so those builds do not multiply the machine's CPU and
+memory budgets or repeat an identical cold compilation. See the copyable
+[mise task example](/getting-started#run-multiple-cargo-builds-at-the-same-time), the
+[parallel GitHub Actions example](/github-action#parallel-cargo-steps), the
+[scheduler details](/configuration#machine-wide-compile-scheduling), and the
+[contention benchmark](/benchmarks#contention).
+
 ## Build-script C and C++
 
 Cargo has no `CC_WRAPPER`, so the shims arrive as compiler variables

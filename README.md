@@ -6,7 +6,8 @@
 
 <p align="center">
   <strong>fix <code>target/</code></strong><br>
-  Put mbx in front of any cargo command. One cache warms every worktree and CI run, and prunes itself to a size budget.
+  Put mbx in front of any cargo command. One cache warms every worktree and CI run, and prunes itself to a size budget.<br>
+  Run multiple Cargo builds at the same time.
 </p>
 
 <p align="center">
@@ -44,6 +45,9 @@ is pruned to, and when a `target/` directory becomes collectable.
 - **Warm CI safely.** GitHub Actions cache can warm fork pull requests from a
   cache built on `main`, while a self-hosted remote can serve trusted runners
   and teammates. Pull requests never publish remote objects.
+- **Run multiple Cargo builds at the same time.** They share one machine-wide
+  CPU and memory budget. Identical cold compilations already running are
+  compiled once and restored into every other build.
 - **See the whole result.** mbx reports hits, misses, actions it could not look
   up, and actions it deliberately bypassed. A high hit rate cannot hide work
   that never entered the cache. `mbx tui` shows the same outcomes as they
@@ -131,7 +135,7 @@ to disable managed placement and the prompt.
 
 [Learn about managed targets →](https://mr-boxington.jdx.dev/managed-targets)
 
-## Worktree and CI warming
+## Worktrees and parallel CI
 
 An equivalent rustc action keys the same across checkout paths. One worktree's
 dependency build can therefore warm another while every checkout keeps its own
@@ -143,7 +147,13 @@ branch and restoring in pull requests. Trusted environments can switch the
 same action to a compatible remote such as the self-hostable
 [cache server](https://mr-boxington.jdx.dev/cache-server).
 
-[Configure GitHub Action →](https://mr-boxington.jdx.dev/github-action)
+GitHub Actions' parallel steps can start independent Clippy or test
+configurations together. Give each one a separate `CARGO_TARGET_DIR` and run
+it through mbx: the commands share one scheduler instead of each trying to
+fill the runner on its own. In two cold, order-reversed A/B trials on an xlarge
+CI runner, that cut lint wall time by up to 44.9%.
+
+[Copy the parallel workflow →](https://mr-boxington.jdx.dev/github-action#parallel-cargo-steps)
 
 ## How it works
 
@@ -164,6 +174,7 @@ Incremental compilations bypass the cache. Correctness comes before hit rate.
 - [Get started](https://mr-boxington.jdx.dev/getting-started)
 - [Configuration](https://mr-boxington.jdx.dev/configuration)
 - [GitHub Action](https://mr-boxington.jdx.dev/github-action)
+- [Benchmarks](https://mr-boxington.jdx.dev/benchmarks)
 - [Remote cache](https://mr-boxington.jdx.dev/remote-cache)
 - [Protocol compatibility](https://mr-boxington.jdx.dev/protocol-compatibility)
 - [Cache results](https://mr-boxington.jdx.dev/cache-results)

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Parallel build lanes joining one shared pool">
+  <defs>
+    <linearGradient id="lane" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f6d693"/>
+      <stop offset="1" stop-color="#c4862c"/>
+    </linearGradient>
+    <linearGradient id="pool" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7fa6ad"/>
+      <stop offset="1" stop-color="#35555c"/>
+    </linearGradient>
+  </defs>
+  <g stroke="#53350f" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M18 28h28c10 0 18 8 18 18v9" fill="none"/>
+    <path d="M18 100h28c10 0 18-8 18-18v-9" fill="none"/>
+    <rect x="10" y="15" width="28" height="26" rx="7" fill="url(#lane)"/>
+    <rect x="10" y="87" width="28" height="26" rx="7" fill="url(#lane)"/>
+    <rect x="48" y="48" width="70" height="32" rx="10" fill="url(#pool)"/>
+  </g>
+  <path d="M63 60h39" stroke="#f6ecd2" stroke-width="5" stroke-linecap="round" opacity=".8"/>
+</svg>

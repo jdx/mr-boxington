@@ -2,15 +2,26 @@
   <div v-if="!data" class="mbx-bench-empty">
     <p>
       No benchmark run has been published yet. The
-      <a href="https://github.com/jdx/mr-boxington/actions/workflows/bench-refresh.yml">bench-refresh workflow</a>
-      opens a pull request with the numbers, and they appear here once it merges.
+      <a
+        href="https://github.com/jdx/mr-boxington/actions/workflows/bench-refresh.yml"
+        >bench-refresh workflow</a
+      >
+      opens a pull request with the numbers, and they appear here once it
+      merges.
     </p>
   </div>
   <div v-else class="mbx-bench">
-    <section v-for="scenario in data.scenarios" :key="scenario.scenario" class="mbx-bench-scenario">
+    <section
+      v-for="scenario in data.scenarios"
+      :key="scenario.scenario"
+      class="mbx-bench-scenario"
+    >
       <h3 :id="scenario.scenario">{{ scenario.scenario }}</h3>
       <p class="mbx-bench-caption">{{ scenario.description }}</p>
-      <p v-if="!scenario.timed && scenario.results.length" class="mbx-bench-guard">
+      <p
+        v-if="!scenario.timed && scenario.results.length"
+        class="mbx-bench-guard"
+      >
         Guard held: of
         {{ scenario.results[0].stats?.predictions_loaded ?? 0 }} predicted
         compilations, a different compiler let mbx look up
@@ -25,6 +36,7 @@
           <tr>
             <th scope="col">Tool</th>
             <th scope="col">Batch time</th>
+            <th scope="col" class="mbx-bench-numeric">vs. sequential</th>
             <th scope="col" class="mbx-bench-numeric">Peak compilers</th>
             <th scope="col" class="mbx-bench-numeric">Lowest free memory</th>
           </tr>
@@ -40,6 +52,7 @@
               />
               <span class="mbx-bench-seconds">{{ cell.seconds }}</span>
             </td>
+            <td class="mbx-bench-numeric">{{ cell.relative }}</td>
             <td class="mbx-bench-numeric">{{ cell.compilers }}</td>
             <td class="mbx-bench-numeric">{{ cell.memory }}</td>
           </tr>
@@ -76,11 +89,12 @@
     </section>
 
     <p class="mbx-bench-provenance">
-      Measured on {{ data.platform }} ({{ data.runner }}) with Rust {{ data.toolchain }},
-      building <code>{{ data.subject }}</code> at <code>{{ data.revision.slice(0, 7) }}</code>
-      under {{ versionList }}.
+      Measured on {{ data.platform }} ({{ data.runner }}) with Rust
+      {{ data.toolchain }}, building <code>{{ data.subject }}</code> at
+      <code>{{ data.revision.slice(0, 7) }}</code> under {{ versionList }}.
       <template v-if="data.workflow_run">
-        <a :href="`https://github.com/jdx/mr-boxington/actions/runs/${data.workflow_run}`"
+        <a
+          :href="`https://github.com/jdx/mr-boxington/actions/runs/${data.workflow_run}`"
           >The run that produced them</a
         >
         has the per-build logs.
@@ -136,13 +150,16 @@ function rows(scenario: BenchmarkScenario) {
 }
 
 // The contention scenario asks a different question than the others -- not
-// which tool finished first, but what the machine looked like while four jobs
-// ran on it at once -- so it gets its own columns rather than a "hits" column
-// that would say nothing about the crowding.
+// whether parallel lint beat its sequential baseline and what the machine
+// looked like while both Cargo processes ran -- so it gets machine-wide
+// columns rather than the ordinary cache-build comparison.
 function contentionRows(scenario: BenchmarkScenario) {
   const slowest = Math.max(
     ...scenario.results.map((cell) => cell.wall_duration_ns),
     1,
+  );
+  const baseline = scenario.results.find(
+    (cell) => cell.tool === "mbx-sequential",
   );
   return scenario.results.map((cell) => {
     const seconds = cell.wall_duration_ns / 1e9;
@@ -154,6 +171,10 @@ function contentionRows(scenario: BenchmarkScenario) {
           ? `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`
           : `${seconds.toFixed(1)}s`,
       width: Math.max(2, (cell.wall_duration_ns / slowest) * 100),
+      relative:
+        !baseline || cell === baseline
+          ? "—"
+          : `${(baseline.wall_duration_ns / cell.wall_duration_ns).toFixed(2)}×`,
       compilers: cell.permits
         ? `${cell.peak_compilers ?? 0} / ${cell.permits} permits`
         : `${cell.peak_compilers ?? 0}`,
@@ -171,13 +192,15 @@ function contentionRows(scenario: BenchmarkScenario) {
 
 const versionList = computed(() => {
   if (!data) return "";
-  return Object.entries(data.versions)
-    .filter(([, value]) => value)
-    // `cargo -V` already says "cargo"; only mbx reports a bare number.
-    .map(([name, value]) =>
-      value!.startsWith(name) ? value! : `${name} ${value}`,
-    )
-    .join(", ");
+  return (
+    Object.entries(data.versions)
+      .filter(([, value]) => value)
+      // `cargo -V` already says "cargo"; only mbx reports a bare number.
+      .map(([name, value]) =>
+        value!.startsWith(name) ? value! : `${name} ${value}`,
+      )
+      .join(", ")
+  );
 });
 </script>
 

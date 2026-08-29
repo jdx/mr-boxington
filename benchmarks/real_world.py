@@ -45,24 +45,23 @@ SUBJECTS: dict[str, dict[str, object]] = {
     },
 }
 
-TOOLS = ("cargo", "mbx", "mbx-unscheduled", "kache")
+TOOLS = ("cargo", "mbx-sequential", "mbx-unscheduled", "mbx", "kache")
 
-# Both run the same binary. "mbx-unscheduled" turns the machine-wide compile
-# scheduler off, which is the comparison the contention scenario exists to
-# make; everywhere else it would just be mbx measured twice.
-MBX_TOOLS = ("mbx", "mbx-unscheduled")
+# All three run the same binary. The contention scenario separates the current
+# sequential lint shape, the proposed parallel shape, and a parallel control
+# with the machine-wide scheduler off. Everywhere else they would just measure
+# mbx repeatedly.
+MBX_TOOLS = ("mbx", "mbx-sequential", "mbx-unscheduled")
 
-# One CI lint job's worth of work, as several commands that land on the
-# machine at once. These are the shapes a Rust CI job actually runs in
-# parallel, and between them they cover the compilations that behave
-# differently under a cache: clippy runs a different driver, `check` emits
-# metadata only, `test --no-run` links test binaries, and `build` links the
-# program. Each gets its own target directory, the way separate CI jobs do.
+# Two overlapping Clippy configurations from mise's real lint job. The default
+# pass and the all-features/all-targets pass shared enough work for native
+# GitHub parallel steps coordinated by mbx to cut the measured wall time. The
+# parallel cells need separate targets so Cargo's target lock does not
+# serialize them; the sequential baseline retains the shared target it uses in
+# production.
 CONTENTION_JOBS: tuple[tuple[str, list[str]], ...] = (
-    ("clippy", ["clippy", "--all-targets", "--locked"]),
-    ("check", ["check", "--all-targets", "--locked"]),
-    ("test", ["test", "--no-run", "--locked"]),
-    ("build", ["build", "--locked"]),
+    ("clippy-default", ["clippy", "--locked"]),
+    ("clippy-all", ["clippy", "--all-features", "--all-targets", "--locked"]),
 )
 
 # Which tools each scenario asks for. cargo appears only where a no-cache
@@ -91,10 +90,10 @@ SCENARIOS: dict[str, dict[str, object]] = {
         "timed": False,
     },
     "contention": {
-        "tools": ("cargo", "mbx-unscheduled", "mbx"),
+        "tools": ("mbx-sequential", "mbx-unscheduled", "mbx"),
         "description": (
-            "four CI jobs at once -- clippy, check, test --no-run, build -- "
-            "on one machine, from a cold store"
+            "two Clippy configurations from one lint job -- sequentially, in "
+            "parallel without scheduling, and in parallel with mbx -- from a cold store"
         ),
         "kind": "contention",
     },
@@ -416,9 +415,17 @@ class Runner:
         machine experiences is all of them at their overlap.
         """
         jobs = []
+        prepared_targets: set[Path] = set()
         for name, args in CONTENTION_JOBS:
-            target = work / f"target-{cell}-{name}"
-            shutil.rmtree(target, ignore_errors=True)
+            # This is the before/after the real lint job experiences. Its
+            # sequential commands reuse one Cargo target. Concurrent Cargo
+            # processes instead need separate targets or Cargo's directory
+            # lock turns the allegedly parallel run back into a serial one.
+            target_name = "shared" if tool == "mbx-sequential" else name
+            target = work / f"target-{cell}-{target_name}"
+            if target not in prepared_targets:
+                shutil.rmtree(target, ignore_errors=True)
+                prepared_targets.add(target)
             command, environment = self.invocation(
                 tool=tool,
                 cell=f"{cell}-{name}",
@@ -446,19 +453,18 @@ class Runner:
                 handle = logs[name].open("w", encoding="utf-8")
                 handle.write(f"$ {' '.join(command)}\n\n")
                 handle.flush()
-                running.append(
-                    (
-                        name,
-                        subprocess.Popen(
-                            command,
-                            cwd=checkout,
-                            env=environment,
-                            stdout=handle,
-                            stderr=subprocess.STDOUT,
-                        ),
-                        handle,
-                    )
+                process = subprocess.Popen(
+                    command,
+                    cwd=checkout,
+                    env=environment,
+                    stdout=handle,
+                    stderr=subprocess.STDOUT,
                 )
+                running.append((name, process, handle))
+                if tool == "mbx-sequential":
+                    # Wait here rather than in the common loop below so the
+                    # next Cargo process cannot overlap this one.
+                    process.wait()
             finished = []
             for name, process, handle in running:
                 returncode = process.wait()
@@ -757,6 +763,7 @@ def validate(scenarios: list[dict[str, object]]) -> list[str]:
     if contention:
         cells = {cell["tool"]: cell for cell in contention["results"]}  # type: ignore[index]
         scheduled = cells.get("mbx")
+        sequential = cells.get("mbx-sequential")
         unscheduled = cells.get("mbx-unscheduled")
         if scheduled is not None:
             permits = int(scheduled.get("permits") or 0)
@@ -785,6 +792,12 @@ def validate(scenarios: list[dict[str, object]]) -> list[str]:
                 failures.append(
                     f"contention: unscheduled builds peaked at {baseline} compilers, within "
                     f"the {permits} permits, so this run never actually contended"
+                )
+        if scheduled is not None and sequential is not None:
+            if scheduled["wall_duration_ns"] >= sequential["wall_duration_ns"]:
+                failures.append(
+                    "contention: scheduled parallel lint was no faster than the "
+                    "sequential baseline"
                 )
 
     toolchain = by_name.get("toolchain")

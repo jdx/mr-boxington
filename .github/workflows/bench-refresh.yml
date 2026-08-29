@@ -74,8 +74,8 @@ jobs:
     # publishes; point this at a dedicated runner to make them comparable
     # across runs too.
     runs-on: ubuntu-24.04
-    # The contention scenario runs four cold builds at once, three times over,
-    # which is most of an hour on four shared cores by itself.
+    # The contention scenario runs two cold Clippy configurations in three
+    # strategies, which is most of an hour on four shared cores by itself.
     timeout-minutes: 180
     permissions:
       contents: read
@@ -191,7 +191,7 @@ jobs:
           cat > "$RUNNER_TEMP/body.md" <<EOF
           ## Refreshed real-world benchmarks
 
-          \`benchmarks/results.json\` was measured with \`${BENCH:-no previous run}\`; the workspace is now \`mbx ${WORKSPACE}\`. Re-ran \`mise run bench:refresh\` on a shared \`ubuntu-24.04\` runner: a pinned checkout of jdx/hk built under raw cargo, mbx, and kache across the cold, warm, next-commit, cross-worktree, toolchain-change, and four-jobs-at-once contention scenarios.
+          \`benchmarks/results.json\` was measured with \`${BENCH:-no previous run}\`; the workspace is now \`mbx ${WORKSPACE}\`. Re-ran \`mise run bench:refresh\` on a shared \`ubuntu-24.04\` runner: a pinned checkout of jdx/hk built under raw cargo, mbx, and kache across the cold, warm, next-commit, cross-worktree, toolchain-change, and sequential-versus-parallel Clippy contention scenarios.
 
           The [run summary](${RUN_URL}) has the table these numbers came from, and the run's artifacts have the per-build logs.
 

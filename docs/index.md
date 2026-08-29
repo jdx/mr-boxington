@@ -18,6 +18,9 @@ hero:
     - theme: alt
       text: GitHub Action
       link: /github-action
+    - theme: alt
+      text: Benchmarks
+      link: /benchmarks
 
 features:
   - icon:
@@ -44,6 +47,22 @@ features:
     title: Warm CI runners
     details: Share the same cache with CI through a remote cache or GitHub Actions.
     link: /github-action
+  - icon:
+      src: /features/concurrency.svg
+      alt: Parallel build lanes joining one shared pool
+      width: 64
+      height: 64
+    title: Run multiple Cargo builds
+    details: Run independent CI checks at the same time. mbx gives their compilers one shared CPU and memory budget.
+    link: /getting-started#run-multiple-cargo-builds-at-the-same-time
+  - icon:
+      src: /features/benchmarks.svg
+      alt: A stopwatch with a rising performance line
+      width: 64
+      height: 64
+    title: Prove the speedup
+    details: Reproducible CI benchmarks compare caching and concurrency strategies, with validity gates around every published result.
+    link: /benchmarks
   - icon:
       src: /features/prune.svg
       alt: A broom sweeping

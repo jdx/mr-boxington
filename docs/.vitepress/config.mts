@@ -19,7 +19,7 @@ const latestVersion = versionMatch[1];
 
 export default defineConfig({
   title: "mr boxington",
-  description: "A drop-in Cargo wrapper that shares compiled work and prunes target/ automatically",
+  description: "Run multiple Cargo builds at the same time with shared compiled work and automatic target/ pruning",
   lang: "en-US",
   lastUpdated: true,
   appearance: "force-dark",
@@ -148,7 +148,7 @@ export default defineConfig({
     ["meta", { property: "og:title", content: "mr boxington" }],
     [
       "meta",
-      { property: "og:description", content: "A drop-in Cargo wrapper that shares compiled work and prunes target/ automatically" },
+      { property: "og:description", content: "Run multiple Cargo builds at the same time with shared compiled work and automatic target/ pruning" },
     ],
     [
       "meta",
