@@ -57,6 +57,57 @@ fn write(directory: &Path, name: &str, contents: &str) -> PathBuf {
 }
 
 #[test]
+fn recursive_manifests_drop_directories_an_ancestor_already_covers() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let root = workspace.path().join("include");
+    let generated = workspace.path().join("generated");
+    std::fs::create_dir_all(root.join("crypto/fipsmodule")).expect("nested include directory");
+    std::fs::create_dir_all(&generated).expect("separate include directory");
+    let directories = BTreeSet::from([
+        root.join("crypto/fipsmodule"),
+        root.clone(),
+        root.join("crypto"),
+        generated.clone(),
+    ]);
+
+    assert_eq!(minimal_manifest_directories(directories), [generated, root]);
+}
+
+#[test]
+fn a_parent_path_does_not_cover_a_directory_that_escapes_through_dot_dot() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let include = workspace.path().join("include");
+    let sibling = workspace.path().join("sibling");
+    std::fs::create_dir_all(&include).expect("include directory");
+    std::fs::create_dir_all(&sibling).expect("sibling directory");
+    let escaped = include.join("../sibling");
+
+    assert_eq!(
+        minimal_manifest_directories(BTreeSet::from([include.clone(), escaped.clone()])),
+        [include, escaped]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_parent_manifest_does_not_claim_a_directory_reached_through_a_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let include = workspace.path().join("include");
+    let generated = workspace.path().join("generated");
+    std::fs::create_dir_all(&include).expect("include directory");
+    std::fs::create_dir_all(generated.join("nested")).expect("generated directory");
+    symlink(&generated, include.join("linked")).expect("directory symlink");
+    let linked = include.join("linked/nested");
+
+    assert_eq!(
+        minimal_manifest_directories(BTreeSet::from([include.clone(), linked.clone()])),
+        [include, linked]
+    );
+}
+
+#[test]
 fn timestamp_macro_tokens_in_any_read_file_bypass() {
     let directory = tempfile::tempdir().expect("tempdir");
     let root = directory.path();
