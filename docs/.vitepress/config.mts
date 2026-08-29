@@ -55,7 +55,6 @@ export default defineConfig({
         text: "Getting started",
         items: [
           { text: "Introduction", link: "/" },
-          { text: "Acknowledgements", link: "/acknowledgements" },
           { text: "Install and run", link: "/getting-started" },
           { text: "FAQ", link: "/faq" },
         ],
@@ -87,6 +86,7 @@ export default defineConfig({
         items: [
           { text: "How it works", link: "/how-it-works" },
           { text: "How mbx compares", link: "/compared" },
+          { text: "Acknowledgements", link: "/acknowledgements" },
           { text: "Benchmarks", link: "/benchmarks" },
           { text: "Stability", link: "/stability" },
           { text: "Protocol compatibility", link: "/protocol-compatibility" },

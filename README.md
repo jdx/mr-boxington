@@ -186,9 +186,8 @@ comes before hit rate.
 > [!NOTE]
 > mbx relies on [Cargo](https://github.com/rust-lang/cargo) and follows earlier
 > compiler-cache work in [sccache](https://github.com/mozilla/sccache) and
-> [kache](https://github.com/kunobi-ninja/kache). kache directly inspired mbx
-> and has the longer production track record.
-> [Read the acknowledgements](https://mr-boxington.jdx.dev/acknowledgements).
+> [kache](https://github.com/kunobi-ninja/kache), which directly inspired its
+> design. [Read the acknowledgements](https://mr-boxington.jdx.dev/acknowledgements).
 
 ## License
 

@@ -8,8 +8,8 @@ C++, and can distribute compilation across machines. mbx caches rustc, the C
 and C++ that cargo build scripts compile, the C and C++ of builds outside
 cargo through [`mbx exec`](/standalone-builds), and native links. That scope
 is narrower, and mbx spends the difference on the parts of caching that are
-not the cache: what it costs to operate, what it does to your disk, and what it is safe to
-let CI write.
+not the cache: what it costs to operate, what it does to your disk, and what
+it is safe to let CI write.
 
 - **No daemon.** sccache builds talk to a background server. It starts
   itself, but it outlives the build, keeps the configuration it was started
@@ -55,18 +55,17 @@ cannot be combined for the same build.
 ## kache
 
 [kache](https://github.com/kunobi-ninja/kache) is the closest tool to mbx, and
-mbx's design was directly inspired by it. No code is shared between the
-projects. mbx began as the Rust cache inside the
-[mise](https://github.com/jdx/mise) task runner and was extracted into its own
-CLI to chase three things: less to operate, a
+it predates mbx and directly inspired its design. No code is shared between
+the projects, but the influence is real and worth saying plainly. mbx began as
+the Rust cache inside the [mise](https://github.com/jdx/mise) task runner and
+was extracted into its own CLI to chase three things: less to operate, a
 better day-to-day experience, and something safe to switch on in a public
 repository that takes fork pull requests. The differences below are mostly
 those three goals.
 
 Like mbx, kache is a content-addressed `RUSTC_WRAPPER` cache built for sharing
 compilations across worktrees, with C and C++ compiler shims, S3-compatible
-and filesystem remotes, and executable caching on Linux and macOS. kache has
-a longer production track record than mbx and is the more proven option.
+and filesystem remotes, and executable caching on Linux and macOS.
 
 - **Nothing to install or keep running.** `kache init` installs an OS service
   by default, with a `--no-service` opt-out. mbx starts an in-process agent
