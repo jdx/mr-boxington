@@ -82,13 +82,17 @@ and filesystem remotes, and executable caching on Linux and macOS.
   cache the way a shared inode can. Where the filesystem cannot clone, mbx
   copies the bytes — still never a hardlink.
 - **Several Cargo builds at once.** Cargo plans one build at a time, so two
-  started together each multiply `-j` as though they owned the machine and
-  both finish late; kache's documentation describes nothing that budgets
-  across build processes. mbx's shims sit in front of every compiler on the
-  machine and hand out permits from one memory-aware pool, so a lint job and
-  a test job can run side by side, and identical compilations in flight at
-  the same moment collapse into one. See [machine-wide compile
-  scheduling](/configuration#machine-wide-compile-scheduling).
+  started together each size themselves to the whole machine and both finish
+  late. kache does not stop you running them, but it does not coordinate
+  them either: it starts each compiler as Cargo asks for it, with no shared
+  budget and nothing that notices two builds compiling the same crate at the
+  same moment. mbx's shims sit in front of every compiler on the machine and
+  hand out permits from one memory-aware pool, so a lint job and a test job
+  run side by side without overloading the box, and a compilation identical
+  to one already running anywhere waits for it instead of repeating it.
+  Either way, give each command its own `CARGO_TARGET_DIR`: Cargo's target
+  directory lock is what serializes them otherwise. See [machine-wide
+  compile scheduling](/configuration#machine-wide-compile-scheduling).
 - **A public repository can share one cache.** This is the difference that
   shaped mbx most. kache's remotes are S3-compatible buckets or a filesystem
   path, and a bucket has one question to ask: does this credential write? So
