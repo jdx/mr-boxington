@@ -19,10 +19,12 @@
 //! permit: the sum of admitted weights never exceeds the capacity, so the
 //! *predicted* memory of everything running stays inside the configured
 //! budget. Prediction comes from a small ledger of peak RSS per crate name,
-//! measured after every real compile on Unix. Two things remain out of reach
-//! and are accepted: a single compilation larger than the machine will still
-//! be too large when it runs alone, and a simultaneous pile-up of
-//! never-measured crates can overshoot before the ledger has learned them.
+//! measured after every real compile on Unix; the static link weight is only
+//! the guess that stands in until one has been measured. Two things remain
+//! out of reach and are accepted: a single compilation larger than the
+//! machine will still be too large when it runs alone, and a simultaneous
+//! pile-up of never-measured crates can overshoot before the ledger has
+//! learned them.
 //!
 //! Concurrent sessions may be configured with different capacities; each
 //! enforces its own bound against the same leases, so the loosest
@@ -43,6 +45,11 @@
 //! is fixed and acyclic: a flight is joined before its permit is requested,
 //! never around the other way, and a waiter blocked on a flight holds no
 //! permit.
+//!
+//! Waiting is a timer everywhere and a wakeup on Linux, where a released
+//! permit is a deleted lease file and [`ReleaseWake`] watches for exactly
+//! that. The timer stays underneath it as the backstop, so nothing depends
+//! on the watch existing.
 
 use crate::config::{Config, SchedulerPriority};
 use eyre::{Context, Result};
@@ -102,10 +109,11 @@ const LINK_WEIGHT: u64 = 2;
 const POLL_INITIAL: Duration = Duration::from_millis(2);
 /// Longest delay between admission attempts.
 ///
-/// A permit is released the instant its compiler exits and nothing wakes the
-/// waiters, so this bounds how long a core sits idle with work queued for
-/// it. Kept short for that reason: one attempt is a readdir and a handful of
-/// `try_lock`s, which even a full pool of waiters can afford at this rate.
+/// On Linux a release wakes waiters through the leases watch (see
+/// [`ReleaseWake`]) and this is only the backstop; elsewhere it bounds how
+/// long a core sits idle with work queued for it. Kept short for that
+/// reason: one attempt is a readdir and a handful of `try_lock`s, which even
+/// a full pool of waiters can afford at this rate.
 const POLL_MAX: Duration = Duration::from_millis(25);
 /// How recently the stamp must have been touched to hold low priority back.
 const PRIORITY_WAIT_FRESHNESS: Duration = Duration::from_secs(2);
@@ -483,10 +491,11 @@ fn bytes_per_permit(memory_bytes: Option<u64>, cpus: u64) -> u64 {
 
 /// Record what the compiler that just ran cost, for the next admission.
 ///
-/// Only crates that would weigh more than one permit are recorded, which keeps
-/// the ledger to the genuinely heavy. A compiler killed by SIGKILL -- the
-/// Linux OOM killer's signature -- is recorded *heavier* than it measured, so
-/// the retry runs with more room instead of repeating the crash.
+/// Crates that fit inside one permit are not worth remembering -- except
+/// links that succeeded, whose measurement is what retires the static floor
+/// they are otherwise charged. A compiler killed by SIGKILL -- the Linux OOM
+/// killer's signature -- is recorded *heavier* than it measured, so the retry
+/// runs with more room instead of repeating the crash.
 pub(crate) fn record_compiler_memory(demand: &Demand, status: &ExitStatus) {
     let Some(pool) = pool() else {
         return;
@@ -532,6 +541,7 @@ impl Pool {
         let mut delay = POLL_INITIAL;
         let mut stamped: Option<Instant> = None;
         let mut complained = false;
+        let mut wake: Option<Option<ReleaseWake>> = None;
         loop {
             // The gate stops applying at its deadline so a machine that stays
             // short of memory delays this compilation rather than starving it.
@@ -564,7 +574,16 @@ impl Pool {
                     self.capacity, demand.name
                 );
             }
-            std::thread::sleep(jittered(delay));
+            // Armed after the first refusal rather than before the first
+            // attempt: most admissions succeed immediately and should not pay
+            // for a watch. Arming races the release it would have caught,
+            // which the timeout below absorbs; from the next iteration on,
+            // a release lands in the watch before the scan it should wake.
+            let wake = wake.get_or_insert_with(|| ReleaseWake::new(&self.dir.join(LEASES_DIR)));
+            match wake {
+                Some(wake) => wake.wait(jittered(delay)),
+                None => std::thread::sleep(jittered(delay)),
+            }
             delay = (delay * 2).min(POLL_MAX);
         }
     }
@@ -577,13 +596,25 @@ impl Pool {
         }
         let recorded = read_ledger(&self.ledger_path())
             .crates
-            .get(&demand.name)
+            .get(&ledger_key(&demand.name, demand.links))
             .copied();
         let link_bytes = link_floor.map(|weight| weight.saturating_mul(self.bytes_per_permit));
-        let predicted = match (recorded, link_bytes) {
-            (Some(recorded), Some(link)) => Some(recorded.max(link)),
-            (one, other) => one.or(other),
-        };
+        // History replaces the floor rather than merely raising it. The floor
+        // is a guess for links the pool has never seen; once one has been
+        // measured, charging it the guess anyway would hold the tail of every
+        // build -- the link-heavy stretch -- to half the concurrency its real
+        // memory justifies. The ledger never lowers a recorded peak and an
+        // OOM kill escalates past it, so trusting the measurement stays safe
+        // in the direction that matters.
+        //
+        // Only a *link's* own history may retire the link floor, which is why
+        // the two are separate ledger entries. One crate is compiled both
+        // ways in a single build -- `cargo check` emits metadata where `cargo
+        // build` links -- and the metadata-only measurement is the smaller of
+        // the two by far. Keyed by name alone it would retire the floor for
+        // the link beside it, which is over-admission with a plausible number
+        // attached to it.
+        let predicted = recorded.or(link_bytes);
         let weight = predicted
             .map_or(1, |bytes| bytes.div_ceil(self.bytes_per_permit))
             .clamp(1, self.capacity);
@@ -722,10 +753,16 @@ impl Pool {
         let Some(measured) = child_peak_rss_bytes() else {
             return;
         };
-        let Some(peak) = ledger_peak(measured, oom_killed(status), self.bytes_per_permit) else {
+        let Some(peak) = ledger_peak(
+            measured,
+            oom_killed(status),
+            demand.links,
+            status.success(),
+            self.bytes_per_permit,
+        ) else {
             return;
         };
-        if let Err(error) = self.record_peak(&demand.name, peak) {
+        if let Err(error) = self.record_peak(&ledger_key(&demand.name, demand.links), peak) {
             debug!("compiler memory was not recorded: {error:#}");
         }
     }
@@ -759,6 +796,21 @@ impl Pool {
         let mut contents = serde_json::to_vec(&ledger)?;
         contents.push(b'\n');
         crate::util::write_atomic(&path, &contents)
+    }
+}
+
+/// What one crate's memory is remembered under.
+///
+/// A link and a metadata-only compile of the same crate are different
+/// workloads with the same name -- `cargo check` and `cargo build` run both
+/// against one crate, often at the same moment -- so they are remembered
+/// apart. The suffix cannot collide with a crate name, which is a Rust
+/// identifier and can hold neither a space nor a bracket.
+fn ledger_key(name: &str, links: bool) -> String {
+    if links {
+        format!("{name} [link]")
+    } else {
+        name.to_string()
     }
 }
 
@@ -797,16 +849,38 @@ fn scan_leases(leases: &Path) -> Result<Vec<u64>> {
 /// What the ledger should remember about one finished compilation.
 ///
 /// `None` means nothing worth writing: the compile fit comfortably inside a
-/// single permit. An OOM kill is recorded past what was measured -- the
-/// measurement is where the killer stopped it, not what it needed -- and past
-/// one permit, so the retry provably weighs more.
-fn ledger_peak(measured: u64, oom_killed: bool, bytes_per_permit: u64) -> Option<u64> {
+/// single permit and carried no static weight worth correcting. An OOM kill
+/// is recorded past what was measured -- the measurement is where the killer
+/// stopped it, not what it needed -- and past one permit, so the retry
+/// provably weighs more.
+///
+/// The link case is the reason this takes an outcome at all, and the rule is
+/// deliberately asymmetric: a *successful* link is recorded whatever it
+/// measured, because that is a true reading of what linking that crate costs
+/// and it is what retires the static floor. A failed one is not. Whether an
+/// invocation links is read off its crate type, so a binary that dies in type
+/// checking never reached the linker at all -- and recording its small peak
+/// would retire the floor using a number from a compilation that never did
+/// the expensive thing, machine-wide, for every later build sharing the
+/// cache. A failure is therefore held to the ordinary bar, where it can still
+/// teach the ledger that something is *heavy* (a link that died reaching for
+/// memory) but can never argue that anything is light.
+fn ledger_peak(
+    measured: u64,
+    oom_killed: bool,
+    links: bool,
+    succeeded: bool,
+    bytes_per_permit: u64,
+) -> Option<u64> {
     if oom_killed {
         return Some(
             measured
                 .saturating_mul(2)
                 .max(bytes_per_permit.saturating_add(1)),
         );
+    }
+    if links && succeeded {
+        return Some(measured);
     }
     (measured > bytes_per_permit).then_some(measured)
 }
@@ -870,6 +944,87 @@ fn oom_killed(_status: &ExitStatus) -> bool {
 fn jittered(delay: Duration) -> Duration {
     use rand::RngExt as _;
     delay + delay.mul_f64(rand::rng().random_range(0.0..0.5))
+}
+
+/// Wakes a waiter the moment a permit is released, on hosts that can.
+///
+/// A permit's release *is* the deletion of its lease file, so on Linux the
+/// leases directory is watched for deletions through inotify and a refused
+/// waiter sleeps on the watch instead of a timer -- the gap between a
+/// compiler exiting and the next admission goes from a poll interval to a
+/// wakeup. The timer stays underneath as the backstop: a release can slip
+/// past while the watch is first armed, and inotify instances are a bounded
+/// per-user resource that a large enough build simply runs out of. Failing
+/// to watch therefore just means waiting the way every other platform does.
+#[cfg(target_os = "linux")]
+struct ReleaseWake {
+    fd: std::os::fd::OwnedFd,
+}
+
+#[cfg(target_os = "linux")]
+impl ReleaseWake {
+    fn new(leases: &Path) -> Option<Self> {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        use std::os::unix::ffi::OsStrExt as _;
+        let path = std::ffi::CString::new(leases.as_os_str().as_bytes()).ok()?;
+        // SAFETY: inotify_init1 returns a new descriptor that nothing else
+        // owns; wrapping it immediately gives it an owner that closes it.
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        if fd < 0 {
+            return None;
+        }
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        // SAFETY: the descriptor is a live inotify instance and the path is a
+        // valid NUL-terminated string for the duration of the call.
+        let watch =
+            unsafe { libc::inotify_add_watch(fd.as_raw_fd(), path.as_ptr(), libc::IN_DELETE) };
+        (watch >= 0).then_some(Self { fd })
+    }
+
+    /// Sleep until a lease is released or the timeout passes.
+    fn wait(&self, timeout: Duration) {
+        use std::os::fd::AsRawFd as _;
+        let mut poll = libc::pollfd {
+            fd: self.fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let millis = i32::try_from(timeout.as_millis().max(1)).unwrap_or(i32::MAX);
+        // SAFETY: one valid pollfd is handed over for the duration of the call.
+        let ready = unsafe { libc::poll(&mut poll, 1, millis) };
+        if ready <= 0 {
+            return;
+        }
+        // Drained so the next wait sleeps on releases that have not been
+        // seen rather than returning instantly on ones that have. What the
+        // events say does not matter; that they happened is the signal.
+        let mut buffer = [0_u8; 4096];
+        // SAFETY: reads only ever land inside the local buffer, and the
+        // descriptor is nonblocking, so the loop cannot hang.
+        while unsafe {
+            libc::read(
+                self.fd.as_raw_fd(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        } > 0
+        {}
+    }
+}
+
+/// Hosts without a release watch wait on the timer alone.
+#[cfg(not(target_os = "linux"))]
+struct ReleaseWake;
+
+#[cfg(not(target_os = "linux"))]
+impl ReleaseWake {
+    fn new(_leases: &Path) -> Option<Self> {
+        None
+    }
+
+    fn wait(&self, timeout: Duration) {
+        std::thread::sleep(timeout)
+    }
 }
 
 #[cfg(test)]
