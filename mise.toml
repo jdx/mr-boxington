@@ -137,7 +137,7 @@ depends = ["perf:prepare"]
 run = """
 python3 benchmarks/real_world.py \
   --mbx target/release/mbx \
-  --scenarios cold,warm,commit,worktree,toolchain \
+  --scenarios cold,warm,commit,worktree,toolchain,contention \
   --output target/benchmarks \
   --write-results benchmarks/results.json
 """

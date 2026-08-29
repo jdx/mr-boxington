@@ -33,11 +33,24 @@ unlooked-up, which is the shape the hk benchmark hit when a runner image
 rolled a new Rust. Not zero hits: actions that do not depend on rustc, such as
 a build script's C objects, legitimately survive a Rust change.
 
+The `contention` scenario is the odd one out: it starts four CI-shaped jobs at
+once -- `clippy --all-targets`, `check --all-targets`, `test --no-run`, and
+`build` -- against a cold store, and measures the machine rather than the
+cache. Cargo bounds only the compilers it starts itself, so four jobs
+oversubscribe by four times, which is what runs a link into an out-of-memory
+kill. The cells are sampled from outside every build: the most real compilers
+alive at once, and the least memory the machine had left. It runs mbx twice,
+once with the machine-wide scheduler and once with `MBX_SCHEDULER=0`, because
+the comparison worth making is against the same binary.
+
 The comparison is kept fair by fetching the registry once outside every timed
 build, pinning the toolchain (hk does not pin one itself), giving each cell
 its own store and target, clearing any inherited `RUSTC_WRAPPER`, and running
 both caches local-only. Validity gates reject a run whose warm builds restored
 nothing or were no faster than cold, because those numbers would still render.
+The contention gates are the same idea from the other side: the scheduled
+batch must stay inside its permits, and the unscheduled one must exceed them,
+since a bound nothing pushed against proves nothing.
 
 `mise run bench` runs the everyday subset; `mise run bench:refresh` runs
 everything and rewrites `results.json`, which the documentation site reads.

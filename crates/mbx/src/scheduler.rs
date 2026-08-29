@@ -74,9 +74,14 @@ const MAX_LEDGER_ENTRIES: usize = 1024;
 /// else -- so they start heavy rather than waiting for history to say so.
 const LINK_WEIGHT: u64 = 2;
 /// First delay after a refused admission.
-const POLL_INITIAL: Duration = Duration::from_millis(15);
+const POLL_INITIAL: Duration = Duration::from_millis(2);
 /// Longest delay between admission attempts.
-const POLL_MAX: Duration = Duration::from_millis(200);
+///
+/// A permit is released the instant its compiler exits and nothing wakes the
+/// waiters, so this bounds how long a core sits idle with work queued for
+/// it. Kept short for that reason: one attempt is a readdir and a handful of
+/// `try_lock`s, which even a full pool of waiters can afford at this rate.
+const POLL_MAX: Duration = Duration::from_millis(25);
 /// How recently the stamp must have been touched to hold low priority back.
 const PRIORITY_WAIT_FRESHNESS: Duration = Duration::from_secs(2);
 /// How long the available-memory gate may defer one compilation.

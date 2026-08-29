@@ -179,7 +179,7 @@ jobs:
           cat > "$RUNNER_TEMP/body.md" <<EOF
           ## Refreshed real-world benchmarks
 
-          \`benchmarks/results.json\` was measured with \`${BENCH:-no previous run}\`; the workspace is now \`mbx ${WORKSPACE}\`. Re-ran \`mise run bench:refresh\` on a shared \`ubuntu-24.04\` runner: a pinned checkout of jdx/hk built under raw cargo, mbx, and kache across the cold, warm, next-commit, cross-worktree, and toolchain-change scenarios.
+          \`benchmarks/results.json\` was measured with \`${BENCH:-no previous run}\`; the workspace is now \`mbx ${WORKSPACE}\`. Re-ran \`mise run bench:refresh\` on a shared \`ubuntu-24.04\` runner: a pinned checkout of jdx/hk built under raw cargo, mbx, and kache across the cold, warm, next-commit, cross-worktree, toolchain-change, and four-jobs-at-once contention scenarios.
 
           The [run summary](${RUN_URL}) has the table these numbers came from, and the run's artifacts have the per-build logs.
 
