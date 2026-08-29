@@ -135,11 +135,10 @@ the branches allowed to assume it, and give pull request jobs a role that can
 only read. See [remote cache](/remote-cache#who-may-publish).
 
 ::: warning Do not cache production releases
-mbx permits caching in tag and release jobs so workflows can test release
-builds. A production release should run Cargo directly, without `mbx`, because
-published artifacts must not depend on any cache being correct. Release jobs
-should also avoid restoring `target/` through `actions/cache` or rust-cache and
-should not use any other compiler cache.
+A production release should run Cargo directly, without `mbx`, because published
+artifacts must not depend on any cache being correct. Release jobs should also
+avoid restoring `target/` through `actions/cache` or rust-cache and should not
+use any other compiler cache.
 :::
 
 For a repository that combines both backends — the server for trusted runs, the
