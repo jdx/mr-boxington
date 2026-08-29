@@ -3,7 +3,7 @@
     <div class="copy">
       <p class="eyebrow">Parallel CI, one machine</p>
       <h2 id="mbx-concurrency-title">
-        Start every Cargo job at once. Keep the machine sane.
+        Run multiple Cargo builds at the same time.
       </h2>
       <p class="lede">
         Cargo limits only the compilers in its own process. mbx coordinates
