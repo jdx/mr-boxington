@@ -279,6 +279,7 @@ fn exec_identity_falls_back_to_the_directory_name() {
 }
 
 #[test]
+/// Jujutsu's remote listing names each remote before its URL.
 fn reads_the_origin_from_jujutsu_remote_output() {
     let remotes = "backup ssh://example.com/backup\norigin https://example.com/project.git\n";
 
@@ -290,6 +291,19 @@ fn reads_the_origin_from_jujutsu_remote_output() {
         jj_origin_url("upstream https://example.com/project.git\n"),
         None
     );
+}
+
+#[test]
+/// A nested Git checkout must not inherit an enclosing Jujutsu remote.
+fn a_nested_git_checkout_does_not_query_jujutsu() {
+    let directory = tempfile::tempdir().unwrap();
+    let outer = directory.path();
+    let inner = outer.join("vendor");
+    std::fs::create_dir(&inner).unwrap();
+    std::fs::create_dir(outer.join(".jj")).unwrap();
+    std::fs::create_dir(inner.join(".git")).unwrap();
+
+    assert_eq!(jj_origin_marker(&inner), None);
 }
 
 #[cfg(unix)]

@@ -522,24 +522,34 @@ fn exec_marker(project_root: &Path) -> String {
 /// which a checkout's directory name does not. Try Git first so colocated
 /// Jujutsu repositories keep exactly the identity they had before.
 fn project_origin_marker(project_root: &Path) -> Option<String> {
-    // Do not let Git walk above a non-colocated Jujutsu repository and borrow
-    // an unrelated enclosing checkout's remote.
-    if !project_root.join(".jj").exists() || project_root.join(".git").exists() {
-        let git = Command::new("git")
-            .arg("-C")
-            .arg(project_root)
-            .args(["config", "--get", "remote.origin.url"])
-            .output();
-        if let Ok(output) = git
-            && output.status.success()
-        {
-            let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !url.is_empty() {
-                return Some(format!("origin\0{url}"));
-            }
-        }
+    if project_root.join(".jj").exists() && !project_root.join(".git").exists() {
+        jj_origin_marker(project_root)
+    } else {
+        git_origin_marker(project_root).or_else(|| jj_origin_marker(project_root))
     }
+}
 
+/// Read Git's origin without imposing a repository layout on explicit roots.
+fn git_origin_marker(project_root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .args(["config", "--get", "remote.origin.url"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!url.is_empty()).then(|| format!("origin\0{url}"))
+}
+
+/// Read Jujutsu's origin only from a root that is itself a Jujutsu checkout.
+fn jj_origin_marker(project_root: &Path) -> Option<String> {
+    // Without this gate `jj -R` may discover an unrelated enclosing checkout.
+    if !project_root.join(".jj").exists() {
+        return None;
+    }
     let output = Command::new("jj")
         .arg("-R")
         .arg(project_root)
@@ -555,6 +565,7 @@ fn project_origin_marker(project_root: &Path) -> Option<String> {
     Some(format!("origin\0{url}"))
 }
 
+/// Extract the fetch URL for the conventionally named origin remote.
 fn jj_origin_url(remotes: &str) -> Option<&str> {
     remotes.lines().find_map(|line| {
         let mut fields = line.split_whitespace();

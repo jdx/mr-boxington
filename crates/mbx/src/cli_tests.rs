@@ -43,6 +43,7 @@ fn falls_back_to_the_starting_directory() {
 }
 
 #[test]
+/// A non-colocated Jujutsu checkout is a project boundary.
 fn discovers_a_jujutsu_project_root() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -51,6 +52,20 @@ fn discovers_a_jujutsu_project_root() {
     std::fs::create_dir(root.join(".jj")).unwrap();
 
     assert_eq!(discover_project_root(&nested), root);
+}
+
+#[test]
+/// A nested Git checkout takes precedence over an enclosing Jujutsu checkout.
+fn discovers_a_nested_git_project_root() {
+    let directory = tempfile::tempdir().unwrap();
+    let outer = directory.path();
+    let inner = outer.join("vendor");
+    let nested = inner.join("src");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir(outer.join(".jj")).unwrap();
+    std::fs::create_dir(inner.join(".git")).unwrap();
+
+    assert_eq!(discover_project_root(&nested), inner);
 }
 
 #[test]
