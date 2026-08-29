@@ -9,9 +9,10 @@ Most scenarios run the same `cargo build --locked` three ways: plain cargo,
 [mbx](/), and [kache](https://github.com/kunobi-ninja/kache). Timings are wall
 clock around one build. Every row is compared against one number — what plain
 cargo costs with nothing cached — because that is the build a cache is
-replacing, and it is the only scenario where running cargo says anything new.
-The last scenario is the exception: it compares sequential and parallel lint
-strategies and measures the machine rather than a single build.
+replacing. cargo is not re-run in the other scenarios: with a fresh `target/`
+it would only repeat that time. The last scenario is the exception, comparing
+sequential and parallel lint strategies and measuring the machine rather than a
+single build.
 
 <BenchmarkResults />
 
@@ -20,9 +21,9 @@ strategies and measures the machine rather than a single build.
 ### cold
 
 An empty store and a fresh `target/`. What a new machine, or a CI
-job with no cache to restore, actually does. There is nothing to hit, so this
-is where a cache can only cost time; a cache that is slower than cargo here is
-charging rent on the first build.
+job with no cache to restore, actually does. There is nothing to hit, so a
+cache can only cost time here, and the gap to cargo is the overhead every cold
+build pays.
 
 ### warm
 
@@ -55,9 +56,8 @@ cache that claims a hit anyway. Not *zero* hits, though: a handful of actions
 do not depend on rustc — a build script's C object is compiled by the C
 compiler, which did not change — and those legitimately survive.
 
-It also pins down the diagnosis for the opposite surprise. A warm build that
-reports no hits after a runner image rolled a new Rust looks like a broken
-store and is not one; it is this.
+It also explains the opposite surprise: a warm build that reports no hits after
+a runner image picked up a new Rust is not a broken store, it is this.
 
 ### contention
 
@@ -71,7 +71,7 @@ native `parallel` steps.
 All three rows use the same mbx binary. The `mbx` and `mbx-unscheduled` rows
 run the parallel shape with the
 [machine-wide scheduler](/configuration#machine-wide-compile-scheduling) on
-and off, which isolates what MBX contributes from parallelism itself. Cargo
+and off, which isolates what mbx contributes from parallelism itself. Cargo
 bounds only the compilers *it* starts and knows nothing about the Cargo process
 beside it; the scheduler gives both processes one machine-wide permit pool and
 deduplicates identical work in flight. The wall clock shows whether the switch
@@ -99,8 +99,8 @@ it.
 
 ## Validity gates
 
-A benchmark that quietly measured nothing is worse than one that failed,
-because its numbers still render. The run fails, and nothing publishes, unless:
+A benchmark that measured nothing still renders numbers, so the run fails and
+nothing publishes unless:
 
 - the warm and cross-worktree builds report cache hits *and* restored output
   files — a fast build that restored nothing was fast for some other reason;
