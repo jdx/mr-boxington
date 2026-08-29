@@ -4,7 +4,9 @@ use crate::{
     CcActionContext, CcActionInput, CcBypassReason, MAX_INPUT_BYTES, MAX_MANIFEST_ENTRIES,
     MAX_PREDICTED_INPUTS, normalize_components,
 };
-use mbx_cache_core::CacheDigest;
+use mbx_cache_core::{
+    CacheDigest, FileDigestCache, FileDigestScope, FileIdentity, RecordedFileDigest,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -151,6 +153,7 @@ impl CcDiscoveredInputs {
         working_dir: &Path,
         files: BTreeSet<PathBuf>,
         directories: BTreeSet<PathBuf>,
+        digests: &dyn FileDigestCache,
     ) -> Result<Self, CcBypassReason> {
         if !working_dir.is_absolute() {
             return Err(CcBypassReason::RelativeWorkingDirectory(
@@ -163,6 +166,13 @@ impl CcDiscoveredInputs {
         let working_dir = normalize_components(working_dir);
         let mut inputs = Vec::with_capacity(files.len() + directories.len());
         let mut total_bytes = 0_u64;
+        // Stat everything first so one batched ledger lookup can stand in for
+        // rereading headers the session already scanned and hashed. A ledger
+        // entry in the cc scope was recorded after the timestamp-macro scan
+        // passed, so a hit skips the scan for the same reason it skips the
+        // hash: the identity says the contents have not changed since both
+        // were established.
+        let mut identified = Vec::with_capacity(files.len());
         for path in files {
             let metadata = std::fs::metadata(&path).map_err(|error| CcBypassReason::InputRead {
                 path: path.clone(),
@@ -178,15 +188,51 @@ impl CcDiscoveredInputs {
             if total_bytes > MAX_INPUT_BYTES {
                 return Err(CcBypassReason::TooManyInputs);
             }
-            if contains_timestamp_macro(&path)? {
-                return Err(CcBypassReason::EmbeddedTimestampMacro(path));
-            }
-            let digest =
-                CacheDigest::blake3_file(&path).map_err(|error| CcBypassReason::InputRead {
-                    path: path.clone(),
-                    message: error.to_string(),
-                })?;
+            let identity = FileIdentity::describe(&path, &metadata);
+            identified.push((path, identity));
+        }
+        let queries = identified
+            .iter()
+            .filter_map(|(_, identity)| identity.clone())
+            .collect::<Vec<_>>();
+        let mut recorded = digests.find(FileDigestScope::CcInput, &queries).into_iter();
+        let mut fresh = Vec::new();
+        for (path, identity) in identified {
+            let remembered = identity
+                .as_ref()
+                .and_then(|_| recorded.next().flatten())
+                .filter(|digest| {
+                    identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.len == digest.size)
+                });
+            let digest = match remembered {
+                Some(digest) => digest,
+                None => {
+                    if contains_timestamp_macro(&path)? {
+                        return Err(CcBypassReason::EmbeddedTimestampMacro(path));
+                    }
+                    let digest = CacheDigest::blake3_file(&path).map_err(|error| {
+                        CcBypassReason::InputRead {
+                            path: path.clone(),
+                            message: error.to_string(),
+                        }
+                    })?;
+                    if let Some(identity) = identity
+                        && identity.len == digest.size
+                    {
+                        fresh.push(RecordedFileDigest {
+                            file: identity,
+                            digest: digest.clone(),
+                        });
+                    }
+                    digest
+                }
+            };
             inputs.push(CcActionInput { path, digest });
+        }
+        if !fresh.is_empty() {
+            digests.record(FileDigestScope::CcInput, fresh);
         }
         let mut manifest_entries = 0_usize;
         for directory in directories {

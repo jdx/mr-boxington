@@ -2,14 +2,15 @@ use mbx_cache_core::{
     ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE, AGENT_PROTOCOL_VERSION,
     ActionPrediction, AgentRequest, AgentResponse, BLOB_MEDIA_TYPE, BLOB_PACK_MEDIA_TYPE,
     BLOB_PACK_RECEIPT_MEDIA_TYPE, CLIENT_METADATA_MEDIA_TYPE, CacheDigest, CacheDirectory,
-    CacheFileNode, CcMetadata, DIRECTORY_MEDIA_TYPE, PROTOCOL_VERSION, RemoteActionResult,
-    RestoreStats, RustcMetadata, TASK_ACTION_MANIFEST_MEDIA_TYPE, canonical_json,
+    CacheFileNode, CcMetadata, DIRECTORY_MEDIA_TYPE, FileDigestScope, FileIdentity,
+    PROTOCOL_VERSION, RecordedFileDigest, RemoteActionResult, RestoreStats, RustcMetadata,
+    TASK_ACTION_MANIFEST_MEDIA_TYPE, canonical_json,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v4.jsonl");
+const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v5.jsonl");
 
 fn digest() -> CacheDigest {
     CacheDigest {
@@ -50,6 +51,18 @@ fn prediction() -> ActionPrediction {
     }
 }
 
+fn file_identity() -> FileIdentity {
+    FileIdentity {
+        path: PathBuf::from("target/debug/deps/libserde.rlib"),
+        len: 7,
+        // A multiple of 100ns: Windows file times carry no finer resolution,
+        // and a value it truncates would give this fixture two spellings.
+        modified: std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::new(1_700_000_000, 2_100),
+        changed: Some((1_700_000_000, 21)),
+    }
+}
+
 fn environment() -> BTreeMap<String, Option<String>> {
     BTreeMap::from([
         ("RUSTFLAGS".into(), Some("-Cdebuginfo=1".into())),
@@ -84,7 +97,7 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
         (
             "request.hello",
             AgentRequest::Hello {
-                protocol: 4,
+                protocol: 5,
                 client_version: "0.3.0".into(),
             },
         ),
@@ -193,6 +206,23 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
                 stdout: b"rustc".to_vec(),
             },
         ),
+        (
+            "request.find_file_digests",
+            AgentRequest::FindFileDigests {
+                scope: FileDigestScope::Content,
+                files: vec![file_identity()],
+            },
+        ),
+        (
+            "request.record_file_digests",
+            AgentRequest::RecordFileDigests {
+                scope: FileDigestScope::CcInput,
+                entries: vec![RecordedFileDigest {
+                    file: file_identity(),
+                    digest: digest(),
+                }],
+            },
+        ),
     ]
 }
 
@@ -201,7 +231,7 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
         (
             "response.hello",
             AgentResponse::Hello {
-                protocol: 4,
+                protocol: 5,
                 agent_version: "0.3.0".into(),
             },
         ),
@@ -294,6 +324,16 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
             AgentResponse::Error {
                 message: "incompatible protocol".into(),
             },
+        ),
+        (
+            "response.file_digests",
+            AgentResponse::FileDigests {
+                digests: vec![Some(digest()), None],
+            },
+        ),
+        (
+            "response.file_digests_recorded",
+            AgentResponse::FileDigestsRecorded,
         ),
     ]
 }
@@ -396,7 +436,7 @@ fn agent_protocol_v3_shapes_match_the_conformance_fixture() {
 
 #[test]
 fn protocol_constants_match_the_contract() {
-    assert_eq!(AGENT_PROTOCOL_VERSION, 4);
+    assert_eq!(AGENT_PROTOCOL_VERSION, 5);
     assert_eq!(PROTOCOL_VERSION, 1);
     assert_eq!(
         ACTION_RESULT_MEDIA_TYPE,
@@ -448,6 +488,8 @@ define_variant_coverage!(request_variant_name, EXPECTED_REQUEST_VARIANTS, AgentR
     AgentRequest::RecordActionPrediction { .. } => "record_action_prediction",
     AgentRequest::FindExecutableIdentity { .. } => "find_executable_identity",
     AgentRequest::StoreExecutableIdentity { .. } => "store_executable_identity",
+    AgentRequest::FindFileDigests { .. } => "find_file_digests",
+    AgentRequest::RecordFileDigests { .. } => "record_file_digests",
 });
 
 define_variant_coverage!(response_variant_name, EXPECTED_RESPONSE_VARIANTS, AgentResponse, {
@@ -469,4 +511,6 @@ define_variant_coverage!(response_variant_name, EXPECTED_RESPONSE_VARIANTS, Agen
     AgentResponse::ActionPredictionRecorded => "action_prediction_recorded",
     AgentResponse::ExecutableIdentity { .. } => "executable_identity",
     AgentResponse::Error { .. } => "error",
+    AgentResponse::FileDigests { .. } => "file_digests",
+    AgentResponse::FileDigestsRecorded => "file_digests_recorded",
 });

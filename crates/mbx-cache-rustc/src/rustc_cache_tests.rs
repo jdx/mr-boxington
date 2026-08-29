@@ -175,6 +175,7 @@ fn tracks_native_search_path_contents_but_still_rejects_native_libraries() {
             &dep_info,
             &working_dir,
             &[PathMapping::new(directory.path().join("target"), "target")],
+            &mbx_cache_core::NoFileDigestCache,
         )
         .unwrap();
     assert!(
@@ -197,7 +198,11 @@ fn tracks_native_search_path_contents_but_still_rejects_native_libraries() {
     assert_eq!(prediction.version, 3);
     std::fs::write(native.join("added.lib"), "second").unwrap();
     let predicted = prediction
-        .discover(&working_dir, &action_context.path_mappings)
+        .discover(
+            &working_dir,
+            &action_context.path_mappings,
+            &mbx_cache_core::NoFileDigestCache,
+        )
         .unwrap();
     assert!(
         predicted
@@ -635,7 +640,11 @@ fn predicts_inputs_without_reusing_stale_contents() {
     assert!(prediction.crate_name.is_empty());
 
     let predicted = prediction
-        .discover(&workspace, &context.path_mappings)
+        .discover(
+            &workspace,
+            &context.path_mappings,
+            &mbx_cache_core::NoFileDigestCache,
+        )
         .unwrap();
     let mut predicted_context = context.clone();
     predicted.apply_to(&mut predicted_context).unwrap();
@@ -643,7 +652,11 @@ fn predicts_inputs_without_reusing_stale_contents() {
 
     std::fs::write(workspace.join("src/lib.rs"), "pub fn value() -> u8 { 2 }").unwrap();
     let changed = prediction
-        .discover(&workspace, &context.path_mappings)
+        .discover(
+            &workspace,
+            &context.path_mappings,
+            &mbx_cache_core::NoFileDigestCache,
+        )
         .unwrap();
     let mut changed_context = context;
     changed.apply_to(&mut changed_context).unwrap();
@@ -695,7 +708,12 @@ fn a_native_search_directory_is_predicted_by_name_not_by_its_contents() {
         environment: BTreeMap::new(),
     };
     let discovered = invocation
-        .discover_inputs_with_mappings(&dep_info, &workspace, &mappings)
+        .discover_inputs_with_mappings(
+            &dep_info,
+            &workspace,
+            &mappings,
+            &mbx_cache_core::NoFileDigestCache,
+        )
         .unwrap();
     assert_eq!(discovered.inputs.len(), 1_201);
 
@@ -734,7 +752,7 @@ fn a_native_search_directory_is_predicted_by_name_not_by_its_contents() {
         .unwrap();
     let mut predicted_context = context.clone();
     prediction
-        .discover(&workspace, &mappings)
+        .discover(&workspace, &mappings, &mbx_cache_core::NoFileDigestCache)
         .unwrap()
         .apply_to(&mut predicted_context)
         .unwrap();

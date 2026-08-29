@@ -2,7 +2,9 @@ use super::{
     ActionContext, ActionInput, Argument, BypassReason, MAX_NATIVE_INPUT_BYTES,
     MAX_PREDICTED_INPUTS, PathMapping, RustcInvocation, normalize_components,
 };
-use mbx_cache_core::CacheDigest;
+use mbx_cache_core::{
+    CacheDigest, FileDigestCache, FileDigestScope, FileIdentity, RecordedFileDigest,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -141,6 +143,7 @@ impl DiscoveredInputs {
         working_dir: &Path,
         paths: BTreeSet<PathBuf>,
         environment: BTreeMap<String, Option<String>>,
+        digests: &dyn FileDigestCache,
     ) -> Result<Self, BypassReason> {
         if !working_dir.is_absolute() {
             return Err(BypassReason::RelativeWorkingDirectory(
@@ -148,7 +151,12 @@ impl DiscoveredInputs {
             ));
         }
         let working_dir = normalize_components(working_dir);
-        let mut inputs = Vec::with_capacity(paths.len());
+        // Stat everything first: the identities drive one batched ledger
+        // lookup, so an upstream rlib the session already hashed -- once, when
+        // it was materialized or published -- is not read again by every crate
+        // that links it. A file the filesystem reports no modification time
+        // for gets no identity and is simply hashed.
+        let mut identified = Vec::with_capacity(paths.len());
         for path in paths {
             let metadata = std::fs::metadata(&path).map_err(|error| BypassReason::InputRead {
                 path: path.clone(),
@@ -160,12 +168,49 @@ impl DiscoveredInputs {
                     message: "input is not a regular file".into(),
                 });
             }
-            let digest =
-                CacheDigest::blake3_file(&path).map_err(|error| BypassReason::InputRead {
-                    path: path.clone(),
-                    message: error.to_string(),
-                })?;
+            let identity = FileIdentity::describe(&path, &metadata);
+            identified.push((path, identity));
+        }
+        let queries = identified
+            .iter()
+            .filter_map(|(_, identity)| identity.clone())
+            .collect::<Vec<_>>();
+        let mut recorded = digests.find(FileDigestScope::Content, &queries).into_iter();
+        let mut inputs = Vec::with_capacity(identified.len());
+        let mut fresh = Vec::new();
+        for (path, identity) in identified {
+            let remembered = identity
+                .as_ref()
+                .and_then(|_| recorded.next().flatten())
+                .filter(|digest| {
+                    identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.len == digest.size)
+                });
+            let digest = match remembered {
+                Some(digest) => digest,
+                None => {
+                    let digest = CacheDigest::blake3_file(&path).map_err(|error| {
+                        BypassReason::InputRead {
+                            path: path.clone(),
+                            message: error.to_string(),
+                        }
+                    })?;
+                    if let Some(identity) = identity
+                        && identity.len == digest.size
+                    {
+                        fresh.push(RecordedFileDigest {
+                            file: identity,
+                            digest: digest.clone(),
+                        });
+                    }
+                    digest
+                }
+            };
             inputs.push(ActionInput { path, digest });
+        }
+        if !fresh.is_empty() {
+            digests.record(FileDigestScope::Content, fresh);
         }
         Ok(Self {
             working_dir,
@@ -272,16 +317,25 @@ impl RustcInvocation {
         dep_info: &RustcDepInfo,
         working_dir: &Path,
     ) -> Result<DiscoveredInputs, BypassReason> {
-        self.discover_inputs_with_mappings(dep_info, working_dir, &[])
+        self.discover_inputs_with_mappings(
+            dep_info,
+            working_dir,
+            &[],
+            &mbx_cache_core::NoFileDigestCache,
+        )
     }
 
     /// Hash dep-info sources plus modeled compiler inputs, allowing native
     /// search directories beneath the working directory or a mapped root.
+    ///
+    /// `digests` may answer for files the session already read in full;
+    /// pass [`mbx_cache_core::NoFileDigestCache`] to hash everything.
     pub fn discover_inputs_with_mappings(
         &self,
         dep_info: &RustcDepInfo,
         working_dir: &Path,
         path_mappings: &[PathMapping],
+        digests: &dyn FileDigestCache,
     ) -> Result<DiscoveredInputs, BypassReason> {
         if !working_dir.is_absolute() {
             return Err(BypassReason::RelativeWorkingDirectory(
@@ -333,7 +387,7 @@ impl RustcInvocation {
                 )?;
             }
         }
-        DiscoveredInputs::from_paths(&working_dir, paths, dep_info.environment.clone())
+        DiscoveredInputs::from_paths(&working_dir, paths, dep_info.environment.clone(), digests)
     }
 }
 
@@ -683,7 +737,12 @@ mod tests {
 
         // The directory does not even exist: its contents are not inputs.
         let discovered = invocation
-            .discover_inputs_with_mappings(&dep_info, root, &mappings)
+            .discover_inputs_with_mappings(
+                &dep_info,
+                root,
+                &mappings,
+                &mbx_cache_core::NoFileDigestCache,
+            )
             .unwrap();
         assert_eq!(discovered.inputs.len(), 1);
         assert_eq!(discovered.inputs[0].path, source);
@@ -700,7 +759,13 @@ mod tests {
         discovered.clone().apply_to(&mut recorded).unwrap();
         let action = invocation.action(recorded).unwrap();
         let prediction = invocation.prediction(&context, &discovered).unwrap();
-        let replayed = prediction.discover(root, &context.path_mappings).unwrap();
+        let replayed = prediction
+            .discover(
+                root,
+                &context.path_mappings,
+                &mbx_cache_core::NoFileDigestCache,
+            )
+            .unwrap();
         let mut replay_context = context.clone();
         replayed.apply_to(&mut replay_context).unwrap();
         assert_eq!(
@@ -738,7 +803,12 @@ mod tests {
         ));
         let dep_info = RustcDepInfo::parse(&format!("output: {}\n", source.display())).unwrap();
         assert_eq!(
-            invocation.discover_inputs_with_mappings(&dep_info, root, &mappings),
+            invocation.discover_inputs_with_mappings(
+                &dep_info,
+                root,
+                &mappings,
+                &mbx_cache_core::NoFileDigestCache
+            ),
             Err(BypassReason::UnsupportedSearchPath("native".into()))
         );
     }
@@ -843,6 +913,135 @@ mod tests {
         assert_eq!(
             discovered.verify(),
             Err(BypassReason::InputChanged(root.join("child.rs")))
+        );
+    }
+
+    /// A ledger that answers with a sentinel and remembers what was recorded.
+    struct SentinelLedger {
+        known: FileIdentity,
+        digest: CacheDigest,
+        recorded: std::sync::Mutex<Vec<RecordedFileDigest>>,
+    }
+
+    impl FileDigestCache for SentinelLedger {
+        fn find(&self, scope: FileDigestScope, files: &[FileIdentity]) -> Vec<Option<CacheDigest>> {
+            assert_eq!(scope, FileDigestScope::Content);
+            files
+                .iter()
+                .map(|file| (*file == self.known).then(|| self.digest.clone()))
+                .collect()
+        }
+
+        fn record(&self, scope: FileDigestScope, entries: Vec<RecordedFileDigest>) {
+            assert_eq!(scope, FileDigestScope::Content);
+            self.recorded.lock().unwrap().extend(entries);
+        }
+    }
+
+    #[test]
+    fn discovery_reuses_recorded_digests_and_records_fresh_ones() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let known_path = root.join("libdep.rlib");
+        let fresh_path = root.join("lib.rs");
+        std::fs::write(&known_path, b"rlib bytes").unwrap();
+        std::fs::write(&fresh_path, b"fn lib() {}").unwrap();
+        let metadata = std::fs::metadata(&known_path).unwrap();
+        // A sentinel digest that hashing could never produce proves the read
+        // was skipped: the discovered input carries it verbatim.
+        let sentinel = CacheDigest {
+            algorithm: "blake3".into(),
+            hash: "c".repeat(64),
+            size: metadata.len(),
+        };
+        let ledger = SentinelLedger {
+            known: FileIdentity::describe(&known_path, &metadata).unwrap(),
+            digest: sentinel.clone(),
+            recorded: std::sync::Mutex::new(Vec::new()),
+        };
+
+        let discovered = DiscoveredInputs::from_paths(
+            root,
+            BTreeSet::from([known_path.clone(), fresh_path.clone()]),
+            BTreeMap::new(),
+            &ledger,
+        )
+        .unwrap();
+
+        let by_path = |path: &Path| {
+            discovered
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap()
+                .digest
+                .clone()
+        };
+        assert_eq!(
+            by_path(&known_path),
+            sentinel,
+            "the recorded digest answers"
+        );
+        assert_eq!(
+            by_path(&fresh_path),
+            CacheDigest::blake3_file(&fresh_path).unwrap(),
+            "an unrecorded file is hashed"
+        );
+        let recorded = ledger.recorded.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "only the fresh hash is recorded");
+        assert_eq!(recorded[0].file.path, fresh_path);
+        assert_eq!(recorded[0].digest, by_path(&fresh_path));
+    }
+
+    /// A rewrite that restores length and modification time must still be
+    /// hashed: the platform change token moves with every write, so the
+    /// identity the ledger recorded no longer describes the file.
+    #[cfg(unix)]
+    #[test]
+    fn a_disguised_rewrite_is_not_answered_from_the_ledger() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let path = root.join("lib.rs");
+        std::fs::write(&path, b"fn lib() -> u8 { 1 }").unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        let identity = FileIdentity::describe(&path, &before).unwrap();
+
+        // Same length, modification time put back: only the change token can
+        // tell this file has new contents.
+        std::fs::write(&path, b"fn lib() -> u8 { 2 }").unwrap();
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(before.modified().unwrap()))
+            .unwrap();
+        drop(file);
+        let after = std::fs::metadata(&path).unwrap();
+        let disguised = FileIdentity::describe(&path, &after).unwrap();
+        assert_eq!(disguised.len, identity.len);
+        assert_eq!(disguised.modified, identity.modified);
+        assert_ne!(
+            disguised, identity,
+            "the change token must expose the rewrite"
+        );
+
+        let ledger = SentinelLedger {
+            known: identity,
+            digest: CacheDigest {
+                algorithm: "blake3".into(),
+                hash: "e".repeat(64),
+                size: after.len(),
+            },
+            recorded: std::sync::Mutex::new(Vec::new()),
+        };
+        let discovered = DiscoveredInputs::from_paths(
+            root,
+            BTreeSet::from([path.clone()]),
+            BTreeMap::new(),
+            &ledger,
+        )
+        .unwrap();
+        assert_eq!(
+            discovered.inputs[0].digest,
+            CacheDigest::blake3_file(&path).unwrap(),
+            "the disguised rewrite is hashed, not answered from the ledger"
         );
     }
 }

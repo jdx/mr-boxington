@@ -17,7 +17,7 @@
 //! roots are checkout-specific.
 #![deny(missing_docs)]
 
-use mbx_cache_core::{CacheDigest, canonical_json};
+use mbx_cache_core::{CacheDigest, FileDigestCache, canonical_json};
 use mbx_cache_rustc::{BypassReason as RustcBypassReason, PathMapping, normalize_mapped_path};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -702,6 +702,7 @@ impl CcInputPrediction {
         &self,
         working_dir: &Path,
         path_mappings: &[PathMapping],
+        digests: &dyn FileDigestCache,
     ) -> Result<CcDiscoveredInputs, CcBypassReason> {
         if self.version != 1 {
             return Err(CcBypassReason::UnsupportedPrediction);
@@ -722,7 +723,7 @@ impl CcInputPrediction {
                 }
             }
         }
-        CcDiscoveredInputs::collect(working_dir, files, directories)
+        CcDiscoveredInputs::collect(working_dir, files, directories, digests)
     }
 }
 

@@ -1,5 +1,6 @@
 use super::*;
 use crate::manifest_snapshot;
+use mbx_cache_core::NoFileDigestCache;
 use std::collections::BTreeSet;
 
 #[test]
@@ -62,14 +63,22 @@ fn timestamp_macro_tokens_in_any_read_file_bypass() {
     let source = write(root, "a.c", "int main(void) { return 0; }\n");
     let header = write(root, "a.h", "/* built on __DATE__ */\n");
 
-    let clean =
-        CcDiscoveredInputs::collect(root, BTreeSet::from([source.clone()]), BTreeSet::new())
-            .expect("clean inputs should be discovered");
+    let clean = CcDiscoveredInputs::collect(
+        root,
+        BTreeSet::from([source.clone()]),
+        BTreeSet::new(),
+        &NoFileDigestCache,
+    )
+    .expect("clean inputs should be discovered");
     assert_eq!(clean.inputs.len(), 1);
 
-    let reason =
-        CcDiscoveredInputs::collect(root, BTreeSet::from([source, header]), BTreeSet::new())
-            .unwrap_err();
+    let reason = CcDiscoveredInputs::collect(
+        root,
+        BTreeSet::from([source, header]),
+        BTreeSet::new(),
+        &NoFileDigestCache,
+    )
+    .unwrap_err();
     assert_eq!(reason.kind(), "embedded-timestamp-macro");
 }
 
@@ -78,8 +87,13 @@ fn file_macro_alone_does_not_bypass() {
     let directory = tempfile::tempdir().expect("tempdir");
     let root = directory.path();
     let source = write(root, "a.c", "#define A() assert(__FILE__ != 0)\n");
-    let discovered = CcDiscoveredInputs::collect(root, BTreeSet::from([source]), BTreeSet::new())
-        .expect("__FILE__ is not a timestamp macro");
+    let discovered = CcDiscoveredInputs::collect(
+        root,
+        BTreeSet::from([source]),
+        BTreeSet::new(),
+        &NoFileDigestCache,
+    )
+    .expect("__FILE__ is not a timestamp macro");
     assert_eq!(discovered.inputs.len(), 1);
 }
 
@@ -90,8 +104,13 @@ fn a_timestamp_macro_split_across_a_read_boundary_is_still_found() {
     let mut contents = "a".repeat(SCAN_CHUNK_BYTES - 4);
     contents.push_str("__TIMESTAMP__");
     let source = write(root, "a.c", &contents);
-    let reason =
-        CcDiscoveredInputs::collect(root, BTreeSet::from([source]), BTreeSet::new()).unwrap_err();
+    let reason = CcDiscoveredInputs::collect(
+        root,
+        BTreeSet::from([source]),
+        BTreeSet::new(),
+        &NoFileDigestCache,
+    )
+    .unwrap_err();
     assert_eq!(reason.kind(), "embedded-timestamp-macro");
 }
 
@@ -108,6 +127,7 @@ fn include_directory_manifests_change_the_key_when_a_shadowing_header_appears() 
         root,
         BTreeSet::from([source.clone()]),
         BTreeSet::from([include.clone()]),
+        &NoFileDigestCache,
     )
     .expect("discovery");
 
@@ -118,6 +138,7 @@ fn include_directory_manifests_change_the_key_when_a_shadowing_header_appears() 
         root,
         BTreeSet::from([source]),
         BTreeSet::from([include.clone()]),
+        &NoFileDigestCache,
     )
     .expect("discovery");
 
@@ -147,6 +168,7 @@ fn a_missing_include_directory_has_an_empty_manifest_rather_than_an_error() {
         root,
         BTreeSet::from([source]),
         BTreeSet::from([root.join("absent")]),
+        &NoFileDigestCache,
     )
     .expect("a directory that does not exist yet is not an error");
     assert_eq!(discovered.inputs.len(), 2);
@@ -157,9 +179,13 @@ fn discovery_rejects_inputs_modified_during_compilation() {
     let directory = tempfile::tempdir().expect("tempdir");
     let root = directory.path();
     let source = write(root, "a.c", "int a(void) { return 0; }\n");
-    let discovered =
-        CcDiscoveredInputs::collect(root, BTreeSet::from([source.clone()]), BTreeSet::new())
-            .expect("discovery");
+    let discovered = CcDiscoveredInputs::collect(
+        root,
+        BTreeSet::from([source.clone()]),
+        BTreeSet::new(),
+        &NoFileDigestCache,
+    )
+    .expect("discovery");
 
     // A file written before the compile started is what produced the object.
     assert!(
@@ -184,9 +210,14 @@ fn discovery_rejects_inputs_modified_during_compilation() {
 #[test]
 fn discovery_requires_an_absolute_working_directory() {
     assert_eq!(
-        CcDiscoveredInputs::collect(Path::new("relative"), BTreeSet::new(), BTreeSet::new())
-            .unwrap_err()
-            .kind(),
+        CcDiscoveredInputs::collect(
+            Path::new("relative"),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            &NoFileDigestCache,
+        )
+        .unwrap_err()
+        .kind(),
         "relative-working-directory"
     );
 }
@@ -298,4 +329,69 @@ fn a_precompiled_header_appearing_beside_its_header_changes_the_manifest() {
         );
         std::fs::remove_file(include.join(precompiled)).expect("remove");
     }
+}
+
+/// A ledger that vouches for one cc input identity.
+struct VouchingLedger {
+    known: mbx_cache_core::FileIdentity,
+    digest: CacheDigest,
+}
+
+impl mbx_cache_core::FileDigestCache for VouchingLedger {
+    fn find(
+        &self,
+        scope: mbx_cache_core::FileDigestScope,
+        files: &[mbx_cache_core::FileIdentity],
+    ) -> Vec<Option<CacheDigest>> {
+        assert_eq!(scope, mbx_cache_core::FileDigestScope::CcInput);
+        files
+            .iter()
+            .map(|file| (*file == self.known).then(|| self.digest.clone()))
+            .collect()
+    }
+
+    fn record(
+        &self,
+        _scope: mbx_cache_core::FileDigestScope,
+        _entries: Vec<mbx_cache_core::RecordedFileDigest>,
+    ) {
+    }
+}
+
+#[test]
+fn a_vouched_cc_input_skips_the_scan_it_already_passed() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let root = directory.path();
+    // The macro token would bypass on a first encounter; a cc-scope ledger
+    // entry says this exact identity already passed the scan, so neither the
+    // scan nor the hash reads the file again.
+    let source = write(root, "a.c", "/* __DATE__ */ int main(void) { return 0; }\n");
+    let metadata = std::fs::metadata(&source).expect("metadata");
+    let digest = CacheDigest {
+        algorithm: "blake3".into(),
+        hash: "d".repeat(64),
+        size: metadata.len(),
+    };
+    let ledger = VouchingLedger {
+        known: mbx_cache_core::FileIdentity::describe(&source, &metadata).expect("identity"),
+        digest: digest.clone(),
+    };
+
+    let discovered = CcDiscoveredInputs::collect(
+        root,
+        BTreeSet::from([source.clone()]),
+        BTreeSet::new(),
+        &ledger,
+    )
+    .expect("the vouched identity answers without a scan");
+    assert_eq!(discovered.inputs.len(), 1);
+    assert_eq!(discovered.inputs[0].digest, digest);
+
+    // Rewrite the file to a new length: the identity no longer matches, so
+    // the scan runs and the macro token bypasses again.
+    std::fs::write(&source, "/* __DATE__ */ int main(void) { return 12345; }\n").expect("rewrite");
+    let reason =
+        CcDiscoveredInputs::collect(root, BTreeSet::from([source]), BTreeSet::new(), &ledger)
+            .unwrap_err();
+    assert_eq!(reason.kind(), "embedded-timestamp-macro");
 }
