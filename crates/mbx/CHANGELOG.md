@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/jdx/mr-boxington/compare/v0.6.0...v0.7.0) - 2026-08-29
+
+### Added
+
+- *(cache-rustc)* cache macOS debug links behind an oso_prefix the shim appends ([#166](https://github.com/jdx/mr-boxington/pull/166))
+- *(cli)* read the toolchain instead of forwarding it ([#159](https://github.com/jdx/mr-boxington/pull/159))
+
+### Fixed
+
+- *(cache-rustc)* predict a native search directory by name, not by its contents ([#162](https://github.com/jdx/mr-boxington/pull/162))
+
+### Other
+
+- keep outputs that already hold the cached bytes ([#165](https://github.com/jdx/mr-boxington/pull/165))
+- [**breaking**] stop rehashing inputs the session already read in full ([#164](https://github.com/jdx/mr-boxington/pull/164))
+- *(doctor)* reach the failure line without spawning a process ([#163](https://github.com/jdx/mr-boxington/pull/163))
+
 ## [0.6.0](https://github.com/jdx/mr-boxington/compare/v0.5.4...v0.6.0) - 2026-08-28
 
 ### Fixed

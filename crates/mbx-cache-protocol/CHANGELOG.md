@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.5.2...mbx-cache-protocol-v0.5.3) - 2026-08-29
+
+### Fixed
+
+- *(cache-rustc)* predict a native search directory by name, not by its contents ([#162](https://github.com/jdx/mr-boxington/pull/162))
+
 ## [0.5.2](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.5.1...mbx-cache-protocol-v0.5.2) - 2026-08-28
 
 ### Added
