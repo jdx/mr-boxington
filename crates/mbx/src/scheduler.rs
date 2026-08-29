@@ -113,17 +113,19 @@ impl Demand {
 
 /// One admitted compilation's capacity, released on drop or process death.
 pub(crate) struct Permit {
-    lock: fslock::LockFile,
+    /// Taken before the file is removed. Windows refuses to delete a file
+    /// anyone still holds open, so closing the handle -- not merely unlocking
+    /// it -- is what lets the lease go away rather than accumulate.
+    lock: Option<fslock::LockFile>,
     path: PathBuf,
 }
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        // Unlocked before removal because Windows will not delete a file whose
-        // lock is still held. The registrar serializes scans, and between these
-        // two steps the holder is this very much alive process, so nothing can
-        // misread the gap.
-        let _ = self.lock.unlock();
+        // Between the close and the removal this lease reads as stale to
+        // anyone scanning, which is exactly what it is: its holder has
+        // finished. The worst a concurrent scan does is remove it first.
+        drop(self.lock.take());
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -377,7 +379,10 @@ impl Pool {
         if !lock.try_lock()? {
             eyre::bail!("a freshly created lease was already locked");
         }
-        Ok(Permit { lock, path })
+        Ok(Permit {
+            lock: Some(lock),
+            path,
+        })
     }
 
     fn priority_wait_is_fresh(&self) -> bool {
@@ -449,8 +454,10 @@ fn scan_leases(leases: &Path) -> Result<Vec<u64>> {
         let path = entry?.path();
         let mut lock = fslock::LockFile::open(&path)?;
         if lock.try_lock()? {
-            // Nobody holds it: the process that created it is gone.
-            let _ = lock.unlock();
+            // Nobody holds it: the process that created it is gone. Closed
+            // before the removal, because Windows will not delete a file that
+            // is still open anywhere.
+            drop(lock);
             let _ = std::fs::remove_file(&path);
             continue;
         }

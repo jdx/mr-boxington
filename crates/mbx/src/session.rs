@@ -1950,7 +1950,7 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
     let demand = crate_name
         .as_deref()
         .filter(|_| !is_query)
-        .map(|name| crate::scheduler::Demand::new(name, false));
+        .map(|name| crate::scheduler::Demand::new(name, links_natively(&arguments)));
     let permit = demand
         .as_ref()
         .and_then(|demand| crate::scheduler::pool().and_then(|pool| pool.admit(demand)));
@@ -2033,6 +2033,45 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
             }
         }
     }
+}
+
+/// Whether a bypassed invocation will run a linker.
+///
+/// Read off the raw arguments because there is no parsed invocation here: this
+/// is the path a compilation takes when the cache could not model it, and
+/// native links are exactly that path today -- they bypass by default. They
+/// are also the compilations that run a machine out of memory, so the
+/// scheduler has to recognize one without the parser's help.
+///
+/// A test harness links a program whatever its crate type says, which is why
+/// `--test` counts on its own.
+fn links_natively(arguments: &[OsString]) -> bool {
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        let Some(argument) = argument.to_str() else {
+            continue;
+        };
+        if argument == "--test" {
+            return true;
+        }
+        let kinds = if argument == "--crate-type" {
+            arguments.next().and_then(|kinds| kinds.to_str())
+        } else {
+            argument.strip_prefix("--crate-type=")
+        };
+        // rustc accepts them comma-separated, and any one of them links.
+        if kinds.is_some_and(|kinds| {
+            kinds.split(',').any(|kind| {
+                matches!(
+                    kind,
+                    "bin" | "cdylib" | "dylib" | "proc-macro" | "staticlib"
+                )
+            })
+        }) {
+            return true;
+        }
+    }
+    false
 }
 
 fn crate_name_argument(arguments: &[OsString]) -> Option<String> {

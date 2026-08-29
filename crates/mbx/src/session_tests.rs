@@ -485,6 +485,37 @@ fn finds_crate_names_in_transparent_invocations() {
     assert_eq!(crate_name_argument(&["--version".into()]), None);
 }
 
+#[test]
+fn recognizes_the_bypassed_invocations_that_run_a_linker() {
+    // Native links bypass the cache today, so this is the only thing that
+    // tells the scheduler one of them is about to run.
+    for arguments in [
+        vec!["--crate-type", "bin"],
+        vec!["--crate-type=cdylib"],
+        vec!["--crate-type", "lib,dylib"],
+        vec!["--crate-type=proc-macro"],
+        vec!["--crate-type=staticlib"],
+        // A test harness links a program whatever its crate type says.
+        vec!["--test", "--crate-type=lib"],
+    ] {
+        let arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
+        assert!(links_natively(&arguments), "{arguments:?} links");
+    }
+
+    for arguments in [
+        vec!["--crate-type", "lib"],
+        vec!["--crate-type=rlib"],
+        vec!["--crate-type", "lib,rlib"],
+        vec!["--emit=metadata"],
+        // The flag's own name is not its value: a crate called "bin" is not
+        // a program.
+        vec!["--crate-name", "bin"],
+    ] {
+        let arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
+        assert!(!links_natively(&arguments), "{arguments:?} does not link");
+    }
+}
+
 /// The session shim must be a symlink, not a hard link.
 ///
 /// Cargo execs it within milliseconds of its creation, and a hard link that new
