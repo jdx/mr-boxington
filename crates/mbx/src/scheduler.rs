@@ -28,6 +28,14 @@
 //! enforces its own bound against the same leases, so the loosest
 //! configuration wins and nothing deadlocks. Every failure here degrades to
 //! compiling without a permit -- the pool is a courtesy, never a dependency.
+//!
+//! This sits above Cargo's jobserver rather than beside it. A shim waiting
+//! for a permit is holding the implicit jobserver token Cargo gave it, so the
+//! two systems do hold each other's resources -- but they cannot deadlock,
+//! because rustc never needs a *second* token to finish: it keeps the
+//! implicit one and falls back to compiling its codegen units on fewer
+//! threads. The worst case is a permit holder running single-threaded, which
+//! costs time and always ends.
 
 use crate::config::{Config, SchedulerPriority};
 use eyre::{Context, Result};
@@ -84,6 +92,10 @@ const POLL_INITIAL: Duration = Duration::from_millis(2);
 const POLL_MAX: Duration = Duration::from_millis(25);
 /// How recently the stamp must have been touched to hold low priority back.
 const PRIORITY_WAIT_FRESHNESS: Duration = Duration::from_secs(2);
+/// How often one waiter refreshes that stamp, well inside its freshness.
+const PRIORITY_STAMP_INTERVAL: Duration = Duration::from_millis(500);
+/// How long one compilation waits before saying so in the debug log.
+const SLOW_WAIT_NOTICE: Duration = Duration::from_secs(60);
 /// How long the available-memory gate may defer one compilation.
 ///
 /// The gate exists to avoid piling predicted-heavy work onto a machine that is
@@ -284,6 +296,8 @@ impl Pool {
         let (weight, predicted) = self.plan(demand);
         let started = Instant::now();
         let mut delay = POLL_INITIAL;
+        let mut stamped: Option<Instant> = None;
+        let mut complained = false;
         loop {
             // The gate stops applying at its deadline so a machine that stays
             // short of memory delays this compilation rather than starving it.
@@ -296,8 +310,25 @@ impl Pool {
                     return None;
                 }
             }
-            if self.priority == SchedulerPriority::Normal {
+            // Refreshed well inside the freshness window rather than on every
+            // attempt: this says "somebody is waiting", which does not become
+            // truer for being written forty times a second by every waiter.
+            if self.priority == SchedulerPriority::Normal
+                && stamped.is_none_or(|last| last.elapsed() >= PRIORITY_STAMP_INTERVAL)
+            {
                 let _ = std::fs::write(self.dir.join(PRIORITY_WAIT_STAMP), b"");
+                stamped = Some(Instant::now());
+            }
+            // A pool that is genuinely full is a pool doing its job, so this
+            // waits rather than giving up. Said once, because the alternative
+            // is a build that looks hung with nothing to explain it: the
+            // permits are held by compilers that are really running.
+            if !complained && started.elapsed() >= SLOW_WAIT_NOTICE {
+                complained = true;
+                debug!(
+                    "waiting for {weight} of {} machine-wide compile permits ({})",
+                    self.capacity, demand.name
+                );
             }
             std::thread::sleep(jittered(delay));
             delay = (delay * 2).min(POLL_MAX);
