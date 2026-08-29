@@ -1405,9 +1405,124 @@ fn a_compilation_that_never_links_is_not_a_link() {
         "-Cdebuginfo=2",
         "src/lib.rs",
     ]);
+    assert!(
+        RustcInvocation::parse_with(&with_debug, native_links()).is_ok(),
+        "a debug-info flag no linker reads must not bypass a check compilation"
+    );
+    assert!(RustcInvocation::parse(&with_debug).is_ok());
+}
+
+/// `cargo check` and clippy compile every binary target this way. rustc names
+/// the metadata `lib<name>.rmeta` whatever the crate type, so there is nothing
+/// here an rlib's metadata emit does not already do.
+#[test]
+fn a_binary_that_only_emits_metadata_is_cached_like_a_library() {
+    let working_dir = absolute(&["workspace"]);
+    let invocation = RustcInvocation::parse(&args(&[
+        "--crate-name=widget",
+        "--crate-type=bin",
+        "--emit=dep-info,metadata",
+        "--out-dir=target/debug/deps",
+        "-Cextra-filename=-abc123",
+        "src/main.rs",
+    ]))
+    .unwrap();
+
+    assert!(!invocation.links_natively());
+    let outputs = invocation.outputs(&working_dir).unwrap();
     assert_eq!(
-        RustcInvocation::parse_with(&with_debug, native_links()),
-        Err(BypassReason::UnsupportedCrateType("test".into()))
+        outputs.files,
+        vec![working_dir.join("target/debug/deps/libwidget-abc123.rmeta")]
+    );
+    assert_eq!(
+        outputs.dep_info,
+        working_dir.join("target/debug/deps/widget-abc123.d")
+    );
+}
+
+/// A test target carries `--test` and no crate type at all, and cargo omits
+/// the extra filename for a unit that needs no disambiguating.
+#[test]
+fn a_test_target_that_only_emits_metadata_is_cached_like_a_library() {
+    let working_dir = absolute(&["workspace"]);
+    let invocation = RustcInvocation::parse(&args(&[
+        "--crate-name=widget",
+        "--test",
+        "--emit=dep-info,metadata",
+        "--out-dir=target/debug/deps",
+        "src/lib.rs",
+    ]))
+    .unwrap();
+
+    assert!(!invocation.links_natively());
+    let outputs = invocation.outputs(&working_dir).unwrap();
+    assert_eq!(
+        outputs.files,
+        vec![working_dir.join("target/debug/deps/libwidget.rmeta")]
+    );
+}
+
+/// The crate type describes what a *link* would produce, and nothing links
+/// here, so none of them is a reason to refuse.
+#[test]
+fn every_crate_type_is_cached_when_nothing_links() {
+    for crate_type in ["bin", "cdylib", "dylib", "staticlib", "proc-macro", "lib"] {
+        let parsed = RustcInvocation::parse(&args(&[
+            "--crate-name=widget",
+            &format!("--crate-type={crate_type}"),
+            "--emit=dep-info,metadata",
+            "--out-dir=target/debug/deps",
+            "src/lib.rs",
+        ]));
+        assert!(parsed.is_ok(), "{crate_type} was refused: {parsed:?}");
+    }
+}
+
+/// The widening is about what links, not about what is named: an artifact that
+/// really is linked stays outside the tier exactly as it was.
+#[test]
+fn linked_artifacts_still_bypass_when_nothing_admits_them() {
+    assert_eq!(
+        RustcInvocation::parse(&args(&[
+            "--crate-name=widget",
+            "--crate-type=bin",
+            "--emit=dep-info,link",
+            "--out-dir=target/debug/deps",
+            "src/main.rs",
+        ])),
+        Err(BypassReason::UnsupportedCrateType("bin".into()))
+    );
+    // Even with native links modeled, a proc macro is a dylib nobody admits.
+    assert_eq!(
+        RustcInvocation::parse_with(
+            &args(&[
+                "--crate-name=widget",
+                "--crate-type=proc-macro",
+                "--emit=dep-info,metadata,link",
+                "--out-dir=target/debug/deps",
+                "src/lib.rs",
+            ]),
+            native_links()
+        ),
+        Err(BypassReason::UnsupportedCrateType("proc-macro".into()))
+    );
+}
+
+/// A native library is a linker input, and the reason it bypasses -- mbx does
+/// not model where it came from -- does not soften because this particular
+/// compilation stopped short of the link.
+#[test]
+fn a_native_library_still_bypasses_a_check_compilation() {
+    assert_eq!(
+        RustcInvocation::parse(&args(&[
+            "--crate-name=widget",
+            "--test",
+            "--emit=dep-info,metadata",
+            "--out-dir=target/debug/deps",
+            "-lstatic=fixture",
+            "src/lib.rs",
+        ])),
+        Err(BypassReason::NativeLibrary)
     );
 }
 
