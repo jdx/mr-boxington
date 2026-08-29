@@ -123,10 +123,24 @@ const POLL_INITIAL: Duration = Duration::from_millis(2);
 ///
 /// Waking waiters on the release itself -- watching the leases directory, so
 /// the wait ends when a lease disappears -- was built and measured and did
-/// not pay, so it is deliberately not here. A build's whole idle on this is
-/// one interval per compilation, and every core is compiling while it
-/// elapses: about a second of a forty-second build. The pool is rarely what
-/// a build waits on; Cargo's dependency graph is.
+/// not pay, so it is deliberately not here. The reason is not that the win
+/// was small enough to lose in the noise: this interval is not what a waiter
+/// is waiting on. Waiters poll at independent jittered phases, so a released
+/// permit is found by whichever of them wakes first, and the more waiters
+/// there are the sooner that is.
+///
+/// Measured on hk, which is the shape that makes this look worst -- one
+/// build, permits deliberately scarce so the pool really is the constraint:
+///
+/// - at the default permit count, the whole build spends 0.2 s waiting for
+///   permits across ten admissions, so nothing here is worth reaching for;
+/// - at two permits, where admissions wait 1100 s in aggregate, cutting this
+///   interval by twelve and a half times -- to 2 ms, past what any wake could
+///   save -- moved the build from 62.5 s to 63.0 s, and the aggregate wait
+///   from 1105 s to 1073 s. Both are inside the run-to-run spread.
+///
+/// What that aggregate wait is, then, is capacity that genuinely was not
+/// free. No mechanism for noticing sooner can return it.
 const POLL_MAX: Duration = Duration::from_millis(25);
 /// How recently the stamp must have been touched to hold low priority back.
 const PRIORITY_WAIT_FRESHNESS: Duration = Duration::from_secs(2);
