@@ -381,18 +381,16 @@ impl Pool {
         let live = scan_leases(&leases)?;
         let capacity = self.capacity - self.reserved();
         let used: u64 = live.iter().sum();
-        // A demand heavier than the pool itself would never fit, so it runs
-        // alone rather than never. Conditioned on the demand rather than on
-        // the pool merely being empty: an idle pool is the normal state
-        // between two compilations, and granting unconditionally there would
-        // let a low-priority build take the whole machine in exactly the gap
-        // the reserve exists to hold open for somebody else.
-        //
-        // Measured against the whole pool rather than the share left after
-        // that reserve, for the same reason: a demand that would fit if
-        // nobody were waiting has somewhere to fit later, and waiting for it
-        // is what yielding means.
-        if used == 0 && weight > self.capacity {
+        // A demand too heavy for what the pool will lend it can only ever run
+        // by itself, so on an idle pool it does, rather than waiting for room
+        // that nothing is going to make. Measured against the capacity left
+        // after the reserve, because that is what this build may actually
+        // take -- and conditioned on the demand rather than on the pool
+        // merely being idle, since idle is the ordinary state between two
+        // compilations and granting unconditionally there would let a
+        // low-priority build take the machine in exactly the gap the reserve
+        // exists to hold open.
+        if used == 0 && weight > capacity {
             return self.grant(&leases, weight).map(Some);
         }
         if used.saturating_add(weight) > capacity {
@@ -402,7 +400,13 @@ impl Pool {
         // against the machine as it is right now, catching pressure the
         // ledger cannot see -- unmeasured crates already running, or memory
         // that was never the build's to spend.
-        if let Some(needed) = predicted
+        //
+        // Only while somebody else holds a permit, though. With an idle pool
+        // there is no compilation whose finishing would return the memory
+        // this one is short of, so deferring would stall the one thing that
+        // could proceed and wait out the deadline to reach the same answer.
+        if used > 0
+            && let Some(needed) = predicted
             && let Some(available) = (self.available_memory)()
             && available < needed
         {

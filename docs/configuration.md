@@ -104,7 +104,10 @@ dies, so a crashed build cannot wedge its siblings.
 
 The pool is memory-aware. `scheduler.cpus` permits (default: logical CPUs)
 divide `scheduler.memory` (default: 85% of physical memory, leaving headroom
-for everything that is not a compiler; `"none"` keeps plain CPU permits).
+for everything that is not a compiler; `"none"` keeps plain CPU permits). In a
+container, "physical memory" means the cgroup's limit rather than the host's
+RAM — a build in a 4GiB container on a large machine is budgeted by the 4GiB,
+because the rest was never its to spend.
 Native links start at two permits, and crates whose compilations have measured
 memory-heavy are weighted by what they actually used, so the predicted memory
 of everything running stays inside the budget. A compilation the Linux OOM

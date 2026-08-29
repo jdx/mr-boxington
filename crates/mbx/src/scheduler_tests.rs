@@ -136,21 +136,62 @@ fn a_demand_heavier_than_the_pool_runs_alone_rather_than_never() {
 }
 
 #[test]
-fn low_priority_does_not_take_an_idle_pool_out_from_under_a_waiter() {
+fn low_priority_leaves_the_reserve_even_on_an_idle_pool() {
     let directory = tempfile::tempdir().unwrap();
     let mut low = Pool::new(directory.path().to_path_buf(), 4, 0, SchedulerPriority::Low);
     low.available_memory = || None;
     std::fs::write(directory.path().join(PRIORITY_WAIT_STAMP), b"").unwrap();
 
     // An idle pool is the ordinary state between two compilations, so it is
-    // no licence to take the whole machine: the reserve still applies.
+    // no licence to stop yielding: three of the four permits are what a
+    // low-priority build may take while somebody is waiting.
+    let admitted = low.try_admit(3, None).unwrap();
+    assert!(admitted.is_some(), "what fits beside the reserve is taken");
+    let leases = std::fs::read_dir(directory.path().join(LEASES_DIR))
+        .unwrap()
+        .count();
+    assert_eq!(leases, 1);
+    drop(admitted);
+}
+
+#[test]
+fn a_weight_the_reserve_would_never_admit_still_runs_alone() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut low = Pool::new(directory.path().to_path_buf(), 4, 0, SchedulerPriority::Low);
+    low.available_memory = || None;
+    std::fs::write(directory.path().join(PRIORITY_WAIT_STAMP), b"").unwrap();
+
+    // Four permits out of four never fits beside a reserve of one, and a
+    // weight is already clamped to the capacity, so refusing here would not
+    // be yielding -- it would be a compilation that never runs at all for as
+    // long as anybody keeps waiting. It goes alone instead.
     assert!(
-        low.try_admit(4, None).unwrap().is_none(),
-        "the reserve holds even when nothing is running"
+        low.try_admit(4, None).unwrap().is_some(),
+        "a demand the reserve excludes outright runs by itself"
     );
+}
+
+#[test]
+fn a_predicted_heavy_compile_does_not_wait_out_the_gate_on_an_idle_machine() {
+    let directory = tempfile::tempdir().unwrap();
+    let bytes_per_permit = 1024;
+    let mut pool = pool_at(directory.path(), 4, bytes_per_permit);
+    // Short of memory, and nothing running that could give any back.
+    pool.available_memory = || Some(1);
+    // Through `plan`, because that is the only weight production ever asks
+    // for -- and it clamps to the capacity, so a rule written against
+    // heavier-than-capacity weights would never fire for a real compilation.
+    pool.record_peak("enormous", bytes_per_permit * 1000)
+        .unwrap();
+    let (weight, predicted) = pool.plan(&Demand::new("enormous", true));
+    assert_eq!(
+        weight, 4,
+        "a clamped weight is what admission actually sees"
+    );
+
     assert!(
-        low.try_admit(3, None).unwrap().is_some(),
-        "what fits beside the reserve is still admitted"
+        pool.try_admit(weight, predicted).unwrap().is_some(),
+        "an idle machine admits it rather than waiting out the gate deadline"
     );
 }
 
