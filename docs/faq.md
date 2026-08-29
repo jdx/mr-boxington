@@ -27,9 +27,9 @@ self-contained WebAssembly targets everywhere; the rest is
 No — the compiler is part of every key, so a toolchain roll invalidates every
 rustc action at once, and the build says so:
 `a manifest predicting N compilations was loaded, but none matched this build`.
-The [toolchain benchmark scenario](/benchmarks#toolchain) exists to pin down
-exactly this diagnosis. Actions that do not depend on rustc, such as a build
-script's C objects, legitimately survive.
+The benchmarks cover this in the [toolchain scenario](/benchmarks#toolchain).
+Actions that do not depend on rustc, such as a build script's C objects,
+legitimately survive.
 
 ## Can I use mbx together with sccache?
 
@@ -54,7 +54,7 @@ comes from the paths listed at the top of [configuration](/configuration).
 
 ## How do I turn one feature off?
 
-Every feature has its own switch, so none of them has to be a package deal:
+Every feature has its own switch:
 
 | Switch | Turns off |
 | --- | --- |
@@ -68,6 +68,5 @@ Every feature has its own switch, so none of them has to be a package deal:
 
 ## Something looks wrong. What should a report include?
 
-Three things describe almost any mbx problem: `mbx doctor --json`,
-`MBX_LOG=debug`, and `MBX_BYPASS_LOG`. See
+`mbx doctor --json`, a run with `MBX_LOG=debug`, and `MBX_BYPASS_LOG`. See
 [reporting a problem](/getting-started#reporting-a-problem).
