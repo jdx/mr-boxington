@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1](https://github.com/jdx/mr-boxington/compare/v1.0.0...v1.0.1) - 2026-08-29
+
+### Fixed
+
+- support Jujutsu repositories in mbx exec ([#207](https://github.com/jdx/mr-boxington/pull/207))
+
+### Other
+
+- recognize Cargo, sccache, and kache ([#205](https://github.com/jdx/mr-boxington/pull/205))
+
 ## [1.0.0](https://github.com/jdx/mr-boxington/compare/v0.7.2...v1.0.0) - 2026-08-29
 
 ### Other
