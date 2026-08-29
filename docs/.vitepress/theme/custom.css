@@ -120,6 +120,15 @@ body::after {
   letter-spacing: -0.03em;
 }
 
+.VPHero .text code {
+  background: none;
+  color: inherit;
+  font-family: var(--vp-font-family-mono);
+  font-size: inherit;
+  font-weight: inherit;
+  padding: 0;
+}
+
 .VPHero .name .clip {
   position: relative;
   z-index: 0;

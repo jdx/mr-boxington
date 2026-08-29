@@ -3,7 +3,7 @@ layout: home
 
 hero:
   name: "mr boxington"
-  text: "fix target/"
+  text: "fix <code>target/</code>"
   tagline: Put mbx in front of any cargo command. One cache warms every worktree and CI run, and prunes itself to a size budget.
   image:
     src: /logo.svg
