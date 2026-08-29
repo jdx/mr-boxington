@@ -634,7 +634,7 @@
     },
     {
       "scenario": "contention",
-      "description": "two Clippy configurations from one lint job -- sequentially, in parallel without scheduling, and in parallel with mbx -- from a cold store",
+      "description": "two Clippy jobs on one runner -- sequential, parallel without scheduling, and parallel sharing mbx's four-compiler limit",
       "timed": true,
       "kind": "contention",
       "results": [

@@ -21,7 +21,10 @@
           <h3 :id="scenario.scenario">{{ scenario.scenario }}</h3>
           <p class="mbx-bench-caption">{{ scenario.description }}</p>
         </div>
-        <span v-if="scenario.timed" class="mbx-bench-direction">
+        <span
+          v-if="scenario.timed && scenario.kind !== 'contention'"
+          class="mbx-bench-direction"
+        >
           lower is better
         </span>
       </header>
@@ -49,8 +52,8 @@
           role="listitem"
         >
           <div class="mbx-bench-tool">
-            <code>{{ cell.tool }}</code>
-            <span v-if="cell.fastest" class="mbx-bench-fastest">fastest</span>
+            <code>{{ cell.label }}</code>
+            <span v-if="cell.baseline" class="mbx-bench-fastest">baseline</span>
           </div>
           <div class="mbx-bench-bar-track" aria-hidden="true">
             <span
@@ -61,9 +64,9 @@
           </div>
           <strong class="mbx-bench-seconds">{{ cell.seconds }}</strong>
           <div class="mbx-bench-meta">
-            <span v-if="cell.relative !== '—'">{{ cell.relative }} vs. sequential</span>
+            <span v-if="cell.comparison">{{ cell.comparison }}</span>
             <span>{{ cell.compilers }}</span>
-            <span>{{ cell.memory }} free</span>
+            <span>{{ cell.memory }}</span>
           </div>
         </div>
       </div>
@@ -178,29 +181,35 @@ function contentionRows(scenario: BenchmarkScenario) {
     ...scenario.results.map((cell) => cell.wall_duration_ns),
     1,
   );
-  const fastest = Math.min(
-    ...scenario.results.map((cell) => cell.wall_duration_ns),
-  );
   const baseline = scenario.results.find(
     (cell) => cell.tool === "mbx-sequential",
   );
   return scenario.results.map((cell) => {
     const seconds = cell.wall_duration_ns / 1e9;
     const available = cell.min_available_bytes;
+    const delta = baseline
+      ? (cell.wall_duration_ns - baseline.wall_duration_ns) / 1e9
+      : null;
     return {
       tool: cell.tool,
-      fastest: cell.wall_duration_ns === fastest,
+      label:
+        cell.tool === "mbx-sequential"
+          ? "sequential"
+          : cell.tool === "mbx-unscheduled"
+            ? "parallel · scheduler off"
+            : "parallel · mbx scheduled",
+      baseline: cell === baseline,
       seconds:
         seconds >= 60
           ? `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`
           : `${seconds.toFixed(1)}s`,
       width: barWidth(cell.wall_duration_ns, slowest),
-      relative:
-        !baseline || cell === baseline
-          ? "—"
-          : `${(baseline.wall_duration_ns / cell.wall_duration_ns).toFixed(2)}×`,
+      comparison:
+        delta === null || cell === baseline
+          ? null
+          : `${Math.abs(delta).toFixed(1)}s ${delta >= 0 ? "slower" : "faster"} than sequential`,
       compilers: cell.permits
-        ? `${cell.peak_compilers ?? 0} peak / ${cell.permits} permits`
+        ? `${cell.peak_compilers ?? 0} of ${cell.permits} compiler slots used`
         : `${cell.peak_compilers ?? 0} peak compilers`,
       // Only Linux reports it, and only Linux runs the published benchmark.
       // Zero is a real reading -- a machine that ran itself out -- and it is
@@ -209,7 +218,7 @@ function contentionRows(scenario: BenchmarkScenario) {
       memory:
         available === null || available === undefined
           ? "—"
-          : `${(available / 1e9).toFixed(1)} GB`,
+          : `${(available / 1e9).toFixed(1)} GB minimum free`,
     };
   });
 }
