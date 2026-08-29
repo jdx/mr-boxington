@@ -106,6 +106,20 @@ const GATE_DEADLINE: Duration = Duration::from_secs(120);
 /// Distinguishes leases created by one process, which may hold several.
 static LEASE_NONCE: AtomicU64 = AtomicU64::new(0);
 
+/// Names tried before giving up on finding an unused one.
+///
+/// A collision needs two processes to draw the same token, so one retry
+/// already makes it vanishingly unlikely; the rest are for the pathological
+/// case where the token source is not what it claims to be.
+const LEASE_NAME_ATTEMPTS: usize = 8;
+
+/// A token drawn once, distinguishing this process from one that shares its
+/// pid in another namespace.
+fn process_token() -> &'static str {
+    static TOKEN: OnceLock<String> = OnceLock::new();
+    TOKEN.get_or_init(|| crate::util::random_string(8))
+}
+
 /// What one compilation asks the pool for.
 pub(crate) struct Demand {
     /// Compiler crate name, keying the peak-RSS ledger.
@@ -399,27 +413,58 @@ impl Pool {
 
     /// Create and lock this process's lease. Runs under the registrar lock,
     /// which is what keeps the moment between creation and locking private.
+    ///
+    /// The name has to be unique against processes this one cannot see. A pid
+    /// is only unique within its namespace, and two containers sharing a cache
+    /// directory have separate ones -- pid 7 in each is two different
+    /// processes. A name collision there would be silent and wrong in both
+    /// directions: writing the lease would truncate a live holder's record,
+    /// and this compilation would then run unscheduled. So the name carries a
+    /// token drawn once per process, and the file is created exclusively so
+    /// that a collision is an error to retry rather than an overwrite.
     fn grant(&self, leases: &Path, weight: u64) -> Result<Permit> {
-        let path = leases.join(format!(
-            "{}-{}",
-            std::process::id(),
-            LEASE_NONCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        let lease = Lease {
+        let lease = serde_json::to_vec(&Lease {
             version: LEASE_VERSION,
             weight,
             priority: self.priority.as_str().into(),
-        };
-        std::fs::write(&path, serde_json::to_vec(&lease)?)
-            .wrap_err_with(|| format!("failed to write {}", path.display()))?;
-        let mut lock = fslock::LockFile::open(&path)?;
-        if !lock.try_lock()? {
-            eyre::bail!("a freshly created lease was already locked");
+        })?;
+        let mut last = None;
+        for _ in 0..LEASE_NAME_ATTEMPTS {
+            let path = leases.join(format!(
+                "{}-{}-{}",
+                std::process::id(),
+                process_token(),
+                LEASE_NONCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    std::io::Write::write_all(&mut file, &lease)
+                        .wrap_err_with(|| format!("failed to write {}", path.display()))?;
+                    drop(file);
+                    let mut lock = fslock::LockFile::open(&path)?;
+                    if !lock.try_lock()? {
+                        eyre::bail!("a freshly created lease was already locked");
+                    }
+                    return Ok(Permit {
+                        lock: Some(lock),
+                        path,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    last = Some(error);
+                }
+                Err(error) => {
+                    return Err(error)
+                        .wrap_err_with(|| format!("failed to create {}", path.display()));
+                }
+            }
         }
-        Ok(Permit {
-            lock: Some(lock),
-            path,
-        })
+        Err(last.expect("a name is only retried after a collision"))
+            .wrap_err("failed to name a lease that was not already taken")
     }
 
     /// Permits this build holds back for somebody who is waiting on them.

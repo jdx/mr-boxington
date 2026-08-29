@@ -839,8 +839,10 @@ def summarize(result: dict[str, object]) -> str:
                 peak = f"{cell.get('peak_compilers', 0)}"
                 if permits:
                     peak += f" / {permits} permits"
+                # Zero is a reading, not a missing one: it says the machine
+                # ran itself out, which is the whole point of the column.
                 available = cell.get("min_available_bytes")
-                memory = f"{available / 1e9:.1f} GB" if available else "-"
+                memory = "-" if available is None else f"{available / 1e9:.1f} GB"
                 lines.append(
                     f"| {cell['tool']} | {cell['wall_duration_ns'] / 1e9:.1f} s | {peak} "
                     f"| {memory} | {hits(cell)} |"

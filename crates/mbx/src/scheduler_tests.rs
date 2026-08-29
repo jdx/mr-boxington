@@ -43,6 +43,46 @@ fn capacity_is_enforced_and_released() {
 }
 
 #[test]
+fn leases_never_collide_with_a_name_already_taken() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 8, 0);
+    let leases = directory.path().join(LEASES_DIR);
+
+    let held: Vec<_> = (0..4)
+        .map(|_| pool.try_admit(1, None).unwrap().expect("permit"))
+        .collect();
+    let names: std::collections::BTreeSet<_> = std::fs::read_dir(&leases)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names.len(), 4, "every live lease has its own file");
+
+    // A pid is unique only inside its namespace, so a name that is merely
+    // "pid plus counter" collides between two containers sharing a cache --
+    // silently truncating a live holder's record. Stood in for by a lease
+    // somebody else holds the lock on, since that is what makes the name
+    // genuinely taken: an unlocked file of the same name is a dead holder's,
+    // and reclaiming it is correct.
+    let squatted = leases.join(format!("{}-{}-{}", std::process::id(), process_token(), 99));
+    std::fs::write(&squatted, b"another namespace's lease").unwrap();
+    let mut elsewhere = fslock::LockFile::open(&squatted).unwrap();
+    assert!(
+        elsewhere.try_lock().unwrap(),
+        "the stand-in holds its lease"
+    );
+
+    LEASE_NONCE.store(99, Ordering::Relaxed);
+    let next = pool.try_admit(1, None).unwrap().expect("permit");
+    assert_eq!(
+        std::fs::read(&squatted).unwrap(),
+        b"another namespace's lease",
+        "a name in use is left exactly as it was found"
+    );
+    drop(next);
+    drop(held);
+}
+
+#[test]
 fn weights_count_against_capacity() {
     let directory = tempfile::tempdir().unwrap();
     let pool = pool_at(directory.path(), 4, 0);

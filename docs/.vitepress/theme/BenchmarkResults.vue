@@ -158,7 +158,13 @@ function contentionRows(scenario: BenchmarkScenario) {
         ? `${cell.peak_compilers ?? 0} / ${cell.permits} permits`
         : `${cell.peak_compilers ?? 0}`,
       // Only Linux reports it, and only Linux runs the published benchmark.
-      memory: available ? `${(available / 1e9).toFixed(1)} GB` : "—",
+      // Zero is a real reading -- a machine that ran itself out -- and it is
+      // the single most interesting cell on the page, so it must not be
+      // rounded away into the same dash that means "never measured".
+      memory:
+        available === null || available === undefined
+          ? "—"
+          : `${(available / 1e9).toFixed(1)} GB`,
     };
   });
 }

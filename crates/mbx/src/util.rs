@@ -216,7 +216,12 @@ pub fn memory_total_bytes() -> Option<u64> {
     (ok == 0).then_some(total).filter(|total| *total > 0)
 }
 
-/// Physical memory installed in this machine, when it can be measured.
+/// Memory this process may actually use, when it can be measured.
+///
+/// The container's limit, where there is one, rather than the host's RAM. A
+/// build inside a 4GiB container on a 128GiB machine is budgeted by the 4GiB,
+/// because the other 124GiB are not its to spend and reaching for them is an
+/// out-of-memory kill rather than a slow build.
 #[cfg(target_os = "linux")]
 pub fn memory_total_bytes() -> Option<u64> {
     // SAFETY: `sysinfo` only writes into the zeroed struct it is given.
@@ -233,7 +238,59 @@ pub fn memory_total_bytes() -> Option<u64> {
     let unit = u64::from(info.mem_unit);
     #[allow(clippy::useless_conversion)]
     let total = u64::try_from(info.totalram).ok()?;
-    total.checked_mul(unit).filter(|total| *total > 0)
+    let physical = total.checked_mul(unit).filter(|total| *total > 0)?;
+    Some(match cgroup_memory_limit() {
+        Some(limit) => physical.min(limit),
+        None => physical,
+    })
+}
+
+/// The memory ceiling this process's cgroup imposes, if it imposes one.
+///
+/// Read at the root of the cgroup filesystem, which is what a container sees
+/// of its own limit through a cgroup namespace -- the ordinary Docker,
+/// Podman, and Kubernetes arrangement. A process placed in a nested cgroup
+/// *without* such a namespace reads the root's limit instead and is budgeted
+/// as though the nesting were not there; that is the same answer it had
+/// before any of this, so it loses nothing.
+#[cfg(target_os = "linux")]
+fn cgroup_memory_limit() -> Option<u64> {
+    // v2 states "max" for unlimited; v1 states a number so large it means the
+    // same thing, so anything at or above the host's addressable range is
+    // treated as no limit rather than as a budget.
+    read_cgroup_value("/sys/fs/cgroup/memory.max")
+        .or_else(|| read_cgroup_value("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
+}
+
+/// Memory the cgroup is already using, where a cgroup accounts for it.
+#[cfg(target_os = "linux")]
+fn cgroup_memory_usage() -> Option<u64> {
+    read_cgroup_value("/sys/fs/cgroup/memory.current")
+        .or_else(|| read_cgroup_value("/sys/fs/cgroup/memory/memory.usage_in_bytes"))
+}
+
+/// One cgroup number, or `None` for absent, unparseable, or "no limit".
+#[cfg(target_os = "linux")]
+fn read_cgroup_value(path: &str) -> Option<u64> {
+    read_cgroup_text(&std::fs::read_to_string(path).ok()?)
+}
+
+/// The parsing half, separated so it can be tested without a cgroup mount.
+#[cfg(any(target_os = "linux", test))]
+fn read_cgroup_text(contents: &str) -> Option<u64> {
+    let value = contents.trim();
+    if value == "max" {
+        return None;
+    }
+    // cgroup v1 spells "unlimited" as a page-aligned number near i64::MAX
+    // rather than in words. The largest machines built hold tens of
+    // tebibytes, so anything past a pebibyte is that idiom rather than a
+    // budget worth dividing into permits.
+    const NO_LIMIT: u64 = 1 << 50;
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|bytes| *bytes > 0 && *bytes < NO_LIMIT)
 }
 
 /// Physical memory installed in this machine, when it can be measured.
@@ -269,7 +326,8 @@ pub fn memory_total_bytes() -> Option<u64> {
 pub fn memory_available_bytes() -> Option<u64> {
     // `MemAvailable` is the kernel's own estimate of exactly this question,
     // accounting for reclaimable caches; summing fields by hand would just
-    // reimplement it worse.
+    // reimplement it worse. It describes the host, though -- `/proc/meminfo`
+    // is not namespaced -- so a container's own headroom bounds it below.
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
     let line = meminfo
         .lines()
@@ -280,7 +338,15 @@ pub fn memory_available_bytes() -> Option<u64> {
         .trim()
         .parse::<u64>()
         .ok()?;
-    kibibytes.checked_mul(1024).filter(|bytes| *bytes > 0)
+    let host = kibibytes.checked_mul(1024)?;
+    let available = match (cgroup_memory_limit(), cgroup_memory_usage()) {
+        (Some(limit), Some(used)) => host.min(limit.saturating_sub(used)),
+        (Some(limit), None) => host.min(limit),
+        _ => host,
+    };
+    // Zero is a real answer here -- a cgroup at its limit has nothing left --
+    // and the caller has to be able to tell it from "cannot measure".
+    Some(available)
 }
 
 /// Memory the machine could hand a new process right now, when measurable.
@@ -368,6 +434,23 @@ pub fn random_string(length: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cgroup_limits_are_read_and_no_limit_is_recognized() {
+        assert_eq!(
+            read_cgroup_text("4294967296\n"),
+            Some(4 * 1024 * 1024 * 1024)
+        );
+        // cgroup v2 spells "unlimited" in words.
+        assert_eq!(read_cgroup_text("max\n"), None);
+        // cgroup v1 spells it as a number nothing real could reach. Budgeting
+        // permits out of it would be the same as having no limit, but with
+        // arithmetic in between.
+        assert_eq!(read_cgroup_text("9223372036854771712"), None);
+        assert_eq!(read_cgroup_text("0"), None);
+        assert_eq!(read_cgroup_text("not a number"), None);
+        assert_eq!(read_cgroup_text(""), None);
+    }
 
     #[test]
     fn writes_files_atomically() {
