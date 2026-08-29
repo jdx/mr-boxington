@@ -4,7 +4,10 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/.." && pwd)"
+repo_root="${MBX_PGO_REPO_ROOT:-}"
+if [ -z "$repo_root" ]; then
+	repo_root="$(cd "$script_dir/.." && pwd)"
+fi
 cd "$repo_root"
 
 pgo_target="${MBX_PGO_TARGET:-}"
