@@ -54,11 +54,11 @@ cannot be combined for the same build.
 
 ## kache
 
-[kache](https://github.com/kunobi-ninja/kache) is the closest tool to mbx, and
-it predates mbx and directly inspired its design. No code is shared between
-the projects, but the influence is real and worth saying plainly. mbx began as
-the Rust cache inside the [mise](https://github.com/jdx/mise) task runner and
-was extracted into its own CLI to chase three things: less to operate, a
+[kache](https://github.com/kunobi-ninja/kache) is the closest tool to mbx: it
+predates mbx and directly inspired its design, though the projects share no
+code. mbx began as the Rust cache inside the
+[mise](https://github.com/jdx/mise) task runner and was extracted into its
+own CLI to chase three things: less to operate, a
 better day-to-day experience, and something safe to switch on in a public
 repository that takes fork pull requests. The differences below are mostly
 those three goals.
