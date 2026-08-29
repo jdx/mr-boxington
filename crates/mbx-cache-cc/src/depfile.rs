@@ -160,6 +160,7 @@ impl CcDiscoveredInputs {
                 working_dir.to_path_buf(),
             ));
         }
+        let directories = minimal_manifest_directories(directories);
         if files.len() + directories.len() > MAX_PREDICTED_INPUTS {
             return Err(CcBypassReason::TooManyInputs);
         }
@@ -306,6 +307,26 @@ impl CcDiscoveredInputs {
     }
 }
 
+/// Drop include directories already covered by an ancestor's recursive manifest.
+///
+/// Discovered headers often contribute hundreds of nested parent directories,
+/// especially for amalgamated C sources. Keeping both an ancestor and its
+/// descendants walks and hashes the same subtree repeatedly, and can exhaust
+/// the manifest-entry budget even though the ancestor already names every
+/// includable file below it.
+fn minimal_manifest_directories(directories: BTreeSet<PathBuf>) -> Vec<PathBuf> {
+    let mut minimal = Vec::<PathBuf>::new();
+    for directory in directories {
+        if !minimal
+            .iter()
+            .any(|ancestor| directory.starts_with(ancestor))
+        {
+            minimal.push(directory);
+        }
+    }
+    minimal
+}
+
 fn is_manifest_input(path: &Path) -> bool {
     path.to_str()
         .is_some_and(|path| path.starts_with(INCLUDE_MANIFEST_PREFIX))
@@ -322,10 +343,10 @@ pub fn manifest_snapshot(
     directories: &BTreeSet<PathBuf>,
 ) -> Result<BTreeMap<PathBuf, CacheDigest>, CcBypassReason> {
     let mut budget = 0_usize;
-    directories
-        .iter()
+    minimal_manifest_directories(directories.iter().cloned().collect())
+        .into_iter()
         .map(|directory| {
-            include_manifest(directory, &mut budget).map(|digest| (directory.clone(), digest))
+            include_manifest(&directory, &mut budget).map(|digest| (directory, digest))
         })
         .collect()
 }

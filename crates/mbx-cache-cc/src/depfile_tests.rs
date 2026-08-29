@@ -57,6 +57,22 @@ fn write(directory: &Path, name: &str, contents: &str) -> PathBuf {
 }
 
 #[test]
+fn recursive_manifests_drop_directories_an_ancestor_already_covers() {
+    let root = PathBuf::from("/workspace/include");
+    let directories = BTreeSet::from([
+        root.join("crypto/fipsmodule"),
+        root.clone(),
+        root.join("crypto"),
+        PathBuf::from("/workspace/generated"),
+    ]);
+
+    assert_eq!(
+        minimal_manifest_directories(directories),
+        [PathBuf::from("/workspace/generated"), root]
+    );
+}
+
+#[test]
 fn timestamp_macro_tokens_in_any_read_file_bypass() {
     let directory = tempfile::tempdir().expect("tempdir");
     let root = directory.path();
