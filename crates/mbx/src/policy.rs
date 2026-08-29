@@ -2,8 +2,7 @@
 //!
 //! Cache writes are only trusted from a CI context that a pull request cannot
 //! influence, so untrusted contexts read the remote cache but never publish to
-//! it. Release builds do not participate at all, and CI never compiles
-//! incrementally.
+//! it. CI never compiles incrementally.
 
 use mbx_cache_core::RemoteCacheMode;
 
@@ -25,11 +24,6 @@ fn effective_remote_cache_mode_with(
         RemoteCacheMode::ReadWrite | RemoteCacheMode::ReadOnly => Some(RemoteCacheMode::ReadOnly),
         RemoteCacheMode::WriteOnly => None,
     }
-}
-
-/// Whether this is a release build, which never uses the cache.
-pub fn release_context() -> bool {
-    release_context_with(|name| std::env::var(name).ok())
 }
 
 /// Whether incremental compilation is worth allowing here.
@@ -75,14 +69,6 @@ fn trusted_cache_writer(get_env: &impl Fn(&str) -> Option<String>) -> bool {
             && env_truthy(get_env("CI_COMMIT_REF_PROTECTED"));
     }
     false
-}
-
-fn release_context_with(get_env: impl Fn(&str) -> Option<String>) -> bool {
-    env_truthy(get_env("MBX_RELEASE"))
-        || (env_truthy(get_env("GITHUB_ACTIONS"))
-            && (get_env("GITHUB_REF_TYPE").as_deref() == Some("tag")
-                || get_env("GITHUB_EVENT_NAME").as_deref() == Some("release")))
-        || (env_truthy(get_env("GITLAB_CI")) && get_env("CI_COMMIT_TAG").is_some())
 }
 
 fn env_truthy(value: Option<String>) -> bool {
@@ -158,6 +144,31 @@ mod tests {
     }
 
     #[test]
+    fn release_markers_do_not_disable_the_cache() {
+        let release = env(&[
+            ("MBX_RELEASE", "1"),
+            ("GITHUB_ACTIONS", "true"),
+            ("GITHUB_EVENT_NAME", "push"),
+            ("GITHUB_REF_TYPE", "branch"),
+            ("GITHUB_REF_PROTECTED", "true"),
+        ]);
+        assert_eq!(
+            effective_remote_cache_mode_with(RemoteCacheMode::ReadWrite, &release),
+            Some(RemoteCacheMode::ReadWrite)
+        );
+
+        let tag = env(&[
+            ("GITHUB_ACTIONS", "true"),
+            ("GITHUB_EVENT_NAME", "push"),
+            ("GITHUB_REF_TYPE", "tag"),
+        ]);
+        assert_eq!(
+            effective_remote_cache_mode_with(RemoteCacheMode::ReadWrite, &tag),
+            Some(RemoteCacheMode::ReadOnly)
+        );
+    }
+
+    #[test]
     fn ci_never_compiles_incrementally() {
         assert!(!incremental_allowed_with(true, env(&[("CI", "true")])));
         assert!(incremental_allowed_with(true, env(&[])));
@@ -172,22 +183,5 @@ mod tests {
         ));
         assert!(learned_incremental_allowed_with(true, env(&[])));
         assert!(!learned_incremental_allowed_with(false, env(&[])));
-    }
-
-    #[test]
-    fn tags_and_releases_are_release_contexts() {
-        assert!(release_context_with(env(&[("MBX_RELEASE", "1")])));
-        assert!(release_context_with(env(&[
-            ("GITHUB_ACTIONS", "1"),
-            ("GITHUB_REF_TYPE", "tag"),
-        ])));
-        assert!(release_context_with(env(&[
-            ("GITLAB_CI", "1"),
-            ("CI_COMMIT_TAG", "v1.0.0"),
-        ])));
-        assert!(!release_context_with(env(&[
-            ("GITHUB_ACTIONS", "1"),
-            ("GITHUB_REF_TYPE", "branch"),
-        ])));
     }
 }

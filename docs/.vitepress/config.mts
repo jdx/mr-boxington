@@ -37,7 +37,7 @@ export default defineConfig({
     nav: [
       { text: "Get Started", link: "/getting-started" },
       { text: "Configuration", link: "/configuration" },
-      { text: "GitHub Actions", link: "/github-actions" },
+      { text: "GitHub Action", link: "/github-action" },
       { text: "CLI", link: "/cli/" },
       {
         text: `v${latestVersion}`,
@@ -56,7 +56,7 @@ export default defineConfig({
         text: "Use mbx",
         items: [
           { text: "Configuration", link: "/configuration" },
-          { text: "GitHub Actions", link: "/github-actions" },
+          { text: "GitHub Action", link: "/github-action" },
           { text: "Remote cache", link: "/remote-cache" },
           { text: "Cache server", link: "/cache-server" },
           { text: "Managed targets", link: "/managed-targets" },

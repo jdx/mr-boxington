@@ -254,5 +254,5 @@ rather than a public thread; see
 ## Next steps
 
 - Tune local behavior in [Configuration](/configuration).
-- Warm pull requests with [GitHub Actions cache](/github-actions).
+- Warm pull requests with [GitHub Actions cache](/github-action).
 - Learn what enters a key in [How it works](/how-it-works).

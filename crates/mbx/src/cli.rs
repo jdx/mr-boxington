@@ -380,7 +380,7 @@ fn strings(arguments: &[std::ffi::OsString]) -> Result<Vec<String>> {
 }
 
 fn prefetch(config: &Config, arguments: &[String]) -> Result<ExitCode> {
-    validate_prefetch_config(config, policy::release_context())?;
+    validate_prefetch_config(config)?;
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let working_dir = std::env::current_dir()?;
     let roots = resolve_roots(&cargo, arguments, &working_dir);
@@ -406,15 +406,12 @@ fn prefetch(config: &Config, arguments: &[String]) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn validate_prefetch_config(config: &Config, release_context: bool) -> Result<()> {
+fn validate_prefetch_config(config: &Config) -> Result<()> {
     if config.remote.url.is_none() {
         eyre::bail!("remote prefetch requires remote.url or MBX_REMOTE_URL");
     }
     if !config.remote.mode.reads() {
         eyre::bail!("remote prefetch requires a read-capable remote.mode");
-    }
-    if release_context {
-        eyre::bail!("remote prefetch is disabled in release contexts");
     }
     Ok(())
 }
@@ -614,13 +611,6 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
 ) -> Result<ExitCode> {
     let retention = &settings.retention;
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    // Release builds publish artifacts that must not depend on a cache, and a
-    // tag build has no later build to share with anyway.
-    if policy::release_context() {
-        log::warn!("the build cache is disabled for release builds");
-        return run_cargo(&cargo, arguments, BTreeMap::new());
-    }
-
     // Only where mbx can identify the linker precisely enough to key what it
     // produced. Said out loud only to somebody who asked for it: this is on
     // by default now, and a platform that cannot do it would otherwise warn
@@ -837,13 +827,6 @@ fn exec(config: &Config, settings: &CliSettings, args: &ExecArgs) -> Result<Exit
         eyre::bail!("exec needs a command to run");
     };
     let program: std::ffi::OsString = program.into();
-    // The same two stand-asides as a cargo build: a release build must not
-    // depend on a cache, and MBX_CC=0 turns the C and C++ cache off -- which
-    // is all of what this command caches.
-    if policy::release_context() {
-        log::warn!("the build cache is disabled for release builds");
-        return run_cargo(&program, arguments, BTreeMap::new());
-    }
     let working_dir = std::env::current_dir()?;
     let project_root = match &args.project_root {
         Some(root) => absolute(&working_dir, root),

@@ -67,5 +67,5 @@ across them.
 ## Turning it off
 
 `MBX_CC=0` disables the C and C++ cache, which is all `mbx exec` caches, so
-the command runs plainly. Tag and release builds run plainly always, exactly
-as cargo builds do.
+the command runs plainly. For production releases, run the build tool directly
+instead of through `mbx` so published artifacts do not depend on cached output.

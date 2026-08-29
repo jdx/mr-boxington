@@ -309,18 +309,12 @@ fn setup_paths() -> Option<(PathBuf, PathBuf)> {
 }
 
 async fn remote_checks(config: &Config) -> Vec<Check> {
-    let release_context = policy::release_context();
-    let effective_mode = if release_context {
-        None
-    } else {
-        policy::effective_remote_cache_mode(config.remote.mode)
-    };
-    remote_checks_with_policy(config, release_context, effective_mode).await
+    let effective_mode = policy::effective_remote_cache_mode(config.remote.mode);
+    remote_checks_with_policy(config, effective_mode).await
 }
 
 async fn remote_checks_with_policy(
     config: &Config,
-    release_context: bool,
     effective_mode: Option<mbx_cache_core::RemoteCacheMode>,
 ) -> Vec<Check> {
     let Some(base_url) = config
@@ -335,14 +329,10 @@ async fn remote_checks_with_policy(
             "not configured; using the local cache",
         )];
     };
-    let effective = if release_context {
-        "disabled in this release context".to_string()
-    } else {
-        effective_mode.map_or_else(
-            || "disabled by cache write policy".to_string(),
-            |mode| mode.to_string(),
-        )
-    };
+    let effective = effective_mode.map_or_else(
+        || "disabled by cache write policy".to_string(),
+        |mode| mode.to_string(),
+    );
     let policy = Check::pass(
         "policy",
         format!("configured {}, effective {effective}", config.remote.mode),
@@ -450,7 +440,6 @@ mod tests {
             .unwrap();
         let checks = runtime.block_on(remote_checks_with_policy(
             &config,
-            false,
             Some(mbx_cache_core::RemoteCacheMode::ReadOnly),
         ));
         let failure = checks
@@ -485,7 +474,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let checks = runtime.block_on(remote_checks_with_policy(&config, false, None));
+        let checks = runtime.block_on(remote_checks_with_policy(&config, None));
 
         assert!(checks.iter().all(|check| check.severity == Severity::Pass));
         assert!(checks.iter().any(|check| {

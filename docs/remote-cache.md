@@ -133,7 +133,7 @@ Configured mode is constrained by the environment:
 | --- | --- |
 | Protected branch push on GitHub Actions or GitLab CI | Configured mode |
 | Pull request, merge request, local shell, or unprotected branch | Read-only; `write-only` becomes disabled |
-| Tag or release build | All caching disabled — mbx runs plain Cargo |
+| Tag or release build | Read-only; `write-only` becomes disabled |
 
 This policy prevents untrusted code from publishing objects that later builds
 would trust. The server should still authenticate and authorize requests; the
@@ -143,7 +143,7 @@ client-side policy is defense in depth, not an access-control boundary.
 
 The write policy recognizes GitLab CI with the same shape as GitHub Actions: a
 push pipeline on a protected branch may write, merge requests and unprotected
-branches are read-only, and tag pipelines do not use the remote at all.
+branches are read-only, and tag pipelines cannot publish to the remote.
 
 The OIDC flow is GitHub-specific, so authenticate GitLab jobs with a bearer
 token in a masked, protected CI/CD variable:

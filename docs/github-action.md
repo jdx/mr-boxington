@@ -1,4 +1,4 @@
-# GitHub Actions
+# GitHub Action
 
 [`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action)
 installs mbx and connects it to either GitHub Actions cache or an mbx-compatible
@@ -90,10 +90,10 @@ steps:
   - run: mbx build --workspace --all-features
 ```
 
-Only a push to a protected branch may write. Pull requests degrade to read-only,
-and tag or release builds do not use the remote cache at all. If fork authors
-must not reach the host, use the GitHub backend for those jobs instead. A bearer
-token can be supplied with the action's `token` input when OIDC is unavailable.
+Only a push to a protected branch may write. Pull requests and tag or release
+builds degrade to read-only. If fork authors must not reach the host, use the
+GitHub backend for those jobs instead. A bearer token can be supplied with the
+action's `token` input when OIDC is unavailable.
 
 ## S3-compatible bucket
 
@@ -134,11 +134,11 @@ server to authorize anything, make IAM agree: scope the role's trust policy to
 the branches allowed to assume it, and give pull request jobs a role that can
 only read. See [remote cache](/remote-cache#who-may-publish).
 
-::: warning Release builds are never cached
-In a tag or release build (or with `MBX_RELEASE=1`), mbx runs plain Cargo —
-no local or remote cache — because published artifacts must not depend on any
-cache being correct. Hold the rest of the workflow to the same rule: release
-jobs should not restore `target/` through `actions/cache` or rust-cache, and
+::: warning Do not cache production releases
+mbx permits caching in tag and release jobs so workflows can test release
+builds. A production release should run Cargo directly, without `mbx`, because
+published artifacts must not depend on any cache being correct. Release jobs
+should also avoid restoring `target/` through `actions/cache` or rust-cache and
 should not use any other compiler cache.
 :::
 
