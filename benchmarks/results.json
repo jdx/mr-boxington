@@ -1,0 +1,149 @@
+{
+  "schema": 1,
+  "subject": "hk",
+  "revision": "fc29ead1456ba7c1f62826c284126410a4014b00",
+  "toolchain": "1.97.1",
+  "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+  "runner": "GitHub Actions 1000680189",
+  "workflow_run": "33228589507",
+  "commit": "c320ef3fd64f195ca4456d51e45616fe8c31e230",
+  "versions": {
+    "mbx": "0.7.0",
+    "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "kache": "kache 0.16.0"
+  },
+  "passed": true,
+  "failures": [],
+  "scenarios": [
+    {
+      "scenario": "cold",
+      "description": "empty store, fresh target -- a first build on a new machine",
+      "timed": true,
+      "results": [
+        {
+          "tool": "cargo",
+          "wall_duration_ns": 89025729339
+        },
+        {
+          "tool": "mbx",
+          "wall_duration_ns": 93767923422,
+          "stats": {
+            "lookups": 2,
+            "hits": 2,
+            "misses": 0,
+            "unconsulted": 726,
+            "predictions_loaded": 0,
+            "restored_output_files": 2,
+            "restored_output_bytes": 2624
+          }
+        },
+        {
+          "tool": "kache",
+          "wall_duration_ns": 102311465973
+        }
+      ],
+      "skipped": []
+    },
+    {
+      "scenario": "warm",
+      "description": "warm store, fresh target -- CI restoring a cache for the same commit",
+      "timed": true,
+      "results": [
+        {
+          "tool": "mbx",
+          "wall_duration_ns": 36514320997,
+          "stats": {
+            "lookups": 719,
+            "hits": 718,
+            "misses": 1,
+            "unconsulted": 9,
+            "predictions_loaded": 716,
+            "restored_output_files": 1218,
+            "restored_output_bytes": 793317714
+          }
+        },
+        {
+          "tool": "kache",
+          "wall_duration_ns": 30192672992
+        }
+      ],
+      "skipped": []
+    },
+    {
+      "scenario": "commit",
+      "description": "store warmed at the parent commit, build the child -- push-to-push CI",
+      "timed": true,
+      "results": [
+        {
+          "tool": "cargo",
+          "wall_duration_ns": 89094430600
+        },
+        {
+          "tool": "mbx",
+          "wall_duration_ns": 36445541175,
+          "stats": {
+            "lookups": 719,
+            "hits": 718,
+            "misses": 1,
+            "unconsulted": 9,
+            "predictions_loaded": 716,
+            "restored_output_files": 1218,
+            "restored_output_bytes": 793318362
+          }
+        },
+        {
+          "tool": "kache",
+          "wall_duration_ns": 41568348861
+        }
+      ],
+      "skipped": []
+    },
+    {
+      "scenario": "worktree",
+      "description": "warm store, second checkout at a different path",
+      "timed": true,
+      "results": [
+        {
+          "tool": "mbx",
+          "wall_duration_ns": 49757510602,
+          "stats": {
+            "lookups": 719,
+            "hits": 683,
+            "misses": 36,
+            "unconsulted": 9,
+            "predictions_loaded": 716,
+            "restored_output_files": 1113,
+            "restored_output_bytes": 549621377
+          }
+        },
+        {
+          "tool": "kache",
+          "wall_duration_ns": 30366841101
+        }
+      ],
+      "skipped": []
+    },
+    {
+      "scenario": "toolchain",
+      "description": "store warmed on the pinned toolchain, rebuild on another",
+      "timed": false,
+      "results": [
+        {
+          "tool": "mbx",
+          "wall_duration_ns": 97949335931,
+          "stats": {
+            "lookups": 2,
+            "hits": 2,
+            "misses": 0,
+            "unconsulted": 726,
+            "predictions_loaded": 716,
+            "restored_output_files": 2,
+            "restored_output_bytes": 2624
+          }
+        }
+      ],
+      "skipped": []
+    }
+  ]
+}
