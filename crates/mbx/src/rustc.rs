@@ -338,14 +338,13 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             let action = if learned.engaged() {
                 &candidates.literal
             } else {
-                let action = publish_result(
+                publish_result(
                     &candidates,
                     &portable,
                     &outputs,
                     &output,
                     &portable.mappings,
-                )?;
-                action
+                )?
             };
             // The flight prediction is only left behind a *published* result:
             // an incremental artifact was withheld from the store, so a
