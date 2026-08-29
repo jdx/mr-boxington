@@ -22,11 +22,12 @@ nothing to install into Cargo: put `mbx` in front of the command you already
 run.
 
 > [!NOTE]
-> mbx is deeply inspired by [kache](https://github.com/kunobi-ninja/kache),
-> which demonstrated how a content-addressed Rust compiler cache could share
-> work across checkouts and machines. Its ideas helped shape mbx from the
-> beginning. kache has also been around longer and is the more proven choice
-> today. [Read the full acknowledgement](https://mr-boxington.jdx.dev/acknowledgements).
+> mbx stands on [Cargo](https://github.com/rust-lang/cargo), follows the
+> compiler-caching trail established by
+> [sccache](https://github.com/mozilla/sccache), and is deeply inspired by
+> [kache](https://github.com/kunobi-ninja/kache). kache has also been around
+> longer and is the more proven choice today.
+> [Read the full acknowledgement](https://mr-boxington.jdx.dev/acknowledgements).
 
 ```sh
 mbx build                  # cargo build, with caching

@@ -23,12 +23,14 @@ hero:
       link: /benchmarks
 ---
 
-## With thanks to kache
+## With thanks to Cargo, sccache, and kache
 
-mbx is deeply inspired by [kache](https://github.com/kunobi-ninja/kache).
-kache demonstrated how a content-addressed Rust compiler cache could share
-work across checkouts and machines, and its ideas helped shape mbx from the
-beginning. It has also been around longer and is the more proven choice today.
-We are grateful to its maintainers for the path they opened.
+[Cargo](https://github.com/rust-lang/cargo) is the foundation mbx runs on, and
+its `RUSTC_WRAPPER` integration makes Rust compiler caches possible.
+[sccache](https://github.com/mozilla/sccache) established compiler caching in
+the Rust ecosystem. [kache](https://github.com/kunobi-ninja/kache) most
+directly inspired mbx's design; it has also been around longer and is the more
+proven choice today. We are grateful to all of their maintainers and
+contributors.
 
-[Read about kache's influence on mbx →](/acknowledgements)
+[Read the acknowledgements →](/acknowledgements)

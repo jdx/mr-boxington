@@ -1,9 +1,9 @@
 # How mbx compares
 
-::: info An important influence
-mbx is deeply inspired by [kache](https://github.com/kunobi-ninja/kache), the
-project that most directly shaped it. See the
-[acknowledgements](/acknowledgements) for a fuller account of that debt.
+::: info Standing on earlier work
+mbx runs on Cargo, follows the compiler-caching trail established by sccache,
+and is deeply inspired by kache, the project that most directly shaped it. See
+the [acknowledgements](/acknowledgements) for a fuller account of those debts.
 :::
 
 ## sccache
