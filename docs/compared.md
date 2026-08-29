@@ -58,10 +58,10 @@ cannot be combined for the same build.
 predates mbx and directly inspired its design, though the projects share no
 code. mbx began as the Rust cache inside the
 [mise](https://github.com/jdx/mise) task runner and was extracted into its
-own CLI to chase three things: less to operate, a
-better day-to-day experience, and something safe to switch on in a public
-repository that takes fork pull requests. The differences below are mostly
-those three goals.
+own CLI to chase three things: less to operate, a better day-to-day
+experience, and tight limits on what CI can write to a shared cache — the
+concern that matters most in a public repository that takes fork pull
+requests. The differences below are mostly those three goals.
 
 Like mbx, kache is a content-addressed `RUSTC_WRAPPER` cache built for sharing
 compilations across worktrees, with C and C++ compiler shims, S3-compatible
