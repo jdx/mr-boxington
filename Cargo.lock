@@ -1401,6 +1401,7 @@ dependencies = [
  "mbx-cache-core",
  "mbx-cache-rustc",
  "mbx-cache-store",
+ "memchr",
  "rand 0.10.2",
  "ratatui",
  "reflink-copy",

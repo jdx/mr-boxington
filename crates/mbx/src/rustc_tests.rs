@@ -117,25 +117,21 @@ fn an_output_carrying_a_normalized_value_is_not_portable() {
     std::fs::write(&carries, format!("compiled in {out_dir} at some offset")).unwrap();
 
     let portable = portable_for(&[out_dir]);
-    assert!(
-        portable
-            .outputs_are_clean(std::slice::from_ref(&clean))
-            .unwrap()
-    );
-    assert!(
-        !portable
-            .outputs_are_clean(std::slice::from_ref(&carries))
-            .unwrap()
-    );
+    assert!(portable.contents_are_clean(&std::fs::read(&clean).unwrap()));
+    assert!(!portable.contents_are_clean(&std::fs::read(&carries).unwrap()));
     // One dirty output is enough: the artifact is published as a set.
-    assert!(!portable.outputs_are_clean(&[clean, carries]).unwrap());
+    assert!(
+        ![clean, carries]
+            .iter()
+            .all(|output| portable.contents_are_clean(&std::fs::read(output).unwrap()))
+    );
 }
 
 /// Nothing was made portable, so there is no portable key to publish under
 /// and no claim to check.
 #[test]
 fn nothing_portable_is_never_clean() {
-    assert!(!portable_for(&[]).outputs_are_clean(&[]).unwrap());
+    assert!(!portable_for(&[]).contents_are_clean(b"an artifact"));
 }
 
 #[test]

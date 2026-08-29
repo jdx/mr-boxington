@@ -279,7 +279,7 @@ Permit priority of this build's compilations.
 ### `share_out_dir`
 
 - **Type:** `bool`
-- **Default:** `false`
+- **Default:** `true`
 - **Set with:** `MBX_SHARE_OUT_DIR`
 
 Share eligible compilations that read `OUT_DIR`.

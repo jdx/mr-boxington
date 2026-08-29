@@ -128,13 +128,14 @@ The shims are only installed when the build has not chosen its own compiler.
 Setting `CC`, `CXX`, `HOST_CC`, `HOST_CXX`, `TARGET_CC`, or `TARGET_CXX` leaves
 that build's C compilations uncached, and `MBX_CC=0` disables the feature.
 
-## `OUT_DIR` sharing is opt-in
+## `OUT_DIR` sharing remaps generated source paths
 
 A generated source path can contain an absolute checkout-specific `OUT_DIR`.
-`MBX_SHARE_OUT_DIR=1` remaps the path and inspects outputs before choosing a
-shared key, but generated sources then appear in debug info under a placeholder
-path. It cannot detect a value derived from the path without embedding the path
-itself.
+mbx remaps the path and inspects outputs before choosing a shared key, but
+generated sources then appear in debug info under a placeholder path. It cannot
+detect a value derived from the path without embedding the path itself. Set
+`MBX_SHARE_OUT_DIR=0` to keep generated source paths literal at the cost of
+cross-checkout cache sharing for their dependent crates.
 
 ## Incremental output reduces sharing
 

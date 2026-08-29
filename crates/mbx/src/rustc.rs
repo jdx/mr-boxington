@@ -338,10 +338,9 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             let action = if learned.engaged() {
                 &candidates.literal
             } else {
-                let action = candidates.publishable(&portable, &outputs.files)?;
-                publish_result(
-                    &action.digest,
-                    &action.bytes,
+                let action = publish_result(
+                    &candidates,
+                    &portable,
                     &outputs,
                     &output,
                     &portable.mappings,
@@ -711,10 +710,10 @@ impl ActionCandidates {
     /// itself, but not one a crate reads through `env!` and keeps as a string,
     /// and nothing in the inputs distinguishes the two shapes -- so the outputs
     /// are read.
-    fn publishable(&self, portable: &Portable, outputs: &[PathBuf]) -> Result<&RustcAction> {
+    fn publishable(&self, outputs_are_clean: bool) -> &RustcAction {
         match &self.portable {
-            Some(action) if portable.outputs_are_clean(outputs)? => Ok(action),
-            _ => Ok(&self.literal),
+            Some(action) if outputs_are_clean => action,
+            _ => &self.literal,
         }
     }
 
@@ -1614,18 +1613,8 @@ impl Portable {
     /// construction, and is restored as written for every action that already
     /// shares across checkouts today. Judging the artifact by it would reject
     /// every compilation.
-    fn outputs_are_clean(&self, outputs: &[PathBuf]) -> Result<bool> {
-        if self.values.is_empty() {
-            return Ok(false);
-        }
-        for output in outputs {
-            let contents = std::fs::read(output)
-                .wrap_err_with(|| format!("failed to read rustc output {}", output.display()))?;
-            if self.values.iter().any(|value| carries(&contents, value)) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+    fn contents_are_clean(&self, contents: &[u8]) -> bool {
+        !self.values.is_empty() && !self.values.iter().any(|value| carries(contents, value))
     }
 }
 
@@ -1642,18 +1631,7 @@ fn carries(contents: &[u8], value: &str) -> bool {
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    let Some((first, rest)) = needle.split_first() else {
-        return false;
-    };
-    let mut offset = 0;
-    while let Some(index) = haystack[offset..].iter().position(|byte| byte == first) {
-        let start = offset + index;
-        if haystack[start + 1..].starts_with(rest) {
-            return true;
-        }
-        offset = start + 1;
-    }
-    false
+    !needle.is_empty() && memchr::memmem::find(haystack, needle).is_some()
 }
 
 fn path_mappings(
@@ -1781,18 +1759,18 @@ fn replay_output(output: &Output) -> Result<()> {
     replay_bytes(&output.stdout, &output.stderr)
 }
 
-fn publish_result(
-    action: &CacheDigest,
-    action_bytes: &[u8],
+fn publish_result<'a>(
+    candidates: &'a ActionCandidates,
+    portable: &Portable,
     outputs: &RustcOutputs,
     output: &Output,
     mappings: &[PathMapping],
-) -> Result<()> {
+) -> Result<&'a RustcAction> {
     if outputs.files.is_empty() {
         bail!("rustc produced no cacheable outputs");
     }
     let staging = staging_directory()?;
-    let mut blobs = vec![staged_bytes(staging.path(), "action.json", action_bytes)?];
+    let mut blobs = Vec::new();
     let stdout = staged_bytes(
         staging.path(),
         "stdout",
@@ -1811,6 +1789,7 @@ fn publish_result(
         .chain(std::iter::once(&outputs.dep_info));
     let mut files = Vec::with_capacity(outputs.files.len() + 1);
     let mut hashed_outputs = Vec::with_capacity(outputs.files.len());
+    let mut portable_outputs_are_clean = candidates.portable.is_some();
     for path in output_paths {
         let metadata = std::fs::metadata(path)
             .wrap_err_with(|| format!("failed to inspect rustc output {}", path.display()))?;
@@ -1826,7 +1805,18 @@ fn publish_result(
             blobs.push(staged.clone());
             staged.0
         } else {
-            let digest = CacheDigest::blake3_file(path)?;
+            // When a portable key is possible, inspect the same bytes used to
+            // hash the artifact. Reading first and then calling `blake3_file`
+            // made cold builds read every output twice merely to decide which
+            // action key could safely name it.
+            let digest = if candidates.portable.is_some() {
+                let contents = std::fs::read(path)
+                    .wrap_err_with(|| format!("failed to read rustc output {}", path.display()))?;
+                portable_outputs_are_clean &= portable.contents_are_clean(&contents);
+                CacheDigest::blake3(&contents)
+            } else {
+                CacheDigest::blake3_file(path)?
+            };
             blobs.push((digest.clone(), path.clone()));
             // Freshly compiled artifacts enter the ledger too: on a cold
             // build these are exactly the rlibs every dependent is about to
@@ -1857,6 +1847,9 @@ fn publish_result(
     files.sort_by(|left, right| left.name.cmp(&right.name));
     session::record_file_digests(FileDigestScope::Content, hashed_outputs);
 
+    let action = candidates.publishable(portable_outputs_are_clean);
+    blobs.push(staged_bytes(staging.path(), "action.json", &action.bytes)?);
+
     let metadata = canonical_json(&RustcMetadata {
         version: 1,
         kind: "rustc".into(),
@@ -1883,7 +1876,7 @@ fn publish_result(
     }
     requests.push(AgentRequest::StoreActionResult {
         result: RemoteActionResult {
-            action: action.clone(),
+            action: action.digest.clone(),
             metadata: Some(metadata.0),
             output_root: Some(directory.0),
             version: 1,
@@ -1896,7 +1889,7 @@ fn publish_result(
             _ => bail!("cache agent returned an unexpected publish response"),
         }
     }
-    Ok(())
+    Ok(action)
 }
 
 fn staged_bytes(directory: &Path, name: &str, bytes: &[u8]) -> Result<(CacheDigest, PathBuf)> {

@@ -92,8 +92,9 @@ The usual causes, roughly in the order they show up:
   reports it as an ordinary miss. `cargo tree` and comparing the two commands
   usually finds it.
 - **Build-script output paths.** A crate that embeds its `OUT_DIR` produces
-  checkout-specific inputs for its dependents. `MBX_SHARE_OUT_DIR=1` remaps
-  it; see [limits](/limits#out_dir-sharing-is-opt-in).
+  checkout-specific inputs for its dependents. mbx remaps this by default;
+  `MBX_SHARE_OUT_DIR=0` disables that sharing. See
+  [limits](/limits#out_dir-sharing-remaps-generated-source-paths).
 - **A build chose its own C compiler, or is cross-compiling.** Setting `CC`,
   `HOST_CC`, or a target-specific variant leaves that build's C and C++
   compilations uncached, and so does `--target`. Bypass kinds beginning `cc-`

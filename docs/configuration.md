@@ -26,7 +26,7 @@ Every value below is optional; these are shown set explicitly.
 # <config directory>/mbx/config.toml
 cache_dir = "/var/cache/mbx"
 incremental = false
-share_out_dir = false
+share_out_dir = true
 cc = true
 savings = "quips"        # or "plain", "off"
 
@@ -75,6 +75,9 @@ Environment variables still win. Machine paths, remote-cache configuration,
 credentials, diagnostics, target placement, and garbage collection are not
 accepted from a repository-owned file. mbx reports an error instead of applying
 an unsafe or misspelled workspace setting.
+
+`share_out_dir = true` is the global default. A workspace may set it to false
+when generated source paths must remain literal in debug information.
 
 ## Build-script C and C++
 
