@@ -134,6 +134,21 @@ export default defineConfig({
     footer: false,
   },
   head: [
+    [
+      "script",
+      {
+        async: "",
+        src: "https://www.googletagmanager.com/gtag/js?id=G-0MDX8ZJYFY",
+      },
+    ],
+    [
+      "script",
+      {},
+      `window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-0MDX8ZJYFY');`,
+    ],
     ["link", { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" }],
     ["link", { rel: "alternate icon", href: "/favicon.png", type: "image/png" }],
     ["link", { rel: "preconnect", href: "https://fonts.googleapis.com" }],
