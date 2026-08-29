@@ -194,6 +194,9 @@ fn build_with(
         // must not read an answer out of the developer's environment.
         .env_remove("MBX_SHARE_OUT_DIR")
         .env_remove("MBX_LEARNED_INCREMENTAL")
+        // Native links are cached by default and several counts here include
+        // one, so an inherited answer would decide them.
+        .env_remove("MBX_CACHE_LINKS")
         // The C shims are on by default; a test that says nothing about them
         // must not inherit a different answer from the developer's shell. The
         // compiler variables matter just as much: this suite is itself run

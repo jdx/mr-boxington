@@ -7,7 +7,10 @@ setup() {
   export CARGO_HOME="${CARGO_HOME:-$developer_home/.cargo}"
   _common_setup
 
-  unset CARGO_TARGET_DIR MBX_INCREMENTAL CARGO_INCREMENTAL CI
+  # MBX_CACHE_LINKS above all: two cases here state what an unconfigured
+  # machine does, and an inherited value would answer for it -- a leftover
+  # 1 hiding a regression in the default, a leftover 0 failing the counts.
+  unset CARGO_TARGET_DIR MBX_INCREMENTAL CARGO_INCREMENTAL CI MBX_CACHE_LINKS
   export MBX_CACHE_DIR="$BATS_TEST_TMPDIR/store"
 
   export PROJECT="$BATS_TEST_TMPDIR/project"

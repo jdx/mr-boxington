@@ -9,7 +9,7 @@ setup() {
 
   # CC and CXX are unset for the same reason MBX_CC is: an inherited compiler
   # choice would make mbx stand aside and the fixture prove nothing.
-  unset CARGO_TARGET_DIR MBX_INCREMENTAL CARGO_INCREMENTAL CI MBX_CC
+  unset CARGO_TARGET_DIR MBX_INCREMENTAL CARGO_INCREMENTAL CI MBX_CC MBX_CACHE_LINKS
   unset CC CXX HOST_CC HOST_CXX TARGET_CC TARGET_CXX MBX_REAL_CC MBX_REAL_CXX
   export MBX_CACHE_DIR="$BATS_TEST_TMPDIR/store"
 
