@@ -60,10 +60,12 @@ times — which is what runs a linker into an out-of-memory kill. The columns
 are what the machine did, sampled from outside every build: the most real
 compilers alive at once, and the least memory it had left.
 
-mbx's [machine-wide scheduler](/configuration#machine-wide-compile-scheduling)
-is what the third row measures, against the same mbx with it turned off. The
-comparison to watch is the peak, not only the clock: bounding concurrency is
-the point, and finishing no slower while doing it is the cost being checked.
+The `mbx` and `mbx-unscheduled` rows are the same binary with its
+[machine-wide scheduler](/configuration#machine-wide-compile-scheduling) on
+and off, which is the only way to compare the scheduler rather than two
+different caches. The comparison to watch is the peak, not the clock:
+bounding concurrency is the point, and finishing no slower while doing it is
+the cost being checked.
 
 ## How the comparison is kept fair
 
