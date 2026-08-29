@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "docs/**"
+      - "benchmarks/results.json"
       - "Cargo.toml"
       - "Cargo.lock"
       - "crates/mbx/**"
