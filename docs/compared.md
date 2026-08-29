@@ -6,26 +6,47 @@
 cache, and it aims wider: it caches CUDA alongside Rust, C, and C++, and can
 distribute compilation across machines. mbx caches rustc, the C and C++ that
 cargo build scripts compile, the C and C++ of builds outside cargo through
-[`mbx exec`](/standalone-builds), and native links. That scope is still
-narrower than sccache's, and mbx spends it on problems sccache does not
-attempt:
+[`mbx exec`](/standalone-builds), and native links. That scope is narrower,
+and mbx spends the difference on the parts of caching that are not the cache:
+what it costs to operate, what it does to your disk, and what it is safe to
+let CI write.
 
-- **No daemon.** sccache runs a background server that builds talk to. mbx
-  starts an in-process agent for each command and exits with it; there is
-  nothing to start, restart, or leave running.
-- **Managed `target/` directories.** mbx stores outputs once in a
-  content-addressed store, reflinks them into each checkout's `target/`, and
-  collects directories whose checkout is gone. sccache caches compilations but
-  leaves every `target/` to grow on its own.
-- **Keys built for worktrees.** Workspace, registry, toolchain, and sysroot
-  paths are mapped to placeholders before they enter a key, so equivalent
-  checkouts share compilations even when their absolute paths differ.
-- **Per-build accounting.** Every build reports hits, misses, lookups it could
-  not attempt, and deliberate bypasses, so a low hit rate has a visible cause
-  rather than a global counter.
-- **CI write policy.** The client itself refuses to publish remote objects
-  from pull requests, unprotected branches, and tag builds, on top of whatever
-  the server enforces.
+- **No daemon.** sccache builds talk to a background server. It starts
+  itself, but it outlives the build, keeps the configuration it was started
+  with — so changing a setting means remembering to restart it — and a build
+  that cannot reach it fails unless you have opted into falling back. mbx
+  starts an in-process agent for each command and exits with it: nothing
+  outlives the build, so there is no stale configuration and nothing to
+  restart.
+- **`target/` stops growing.** sccache caches compilations, but each
+  checkout's `target/` is still yours to hold and yours to clean. mbx stores
+  outputs once in a content-addressed store, reflinks them into each
+  checkout's `target/`, and collects the directories whose checkout is gone,
+  so a dozen worktrees cost roughly what one does.
+- **Several Cargo builds at once.** sccache hands a GNU make jobserver down
+  to the compilers it spawns, which keeps one build from oversubscribing the
+  machine. mbx budgets across builds rather than inside one: Cargo commands
+  started independently — clippy beside tests, or two lint configurations —
+  draw their compilers from a single machine-wide CPU and memory pool, and a
+  compilation identical to one already running anywhere on the machine waits
+  for that one instead of burning a core on it. See [machine-wide compile
+  scheduling](/configuration#machine-wide-compile-scheduling).
+- **Sharing between checkouts is the default, not a setting.** sccache
+  matches on absolute paths until you set `SCCACHE_BASEDIRS` to the
+  directories to strip, and a path you forget to list is a cache miss you
+  never hear about. mbx derives the placeholders itself — workspace, target,
+  registry, toolchain, and sysroot — so a new worktree is warm without being
+  told where anything lives.
+- **A hit rate you can act on.** Every build reports hits, misses, lookups it
+  could not attempt, and deliberate bypasses, so a disappointing build points
+  at its own cause instead of moving a global counter.
+- **A remote that limits what CI can write.** sccache's backends are buckets and
+  services reached with a credential; what holds that credential can write,
+  and usually delete. mbx's remote is a [cache server](/cache-server) with
+  deny-by-default grants, separate read and write namespace patterns,
+  immutable blobs, and no deletion endpoint, so a job that should never
+  publish cannot, and one that may publish still cannot rewrite or remove
+  what an earlier build wrote.
 
 If you need CUDA, distributed compilation, or C and C++ on Windows and MSVC,
 sccache is the right tool. Both wrap rustc through `RUSTC_WRAPPER`, so they
@@ -33,69 +54,79 @@ cannot be combined for the same build.
 
 ## kache
 
-[kache](https://github.com/kunobi-ninja/kache) is the closest tool to mbx,
-and the comparison comes with a debt: parts of mbx's design were inspired by
-kache. No code is shared between the projects, but the influence is real and
-worth acknowledging. mbx has a lineage of its own: it began as the Rust task
-cache inside the [mise](https://github.com/jdx/mise) task runner and was
-later extracted into a standalone CLI, on the theory that a dedicated tool
-could improve the day-to-day experience, be simpler to operate, and be safe
-for public repositories that take fork pull requests. Most of the
-differences below trace back to those three goals.
+[kache](https://github.com/kunobi-ninja/kache) is the closest tool to mbx, and
+parts of mbx's design were inspired by it. No code is shared between the
+projects, but the influence is real and worth saying plainly. mbx began as the
+Rust cache inside the [mise](https://github.com/jdx/mise) task runner and was
+extracted into its own CLI to chase three things: less to operate, a better
+day-to-day experience, and something safe to switch on in a public repository
+that takes fork pull requests. The differences below are mostly those three
+goals.
 
-Like mbx, kache is a content-addressed `RUSTC_WRAPPER`
-cache built for sharing compilations across worktrees, with C/C++ compiler
-shims, S3-compatible remotes, and executable caching on Linux and macOS. It
-also publishes a scheduled benchmark workflow that builds Firefox, LLVM, and
-other large projects cold and warm, at a scale mbx's own
-[benchmarks](/benchmarks) — one mid-size project, across the situations CI
-hits — do not match. The differences are in the mechanics:
+Like mbx, kache is a content-addressed `RUSTC_WRAPPER` cache built for sharing
+compilations across worktrees, with C and C++ compiler shims, S3-compatible
+and filesystem remotes, and executable caching on Linux and macOS.
 
-- **No daemon.** `kache init` installs an OS service by default (there is a
-  `--no-service` opt-out). mbx starts an in-process agent for each command
-  and exits with it; there is nothing to install, restart, or leave running.
-- **Managed `target/` vs. deduplicated `target/`.** kache hardlinks outputs
-  into place, so each checkout's `target/` shares disk with the store but
-  stays where it is, pruned by `kache gc`. mbx owns the directories it
+- **Nothing to install or keep running.** `kache init` installs an OS service
+  by default, with a `--no-service` opt-out. mbx starts an in-process agent
+  with each command and exits with it: nothing to bring back after a reboot,
+  nothing to restart when it misbehaves, and no state on the machine that
+  outlives the build.
+- **Nobody has to remember to prune.** kache hardlinks outputs into place, so
+  a checkout's `target/` shares disk with the store but stays where it is,
+  cleaned up by `kache gc` when someone runs it. mbx owns the directories it
   creates: outputs live once in the store, appear in each checkout by
-  reflink — a copy-on-write clone that diverges on first write, never a
-  hardlink sharing the cache's inode — and directories whose checkout is
-  gone are collected automatically. Where the filesystem cannot clone, mbx
-  falls back to a plain byte copy, still never a hardlink.
-- **CI write policy.** kache's README states no policy on what may publish
-  from pull requests — whatever the credentials allow, any build can write.
-  mbx's client refuses to publish from pull requests, unprotected branches,
-  and tag or release builds, before the server enforces anything.
-- **A server, not a bucket.** kache's remotes are S3-compatible buckets
-  reached through the standard AWS credential chain. mbx's remote is a
-  namespaced protocol server with guardrails a bucket cannot express:
-  deny-by-default grants with separate read and write namespace patterns,
-  OIDC rules that pin a repository and its immutable numeric owner ID and
-  can narrow to a `ref` or `environment`, immutable blobs with atomic
-  action commits, and no deletion endpoint — a credentialed writer can add
-  results but never rewrite or remove what an earlier build published. Fork
-  pull requests hold no credentials at all and fall back to a read-only
-  platform cache; see [fork PRs](/cookbook/fork-prs).
-- **How the C and C++ shims arrive.** Both put shims on `PATH` for make,
-  CMake, or anything else that resolves its compiler there. kache installs
-  them alongside its service, so every build on the machine finds them; mbx
-  puts them on `PATH` for one [`mbx exec`](/standalone-builds) command at a
-  time, so a build is cached when it asks to be and untouched otherwise.
-  kache covers Windows as well; mbx shims only the plain Unix driver names.
-- **Executable caching.** Both cache linked binaries on Linux and macOS. In
-  mbx the key includes the resolved linker, startup objects, libc, and SDK
-  rather than dep-info alone, so a host mbx cannot describe that precisely
-  links normally instead of sharing a binary it cannot stand behind.
-- **A store other tools embed.** The extraction from mise went both ways:
-  mise now embeds mbx's cache crates, so a task run through mise and a
-  direct mbx build fill and hit the same shared action store and speak the
-  same remote protocol, each warming the other. kache's integration points
-  are its compiler wrappers and its GitHub Action.
+  reflink, and a `target/` whose checkout is gone is collected without being
+  asked. Reflinks are copy-on-write clones that diverge the moment something
+  writes to them, so a build that scribbles into `target/` cannot damage the
+  cache the way a shared inode can. Where the filesystem cannot clone, mbx
+  copies the bytes — still never a hardlink.
+- **Several Cargo builds at once.** Cargo plans one build at a time, so two
+  started together each size themselves to the whole machine and both finish
+  late. kache does not stop you running them, but it does not coordinate
+  them either: it starts each compiler as Cargo asks for it, with no shared
+  budget and nothing that notices two builds compiling the same crate at the
+  same moment. mbx's shims sit in front of every compiler on the machine and
+  hand out permits from one memory-aware pool, so a lint job and a test job
+  run side by side without overloading the box, and a compilation identical
+  to one already running anywhere waits for it instead of repeating it.
+  Either way, give each command its own `CARGO_TARGET_DIR`: Cargo's target
+  directory lock is what serializes them otherwise. See [machine-wide
+  compile scheduling](/configuration#machine-wide-compile-scheduling).
+- **A public repository can share one cache.** This is the difference that
+  shaped mbx most. kache's remotes are S3-compatible buckets or a filesystem
+  path, and a bucket has one question to ask: does this credential write? So
+  whatever can publish can also overwrite or remove what an earlier build
+  published, and one leaked credential is the whole cache. mbx's remote is a
+  protocol server, which puts those rules somewhere they can be expressed:
+  grants are deny-by-default with separate read and write namespace patterns;
+  CI authenticates with a short-lived OIDC token pinned to a repository and
+  its immutable numeric owner ID, narrowable to a `ref` or `environment`,
+  instead of a stored secret; blobs are immutable and results commit
+  atomically; and there is no deletion endpoint, so a writer adds results and
+  can never rewrite or remove one. Fork pull requests hold no credentials at
+  all and fall back to a read-only platform cache — see [fork
+  PRs](/cookbook/fork-prs). mbx's client refuses to publish from pull
+  requests, unprotected branches, and tag builds too, but that is a
+  convenience that catches a misconfigured grant early; the server is what
+  makes the guarantee.
+- **Caching C and C++ is opt-in per command.** Both put shims on `PATH` so
+  make, CMake, or anything else that resolves its compiler there gets cached.
+  kache installs them alongside its service, so once they are on `PATH` every
+  build on the machine goes through the cache; mbx puts them on `PATH` for a
+  single [`mbx exec`](/standalone-builds) command, so a build is cached when
+  it asks to be and untouched otherwise. kache covers Windows;
+  mbx shims only the plain Unix driver names.
+- **Linked binaries.** Both cache them on Linux and macOS. mbx keys on the
+  resolved linker, startup objects, libc, and SDK rather than dep-info alone,
+  because a binary linked against a different libc or SDK is a different
+  binary. On a host mbx cannot describe that precisely, it links normally
+  rather than handing back one it cannot vouch for.
 
-If you build on Windows, want the C and C++ shims installed once rather than
-wrapping the commands that should use them, or want benchmark numbers on
-projects the size of Firefox and LLVM, kache is worth evaluating. Both tools wrap
-rustc through `RUSTC_WRAPPER`, so they cannot be combined for the same build.
+If you build on Windows, or want the C and C++ shims installed once rather
+than wrapping the commands that should use them, kache is worth evaluating.
+Both tools wrap rustc through `RUSTC_WRAPPER`, so they cannot be combined for
+the same build.
 
 ## Tarball CI caches
 
