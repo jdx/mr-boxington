@@ -19,27 +19,37 @@ strategies and measures the machine rather than a single build.
 
 ## What each scenario reproduces
 
-**cold** — an empty store and a fresh `target/`. What a new machine, or a CI
+### cold
+
+An empty store and a fresh `target/`. What a new machine, or a CI
 job with no cache to restore, actually does. There is nothing to hit, so this
 is where a cache can only cost time; a cache that is slower than cargo here is
 charging rent on the first build.
 
-**warm** — the store from the cold build, a fresh `target/`. This is the
+### warm
+
+The store from the cold build, a fresh `target/`. This is the
 common CI shape: a runner restores a cache, then builds a commit it has
 already seen. cargo is not run, because with a wiped `target/` it would just
 repeat its cold number.
 
-**commit** — the store is warmed at one commit and the build runs at the next
+### commit
+
+The store is warmed at one commit and the build runs at the next
 one. Push-to-push CI: most of the dependency graph is unchanged, a few crates
 are not. cargo's baseline here is a cold build, because that is what cargo
 does with an empty `target/`.
 
-**worktree** — the store is warmed in one checkout, and the timed build runs
+### worktree
+
+The store is warmed in one checkout, and the timed build runs
 in a second checkout at a different path. This is the claim that absolute
 paths did not enter the keys. A cache that keys on paths reports a cold build
 here.
 
-**toolchain** — not a timing. The store is warmed on the pinned Rust and the
+### toolchain
+
+Not a timing. The store is warmed on the pinned Rust and the
 build reruns on a different one, and the run fails unless essentially none of
 the predicted compilations were even looked up. A compiler change invalidates
 every invocation digest at once; the failure mode worth guarding against is a
@@ -51,7 +61,9 @@ It also pins down the diagnosis for the opposite surprise. A warm build that
 reports no hits after a runner image rolled a new Rust looks like a broken
 store and is not one; it is this.
 
-**contention** — the two Clippy configurations from mise's real lint job,
+### contention
+
+The two Clippy configurations from mise's real lint job,
 from a cold store: the default configuration and `--all-features
 --all-targets`. The `mbx-sequential` row is the before picture, with both
 commands sharing one target directory. The parallel rows use separate targets
