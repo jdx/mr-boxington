@@ -22,7 +22,7 @@ export interface BenchmarkCell {
   };
 }
 
-export interface BenchmarkScenario {
+interface BenchmarkScenarioBase {
   scenario: string;
   description: string;
   /** False for the compiler-change guard, which asserts rather than races. */
@@ -36,6 +36,13 @@ export interface BenchmarkScenario {
   results: BenchmarkCell[];
   skipped: string[];
 }
+
+/** A separately refreshed scenario must identify both its run and runner. */
+export type BenchmarkScenario = BenchmarkScenarioBase &
+  (
+    | { workflow_run: string; runner: string }
+    | { workflow_run?: never; runner?: never }
+  );
 
 export interface BenchmarkResults {
   schema: number;

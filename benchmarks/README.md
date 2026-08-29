@@ -33,15 +33,13 @@ unlooked-up, which is the shape the hk benchmark hit when a runner image
 rolled a new Rust. Not zero hits: actions that do not depend on rustc, such as
 a build script's C objects, legitimately survive a Rust change.
 
-The `contention` scenario is the odd one out: it mirrors the two overlapping
-Clippy configurations in mise's lint job. It measures the current sequential
-shape, native-step parallelism with mbx scheduling, and the same parallel
-shape with `MBX_SCHEDULER=0`, all from cold stores. The parallel commands get
-separate targets so Cargo's target lock cannot serialize them; the sequential
-baseline keeps its shared target. This separates the actual before/after wall
-time from what the scheduler contributes to parallelism. The cells are sampled
-from outside every build: the most real compilers alive at once, and the least
-memory the machine had left.
+The `contention` scenario is the odd one out: it stacks six overlapping check,
+Clippy, and test-compilation jobs on one runner. It measures sequential context,
+native-step parallelism with mbx scheduling, and the same parallel shape with
+`MBX_SCHEDULER=0`, all from cold stores. The parallel commands get separate
+targets so Cargo's target lock cannot serialize them; the sequential reference
+keeps its shared target. The cells are sampled from outside every build: the
+most real compilers alive at once, and the least memory the machine had left.
 
 The comparison is kept fair by fetching the registry once outside every timed
 build, pinning the toolchain (hk does not pin one itself), giving each cell

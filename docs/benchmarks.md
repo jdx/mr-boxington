@@ -61,12 +61,12 @@ a runner image picked up a new Rust is not a broken store, it is this.
 
 ### contention
 
-The two Clippy configurations from mise's real lint job,
-from a cold store: the default configuration and `--all-features
---all-targets`. The `mbx-sequential` row is the before picture, with both
-commands sharing one target directory. The parallel rows use separate targets
-so Cargo's target lock does not serialize them, matching GitHub Actions'
-native `parallel` steps.
+Six overlapping Rust CI jobs from a cold store: default and all-targets/all-
+features variants of `cargo check`, Clippy, and test compilation. The
+`sequential` row is context, with the commands sharing one target directory.
+The parallel rows use separate targets so Cargo's target lock does not
+serialize them, matching separate CI steps. The apples-to-apples scheduler
+comparison is between those two parallel rows.
 
 All three rows use the same mbx binary. The `mbx` and `mbx-unscheduled` rows
 run the parallel shape with the
@@ -93,9 +93,9 @@ it.
   inherited from the caller is cleared so the uncached baseline is really
   uncached.
 - **Both caches run local-only.** A remote would measure a network.
-- **The published numbers come from one CI run**, so the tools are comparable
-  to each other. Shared runners are noisy enough that comparing across runs is
-  not meaningful; the provenance line above says which run and which machine.
+- **Every scenario's rows come from one CI run**, so the tools within it are
+  comparable. A scenario refreshed separately carries its own run link;
+  otherwise the provenance line below the cards applies.
 
 ## Validity gates
 
