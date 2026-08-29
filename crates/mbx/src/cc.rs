@@ -28,7 +28,8 @@ use mbx_cache_core::{
     CcMetadata, FileDigestScope, FileIdentity, RecordedFileDigest, RemoteActionResult,
     RestoreStats, canonical_json,
 };
-use mbx_cache_rustc::PathMapping;
+use mbx_cache_rustc::{PathMapping, normalize_mapped_path};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -43,14 +44,20 @@ const ADAPTER: &str = "cc";
 /// a successful compile is ever published, so a compiler error always reaches
 /// the build exactly as it would have without mbx.
 pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -> Result<ExitCode> {
-    let invocation = CcInvocation::parse(arguments)?;
     let working_dir = std::env::current_dir()?;
+    let mappings = path_mappings(&working_dir);
+    // Appended before anything parses, so the flag is part of the key the same
+    // way the caller's own prefix maps are.
+    let portable = Portable::detect(&mappings);
+    let arguments = portable.applied_to(arguments);
+    let arguments = arguments.as_ref();
+    let invocation = CcInvocation::parse(arguments)?;
     let environment = environment_inputs(|name| std::env::var(name).ok(), invocation.sysroot())?;
     let identity = compiler_identity(compiler, language)?;
     let mut context = CcActionContext {
         compiler: identity,
         working_dir: working_dir.clone(),
-        path_mappings: path_mappings(&working_dir),
+        path_mappings: mappings,
         environment,
         inputs: Vec::new(),
     };
@@ -223,6 +230,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         &searchable,
         before,
         flight.as_ref(),
+        &portable,
     ) {
         #[cfg(debug_assertions)]
         session::report_shim_warning(&format!("cc result was not published: {error:#}"));
@@ -247,12 +255,20 @@ fn publish(
     searchable: &BTreeSet<PathBuf>,
     before: Option<BTreeMap<PathBuf, CacheDigest>>,
     flight: Option<&crate::scheduler::Flight>,
+    portable: &Portable,
 ) -> Result<()> {
     let discovered = discover(invocation, context, depfile)?;
     discovered.verify_not_modified_since(compilation_started)?;
     verify_search_path_unchanged(searchable, before)?;
     discovered.verify()?;
     discovered.apply_to(context)?;
+    // The key says this object does not depend on where the build script put
+    // its headers. Publishing one that names the directory anyway would make
+    // that claim false for every checkout that restored it, so a compilation
+    // whose output kept the value is left uncached rather than shared wrong.
+    if !portable.outputs_are_clean(invocation.output()) {
+        return Err(CcBypassReason::UnportableOutput(invocation.output().to_path_buf()).into());
+    }
     let action = invocation.action(context.clone())?;
     publish_result(&action, invocation, output, &context.path_mappings)?;
     let prediction = invocation.prediction(context, duration_ns)?;
@@ -298,6 +314,102 @@ fn restore_flight_prediction(
     record_prediction(task, invocation_digest, &action.digest, &prediction, None);
     Ok(Some((action.digest, cached)))
 }
+
+/// The environment values whose absolute paths a compilation is made
+/// independent of, and the check that says it really was.
+///
+/// This is the C and C++ half of what [`crate::rustc::Portable`] does, and it
+/// exists for the same reason. `OUT_DIR` differs per checkout and per target
+/// directory, a build script that generates headers there passes it as an
+/// include directory, and the compiler records that directory in the debug
+/// information of every object it produces. The key already normalizes those
+/// paths, so without this the cache serves an object naming a directory it
+/// was not built in -- equivalent, but not the artifact this compilation
+/// would have written, and every qualification run says so once per object.
+///
+/// Two things must hold, exactly as they must for rustc.
+/// `-fdebug-prefix-map` makes the compiler record the placeholder instead of
+/// the real path, covering the debug information it writes itself. It does
+/// not cover a path the source keeps as a string, so the object is read
+/// before publishing and a compilation whose output still carries the value
+/// is not published at all.
+///
+/// `-fdebug-prefix-map` rather than `-ffile-prefix-map`: the latter also
+/// rewrites `__FILE__`, which a C program can print or assert on, and
+/// changing what a program says at runtime is not this cache's business.
+struct Portable {
+    /// Flags appended to the real compiler invocation, one per value.
+    arguments: Vec<OsString>,
+    /// The literal values, for the check before publishing.
+    values: Vec<String>,
+}
+
+impl Portable {
+    fn detect(mappings: &[PathMapping]) -> Self {
+        let mut portable = Self {
+            arguments: Vec::new(),
+            values: Vec::new(),
+        };
+        if !session::share_out_dir_requested() {
+            return portable;
+        }
+        for name in PORTABLE_ENVIRONMENT {
+            let Some(value) = std::env::var(name)
+                .ok()
+                .filter(|value| Path::new(value).is_absolute())
+            else {
+                continue;
+            };
+            // A value under no known root is one no key could agree on
+            // anyway, so there is nothing to remap and nothing to promise.
+            let Ok(placeholder) =
+                normalize_mapped_path(Path::new(&value), Path::new("/"), mappings)
+            else {
+                continue;
+            };
+            let mut flag = OsString::from("-fdebug-prefix-map=");
+            flag.push(&value);
+            flag.push("=");
+            flag.push(&placeholder);
+            portable.arguments.push(flag);
+            portable.values.push(value);
+        }
+        portable
+    }
+
+    fn applied_to<'a>(&self, arguments: &'a [OsString]) -> Cow<'a, [OsString]> {
+        if self.arguments.is_empty() {
+            return Cow::Borrowed(arguments);
+        }
+        let mut applied = arguments.to_vec();
+        applied.extend(self.arguments.iter().cloned());
+        Cow::Owned(applied)
+    }
+
+    /// Whether an output is free of every value the flags normalized away.
+    fn outputs_are_clean(&self, path: &Path) -> bool {
+        if self.values.is_empty() {
+            return true;
+        }
+        let Ok(contents) = std::fs::read(path) else {
+            // Unreadable is not evidence of cleanliness.
+            return false;
+        };
+        !self.values.iter().any(|value| {
+            memchr::memmem::find(&contents, value.as_bytes()).is_some()
+                || (value.contains('\\')
+                    && memchr::memmem::find(&contents, value.replace('\\', "/").as_bytes())
+                        .is_some())
+        })
+    }
+}
+
+/// The environment values a C or C++ compilation may be made independent of.
+///
+/// `OUT_DIR` alone, for the same reason the rustc adapter names only that one:
+/// it is what a build script hands its own compilations, and what differs
+/// between two checkouts and two target directories.
+const PORTABLE_ENVIRONMENT: &[&str] = &["OUT_DIR"];
 
 /// Read the dependency list and turn it into digested inputs.
 fn discover(

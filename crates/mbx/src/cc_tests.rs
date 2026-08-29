@@ -192,3 +192,51 @@ fn success_status() -> std::process::ExitStatus {
     use std::os::windows::process::ExitStatusExt as _;
     std::process::ExitStatus::from_raw(0)
 }
+
+/// The flags are the half that makes the compiler record a placeholder; the
+/// output check is the half that refuses when something recorded the path
+/// anyway. Either alone is wrong -- one silently, one unsoundly.
+#[test]
+fn a_portable_compilation_remaps_its_paths_and_refuses_an_output_that_kept_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let out_dir = "/checkout/target/debug/build/widget-1234/out";
+    let portable = Portable {
+        arguments: vec![OsString::from(format!(
+            "-fdebug-prefix-map={out_dir}=${{target}}/debug/build/widget-1234/out"
+        ))],
+        values: vec![out_dir.to_string()],
+    };
+
+    // The flag is appended, so it lands in the key like any other argument.
+    let arguments = vec![OsString::from("-c"), OsString::from("src/hello.c")];
+    let applied = portable.applied_to(&arguments);
+    assert_eq!(applied.len(), 3);
+    assert!(
+        applied[2]
+            .to_string_lossy()
+            .starts_with("-fdebug-prefix-map="),
+        "the remap is appended: {applied:?}"
+    );
+
+    let clean = directory.path().join("clean.o");
+    std::fs::write(&clean, b"nothing here names a checkout").unwrap();
+    assert!(portable.outputs_are_clean(&clean));
+
+    // A path the source kept as a string survives the remap, and an object
+    // carrying one must not be published under a key that normalized it.
+    let dirty = directory.path().join("dirty.o");
+    std::fs::write(&dirty, format!("built in {out_dir} and says so").as_bytes()).unwrap();
+    assert!(!portable.outputs_are_clean(&dirty));
+
+    // An unreadable output is not evidence of cleanliness.
+    assert!(!portable.outputs_are_clean(&directory.path().join("absent.o")));
+
+    // With nothing remapped there is nothing to promise, and every output
+    // passes -- which is what a build with OUT_DIR sharing off looks like.
+    let inert = Portable {
+        arguments: Vec::new(),
+        values: Vec::new(),
+    };
+    assert!(inert.outputs_are_clean(&dirty));
+    assert!(matches!(inert.applied_to(&arguments), Cow::Borrowed(_)));
+}

@@ -291,6 +291,15 @@ pub enum CcBypassReason {
     /// ran, so the manifest recorded after it is not what the compilation saw.
     #[error("include search directory changed during the compilation: {0}")]
     SearchPathModifiedDuringCompilation(PathBuf),
+
+    /// The object kept a path the key normalized away.
+    ///
+    /// Remapping covers what the compiler records itself; a path the source
+    /// keeps as a string survives it, and publishing such an object would
+    /// share this checkout's directory under a key that says it does not
+    /// matter.
+    #[error("compilation output records a path its key normalized away: {0}")]
+    UnportableOutput(PathBuf),
     /// The object depends on the machine's own CPU rather than on named inputs.
     #[error("compiler flag tunes for the local CPU: {0}")]
     LocalCpuTarget(String),
