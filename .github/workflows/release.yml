@@ -63,10 +63,12 @@ jobs:
             runner: namespace-profile-endev-linux-amd64
             bin: mbx
             cross: true
+            pgo: true
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             runner: namespace-profile-endev-linux-amd64
             bin: mbx
+            pgo: true
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             runner: namespace-profile-endev-linux-amd64
@@ -76,10 +78,12 @@ jobs:
             os: ubuntu-24.04-arm
             runner: namespace-profile-endev-linux-arm64
             bin: mbx
+            pgo: true
           - target: aarch64-apple-darwin
             os: macos-latest
             runner: namespace-profile-endev-macos-arm64
             bin: mbx
+            pgo: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             runner: windows-latest
@@ -102,6 +106,10 @@ jobs:
         if: matrix.cross
         with:
           tool: cross
+
+      - name: Install LLVM profiling tools
+        if: matrix.pgo
+        run: rustup component add llvm-tools
 
       - name: Import macOS signing certificate
         if: runner.os == 'macOS'
@@ -128,7 +136,7 @@ jobs:
           sudo apt-get install -y musl-tools
 
       - name: Build
-        if: ${{ !matrix.cross }}
+        if: ${{ !matrix.cross && !matrix.pgo }}
         shell: bash
         # rustls brings in aws-lc-sys, which compiles C: cc-rs looks for a
         # target-prefixed compiler, and Debian's musl-tools only ships
@@ -146,8 +154,23 @@ jobs:
       # baseline. Building them directly on the rolling runner would silently
       # raise that floor whenever the runner image changes.
       - name: Build GNU release
-        if: matrix.cross
+        if: ${{ matrix.cross && !matrix.pgo }}
         run: cross build --release --locked --package mbx --target ${{ matrix.target }}
+
+      - name: Build PGO release
+        if: matrix.pgo
+        shell: bash
+        env:
+          MBX_PGO_BUILD_TOOL: ${{ matrix.cross && 'cross' || 'cargo' }}
+          MBX_PGO_TARGET: ${{ matrix.target }}
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          # cc-rs mirrors Rust's PGO flags into the C compiler. Apple clang's
+          # profiling ABI follows Xcode rather than rustc, so keep vendored C
+          # dependencies out of this Rust profile on macOS.
+          CFLAGS: ${{ runner.os == 'macOS' && '-fno-profile-generate -fno-profile-use' || '' }}
+          CXXFLAGS: ${{ runner.os == 'macOS' && '-fno-profile-generate -fno-profile-use' || '' }}
+        run: benchmarks/pgo.bash
 
       - name: Sign macOS binary
         if: runner.os == 'macOS'
@@ -232,14 +255,16 @@ jobs:
           spctl --assess --type exec -vv "$BINARY" || true
 
       - name: Check the binary runs
-        if: ${{ !matrix.cross }}
+        # The x86_64 GNU PGO binary is host-runnable too. Execute the finished
+        # artifact directly so a smoke-test build cannot replace it.
+        if: ${{ !matrix.cross || matrix.pgo }}
         shell: bash
         run: ./target/${{ matrix.target }}/release/${{ matrix.bin }} --version
 
       # The ARM64 GNU artifact is cross-compiled on the AMD64 release runner;
       # let cross provide its matching execution environment for the smoke test.
       - name: Check the GNU binary runs
-        if: matrix.cross
+        if: ${{ matrix.cross && !matrix.pgo }}
         run: cross run --release --locked --package mbx --target ${{ matrix.target }} -- --version
 
       # The archive is flat and holds only the binary, so extracting it

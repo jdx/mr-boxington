@@ -111,6 +111,10 @@ run_windows = "git diff --exit-code -- docs/cli; if (git status --porcelain --un
 description = "Build the fixed benchmark subject"
 run = "cargo build --release --locked -p mbx"
 
+[tasks."build:pgo"]
+description = "Build a profile-guided mbx release binary"
+run = "benchmarks/pgo.bash"
+
 [tasks.perf]
 description = "Measure instruction-counted performance benchmarks"
 depends = ["perf:prepare"]
