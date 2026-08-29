@@ -152,7 +152,7 @@ jobs:
       - name: Force-push the bench-refresh branch
         if: steps.dirty.outputs.dirty == 'true'
         env:
-          GITHUB_TOKEN: ${{ secrets.BENCH_REFRESH_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           REPOSITORY: ${{ github.repository }}
         run: |
           git config user.name "github-actions[bot]"
@@ -169,9 +169,10 @@ jobs:
       - name: Create or update the pull request
         if: steps.dirty.outputs.dirty == 'true'
         env:
-          # Falls back to the default token, whose pull requests do not start
-          # CI and need the repository to allow Actions to open them.
-          GITHUB_TOKEN: ${{ secrets.BENCH_REFRESH_TOKEN || secrets.GITHUB_TOKEN }}
+          # The same credential release-plz uses to open its pull requests.
+          # The default token cannot: this repository does not let Actions
+          # create them, and one it opened would not start CI anyway.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           WORKSPACE: ${{ needs.check.outputs.workspace }}
           BENCH: ${{ needs.check.outputs.bench }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
