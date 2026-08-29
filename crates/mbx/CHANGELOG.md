@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1](https://github.com/jdx/mr-boxington/compare/v0.7.0...v0.7.1) - 2026-08-29
+
+### Added
+
+- *(release)* add GNU Linux artifacts ([#181](https://github.com/jdx/mr-boxington/pull/181))
+- *(rustc)* cache native links by default ([#178](https://github.com/jdx/mr-boxington/pull/178))
+- *(rustc)* cache the compilations that never link ([#177](https://github.com/jdx/mr-boxington/pull/177))
+- a machine-wide, memory-aware compiler scheduler ([#170](https://github.com/jdx/mr-boxington/pull/170))
+
+### Fixed
+
+- *(cc)* make an object independent of the directory it was built in ([#185](https://github.com/jdx/mr-boxington/pull/185))
+- *(cc)* say what diverged, and describe when C objects legitimately do ([#182](https://github.com/jdx/mr-boxington/pull/182))
+
+### Other
+
+- *(scheduler)* drop the release watch, which measured as nothing ([#183](https://github.com/jdx/mr-boxington/pull/183))
+- *(scheduler)* weigh an unmeasured link by what this machine's links cost ([#180](https://github.com/jdx/mr-boxington/pull/180))
+- share OUT_DIR artifacts across worktrees ([#176](https://github.com/jdx/mr-boxington/pull/176))
+- *(scheduler)* retire the link guess, and wake waiters on release ([#174](https://github.com/jdx/mr-boxington/pull/174))
+- reduce mbx startup relocations ([#175](https://github.com/jdx/mr-boxington/pull/175))
+
 ## [0.7.0](https://github.com/jdx/mr-boxington/compare/v0.6.0...v0.7.0) - 2026-08-29
 
 ### Added

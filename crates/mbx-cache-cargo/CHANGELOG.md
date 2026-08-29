@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.1.3...mbx-cache-cargo-v0.1.4) - 2026-08-29
+
+### Added
+
+- *(release)* add GNU Linux artifacts ([#181](https://github.com/jdx/mr-boxington/pull/181))
+
 ## [0.1.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.1.2...mbx-cache-cargo-v0.1.3) - 2026-08-29
 
 ### Other
