@@ -86,6 +86,7 @@ export default defineConfig({
         items: [
           { text: "How it works", link: "/how-it-works" },
           { text: "How mbx compares", link: "/compared" },
+          { text: "Acknowledgements", link: "/acknowledgements" },
           { text: "Benchmarks", link: "/benchmarks" },
           { text: "Stability", link: "/stability" },
           { text: "Protocol compatibility", link: "/protocol-compatibility" },

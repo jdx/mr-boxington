@@ -3,13 +3,13 @@
 ## sccache
 
 [sccache](https://github.com/mozilla/sccache) is the established compiler
-cache, and it aims wider: it caches CUDA alongside Rust, C, and C++, and can
-distribute compilation across machines. mbx caches rustc, the C and C++ that
-cargo build scripts compile, the C and C++ of builds outside cargo through
-[`mbx exec`](/standalone-builds), and native links. That scope is narrower,
-and mbx spends the difference on the parts of caching that are not the cache:
-what it costs to operate, what it does to your disk, and what it is safe to
-let CI write.
+cache and predates mbx. It aims wider: it caches CUDA alongside Rust, C, and
+C++, and can distribute compilation across machines. mbx caches rustc, the C
+and C++ that cargo build scripts compile, the C and C++ of builds outside
+cargo through [`mbx exec`](/standalone-builds), and native links. That scope
+is narrower, and mbx spends the difference on the parts of caching that are
+not the cache: what it costs to operate, what it does to your disk, and what
+it is safe to let CI write.
 
 - **No daemon.** sccache builds talk to a background server. It starts
   itself, but it outlives the build, keeps the configuration it was started
@@ -54,14 +54,14 @@ cannot be combined for the same build.
 
 ## kache
 
-[kache](https://github.com/kunobi-ninja/kache) is the closest tool to mbx, and
-parts of mbx's design were inspired by it. No code is shared between the
-projects, but the influence is real and worth saying plainly. mbx began as the
-Rust cache inside the [mise](https://github.com/jdx/mise) task runner and was
-extracted into its own CLI to chase three things: less to operate, a better
-day-to-day experience, and something safe to switch on in a public repository
-that takes fork pull requests. The differences below are mostly those three
-goals.
+[kache](https://github.com/kunobi-ninja/kache) is the closest tool to mbx: it
+predates mbx and directly inspired its design, though the projects share no
+code. mbx began as the Rust cache inside the
+[mise](https://github.com/jdx/mise) task runner and was extracted into its
+own CLI to chase three things: less to operate, a better day-to-day
+experience, and tight limits on what CI can write to a shared cache — the
+concern that matters most in a public repository that takes fork pull
+requests. The differences below are mostly those three goals.
 
 Like mbx, kache is a content-addressed `RUSTC_WRAPPER` cache built for sharing
 compilations across worktrees, with C and C++ compiler shims, S3-compatible

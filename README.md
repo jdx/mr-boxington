@@ -183,6 +183,13 @@ comes before hit rate.
 - [CLI reference](https://mr-boxington.jdx.dev/cli)
 - [Current limits](https://mr-boxington.jdx.dev/limits)
 
+## Acknowledgements
+
+mbx relies on [Cargo](https://github.com/rust-lang/cargo) and follows earlier
+compiler-cache work in [sccache](https://github.com/mozilla/sccache) and
+[kache](https://github.com/kunobi-ninja/kache), which directly inspired its
+design. [Read the acknowledgements](https://mr-boxington.jdx.dev/acknowledgements).
+
 ## License
 
 [MIT](LICENSE)
