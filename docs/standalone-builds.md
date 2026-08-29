@@ -53,16 +53,16 @@ deliberately, and mbx stands aside rather than intercepting it.
 
 Compilation keys map the project root to a placeholder, so equivalent
 checkouts share objects even when their absolute paths differ. The project
-root is the enclosing git checkout (or the working directory outside one);
-`--project-root` overrides it.
+root is the enclosing Git or Jujutsu checkout (or the working directory
+outside one); `--project-root` overrides it.
 
 Warm lookups travel between checkouts through the build's manifest, and the
 manifest's identity must therefore name the *project*, not the checkout. It
-is derived from, in order: the `Cargo.lock` digest where one exists, the git
-`origin` remote URL, and the directory name as a last resort. A project with
-none of the first two still caches within each checkout; give worktrees the
-same directory name or pass `--project-root` through a stable path to share
-across them.
+is derived from, in order: the `Cargo.lock` digest where one exists, the Git or
+Jujutsu `origin` remote URL, and the directory name as a last resort. A project
+with none of the first two still caches within each checkout; give worktrees
+the same directory name or pass `--project-root` through a stable path to
+share across them.
 
 ## Turning it off
 

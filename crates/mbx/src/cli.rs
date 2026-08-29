@@ -882,15 +882,15 @@ fn exec(config: &Config, settings: &CliSettings, args: &ExecArgs) -> Result<Exit
     account_session(config, settings, session_outcome, None)
 }
 
-/// The root `mbx exec` keys paths against: the enclosing git checkout, so
-/// every subdirectory of one project agrees on it, or the working directory
-/// outside one.
+/// The root `mbx exec` keys paths against: the enclosing VCS checkout, so every
+/// subdirectory of one project agrees on it, or the working directory outside
+/// one.
 fn discover_project_root(working_dir: &Path) -> PathBuf {
     let mut directory = working_dir;
     loop {
-        // A plain file rather than a directory in linked worktrees, which are
-        // exactly the checkouts worth recognizing.
-        if directory.join(".git").exists() {
+        // `.git` may be a plain file in a linked worktree. Jujutsu's marker is
+        // a directory today, but existence is the useful distinction for both.
+        if directory.join(".git").exists() || directory.join(".jj").exists() {
             return directory.to_path_buf();
         }
         match directory.parent() {

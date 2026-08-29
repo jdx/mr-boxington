@@ -492,7 +492,7 @@ struct ExecIdentity<'a> {
 /// Worktrees of one project must share a manifest for predictions to travel --
 /// the cc adapter has no second way to build a key -- so the marker prefers
 /// content and origin over location: a `Cargo.lock` digest where one exists,
-/// then the git origin URL, and only then the directory name.
+/// then the Git or Jujutsu origin URL, and only then the directory name.
 pub fn exec_identity(project_root: &Path, command: &[String]) -> String {
     let project = exec_marker(project_root);
     let material = ExecIdentity {
@@ -508,7 +508,7 @@ fn exec_marker(project_root: &Path) -> String {
     if let Ok(lock) = std::fs::read(project_root.join("Cargo.lock")) {
         return CacheDigest::blake3(&lock).hash;
     }
-    if let Some(origin) = git_origin_marker(project_root) {
+    if let Some(origin) = project_origin_marker(project_root) {
         return origin;
     }
     project_root
@@ -519,22 +519,51 @@ fn exec_marker(project_root: &Path) -> String {
 }
 
 /// The origin URL names a project the same way in every worktree and clone,
-/// which a checkout's directory name does not.
-fn git_origin_marker(project_root: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
+/// which a checkout's directory name does not. Try Git first so colocated
+/// Jujutsu repositories keep exactly the identity they had before.
+fn project_origin_marker(project_root: &Path) -> Option<String> {
+    // Do not let Git walk above a non-colocated Jujutsu repository and borrow
+    // an unrelated enclosing checkout's remote.
+    if !project_root.join(".jj").exists() || project_root.join(".git").exists() {
+        let git = Command::new("git")
+            .arg("-C")
+            .arg(project_root)
+            .args(["config", "--get", "remote.origin.url"])
+            .output();
+        if let Ok(output) = git
+            && output.status.success()
+        {
+            let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !url.is_empty() {
+                return Some(format!("origin\0{url}"));
+            }
+        }
+    }
+
+    let output = Command::new("jj")
+        .arg("-R")
         .arg(project_root)
-        .args(["config", "--get", "remote.origin.url"])
+        .arg("--ignore-working-copy")
+        .args(["git", "remote", "list"])
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if url.is_empty() {
-        return None;
-    }
+    let remotes = String::from_utf8_lossy(&output.stdout);
+    let url = jj_origin_url(&remotes)?;
     Some(format!("origin\0{url}"))
+}
+
+fn jj_origin_url(remotes: &str) -> Option<&str> {
+    remotes.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        if fields.next()? == "origin" {
+            fields.next()
+        } else {
+            None
+        }
+    })
 }
 
 fn action_remote_cache(config: &Config, store: &Path) -> Result<Option<AgentRemoteCache>> {

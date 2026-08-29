@@ -43,6 +43,17 @@ fn falls_back_to_the_starting_directory() {
 }
 
 #[test]
+fn discovers_a_jujutsu_project_root() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let nested = root.join("build").join("debug");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir(root.join(".jj")).unwrap();
+
+    assert_eq!(discover_project_root(&nested), root);
+}
+
+#[test]
 fn reads_both_flag_spellings() {
     let joined = ["build".to_string(), "--target-dir=/tmp/out".to_string()];
     let split = [

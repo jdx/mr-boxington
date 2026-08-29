@@ -278,6 +278,20 @@ fn exec_identity_falls_back_to_the_directory_name() {
     );
 }
 
+#[test]
+fn reads_the_origin_from_jujutsu_remote_output() {
+    let remotes = "backup ssh://example.com/backup\norigin https://example.com/project.git\n";
+
+    assert_eq!(
+        jj_origin_url(remotes),
+        Some("https://example.com/project.git")
+    );
+    assert_eq!(
+        jj_origin_url("upstream https://example.com/project.git\n"),
+        None
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_shim_directory_never_supplies_the_real_compiler() {
