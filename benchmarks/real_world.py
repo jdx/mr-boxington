@@ -238,6 +238,18 @@ class Runner:
                 capture_output=True,
             )
             extra["summary"] = stats.stdout.strip().splitlines()
+            # Each cell points kache at its own runtime directory, so each one
+            # starts its own daemon. Stopping it keeps the cells independent
+            # and stops a draining daemon from writing into a tree that is
+            # about to be removed.
+            subprocess.run(
+                [kache, "daemon", "stop"],
+                cwd=checkout,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
 
         return {"tool": tool, "wall_duration_ns": duration_ns, **extra}
 
@@ -578,7 +590,14 @@ def main() -> int:
 
     # Checkouts, targets, and stores are large and disposable; only the reports
     # under --output survive the run.
-    with tempfile.TemporaryDirectory(prefix="mbx-real-world-") as temporary:
+    # ignore_cleanup_errors: the results are computed after this block, so a
+    # failure to remove the scratch tree would throw away the whole run. kache
+    # runs a daemon per cell that writes into its own runtime directory here,
+    # and one still draining while rmtree walks makes the removal fail. The
+    # tree is disposable; the measurements are not.
+    with tempfile.TemporaryDirectory(
+        prefix="mbx-real-world-", ignore_cleanup_errors=True
+    ) as temporary:
         work = Path(temporary)
         cargo_home = work / "cargo-home"
         cargo_home.mkdir()

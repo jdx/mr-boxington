@@ -100,7 +100,16 @@ jobs:
         run: mise run bench:refresh
       - name: Publish job summary
         if: always()
-        run: cat target/benchmarks/real-world.md >> "$GITHUB_STEP_SUMMARY"
+        # A run that failed before writing its summary has already reported
+        # why; a missing file here would only add a second, less informative
+        # red step on top of it.
+        run: |
+          if [ -f target/benchmarks/real-world.md ]; then
+            cat target/benchmarks/real-world.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "The benchmark did not get as far as writing a summary." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Upload measurements
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
