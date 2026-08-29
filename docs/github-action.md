@@ -136,8 +136,9 @@ only read. See [remote cache](/remote-cache#who-may-publish).
 
 ::: warning Do not use remote caches for production releases
 A production release may still use `mbx` and its local cache, but should not use
-a remote cache. Release jobs should also avoid restoring or saving the mbx store
-through `actions/cache`.
+a remote cache so a cache-poisoning attack cannot influence published artifacts.
+Release jobs should also avoid restoring or saving the mbx store through
+`actions/cache`.
 :::
 
 For a repository that combines both backends — the server for trusted runs, the
