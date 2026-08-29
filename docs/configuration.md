@@ -124,8 +124,16 @@ running stays inside the budget. The two-permit start is a guess for links
 nobody has measured yet, and the first measurement replaces it in either
 direction: a link that turns out to fit in one permit stops being charged for
 two, which is what keeps the link-heavy tail of a build from running at half
-concurrency. A compilation the Linux OOM killer stops is recorded heavier than
-it measured, so its retry runs with more room instead of repeating the crash.
+concurrency.
+
+A link mbx has never seen is weighed by what this machine's recent links have
+cost rather than by that constant, once a few have been measured — the
+heaviest of them, since guessing low costs an out-of-memory kill and guessing
+high costs a wait. Test binaries are why: each one is its own crate name, so a
+cold `cargo test --no-run` has no per-crate history for any of the links in
+front of it and would otherwise spend the whole run on a guess. A compilation
+the Linux OOM killer stops is recorded heavier than it measured, so its retry
+runs with more room instead of repeating the crash.
 
 `priority = "low"` (`MBX_SCHEDULER_PRIORITY`) is for builds nobody is sitting
 at — CI on a shared box, an editor's background check. While a normal-priority

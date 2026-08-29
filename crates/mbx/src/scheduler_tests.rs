@@ -181,7 +181,7 @@ fn a_predicted_heavy_compile_does_not_wait_out_the_gate_on_an_idle_machine() {
     // Through `plan`, because that is the only weight production ever asks
     // for -- and it clamps to the capacity, so a rule written against
     // heavier-than-capacity weights would never fire for a real compilation.
-    pool.record_peak(&ledger_key("enormous", true), bytes_per_permit * 1000)
+    pool.record_peak(&ledger_key("enormous", true), bytes_per_permit * 1000, true)
         .unwrap();
     let (weight, predicted) = pool.plan(&Demand::new("enormous", true));
     assert_eq!(
@@ -272,8 +272,8 @@ fn plans_weigh_history_links_and_nothing() {
     let directory = tempfile::tempdir().unwrap();
     let bytes_per_permit = 1024;
     let pool = pool_at(directory.path(), 8, bytes_per_permit);
-    pool.record_peak("heavy", 3500).unwrap();
-    pool.record_peak("enormous", 1024 * 1024).unwrap();
+    pool.record_peak("heavy", 3500, false).unwrap();
+    pool.record_peak("enormous", 1024 * 1024, false).unwrap();
 
     let (weight, predicted) = pool.plan(&Demand::new("unseen", false));
     assert_eq!((weight, predicted), (1, None));
@@ -303,7 +303,8 @@ fn plans_weigh_history_links_and_nothing() {
 
     // A link measured *as a link* is weighted by what it used, whichever
     // side of the floor that falls on -- above it,
-    pool.record_peak(&ledger_key("heavy", true), 9000).unwrap();
+    pool.record_peak(&ledger_key("heavy", true), 9000, true)
+        .unwrap();
     let (weight, predicted) = pool.plan(&Demand::new("heavy", true));
     assert_eq!(
         (weight, predicted),
@@ -311,7 +312,7 @@ fn plans_weigh_history_links_and_nothing() {
         "a link's own history above the floor wins"
     );
     // and below it, which is the floor being retired rather than raised.
-    pool.record_peak(&ledger_key("light-link", true), 700)
+    pool.record_peak(&ledger_key("light-link", true), 700, true)
         .unwrap();
     let (weight, predicted) = pool.plan(&Demand::new("light-link", true));
     assert_eq!(
@@ -339,6 +340,110 @@ fn plans_weigh_history_links_and_nothing() {
     );
 }
 
+/// Every test binary is its own crate name, so a cold `cargo test --no-run`
+/// never finds a per-crate entry for the link in front of it. What the machine
+/// has learned about links in general is what it has to go on instead.
+#[test]
+fn an_unmeasured_link_is_weighed_by_what_this_machine_s_links_have_cost() {
+    let directory = tempfile::tempdir().unwrap();
+    let bytes_per_permit = 1000;
+    let pool = pool_at(directory.path(), 8, bytes_per_permit);
+
+    // Below the sample floor, one measurement is an anecdote: the static
+    // weight still stands.
+    pool.record_peak(&ledger_key("first", true), 5000, true)
+        .unwrap();
+    pool.record_peak(&ledger_key("second", true), 4000, true)
+        .unwrap();
+    assert_eq!(
+        pool.plan(&Demand::new("unseen", true)),
+        (LINK_WEIGHT, Some(LINK_WEIGHT * bytes_per_permit)),
+        "two measurements are not yet history"
+    );
+
+    // The third makes it history, and the heaviest of them is the guess.
+    pool.record_peak(&ledger_key("third", true), 3000, true)
+        .unwrap();
+    assert_eq!(
+        pool.plan(&Demand::new("unseen", true)),
+        (5, Some(5000)),
+        "an unmeasured link is weighed by the heaviest link this machine made"
+    );
+
+    // A link this machine has actually measured still speaks for itself.
+    pool.record_peak(&ledger_key("known", true), 1500, true)
+        .unwrap();
+    assert_eq!(
+        pool.plan(&Demand::new("known", true)),
+        (2, Some(1500)),
+        "a crate's own history outranks the machine's"
+    );
+
+    // And nothing about this reaches a compilation that never links.
+    assert_eq!(pool.plan(&Demand::new("unseen", false)), (1, None));
+}
+
+/// The window is what links cost *lately*, so it forgets in order and keeps
+/// recording even when the crate's own entry has nothing to learn.
+#[test]
+fn the_link_window_is_bounded_and_records_every_link() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 8, 1000);
+
+    for index in 0..MAX_LINK_SAMPLES + 4 {
+        pool.record_peak(&ledger_key("crate", true), 1000 + index as u64, true)
+            .unwrap();
+    }
+    let ledger = read_ledger(&pool.ledger_path());
+    assert_eq!(ledger.link_peaks.len(), MAX_LINK_SAMPLES);
+    assert_eq!(
+        ledger.link_peaks.first().copied(),
+        Some(1000 + 4),
+        "the oldest measurements are the ones dropped"
+    );
+
+    // A measurement no higher than the crate's recorded peak leaves the entry
+    // alone, but the window still saw a link happen.
+    let before = read_ledger(&pool.ledger_path()).link_peaks.len();
+    pool.record_peak(&ledger_key("crate", true), 1, true)
+        .unwrap();
+    let after = read_ledger(&pool.ledger_path());
+    assert_eq!(after.link_peaks.len(), before);
+    assert_eq!(after.link_peaks.last().copied(), Some(1));
+    assert_eq!(
+        after.crates.get(&ledger_key("crate", true)).copied(),
+        Some(1000 + MAX_LINK_SAMPLES as u64 + 3),
+        "a lower measurement never shrinks the recorded peak"
+    );
+}
+
+/// A ledger written before the window existed reads as one with no link
+/// history, which is what it is.
+#[test]
+fn a_ledger_without_a_link_window_still_loads() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 8, 1000);
+    std::fs::create_dir_all(directory.path()).unwrap();
+    std::fs::write(
+        pool.ledger_path(),
+        br#"{"version":1,"crates":{"widget [link]":4000}}"#,
+    )
+    .unwrap();
+
+    let ledger = read_ledger(&pool.ledger_path());
+    assert!(ledger.link_peaks.is_empty());
+    assert_eq!(
+        pool.plan(&Demand::new("widget", true)),
+        (4, Some(4000)),
+        "the entries it does carry still count"
+    );
+    assert_eq!(
+        pool.plan(&Demand::new("unseen", true)),
+        (LINK_WEIGHT, Some(LINK_WEIGHT * 1000)),
+        "and an empty window leaves the static weight standing"
+    );
+}
+
 #[test]
 fn the_ledger_only_remembers_what_matters_and_never_shrinks_a_peak() {
     let directory = tempfile::tempdir().unwrap();
@@ -352,8 +457,8 @@ fn the_ledger_only_remembers_what_matters_and_never_shrinks_a_peak() {
     // retires its floor.
     assert_eq!(ledger_peak(900, false, true, true, 1000), Some(900));
 
-    pool.record_peak("crate", 1500).unwrap();
-    pool.record_peak("crate", 1200).unwrap();
+    pool.record_peak("crate", 1500, false).unwrap();
+    pool.record_peak("crate", 1200, false).unwrap();
     assert_eq!(
         read_ledger(&pool.ledger_path()).crates.get("crate"),
         Some(&1500),
@@ -363,7 +468,7 @@ fn the_ledger_only_remembers_what_matters_and_never_shrinks_a_peak() {
     let garbage = pool.ledger_path();
     std::fs::write(&garbage, b"not json").unwrap();
     assert!(read_ledger(&garbage).crates.is_empty());
-    pool.record_peak("crate", 1500).unwrap();
+    pool.record_peak("crate", 1500, false).unwrap();
     assert_eq!(read_ledger(&garbage).crates.get("crate"), Some(&1500));
 }
 
@@ -402,7 +507,7 @@ fn the_ledger_drops_its_smallest_entries_at_the_cap() {
     let pool = pool_at(directory.path(), 4, 1);
 
     for index in 0..MAX_LEDGER_ENTRIES + 10 {
-        pool.record_peak(&format!("crate-{index}"), 100 + index as u64)
+        pool.record_peak(&format!("crate-{index}"), 100 + index as u64, false)
             .unwrap();
     }
     let ledger = read_ledger(&pool.ledger_path());

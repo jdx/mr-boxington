@@ -100,6 +100,18 @@ const MAX_FLIGHT_PAYLOAD: usize = 4 * 1024 * 1024;
 const LEDGER_VERSION: u8 = 1;
 /// Most crates the ledger retains; the smallest are dropped first.
 const MAX_LEDGER_ENTRIES: usize = 1024;
+/// Link measurements the window keeps, newest last.
+///
+/// Small on purpose: it stands for what *this* machine's links cost lately,
+/// and a window long enough to remember a toolchain ago would keep quoting a
+/// number nothing here produces any more.
+const MAX_LINK_SAMPLES: usize = 16;
+/// Measurements the window needs before it may speak for an unmeasured link.
+///
+/// One link is an anecdote -- the first one on a machine is as likely to be a
+/// trivial build script as the program itself -- so the static floor stands
+/// until a few have been seen.
+const MIN_LINK_SAMPLES: usize = 3;
 /// Permits a native link costs before it has ever been measured.
 ///
 /// Links are the out-of-memory class -- rust-lang/cargo#12912 is about little
@@ -400,6 +412,12 @@ fn flight_at(pool_dir: &Path, adapter: &'static str, invocation: &str) -> Result
 struct MemoryLedger {
     version: u8,
     crates: BTreeMap<String, u64>,
+    /// Recent link measurements, newest last, whatever crate they came from.
+    ///
+    /// Defaulted rather than versioned: a ledger written before this existed
+    /// reads as one with no link history, which is exactly what it is.
+    #[serde(default)]
+    link_peaks: Vec<u64>,
 }
 
 /// The machine-wide permit pool one process draws from.
@@ -594,11 +612,25 @@ impl Pool {
         if self.bytes_per_permit == 0 {
             return (link_floor.unwrap_or(1).min(self.capacity), None);
         }
-        let recorded = read_ledger(&self.ledger_path())
+        let ledger = read_ledger(&self.ledger_path());
+        let recorded = ledger
             .crates
             .get(&ledger_key(&demand.name, demand.links))
             .copied();
-        let link_bytes = link_floor.map(|weight| weight.saturating_mul(self.bytes_per_permit));
+        let link_bytes = link_floor.map(|weight| {
+            // What this machine's links have actually cost beats a constant
+            // chosen before anyone had seen one. Every test binary is its own
+            // crate name, so a cold `cargo test --no-run` never gets to reuse
+            // the measurement of the link it just made -- the per-crate entry
+            // is always missing for the one in front of it -- and this is the
+            // history it can use instead. The heaviest of the window rather
+            // than its average, because the cost of guessing low is an
+            // out-of-memory kill and the cost of guessing high is a wait.
+            let measured = (ledger.link_peaks.len() >= MIN_LINK_SAMPLES)
+                .then(|| ledger.link_peaks.iter().copied().max())
+                .flatten();
+            measured.unwrap_or_else(|| weight.saturating_mul(self.bytes_per_permit))
+        });
         // History replaces the floor rather than merely raising it. The floor
         // is a guess for links the pool has never seen; once one has been
         // measured, charging it the guess anyway would hold the tail of every
@@ -762,7 +794,9 @@ impl Pool {
         ) else {
             return;
         };
-        if let Err(error) = self.record_peak(&ledger_key(&demand.name, demand.links), peak) {
+        if let Err(error) =
+            self.record_peak(&ledger_key(&demand.name, demand.links), peak, demand.links)
+        {
             debug!("compiler memory was not recorded: {error:#}");
         }
     }
@@ -772,7 +806,7 @@ impl Pool {
     }
 
     /// Raise the recorded peak for one crate; never lower it.
-    fn record_peak(&self, name: &str, peak: u64) -> Result<()> {
+    fn record_peak(&self, name: &str, peak: u64, links: bool) -> Result<()> {
         std::fs::create_dir_all(&self.dir)
             .wrap_err_with(|| format!("failed to create {}", self.dir.display()))?;
         let mut lock = fslock::LockFile::open(&self.dir.join(LEDGER_LOCK))?;
@@ -780,8 +814,20 @@ impl Pool {
         let path = self.ledger_path();
         let mut ledger = read_ledger(&path);
         ledger.version = LEDGER_VERSION;
-        if ledger.crates.get(name).is_some_and(|known| *known >= peak) {
-            return Ok(());
+        // The window records every link, including one whose per-crate entry
+        // is already higher: it says what links cost around here lately, which
+        // a measurement no worse than the last one still answers.
+        if links {
+            ledger.link_peaks.push(peak);
+            let surplus = ledger.link_peaks.len().saturating_sub(MAX_LINK_SAMPLES);
+            ledger.link_peaks.drain(..surplus);
+        }
+        let known = ledger.crates.get(name).is_some_and(|known| *known >= peak);
+        if known {
+            // Still written: the window moved even though the entry did not.
+            let mut contents = serde_json::to_vec(&ledger)?;
+            contents.push(b'\n');
+            return crate::util::write_atomic(&path, &contents);
         }
         ledger.crates.insert(name.to_string(), peak);
         while ledger.crates.len() > MAX_LEDGER_ENTRIES {
