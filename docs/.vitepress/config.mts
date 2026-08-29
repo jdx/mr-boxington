@@ -5,11 +5,17 @@ import { defineConfig } from "vitepress";
 import { tabsMarkdownPlugin } from "vitepress-plugin-tabs";
 
 const configDir = dirname(fileURLToPath(import.meta.url));
-const cargoToml = readFileSync(resolve(configDir, "../../Cargo.toml"), "utf8");
-const versionMatch = cargoToml.match(
-  /^\[workspace\.package\][\s\S]*?^\s*version\s*=\s*"([^"]+)"/m,
+const cargoToml = readFileSync(
+  resolve(configDir, "../../crates/mbx/Cargo.toml"),
+  "utf8",
 );
-const latestVersion = versionMatch?.[1] ?? "0.0.0";
+const versionMatch = cargoToml.match(
+  /^\[package\][\s\S]*?^\s*version\s*=\s*"([^"]+)"/m,
+);
+if (!versionMatch) {
+  throw new Error("could not read the mbx version from crates/mbx/Cargo.toml");
+}
+const latestVersion = versionMatch[1];
 
 export default defineConfig({
   title: "mr boxington",
