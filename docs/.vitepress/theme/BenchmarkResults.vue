@@ -54,6 +54,7 @@
           <div class="mbx-bench-tool">
             <code>{{ cell.label }}</code>
             <span v-if="cell.badge" class="mbx-bench-fastest">{{ cell.badge }}</span>
+            <span v-if="cell.fastest" class="mbx-bench-fastest">fastest</span>
           </div>
           <div class="mbx-bench-bar-track" aria-hidden="true">
             <span
@@ -191,6 +192,9 @@ function contentionRows(scenario: BenchmarkScenario) {
   const parallelControl = scenario.results.find(
     (cell) => cell.tool === "mbx-unscheduled",
   );
+  const fastest = Math.min(
+    ...scenario.results.map((cell) => cell.wall_duration_ns),
+  );
   return scenario.results.map((cell) => {
     const seconds = cell.wall_duration_ns / 1e9;
     const available = cell.min_available_bytes;
@@ -210,7 +214,8 @@ function contentionRows(scenario: BenchmarkScenario) {
           ? "context"
           : cell.tool === "mbx-unscheduled"
             ? "parallel control"
-            : "fastest",
+            : null,
+      fastest: cell.wall_duration_ns === fastest,
       seconds:
         seconds >= 60
           ? `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`
