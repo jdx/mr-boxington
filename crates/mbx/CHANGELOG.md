@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3](https://github.com/jdx/mr-boxington/compare/v0.7.2...v0.7.3) - 2026-08-29
+
+### Other
+
+- lead the landing page with three feature cards ([#198](https://github.com/jdx/mr-boxington/pull/198))
+- cache linked proc macros ([#197](https://github.com/jdx/mr-boxington/pull/197))
+- corrections, editorial rebalance, and a CI anchor check ([#195](https://github.com/jdx/mr-boxington/pull/195))
+- *(benchmarks)* demonstrate parallel lint scheduling ([#191](https://github.com/jdx/mr-boxington/pull/191))
+
 ## [0.7.2](https://github.com/jdx/mr-boxington/compare/v0.7.1...v0.7.2) - 2026-08-29
 
 ### Fixed

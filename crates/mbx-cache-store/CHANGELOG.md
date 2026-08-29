@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.5...mbx-cache-store-v0.1.6) - 2026-08-29
+
+### Other
+
+- lead the landing page with three feature cards ([#198](https://github.com/jdx/mr-boxington/pull/198))
+- corrections, editorial rebalance, and a CI anchor check ([#195](https://github.com/jdx/mr-boxington/pull/195))
+- *(benchmarks)* demonstrate parallel lint scheduling ([#191](https://github.com/jdx/mr-boxington/pull/191))
+
 ## [0.1.5](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.4...mbx-cache-store-v0.1.5) - 2026-08-29
 
 ### Fixed
