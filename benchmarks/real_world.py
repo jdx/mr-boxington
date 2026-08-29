@@ -109,8 +109,8 @@ SCENARIOS: dict[str, dict[str, object]] = {
     "contention": {
         "tools": ("mbx-sequential", "mbx-unscheduled", "mbx"),
         "description": (
-            "two Clippy jobs on one runner -- sequential for context, then parallel "
-            "with and without mbx's four-compiler limit"
+            "six overlapping check, Clippy, and test jobs -- sequential for context, "
+            "then parallel with and without mbx's machine-wide compiler limit"
         ),
         "kind": "contention",
     },

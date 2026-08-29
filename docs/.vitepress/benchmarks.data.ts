@@ -33,6 +33,9 @@ export interface BenchmarkScenario {
    * published before the contention scenario existed, which are all "build".
    */
   kind?: "build" | "contention";
+  /** Optional override when one scenario was refreshed in a separate run. */
+  workflow_run?: string;
+  runner?: string;
   results: BenchmarkCell[];
   skipped: string[];
 }

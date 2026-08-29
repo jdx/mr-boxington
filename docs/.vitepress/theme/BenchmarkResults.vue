@@ -104,6 +104,13 @@
       <p v-if="scenario.skipped.length" class="mbx-bench-skipped">
         Not measured: {{ scenario.skipped.join("; ") }}
       </p>
+      <p v-if="scenario.workflow_run" class="mbx-bench-scenario-provenance">
+        Measured separately on {{ scenario.runner }}.
+        <a
+          :href="`https://github.com/jdx/mr-boxington/actions/runs/${scenario.workflow_run}`"
+          >View run</a
+        >.
+      </p>
     </section>
 
     <p class="mbx-bench-provenance">
@@ -203,7 +210,7 @@ function contentionRows(scenario: BenchmarkScenario) {
           ? "context"
           : cell.tool === "mbx-unscheduled"
             ? "parallel control"
-            : null,
+            : "fastest",
       seconds:
         seconds >= 60
           ? `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`
@@ -370,12 +377,14 @@ const versionList = computed(() => {
 }
 .mbx-bench-guard,
 .mbx-bench-skipped,
+.mbx-bench-scenario-provenance,
 .mbx-bench-provenance {
   color: var(--vp-c-text-2);
   font-size: 13px;
 }
 .mbx-bench-guard,
-.mbx-bench-skipped {
+.mbx-bench-skipped,
+.mbx-bench-scenario-provenance {
   border-top: 1px solid var(--vp-c-divider);
   margin: 0;
   padding: 16px 22px;

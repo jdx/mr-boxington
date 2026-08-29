@@ -634,65 +634,40 @@
     },
     {
       "scenario": "contention",
-      "description": "two Clippy jobs on one runner -- sequential for context, then parallel with and without mbx's four-compiler limit",
+      "description": "six overlapping check, Clippy, and test jobs -- sequential for context, then parallel with and without mbx's machine-wide compiler limit",
       "timed": true,
       "kind": "contention",
+      "workflow_run": "33261472567",
+      "runner": "Namespace Linux xlarge (32 vCPU)",
       "results": [
         {
           "tool": "mbx-sequential",
-          "wall_duration_ns": 95125280452,
-          "jobs": [
-            {
-              "job": "clippy-default"
-            },
-            {
-              "job": "clippy-all"
-            }
-          ],
-          "peak_compilers": 4,
-          "min_available_bytes": 14522449920,
+          "wall_duration_ns": 55368916289,
+          "peak_compilers": 30,
+          "min_available_bytes": 62773579776,
           "permits": null,
-          "samples": 1366,
           "stats": {
-            "hits": 2
+            "hits": 6
           }
         },
         {
           "tool": "mbx-unscheduled",
-          "wall_duration_ns": 153248071283,
-          "jobs": [
-            {
-              "job": "clippy-default"
-            },
-            {
-              "job": "clippy-all"
-            }
-          ],
-          "peak_compilers": 8,
-          "min_available_bytes": 13968519168,
+          "wall_duration_ns": 49007559044,
+          "peak_compilers": 187,
+          "min_available_bytes": 54251028480,
           "permits": null,
-          "samples": 1732,
           "stats": {
-            "hits": 4
+            "hits": 12
           }
         },
         {
           "tool": "mbx",
-          "wall_duration_ns": 97370361932,
-          "jobs": [
-            {
-              "job": "clippy-default"
-            },
-            {
-              "job": "clippy-all"
-            }
-          ],
-          "peak_compilers": 4,
-          "min_available_bytes": 13920153600,
-          "permits": 4,
-          "samples": 1295,
+          "wall_duration_ns": 39786716714,
+          "peak_compilers": 32,
+          "min_available_bytes": 62056759296,
+          "permits": 32,
           "stats": {
-            "hits": 798
+            "hits": 3722
           }
         }
       ],
