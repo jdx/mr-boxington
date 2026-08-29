@@ -28,9 +28,9 @@ export interface BenchmarkScenario {
   /** False for the compiler-change guard, which asserts rather than races. */
   timed: boolean;
   /**
-   * "build" times one build per tool; "contention" runs several at once and
-   * reports what the machine did. Absent on runs published before the
-   * contention scenario existed, which are all "build".
+   * "build" times one build per tool; "contention" compares sequential and
+   * parallel commands and reports what the machine did. Absent on runs
+   * published before the contention scenario existed, which are all "build".
    */
   kind?: "build" | "contention";
   results: BenchmarkCell[];

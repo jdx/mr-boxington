@@ -12,8 +12,8 @@ Most scenarios run the same `cargo build --locked` three ways: plain cargo,
 clock around one build. Every row is compared against one number — what plain
 cargo costs with nothing cached — because that is the build a cache is
 replacing, and it is the only scenario where running cargo says anything new.
-The last scenario is the exception: it runs four builds at once and measures
-the machine rather than the cache.
+The last scenario is the exception: it compares sequential and parallel lint
+strategies and measures the machine rather than a single build.
 
 <BenchmarkResults />
 
@@ -51,24 +51,23 @@ It also pins down the diagnosis for the opposite surprise. A warm build that
 reports no hits after a runner image rolled a new Rust looks like a broken
 store and is not one; it is this.
 
-**contention** — four CI jobs at once on one machine, from a cold store:
-`clippy --all-targets`, `check --all-targets`, `test --no-run`, and `build`.
-This is the lint stage of a real pipeline, and it is the one scenario that is
-not about cache hits. Cargo bounds the compilers *it* starts and knows nothing
-about the job beside it, so four of them oversubscribe the machine by four
-times — which is what runs a linker into an out-of-memory kill. The columns
-are what the machine did, sampled from outside every build: the most real
-compilers alive at once, and the least memory it had left.
+**contention** — the two Clippy configurations from mise's real lint job,
+from a cold store: the default configuration and `--all-features
+--all-targets`. The `mbx-sequential` row is the before picture, with both
+commands sharing one target directory. The parallel rows use separate targets
+so Cargo's target lock does not serialize them, matching GitHub Actions'
+native `parallel` steps.
 
-The `mbx` and `mbx-unscheduled` rows are the same binary with its
+All three rows use the same mbx binary. The `mbx` and `mbx-unscheduled` rows
+run the parallel shape with the
 [machine-wide scheduler](/configuration#machine-wide-compile-scheduling) on
-and off, which is the only way to compare the scheduler rather than two
-different caches. Two things separate the rows. The peak shows the bound: the
-pool holds the machine at its permit count while the unscheduled batch runs
-everything at once. The clock and the hits show the deduplication: four jobs
-building one commit reach the same compilations, and under the scheduler each
-runs once and is restored everywhere else, so the scheduled batch finishes
-ahead of the unscheduled one rather than merely no slower.
+and off, which isolates what MBX contributes from parallelism itself. Cargo
+bounds only the compilers *it* starts and knows nothing about the Cargo process
+beside it; the scheduler gives both processes one machine-wide permit pool and
+deduplicates identical work in flight. The wall clock shows whether the switch
+beats the sequential baseline. Peak compilers and lowest free memory show
+whether it got there by safely sharing the machine or merely oversubscribing
+it.
 
 ## How the comparison is kept fair
 
@@ -101,7 +100,8 @@ because its numbers still render. The run fails, and nothing publishes, unless:
   not a guard that passed;
 - the contention run sampled the machine, saw compilers running, and kept the
   scheduled batch inside its permits — *and* that the unscheduled batch went
-  past them, because a bound nothing pushed against proves nothing.
+  past them, because a bound nothing pushed against proves nothing;
+- the scheduled parallel lint finished ahead of its sequential baseline.
 
 A run that fails these is not rendered here at all — the page shows its empty
 state rather than numbers it cannot stand behind.
