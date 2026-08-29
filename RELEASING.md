@@ -75,7 +75,7 @@ promise each version line makes.
 
 The `mbx` crate is tagged `v{version}`; the three library crates are published to
 crates.io but get no GitHub release of their own. Asset names carry no version
-(`mbx-x86_64-unknown-linux-musl.tar.gz`), which is what keeps
+(`mbx-x86_64-unknown-linux-gnu.tar.gz`), which is what keeps
 `releases/latest/download/…` a stable URL.
 
 ## Setup this depends on
