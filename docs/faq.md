@@ -70,3 +70,18 @@ Every feature has its own switch:
 
 `mbx doctor --json`, a run with `MBX_LOG=debug`, and `MBX_BYPASS_LOG`. See
 [reporting a problem](/getting-started#reporting-a-problem).
+
+## Why is it called Mr. Boxington?
+
+The project is named after this cardboard box, christened “Mr. Boxington” by
+jdx's daughter while he was working on mbx. The name stuck.
+
+::: info For non-English speakers
+The joke is in “Boxington”: it combines _box_ with _-ington_, an ending
+familiar from English place names and surnames. The result makes an ordinary
+cardboard box sound like a distinguished gentleman.
+:::
+
+<img src="/mr-boxington.jpeg" alt="A child kneeling inside a tall cardboard box decorated with a face and a strawberry" width="480">
+
+_The original Mr. Boxington._
