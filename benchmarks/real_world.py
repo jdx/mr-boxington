@@ -422,38 +422,42 @@ class Runner:
                 environment["MBX_SCHEDULER_CPUS"] = str(permits)
             jobs.append((name, command, environment))
 
+        # Straight to files rather than pipes. A pipe holds 64KiB, and these
+        # jobs are only read after they are all started, so a chatty one would
+        # block on a full buffer instead of compiling -- which would land in
+        # the timing as though the machine had been busy.
+        logs = {name: self.output / f"{cell}-{name}.log" for name, _ in CONTENTION_JOBS}
         started = time.perf_counter_ns()
         with MachineSampler() as sampler:
-            running = [
-                (
-                    name,
-                    command,
-                    subprocess.Popen(
-                        command,
-                        cwd=checkout,
-                        env=environment,
-                        text=True,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                    ),
-                    time.perf_counter_ns(),
+            running = []
+            for name, command, environment in jobs:
+                handle = logs[name].open("w", encoding="utf-8")
+                handle.write(f"$ {' '.join(command)}\n\n")
+                handle.flush()
+                running.append(
+                    (
+                        name,
+                        subprocess.Popen(
+                            command,
+                            cwd=checkout,
+                            env=environment,
+                            stdout=handle,
+                            stderr=subprocess.STDOUT,
+                        ),
+                        handle,
+                    )
                 )
-                for name, command, environment in jobs
-            ]
             finished = []
-            for name, command, process, job_started in running:
-                stdout, stderr = process.communicate()
-                finished.append(
-                    (name, command, process.returncode, stdout, stderr, job_started)
-                )
+            for name, process, handle in running:
+                returncode = process.wait()
+                handle.close()
+                finished.append((name, returncode))
         duration_ns = time.perf_counter_ns() - started
 
         job_results = []
-        for name, command, returncode, stdout, stderr, job_started in finished:
-            log = self.output / f"{cell}-{name}.log"
-            log.write_text(f"$ {' '.join(command)}\n\n{stdout}\n{stderr}", encoding="utf-8")
+        for name, returncode in finished:
             if returncode != 0:
-                raise RuntimeError(f"{cell}/{tool} job {name} failed; see {log}")
+                raise RuntimeError(f"{cell}/{tool} job {name} failed; see {logs[name]}")
             job_results.append({"job": name})
 
         result: dict[str, object] = {

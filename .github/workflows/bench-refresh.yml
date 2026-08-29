@@ -74,7 +74,9 @@ jobs:
     # publishes; point this at a dedicated runner to make them comparable
     # across runs too.
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    # The contention scenario runs four cold builds at once, three times over,
+    # which is most of an hour on four shared cores by itself.
+    timeout-minutes: 180
     permissions:
       contents: read
     steps:

@@ -30,6 +30,16 @@ fn capacity_is_enforced_and_released() {
     assert!(third.is_some(), "a released permit frees capacity");
     drop(second);
     drop(third);
+
+    // Not merely unlocked: a released lease leaves no file behind. Windows
+    // refuses to delete a file anyone still holds open, so a permit that only
+    // unlocked its handle would leave one of these per compilation there --
+    // capacity would stay correct and the directory would grow forever.
+    let leases: Vec<_> = std::fs::read_dir(directory.path().join(LEASES_DIR))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert!(leases.is_empty(), "released leases are removed: {leases:?}");
 }
 
 #[test]
