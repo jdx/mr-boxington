@@ -128,11 +128,11 @@ Unsupported crate types, unmodeled search paths, and incremental compilations
 bypass the shared action cache. A compilation that links nothing is cached
 whatever its crate type — `cargo check` and clippy compile every binary and
 test target that way, and metadata is metadata. A native link is admitted only
-when its linker can be described: host binaries and tests on Linux and macOS,
-where mbx puts the resolved linker, startup objects, libc, and SDK into the
-key, and a fixed allowlist of built-in WebAssembly targets whose default
-linker and system inputs ship with rustc. Everything else — native libraries,
-custom linkers, Windows — links as it always did; see
+when its linker can be described: host binaries, tests, and proc macros on Linux
+and macOS, where mbx puts the resolved linker, startup objects, libc, and SDK
+into the key, and a fixed allowlist of built-in WebAssembly targets whose
+default linker and system inputs ship with rustc. Everything else — native
+libraries, custom linkers, Windows — links as it always did; see
 [limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
 `MBX_VERIFY=1` compiles while also consulting the cache and compares the result,
 providing a deliberately expensive qualification mode.

@@ -80,10 +80,10 @@ A build can report a high hit rate among attempted lookups while spending most
 of its time on actions that were not looked up or were bypassed. Read all three
 summary lines together, and compare wall-clock time when evaluating the cache.
 
-A link mbx cannot describe always runs, so a warm build of such a binary still
-has work to do. Host binaries and tests on Linux and macOS, and binaries,
-tests, and `cdylib`s for supported self-contained WebAssembly targets, may be
-restored as hits; see
+A link mbx cannot describe always runs, so its downstream crates may have work
+to do on an otherwise warm build. Native executables, tests, and proc macros on
+Linux and macOS, plus binaries, tests, and `cdylib`s for supported self-contained
+WebAssembly targets, may be restored as hits; see
 [limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
 
 ## Troubleshooting a low hit rate
@@ -104,11 +104,11 @@ The usual causes, roughly in the order they show up:
   members compile incrementally, those compilations bypass the cache, and the
   changed artifacts make crates above them miss too. See
   [limits](/limits#incremental-compilations-are-not-cached).
-- **Undescribed links always run.** Host binaries and tests are cached on
-  Linux and macOS, and self-contained WebAssembly targets everywhere, but a
-  link naming a native library, a custom linker, or built on Windows re-links
-  even when every compilation hit, so a warm build of such a binary still
-  takes time. See
+- **A link could not be described.** Native executables, tests, and proc macros
+  are cached on Linux and macOS, and self-contained WebAssembly targets
+  everywhere, but native links with custom or unmodeled inputs and links built
+  on Windows still run. A rebuilt dylib can also change the keys of its
+  downstream crates. `mbx explain` reports why the link bypassed; see
   [limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
 - **The inputs actually differ.** A different toolchain, feature set, profile,
   or `RUSTFLAGS` between two checkouts is a different key, and the summary
