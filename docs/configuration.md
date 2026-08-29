@@ -77,7 +77,9 @@ accepted from a repository-owned file. mbx reports an error instead of applying
 an unsafe or misspelled workspace setting.
 
 `share_out_dir = true` is the global default. A workspace may set it to false
-when generated source paths must remain literal in debug information.
+when generated source paths must remain literal in debug information -- for
+C and C++ objects as well as Rust artifacts, since a build script's generated
+headers reach both.
 
 ## Build-script C and C++
 
