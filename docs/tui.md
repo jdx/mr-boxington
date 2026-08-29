@@ -66,6 +66,16 @@ or a quick look that does not take over the terminal.
 mbx tui --once
 ```
 
+```text
+store: /home/you/.cache/mbx/actions
+objects: 44 (8.6 MiB); action results: 7 (2.5 KiB)
+
+command                             state         hit   miss  unconsulted  bypass
+mbx check --workspace               live            0      0            4       3
+mbx build                           finished        3      0            0       3
+mbx build                           finished        0      0            3       3
+```
+
 ## Recording
 
 Recording is on by default. A build appends one short line per compilation

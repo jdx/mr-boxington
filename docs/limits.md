@@ -136,6 +136,11 @@ because a build writes those into the very directory a generated header lives
 in, and counting them would make the key depend on how many sibling
 compilations had finished rather than on anything about this one.
 
+Manifests are taken once before the compiler runs and again before publishing.
+A header that appeared while the compilation was in flight is one the compiler
+never saw, so recording it would claim a state that did not produce this
+object.
+
 System roots are exempt from manifests entirely: enumerating an SDK on every
 compile costs more than the risk, and anything actually read from one is
 digested like any other input.

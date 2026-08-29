@@ -56,6 +56,7 @@ export default defineConfig({
         items: [
           { text: "Introduction", link: "/" },
           { text: "Install and run", link: "/getting-started" },
+          { text: "FAQ", link: "/faq" },
         ],
       },
       {
@@ -74,6 +75,10 @@ export default defineConfig({
         text: "Cookbook",
         items: [
           { text: "CI with fork pull requests", link: "/cookbook/fork-prs" },
+          {
+            text: "Migrate from rust-cache or sccache",
+            link: "/cookbook/migrate",
+          },
         ],
       },
       {

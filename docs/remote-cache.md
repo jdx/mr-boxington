@@ -172,44 +172,42 @@ mbx prefetch build --workspace --release
 
 The workspace's `Cargo.lock` and complete Cargo argument list select the same
 manifest as a normal mbx build. Prefetch requires a configured remote in
-`read-only` or `read-write` mode, waits for every predicted action, and returns
-an error when the manifest lookup fails.
+`read-only` or `read-write` mode, waits for every predicted action, and reports
+what it pulled:
+
+```text
+prefetched 161 actions; 214.8 MiB downloaded and 214.8 MiB stored locally
+```
+
+A workspace and command nobody has published a manifest for print
+`no recorded actions for this workspace and Cargo command` and exit
+successfully — there was nothing to fetch, which is normal for a first build.
+A lookup that *fails* — unreachable host, refused credentials — is an error,
+so CI can tell an empty cache from a broken one. A typical place for the
+command is a runner or devcontainer image's start-up hook, so the store is
+warm before anyone builds.
 
 ## Deferred publication
 
-An upload is not on the critical path of the build that produced it. A store
-request returns once the object is durable in the local content-addressed store,
-and the upload it implies is queued and performed while the build continues, so a
-compilation never waits for a round trip that only later builds benefit from.
+Uploads are not on the critical path of the build that produced them: they are
+queued while the build continues and drained before the session exits, and an
+action result is published only after every blob it references, so a reader
+never fetches a result whose outputs it cannot restore. A command killed part
+way through publishes less than it stored, which costs only hit rate — the
+next build recomputes what never landed.
 
-Two rules follow from that:
-
-- An action result is published only after every blob it references. A server
-  validates an action result's output tree before committing it, so publishing
-  one early would be rejected — and a reader that fetched it would find outputs
-  it cannot restore. A blob that fails to upload therefore withholds the action
-  result naming it, and a task manifest waits for the results it predicts.
-- The session drains its queue before exiting. Uploads belong to the build's
-  process, so a command killed part way through publishes less than it stored.
-  Nothing is lost but hit rate: the next build recomputes what never landed.
-
-A failed upload is reported, counted in `remote_failures`, and recovered from.
-The build keeps its local result either way. The session summary reports what was
-published and what the drain cost:
+A failed upload is reported, counted in `remote_failures`, and recovered from;
+the build keeps its local result either way. The session summary reports what
+was published and what the drain cost, and where the server accepts them,
+queued blobs are published several to a request rather than one at a time:
 
 ```text
-mbx[cache]: uploads: 143 published, 0 not published; 412ms waited for after the build
+mbx[cache]: uploads: 143 published (118 of them in 2 packs), 0 not published; 412.0ms waited for after the build
 ```
 
 `MBX_STATS_REPORT` carries the same figures as `background_uploads`,
-`background_upload_failures`, and `upload_drain_duration_ns`.
-
-Where the server accepts them, queued blobs are published several to a request
-rather than one at a time — rustc output is many small objects, so one request
-each spends most of its time in round trips. The summary says how many went that
-way, and `remote_blob_pack_uploads` and `remote_blob_pack_upload_blobs` report
-it. A pack the server refuses is republished blob by blob, which also says which
-blob was the problem.
+`background_upload_failures`, `upload_drain_duration_ns`,
+`remote_blob_pack_uploads`, and `remote_blob_pack_upload_blobs`.
 
 ## Batched lookups
 
@@ -224,17 +222,14 @@ has made; nothing needs configuring either way.
 
 ## Transfer behavior
 
-Remote blobs are compressed with zstd. `MBX_HTTP_DOWNLOAD_TIMEOUT` is separate
-from the normal request timeout because artifacts can be much larger than
-metadata responses. Failed requests are retried according to
-`MBX_HTTP_RETRIES`.
+Remote blobs are compressed with zstd. Failed requests are retried according
+to `MBX_HTTP_RETRIES`, and a stalled attempt is cut short by
+`MBX_HTTP_TIMEOUT`.
 
-`MBX_HTTP_DOWNLOAD_TIMEOUT` is a deadline for the whole download rather than a
-budget per attempt: it spans every retry named by `MBX_HTTP_RETRIES` and the
-backoff between them, so a download that exhausts it fails even with retries
-left. That bounds how long one blob can hold a build open, and a stalled attempt
-is separately cut short by `MBX_HTTP_TIMEOUT`. Both the protocol server and the
-bucket backend read it the same way; a packed request to a protocol server
-scales the deadline up with the bytes and object count it asks for, since the
-configured value describes a single blob. Raise `MBX_HTTP_DOWNLOAD_TIMEOUT` if a
-slow link makes large artifacts run out of time before their retries are spent.
+`MBX_HTTP_DOWNLOAD_TIMEOUT` exists separately because artifacts can be much
+larger than metadata responses. It is a deadline for the whole download, not a
+budget per attempt — it spans every retry and the backoff between them, which
+bounds how long one blob can hold a build open. A packed request scales the
+deadline up with the bytes and object count it asks for, since the configured
+value describes a single blob. Raise it if a slow link makes large artifacts
+run out of time before their retries are spent.

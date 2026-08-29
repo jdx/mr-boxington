@@ -31,7 +31,25 @@ group identical causes, and print guidance for every bypass category:
 mbx explain build --workspace
 ```
 
-The command preserves Cargo's exit status after printing the explanation.
+```text
+cache explanation: 8 compilations bypassed the cache
+
+compiler-query (2)
+Expected: Cargo asks rustc for toolchain information; there is no compilation to cache.
+  - rustc invocation is a compiler query, not a compilation (2 times)
+
+incremental (5)
+Cargo compiled this incrementally, which mbx cannot cache. `MBX_INCREMENTAL=0` makes it cacheable again; mbx already gives a crate you are editing its own incremental state without giving up the rest of the cache.
+  - incremental compilation cannot be combined with action caching (5 times)
+
+standard-input (1)
+Expected for Cargo probes: source supplied on standard input cannot be rediscovered later.
+  - rustc invocation reads source from standard input
+```
+
+Categories marked expected appear on every build and cost nothing; here the
+`incremental` group is the one the build could act on. The command preserves
+Cargo's exit status after printing the explanation.
 
 ## Remote failure
 
@@ -114,11 +132,18 @@ The usual causes, roughly in the order they show up:
 ## Compiler time
 
 The session summary reports real compiler time by outcome and an estimate of
-the compiler time avoided by cache hits. The estimate comes from the duration
-recorded with the successful compilation that populated the action prediction;
-older predictions without a timing hint contribute zero rather than being
-guessed. The five crates with the largest cumulative uncached compiler time are
-listed so optimization work can target wall-clock cost instead of action count.
+the compiler time avoided by cache hits:
+
+```text
+mbx[cache]: compiler time: 252.90s estimated avoided; 38.20s spent (161 miss in 31.00s, 7 unconsulted in 7.20s)
+mbx[cache]: slowest uncached crates: syn 8.90s, regex-syntax 4.90s, serde_derive 3.90s
+```
+
+The estimate comes from the duration recorded with the successful compilation
+that populated the action prediction; older predictions without a timing hint
+contribute zero rather than being guessed. The five crates with the largest
+cumulative uncached compiler time are listed so optimization work can target
+wall-clock cost instead of action count.
 
 The version 2 JSON statistics report exposes the same data in
 `estimated_compiler_duration_avoided_ns`, `compiler`, and

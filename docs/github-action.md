@@ -2,7 +2,8 @@
 
 [`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action)
 installs mbx and connects it to either GitHub Actions cache or an mbx-compatible
-server.
+server. The examples below show the inputs that matter for each backend; the
+action's repository documents the complete list.
 
 ## GitHub Actions cache
 

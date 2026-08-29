@@ -19,11 +19,14 @@ component to keep up to date.
 That wrapper boundary also covers multiple Cargo builds running at the same
 time. Their compiler shims share a machine-wide permit pool and an
 in-flight-work registry, so those builds do not multiply the machine's CPU and
-memory budgets or repeat an identical cold compilation. See the copyable
-[mise task example](/getting-started#run-multiple-cargo-builds-at-the-same-time), the
-[parallel GitHub Actions example](/github-action#parallel-cargo-steps), the
-[scheduler details](/configuration#machine-wide-compile-scheduling), and the
-[contention benchmark](/benchmarks#contention).
+memory budgets or repeat an identical cold compilation.
+[Machine-wide scheduling](#machine-wide-scheduling) below describes the
+mechanism; the
+[mise task example](/getting-started#run-multiple-cargo-builds-at-the-same-time)
+and the
+[parallel GitHub Actions example](/github-action#parallel-cargo-steps) are
+copyable shapes, and the [contention benchmark](/benchmarks#contention)
+measures it.
 
 ## Build-script C and C++
 
@@ -44,14 +47,8 @@ key to look up yet — it is stored after compiling and warms the next build. Th
 directories the compile searched also contribute a manifest of the names in
 them that could answer an `#include`, so a header appearing where it would
 *shadow* one that was read changes the key even though every file that was read
-is unchanged. Objects and dependency files are not counted: they cannot shadow
-an include, and a build writes them into the very directory a generated header
-lives in.
-
-Those manifests are taken once before the compiler runs and again before
-publishing. A header that appeared while the compilation was in flight is one
-the compiler never saw, so recording it would claim a state that did not
-produce this object.
+is unchanged; what a manifest counts and leaves out is covered in
+[limits](/limits#shadowing-is-modeled-by-name-not-by-content).
 
 ## Portable keys
 
@@ -91,6 +88,39 @@ the same values as `reflinked_output_files`, `reflinked_output_bytes`,
 This is filesystem copy-on-write, not a placeholder or userspace on-demand
 filesystem. Restored paths retain normal file semantics on every supported
 platform, including when mbx has to use the copy fallback.
+
+## Machine-wide scheduling
+
+Every compiler mbx starts takes a permit from one pool shared by every build
+on the machine, so simultaneous builds do not multiply the machine's CPU and
+memory budgets. Cache hits never wait, Cargo keeps its own dependency
+scheduling, and permits are released by the kernel if a process dies, so a
+crashed build cannot wedge its siblings.
+
+Concurrent builds also stop repeating each other. Four CI jobs building one
+commit compile the same dependency graph four times; under the scheduler, a
+compilation identical to one already running anywhere on the machine waits for
+that one to finish and restores its result from the cache instead of burning a
+core on it. The finished compilation also leaves its input list behind, so a
+job arriving after it is already done can build the cache key it would
+otherwise lack and hit where it would have compiled cold. Both paths rehash
+every input before trusting anything, so the worst a stale record can do is
+fall back to compiling.
+
+Permits are weighted by memory. Native links start at two permits, and every
+compilation is thereafter weighted by what it actually used, so the predicted
+memory of everything running stays inside the budget; a link that turns out to
+fit in one permit stops being charged for two, which is what keeps the
+link-heavy tail of a build from running at half concurrency. A link mbx has
+never seen is weighed by the heaviest of this machine's recent links —
+guessing low costs an out-of-memory kill and guessing high costs a wait, and
+test binaries make the case for remembering: each is its own crate name, so a
+cold `cargo test --no-run` has no per-crate history for the links in front of
+it. A compilation the Linux OOM killer stops is recorded heavier than it
+measured, so its retry runs with more room instead of repeating the crash.
+
+The pool size, memory budget, and priority are settings; see
+[machine-wide compile scheduling](/configuration#machine-wide-compile-scheduling).
 
 ## Correctness first
 

@@ -1,9 +1,16 @@
 # Configuration
 
-mbx loads environment variables over `.mbx.toml` at the resolved Cargo
-workspace root, then `mbx/config.toml` in the platform configuration directory,
-then defaults. This honors platform and XDG overrides through the operating
-system's configuration-directory lookup. Unknown TOML keys are rejected, so a
+mbx reads configuration from three places; the first value found wins:
+
+1. Environment variables (`MBX_*`).
+2. `.mbx.toml` at the resolved Cargo workspace root — the
+   [build-policy switches](#workspace-policy) only.
+3. `mbx/config.toml` in the platform configuration directory:
+   - Linux: `~/.config/mbx/config.toml`, honoring `$XDG_CONFIG_HOME`
+   - macOS: `~/Library/Application Support/mbx/config.toml`
+   - Windows: `%APPDATA%\mbx\config.toml`
+
+Anything still unset takes its default. Unknown TOML keys are rejected, so a
 misspelled setting is an error rather than a silent no-op.
 
 ## Disk-scaled defaults
@@ -107,16 +114,11 @@ cache directory (on by default; `MBX_SCHEDULER=0` turns it off). Cache hits
 never wait, Cargo keeps its own dependency scheduling, and permits are released
 by the kernel if a process dies, so a crashed build cannot wedge its siblings.
 
-Builds running at the same time do not just take turns, they stop repeating
-each other.
-Four CI jobs building one commit compile the same dependency graph four
-times; under the scheduler, a compilation identical to one already running
-anywhere on the machine waits for that one to finish and restores its result
-from the cache instead of burning a core on it. The finished compilation also
-leaves its input list behind, so a job arriving after it is already done can
-build the cache key it would otherwise lack and hit where it would have
-compiled cold. Both paths rehash every input before trusting anything, so
-the worst a stale record can do is fall back to compiling.
+Builds running at the same time also stop repeating each other: a compilation
+identical to one already running anywhere on the machine waits for that one
+and restores its result instead of burning a core on it. How the pool weighs
+compilations and links — and what happens when a guess is wrong — is described
+in [how it works](/how-it-works#machine-wide-scheduling).
 
 The pool is memory-aware. `scheduler.cpus` permits (default: logical CPUs)
 divide `scheduler.memory` (default: 85% of physical memory, leaving headroom
@@ -124,22 +126,6 @@ for everything that is not a compiler; `"none"` keeps plain CPU permits). In a
 container, "physical memory" means the cgroup's limit rather than the host's
 RAM — a build in a 4 GiB container on a large machine is budgeted by the
 4 GiB, because the rest was never its to spend.
-Native links start at two permits, and every compilation is thereafter
-weighted by what it actually used, so the predicted memory of everything
-running stays inside the budget. The two-permit start is a guess for links
-nobody has measured yet, and the first measurement replaces it in either
-direction: a link that turns out to fit in one permit stops being charged for
-two, which is what keeps the link-heavy tail of a build from running at half
-concurrency.
-
-A link mbx has never seen is weighed by what this machine's recent links have
-cost rather than by that constant, once a few have been measured — the
-heaviest of them, since guessing low costs an out-of-memory kill and guessing
-high costs a wait. Test binaries are why: each one is its own crate name, so a
-cold `cargo test --no-run` has no per-crate history for any of the links in
-front of it and would otherwise spend the whole run on a guess. A compilation
-the Linux OOM killer stops is recorded heavier than it measured, so its retry
-runs with more room instead of repeating the crash.
 
 `priority = "low"` (`MBX_SCHEDULER_PRIORITY`) is for builds nobody is sitting
 at — CI on a shared box, an editor's background check. While a normal-priority
@@ -193,26 +179,15 @@ The crate you are editing misses the cache on every build, because its content
 is new every time. After three consecutive compilations whose sources changed,
 mbx compiles that crate with its own incremental state rather than from
 scratch, and keeps the result out of the shared cache — an incremental artifact
-describes one checkout's edit history, not its source, so it is never something
-another checkout should restore. The build reports those compilations as
-`incremental` and says how many were held back.
+describes one checkout's edit history, not its source. The build reports those
+compilations as `incremental` and says how many were held back.
 
-What it watches is the crate's own sources, not its cache key. A key also
-covers the artifacts a crate links against, so rebuilding one dependency
-changes the key of everything above it; watching that would send a whole
-dependency cone incremental because one crate at the bottom was edited, and
-stop all of it publishing. Crates above the one you are editing keep compiling
-and publishing normally.
-
-Unchanged sources are never churn, however the compilation got here. A miss on
-them means something else lost the result — a wiped `target/`, a first build in
-a new checkout — so it compiles normally and publishes for everyone.
-
-The record of what a crate last compiled belongs to one checkout, and lives in
-`mbx-incremental/` inside that build's target directory alongside the
-incremental state itself. A sibling worktree keeps its own, so one developer's
-edit loop cannot mark a crate hot for a worktree that is merely building it. A
-managed target reclaims both along with everything else it holds, and each
+The trigger is the crate's own sources, not its cache key, so a rebuilt
+dependency — which changes the keys of everything above it — keeps compiling
+and publishing normally, and so does a miss on unchanged sources (a wiped
+`target/`, a first build in a new checkout). The record is private to each
+checkout, living in `mbx-incremental/` inside that build's target directory
+beside the incremental state itself; a managed target reclaims both, and each
 crate's incremental state is discarded once it passes 1 GiB.
 
 CI never does this, for the same reason it never compiles incrementally: there

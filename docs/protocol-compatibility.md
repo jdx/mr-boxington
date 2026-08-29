@@ -98,25 +98,12 @@ protocols. Pull requests that touch workspace crates run `cargo-semver-checks`
 against the pull request's base commit with all features enabled. Wire format
 changes still require the protocol-version steps above.
 
-A breaking API change is *declared*, not numbered by hand. Mark the commit
-breaking — `feat!:`, or a `BREAKING CHANGE:` footer — and release-plz prices
-it into the version when it opens the release PR. Do not edit a crate's version
-in a pull request: release-plz owns those numbers, and it knows that a crate on
-`0.x` needs a minor bump where a `1.x` crate would need a major one.
-
-One consequence is worth knowing before it surprises you. A pull request that
-breaks an API on purpose leaves `public API compatibility` red, because the
-version it compares against cannot move until the release PR exists. The
-breaking marker on the commit is what makes the break deliberate; the red check
-is the expected state of an honest breaking change, not a problem to solve
-inside the pull request.
-
-Read that job's output as a list of what broke, not as an instruction. Its
-summary says "semver requires new major version" whatever the crate's position,
-so for the crates on `0.x` it names a bump Cargo does not want — there, a break
-is a minor. The lint names above the summary are the useful part: they say which
-items changed shape, which is what a reviewer needs to judge whether the break
-was intended.
+A breaking API change is *declared*, not numbered by hand: the commit carries
+`feat!:` or a `BREAKING CHANGE:` footer, and release-plz prices it into the
+version when it opens the release PR. What that means for contributors —
+including why a deliberate break leaves the semver check red until the release
+PR exists — is covered in
+[RELEASING.md](https://github.com/jdx/mr-boxington/blob/main/RELEASING.md).
 
 The published crates do not all share a version, because they do not promise
 the same things:
