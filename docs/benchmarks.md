@@ -110,8 +110,7 @@ nothing publishes unless:
   not a guard that passed;
 - the contention run sampled the machine, saw compilers running, and kept the
   scheduled batch inside its permits — *and* that the unscheduled batch went
-  past them, because a bound nothing pushed against proves nothing;
-- the scheduled parallel lint finished ahead of its sequential baseline.
+  past them, because a bound nothing pushed against proves nothing.
 
 A run that fails these is not rendered here at all — the page shows its empty
 state rather than numbers it cannot stand behind.

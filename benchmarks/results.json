@@ -4,11 +4,11 @@
   "revision": "fc29ead1456ba7c1f62826c284126410a4014b00",
   "toolchain": "1.97.1",
   "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
-  "runner": "GitHub Actions 1000680189",
-  "workflow_run": "33228589507",
-  "commit": "c320ef3fd64f195ca4456d51e45616fe8c31e230",
+  "runner": "GitHub Actions 1000682470",
+  "workflow_run": "33256552530",
+  "commit": "5063276c07708ed8a3111f99c71a002572433b7c",
   "versions": {
-    "mbx": "0.7.0",
+    "mbx": "1.0.0",
     "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
     "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
     "kache": "kache 0.16.0"
@@ -20,27 +20,124 @@
       "scenario": "cold",
       "description": "empty store, fresh target -- a first build on a new machine",
       "timed": true,
+      "kind": "build",
       "results": [
         {
           "tool": "cargo",
-          "wall_duration_ns": 89025729339
+          "wall_duration_ns": 94178850135
         },
         {
           "tool": "mbx",
-          "wall_duration_ns": 93767923422,
+          "wall_duration_ns": 104355980863,
           "stats": {
+            "version": 4,
+            "session_duration_ns": 104286798044,
             "lookups": 2,
             "hits": 2,
             "misses": 0,
-            "unconsulted": 726,
+            "unconsulted": 789,
+            "compiler_invocations_avoided": 2,
+            "estimated_compiler_duration_avoided_ns": 0,
+            "compiler": {
+              "bypass": {
+                "invocations": 4,
+                "duration_ns": 624449414
+              },
+              "unconsulted": {
+                "invocations": 789,
+                "duration_ns": 261939539073
+              }
+            },
+            "slow_compilations": [
+              {
+                "crate_name": "hk",
+                "duration_ns": 11097951380
+              },
+              {
+                "crate_name": "rmcp",
+                "duration_ns": 10321536615
+              },
+              {
+                "crate_name": "syn",
+                "duration_ns": 10074055140
+              },
+              {
+                "crate_name": "usage_derive",
+                "duration_ns": 7784217888
+              },
+              {
+                "crate_name": "darling_core",
+                "duration_ns": 5870336709
+              }
+            ],
+            "verifications": 0,
+            "divergences": 0,
+            "prefetched_actions": 0,
             "predictions_loaded": 0,
+            "prefetch_runs": 0,
+            "bypasses": {
+              "cc-compiler-query": 10,
+              "cc-non-object-output": 10,
+              "cc-tool-passthrough": 111,
+              "cc-unknown-flag": 3,
+              "compiler-query": 8,
+              "native-library": 3,
+              "no-dep-info": 1,
+              "standard-input": 8
+            },
+            "downloaded_bytes": 0,
+            "uploaded_bytes": 0,
+            "background_uploads": 0,
+            "background_upload_failures": 0,
+            "remote_blob_pack_uploads": 0,
+            "remote_blob_pack_upload_blobs": 0,
+            "upload_drain_duration_ns": 0,
+            "stored_bytes": 1398398951,
             "restored_output_files": 2,
-            "restored_output_bytes": 2624
-          }
+            "restored_output_bytes": 2624,
+            "reflinked_output_files": 0,
+            "reflinked_output_bytes": 0,
+            "copied_output_files": 0,
+            "copied_output_bytes": 0,
+            "reused_output_files": 2,
+            "reused_output_bytes": 2624,
+            "remote_failures": 0,
+            "remote_manifest_lookups": 0,
+            "remote_action_lookups": 0,
+            "remote_blob_requests": 0,
+            "remote_blob_pack_requests": 0,
+            "remote_blob_pack_blobs": 0,
+            "remote_manifest_lookup_duration_ns": 0,
+            "remote_action_lookup_duration_ns": 0,
+            "remote_blob_transfer_duration_ns": 0,
+            "local_cas_write_duration_ns": 0,
+            "prefetch_duration_ns": 0,
+            "materialization_duration_ns": 798291
+          },
+          "summary": [
+            "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 44s",
+            "mbx[cache]: 2 hits, 0 misses, 0 prefetched; 0 B downloaded, 0 B uploaded, 1.3 GiB stored locally",
+            "mbx[cache]: could not look up 789 compilations: no usable dep-info from an earlier build and no prediction to derive an action key from",
+            "mbx[cache]: bypassed 154 compilations: 111 cc-tool-passthrough, 10 cc-compiler-query, 10 cc-non-object-output, 8 compiler-query, 8 standard-input, 3 cc-unknown-flag, 3 native-library, 1 no-dep-info",
+            "mbx[cache]: compiler time: 0ns estimated avoided; 262.56s spent (4 bypass in 624.4ms, 789 unconsulted in 261.94s)",
+            "mbx[cache]: slowest uncached crates: hk 11.10s, rmcp 10.32s, syn 10.07s, usage_derive 7.78s, darling_core 5.87s",
+            "mbx[cache]: timing: 104.29s session, 0ns prefetch; cumulative 0ns remote lookup, 0ns blob transfer, 0ns CAS write, 798\u00b5s materialization",
+            "mbx[cache]: materialization: 0 outputs (0 B) reflinked, 0 outputs (0 B) copied, 2 outputs (2.6 KiB) already in place"
+          ]
         },
         {
           "tool": "kache",
-          "wall_duration_ns": 102311465973
+          "wall_duration_ns": 106286516343,
+          "summary": [
+            "Store:      1.3 GiB / 50.0 GiB (315 entries, 3%)",
+            "Dedup:      882 unique blobs, 1.3 GiB physical, 0.0% savings",
+            "Hit rate:   0.0% (local: 0, prefetch: 0, remote: 0, dup: 0, miss: 315)",
+            "Weighted:   0.0% by compile cost",
+            "Miss share: 100.0% of wrapper time (~4min)",
+            "Time saved: n/a (estimated compile work avoided, last 24h)",
+            "Daemon:     v0.16.0 (epoch 1788012474, config /home/runner/.config/kache/config.toml)",
+            "Remote:     not configured"
+          ]
         }
       ],
       "skipped": []
@@ -49,23 +146,124 @@
       "scenario": "warm",
       "description": "warm store, fresh target -- CI restoring a cache for the same commit",
       "timed": true,
+      "kind": "build",
       "results": [
         {
           "tool": "mbx",
-          "wall_duration_ns": 36514320997,
+          "wall_duration_ns": 19415261403,
           "stats": {
-            "lookups": 719,
-            "hits": 718,
+            "version": 4,
+            "session_duration_ns": 19385162332,
+            "lookups": 782,
+            "hits": 781,
             "misses": 1,
             "unconsulted": 9,
-            "predictions_loaded": 716,
-            "restored_output_files": 1218,
-            "restored_output_bytes": 793317714
-          }
+            "compiler_invocations_avoided": 781,
+            "estimated_compiler_duration_avoided_ns": 213604865886,
+            "compiler": {
+              "bypass": {
+                "invocations": 4,
+                "duration_ns": 603565995
+              },
+              "miss": {
+                "invocations": 1,
+                "duration_ns": 20375121
+              },
+              "unconsulted": {
+                "invocations": 9,
+                "duration_ns": 3631915197
+              }
+            },
+            "slow_compilations": [
+              {
+                "crate_name": "cc:bcm.c",
+                "duration_ns": 3475187845
+              },
+              {
+                "crate_name": "aws_lc_sys",
+                "duration_ns": 390222220
+              },
+              {
+                "crate_name": "libgit2_sys",
+                "duration_ns": 160806813
+              },
+              {
+                "crate_name": "cc:flag_check.c",
+                "duration_ns": 133917382
+              },
+              {
+                "crate_name": "libz_sys",
+                "duration_ns": 34119083
+              }
+            ],
+            "verifications": 0,
+            "divergences": 0,
+            "prefetched_actions": 0,
+            "predictions_loaded": 779,
+            "prefetch_runs": 0,
+            "bypasses": {
+              "cc-compiler-query": 10,
+              "cc-non-object-output": 10,
+              "cc-tool-passthrough": 111,
+              "cc-unknown-flag": 3,
+              "compiler-query": 8,
+              "native-library": 3,
+              "no-dep-info": 1,
+              "standard-input": 8
+            },
+            "downloaded_bytes": 0,
+            "uploaded_bytes": 0,
+            "background_uploads": 0,
+            "background_upload_failures": 0,
+            "remote_blob_pack_uploads": 0,
+            "remote_blob_pack_upload_blobs": 0,
+            "upload_drain_duration_ns": 0,
+            "stored_bytes": 0,
+            "restored_output_files": 1344,
+            "restored_output_bytes": 1377961093,
+            "reflinked_output_files": 0,
+            "reflinked_output_bytes": 0,
+            "copied_output_files": 1340,
+            "copied_output_bytes": 1378389054,
+            "reused_output_files": 4,
+            "reused_output_bytes": 5248,
+            "remote_failures": 0,
+            "remote_manifest_lookups": 0,
+            "remote_action_lookups": 0,
+            "remote_blob_requests": 0,
+            "remote_blob_pack_requests": 0,
+            "remote_blob_pack_blobs": 0,
+            "remote_manifest_lookup_duration_ns": 0,
+            "remote_action_lookup_duration_ns": 0,
+            "remote_blob_transfer_duration_ns": 0,
+            "local_cas_write_duration_ns": 0,
+            "prefetch_duration_ns": 0,
+            "materialization_duration_ns": 1877881797
+          },
+          "summary": [
+            "mbx[cache]: 781 hits, 1 misses, 0 prefetched; 0 B downloaded, 0 B uploaded, 0 B stored locally",
+            "mbx[cache]: could not look up 9 compilations: no usable dep-info from an earlier build and no prediction to derive an action key from",
+            "mbx[cache]: bypassed 154 compilations: 111 cc-tool-passthrough, 10 cc-compiler-query, 10 cc-non-object-output, 8 compiler-query, 8 standard-input, 3 cc-unknown-flag, 3 native-library, 1 no-dep-info",
+            "mbx[cache]: compiler time: 213.60s estimated avoided; 4.26s spent (4 bypass in 603.6ms, 1 miss in 20.4ms, 9 unconsulted in 3.63s)",
+            "mbx[cache]: slowest uncached crates: cc:bcm.c 3.48s, aws_lc_sys 390.2ms, libgit2_sys 160.8ms, cc:flag_check.c 133.9ms, libz_sys 34.1ms",
+            "mbx[cache]: timing: 19.39s session, 0ns prefetch; cumulative 0ns remote lookup, 0ns blob transfer, 0ns CAS write, 1.88s materialization",
+            "mbx[cache]: materialization: 0 outputs (0 B) reflinked, 1340 outputs (1.3 GiB) copied, 4 outputs (5.1 KiB) already in place",
+            "mbx[savings]: 781 compilations answered from memory. rustc can finish its coffee. (3m 33s saved)"
+          ]
         },
         {
           "tool": "kache",
-          "wall_duration_ns": 30192672992
+          "wall_duration_ns": 33927532731,
+          "summary": [
+            "Store:      1.3 GiB / 50.0 GiB (315 entries, 3%)",
+            "Dedup:      882 unique blobs, 1.3 GiB physical, 0.0% savings",
+            "Hit rate:   50.0% (local: 315, prefetch: 0, remote: 0, dup: 0, miss: 315)",
+            "Weighted:   50.0% by compile cost",
+            "Miss share: 92.5% of wrapper time (~4min)",
+            "Time saved: ~4min (estimated compile work avoided, last 24h)",
+            "Daemon:     v0.16.0 (epoch 1788012474, config /home/runner/.config/kache/config.toml)",
+            "Remote:     not configured"
+          ]
         }
       ],
       "skipped": []
@@ -74,27 +272,128 @@
       "scenario": "commit",
       "description": "store warmed at the parent commit, build the child -- push-to-push CI",
       "timed": true,
+      "kind": "build",
       "results": [
         {
           "tool": "cargo",
-          "wall_duration_ns": 89094430600
+          "wall_duration_ns": 95054700365
         },
         {
           "tool": "mbx",
-          "wall_duration_ns": 36445541175,
+          "wall_duration_ns": 33439628219,
           "stats": {
-            "lookups": 719,
-            "hits": 718,
-            "misses": 1,
+            "version": 4,
+            "session_duration_ns": 33317702573,
+            "lookups": 783,
+            "hits": 780,
+            "misses": 3,
             "unconsulted": 9,
-            "predictions_loaded": 716,
-            "restored_output_files": 1218,
-            "restored_output_bytes": 793318362
-          }
+            "compiler_invocations_avoided": 780,
+            "estimated_compiler_duration_avoided_ns": 186515121254,
+            "compiler": {
+              "bypass": {
+                "invocations": 4,
+                "duration_ns": 577795663
+              },
+              "miss": {
+                "invocations": 2,
+                "duration_ns": 11944719652
+              },
+              "unconsulted": {
+                "invocations": 9,
+                "duration_ns": 3256100989
+              }
+            },
+            "slow_compilations": [
+              {
+                "crate_name": "hk",
+                "duration_ns": 11926413822
+              },
+              {
+                "crate_name": "cc:bcm.c",
+                "duration_ns": 3112805269
+              },
+              {
+                "crate_name": "aws_lc_sys",
+                "duration_ns": 365777254
+              },
+              {
+                "crate_name": "libgit2_sys",
+                "duration_ns": 157264032
+              },
+              {
+                "crate_name": "cc:flag_check.c",
+                "duration_ns": 123076251
+              }
+            ],
+            "verifications": 0,
+            "divergences": 0,
+            "prefetched_actions": 0,
+            "predictions_loaded": 779,
+            "prefetch_runs": 0,
+            "bypasses": {
+              "cc-compiler-query": 10,
+              "cc-non-object-output": 10,
+              "cc-tool-passthrough": 111,
+              "cc-unknown-flag": 3,
+              "compiler-query": 8,
+              "native-library": 3,
+              "no-dep-info": 1,
+              "standard-input": 8
+            },
+            "downloaded_bytes": 0,
+            "uploaded_bytes": 0,
+            "background_uploads": 0,
+            "background_upload_failures": 0,
+            "remote_blob_pack_uploads": 0,
+            "remote_blob_pack_upload_blobs": 0,
+            "upload_drain_duration_ns": 0,
+            "stored_bytes": 186697384,
+            "restored_output_files": 1342,
+            "restored_output_bytes": 1191434965,
+            "reflinked_output_files": 0,
+            "reflinked_output_bytes": 0,
+            "copied_output_files": 1338,
+            "copied_output_bytes": 1191864114,
+            "reused_output_files": 4,
+            "reused_output_bytes": 5248,
+            "remote_failures": 0,
+            "remote_manifest_lookups": 0,
+            "remote_action_lookups": 0,
+            "remote_blob_requests": 0,
+            "remote_blob_pack_requests": 0,
+            "remote_blob_pack_blobs": 0,
+            "remote_manifest_lookup_duration_ns": 0,
+            "remote_action_lookup_duration_ns": 0,
+            "remote_blob_transfer_duration_ns": 0,
+            "local_cas_write_duration_ns": 0,
+            "prefetch_duration_ns": 0,
+            "materialization_duration_ns": 1730715611
+          },
+          "summary": [
+            "mbx[cache]: 780 hits, 3 misses, 0 prefetched; 0 B downloaded, 0 B uploaded, 178.0 MiB stored locally",
+            "mbx[cache]: could not look up 9 compilations: no usable dep-info from an earlier build and no prediction to derive an action key from",
+            "mbx[cache]: bypassed 154 compilations: 111 cc-tool-passthrough, 10 cc-compiler-query, 10 cc-non-object-output, 8 compiler-query, 8 standard-input, 3 cc-unknown-flag, 3 native-library, 1 no-dep-info",
+            "mbx[cache]: compiler time: 186.52s estimated avoided; 15.78s spent (4 bypass in 577.8ms, 2 miss in 11.94s, 9 unconsulted in 3.26s)",
+            "mbx[cache]: slowest uncached crates: hk 11.93s, cc:bcm.c 3.11s, aws_lc_sys 365.8ms, libgit2_sys 157.3ms, cc:flag_check.c 123.1ms",
+            "mbx[cache]: timing: 33.32s session, 0ns prefetch; cumulative 0ns remote lookup, 0ns blob transfer, 0ns CAS write, 1.73s materialization",
+            "mbx[cache]: materialization: 0 outputs (0 B) reflinked, 1338 outputs (1.1 GiB) copied, 4 outputs (5.1 KiB) already in place",
+            "mbx[savings]: 782 cache hits and counting. rustc thinks it has been busy."
+          ]
         },
         {
           "tool": "kache",
-          "wall_duration_ns": 41568348861
+          "wall_duration_ns": 46216607276,
+          "summary": [
+            "Store:      1.5 GiB / 50.0 GiB (316 entries, 3%)",
+            "Dedup:      883 unique blobs, 1.5 GiB physical, 0.0% savings",
+            "Hit rate:   49.8% (local: 314, prefetch: 0, remote: 0, dup: 0, miss: 316)",
+            "Weighted:   47.1% by compile cost",
+            "Miss share: 92.5% of wrapper time (~4min)",
+            "Time saved: ~3min (estimated compile work avoided, last 24h)",
+            "Daemon:     v0.16.0 (epoch 1788012474, config /home/runner/.config/kache/config.toml)",
+            "Remote:     not configured"
+          ]
         }
       ],
       "skipped": []
@@ -103,23 +402,124 @@
       "scenario": "worktree",
       "description": "warm store, second checkout at a different path",
       "timed": true,
+      "kind": "build",
       "results": [
         {
           "tool": "mbx",
-          "wall_duration_ns": 49757510602,
+          "wall_duration_ns": 20383671576,
           "stats": {
-            "lookups": 719,
-            "hits": 683,
-            "misses": 36,
+            "version": 4,
+            "session_duration_ns": 20356043294,
+            "lookups": 782,
+            "hits": 781,
+            "misses": 1,
             "unconsulted": 9,
-            "predictions_loaded": 716,
-            "restored_output_files": 1113,
-            "restored_output_bytes": 549621377
-          }
+            "compiler_invocations_avoided": 781,
+            "estimated_compiler_duration_avoided_ns": 208865987844,
+            "compiler": {
+              "bypass": {
+                "invocations": 4,
+                "duration_ns": 565231170
+              },
+              "miss": {
+                "invocations": 1,
+                "duration_ns": 17465073
+              },
+              "unconsulted": {
+                "invocations": 9,
+                "duration_ns": 3438423488
+              }
+            },
+            "slow_compilations": [
+              {
+                "crate_name": "cc:bcm.c",
+                "duration_ns": 3286272700
+              },
+              {
+                "crate_name": "aws_lc_sys",
+                "duration_ns": 356871144
+              },
+              {
+                "crate_name": "libgit2_sys",
+                "duration_ns": 152131588
+              },
+              {
+                "crate_name": "cc:flag_check.c",
+                "duration_ns": 126067395
+              },
+              {
+                "crate_name": "libz_sys",
+                "duration_ns": 33578749
+              }
+            ],
+            "verifications": 0,
+            "divergences": 0,
+            "prefetched_actions": 0,
+            "predictions_loaded": 779,
+            "prefetch_runs": 0,
+            "bypasses": {
+              "cc-compiler-query": 10,
+              "cc-non-object-output": 10,
+              "cc-tool-passthrough": 111,
+              "cc-unknown-flag": 3,
+              "compiler-query": 8,
+              "native-library": 3,
+              "no-dep-info": 1,
+              "standard-input": 8
+            },
+            "downloaded_bytes": 0,
+            "uploaded_bytes": 0,
+            "background_uploads": 0,
+            "background_upload_failures": 0,
+            "remote_blob_pack_uploads": 0,
+            "remote_blob_pack_upload_blobs": 0,
+            "upload_drain_duration_ns": 0,
+            "stored_bytes": 0,
+            "restored_output_files": 1344,
+            "restored_output_bytes": 1377961117,
+            "reflinked_output_files": 0,
+            "reflinked_output_bytes": 0,
+            "copied_output_files": 1340,
+            "copied_output_bytes": 1378402056,
+            "reused_output_files": 4,
+            "reused_output_bytes": 5248,
+            "remote_failures": 0,
+            "remote_manifest_lookups": 0,
+            "remote_action_lookups": 0,
+            "remote_blob_requests": 0,
+            "remote_blob_pack_requests": 0,
+            "remote_blob_pack_blobs": 0,
+            "remote_manifest_lookup_duration_ns": 0,
+            "remote_action_lookup_duration_ns": 0,
+            "remote_blob_transfer_duration_ns": 0,
+            "local_cas_write_duration_ns": 0,
+            "prefetch_duration_ns": 0,
+            "materialization_duration_ns": 1882502832
+          },
+          "summary": [
+            "mbx[cache]: 781 hits, 1 misses, 0 prefetched; 0 B downloaded, 0 B uploaded, 0 B stored locally",
+            "mbx[cache]: could not look up 9 compilations: no usable dep-info from an earlier build and no prediction to derive an action key from",
+            "mbx[cache]: bypassed 154 compilations: 111 cc-tool-passthrough, 10 cc-compiler-query, 10 cc-non-object-output, 8 compiler-query, 8 standard-input, 3 cc-unknown-flag, 3 native-library, 1 no-dep-info",
+            "mbx[cache]: compiler time: 208.87s estimated avoided; 4.02s spent (4 bypass in 565.2ms, 1 miss in 17.5ms, 9 unconsulted in 3.44s)",
+            "mbx[cache]: slowest uncached crates: cc:bcm.c 3.29s, aws_lc_sys 356.9ms, libgit2_sys 152.1ms, cc:flag_check.c 126.1ms, libz_sys 33.6ms",
+            "mbx[cache]: timing: 20.36s session, 0ns prefetch; cumulative 0ns remote lookup, 0ns blob transfer, 0ns CAS write, 1.88s materialization",
+            "mbx[cache]: materialization: 0 outputs (0 B) reflinked, 1340 outputs (1.3 GiB) copied, 4 outputs (5.1 KiB) already in place",
+            "mbx[savings]: 781 compilations arrived precompiled. somewhere a fan is not spinning. (3m 28s saved)"
+          ]
         },
         {
           "tool": "kache",
-          "wall_duration_ns": 30366841101
+          "wall_duration_ns": 33196414519,
+          "summary": [
+            "Store:      1.3 GiB / 50.0 GiB (317 entries, 3%)",
+            "Dedup:      883 unique blobs, 1.3 GiB physical, 1.4% savings",
+            "Hit rate:   49.7% (local: 313, prefetch: 0, remote: 0, dup: 1, miss: 316)",
+            "Weighted:   49.9% by compile cost",
+            "Miss share: 92.0% of wrapper time (~4min)",
+            "Time saved: ~4min (estimated compile work avoided, last 24h)",
+            "Daemon:     v0.16.0 (epoch 1788012474, config /home/runner/.config/kache/config.toml)",
+            "Remote:     not configured"
+          ]
         }
       ],
       "skipped": []
@@ -128,18 +528,171 @@
       "scenario": "toolchain",
       "description": "store warmed on the pinned toolchain, rebuild on another",
       "timed": false,
+      "kind": "build",
       "results": [
         {
           "tool": "mbx",
-          "wall_duration_ns": 97949335931,
+          "wall_duration_ns": 113982385047,
           "stats": {
+            "version": 4,
+            "session_duration_ns": 112568295602,
             "lookups": 2,
             "hits": 2,
             "misses": 0,
-            "unconsulted": 726,
-            "predictions_loaded": 716,
+            "unconsulted": 789,
+            "compiler_invocations_avoided": 2,
+            "estimated_compiler_duration_avoided_ns": 0,
+            "compiler": {
+              "bypass": {
+                "invocations": 4,
+                "duration_ns": 613188726
+              },
+              "unconsulted": {
+                "invocations": 789,
+                "duration_ns": 288702265392
+              }
+            },
+            "slow_compilations": [
+              {
+                "crate_name": "build_script_build",
+                "duration_ns": 21050349148
+              },
+              {
+                "crate_name": "hk",
+                "duration_ns": 11960035991
+              },
+              {
+                "crate_name": "rmcp",
+                "duration_ns": 10589504525
+              },
+              {
+                "crate_name": "syn",
+                "duration_ns": 10041139588
+              },
+              {
+                "crate_name": "usage_derive",
+                "duration_ns": 7855372407
+              }
+            ],
+            "verifications": 0,
+            "divergences": 0,
+            "prefetched_actions": 0,
+            "predictions_loaded": 779,
+            "prefetch_runs": 0,
+            "bypasses": {
+              "cc-compiler-query": 10,
+              "cc-non-object-output": 10,
+              "cc-tool-passthrough": 111,
+              "cc-unknown-flag": 3,
+              "compiler-query": 8,
+              "native-library": 3,
+              "no-dep-info": 1,
+              "standard-input": 8
+            },
+            "downloaded_bytes": 0,
+            "uploaded_bytes": 0,
+            "background_uploads": 0,
+            "background_upload_failures": 0,
+            "remote_blob_pack_uploads": 0,
+            "remote_blob_pack_upload_blobs": 0,
+            "upload_drain_duration_ns": 0,
+            "stored_bytes": 1401900296,
             "restored_output_files": 2,
-            "restored_output_bytes": 2624
+            "restored_output_bytes": 2624,
+            "reflinked_output_files": 0,
+            "reflinked_output_bytes": 0,
+            "copied_output_files": 0,
+            "copied_output_bytes": 0,
+            "reused_output_files": 2,
+            "reused_output_bytes": 2624,
+            "remote_failures": 0,
+            "remote_manifest_lookups": 0,
+            "remote_action_lookups": 0,
+            "remote_blob_requests": 0,
+            "remote_blob_pack_requests": 0,
+            "remote_blob_pack_blobs": 0,
+            "remote_manifest_lookup_duration_ns": 0,
+            "remote_action_lookup_duration_ns": 0,
+            "remote_blob_transfer_duration_ns": 0,
+            "local_cas_write_duration_ns": 0,
+            "prefetch_duration_ns": 0,
+            "materialization_duration_ns": 790626
+          },
+          "summary": [
+            "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 52s",
+            "mbx[cache]: 2 hits, 0 misses, 0 prefetched; 0 B downloaded, 0 B uploaded, 1.3 GiB stored locally",
+            "mbx[cache]: could not look up 789 compilations: no usable dep-info from an earlier build and no prediction to derive an action key from",
+            "mbx[cache]: bypassed 154 compilations: 111 cc-tool-passthrough, 10 cc-compiler-query, 10 cc-non-object-output, 8 compiler-query, 8 standard-input, 3 cc-unknown-flag, 3 native-library, 1 no-dep-info",
+            "mbx[cache]: compiler time: 0ns estimated avoided; 289.32s spent (4 bypass in 613.2ms, 789 unconsulted in 288.70s)",
+            "mbx[cache]: slowest uncached crates: build_script_build 21.05s, hk 11.96s, rmcp 10.59s, syn 10.04s, usage_derive 7.86s",
+            "mbx[cache]: timing: 112.57s session, 0ns prefetch; cumulative 0ns remote lookup, 0ns blob transfer, 0ns CAS write, 791\u00b5s materialization",
+            "mbx[cache]: materialization: 0 outputs (0 B) reflinked, 0 outputs (0 B) copied, 2 outputs (2.6 KiB) already in place"
+          ]
+        }
+      ],
+      "skipped": []
+    },
+    {
+      "scenario": "contention",
+      "description": "two Clippy configurations from one lint job -- sequentially, in parallel without scheduling, and in parallel with mbx -- from a cold store",
+      "timed": true,
+      "kind": "contention",
+      "results": [
+        {
+          "tool": "mbx-sequential",
+          "wall_duration_ns": 95125280452,
+          "jobs": [
+            {
+              "job": "clippy-default"
+            },
+            {
+              "job": "clippy-all"
+            }
+          ],
+          "peak_compilers": 4,
+          "min_available_bytes": 14522449920,
+          "permits": null,
+          "samples": 1366,
+          "stats": {
+            "hits": 2
+          }
+        },
+        {
+          "tool": "mbx-unscheduled",
+          "wall_duration_ns": 153248071283,
+          "jobs": [
+            {
+              "job": "clippy-default"
+            },
+            {
+              "job": "clippy-all"
+            }
+          ],
+          "peak_compilers": 8,
+          "min_available_bytes": 13968519168,
+          "permits": null,
+          "samples": 1732,
+          "stats": {
+            "hits": 4
+          }
+        },
+        {
+          "tool": "mbx",
+          "wall_duration_ns": 97370361932,
+          "jobs": [
+            {
+              "job": "clippy-default"
+            },
+            {
+              "job": "clippy-all"
+            }
+          ],
+          "peak_compilers": 4,
+          "min_available_bytes": 13920153600,
+          "permits": 4,
+          "samples": 1295,
+          "stats": {
+            "hits": 798
           }
         }
       ],

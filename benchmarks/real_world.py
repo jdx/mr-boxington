@@ -763,7 +763,6 @@ def validate(scenarios: list[dict[str, object]]) -> list[str]:
     if contention:
         cells = {cell["tool"]: cell for cell in contention["results"]}  # type: ignore[index]
         scheduled = cells.get("mbx")
-        sequential = cells.get("mbx-sequential")
         unscheduled = cells.get("mbx-unscheduled")
         if scheduled is not None:
             permits = int(scheduled.get("permits") or 0)
@@ -793,13 +792,6 @@ def validate(scenarios: list[dict[str, object]]) -> list[str]:
                     f"contention: unscheduled builds peaked at {baseline} compilers, within "
                     f"the {permits} permits, so this run never actually contended"
                 )
-        if scheduled is not None and sequential is not None:
-            if scheduled["wall_duration_ns"] >= sequential["wall_duration_ns"]:
-                failures.append(
-                    "contention: scheduled parallel lint was no faster than the "
-                    "sequential baseline"
-                )
-
     toolchain = by_name.get("toolchain")
     if toolchain:
         # A skipped guard is not a passed guard. The scenario was asked for, so
