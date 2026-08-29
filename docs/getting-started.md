@@ -89,7 +89,7 @@ host glibc.
 ### Cargo
 
 ```sh
-cargo install mbx
+cargo install mbx --locked
 ```
 
 ## Supported platforms
@@ -101,8 +101,8 @@ Release binaries cover:
 - Windows x86-64 and ARM64
 
 Other platforms with a Rust toolchain can build from source with
-`cargo install mbx`. mbx wraps whichever Cargo and rustc are active, including
-rustup-managed toolchains — `mbx doctor` reports the pair it found.
+`cargo install mbx --locked`. mbx wraps whichever Cargo and rustc are active,
+including rustup-managed toolchains — `mbx doctor` reports the pair it found.
 
 Reflinked output restoration needs a filesystem with copy-on-write file
 cloning: APFS on macOS, btrfs or XFS on Linux, ReFS (Dev Drive) on Windows.

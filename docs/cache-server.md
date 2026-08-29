@@ -19,7 +19,7 @@ docker compose up --build
 For a standalone instance with filesystem storage:
 
 ```sh
-cargo install mbx-cache
+cargo install mbx-cache --locked
 mbx-cache \
   --allow-anonymous \
   --data-dir ./data \

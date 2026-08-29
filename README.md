@@ -6,8 +6,7 @@
 
 <p align="center">
   <strong>fix <code>target/</code></strong><br>
-  Put mbx in front of any cargo command. One cache warms every worktree and CI run, and prunes itself to a size budget.<br>
-  Run multiple Cargo builds at the same time.
+  Put mbx in front of any cargo command. Every build on the machine shares one self-pruning cache, and you can run multiple Cargo builds in parallel.
 </p>
 
 <p align="center">
@@ -64,7 +63,7 @@ mise use -g mr-boxington
 With Cargo:
 
 ```sh
-cargo install mbx
+cargo install mbx --locked
 ```
 
 Or install the latest Linux x86-64 release archive:
@@ -149,9 +148,9 @@ same action to a compatible remote such as the self-hostable
 
 GitHub Actions' parallel steps can start independent Clippy or test
 configurations together. Give each one a separate `CARGO_TARGET_DIR` and run
-it through mbx: the commands share one scheduler instead of each trying to
-fill the runner on its own. In two cold, order-reversed A/B trials on an xlarge
-CI runner, that cut lint wall time by up to 44.9%.
+it through mbx: the commands share one CPU and memory budget instead of each
+trying to fill the runner on its own. We saw mise's lint job finish up to 45%
+sooner this way.
 
 [Copy the parallel workflow →](https://mr-boxington.jdx.dev/github-action#parallel-cargo-steps)
 

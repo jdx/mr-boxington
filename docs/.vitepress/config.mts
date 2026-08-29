@@ -19,7 +19,7 @@ const latestVersion = versionMatch[1];
 
 export default defineConfig({
   title: "mr boxington",
-  description: "Run multiple Cargo builds at the same time with shared compiled work and automatic target/ pruning",
+  description: "Put mbx in front of any cargo command. Every build on the machine shares one self-pruning cache, and you can run multiple Cargo builds in parallel.",
   lang: "en-US",
   lastUpdated: true,
   appearance: "force-dark",
@@ -153,7 +153,7 @@ export default defineConfig({
     ["meta", { property: "og:title", content: "mr boxington" }],
     [
       "meta",
-      { property: "og:description", content: "Run multiple Cargo builds at the same time with shared compiled work and automatic target/ pruning" },
+      { property: "og:description", content: "Put mbx in front of any cargo command. Every build on the machine shares one self-pruning cache, and you can run multiple Cargo builds in parallel." },
     ],
     [
       "meta",

@@ -44,17 +44,11 @@ steps:
 
 Each command needs a separate `CARGO_TARGET_DIR`; otherwise Cargo's target
 directory lock serializes the supposedly parallel steps. The mbx store and
-scheduler remain shared. When both configurations reach the same cold
-compilation, one does the work and the other restores its result; unrelated
-compilations run within the shared permit pool instead of each Cargo process
-trying to fill the runner independently.
+scheduler stay shared, so the steps run side by side on one CPU and memory
+budget rather than each Cargo process trying to fill the runner on its own.
 
-In two cold, order-reversed A/B trials on an xlarge CI runner, parallel Clippy
-finished **up to 44.9% sooner** than the same two commands run sequentially.
-The permanent
-[contention benchmark](/benchmarks#contention) reproduces that workload and
-checks both wall time and peak compiler count. Tuning and failure behavior are
-covered under
+We saw mise's own lint job finish up to 45% sooner this way. Tuning and
+failure behavior are covered under
 [machine-wide compile scheduling](/configuration#machine-wide-compile-scheduling).
 
 Before saving, the action prunes the store to 3 GB. Set `max-size` to change the
