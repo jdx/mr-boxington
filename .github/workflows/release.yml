@@ -255,14 +255,16 @@ jobs:
           spctl --assess --type exec -vv "$BINARY" || true
 
       - name: Check the binary runs
-        if: ${{ !matrix.cross }}
+        # The x86_64 GNU PGO binary is host-runnable too. Execute the finished
+        # artifact directly so a smoke-test build cannot replace it.
+        if: ${{ !matrix.cross || matrix.pgo }}
         shell: bash
         run: ./target/${{ matrix.target }}/release/${{ matrix.bin }} --version
 
       # The ARM64 GNU artifact is cross-compiled on the AMD64 release runner;
       # let cross provide its matching execution environment for the smoke test.
       - name: Check the GNU binary runs
-        if: matrix.cross
+        if: ${{ matrix.cross && !matrix.pgo }}
         run: cross run --release --locked --package mbx --target ${{ matrix.target }} -- --version
 
       # The archive is flat and holds only the binary, so extracting it
