@@ -269,11 +269,29 @@ pub enum BypassReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Argument {
     Plain(String),
-    Path { flag: String, path: PathBuf },
-    SearchPath { kind: String, path: PathBuf },
-    Extern { name: String, path: Option<PathBuf> },
+    Path {
+        flag: String,
+        path: PathBuf,
+    },
+    SearchPath {
+        kind: String,
+        path: PathBuf,
+    },
+    Extern {
+        name: String,
+        path: Option<PathBuf>,
+    },
     Emit(Vec<Emit>),
-    RemapPath { from: PathBuf, to: String },
+    RemapPath {
+        from: PathBuf,
+        to: String,
+    },
+    /// An `-oso_prefix` handed to ld64, whose path strips checkout-specific
+    /// prefixes from the debug map the linker records.
+    OsoPrefix {
+        path: PathBuf,
+        trailing_slash: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1320,6 +1338,23 @@ impl<'a> Parser<'a> {
         if SUPPORTED_CODEGEN_OPTIONS.binary_search(&name).is_err() {
             return Err(BypassReason::UnknownCodegenOption(name.into()));
         }
+        // `-oso_prefix` names a checkout-specific path, so it is parsed
+        // rather than keyed as text: the path normalizes like every other
+        // path in the key, which is what lets two checkouts passing their own
+        // prefixes agree on one action.
+        if matches!(name, "link-arg" | "link-args")
+            && let Some((_, option)) = value.split_once('=')
+            && let Some(prefix) = option.strip_prefix("-Wl,-oso_prefix,")
+            && !prefix.trim_end_matches('/').is_empty()
+            && !prefix.contains(',')
+        {
+            let trailing_slash = prefix.ends_with('/');
+            self.parsed.push(Argument::OsoPrefix {
+                path: PathBuf::from(prefix.trim_end_matches('/')),
+                trailing_slash,
+            });
+            return Ok(());
+        }
         self.parsed
             .push(Argument::Plain(format!("--codegen={value}")));
         if name == "extra-filename" {
@@ -1410,6 +1445,21 @@ impl<'a> Parser<'a> {
         {
             return Err(BypassReason::UnmodeledLinkArgument(option.to_owned()));
         }
+        // `-oso_prefix` is modeled, but only where ld64 is the linker reading
+        // it: a native macOS link. Any other linker sees an option this
+        // adapter cannot vouch for, exactly like the arguments above.
+        if !matches!(
+            link_output,
+            LinkOutput::Library | LinkOutput::NativeExecutable
+        ) && self
+            .parsed
+            .iter()
+            .any(|argument| matches!(argument, Argument::OsoPrefix { .. }))
+        {
+            return Err(BypassReason::UnmodeledLinkArgument(
+                "link-arg=-Wl,-oso_prefix".into(),
+            ));
+        }
         if let Some(name) = self.parsed.iter().find_map(|argument| match argument {
             Argument::Extern { name, path: None } if name != "proc_macro" => Some(name),
             _ => None,
@@ -1445,6 +1495,34 @@ impl Parser<'_> {
             let option = value.strip_prefix("--codegen=")?;
             let name = option.split_once('=').map_or(option, |(name, _)| name);
             matches!(name, "link-arg" | "link-args").then_some(option)
+        })
+    }
+
+    /// Whether an `-oso_prefix` strips the directory this link's objects live
+    /// in from the debug map ld64 records.
+    ///
+    /// The objects a native link reads -- this unit's own compiled objects
+    /// and the rlibs it links -- sit in the output directory, so a prefix
+    /// covering that directory leaves the debug map naming spellings every
+    /// checkout shares. Toolchain objects stay absolute, as they do in the
+    /// paths rustc itself embeds on every platform.
+    fn oso_prefix_covers_outputs(&self) -> bool {
+        let Some(directory) = self
+            .out_dir
+            .as_deref()
+            .or_else(|| self.explicit_output.as_deref().and_then(Path::parent))
+        else {
+            return false;
+        };
+        if !directory.is_absolute() {
+            return false;
+        }
+        let directory = normalize_components(directory);
+        self.parsed.iter().any(|argument| {
+            let Argument::OsoPrefix { path, .. } = argument else {
+                return false;
+            };
+            path.is_absolute() && directory.starts_with(normalize_components(path))
         })
     }
 
@@ -1493,13 +1571,28 @@ impl Parser<'_> {
             };
             let unportable = match name {
                 // Packed debug info leaves a .dSYM bundle or .dwp file beside
-                // the binary, and mbx stores neither.
-                "split-debuginfo" => value != Some("off"),
+                // the binary, and mbx stores neither. Unpacked is macOS's
+                // debug-map arrangement -- debug info stays in the objects and
+                // nothing lands beside the binary -- so the same covering
+                // `-oso_prefix` that makes the debug map portable covers it.
+                "split-debuginfo" => match value {
+                    Some("off") => false,
+                    Some("unpacked") if cfg!(target_os = "macos") => {
+                        !self.oso_prefix_covers_outputs()
+                    }
+                    _ => true,
+                },
                 // ld64 records absolute object paths and their timestamps in
                 // the binary's debug map, so the same source links to
                 // different bytes in another checkout -- or the same one
-                // twice.
-                "debuginfo" if cfg!(target_os = "macos") => !matches!(value, Some("0" | "none")),
+                // twice. An `-oso_prefix` covering the output directory
+                // strips those paths down to spellings every checkout
+                // shares, which is the same leniency a Linux link already
+                // gets for the paths rustc itself embeds; what remains
+                // (object timestamps) only shows up under verification.
+                "debuginfo" if cfg!(target_os = "macos") => {
+                    !matches!(value, Some("0" | "none")) && !self.oso_prefix_covers_outputs()
+                }
                 // Both embed this checkout's absolute target directory.
                 "rpath" | "prefer-dynamic" => is_enabled(value),
                 // The CRT objects a self-contained link uses come from
@@ -1734,6 +1827,14 @@ impl<'a> ActionBuilder<'a> {
                 "--remap-path-prefix={}={}",
                 self.normalize_path(from)?,
                 to
+            )),
+            Argument::OsoPrefix {
+                path,
+                trailing_slash,
+            } => Ok(format!(
+                "--codegen=link-arg=-Wl,-oso_prefix,{}{}",
+                self.normalize_path(path)?,
+                if *trailing_slash { "/" } else { "" }
             )),
         }
     }

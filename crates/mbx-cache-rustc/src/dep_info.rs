@@ -439,6 +439,17 @@ fn render_argument(argument: &Argument) -> Result<OsString, BypassReason> {
             from.to_str()
                 .ok_or_else(|| BypassReason::NonUtf8Path(from.clone()))?
         ),
+        // Nothing links while emitting dep-info, so the prefix is inert here;
+        // it is replayed verbatim to keep the command faithful.
+        Argument::OsoPrefix {
+            path,
+            trailing_slash,
+        } => format!(
+            "--codegen=link-arg=-Wl,-oso_prefix,{}{}",
+            path.to_str()
+                .ok_or_else(|| BypassReason::NonUtf8Path(path.clone()))?,
+            if *trailing_slash { "/" } else { "" }
+        ),
     };
     Ok(rendered.into())
 }
