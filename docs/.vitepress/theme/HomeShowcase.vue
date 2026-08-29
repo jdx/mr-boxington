@@ -2,53 +2,64 @@
   <div class="MbxShowcase">
     <section class="card" aria-labelledby="mbx-targets-title">
       <div class="copy">
-        <p class="eyebrow">Every checkout, one disk budget</p>
-        <h2 id="mbx-targets-title">target/ cleans up after itself.</h2>
+        <p class="eyebrow">Every worktree, one store</p>
+        <h2 id="mbx-targets-title">
+          Every worktree starts warm, and cleans up after itself.
+        </h2>
         <p class="lede">
-          mbx parks each checkout's <code>target/</code> under its cache root
-          and leaves a symlink where Cargo expects one. A directory is
-          reclaimed when its checkout is gone, when it goes unused for 30
-          days, or when the collection outgrows its budget — least recently
-          used first, and never the checkout you are working in.
+          Workspace, registry, toolchain, and sysroot paths become stable
+          placeholders before they enter a key, so a crate compiled in one
+          checkout is restored in the next — each keeping its own
+          <code>target/</code>, with no shared Cargo lock to serialize them.
+          mbx parks those directories under its cache root and collects one
+          when its checkout is gone, when it sits unused for 30 days, or when
+          they outgrow their budget.
         </p>
-        <div class="proof" aria-label="Default disk budget">
-          <strong>10% of the disk</strong>
-          <span>is the default budget for every managed target/ combined</span>
+        <div class="proof" aria-label="Cache keys contain no absolute paths">
+          <strong>No absolute paths</strong>
+          <span>
+            enter a cache key, so a second checkout restores instead of
+            rebuilding
+          </span>
         </div>
         <p class="validation">
-          The action store defaults to 5%. Both budgets scale with the disk
-          that holds them, and <code>mbx gc --dry-run</code> previews a policy
-          before anything is deleted.
+          A benchmark builds one checkout and times another, and the run is
+          thrown away unless that second checkout reports hits and restored
+          files. Budgets scale with the disk — 10% for managed target
+          directories, 5% for the store — and the directory you are working in
+          is never the one collected.
         </p>
         <div class="links">
-          <a class="primary" href="/managed-targets#collection">
-            See how collection works
+          <a class="primary" href="/how-it-works#portable-keys">
+            See how the keys travel
           </a>
-          <a href="/managed-targets#budgets-scale-with-the-disk">
-            Set the budgets →
-          </a>
+          <a href="/managed-targets#collection">What gets collected →</a>
         </div>
       </div>
 
       <div
         class="diagram"
-        aria-label="Two target directories sharing one disk budget"
+        aria-label="Three checkouts sharing one content-addressed store"
       >
         <div class="job">
-          <span class="label">your worktree · in use</span>
+          <span class="label">~/src/app · compiled here</span>
           <code>target -> targets/v1/1f9c2ab7</code>
         </div>
-        <div class="job dim">
-          <span class="label">abandoned checkout · reclaimed</span>
-          <code>targets/v1/8a20d941</code>
+        <div class="job">
+          <span class="label">~/src/app-hotfix · starts warm</span>
+          <code>target -> targets/v1/8a20d941</code>
+        </div>
+        <div class="job dim last">
+          <span class="label">deleted checkout · collected</span>
+          <code>targets/v1/3c5f0e2b</code>
         </div>
         <div class="join" aria-hidden="true">
           <span></span>
           <span></span>
         </div>
         <div class="pool">
-          <span class="pool-title">one disk budget</span>
-          <span>10% of the disk · least recently used first</span>
+          <span class="pool-title">one shared store</span>
+          <span>compiled once · reflinked into each target/</span>
         </div>
       </div>
     </section>
@@ -89,7 +100,7 @@
           <span class="label">default features</span>
           <code>mbx clippy</code>
         </div>
-        <div class="job">
+        <div class="job last">
           <span class="label">all features + targets</span>
           <code>mbx clippy --all-features --all-targets</code>
         </div>
@@ -138,7 +149,7 @@
           <span class="label">CI on main · read-write</span>
           <code>mbx test --workspace</code>
         </div>
-        <div class="job">
+        <div class="job last">
           <span class="label">teammate's laptop · read-only</span>
           <code>mbx build</code>
         </div>
@@ -274,8 +285,11 @@ h2 {
   border-radius: 12px 12px 0 0;
 }
 
-.job:nth-child(2) {
+.job.last {
   border-radius: 0 0 12px 12px;
+}
+
+.job + .job {
   border-top: 0;
 }
 
