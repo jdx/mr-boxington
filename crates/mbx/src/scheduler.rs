@@ -45,11 +45,6 @@
 //! is fixed and acyclic: a flight is joined before its permit is requested,
 //! never around the other way, and a waiter blocked on a flight holds no
 //! permit.
-//!
-//! Waiting is a timer everywhere and a wakeup on Linux, where a released
-//! permit is a deleted lease file and [`ReleaseWake`] watches for exactly
-//! that. The timer stays underneath it as the backstop, so nothing depends
-//! on the watch existing.
 
 use crate::config::{Config, SchedulerPriority};
 use eyre::{Context, Result};
@@ -121,11 +116,17 @@ const LINK_WEIGHT: u64 = 2;
 const POLL_INITIAL: Duration = Duration::from_millis(2);
 /// Longest delay between admission attempts.
 ///
-/// On Linux a release wakes waiters through the leases watch (see
-/// [`ReleaseWake`]) and this is only the backstop; elsewhere it bounds how
-/// long a core sits idle with work queued for it. Kept short for that
-/// reason: one attempt is a readdir and a handful of `try_lock`s, which even
-/// a full pool of waiters can afford at this rate.
+/// A permit is released the instant its compiler exits and nothing wakes the
+/// waiters, so this bounds how long a core sits idle with work queued for
+/// it. Kept short for that reason: one attempt is a readdir and a handful of
+/// `try_lock`s, which even a full pool of waiters can afford at this rate.
+///
+/// Waking waiters on the release itself -- watching the leases directory, so
+/// the wait ends when a lease disappears -- was built and measured and did
+/// not pay, so it is deliberately not here. A build's whole idle on this is
+/// one interval per compilation, and every core is compiling while it
+/// elapses: about a second of a forty-second build. The pool is rarely what
+/// a build waits on; Cargo's dependency graph is.
 const POLL_MAX: Duration = Duration::from_millis(25);
 /// How recently the stamp must have been touched to hold low priority back.
 const PRIORITY_WAIT_FRESHNESS: Duration = Duration::from_secs(2);
@@ -559,7 +560,6 @@ impl Pool {
         let mut delay = POLL_INITIAL;
         let mut stamped: Option<Instant> = None;
         let mut complained = false;
-        let mut wake: Option<Option<ReleaseWake>> = None;
         loop {
             // The gate stops applying at its deadline so a machine that stays
             // short of memory delays this compilation rather than starving it.
@@ -592,16 +592,7 @@ impl Pool {
                     self.capacity, demand.name
                 );
             }
-            // Armed after the first refusal rather than before the first
-            // attempt: most admissions succeed immediately and should not pay
-            // for a watch. Arming races the release it would have caught,
-            // which the timeout below absorbs; from the next iteration on,
-            // a release lands in the watch before the scan it should wake.
-            let wake = wake.get_or_insert_with(|| ReleaseWake::new(&self.dir.join(LEASES_DIR)));
-            match wake {
-                Some(wake) => wake.wait(jittered(delay)),
-                None => std::thread::sleep(jittered(delay)),
-            }
+            std::thread::sleep(jittered(delay));
             delay = (delay * 2).min(POLL_MAX);
         }
     }
@@ -993,87 +984,6 @@ fn oom_killed(_status: &ExitStatus) -> bool {
 fn jittered(delay: Duration) -> Duration {
     use rand::RngExt as _;
     delay + delay.mul_f64(rand::rng().random_range(0.0..0.5))
-}
-
-/// Wakes a waiter the moment a permit is released, on hosts that can.
-///
-/// A permit's release *is* the deletion of its lease file, so on Linux the
-/// leases directory is watched for deletions through inotify and a refused
-/// waiter sleeps on the watch instead of a timer -- the gap between a
-/// compiler exiting and the next admission goes from a poll interval to a
-/// wakeup. The timer stays underneath as the backstop: a release can slip
-/// past while the watch is first armed, and inotify instances are a bounded
-/// per-user resource that a large enough build simply runs out of. Failing
-/// to watch therefore just means waiting the way every other platform does.
-#[cfg(target_os = "linux")]
-struct ReleaseWake {
-    fd: std::os::fd::OwnedFd,
-}
-
-#[cfg(target_os = "linux")]
-impl ReleaseWake {
-    fn new(leases: &Path) -> Option<Self> {
-        use std::os::fd::{AsRawFd as _, FromRawFd as _};
-        use std::os::unix::ffi::OsStrExt as _;
-        let path = std::ffi::CString::new(leases.as_os_str().as_bytes()).ok()?;
-        // SAFETY: inotify_init1 returns a new descriptor that nothing else
-        // owns; wrapping it immediately gives it an owner that closes it.
-        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
-        if fd < 0 {
-            return None;
-        }
-        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
-        // SAFETY: the descriptor is a live inotify instance and the path is a
-        // valid NUL-terminated string for the duration of the call.
-        let watch =
-            unsafe { libc::inotify_add_watch(fd.as_raw_fd(), path.as_ptr(), libc::IN_DELETE) };
-        (watch >= 0).then_some(Self { fd })
-    }
-
-    /// Sleep until a lease is released or the timeout passes.
-    fn wait(&self, timeout: Duration) {
-        use std::os::fd::AsRawFd as _;
-        let mut poll = libc::pollfd {
-            fd: self.fd.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let millis = i32::try_from(timeout.as_millis().max(1)).unwrap_or(i32::MAX);
-        // SAFETY: one valid pollfd is handed over for the duration of the call.
-        let ready = unsafe { libc::poll(&mut poll, 1, millis) };
-        if ready <= 0 {
-            return;
-        }
-        // Drained so the next wait sleeps on releases that have not been
-        // seen rather than returning instantly on ones that have. What the
-        // events say does not matter; that they happened is the signal.
-        let mut buffer = [0_u8; 4096];
-        // SAFETY: reads only ever land inside the local buffer, and the
-        // descriptor is nonblocking, so the loop cannot hang.
-        while unsafe {
-            libc::read(
-                self.fd.as_raw_fd(),
-                buffer.as_mut_ptr().cast(),
-                buffer.len(),
-            )
-        } > 0
-        {}
-    }
-}
-
-/// Hosts without a release watch wait on the timer alone.
-#[cfg(not(target_os = "linux"))]
-struct ReleaseWake;
-
-#[cfg(not(target_os = "linux"))]
-impl ReleaseWake {
-    fn new(_leases: &Path) -> Option<Self> {
-        None
-    }
-
-    fn wait(&self, timeout: Duration) {
-        std::thread::sleep(timeout)
-    }
 }
 
 #[cfg(test)]
