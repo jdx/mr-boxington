@@ -55,6 +55,7 @@ export default defineConfig({
         text: "Getting started",
         items: [
           { text: "Introduction", link: "/" },
+          { text: "Acknowledgements", link: "/acknowledgements" },
           { text: "Install and run", link: "/getting-started" },
           { text: "FAQ", link: "/faq" },
         ],

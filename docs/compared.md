@@ -1,5 +1,11 @@
 # How mbx compares
 
+::: info An important influence
+mbx is deeply inspired by [kache](https://github.com/kunobi-ninja/kache), the
+project that most directly shaped it. See the
+[acknowledgements](/acknowledgements) for a fuller account of that debt.
+:::
+
 ## sccache
 
 [sccache](https://github.com/mozilla/sccache) is the established compiler
@@ -54,18 +60,21 @@ cannot be combined for the same build.
 
 ## kache
 
-[kache](https://github.com/kunobi-ninja/kache) is the closest tool to mbx, and
-parts of mbx's design were inspired by it. No code is shared between the
-projects, but the influence is real and worth saying plainly. mbx began as the
-Rust cache inside the [mise](https://github.com/jdx/mise) task runner and was
-extracted into its own CLI to chase three things: less to operate, a better
-day-to-day experience, and something safe to switch on in a public repository
-that takes fork pull requests. The differences below are mostly those three
-goals.
+[kache](https://github.com/kunobi-ninja/kache) is the closest tool to mbx and
+the project that most directly inspired it. No code is shared between the
+projects, but the influence is substantial and worth saying plainly. mbx began
+as the Rust cache inside the [mise](https://github.com/jdx/mise) task runner
+and was extracted into its own CLI to chase three things: less to operate, a
+better day-to-day experience, and something safe to switch on in a public
+repository that takes fork pull requests. The differences below are mostly
+those three goals.
 
 Like mbx, kache is a content-addressed `RUSTC_WRAPPER` cache built for sharing
 compilations across worktrees, with C and C++ compiler shims, S3-compatible
-and filesystem remotes, and executable caching on Linux and macOS.
+and filesystem remotes, and executable caching on Linux and macOS. kache has
+also been around longer and has more real-world history behind it. It is the
+more proven choice today; if maturity is the deciding factor, that is its most
+important advantage over mbx.
 
 - **Nothing to install or keep running.** `kache init` installs an OS service
   by default, with a `--no-service` opt-out. mbx starts an in-process agent
@@ -123,10 +132,10 @@ and filesystem remotes, and executable caching on Linux and macOS.
   binary. On a host mbx cannot describe that precisely, it links normally
   rather than handing back one it cannot vouch for.
 
-If you build on Windows, or want the C and C++ shims installed once rather
-than wrapping the commands that should use them, kache is worth evaluating.
-Both tools wrap rustc through `RUSTC_WRAPPER`, so they cannot be combined for
-the same build.
+If you value a longer track record, build on Windows, or want the C and C++
+shims installed once rather than wrapping the commands that should use them,
+kache is worth evaluating. Both tools wrap rustc through `RUSTC_WRAPPER`, so
+they cannot be combined for the same build.
 
 ## Tarball CI caches
 
