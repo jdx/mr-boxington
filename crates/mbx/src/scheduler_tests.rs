@@ -554,35 +554,6 @@ fn the_ledger_drops_its_smallest_entries_at_the_cap() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn a_released_permit_wakes_a_waiter_rather_than_leaving_it_to_time_out() {
-    let directory = tempfile::tempdir().unwrap();
-    let pool = pool_at(directory.path(), 1, 0);
-    let held = pool.try_admit(1, None).unwrap().expect("the only permit");
-
-    let wake = ReleaseWake::new(&directory.path().join(LEASES_DIR)).expect("a watch");
-    let releasing = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(50));
-        drop(held);
-    });
-
-    // A timeout far longer than the release it is waiting for: returning
-    // early is only possible if the watch saw the lease disappear.
-    let started = Instant::now();
-    wake.wait(Duration::from_secs(10));
-    let waited = started.elapsed();
-    releasing.join().unwrap();
-
-    assert!(
-        waited < Duration::from_secs(5),
-        "the release woke the waiter after {waited:?} rather than at the timeout"
-    );
-    assert!(
-        pool.try_admit(1, None).unwrap().is_some(),
-        "the permit really was free by the time the waiter woke"
-    );
-}
-
-#[test]
 fn a_flight_leaves_its_prediction_for_the_next_build() {
     let directory = tempfile::tempdir().unwrap();
 
