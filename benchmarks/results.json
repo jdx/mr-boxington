@@ -144,7 +144,7 @@
     },
     {
       "scenario": "warm",
-      "description": "warm store, fresh target -- CI restoring a cache for the same commit",
+      "description": "warm store, fresh target -- CI restoring the same commit; plain Cargo has no cache to restore",
       "timed": true,
       "kind": "build",
       "results": [
@@ -270,7 +270,7 @@
     },
     {
       "scenario": "commit",
-      "description": "store warmed at the parent commit, build the child -- push-to-push CI",
+      "description": "cache tools warmed at the parent commit, build the child -- Cargo is the uncached push-to-push baseline",
       "timed": true,
       "kind": "build",
       "results": [
@@ -400,7 +400,7 @@
     },
     {
       "scenario": "worktree",
-      "description": "warm store, second checkout at a different path",
+      "description": "warm store, second checkout at a different path; plain Cargo cannot reuse the first checkout's target",
       "timed": true,
       "kind": "build",
       "results": [

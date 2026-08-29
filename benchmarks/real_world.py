@@ -74,15 +74,24 @@ SCENARIOS: dict[str, dict[str, object]] = {
     },
     "warm": {
         "tools": ("mbx", "kache"),
-        "description": "warm store, fresh target -- CI restoring a cache for the same commit",
+        "description": (
+            "warm store, fresh target -- CI restoring the same commit; "
+            "plain Cargo has no cache to restore"
+        ),
     },
     "commit": {
         "tools": ("cargo", "mbx", "kache"),
-        "description": "store warmed at the parent commit, build the child -- push-to-push CI",
+        "description": (
+            "cache tools warmed at the parent commit, build the child -- "
+            "Cargo is the uncached push-to-push baseline"
+        ),
     },
     "worktree": {
         "tools": ("mbx", "kache"),
-        "description": "warm store, second checkout at a different path",
+        "description": (
+            "warm store, second checkout at a different path; "
+            "plain Cargo cannot reuse the first checkout's target"
+        ),
     },
     "toolchain": {
         "tools": ("mbx",),

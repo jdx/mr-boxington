@@ -5,14 +5,14 @@ dependencies, pinned to a fixed commit — rather than mbx's own workspace, whic
 is too small to measure anything useful against. Every scenario is one CI
 actually hits.
 
-Most scenarios run the same `cargo build --locked` three ways: plain cargo,
-[mbx](/), and [kache](https://github.com/kunobi-ninja/kache). Timings are wall
-clock around one build. Every row is compared against one number — what plain
-cargo costs with nothing cached — because that is the build a cache is
-replacing. cargo is not re-run in the other scenarios: with a fresh `target/`
-it would only repeat that time. The last scenario is the exception, comparing
-sequential and parallel lint strategies and measuring the machine rather than a
-single build.
+The build scenarios run the same `cargo build --locked` through plain Cargo,
+[mbx](/), and [kache](https://github.com/kunobi-ninja/kache), where each tool
+can make a meaningful comparison. Timings are wall clock around one build.
+When Cargo appears, it is an uncached baseline measured in that same scenario;
+cache rows compare only with that result. The warm and worktree scenarios omit
+Cargo because a fresh `target/` or a different checkout gives it nothing to
+reuse. The contention scenario is the exception, comparing sequential and
+parallel lint strategies and measuring the machine rather than a single build.
 
 <BenchmarkResults />
 

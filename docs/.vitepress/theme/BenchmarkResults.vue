@@ -93,7 +93,7 @@
           </div>
           <strong class="mbx-bench-seconds">{{ cell.seconds }}</strong>
           <div class="mbx-bench-meta">
-            <span v-if="cell.relative !== '—'">{{ cell.relative }} vs. cold cargo</span>
+            <span v-if="cell.comparison">{{ cell.comparison }}</span>
             <span v-if="cell.hits !== '—'">{{ cell.hits }} cache hits</span>
           </div>
         </div>
@@ -123,18 +123,6 @@ import { computed } from "vue";
 import { data } from "../benchmarks.data";
 import type { BenchmarkScenario } from "../benchmarks.data";
 
-// Every scenario compares against the same number: what plain cargo costs
-// with nothing cached. Only the cold scenario runs cargo -- with a wiped
-// target/ the others would just repeat it -- so a per-scenario baseline would
-// leave the warm and cross-worktree rows with nothing to compare to, which is
-// exactly the comparison a reader wants.
-const coldCargo = computed(
-  () =>
-    data?.scenarios
-      .find((scenario) => scenario.scenario === "cold")
-      ?.results.find((cell) => cell.tool === "cargo") ?? null,
-);
-
 // Bars are scaled within a scenario, never across them: each card answers
 // which tool was faster on that workload, not how the workloads compare to
 // each other. The bar has its own fixed-width track beside the duration label,
@@ -151,9 +139,15 @@ function rows(scenario: BenchmarkScenario) {
   const fastest = Math.min(
     ...scenario.results.map((cell) => cell.wall_duration_ns),
   );
-  const baseline = coldCargo.value;
+  // A Cargo result is meaningful only inside the scenario that measured it.
+  // In the commit case it is deliberately an uncached control: Cargo has no
+  // portable store to seed from the parent commit, and its target is fresh.
+  const baseline = scenario.results.find((cell) => cell.tool === "cargo");
   return scenario.results.map((cell) => {
     const seconds = cell.wall_duration_ns / 1e9;
+    const ratio = baseline
+      ? baseline.wall_duration_ns / cell.wall_duration_ns
+      : null;
     return {
       tool: cell.tool,
       fastest: cell.wall_duration_ns === fastest,
@@ -162,12 +156,14 @@ function rows(scenario: BenchmarkScenario) {
           ? `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`
           : `${seconds.toFixed(1)}s`,
       width: barWidth(cell.wall_duration_ns, slowest),
-      relative:
-        // Two decimals: a cache that costs 3% on a cold build rounds to
-        // "1.0x" at one, which reads as free.
-        !baseline || cell === baseline
-          ? "—"
-          : `${(baseline.wall_duration_ns / cell.wall_duration_ns).toFixed(2)}×`,
+      comparison:
+        !baseline
+          ? null
+          : cell === baseline
+            ? "uncached baseline"
+            : ratio! >= 1
+              ? `${ratio!.toFixed(2)}× faster than cargo`
+              : `${(1 / ratio!).toFixed(2)}× slower than cargo`,
       hits: cell.stats?.hits ?? "—",
     };
   });
