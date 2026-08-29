@@ -315,16 +315,61 @@ impl CcDiscoveredInputs {
 /// the manifest-entry budget even though the ancestor already names every
 /// includable file below it.
 fn minimal_manifest_directories(directories: BTreeSet<PathBuf>) -> Vec<PathBuf> {
-    let mut minimal = Vec::<PathBuf>::new();
-    for directory in directories {
+    let mut directories = directories
+        .into_iter()
+        .map(|directory| {
+            let normalized = normalize_components(&directory);
+            (directory, normalized)
+        })
+        .collect::<Vec<_>>();
+    directories.sort_by(|(left, left_normalized), (right, right_normalized)| {
+        left_normalized
+            .components()
+            .count()
+            .cmp(&right_normalized.components().count())
+            .then_with(|| left_normalized.cmp(right_normalized))
+            .then_with(|| left.cmp(right))
+    });
+
+    let mut minimal = Vec::<(PathBuf, PathBuf)>::new();
+    for (directory, normalized) in directories {
         if !minimal
             .iter()
-            .any(|ancestor| directory.starts_with(ancestor))
+            .any(|(_, ancestor)| manifest_covers(ancestor, &normalized))
         {
-            minimal.push(directory);
+            minimal.push((directory, normalized));
         }
     }
     minimal
+        .into_iter()
+        .map(|(directory, _)| directory)
+        .collect()
+}
+
+/// Whether walking `ancestor` recursively is guaranteed to visit `descendant`.
+///
+/// Component-aware normalization rejects a lexical prefix that escapes through
+/// `..`. Directory symlinks need an explicit check because `read_dir` follows
+/// the directory it starts at but the recursive walk deliberately does not
+/// follow symlink entries beneath it.
+fn manifest_covers(ancestor: &Path, descendant: &Path) -> bool {
+    let Ok(relative) = descendant.strip_prefix(ancestor) else {
+        return false;
+    };
+    if relative.as_os_str().is_empty() {
+        return false;
+    }
+    let mut current = ancestor.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        let Ok(metadata) = std::fs::symlink_metadata(&current) else {
+            return false;
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return false;
+        }
+    }
+    true
 }
 
 fn is_manifest_input(path: &Path) -> bool {
