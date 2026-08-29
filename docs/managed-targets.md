@@ -44,11 +44,11 @@ a build server do not need the same configuration:
 
 | Budget | Default | Bounds |
 | --- | --- | --- |
-| `gc.max_size` (action store) | 5% of the disk | 5GiB to 100GiB |
-| `target.max_size` (managed targets) | 10% of the disk | 10GiB to 100GiB |
+| `gc.max_size` (action store) | 5% of the disk | 5 GiB to 100 GiB |
+| `target.max_size` (managed targets) | 10% of the disk | 10 GiB to 100 GiB |
 
-Scaled budgets are rounded down to a whole 5GiB. When the disk cannot be
-measured, mbx uses 20GiB and 30GiB respectively. Any value you set outright
+Scaled budgets are rounded down to a whole 5 GiB. When the disk cannot be
+measured, mbx uses 20 GiB and 30 GiB respectively. Any value you set outright
 wins, and `mbx gc --dry-run` previews the effect of a policy without deleting
 anything.
 
@@ -74,8 +74,8 @@ existing `target` symlink keeps counting as in use, so turning placement off
 does not schedule existing outputs for deletion.
 
 Each budget is measured against the disk that actually holds it, so putting
-`target.root` on a large scratch volume sizes the target budget from that
-volume rather than from the cache disk.
+[`target.root`](/configuration#target-root) on a large scratch volume sizes
+the target budget from that volume rather than from the cache disk.
 
 ## When mbx leaves a target alone
 

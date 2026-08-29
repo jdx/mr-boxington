@@ -30,7 +30,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           mise run check:docs
-          mise run build:docs
+          mise run check:links
 
   lint:
     runs-on: namespace-profile-endev-linux-amd64

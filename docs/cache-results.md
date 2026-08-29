@@ -31,7 +31,25 @@ group identical causes, and print guidance for every bypass category:
 mbx explain build --workspace
 ```
 
-The command preserves Cargo's exit status after printing the explanation.
+```text
+cache explanation: 8 compilations bypassed the cache
+
+compiler-query (2)
+Expected: Cargo asks rustc for toolchain information; there is no compilation to cache.
+  - rustc invocation is a compiler query, not a compilation (2 times)
+
+incremental (5)
+Cargo compiled this incrementally, which mbx cannot cache. `MBX_INCREMENTAL=0` makes it cacheable again; mbx already gives a crate you are editing its own incremental state without giving up the rest of the cache.
+  - incremental compilation cannot be combined with action caching (5 times)
+
+standard-input (1)
+Expected for Cargo probes: source supplied on standard input cannot be rediscovered later.
+  - rustc invocation reads source from standard input
+```
+
+Categories marked expected appear on every build and cost nothing; here the
+`incremental` group is the one the build could act on. The command preserves
+Cargo's exit status after printing the explanation.
 
 ## Remote failure
 
@@ -52,8 +70,8 @@ on a cache that has quietly stopped serving.
 ## Watching a build instead
 
 Everything above describes the summary printed after a build. To see the same
-outcomes as they are decided -- one row per compilation, with the crate it
-belongs to -- run [`mbx tui`](/tui) in another terminal. It reads every build on
+outcomes as they are decided — one row per compilation, with the crate it
+belongs to — run [`mbx tui`](/tui) in another terminal. It reads every build on
 the machine, including ones already running.
 
 ## Reading the hit rate
@@ -62,9 +80,11 @@ A build can report a high hit rate among attempted lookups while spending most
 of its time on actions that were not looked up or were bypassed. Read all three
 summary lines together, and compare wall-clock time when evaluating the cache.
 
-Native link steps always run, so an otherwise warm native binary build still
-has work to do. Binaries, tests, and `cdylib`s for supported self-contained
-WebAssembly targets are the exception and may be restored as hits.
+A link mbx cannot describe always runs, so a warm build of such a binary still
+has work to do. Host binaries and tests on Linux and macOS, and binaries,
+tests, and `cdylib`s for supported self-contained WebAssembly targets, may be
+restored as hits; see
+[limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
 
 ## Troubleshooting a low hit rate
 
@@ -84,9 +104,12 @@ The usual causes, roughly in the order they show up:
   members compile incrementally, those compilations bypass the cache, and the
   changed artifacts make crates above them miss too. See
   [limits](/limits#incremental-compilations-are-not-cached).
-- **Link steps always run.** Native binaries, tests, and dylibs re-link even
-  when every compilation hit, so a warm build of a large binary still takes
-  time. Self-contained WebAssembly targets are the exception.
+- **Undescribed links always run.** Host binaries and tests are cached on
+  Linux and macOS, and self-contained WebAssembly targets everywhere, but a
+  link naming a native library, a custom linker, or built on Windows re-links
+  even when every compilation hit, so a warm build of such a binary still
+  takes time. See
+  [limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
 - **The inputs actually differ.** A different toolchain, feature set, profile,
   or `RUSTFLAGS` between two checkouts is a different key, and the summary
   reports it as an ordinary miss. `cargo tree` and comparing the two commands
@@ -94,12 +117,12 @@ The usual causes, roughly in the order they show up:
 - **Build-script output paths.** A crate that embeds its `OUT_DIR` produces
   checkout-specific inputs for its dependents. mbx remaps this by default;
   `MBX_SHARE_OUT_DIR=0` disables that sharing. See
-  [limits](/limits#out_dir-sharing-remaps-generated-source-paths).
+  [limits](/limits#out-dir-sharing-remaps-generated-source-paths).
 - **A build chose its own C compiler, or is cross-compiling.** Setting `CC`,
   `HOST_CC`, or a target-specific variant leaves that build's C and C++
   compilations uncached, and so does `--target`. Bypass kinds beginning `cc-`
   report anything the C adapter declined to model. See
-  [limits](/limits#c-and-c-caching-covers-build-script-compiles-only).
+  [limits](/limits#c-and-c-caching-covers-the-host-compiles-mbx-drives).
 - **CI restored nothing.** On GitHub Actions, check that the cache step
   actually restored an entry — a changed `cache-generation` or a fresh
   repository starts empty by design. With a remote cache configured, check the
@@ -109,11 +132,18 @@ The usual causes, roughly in the order they show up:
 ## Compiler time
 
 The session summary reports real compiler time by outcome and an estimate of
-the compiler time avoided by cache hits. The estimate comes from the duration
-recorded with the successful compilation that populated the action prediction;
-older predictions without a timing hint contribute zero rather than being
-guessed. The five crates with the largest cumulative uncached compiler time are
-listed so optimization work can target wall-clock cost instead of action count.
+the compiler time avoided by cache hits:
+
+```text
+mbx[cache]: compiler time: 252.90s estimated avoided; 38.20s spent (161 miss in 31.00s, 7 unconsulted in 7.20s)
+mbx[cache]: slowest uncached crates: syn 8.90s, regex-syntax 4.90s, serde_derive 3.90s
+```
+
+The estimate comes from the duration recorded with the successful compilation
+that populated the action prediction; older predictions without a timing hint
+contribute zero rather than being guessed. The five crates with the largest
+cumulative uncached compiler time are listed so optimization work can target
+wall-clock cost instead of action count.
 
 The version 2 JSON statistics report exposes the same data in
 `estimated_compiler_duration_avoided_ns`, `compiler`, and

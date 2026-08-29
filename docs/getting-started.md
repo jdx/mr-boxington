@@ -108,9 +108,25 @@ Reflinked output restoration needs a filesystem with copy-on-write file
 cloning: APFS on macOS, btrfs or XFS on Linux, ReFS (Dev Drive) on Windows.
 mbx probes the actual cache and target locations rather than assuming from
 the platform, and copies bytes where cloning is unavailable — caching still
-works on ext4 or NTFS, it just spends the disk twice. On Windows, managed
-target directories also need Developer Mode or a privileged process to create
-the `target` link; see [managed target directories](/managed-targets).
+works on ext4 or NTFS, it just spends the disk twice.
+
+### Windows
+
+Windows is a supported release platform with a narrower caching tier. The
+differences, which the pages they belong to also note in place:
+
+- Reflinks need ReFS, which usually means a Dev Drive; on NTFS mbx copies
+  bytes instead.
+- The managed `target` link needs Developer Mode or a privileged process;
+  where Windows refuses to create it, Cargo keeps its ordinary target
+  directory. See [managed target directories](/managed-targets).
+- rustc compilations are cached as on every platform, but there is no
+  native-link tier: host programs and tests link as they always did, and only
+  the self-contained WebAssembly targets restore linked binaries. See
+  [limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
+- No C or C++ shims are installed, and MSVC invocations are never modeled, so
+  build-script C and `mbx exec` caching are Unix-only. See
+  [limits](/limits#c-and-c-caching-covers-the-host-compiles-mbx-drives).
 
 ## Run a build
 
@@ -126,6 +142,17 @@ The command and its arguments are passed to Cargo unchanged. Cargo still owns
 dependency resolution, feature unification, build planning, and linking. mbx
 also forwards Cargo aliases and installed subcommands. Nothing goes into
 Cargo's configuration, and there is nothing to tune before the first build.
+
+A toolchain goes where rustup expects it, in front of the command:
+
+```sh
+mbx +1.91 check --workspace
+```
+
+mbx reads that word rather than passing it along unexamined, so it means the
+same thing in front of mbx's own commands: `mbx +1.91 doctor` reports on 1.91,
+and `mbx +1.91 explain check` diagnoses a build under it. Commands that never
+reach a compiler, such as `mbx gc`, refuse a toolchain instead of ignoring one.
 
 ## Run multiple Cargo builds at the same time
 
@@ -149,21 +176,9 @@ mise run lint:default ::: lint:all
 
 Separate target directories keep Cargo's directory lock from serializing the
 commands. mbx shares one machine-wide compiler pool and deduplicates identical
-work in flight without further configuration. The same shape works directly
-inside [GitHub Actions](/github-action#parallel-cargo-steps); see
-[machine-wide compile scheduling](/configuration#machine-wide-compile-scheduling)
-for its CPU and memory behavior.
-
-A toolchain goes where rustup expects it, in front of the command:
-
-```sh
-mbx +1.91 check --workspace
-```
-
-mbx reads that word rather than passing it along unexamined, so it means the
-same thing in front of mbx's own commands: `mbx +1.91 doctor` reports on 1.91,
-and `mbx +1.91 explain check` diagnoses a build under it. Commands that never
-reach a compiler, such as `mbx gc`, refuse a toolchain instead of ignoring one.
+work in flight without further configuration — see
+[how it works](/how-it-works#machine-wide-scheduling) for the mechanism and
+the same shape [inside GitHub Actions](/github-action#parallel-cargo-steps).
 
 ## The first build
 
@@ -193,7 +208,7 @@ mbx doctor
   ok  cargo        cargo 1.98.0 (797e8a9bc 2026-08-05)
   ok  rustc        rustc 1.98.0 (88d9e12ae 2026-08-18)
   ok  cache        /home/you/.cache/mbx is writable
-  ok  config       20.0 GiB budget, automatic gc enabled, managed targets enabled at /home/you/.cache/mbx/targets
+  ok  config       50.0 GiB budget, automatic gc enabled, managed targets enabled at /home/you/.cache/mbx/targets
   ok  reflink      supported by the cache filesystem
   ok  setup        no plain-cargo wrapper installed; mbx wraps cargo directly
   ok  remote       not configured; using the local cache

@@ -158,14 +158,16 @@ CI runner, that cut lint wall time by up to 44.9%.
 ## How it works
 
 An `mbx` Cargo command starts an in-process cache agent, points Cargo at a rustc shim with
-`RUSTC_WRAPPER`, and exits the agent with the build—there is no daemon. The shim
+`RUSTC_WRAPPER`, and exits the agent with the build — there is no daemon. The shim
 derives an action key, restores cached outputs when possible, or runs the real
 compiler and publishes a successful result.
 
-Anything mbx cannot model exactly bypasses the cache. Native linking is not
-cached; built-in WebAssembly targets with self-contained linkers are the narrow
-exception because their linker, CRT, and libc inputs ship in the Rust toolchain.
-Incremental compilations bypass the cache. Correctness comes before hit rate.
+Anything mbx cannot model exactly bypasses the cache. A native link is cached
+only when the linker itself can enter the key: host binaries and tests on Linux
+and macOS, where mbx resolves the linker, startup objects, and libc, and
+self-contained WebAssembly targets everywhere, whose linker and libc ship in
+the Rust toolchain. Incremental compilations bypass the cache. Correctness
+comes before hit rate.
 
 [Read the architecture and limits →](https://mr-boxington.jdx.dev/how-it-works)
 

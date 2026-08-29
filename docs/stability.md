@@ -41,8 +41,8 @@ versioned under `/v1/` with explicit evolution rules, and published Rust crates
 follow semantic versioning enforced by `cargo-semver-checks` in CI. See
 [protocol compatibility](/protocol-compatibility) for the details.
 
-`mbx-cache-cargo`, `mbx-cache-store`, `mbx-cache-core`, and
-`mbx-cache-rustc` are supported building blocks for coordinated embedding.
+`mbx-cache-cargo`, `mbx-cache-store`, `mbx-cache-core`, `mbx-cache-rustc`, and
+`mbx-cache-cc` are supported building blocks for coordinated embedding.
 They intentionally stay on `0.x`: their public APIs can change in a new minor
 release, and embedders should pin a compatible minor. Store and wire formats
 remain independently versioned and treat unfamiliar records as cache misses.

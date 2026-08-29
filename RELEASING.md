@@ -52,9 +52,10 @@ The crates do not share a version. `mbx` and `mbx-cache-protocol` each have an
 independent one, because each carries a stability promise the other should not
 be able to break: the CLI's surface is its commands and JSON output, and the
 protocol crate's is the remote cache wire contract that `jdx/mbx-cache` depends
-on. `mbx-cache-core` and `mbx-cache-rustc` are internals; they share the
-`mbx-internals` version group, move together, and stay on `0.x` so semver
-itself says a minor bump may break them.
+on. `mbx-cache-core`, `mbx-cache-rustc`, and `mbx-cache-cc` are internals;
+they share the `mbx-internals` version group, move together, and stay on `0.x`
+so semver itself says a minor bump may break them. `mbx-cache-cargo` and
+`mbx-cache-store` release independently on `0.x`.
 
 Nobody edits a version in a feature pull request. release-plz owns every
 number, and one written by hand either collides with its calculation or is
@@ -62,6 +63,19 @@ overwritten by it. A failing `cargo semver-checks` reports what a change would
 require; it is not a request for a bump. Either the break is unintended, and
 the API is what to fix, or it is intended, and the pull request should say so
 and leave the version alone.
+
+An intended break is declared on the commit — `feat!:`, or a `BREAKING
+CHANGE:` footer — and leaves the `public API compatibility` check red, because
+the version it compares against cannot move until the release PR exists. That
+red check is the expected state of an honest breaking change, not a problem to
+solve inside the pull request.
+
+Read that job's output as a list of what broke, not as an instruction. Its
+summary says "semver requires new major version" whatever the crate's
+position, so for the crates on `0.x` it names a bump Cargo does not want —
+there, a break is a minor. The lint names above the summary are the useful
+part: they say which items changed shape, which is what a reviewer needs to
+judge whether the break was intended.
 
 release-plz computes each line from the commits that touched it and updates the
 path dependencies' version requirements, so a release can move one crate and
@@ -73,7 +87,7 @@ promise each version line makes.
 
 ## Tags and asset names
 
-The `mbx` crate is tagged `v{version}`; the three library crates are published to
+The `mbx` crate is tagged `v{version}`; the library crates are published to
 crates.io but get no GitHub release of their own. Asset names carry no version
 (`mbx-x86_64-unknown-linux-gnu.tar.gz`), which is what keeps
 `releases/latest/download/…` a stable URL.
@@ -109,8 +123,9 @@ successful releases:
   build annotates a warning instead of failing. What it loses is Gatekeeper
   approval for anyone who downloads the archive through a browser — see
   [Notarization](#notarization).
-- **A crates.io Trusted Publisher for each of `mbx`, `mbx-cache-core`,
-  `mbx-cache-protocol`, and `mbx-cache-rustc`**, naming this repository and the
+- **A crates.io Trusted Publisher for every published crate** — `mbx`,
+  `mbx-cache-cargo`, `mbx-cache-cc`, `mbx-cache-core`, `mbx-cache-protocol`,
+  `mbx-cache-rustc`, and `mbx-cache-store` — naming this repository and the
   workflow file `release-plz.yml`. Publishing is OIDC-only; no registry token
   exists anywhere. **Renaming `release-plz.yml` breaks publishing** until the
   trusted publishers are updated to match. A crate that does not exist on

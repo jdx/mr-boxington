@@ -70,7 +70,7 @@ run_windows = [
 ]
 
 [tasks.ci]
-depends = ["lint", "build", "check:docs", "build:docs", "test"]
+depends = ["lint", "build", "check:docs", "check:links", "test"]
 
 [tasks.docs]
 description = "Start the documentation development server"
@@ -106,6 +106,14 @@ description = "Check that generated documentation is current"
 depends = ["render:docs"]
 run = "git diff --exit-code -- docs/cli && test -z \"$(git status --porcelain --untracked-files=all -- docs/cli)\""
 run_windows = "git diff --exit-code -- docs/cli; if (git status --porcelain --untracked-files=all -- docs/cli) { exit 1 }"
+
+# VitePress validates page links at build time but not #fragments, so a
+# renamed heading rots its inbound anchors silently. --offline keeps external
+# URLs out of it: this checks the site against itself, not the internet.
+[tasks."check:links"]
+description = "Check internal links and anchors in the built documentation"
+depends = ["build:docs"]
+run = "lychee --offline --include-fragments --root-dir \"$PWD/docs/.vitepress/dist\" --fallback-extensions html 'docs/.vitepress/dist/**/*.html'"
 
 [tasks."perf:prepare"]
 description = "Build the fixed benchmark subject"
@@ -155,6 +163,7 @@ run = "tak run --record"
 "github:jdx/tak" = "0.0.8"
 aube = "latest"
 communique = "latest"
+lychee = "0.24.2"
 node = "24"
 rust = "1.97.1"
 usage = "6.5.0"
