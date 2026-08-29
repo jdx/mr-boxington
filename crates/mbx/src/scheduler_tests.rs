@@ -181,7 +181,7 @@ fn a_predicted_heavy_compile_does_not_wait_out_the_gate_on_an_idle_machine() {
     // Through `plan`, because that is the only weight production ever asks
     // for -- and it clamps to the capacity, so a rule written against
     // heavier-than-capacity weights would never fire for a real compilation.
-    pool.record_peak("enormous", bytes_per_permit * 1000)
+    pool.record_peak(&ledger_key("enormous", true), bytes_per_permit * 1000)
         .unwrap();
     let (weight, predicted) = pool.plan(&Demand::new("enormous", true));
     assert_eq!(
@@ -288,22 +288,42 @@ fn plans_weigh_history_links_and_nothing() {
     let (weight, predicted) = pool.plan(&Demand::new("heavy", false));
     assert_eq!((weight, predicted), (4, Some(3500)));
 
+    // "heavy" was measured compiling to metadata, and a link of that same
+    // crate must not inherit it: `cargo check` and `cargo build` name one
+    // crate for two very different workloads, and the metadata-only number
+    // is the smaller. Inheriting it retires the link floor with a
+    // measurement that was never a link's -- over-admission with a
+    // plausible number attached. An unmeasured link keeps the floor.
     let (weight, predicted) = pool.plan(&Demand::new("heavy", true));
     assert_eq!(
         (weight, predicted),
-        (4, Some(3500)),
-        "history above the link floor wins"
+        (LINK_WEIGHT, Some(LINK_WEIGHT * bytes_per_permit)),
+        "a metadata-only measurement never speaks for the link beside it"
     );
 
-    // A link the pool has measured is weighted by what it used, not by the
-    // guess it was charged before anyone had seen it: the floor exists for
-    // unmeasured links, and a measurement retires it in either direction.
-    pool.record_peak("light-link", 700).unwrap();
+    // A link measured *as a link* is weighted by what it used, whichever
+    // side of the floor that falls on -- above it,
+    pool.record_peak(&ledger_key("heavy", true), 9000).unwrap();
+    let (weight, predicted) = pool.plan(&Demand::new("heavy", true));
+    assert_eq!(
+        (weight, predicted),
+        (8, Some(9000)),
+        "a link's own history above the floor wins"
+    );
+    // and below it, which is the floor being retired rather than raised.
+    pool.record_peak(&ledger_key("light-link", true), 700)
+        .unwrap();
     let (weight, predicted) = pool.plan(&Demand::new("light-link", true));
     assert_eq!(
         (weight, predicted),
         (1, Some(700)),
-        "history below the link floor also wins"
+        "a link's own history below the floor also wins"
+    );
+    // The two entries are genuinely separate, not one overwriting the other.
+    assert_eq!(
+        pool.plan(&Demand::new("heavy", false)),
+        (4, Some(3500)),
+        "the metadata entry survives the link entry beside it"
     );
 
     let (weight, _) = pool.plan(&Demand::new("enormous", false));

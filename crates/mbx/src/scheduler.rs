@@ -596,7 +596,7 @@ impl Pool {
         }
         let recorded = read_ledger(&self.ledger_path())
             .crates
-            .get(&demand.name)
+            .get(&ledger_key(&demand.name, demand.links))
             .copied();
         let link_bytes = link_floor.map(|weight| weight.saturating_mul(self.bytes_per_permit));
         // History replaces the floor rather than merely raising it. The floor
@@ -606,6 +606,14 @@ impl Pool {
         // memory justifies. The ledger never lowers a recorded peak and an
         // OOM kill escalates past it, so trusting the measurement stays safe
         // in the direction that matters.
+        //
+        // Only a *link's* own history may retire the link floor, which is why
+        // the two are separate ledger entries. One crate is compiled both
+        // ways in a single build -- `cargo check` emits metadata where `cargo
+        // build` links -- and the metadata-only measurement is the smaller of
+        // the two by far. Keyed by name alone it would retire the floor for
+        // the link beside it, which is over-admission with a plausible number
+        // attached to it.
         let predicted = recorded.or(link_bytes);
         let weight = predicted
             .map_or(1, |bytes| bytes.div_ceil(self.bytes_per_permit))
@@ -753,7 +761,7 @@ impl Pool {
         ) else {
             return;
         };
-        if let Err(error) = self.record_peak(&demand.name, peak) {
+        if let Err(error) = self.record_peak(&ledger_key(&demand.name, demand.links), peak) {
             debug!("compiler memory was not recorded: {error:#}");
         }
     }
@@ -787,6 +795,21 @@ impl Pool {
         let mut contents = serde_json::to_vec(&ledger)?;
         contents.push(b'\n');
         crate::util::write_atomic(&path, &contents)
+    }
+}
+
+/// What one crate's memory is remembered under.
+///
+/// A link and a metadata-only compile of the same crate are different
+/// workloads with the same name -- `cargo check` and `cargo build` run both
+/// against one crate, often at the same moment -- so they are remembered
+/// apart. The suffix cannot collide with a crate name, which is a Rust
+/// identifier and can hold neither a space nor a bracket.
+fn ledger_key(name: &str, links: bool) -> String {
+    if links {
+        format!("{name} [link]")
+    } else {
+        name.to_string()
     }
 }
 
