@@ -21,12 +21,11 @@ time. Their compiler shims share a machine-wide permit pool and an
 in-flight-work registry, so those builds do not multiply the machine's CPU and
 memory budgets or repeat an identical cold compilation.
 [Machine-wide scheduling](#machine-wide-scheduling) below describes the
-mechanism; the
+mechanism, and the
 [mise task example](/getting-started#run-multiple-cargo-builds-at-the-same-time)
-and the
+and
 [parallel GitHub Actions example](/github-action#parallel-cargo-steps) are
-copyable shapes, and the [contention benchmark](/benchmarks#contention)
-measures it.
+copyable shapes.
 
 ## Build-script C and C++
 

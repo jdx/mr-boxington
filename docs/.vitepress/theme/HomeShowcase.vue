@@ -7,33 +7,17 @@
           Every worktree starts warm, and cleans up after itself.
         </h2>
         <p class="lede">
-          Workspace, registry, toolchain, and sysroot paths become stable
-          placeholders before they enter a key, so a crate compiled in one
-          checkout is restored in the next — each keeping its own
-          <code>target/</code>, with no shared Cargo lock to serialize them.
-          mbx parks those directories under its cache root and collects one
-          when its checkout is gone, when it sits unused for 30 days, or when
-          they outgrow their budget.
-        </p>
-        <div class="proof" aria-label="Cache keys contain no absolute paths">
-          <strong>No absolute paths</strong>
-          <span>
-            enter a cache key, so a second checkout restores instead of
-            rebuilding
-          </span>
-        </div>
-        <p class="validation">
-          A benchmark builds one checkout and times another, and the run is
-          thrown away unless that second checkout reports hits and restored
-          files. Budgets scale with the disk — 10% for managed target
-          directories, 5% for the store — and the directory you are working in
-          is never the one collected to meet them.
+          Every checkout draws from one shared store instead of compiling the
+          same crates into its own <code>target/</code>, so build in one
+          worktree and the next starts warm. And those directories prune
+          themselves: one goes away when its checkout is deleted, when it sits
+          unused for a month, or when they outgrow their share of the disk.
         </p>
         <div class="links">
           <a class="primary" href="/how-it-works#portable-keys">
-            See how the keys travel
+            How worktrees share
           </a>
-          <a href="/managed-targets#collection">What gets collected →</a>
+          <a href="/managed-targets#collection">What gets pruned →</a>
         </div>
       </div>
 
@@ -116,20 +100,11 @@
         <p class="eyebrow">Every runner, one cache</p>
         <h2 id="mbx-remote-title">CI runners and teammates start warm.</h2>
         <p class="lede">
-          Point mbx at a cache server or any S3-compatible bucket and
-          ephemeral runners download only the rustc actions their build
-          needs. On GitHub Actions there is nothing to host: the default
-          backend rides the Actions cache and warms fork pull requests from
-          caches built on main.
-        </p>
-        <div class="proof" aria-label="Write policy">
-          <strong>PRs never publish</strong>
-          <span>pull requests restore and cannot write, forks included</span>
-        </div>
-        <p class="validation">
-          Only protected-branch builds may write. The client enforces it and
-          your server should too — defense in depth, not an access-control
-          boundary.
+          Point mbx at a cache server or an S3 bucket and your CI runners and
+          teammates all start from the same cache, each build downloading only
+          what it needs. On GitHub Actions there is nothing to host at all.
+          Pull requests from forks are safe to run: they read from the cache
+          without being able to write to it.
         </p>
         <div class="links">
           <a class="primary" href="/github-action">Set up the GitHub Action</a>
@@ -142,11 +117,11 @@
         aria-label="A CI build and a laptop sharing one remote cache"
       >
         <div class="job">
-          <span class="label">CI on main · read-write</span>
+          <span class="label">CI runner</span>
           <code>mbx test --workspace</code>
         </div>
         <div class="job last">
-          <span class="label">teammate's laptop · read-only</span>
+          <span class="label">teammate's laptop</span>
           <code>mbx build</code>
         </div>
         <div class="join" aria-hidden="true">
@@ -154,8 +129,8 @@
           <span></span>
         </div>
         <div class="pool">
-          <span class="pool-title">one remote cache</span>
-          <span>mbx cache server · any S3-compatible bucket</span>
+          <span class="pool-title">one shared cache</span>
+          <span>cache server · S3 bucket · GitHub Actions</span>
         </div>
       </div>
     </section>
@@ -210,35 +185,9 @@ h2 {
   max-width: 42rem;
 }
 
-.lede code,
-.validation code {
+.lede code {
   font-family: var(--vp-font-family-mono);
   font-size: 0.9em;
-}
-
-.proof {
-  align-items: baseline;
-  display: flex;
-  gap: 14px;
-}
-
-.proof strong {
-  color: var(--mbx-amber-bright);
-  font-family: var(--mbx-display);
-  font-size: 38px;
-  letter-spacing: -0.04em;
-  white-space: nowrap;
-}
-
-.proof span,
-.validation {
-  color: var(--vp-c-text-2);
-  line-height: 1.45;
-}
-
-.validation {
-  font-size: 13px;
-  margin: 8px 0 24px;
 }
 
 .links {
@@ -397,12 +346,6 @@ h2 {
 
   .MbxShowcase {
     margin-top: 48px;
-  }
-
-  .proof {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 2px;
   }
 
   .job code {
