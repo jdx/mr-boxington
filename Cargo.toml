@@ -29,4 +29,7 @@ readme = "README.md"
 # every invocation cheaper, including the rustc shim and CLI startup paths.
 lto = "fat"
 codegen-units = 1
+# A panic is already fatal at every CLI and shim boundary. Omitting unwind
+# tables keeps the frequently-started binary smaller without changing recovery.
+panic = "abort"
 strip = "symbols"
