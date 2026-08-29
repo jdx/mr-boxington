@@ -195,6 +195,134 @@ fn disk_total_bytes_at(path: &Path) -> Option<u64> {
     }
 }
 
+/// Physical memory installed in this machine, when it can be measured.
+#[cfg(target_vendor = "apple")]
+pub fn memory_total_bytes() -> Option<u64> {
+    let mut mib = [libc::CTL_HW, libc::HW_MEMSIZE];
+    let mut total = 0_u64;
+    let mut length = size_of::<u64>();
+    // SAFETY: the MIB names a u64 sysctl, `total` is a valid u64 out buffer of
+    // exactly `length` bytes, and no new value is being set.
+    let ok = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            (&raw mut total).cast(),
+            &raw mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (ok == 0).then_some(total).filter(|total| *total > 0)
+}
+
+/// Physical memory installed in this machine, when it can be measured.
+#[cfg(target_os = "linux")]
+pub fn memory_total_bytes() -> Option<u64> {
+    // SAFETY: `sysinfo` only writes into the zeroed struct it is given.
+    let info = unsafe {
+        let mut info = std::mem::zeroed::<libc::sysinfo>();
+        if libc::sysinfo(&mut info) != 0 {
+            return None;
+        }
+        info
+    };
+    // `mem_unit` narrows from u32 and `totalram` is u64 on 64-bit glibc but
+    // u32 on 32-bit targets; the conversions let one body compile everywhere.
+    #[allow(clippy::useless_conversion)]
+    let unit = u64::from(info.mem_unit);
+    #[allow(clippy::useless_conversion)]
+    let total = u64::try_from(info.totalram).ok()?;
+    total.checked_mul(unit).filter(|total| *total > 0)
+}
+
+/// Physical memory installed in this machine, when it can be measured.
+#[cfg(windows)]
+pub fn memory_total_bytes() -> Option<u64> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    // SAFETY: the struct is a valid out parameter with its length declared,
+    // which is all the API requires.
+    let status = unsafe {
+        let mut status = std::mem::zeroed::<MEMORYSTATUSEX>();
+        status.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
+        if GlobalMemoryStatusEx(&mut status) == 0 {
+            return None;
+        }
+        status
+    };
+    Some(status.ullTotalPhys).filter(|total| *total > 0)
+}
+
+/// Fallback for hosts with no supported probe.
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", windows)))]
+pub fn memory_total_bytes() -> Option<u64> {
+    None
+}
+
+/// Memory the machine could hand a new process right now, when measurable.
+///
+/// "Available" deliberately counts reclaimable memory rather than free pages
+/// alone: a machine whose RAM is full of page cache is not out of memory, and
+/// treating it as such would defer compilations that were going to run fine.
+#[cfg(target_os = "linux")]
+pub fn memory_available_bytes() -> Option<u64> {
+    // `MemAvailable` is the kernel's own estimate of exactly this question,
+    // accounting for reclaimable caches; summing fields by hand would just
+    // reimplement it worse.
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix("MemAvailable:"))?;
+    let kibibytes = line
+        .trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    kibibytes.checked_mul(1024).filter(|bytes| *bytes > 0)
+}
+
+/// Memory the machine could hand a new process right now, when measurable.
+//
+// libc deprecates its Mach bindings in favor of the `mach2` crate, but these
+// four symbols are stable kernel ABI and not worth a dependency that exists
+// to re-export them.
+#[allow(deprecated)]
+#[cfg(target_vendor = "apple")]
+pub fn memory_available_bytes() -> Option<u64> {
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    // SAFETY: the buffer is a zeroed `vm_statistics64` and `count` declares
+    // its size in `integer_t` units, which is what the call requires.
+    let stats = unsafe {
+        let mut stats = std::mem::zeroed::<libc::vm_statistics64>();
+        if libc::host_statistics64(
+            libc::mach_host_self(),
+            libc::HOST_VM_INFO64,
+            (&raw mut stats).cast(),
+            &mut count,
+        ) != libc::KERN_SUCCESS
+        {
+            return None;
+        }
+        stats
+    };
+    // Free plus what the kernel can take back without swapping: inactive pages
+    // and purgeable memory. Speculative pages are already inside `free_count`.
+    // SAFETY: reading a kernel-exported integer.
+    let page_size = unsafe { libc::vm_page_size } as u64;
+    let pages = u64::from(stats.free_count)
+        .checked_add(u64::from(stats.inactive_count))?
+        .checked_add(u64::from(stats.purgeable_count))?;
+    pages.checked_mul(page_size).filter(|bytes| *bytes > 0)
+}
+
+/// Fallback for hosts with no supported probe.
+#[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
+pub fn memory_available_bytes() -> Option<u64> {
+    None
+}
+
 /// Whether a reflink from inside `source_dir` can land inside
 /// `destination_dir`.
 ///

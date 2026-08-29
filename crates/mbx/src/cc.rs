@@ -123,6 +123,11 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     // appeared mid-compile from being recorded as one the compiler had seen.
     let searchable = searchable_directories(&invocation, &working_dir);
     let before = manifest_snapshot(&searchable).ok();
+    // The machine-wide permit is taken after every chance to hit the cache,
+    // and the timer starts afterwards: time spent waiting for the machine is
+    // not time this compilation cost.
+    let demand = crate::scheduler::Demand::new(&compilation_name(&invocation), false);
+    let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
     let started = Instant::now();
     let compilation_started = SystemTime::now();
     let mut command = Command::new(compiler);
@@ -131,6 +136,8 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     let output = command
         .output()
         .wrap_err_with(|| format!("failed to run {}", Path::new(compiler).display()))?;
+    drop(permit);
+    crate::scheduler::record_compiler_memory(&demand, &output.status);
     let duration_ns = duration_ns(started.elapsed());
     session::record_compiler_invocation(
         if verification.is_some() {

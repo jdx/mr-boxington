@@ -219,6 +219,13 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
         }
     }
 
+    // Everything past this point runs the real compiler, so this is where the
+    // machine-wide permit is taken -- after every chance to hit the cache, and
+    // before anything expensive starts. The timer starts afterwards: time
+    // spent waiting for the machine is not time this compilation cost.
+    let demand =
+        crate::scheduler::Demand::new(invocation.crate_name(), invocation.links_natively());
+    let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
     let compilation_started = SystemTime::now();
     let compiler_timer = Instant::now();
     let mut command = Command::new(rustc);
@@ -232,6 +239,10 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
         command.arg(flag);
     }
     let output = command.output().wrap_err("failed to execute rustc")?;
+    // Released before the outputs are read back and published: hashing and
+    // storing cost I/O, not the CPU and memory the permit stands for.
+    drop(permit);
+    crate::scheduler::record_compiler_memory(&demand, &output.status);
     let timing = CompileTiming {
         crate_name: invocation.crate_name().to_string(),
         duration_ns: compiler_timer

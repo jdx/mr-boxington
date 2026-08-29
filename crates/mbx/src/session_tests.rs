@@ -12,6 +12,7 @@ fn test_config(cache_dir: &Path) -> Config {
         remote: Default::default(),
         http: Default::default(),
         gc: Default::default(),
+        scheduler: Default::default(),
         target: crate::config::TargetSettings {
             views: false,
             root: cache_dir.join("targets"),

@@ -749,6 +749,7 @@ fn managed_target_config(root: &Path) -> Config {
         remote: Default::default(),
         http: Default::default(),
         gc: Default::default(),
+        scheduler: Default::default(),
         target: crate::config::TargetSettings {
             views: true,
             root: root.join("targets"),

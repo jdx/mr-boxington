@@ -50,3 +50,4 @@ mod cc;
 mod linker;
 mod materialize;
 mod rustc;
+mod scheduler;

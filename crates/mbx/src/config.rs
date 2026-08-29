@@ -77,6 +77,17 @@ impl ScaledBudget {
     }
 }
 
+/// Share of physical memory the compile scheduler budgets by default.
+///
+/// Deliberately less than the whole machine: the editor, the browser, and the
+/// page cache are spending memory the budget cannot see, and a budget equal to
+/// physical RAM would schedule compilations into exactly the pressure the
+/// scheduler exists to avoid.
+const SCHEDULER_MEMORY_PERCENT: u64 = 85;
+
+/// Memory budget used when physical memory cannot be measured.
+const SCHEDULER_MEMORY_FALLBACK: u64 = 16 * GIB;
+
 /// The single declaration used to resolve and document mbx configuration.
 #[derive(Debug, usage::Config)]
 #[usage(file(
@@ -146,6 +157,29 @@ pub(crate) struct RawConfig {
     gc: RawGc,
     #[usage(flatten)]
     target: RawTarget,
+    #[usage(flatten)]
+    scheduler: RawScheduler,
+}
+
+#[derive(Debug, usage::Config)]
+#[usage(prefix = "scheduler")]
+struct RawScheduler {
+    /// Coordinate real compilations machine-wide through a permit pool.
+    #[usage(env = "MBX_SCHEDULER", default = true)]
+    enabled: bool,
+    /// Machine-wide concurrent compile permits.
+    #[usage(env = "MBX_SCHEDULER_CPUS", default_note = "logical CPUs")]
+    cpus: Option<i64>,
+    /// Memory budget the permits divide, or "none" for plain CPU permits.
+    #[usage(env = "MBX_SCHEDULER_MEMORY", default_note = "85% of physical memory")]
+    memory: Option<String>,
+    /// Permit priority of this build's compilations.
+    #[usage(
+        env = "MBX_SCHEDULER_PRIORITY",
+        default = "normal",
+        choices("normal", "low")
+    )]
+    priority: String,
 }
 
 #[derive(Debug, usage::Config)]
@@ -274,6 +308,7 @@ pub struct Config {
     pub http: HttpSettings,
     pub gc: GcSettings,
     pub target: TargetSettings,
+    pub scheduler: SchedulerSettings,
 }
 
 impl Config {
@@ -298,6 +333,72 @@ impl Config {
                 views: true,
                 root: cache_dir.join("targets"),
             },
+            scheduler: Default::default(),
+        }
+    }
+}
+
+/// How real compilations draw from the machine-wide permit pool.
+#[derive(Debug, Clone)]
+pub struct SchedulerSettings {
+    /// Whether compilations take permits at all.
+    pub enabled: bool,
+    /// Machine-wide concurrent compile permits.
+    pub cpus: u64,
+    /// Memory the permits divide; `None` leaves plain CPU permits.
+    pub memory_bytes: Option<u64>,
+    /// Priority of this build's compilations against other builds.
+    pub priority: SchedulerPriority,
+}
+
+/// The scheduling a hand-built `Config` gets: none.
+///
+/// Deliberately not the declared configuration default, which is enabled. A
+/// `Config` assembled in code rather than resolved from the environment has
+/// not been told where a machine-wide pool should live or how large the
+/// machine is, and guessing would have tests and embedders contending over a
+/// real pool they never asked for. Resolution always states every field.
+impl Default for SchedulerSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cpus: 1,
+            memory_bytes: None,
+            priority: SchedulerPriority::Normal,
+        }
+    }
+}
+
+/// Whose compilations wait when the machine is contended.
+///
+/// `Low` is for builds nobody is sitting at -- CI on a shared box, an editor's
+/// background check -- which leave a share of the permit pool free whenever a
+/// normal-priority build is waiting for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SchedulerPriority {
+    #[default]
+    Normal,
+    Low,
+}
+
+impl SchedulerPriority {
+    /// The spelling the configuration and the session environment use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Low => "low",
+        }
+    }
+}
+
+impl std::str::FromStr for SchedulerPriority {
+    type Err = eyre::Report;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "normal" => Ok(Self::Normal),
+            "low" => Ok(Self::Low),
+            other => Err(eyre::eyre!("priority must be normal or low, not {other:?}")),
         }
     }
 }
@@ -455,13 +556,19 @@ impl Config {
         env: &EnvLayer,
         file: Option<&FileLayer>,
     ) -> Result<(Self, CliSettings)> {
-        Self::from_layers_measuring(env, file, crate::util::disk_total_bytes)
+        Self::from_layers_measuring(
+            env,
+            file,
+            crate::util::disk_total_bytes,
+            crate::util::memory_total_bytes,
+        )
     }
 
     fn from_layers_measuring(
         env: &EnvLayer,
         file: Option<&FileLayer>,
         measure_disk: impl Fn(&Path) -> Option<u64>,
+        measure_memory: impl Fn() -> Option<u64>,
     ) -> Result<(Self, CliSettings)> {
         let mut layers = Layers::new().then(env);
         if let Some(file) = file {
@@ -481,16 +588,17 @@ impl Config {
             bail!("invalid configuration:\n{problems}");
         }
         let raw = RawConfig::read(&resolved)?;
-        Self::from_raw_measuring(raw, measure_disk)
+        Self::from_raw_measuring(raw, measure_disk, measure_memory)
     }
 
-    /// Resolve settings, measuring the cache disk with `measure_disk`.
+    /// Resolve settings, measuring the machine with the given probes.
     ///
-    /// The probe is a parameter so tests can state a disk size rather than
-    /// asserting against whatever disk happens to run them.
+    /// The probes are parameters so tests can state a disk or memory size
+    /// rather than asserting against whatever machine happens to run them.
     fn from_raw_measuring(
         raw: RawConfig,
         measure_disk: impl Fn(&Path) -> Option<u64>,
+        measure_memory: impl Fn() -> Option<u64>,
     ) -> Result<(Self, CliSettings)> {
         let cache_dir = raw.cache_dir.or_else(default_cache_dir).ok_or_else(|| {
             eyre::eyre!("could not determine a cache directory; set MBX_CACHE_DIR")
@@ -562,10 +670,42 @@ impl Config {
             views: raw.target.views,
             root: target_root,
         };
+        let scheduler_cpus = match raw.scheduler.cpus {
+            Some(cpus) => u64::try_from(cpus)
+                .ok()
+                .filter(|cpus| *cpus > 0)
+                .ok_or_else(|| eyre::eyre!("invalid scheduler.cpus: must be a positive count"))?,
+            None => std::thread::available_parallelism().map_or(1, |cpus| cpus.get() as u64),
+        };
+        let scheduler_memory = match raw.scheduler.memory.as_deref() {
+            Some(value) => parse_optional_byte_size(value).wrap_err("invalid scheduler.memory")?,
+            // Measured only when the scheduler would use the answer, like the
+            // disk budgets above.
+            None => Some(
+                raw.scheduler
+                    .enabled
+                    .then(&measure_memory)
+                    .flatten()
+                    .map_or(SCHEDULER_MEMORY_FALLBACK, |total| {
+                        total / 100 * SCHEDULER_MEMORY_PERCENT
+                    }),
+            ),
+        };
+        let scheduler = SchedulerSettings {
+            enabled: raw.scheduler.enabled,
+            cpus: scheduler_cpus,
+            memory_bytes: scheduler_memory,
+            priority: raw
+                .scheduler
+                .priority
+                .parse()
+                .wrap_err("invalid scheduler.priority")?,
+        };
         let config = Self {
             cache_dir,
             gc,
             target,
+            scheduler,
             stats_report: raw.stats_report,
             verify: raw.verify,
             incremental: raw.incremental,
@@ -763,7 +903,7 @@ mod tests {
             std::fs::write(&path, contents).unwrap();
             FileLayer::at(path, FileScope::Global)
         });
-        Config::from_layers_measuring(&env, file.as_ref(), measure_disk)
+        Config::from_layers_measuring(&env, file.as_ref(), measure_disk, || Some(32 * GIB))
     }
 
     #[test]
@@ -1202,6 +1342,66 @@ mod tests {
             configured_for_cli(None, &[("MBX_SAVINGS", "sarcastic")]).is_err(),
             "an unknown style is an error, not a silent default"
         );
+    }
+
+    #[test]
+    fn the_scheduler_defaults_on_with_most_of_the_measured_memory() {
+        let config = configured(None, &[]).unwrap();
+        assert!(config.scheduler.enabled);
+        assert_eq!(
+            config.scheduler.cpus,
+            std::thread::available_parallelism().unwrap().get() as u64
+        );
+        // 85% of the 32GiB the test harness reports.
+        assert_eq!(
+            config.scheduler.memory_bytes,
+            Some(32 * GIB / 100 * 85),
+            "the budget leaves headroom for what it cannot see"
+        );
+        assert_eq!(config.scheduler.priority, SchedulerPriority::Normal);
+    }
+
+    #[test]
+    fn the_scheduler_is_configurable_and_refuses_nonsense() {
+        let config = configured(
+            None,
+            &[
+                ("MBX_SCHEDULER_CPUS", "3"),
+                ("MBX_SCHEDULER_MEMORY", "4GiB"),
+                ("MBX_SCHEDULER_PRIORITY", "low"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(config.scheduler.cpus, 3);
+        assert_eq!(config.scheduler.memory_bytes, Some(4 * GIB));
+        assert_eq!(config.scheduler.priority, SchedulerPriority::Low);
+
+        let config = configured(None, &[("MBX_SCHEDULER", "false")]).unwrap();
+        assert!(!config.scheduler.enabled);
+
+        let config = configured(None, &[("MBX_SCHEDULER_MEMORY", "none")]).unwrap();
+        assert_eq!(
+            config.scheduler.memory_bytes, None,
+            "\"none\" keeps plain CPU permits"
+        );
+
+        let error = configured(None, &[("MBX_SCHEDULER_CPUS", "0")]).unwrap_err();
+        assert!(error.to_string().contains("scheduler.cpus"), "{error}");
+        let error = configured(None, &[("MBX_SCHEDULER_PRIORITY", "loud")]).unwrap_err();
+        assert!(error.to_string().contains("scheduler.priority"), "{error}");
+    }
+
+    #[test]
+    fn a_disabled_scheduler_needs_no_memory_measurement() {
+        let env = EnvLayer::new([("MBX_SCHEDULER".to_string(), "false".to_string())]);
+        let (config, _) = Config::from_layers_measuring(
+            &env,
+            None,
+            |_| None,
+            || panic!("a disabled scheduler must not probe memory"),
+        )
+        .unwrap();
+        assert!(!config.scheduler.enabled);
     }
 
     #[test]

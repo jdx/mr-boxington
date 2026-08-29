@@ -237,6 +237,45 @@ How the savings line after a build reads.
 - `off`
 
 
+### `scheduler.cpus`
+
+- **Type:** `option<int>`
+- **Optional:** true
+- **Default:** logical CPUs
+- **Set with:** `MBX_SCHEDULER_CPUS`
+
+Machine-wide concurrent compile permits.
+
+### `scheduler.enabled`
+
+- **Type:** `bool`
+- **Default:** `true`
+- **Set with:** `MBX_SCHEDULER`
+
+Coordinate real compilations machine-wide through a permit pool.
+
+### `scheduler.memory`
+
+- **Type:** `option<string>`
+- **Optional:** true
+- **Default:** 85% of physical memory
+- **Set with:** `MBX_SCHEDULER_MEMORY`
+
+Memory budget the permits divide, or "none" for plain CPU permits.
+
+### `scheduler.priority`
+
+- **Type:** `string`
+- **Default:** `normal`
+- **Set with:** `MBX_SCHEDULER_PRIORITY`
+
+Permit priority of this build's compilations.
+
+**Choices:**
+- `normal`
+- `low`
+
+
 ### `share_out_dir`
 
 - **Type:** `bool`

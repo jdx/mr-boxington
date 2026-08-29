@@ -61,6 +61,8 @@ pub struct CacheSession {
     agent: CacheAgent,
     /// The stream `mbx tui` watches, when event recording is on.
     events: Option<EventStream>,
+    /// What the shims need to draw compile permits from the machine-wide pool.
+    scheduler_env: Vec<(String, String)>,
     store: PathBuf,
     started: Instant,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
@@ -115,6 +117,7 @@ impl CacheSession {
             share_out_dir: config.share_out_dir,
             agent,
             events,
+            scheduler_env: crate::scheduler::session_environment(config),
             store,
             started: Instant::now(),
             shutdown: Mutex::new(Some(shutdown_tx)),
@@ -190,6 +193,9 @@ impl CacheSession {
             SHARE_OUT_DIR_ENV.into(),
             if self.share_out_dir { "1" } else { "0" }.into(),
         );
+        for (name, value) in &self.scheduler_env {
+            environment.insert(name.clone(), value.clone());
+        }
         if let Some(previous) = environment.insert("RUSTC_WRAPPER".into(), shim.clone())
             && previous != shim
         {
@@ -312,6 +318,9 @@ impl CacheSession {
             VERIFY_ENV.into(),
             if self.verify { "1" } else { "0" }.into(),
         );
+        for (name, value) in &self.scheduler_env {
+            environment.insert(name.clone(), value.clone());
+        }
         if let Ok(pins) = serde_json::to_string(&shims.compilers) {
             environment.insert(PATH_SHIMS_ENV.into(), pins);
         }
@@ -1924,10 +1933,27 @@ pub fn run_rustc_shim() -> ExitCode {
 }
 
 fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode {
-    #[cfg(windows)]
     let crate_name = crate_name_argument(&arguments);
-    #[cfg(windows)]
     let started = Instant::now();
+    // A bypassed compilation is still a real compiler process the machine has
+    // to pay for. Probe invocations pass through unscheduled: cargo runs them
+    // to learn about the compiler before it plans anything, so making one wait
+    // for a permit would stall a build's startup behind its siblings' permits.
+    // Most probes carry no --crate-name; the target-info queries carry the
+    // placeholder name `___` alongside `--print`, and compile nothing.
+    let is_query = arguments.iter().any(|argument| {
+        argument == "-"
+            || argument
+                .to_str()
+                .is_some_and(|argument| argument.starts_with("--print"))
+    });
+    let demand = crate_name
+        .as_deref()
+        .filter(|_| !is_query)
+        .map(|name| crate::scheduler::Demand::new(name, false));
+    let permit = demand
+        .as_ref()
+        .and_then(|demand| crate::scheduler::pool().and_then(|pool| pool.admit(demand)));
     let mut command = if let Some(wrapper) = std::env::var_os(PREVIOUS_RUSTC_WRAPPER_ENV) {
         let mut command = Command::new(wrapper);
         command.arg(&rustc);
@@ -1942,9 +1968,32 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
     {
         use std::os::unix::process::CommandExt as _;
 
-        let error = command.exec();
-        eprintln!("mbx[error]: the rustc shim failed to execute rustc: {error}");
-        ExitCode::from(1)
+        if permit.is_none() {
+            let error = command.exec();
+            eprintln!("mbx[error]: the rustc shim failed to execute rustc: {error}");
+            return ExitCode::from(1);
+        }
+        // A held permit must be released when the compiler finishes, and its
+        // lease lock is close-on-exec, so this process has to outlive the
+        // compiler rather than become it.
+        match command.status() {
+            Ok(status) => {
+                drop(permit);
+                if let Some(demand) = &demand {
+                    crate::scheduler::record_compiler_memory(demand, &status);
+                }
+                record_compiler_invocation(
+                    "bypass",
+                    crate_name.as_deref(),
+                    duration_ns(started.elapsed()),
+                );
+                crate::materialize::exit_code(status)
+            }
+            Err(error) => {
+                eprintln!("mbx[error]: the rustc shim failed to execute rustc: {error}");
+                ExitCode::from(1)
+            }
+        }
     }
     #[cfg(windows)]
     {
@@ -1952,7 +2001,7 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
         use windows_sys::Win32::System::Threading::GetExitCodeProcess;
 
         match command.spawn().and_then(|mut child| {
-            child.wait()?;
+            let status = child.wait()?;
             let mut exit_code = 1;
             // SAFETY: the child owns a valid process handle until it is
             // dropped, and `exit_code` is a valid out pointer.
@@ -1960,10 +2009,14 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
             {
                 Err(std::io::Error::last_os_error())
             } else {
-                Ok(exit_code)
+                Ok((exit_code, status))
             }
         }) {
-            Ok(exit_code) => {
+            Ok((exit_code, status)) => {
+                drop(permit);
+                if let Some(demand) = &demand {
+                    crate::scheduler::record_compiler_memory(demand, &status);
+                }
                 record_compiler_invocation(
                     "bypass",
                     crate_name.as_deref(),
@@ -1982,7 +2035,6 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
     }
 }
 
-#[cfg(any(windows, test))]
 fn crate_name_argument(arguments: &[OsString]) -> Option<String> {
     let mut arguments = arguments.iter();
     while let Some(argument) = arguments.next() {
