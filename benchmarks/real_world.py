@@ -53,15 +53,23 @@ TOOLS = ("cargo", "mbx-sequential", "mbx-unscheduled", "mbx", "kache")
 # mbx repeatedly.
 MBX_TOOLS = ("mbx", "mbx-sequential", "mbx-unscheduled")
 
-# Two overlapping Clippy configurations from mise's real lint job. The default
-# pass and the all-features/all-targets pass shared enough work for native
-# GitHub parallel steps coordinated by mbx to cut the measured wall time. The
-# parallel cells need separate targets so Cargo's target lock does not
-# serialize them; the sequential baseline retains the shared target it uses in
-# production.
+# Overlapping compilation jobs from the check, lint, and test stages a Rust CI
+# pipeline commonly stacks on one large runner. Two Cargo processes barely
+# press a 30-vCPU machine; six distinct workloads create enough overlap to test
+# whether the machine-wide pool helps without manufacturing identical jobs.
+# Parallel cells need separate targets so Cargo's target lock does not
+# serialize them; the sequential reference retains one shared target to show
+# the shape a non-parallel job already gets.
 CONTENTION_JOBS: tuple[tuple[str, list[str]], ...] = (
+    ("check-default", ["check", "--locked"]),
+    ("check-all", ["check", "--all-features", "--all-targets", "--locked"]),
     ("clippy-default", ["clippy", "--locked"]),
     ("clippy-all", ["clippy", "--all-features", "--all-targets", "--locked"]),
+    ("test-default", ["test", "--no-run", "--locked"]),
+    (
+        "test-all",
+        ["test", "--all-features", "--all-targets", "--no-run", "--locked"],
+    ),
 )
 
 # Which tools each scenario asks for. cargo appears only where a no-cache
@@ -101,8 +109,8 @@ SCENARIOS: dict[str, dict[str, object]] = {
     "contention": {
         "tools": ("mbx-sequential", "mbx-unscheduled", "mbx"),
         "description": (
-            "two Clippy jobs on one runner -- sequential, parallel without scheduling, "
-            "and parallel sharing mbx's four-compiler limit"
+            "two Clippy jobs on one runner -- sequential for context, then parallel "
+            "with and without mbx's four-compiler limit"
         ),
         "kind": "contention",
     },

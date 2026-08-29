@@ -634,7 +634,7 @@
     },
     {
       "scenario": "contention",
-      "description": "two Clippy jobs on one runner -- sequential, parallel without scheduling, and parallel sharing mbx's four-compiler limit",
+      "description": "two Clippy jobs on one runner -- sequential for context, then parallel with and without mbx's four-compiler limit",
       "timed": true,
       "kind": "contention",
       "results": [

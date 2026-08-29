@@ -66,7 +66,8 @@ from a cold store: the default configuration and `--all-features
 --all-targets`. The `mbx-sequential` row is the before picture, with both
 commands sharing one target directory. The parallel rows use separate targets
 so Cargo's target lock does not serialize them, matching GitHub Actions'
-native `parallel` steps.
+native `parallel` steps. The apples-to-apples scheduler comparison is between
+those two parallel rows; the sequential row is shown as production context.
 
 All three rows use the same mbx binary. The `mbx` and `mbx-unscheduled` rows
 run the parallel shape with the

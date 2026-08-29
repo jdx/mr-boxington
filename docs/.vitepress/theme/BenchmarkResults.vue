@@ -53,7 +53,7 @@
         >
           <div class="mbx-bench-tool">
             <code>{{ cell.label }}</code>
-            <span v-if="cell.baseline" class="mbx-bench-fastest">baseline</span>
+            <span v-if="cell.badge" class="mbx-bench-fastest">{{ cell.badge }}</span>
           </div>
           <div class="mbx-bench-bar-track" aria-hidden="true">
             <span
@@ -181,14 +181,14 @@ function contentionRows(scenario: BenchmarkScenario) {
     ...scenario.results.map((cell) => cell.wall_duration_ns),
     1,
   );
-  const baseline = scenario.results.find(
-    (cell) => cell.tool === "mbx-sequential",
+  const parallelControl = scenario.results.find(
+    (cell) => cell.tool === "mbx-unscheduled",
   );
   return scenario.results.map((cell) => {
     const seconds = cell.wall_duration_ns / 1e9;
     const available = cell.min_available_bytes;
-    const delta = baseline
-      ? (cell.wall_duration_ns - baseline.wall_duration_ns) / 1e9
+    const delta = parallelControl
+      ? (cell.wall_duration_ns - parallelControl.wall_duration_ns) / 1e9
       : null;
     return {
       tool: cell.tool,
@@ -198,16 +198,21 @@ function contentionRows(scenario: BenchmarkScenario) {
           : cell.tool === "mbx-unscheduled"
             ? "parallel · scheduler off"
             : "parallel · mbx scheduled",
-      baseline: cell === baseline,
+      badge:
+        cell.tool === "mbx-sequential"
+          ? "context"
+          : cell.tool === "mbx-unscheduled"
+            ? "parallel control"
+            : null,
       seconds:
         seconds >= 60
           ? `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`
           : `${seconds.toFixed(1)}s`,
       width: barWidth(cell.wall_duration_ns, slowest),
       comparison:
-        delta === null || cell === baseline
+        delta === null || cell.tool !== "mbx"
           ? null
-          : `${Math.abs(delta).toFixed(1)}s ${delta >= 0 ? "slower" : "faster"} than sequential`,
+          : `${Math.abs(delta).toFixed(1)}s ${delta >= 0 ? "slower" : "faster"} than scheduler off`,
       compilers: cell.permits
         ? `${cell.peak_compilers ?? 0} of ${cell.permits} compiler slots used`
         : `${cell.peak_compilers ?? 0} peak compilers`,
