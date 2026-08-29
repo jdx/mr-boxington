@@ -417,6 +417,38 @@ fn the_link_window_is_bounded_and_records_every_link() {
     );
 }
 
+/// A repeat compilation that teaches the ledger nothing writes nothing: the
+/// file is rewritten under a lock, and every crate in a build would otherwise
+/// pay for it on every build after the first.
+#[test]
+fn a_measurement_that_changes_nothing_leaves_the_ledger_alone() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 8, 1000);
+    pool.record_peak("crate", 4000, false).unwrap();
+
+    let written = || {
+        std::fs::metadata(pool.ledger_path())
+            .and_then(|metadata| metadata.modified())
+            .unwrap()
+    };
+    let before = written();
+    // Coarse filesystem timestamps would hide a rewrite that happened within
+    // the same tick, so the check is on the bytes as well.
+    let bytes = std::fs::read(pool.ledger_path()).unwrap();
+    pool.record_peak("crate", 1000, false).unwrap();
+    assert_eq!(std::fs::read(pool.ledger_path()).unwrap(), bytes);
+    assert_eq!(written().duration_since(before).unwrap().as_nanos(), 0);
+
+    // A link, though, always has a window entry to add.
+    pool.record_peak(&ledger_key("crate", true), 1, true)
+        .unwrap();
+    assert_eq!(
+        read_ledger(&pool.ledger_path()).link_peaks,
+        vec![1],
+        "a link's measurement lands in the window even when it teaches the entry nothing"
+    );
+}
+
 /// A ledger written before the window existed reads as one with no link
 /// history, which is what it is.
 #[test]

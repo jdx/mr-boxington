@@ -805,7 +805,8 @@ impl Pool {
         self.dir.join(LEDGER_FILE)
     }
 
-    /// Raise the recorded peak for one crate; never lower it.
+    /// Raise the recorded peak for one crate, never lowering it, and add a
+    /// link's measurement to the machine-wide window whatever the entry does.
     fn record_peak(&self, name: &str, peak: u64, links: bool) -> Result<()> {
         std::fs::create_dir_all(&self.dir)
             .wrap_err_with(|| format!("failed to create {}", self.dir.display()))?;
@@ -823,13 +824,15 @@ impl Pool {
             ledger.link_peaks.drain(..surplus);
         }
         let known = ledger.crates.get(name).is_some_and(|known| *known >= peak);
-        if known {
-            // Still written: the window moved even though the entry did not.
-            let mut contents = serde_json::to_vec(&ledger)?;
-            contents.push(b'\n');
-            return crate::util::write_atomic(&path, &contents);
+        if known && !links {
+            // Nothing moved: the entry already stands higher and there is no
+            // window entry to add. Rewriting the file identically would cost
+            // every repeat compilation a write under this lock.
+            return Ok(());
         }
-        ledger.crates.insert(name.to_string(), peak);
+        if !known {
+            ledger.crates.insert(name.to_string(), peak);
+        }
         while ledger.crates.len() > MAX_LEDGER_ENTRIES {
             let smallest = ledger
                 .crates
