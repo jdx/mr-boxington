@@ -1,11 +1,9 @@
 # Benchmarks
 
-These numbers come from building somebody else's project, not this one. A
-compiler cache measured against its own workspace tends to flatter itself: the
-workspace is small, the author knows which shapes it avoids, and nothing in it
-was written without the cache in mind. So the subject here is
-[jdx/hk](https://github.com/jdx/hk) — a mid-size Rust CLI with C dependencies,
-pinned to a fixed commit — and every scenario is one CI actually hits.
+The subject is [jdx/hk](https://github.com/jdx/hk) — a mid-size Rust CLI with C
+dependencies, pinned to a fixed commit — rather than mbx's own workspace, which
+is too small to measure anything useful against. Every scenario is one CI
+actually hits.
 
 Most scenarios run the same `cargo build --locked` three ways: plain cargo,
 [mbx](/), and [kache](https://github.com/kunobi-ninja/kache). Timings are wall
