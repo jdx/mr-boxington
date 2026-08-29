@@ -164,9 +164,10 @@ is whether a compilation reproduces itself rather than whether two checkouts
 embed the same paths. Anything above zero divergences is a modeling bug worth
 reporting; `MBX_BYPASS_LOG` and `mbx explain` show what was left out.
 
-This is how to qualify an experimental setting such as
-[`MBX_CACHE_LINKS`](/limits#native-linking-is-not-cached) on your own
-workload before relying on it.
+This is how to qualify a setting whose tier you want to check against your
+own workload, such as
+[native link caching](/limits#native-linking-is-cached-only-where-the-linker-can-be-described),
+before relying on it.
 
 ## The savings line
 

@@ -89,12 +89,41 @@ test_binary() {
   assert_success
 }
 
-@test "native links stay outside the cache until asked for" {
-  local target="$BATS_TEST_TMPDIR/unasked-target"
+@test "a linked test binary is cached without being asked for" {
+  local first_target="$BATS_TEST_TMPDIR/default-first"
+  local second_target="$BATS_TEST_TMPDIR/default-second"
+  local warm_report="$BATS_TEST_TMPDIR/default-warm.json"
+
+  # No MBX_CACHE_LINKS anywhere: this is what an unconfigured machine does.
+  run env \
+    CARGO_TARGET_DIR="$first_target" \
+    "$MBX_BIN" test --offline --no-run --manifest-path "$PROJECT/Cargo.toml"
+  assert_success
+
+  run env \
+    CARGO_TARGET_DIR="$second_target" \
+    MBX_STATS_REPORT="$warm_report" \
+    "$MBX_BIN" test --offline --no-run --manifest-path "$PROJECT/Cargo.toml"
+  assert_success
+  # The library and the linked test binary, as in the asked-for case above.
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*[2-9]' "$warm_report"
+  assert_success
+
+  local restored
+  restored="$(test_binary "$second_target")"
+  assert_file_exists "$restored"
+  assert_file_executable "$restored"
+  run "$restored"
+  assert_success
+}
+
+@test "MBX_CACHE_LINKS=0 keeps native links outside the cache" {
+  local target="$BATS_TEST_TMPDIR/refused-target"
   local bypasses="$BATS_TEST_TMPDIR/bypasses.tsv"
 
   run env \
     CARGO_TARGET_DIR="$target" \
+    MBX_CACHE_LINKS=0 \
     MBX_BYPASS_LOG="$bypasses" \
     "$MBX_BIN" test --offline --no-run --manifest-path "$PROJECT/Cargo.toml"
   assert_success

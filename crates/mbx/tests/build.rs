@@ -860,6 +860,12 @@ fn out_dir_crosses_checkouts_only_where_the_artifact_allows_it() {
 
 /// Build the same fixture in two checkouts, reporting whether the second one
 /// reused anything from the first.
+/// Whether the *crate* shares, which is what every caller here is asking.
+///
+/// Native links are left out rather than counted: a build script's own binary
+/// reads no `OUT_DIR` -- the value is handed to it when it runs, long after it
+/// compiles -- so it shares between these checkouts whatever the crate does,
+/// and counting it would answer a question nobody asked.
 fn two_checkouts_share(generated: Generated, settings: &[(&str, &str)]) -> bool {
     let store = tempfile::tempdir().unwrap();
     let first = tempfile::tempdir().unwrap();
@@ -868,17 +874,21 @@ fn two_checkouts_share(generated: Generated, settings: &[(&str, &str)]) -> bool 
     write_generated_project(first.path(), generated);
     write_generated_project(second.path(), generated);
 
+    let settings: Vec<(&str, &str)> = [("MBX_CACHE_LINKS", "0")]
+        .into_iter()
+        .chain(settings.iter().copied())
+        .collect();
     build_with(
         first.path(),
         store.path(),
         &reports.path().join("first.json"),
-        settings,
+        &settings,
     );
     let (stats, _) = build_with(
         second.path(),
         store.path(),
         &reports.path().join("second.json"),
-        settings,
+        &settings,
     );
     count(&stats, "hits") > 0
 }
@@ -1793,8 +1803,8 @@ fn objects_landing_beside_a_generated_header_still_cross_checkouts() {
     );
     assert_eq!(
         count(&warm, "hits"),
-        4,
-        "all three C compilations and the Rust one should be restored: {warm}"
+        5,
+        "all three C compilations, the Rust one, and the build script should be restored: {warm}"
     );
 }
 
@@ -1959,8 +1969,8 @@ fn a_stale_prediction_recovers_instead_of_stranding_the_compilation() {
     );
     assert_eq!(
         count(&warm, "hits"),
-        2,
-        "both the Rust and the C compilation should be restored: {warm}"
+        3,
+        "the Rust, the C, and the build script's own compilation should be restored: {warm}"
     );
 }
 

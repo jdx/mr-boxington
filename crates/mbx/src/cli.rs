@@ -621,10 +621,13 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
         return run_cargo(&cargo, arguments, BTreeMap::new());
     }
 
-    // Experimental, and only where mbx can identify the linker precisely
-    // enough to key what it produced.
+    // Only where mbx can identify the linker precisely enough to key what it
+    // produced. Said out loud only to somebody who asked for it: this is on
+    // by default now, and a platform that cannot do it would otherwise warn
+    // every build about a setting nobody chose.
     let cache_links = settings.cache_links && session::cache_links_supported();
-    if settings.cache_links && !cache_links {
+    if settings.cache_links && !cache_links && std::env::var_os(session::CACHE_LINKS_ENV).is_some()
+    {
         log::warn!("caching native links is not supported on this platform");
     }
     let working_dir = std::env::current_dir()?;

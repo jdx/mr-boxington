@@ -93,7 +93,9 @@ object_in() {
     MBX_STATS_REPORT="$warm_report" \
     "$MBX_BIN" build --offline --manifest-path "$PROJECT/Cargo.toml"
   assert_success
-  run grep -E '"hits"[[:space:]]*:[[:space:]]*2' "$warm_report"
+  # Three: the crate, the C object, and the build script's own binary, which
+  # is a native link and cached like any other.
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*3' "$warm_report"
   assert_success
 
   local restored
@@ -172,14 +174,14 @@ EOF
     "$MBX_BIN" build --offline --manifest-path "$PROJECT/Cargo.toml"
   assert_success
 
-  # Only the Rust compilation is cached, so the warm build has one hit rather
-  # than two.
+  # The C compilation is left alone, so the warm build hits the crate and the
+  # build script's binary rather than all three.
   run env \
     CARGO_TARGET_DIR="$second_target" \
     MBX_STATS_REPORT="$warm_report" \
     MBX_CC=0 \
     "$MBX_BIN" build --offline --manifest-path "$PROJECT/Cargo.toml"
   assert_success
-  run grep -E '"hits"[[:space:]]*:[[:space:]]*1' "$warm_report"
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*2' "$warm_report"
   assert_success
 }

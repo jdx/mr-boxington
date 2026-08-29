@@ -10,14 +10,16 @@ are the bulk of a cold build. See [incremental
 builds](/configuration#incremental-builds) for the trade `MBX_INCREMENTAL=1`
 makes.
 
-## Native linking is not cached
+## Native linking is cached only where the linker can be described
 
-Native binaries and dynamic libraries always link. Their results can depend on
-an external linker, startup objects, and system libraries that rustc dep-info
-does not enumerate, so mbx bypasses them.
+Native binaries and dynamic libraries link against an external linker, startup
+objects, and system libraries that rustc dep-info does not enumerate. mbx
+caches such a link only when it can put all of that into the key, and bypasses
+it otherwise.
 
-The narrow exception is a binary, test, or `cdylib` for one of these built-in
-targets using its compiler-bundled self-contained linker:
+WebAssembly is the case that needs nothing extra: a binary, test, or `cdylib`
+for one of these built-in targets uses its compiler-bundled self-contained
+linker, so it is cached on every platform:
 
 - `wasm32-unknown-unknown`
 - `wasm32-wasip1` and `wasm32-wasip1-threads`
@@ -31,13 +33,13 @@ identity. Custom target specifications, external WebAssembly toolchains,
 native libraries, custom linkers, disabled WASI CRT bundling, and
 non-affirmative `link-self-contained` modes remain uncached.
 
-`MBX_CACHE_LINKS=1` adds host test binaries and executables on Linux and
-macOS, by putting the rest of the link into the key: the resolved `cc` driver
-and its version, the linker it selects, the startup objects and libc it
-resolves (hashed), and on macOS the SDK. Two hosts that differ in any of those
-produce different keys and miss, rather than sharing a binary neither of them
-built. It is experimental — qualify it on your own workload as described in
-[verify mode](/configuration#verify-mode) before relying on it.
+Host test binaries and executables are cached on Linux and macOS, by putting
+the rest of the link into the key: the resolved `cc` driver and its version,
+the linker it selects, the startup objects and libc it resolves (hashed), and
+on macOS the SDK. Two hosts that differ in any of those produce different keys
+and miss, rather than sharing a binary neither of them built. `cache_links`
+(`MBX_CACHE_LINKS=0`) turns it off; Windows has no such tier, and a build
+there links its programs as it always did.
 
 Some hosts cannot be described at all. mbx asks the driver to place a startup
 object and a libc, and a host where neither resolves gets no linker identity
@@ -49,9 +51,11 @@ other bypass.
 
 Even then, a link bypasses if it names a native library, overrides the linker,
 or carries a flag that would embed this checkout's paths (`-Crpath`,
-`-Cprefer-dynamic`), leave a file beside the binary that mbx does not store
-(`-Csplit-debuginfo`), or — on macOS — record absolute object paths and their
-timestamps in the binary's debug map (`-Cdebuginfo` above `0`). An explicit
+`-Cprefer-dynamic`) or leave a file beside the binary that mbx does not store
+(`-Csplit-debuginfo`). On macOS a debug-info link records absolute object
+paths and their timestamps in the binary's debug map, so the shim passes ld64
+`-oso_prefix` for its own output directory, which is what lets those links
+cache rather than bypass. An explicit
 `--target` bypasses too, even when it spells the host triple: rustc without one
 links for the host by construction, and that is the only linker mbx identifies.
 
