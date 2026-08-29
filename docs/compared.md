@@ -66,9 +66,8 @@ hits — do not match. The differences are in the mechanics:
   plain byte copy where the filesystem cannot clone, never to a hardlink.
 - **CI write policy.** kache's README states no policy on what may publish
   from pull requests — whatever the credentials allow, any build can write.
-  mbx's client refuses to publish from pull requests and unprotected
-  branches and disables caching entirely on tag builds, before the server
-  enforces anything.
+  mbx's client refuses to publish from pull requests, unprotected branches,
+  and tag or release builds, before the server enforces anything.
 - **A server, not a bucket.** kache's remotes are S3-compatible buckets
   reached through the standard AWS credential chain. mbx's remote is a
   namespaced protocol server with guardrails a bucket cannot express:
