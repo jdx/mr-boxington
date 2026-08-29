@@ -62,7 +62,7 @@
           <strong class="mbx-bench-seconds">{{ cell.seconds }}</strong>
           <div class="mbx-bench-meta">
             <span v-if="cell.relative !== '—'">{{ cell.relative }} vs. sequential</span>
-            <span>{{ cell.compilers }} compilers</span>
+            <span>{{ cell.compilers }}</span>
             <span>{{ cell.memory }} free</span>
           </div>
         </div>
@@ -204,8 +204,8 @@ function contentionRows(scenario: BenchmarkScenario) {
           ? "—"
           : `${(baseline.wall_duration_ns / cell.wall_duration_ns).toFixed(2)}×`,
       compilers: cell.permits
-        ? `${cell.peak_compilers ?? 0} / ${cell.permits} permits`
-        : `${cell.peak_compilers ?? 0}`,
+        ? `${cell.peak_compilers ?? 0} peak / ${cell.permits} permits`
+        : `${cell.peak_compilers ?? 0} peak compilers`,
       // Only Linux reports it, and only Linux runs the published benchmark.
       // Zero is a real reading -- a machine that ran itself out -- and it is
       // the single most interesting cell on the page, so it must not be
@@ -392,11 +392,21 @@ const versionList = computed(() => {
     grid-template-columns: minmax(0, 1fr) auto;
     padding: 15px 16px;
   }
-  .mbx-bench-bar-track,
-  .mbx-bench-meta {
+  .mbx-bench-tool {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .mbx-bench-seconds {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .mbx-bench-bar-track {
     grid-column: 1 / -1;
+    grid-row: 2;
   }
   .mbx-bench-meta {
+    grid-column: 1 / -1;
+    grid-row: 3;
     margin-top: -2px;
   }
 }
