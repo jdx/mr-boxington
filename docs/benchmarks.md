@@ -108,7 +108,7 @@ state rather than numbers it cannot stand behind.
 
 ## Running it yourself
 
-```bash
+```sh
 mise run bench
 ```
 

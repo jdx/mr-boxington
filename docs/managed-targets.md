@@ -74,8 +74,8 @@ existing `target` symlink keeps counting as in use, so turning placement off
 does not schedule existing outputs for deletion.
 
 Each budget is measured against the disk that actually holds it, so putting
-`target.root` on a large scratch volume sizes the target budget from that
-volume rather than from the cache disk.
+[`target.root`](/configuration#target-root) on a large scratch volume sizes
+the target budget from that volume rather than from the cache disk.
 
 ## When mbx leaves a target alone
 

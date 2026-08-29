@@ -193,7 +193,7 @@ mbx doctor
   ok  cargo        cargo 1.98.0 (797e8a9bc 2026-08-05)
   ok  rustc        rustc 1.98.0 (88d9e12ae 2026-08-18)
   ok  cache        /home/you/.cache/mbx is writable
-  ok  config       20.0 GiB budget, automatic gc enabled, managed targets enabled at /home/you/.cache/mbx/targets
+  ok  config       50.0 GiB budget, automatic gc enabled, managed targets enabled at /home/you/.cache/mbx/targets
   ok  reflink      supported by the cache filesystem
   ok  setup        no plain-cargo wrapper installed; mbx wraps cargo directly
   ok  remote       not configured; using the local cache

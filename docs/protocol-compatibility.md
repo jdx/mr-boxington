@@ -18,7 +18,7 @@ response variant against `tests/fixtures/agent-protocol-v5.jsonl`. Its exhaustiv
 matches make a newly added variant fail to compile until the fixture and the
 protocol-version decision are reviewed together.
 
-Agent protocol v2 added compiler-duration accounting to hits and real compiler
+Agent protocol v2 adds compiler-duration accounting to hits and real compiler
 invocations. v3 adds the crate name to a recorded hit plus `begin_task` and
 `commit_task`, allowing an embedded Cargo shim to create one prediction manifest
 for each real Cargo invocation. v4 adds `record_warning`, which is how a shim
