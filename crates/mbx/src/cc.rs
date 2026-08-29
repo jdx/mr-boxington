@@ -196,10 +196,12 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     );
 
     if let Some(cached) = verification {
-        let matched = cached_matches(&cached, &output);
-        record_verification(matched, cached.restore);
-        if !matched {
-            session::report_shim_warning("shadow verification diverged from cached output");
+        let divergence = verification_divergence(&cached, &output);
+        record_verification(divergence.is_none(), cached.restore);
+        if let Some(divergence) = divergence {
+            session::report_shim_warning(&format!(
+                "shadow verification diverged from cached output: {divergence}"
+            ));
         }
     }
 
@@ -884,20 +886,43 @@ fn staged_bytes(directory: &Path, name: &str, bytes: &[u8]) -> Result<(CacheDige
     Ok((CacheDigest::blake3(bytes), path))
 }
 
-fn cached_matches(cached: &CachedCompilation, output: &Output) -> bool {
-    output.status.success()
-        && cached.stdout == output.stdout
-        && cached.stderr == output.stderr
-        && cached.outputs.iter().all(|expected| {
-            std::fs::metadata(&expected.path).is_ok_and(|metadata| {
-                file_mode(&metadata) == expected.mode
-                    && executable_mode_matches(&metadata, expected.executable)
-                    && expected
-                        .digest
-                        .matches_file(&expected.path)
-                        .unwrap_or(false)
-            })
-        })
+/// Why a shadow compilation disagreed with the cached result, if it did.
+///
+/// Said in words rather than as a bare `false`, the way the rustc adapter
+/// says it. A qualification run reports a count, and a count with no reason
+/// attached is not something anybody can act on: every divergence looks
+/// alike in the log, so a systematic one and a real modeling bug read the
+/// same.
+fn verification_divergence(cached: &CachedCompilation, output: &Output) -> Option<String> {
+    if !output.status.success() {
+        return Some("the shadow compilation failed".into());
+    }
+    if cached.stdout != output.stdout {
+        return Some("standard output differs".into());
+    }
+    if cached.stderr != output.stderr {
+        return Some("standard error differs".into());
+    }
+    for expected in &cached.outputs {
+        let name = expected.path.display();
+        let Ok(metadata) = std::fs::metadata(&expected.path) else {
+            return Some(format!("{name} is missing"));
+        };
+        if file_mode(&metadata) != expected.mode {
+            return Some(format!("{name} has a different file mode"));
+        }
+        if !executable_mode_matches(&metadata, expected.executable) {
+            return Some(format!("{name} has a different executable bit"));
+        }
+        if !expected
+            .digest
+            .matches_file(&expected.path)
+            .unwrap_or(false)
+        {
+            return Some(format!("{name} has different contents"));
+        }
+    }
+    None
 }
 
 /// Name this compilation goes by in build statistics.

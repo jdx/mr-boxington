@@ -61,19 +61,27 @@ A restore writes this checkout's spelling of the outputs that describe where a
 compilation ran -- its dep-info and its diagnostics -- so the files cargo reads
 name the directory it is building into.
 
-The compiled artifacts are reused as they were produced, and two things can
+The compiled artifacts are reused as they were produced, and a few things can
 make them differ from what a fresh compilation here would have written. rustc
 records absolute source paths in metadata and debug information, so artifacts
 built from two checkouts differ even when the sources are identical. A C or C++
 object compiled with debug information does the same, recording the directory
-the compiler ran in. On Windows they differ between two target directories as
-well, because the debug information also records where the objects were
-written.
+the compiler ran in.
 
-Neither changes what the artifact does. Both are visible to `MBX_VERIFY=1`,
-which compares bytes: a divergence it reports for a compilation restored from
-another checkout, or on Windows from another target directory, is that
-difference rather than a fault.
+A C or C++ object also records the absolute include directories it was given,
+so an object differs between two *target* directories -- not only two
+checkouts -- when a build script generates headers into `OUT_DIR` and compiles
+against them. That is the ordinary shape of a `-sys` crate, and it is why a
+qualification run over one reports a divergence for every object it builds.
+The object path alone does not do this on Linux or macOS; on Windows it does,
+because the debug information records where the object was written as well.
+
+None of these changes what the artifact does. All of them are visible to
+`MBX_VERIFY=1`, which compares bytes: a divergence it reports for a
+compilation restored from another checkout, or from another target directory
+whose paths the object records, is that difference rather than a fault. The
+divergence names the file and what differed about it, so a run's divergences
+can be told apart from one another rather than counted together.
 
 ## C and C++ caching covers the host compiles mbx drives
 

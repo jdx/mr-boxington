@@ -120,3 +120,75 @@ fn a_real_driver_names_its_assembler_or_defers_to_the_path() {
         ),
     }
 }
+
+/// A qualification run reports a count; a count with no reason attached is not
+/// something anybody can act on. The C adapter said only that something
+/// diverged, which is how 150 identical-looking divergences in one run stayed
+/// undiagnosed -- they were every object of one crate whose generated headers
+/// live under `OUT_DIR`, and the message could not say so.
+#[test]
+fn a_divergence_says_which_of_the_things_it_compares_differed() {
+    let directory = tempfile::tempdir().unwrap();
+    let object = directory.path().join("hello.o");
+    std::fs::write(&object, b"compiled").unwrap();
+
+    let cached = |stdout: &[u8], stderr: &[u8], digest: CacheDigest| CachedCompilation {
+        stdout: stdout.to_vec(),
+        stderr: stderr.to_vec(),
+        outputs: vec![CachedOutput {
+            path: object.clone(),
+            digest,
+            executable: false,
+            mode: file_mode(&std::fs::metadata(&object).unwrap()),
+        }],
+        restore: RestoreStats::default(),
+    };
+    let compiled = |stdout: &[u8], stderr: &[u8]| Output {
+        status: success_status(),
+        stdout: stdout.to_vec(),
+        stderr: stderr.to_vec(),
+    };
+    let matching = CacheDigest::blake3(b"compiled");
+
+    assert_eq!(
+        verification_divergence(&cached(b"", b"", matching.clone()), &compiled(b"", b"")),
+        None,
+        "a compilation that reproduced itself is not a divergence"
+    );
+    assert_eq!(
+        verification_divergence(&cached(b"out", b"", matching.clone()), &compiled(b"", b"")),
+        Some("standard output differs".into())
+    );
+    assert_eq!(
+        verification_divergence(&cached(b"", b"warn", matching), &compiled(b"", b"")),
+        Some("standard error differs".into())
+    );
+
+    // The one that matters: the object itself. This is what every divergence
+    // in a real qualification run turned out to be.
+    let divergence = verification_divergence(
+        &cached(b"", b"", CacheDigest::blake3(b"compiled elsewhere")),
+        &compiled(b"", b""),
+    )
+    .expect("differing contents diverge");
+    assert!(
+        divergence.ends_with("has different contents"),
+        "unexpected reason: {divergence}"
+    );
+    assert!(
+        divergence.contains("hello.o"),
+        "the reason names the file: {divergence}"
+    );
+}
+
+#[cfg(unix)]
+fn success_status() -> std::process::ExitStatus {
+    use std::os::unix::process::ExitStatusExt as _;
+    std::process::ExitStatus::from_raw(0)
+}
+
+#[cfg(windows)]
+fn success_status() -> std::process::ExitStatus {
+    use std::os::windows::process::ExitStatusExt as _;
+    std::process::ExitStatus::from_raw(0)
+}
