@@ -195,6 +195,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             }
         }
     }
+    let mut prediction_missing = false;
     if !action_lookup_attempted {
         match restore_predicted_result(
             &compilation,
@@ -212,16 +213,64 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                     return Ok(ExitCode::SUCCESS);
                 }
             }
-            Ok(None) => {}
+            Ok(None) => {
+                prediction_missing = !action_lookup_attempted;
+            }
             Err(error) => {
                 eprintln!("mbx[warning]: prediction was not restored: {error:#}");
             }
         }
     }
 
-    // Everything past this point runs the real compiler, so this is where the
-    // machine-wide permit is taken -- after every chance to hit the cache, and
-    // before anything expensive starts. The timer starts afterwards: time
+    // Everything past this point would run the real compiler, so this is
+    // where machine-wide coordination starts. The flight comes before the
+    // permit: if another build is compiling this exact invocation right now,
+    // waiting for its result costs less than any amount of capacity -- and
+    // waking from that wait, or finding the prediction a finished flight left
+    // behind, is one more chance to restore instead of compile. Never in
+    // verify mode, whose whole point is running the compiler.
+    let flight = if verify {
+        None
+    } else {
+        join_flight(&compilation)
+    };
+    if let Some(flight) = &flight
+        // Only when the payload can say something a lookup this session has
+        // not already said: either we waited and it is freshly published, or
+        // nothing was ever looked up and it is the first prediction we have.
+        && (flight.flight.waited() || !action_lookup_attempted)
+        && let Some(payload) = flight.flight.inherited()
+    {
+        match restore_flight_prediction(
+            &compilation,
+            &outputs,
+            &flight.invocation,
+            payload,
+            &mut action_lookup_attempted,
+            learned_enabled,
+            &mut learned,
+        ) {
+            Ok(Some(cached)) => {
+                let _ = replay_bytes(&cached.stdout, &cached.stderr);
+                return Ok(ExitCode::SUCCESS);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("mbx[warning]: a flight prediction was not restored: {error:#}");
+            }
+        }
+    }
+    // No usable action key, and now no flight prediction either: this
+    // compilation runs without an action-result lookup ever being made, which
+    // is not a miss and has to be counted as its own thing or the summary
+    // reads as though a lookup happened and found nothing. Recorded here
+    // rather than where the prediction came up empty, because a flight can
+    // still turn such a compilation into a real lookup.
+    if prediction_missing && !action_lookup_attempted {
+        session::record_unconsulted();
+    }
+    // The machine-wide permit is taken after every chance to hit the cache,
+    // and before anything expensive starts. The timer starts afterwards: time
     // spent waiting for the machine is not time this compilation cost.
     let demand =
         crate::scheduler::Demand::new(invocation.crate_name(), invocation.links_natively());
@@ -299,7 +348,19 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                 )?;
                 action
             };
-            record_prediction(&compilation, &action.digest, &discovered, &timing);
+            // The flight prediction is only left behind a *published* result:
+            // an incremental artifact was withheld from the store, so a
+            // waiter restoring through its key could only miss.
+            record_prediction(
+                &compilation,
+                &action.digest,
+                &discovered,
+                &timing,
+                flight
+                    .as_ref()
+                    .filter(|_| !learned.engaged())
+                    .map(|flight| &flight.flight),
+            );
             Ok(())
         })();
         if let Err(error) = publication {
@@ -487,7 +548,7 @@ fn restore_predicted_result(
         portable,
         ..
     } = compilation;
-    let mut context = base_action_context(compilation.rustc, working_dir, portable)?;
+    let context = base_action_context(compilation.rustc, working_dir, portable)?;
     let invocation_digest = invocation.invocation_digest(&context)?;
     let task = prediction_task(&invocation_digest);
     let responses = session::request_agent(&[AgentRequest::FindActionPrediction {
@@ -504,11 +565,8 @@ fn restore_predicted_result(
         AgentResponse::ActionPrediction { prediction: None } => {
             // No usable action key: either no dep-info from an earlier build or
             // dep-info that did not yield one, and now no prediction either.
-            // This compilation runs without an action-result lookup ever being
-            // made, which is not a miss and has to be counted as its own thing
-            // or the summary reads as though a lookup happened and found
-            // nothing.
-            session::record_unconsulted();
+            // Whether that leaves the compilation unconsulted is decided by
+            // the caller, after the flight has had its chance to look it up.
             return Ok(None);
         }
         AgentResponse::Error { message } => bail!(message),
@@ -517,9 +575,48 @@ fn restore_predicted_result(
     if prediction.adapter != "rustc" || prediction.invocation != invocation_digest {
         bail!("cache agent returned an incompatible rustc action prediction");
     }
-    let input_prediction: RustcInputPrediction = serde_json::from_str(&prediction.payload)?;
-    if String::from_utf8(canonical_json(&input_prediction)?)? != prediction.payload {
-        bail!("cache agent returned a non-canonical rustc action prediction");
+    restore_prediction_payload(
+        compilation,
+        outputs,
+        context,
+        &invocation_digest,
+        &prediction.payload,
+        Some(&prediction.action),
+        restore_outputs,
+        action_lookup_attempted,
+        learned_enabled,
+        learned,
+    )
+}
+
+/// Rebuild the action key from one prediction payload and restore through it.
+///
+/// Shared by the manifest path and the flight path: both hold a payload of
+/// predicted inputs, and everything after that -- rehashing them, building
+/// the candidates, the lookup itself -- has to be identical, or the two
+/// paths would drift in what they accept.
+#[allow(clippy::too_many_arguments)]
+fn restore_prediction_payload(
+    compilation: &Compilation<'_>,
+    outputs: &RustcOutputs,
+    mut context: ActionContext,
+    invocation_digest: &CacheDigest,
+    payload: &str,
+    recorded_action: Option<&CacheDigest>,
+    restore_outputs: bool,
+    action_lookup_attempted: &mut bool,
+    learned_enabled: bool,
+    learned: &mut LearnedPlan,
+) -> Result<Option<CachedCompilation>> {
+    let Compilation {
+        invocation,
+        working_dir,
+        portable,
+        ..
+    } = compilation;
+    let input_prediction: RustcInputPrediction = serde_json::from_str(payload)?;
+    if String::from_utf8(canonical_json(&input_prediction)?)? != payload {
+        bail!("the rustc action prediction is not canonical");
     }
     let discovered = input_prediction.discover(
         working_dir,
@@ -544,22 +641,27 @@ fn restore_predicted_result(
             if restore_outputs {
                 record_action_hit(&action, cached.restore, invocation.crate_name());
             }
-            // The payload being recorded is the one just fetched, so the only
+            // The payload being recorded is the one just used, so the only
             // news a rewrite could carry is a different action digest -- the
-            // other candidate key hit. An identical record is inherited by the
+            // other candidate key hit, or the record came from outside this
+            // manifest entirely. An identical record is inherited by the
             // committed manifest without being re-sent.
-            if prediction.action != action {
+            if recorded_action != Some(&action) {
                 record_prediction_value(
-                    invocation_digest,
+                    invocation_digest.clone(),
                     action,
-                    prediction.payload,
+                    payload.to_string(),
                     invocation.crate_name(),
                 );
             }
             Ok(Some(cached))
         }
         None => {
-            *learned = plan_learned_reuse(compilation, &discovered, learned_enabled);
+            // A plan an earlier lookup already made carries this checkout's
+            // churn record; replacing it would only repeat the work.
+            if learned.record.is_none() {
+                *learned = plan_learned_reuse(compilation, &discovered, learned_enabled);
+            }
             Ok(None)
         }
     }
@@ -773,6 +875,7 @@ fn record_prediction(
     action: &CacheDigest,
     discovered: &DiscoveredInputs,
     timing: &CompileTiming,
+    flight: Option<&crate::scheduler::Flight>,
 ) {
     let result = (|| {
         let invocation = compilation.invocation;
@@ -787,6 +890,11 @@ fn record_prediction(
         prediction.compiler_duration_ns = timing.duration_ns;
         prediction.crate_name.clone_from(&timing.crate_name);
         let payload = String::from_utf8(canonical_json(&prediction)?)?;
+        // Anyone waiting on this flight -- and any later build of the same
+        // invocation -- restores through this instead of compiling.
+        if let Some(flight) = flight {
+            flight.leave(&payload);
+        }
         record_prediction_value(
             invocation_digest,
             action.clone(),
@@ -798,6 +906,64 @@ fn record_prediction(
     if let Err(error) = result {
         warn_prediction_not_recorded(compilation.invocation.crate_name(), &error);
     }
+}
+
+/// The machine-wide flight this compilation occupies, and the invocation
+/// digest that keys it.
+struct InvocationFlight {
+    flight: crate::scheduler::Flight,
+    invocation: CacheDigest,
+}
+
+/// Join the flight for this invocation, when one can be keyed.
+///
+/// `None` -- an invocation whose digest cannot be built, or a machine with
+/// scheduling off -- just compiles, the way everything here degrades.
+fn join_flight(compilation: &Compilation<'_>) -> Option<InvocationFlight> {
+    let invocation = (|| -> Result<CacheDigest> {
+        let context = base_action_context(
+            compilation.rustc,
+            compilation.working_dir,
+            compilation.portable,
+        )?;
+        Ok(compilation.invocation.invocation_digest(&context)?)
+    })()
+    .ok()?;
+    let flight = crate::scheduler::flight("rustc", &invocation.hash)?;
+    Some(InvocationFlight { flight, invocation })
+}
+
+/// Restore through the prediction a flight left behind.
+///
+/// The payload gets exactly the treatment a manifest prediction does --
+/// canonical-form check, every input rehashed, the store consulted -- so the
+/// worst a stale or foreign record can do is miss.
+fn restore_flight_prediction(
+    compilation: &Compilation<'_>,
+    outputs: &RustcOutputs,
+    invocation_digest: &CacheDigest,
+    payload: &str,
+    action_lookup_attempted: &mut bool,
+    learned_enabled: bool,
+    learned: &mut LearnedPlan,
+) -> Result<Option<CachedCompilation>> {
+    let context = base_action_context(
+        compilation.rustc,
+        compilation.working_dir,
+        compilation.portable,
+    )?;
+    restore_prediction_payload(
+        compilation,
+        outputs,
+        context,
+        invocation_digest,
+        payload,
+        None,
+        true,
+        action_lookup_attempted,
+        learned_enabled,
+        learned,
+    )
 }
 
 /// Refresh the stored prediction behind a hit and recover the timing it holds.

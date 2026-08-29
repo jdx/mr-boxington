@@ -36,6 +36,13 @@
 //! implicit one and falls back to compiling its codegen units on fewer
 //! threads. The worst case is a permit holder running single-threaded, which
 //! costs time and always ends.
+//!
+//! Beside the pool live the *flights*: one lock per invocation identity, so
+//! concurrent builds that reach the same compilation deduplicate it instead
+//! of merely pacing it -- see [`Flight`]. The lock ordering between the two
+//! is fixed and acyclic: a flight is joined before its permit is requested,
+//! never around the other way, and a waiter blocked on a flight holds no
+//! permit.
 
 use crate::config::{Config, SchedulerPriority};
 use eyre::{Context, Result};
@@ -52,6 +59,8 @@ use std::time::{Duration, Instant};
 const SCHEDULER_DIR: &str = "scheduler";
 /// Subdirectory holding one locked lease file per admitted compilation.
 const LEASES_DIR: &str = "leases";
+/// Subdirectory holding one locked flight file per compiling invocation.
+const INFLIGHT_DIR: &str = "inflight";
 /// Registrar lock serializing admission scans.
 const POOL_LOCK: &str = "pool.lock";
 /// Stamp a waiting normal-priority build touches so low-priority builds yield.
@@ -72,6 +81,14 @@ pub(crate) const SCHED_PRIORITY_ENV: &str = "MBX_SCHED_PRIORITY";
 
 /// Schema version of one lease record.
 const LEASE_VERSION: u8 = 1;
+/// Schema version of one flight record.
+const FLIGHT_VERSION: u8 = 1;
+/// Largest prediction one finished compilation leaves behind for the next.
+///
+/// A payload is one crate's input list, tens of kilobytes for anything real;
+/// this cap is not a budget but a refusal to persist something that has
+/// plainly stopped being that.
+const MAX_FLIGHT_PAYLOAD: usize = 4 * 1024 * 1024;
 /// Schema version of the peak-RSS ledger.
 const LEDGER_VERSION: u8 = 1;
 /// Most crates the ledger retains; the smallest are dropped first.
@@ -162,6 +179,209 @@ struct Lease {
     version: u8,
     weight: u64,
     priority: String,
+}
+
+/// What one finished compilation leaves in its flight file: the prediction
+/// that lets whoever comes next rebuild the action key and restore instead of
+/// compiling.
+#[derive(Debug, Serialize, Deserialize)]
+struct FlightRecord {
+    version: u8,
+    adapter: String,
+    invocation: String,
+    payload: String,
+}
+
+/// Exclusive occupancy of one invocation identity, machine-wide.
+///
+/// Concurrent builds duplicate work the permit pool can only pace: four CI
+/// jobs compiling the same dependency graph run the same `rustc` invocation
+/// four times, each burning a permit on a result the store is about to hold
+/// anyway. A flight is a lock keyed by the invocation digest, taken just
+/// before a real compilation starts. Whoever holds it compiles; anyone else
+/// arriving at the same invocation blocks on the lock instead of the
+/// compiler, which is never slower -- the holder finishes no later than the
+/// duplicate would have -- and wakes to a store that already has the result.
+///
+/// The handoff needs more than the lock, because a cold waiter has no way to
+/// build the action key on its own: the key hashes inputs only the compiler's
+/// dependency output names. So the holder leaves its input prediction in the
+/// flight file when it publishes, and the waiter rehashes those inputs to
+/// rebuild the key -- the same validation a manifest prediction gets, so a
+/// stale or foreign record can only miss, never restore the wrong thing. The
+/// file outlives the flight: a later build of the same invocation finds the
+/// prediction even when its own manifest carries nothing, which is what turns
+/// jobs that merely overlap -- rather than collide -- into hits.
+///
+/// Like the pool, this degrades to compiling: every failure returns `None`
+/// and the compilation proceeds as if flights did not exist. A holder that
+/// dies releases the lock with its process; a holder that publishes nothing
+/// -- a failed or uncacheable compile -- wakes its waiters to a miss, and the
+/// first of them compiles. That serializes what would have run in parallel,
+/// which is the accepted cost: it is rare (the compile usually failed for
+/// them all), and for the out-of-memory case it is the desirable behavior.
+pub(crate) struct Flight {
+    lock: Option<fslock::LockFile>,
+    path: PathBuf,
+    adapter: &'static str,
+    invocation: String,
+    /// Whether another process held this invocation when we arrived.
+    waited: bool,
+    /// The prediction found under the lock, when it describes this invocation.
+    inherited: Option<String>,
+}
+
+impl Flight {
+    /// Whether this process blocked behind another compiling the same thing.
+    pub(crate) fn waited(&self) -> bool {
+        self.waited
+    }
+
+    /// The prediction the previous holder left, if any.
+    pub(crate) fn inherited(&self) -> Option<&str> {
+        self.inherited.as_deref()
+    }
+
+    /// Leave this compilation's prediction for whoever comes next.
+    ///
+    /// Written beside the lock file rather than into it, because the lock
+    /// file's contents belong to the lock: releasing one truncates it. The
+    /// record is only ever read and written under the lock, and the write is
+    /// atomic besides, so a reader can never see half of one.
+    pub(crate) fn leave(&self, payload: &str) {
+        if payload.len() > MAX_FLIGHT_PAYLOAD {
+            return;
+        }
+        let record = FlightRecord {
+            version: FLIGHT_VERSION,
+            adapter: self.adapter.into(),
+            invocation: self.invocation.clone(),
+            payload: payload.into(),
+        };
+        let written = serde_json::to_vec(&record)
+            .map_err(eyre::Report::from)
+            .and_then(|bytes| crate::util::write_atomic(&record_path(&self.path), &bytes));
+        if let Err(error) = written {
+            debug!("a flight prediction was not left behind: {error:#}");
+        }
+    }
+}
+
+/// Where one flight's prediction record lives, beside its lock.
+fn record_path(lock_path: &Path) -> PathBuf {
+    let mut path = lock_path.as_os_str().to_owned();
+    path.push(".prediction");
+    PathBuf::from(path)
+}
+
+/// How long an untouched flight is kept for.
+///
+/// Both of a flight's files get a fresh timestamp every time its invocation
+/// really compiles, so age here means nobody has compiled this identity in a
+/// month -- and identities churn with every toolchain and dependency bump,
+/// which is why the directory needs a sweep at all.
+const FLIGHT_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// Drop flight files whose invocations nobody compiles any more.
+///
+/// Run from `mbx gc` beside the store's own collection. Losing a record
+/// costs at most one compilation that would have been a hit; a lock that
+/// cannot be taken belongs to a live compilation and is left alone together
+/// with its record.
+pub(crate) fn prune_flights(cache_dir: &Path) {
+    let dir = cache_dir.join(SCHEDULER_DIR).join(INFLIGHT_DIR);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let stale = |path: &Path| {
+        std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > FLIGHT_MAX_AGE)
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "prediction")
+        {
+            // Swept with its lock below while the lock exists; on its own it
+            // is a leftover from an interrupted sweep.
+            if stale(&path) && !path.with_extension("").exists() {
+                let _ = std::fs::remove_file(&path);
+            }
+            continue;
+        }
+        let record = record_path(&path);
+        if !stale(&path) || (record.exists() && !stale(&record)) {
+            continue;
+        }
+        let Ok(mut lock) = fslock::LockFile::open(&path) else {
+            continue;
+        };
+        if lock.try_lock().is_ok_and(|taken| taken) {
+            let _ = std::fs::remove_file(&record);
+            // Closed before the removal, because Windows will not delete a
+            // file that is still open anywhere.
+            drop(lock);
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+impl Drop for Flight {
+    fn drop(&mut self) {
+        // The file stays: it holds the prediction the next build of this
+        // invocation restores from. Only the lock is released.
+        drop(self.lock.take());
+    }
+}
+
+/// Join the flight for one invocation, becoming its compiler.
+///
+/// Returns holding the lock. If another process was already compiling this
+/// invocation, that means having waited for it to finish -- which is the
+/// point: on waking, `inherited` usually restores and the compiler never
+/// runs. `None` means flights could not be used; the compilation just runs.
+pub(crate) fn flight(adapter: &'static str, invocation: &str) -> Option<Flight> {
+    let pool = pool()?;
+    match flight_at(&pool.dir, adapter, invocation) {
+        Ok(flight) => Some(flight),
+        Err(error) => {
+            debug!("compiling outside a flight: {error:#}");
+            None
+        }
+    }
+}
+
+fn flight_at(pool_dir: &Path, adapter: &'static str, invocation: &str) -> Result<Flight> {
+    let dir = pool_dir.join(INFLIGHT_DIR);
+    std::fs::create_dir_all(&dir)
+        .wrap_err_with(|| format!("failed to create {}", dir.display()))?;
+    let path = dir.join(format!("{adapter}-{invocation}"));
+    let mut lock = fslock::LockFile::open(&path)?;
+    let waited = !lock.try_lock()?;
+    if waited {
+        lock.lock()?;
+    }
+    let inherited = std::fs::read(record_path(&path))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<FlightRecord>(&bytes).ok())
+        .filter(|record| {
+            record.version == FLIGHT_VERSION
+                && record.adapter == adapter
+                && record.invocation == invocation
+        })
+        .map(|record| record.payload);
+    Ok(Flight {
+        lock: Some(lock),
+        path,
+        adapter,
+        invocation: invocation.to_string(),
+        waited,
+        inherited,
+    })
 }
 
 /// Peak compiler RSS by crate name, machine-wide.

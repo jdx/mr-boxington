@@ -361,6 +361,125 @@ fn the_ledger_drops_its_smallest_entries_at_the_cap() {
 }
 
 #[test]
+fn a_flight_leaves_its_prediction_for_the_next_build() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let first = flight_at(directory.path(), "rustc", "abc123").unwrap();
+    assert!(!first.waited(), "an empty pool has nothing to wait on");
+    assert_eq!(first.inherited(), None, "nothing was left before");
+    first.leave("the prediction");
+    drop(first);
+
+    let second = flight_at(directory.path(), "rustc", "abc123").unwrap();
+    assert!(!second.waited(), "the first flight released its lock");
+    assert_eq!(
+        second.inherited(),
+        Some("the prediction"),
+        "what a flight leaves outlives it"
+    );
+}
+
+#[test]
+fn a_waiter_wakes_to_what_its_holder_left() {
+    let directory = tempfile::tempdir().unwrap();
+    let dir = directory.path().to_path_buf();
+
+    let holder = flight_at(&dir, "rustc", "abc123").unwrap();
+    let waiter = std::thread::spawn(move || flight_at(&dir, "rustc", "abc123").unwrap());
+    // Long enough for the thread to block on the lock; a race the other way
+    // only weakens the `waited` assertion into a flake-free pass.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    holder.leave("freshly published");
+    drop(holder);
+
+    let waiter = waiter.join().unwrap();
+    assert!(waiter.waited(), "the second flight blocked on the first");
+    assert_eq!(waiter.inherited(), Some("freshly published"));
+}
+
+#[test]
+fn a_record_that_does_not_describe_this_flight_is_not_inherited() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let holder = flight_at(directory.path(), "rustc", "abc123").unwrap();
+    holder.leave("a rustc prediction");
+    drop(holder);
+
+    // Same file name could never collide across these, but the record itself
+    // must also say what it is: a version bump or a corrupt write reads as
+    // nothing rather than as a prediction.
+    let other = flight_at(directory.path(), "cc", "abc123").unwrap();
+    assert_eq!(other.inherited(), None);
+    drop(other);
+
+    let path = directory
+        .path()
+        .join(INFLIGHT_DIR)
+        .join("rustc-abc123.prediction");
+    std::fs::write(&path, b"not json").unwrap();
+    let corrupt = flight_at(directory.path(), "rustc", "abc123").unwrap();
+    assert_eq!(corrupt.inherited(), None, "garbage reads as nothing");
+}
+
+#[test]
+fn the_sweep_keeps_fresh_and_held_flights_and_drops_the_rest() {
+    let cache = tempfile::tempdir().unwrap();
+    let scheduler = cache.path().join(SCHEDULER_DIR);
+    let inflight = scheduler.join(INFLIGHT_DIR);
+
+    let old = flight_at(&scheduler, "rustc", "old").unwrap();
+    old.leave("stale");
+    drop(old);
+    let fresh = flight_at(&scheduler, "rustc", "fresh").unwrap();
+    fresh.leave("current");
+    drop(fresh);
+    let held = flight_at(&scheduler, "rustc", "held").unwrap();
+
+    let backdate = |name: &str| {
+        let ancient = std::time::SystemTime::now() - FLIGHT_MAX_AGE - Duration::from_secs(60);
+        for path in [
+            inflight.join(name),
+            inflight.join(format!("{name}.prediction")),
+        ] {
+            if path.exists() {
+                std::fs::File::options()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_modified(ancient)
+                    .unwrap();
+            }
+        }
+    };
+    backdate("rustc-old");
+    backdate("rustc-held");
+
+    prune_flights(cache.path());
+
+    assert!(!inflight.join("rustc-old").exists(), "stale flights go");
+    assert!(!inflight.join("rustc-old.prediction").exists());
+    assert!(inflight.join("rustc-fresh").exists(), "fresh flights stay");
+    assert!(inflight.join("rustc-fresh.prediction").exists());
+    assert!(
+        inflight.join("rustc-held").exists(),
+        "a lock that cannot be taken is a live compilation, whatever its age"
+    );
+    drop(held);
+}
+
+#[test]
+fn an_oversized_payload_is_not_left_behind() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let holder = flight_at(directory.path(), "rustc", "abc123").unwrap();
+    holder.leave(&"x".repeat(MAX_FLIGHT_PAYLOAD + 1));
+    drop(holder);
+
+    let next = flight_at(directory.path(), "rustc", "abc123").unwrap();
+    assert_eq!(next.inherited(), None);
+}
+
+#[test]
 fn session_environment_states_off_explicitly() {
     let config = crate::config::Config::for_test(Path::new("/cache"));
     assert_eq!(

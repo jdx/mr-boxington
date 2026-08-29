@@ -102,6 +102,16 @@ machine through one permit pool under the cache directory (on by default;
 dependency scheduling, and permits are released by the kernel if a process
 dies, so a crashed build cannot wedge its siblings.
 
+Concurrent builds do not just take turns, they stop repeating each other.
+Four CI jobs building one commit compile the same dependency graph four
+times; under the scheduler, a compilation identical to one already running
+anywhere on the machine waits for that one to finish and restores its result
+from the cache instead of burning a core on it. The finished compilation also
+leaves its input list behind, so a job arriving after it is already done can
+build the cache key it would otherwise lack and hit where it would have
+compiled cold. Both paths rehash every input before trusting anything, so
+the worst a stale record can do is fall back to compiling.
+
 The pool is memory-aware. `scheduler.cpus` permits (default: logical CPUs)
 divide `scheduler.memory` (default: 85% of physical memory, leaving headroom
 for everything that is not a compiler; `"none"` keeps plain CPU permits). In a

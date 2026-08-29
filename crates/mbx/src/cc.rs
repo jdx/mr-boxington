@@ -112,7 +112,51 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
             }
             verification = Some(cached);
         }
+    }
+
+    // Everything past this point would run the real compiler, so this is
+    // where machine-wide coordination starts. The flight comes before the
+    // permit: another build compiling this exact invocation right now is
+    // waited for rather than duplicated, and the prediction a finished
+    // flight left behind is one more chance to restore. Never in verify
+    // mode, whose whole point is running the compiler.
+    let flight = if verify {
+        None
     } else {
+        crate::scheduler::flight(ADAPTER, &invocation_digest.hash)
+    };
+    if let Some(flight) = &flight
+        // Only when the payload can say something this session's own lookup
+        // has not already said: either we waited and it is freshly
+        // published, or nothing was ever looked up and it is the first
+        // prediction we have.
+        && (flight.waited() || !looked_up)
+        && let Some(payload) = flight.inherited()
+    {
+        match restore_flight_prediction(
+            payload,
+            &invocation,
+            &context,
+            &task,
+            &invocation_digest,
+            &mut looked_up,
+        ) {
+            Ok(Some((action, cached))) => {
+                replay_bytes(&cached.stdout, &cached.stderr)?;
+                record_action_hit(&action, cached.restore, &compilation_name(&invocation));
+                return Ok(ExitCode::SUCCESS);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                session::report_shim_warning(&format!(
+                    "a flight prediction was not restored: {error:#}"
+                ));
+            }
+        }
+    }
+    // Recorded here rather than where the prediction came up empty, because
+    // a flight can still turn such a compilation into a real lookup.
+    if !looked_up {
         session::record_unconsulted();
     }
 
@@ -176,6 +220,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         duration_ns,
         &searchable,
         before,
+        flight.as_ref(),
     ) {
         #[cfg(debug_assertions)]
         session::report_shim_warning(&format!("cc result was not published: {error:#}"));
@@ -199,6 +244,7 @@ fn publish(
     duration_ns: u64,
     searchable: &BTreeSet<PathBuf>,
     before: Option<BTreeMap<PathBuf, CacheDigest>>,
+    flight: Option<&crate::scheduler::Flight>,
 ) -> Result<()> {
     let discovered = discover(invocation, context, depfile)?;
     discovered.verify_not_modified_since(compilation_started)?;
@@ -208,8 +254,47 @@ fn publish(
     let action = invocation.action(context.clone())?;
     publish_result(&action, invocation, output, &context.path_mappings)?;
     let prediction = invocation.prediction(context, duration_ns)?;
-    record_prediction(task, invocation_digest, &action.digest, &prediction);
+    record_prediction(task, invocation_digest, &action.digest, &prediction, flight);
     Ok(())
+}
+
+/// Restore through the prediction a flight left behind.
+///
+/// The payload gets exactly the treatment a manifest prediction does -- its
+/// inputs rehashed, the key rebuilt, the store consulted -- so the worst a
+/// stale or foreign record can do is miss. A restore that works is recorded
+/// into this session's own manifest, which is how the next build finds it
+/// without a flight.
+fn restore_flight_prediction(
+    payload: &str,
+    invocation: &CcInvocation,
+    context: &CcActionContext,
+    task: &str,
+    invocation_digest: &CacheDigest,
+    looked_up: &mut bool,
+) -> Result<Option<(CacheDigest, CachedCompilation)>> {
+    let prediction: CcInputPrediction = serde_json::from_str(payload)?;
+    let discovered = prediction.discover(
+        &context.working_dir,
+        &context.path_mappings,
+        session::file_digest_cache(),
+    )?;
+    let mut candidate = context.clone();
+    discovered.clone().apply_to(&mut candidate)?;
+    let action = invocation.action(candidate)?;
+    *looked_up = true;
+    let restored = restore_result(
+        &action,
+        invocation,
+        &discovered,
+        true,
+        &context.path_mappings,
+    )?;
+    let Some(cached) = restored else {
+        return Ok(None);
+    };
+    record_prediction(task, invocation_digest, &action.digest, &prediction, None);
+    Ok(Some((action.digest, cached)))
 }
 
 /// Read the dependency list and turn it into digested inputs.
@@ -496,10 +581,16 @@ fn record_prediction(
     invocation: &CacheDigest,
     action: &CacheDigest,
     prediction: &CcInputPrediction,
+    flight: Option<&crate::scheduler::Flight>,
 ) {
     let Ok(payload) = serde_json::to_string(prediction) else {
         return;
     };
+    // Anyone waiting on this flight -- and any later build of the same
+    // invocation -- restores through this instead of compiling.
+    if let Some(flight) = flight {
+        flight.leave(&payload);
+    }
     let _ = session::request_agent(&[AgentRequest::RecordActionPrediction {
         task: task.to_string(),
         prediction: ActionPrediction {

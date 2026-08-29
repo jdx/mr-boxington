@@ -63,9 +63,12 @@ compilers alive at once, and the least memory it had left.
 The `mbx` and `mbx-unscheduled` rows are the same binary with its
 [machine-wide scheduler](/configuration#machine-wide-compile-scheduling) on
 and off, which is the only way to compare the scheduler rather than two
-different caches. The comparison to watch is the peak, not the clock:
-bounding concurrency is the point, and finishing no slower while doing it is
-the cost being checked.
+different caches. Two things separate the rows. The peak shows the bound: the
+pool holds the machine at its permit count while the unscheduled batch runs
+everything at once. The clock and the hits show the deduplication: four jobs
+building one commit reach the same compilations, and under the scheduler each
+runs once and is restored everywhere else, so the scheduled batch finishes
+ahead of the unscheduled one rather than merely no slower.
 
 ## How the comparison is kept fair
 
