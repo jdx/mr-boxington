@@ -48,10 +48,10 @@ build, pinning the toolchain (hk does not pin one itself), giving each cell
 its own store and target, clearing any inherited `RUSTC_WRAPPER`, and running
 both caches local-only. Validity gates reject a run whose warm builds restored
 nothing or were no faster than cold, because those numbers would still render.
-The contention gates are the same idea from the other side: the scheduled
-batch must beat the sequential baseline and stay inside its permits, and the
-unscheduled one must exceed them, since a bound nothing pushed against proves
-nothing.
+The contention gates verify that the scheduled batch stays inside its permits
+and the unscheduled one exceeds them, since a bound nothing pushed against
+proves nothing. Wall-time ordering remains a reported benchmark result rather
+than a validity condition because a single shared-runner sample is noisy.
 
 `mise run bench` runs the everyday subset; `mise run bench:refresh` runs
 everything and rewrites `results.json`, which the documentation site reads.
