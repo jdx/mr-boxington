@@ -20,6 +20,43 @@ steps:
   - run: mbx test --workspace
 ```
 
+## Parallel Cargo steps
+
+Independent lint or test configurations do not have to queue behind each
+other. GitHub Actions can start them together, while mbx gives every compiler
+they launch one machine-wide CPU and memory budget:
+
+```yaml
+steps:
+  - uses: actions/checkout@v7
+  - uses: jdx/mr-boxington-action@v1
+  - parallel:
+      - name: Clippy with default features
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/clippy-default
+        run: mbx clippy --workspace -- -D warnings
+      - name: Clippy with all features and targets
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/clippy-all
+        run: mbx clippy --workspace --all-features --all-targets -- -D warnings
+```
+
+Each command needs a separate `CARGO_TARGET_DIR`; otherwise Cargo's target
+directory lock serializes the supposedly parallel steps. The mbx store and
+scheduler remain shared. When both configurations reach the same cold
+compilation, one does the work and the other restores its result; unrelated
+compilations run within the shared permit pool instead of each Cargo process
+trying to fill the runner independently.
+
+This is not just a larger-runner trick. In
+[two cold, order-reversed A/B trials](https://github.com/jdx/mise/pull/12586#issuecomment-5462290794)
+on mise's existing large CI runner, parallel Clippy finished **23–33% sooner**
+than the same two commands run sequentially. The permanent
+[contention benchmark](/benchmarks#contention) reproduces that workload and
+checks both wall time and peak compiler count. Tuning and failure behavior are
+covered under
+[machine-wide compile scheduling](/configuration#machine-wide-compile-scheduling).
+
 Before saving, the action prunes the store to 3 GB. Set `max-size` to change the
 budget, or change `cache-generation` when an upgrade or policy change should
 start fresh:

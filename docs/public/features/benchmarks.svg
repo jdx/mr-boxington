@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="A stopwatch with a rising performance line">
+  <defs>
+    <linearGradient id="watch" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f6d693" />
+      <stop offset="1" stop-color="#c4862c" />
+    </linearGradient>
+  </defs>
+  <g stroke="#53350f" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M51 13h26" />
+    <path d="M64 13v14" />
+    <path d="m94 31 9 9" />
+    <circle cx="64" cy="72" r="43" fill="url(#watch)" />
+  </g>
+  <path d="M38 86 53 70l12 9 24-28" fill="none" stroke="#35555c" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="m78 51h11v11" fill="none" stroke="#35555c" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" />
+</svg>

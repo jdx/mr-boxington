@@ -6,6 +6,7 @@ import { data as starsData } from "../stars.data";
 import BenchmarkResults from "./BenchmarkResults.vue";
 import EndevFooter from "./EndevFooter.vue";
 import EndevSponsors from "./EndevSponsors.vue";
+import HomeConcurrency from "./HomeConcurrency.vue";
 import HomeTerminal from "./HomeTerminal.vue";
 import { initBanner } from "./banner";
 import "./custom.css";
@@ -15,6 +16,7 @@ export default {
   Layout() {
     return h(DefaultTheme.Layout, null, {
       "home-hero-after": () => h(HomeTerminal),
+      "home-features-after": () => h(HomeConcurrency),
       "layout-bottom": () => [h(EndevSponsors), h(EndevFooter)],
     });
   },
