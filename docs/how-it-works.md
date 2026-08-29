@@ -7,7 +7,7 @@ subcommand.
 1. mbx resolves the workspace and target roots through Cargo metadata.
 2. It starts an in-process cache agent and creates shims for the build.
 3. Cargo runs normally with the rustc shim set as `RUSTC_WRAPPER`, and build
-   scripts inherit a `HOST_CC` and `HOST_CXX` pointing at the C and C++ shims.
+   scripts inherit `HOST_CC` and `HOST_CXX` pointing at the C and C++ shims.
 4. Each shim analyzes its compiler invocation and derives a content-addressed action key.
 5. A hit restores the action's outputs; a miss runs the real compiler and publishes the result.
 6. The agent exits with the build, draining any remote uploads it still owes.
@@ -94,12 +94,15 @@ platform, including when mbx has to use the copy fallback.
 
 ## Correctness first
 
-Unsupported crate types, unmodeled search paths, native linking, and
-incremental compilations bypass the shared action cache. A compilation that
-links nothing is cached whatever its crate type -- `cargo check` and clippy
-compile every binary and test target that way, and metadata is metadata.
-Linked WebAssembly binaries, tests, and `cdylib`s are admitted only for a
-fixed allowlist of built-in targets whose default linker and system inputs
-ship with rustc.
+Unsupported crate types, unmodeled search paths, and incremental compilations
+bypass the shared action cache. A compilation that links nothing is cached
+whatever its crate type — `cargo check` and clippy compile every binary and
+test target that way, and metadata is metadata. A native link is admitted only
+when its linker can be described: host binaries and tests on Linux and macOS,
+where mbx puts the resolved linker, startup objects, libc, and SDK into the
+key, and a fixed allowlist of built-in WebAssembly targets whose default
+linker and system inputs ship with rustc. Everything else — native libraries,
+custom linkers, Windows — links as it always did; see
+[limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
 `MBX_VERIFY=1` compiles while also consulting the cache and compares the result,
 providing a deliberately expensive qualification mode.

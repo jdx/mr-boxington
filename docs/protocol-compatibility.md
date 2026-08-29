@@ -14,7 +14,7 @@ the handshake and do not exchange cache requests. Adding, removing, or changing
 a request or response therefore requires incrementing `AGENT_PROTOCOL_VERSION`.
 
 `crates/mbx-cache-core/tests/agent_protocol.rs` exercises every request and
-response variant against `tests/fixtures/agent-protocol-v4.jsonl`. Its exhaustive
+response variant against `tests/fixtures/agent-protocol-v5.jsonl`. Its exhaustive
 matches make a newly added variant fail to compile until the fixture and the
 protocol-version decision are reviewed together.
 
@@ -25,6 +25,8 @@ for each real Cargo invocation. v4 adds `record_warning`, which is how a shim
 reports a diagnostic at all: a C or C++ shim stands in for a compiler whose
 stderr its caller reads as an answer, so it cannot write there itself, and the
 agent prints each distinct message once from the process that owns the build.
+v5 adds `find_file_digests` and `record_file_digests`, which let a shim reuse
+the digest of a file the session already read in full instead of rehashing it.
 The client and agent still require exact protocol and application-version
 equality, including when different applications ship them.
 
@@ -97,7 +99,7 @@ against the pull request's base commit with all features enabled. Wire format
 changes still require the protocol-version steps above.
 
 A breaking API change is *declared*, not numbered by hand. Mark the commit
-breaking -- `feat!:`, or a `BREAKING CHANGE:` footer -- and release-plz prices
+breaking — `feat!:`, or a `BREAKING CHANGE:` footer — and release-plz prices
 it into the version when it opens the release PR. Do not edit a crate's version
 in a pull request: release-plz owns those numbers, and it knows that a crate on
 `0.x` needs a minor bump where a `1.x` crate would need a major one.
@@ -111,7 +113,7 @@ inside the pull request.
 
 Read that job's output as a list of what broke, not as an instruction. Its
 summary says "semver requires new major version" whatever the crate's position,
-so for the crates on `0.x` it names a bump Cargo does not want -- there, a break
+so for the crates on `0.x` it names a bump Cargo does not want — there, a break
 is a minor. The lint names above the summary are the useful part: they say which
 items changed shape, which is what a reviewer needs to judge whether the break
 was intended.
@@ -125,12 +127,13 @@ the same things:
 | `mbx-cache-protocol` | independent | The remote cache wire contract, as described above. Depend on this to speak to an mbx cache. |
 | `mbx-cache-core` | shared `0.x` | Unstable session, store, and agent primitives for coordinated embedding. |
 | `mbx-cache-rustc` | shared `0.x` | Unstable rustc action modeling for coordinated embedding. |
+| `mbx-cache-cc` | shared `0.x` | Unstable C and C++ action modeling for coordinated embedding. |
 | `mbx-cache-cargo` | independent `0.x` | Unstable Cargo invocation and shared-cache-root resolution. |
 | `mbx-cache-store` | independent `0.x` | Unstable checkout claims and disk-bounded shared-store GC. |
 
 The embedding crates stay on `0.x`, where a minor bump is allowed to break.
-`mbx-cache-core` and `mbx-cache-rustc` move together; the smaller Cargo and
-store crates release independently. Pin compatible minors and expect an
+`mbx-cache-core`, `mbx-cache-rustc`, and `mbx-cache-cc` move together; the
+smaller Cargo and store crates release independently. Pin compatible minors and expect an
 upgrade to require source changes.
 
 The Rust types mirror which wire records are open to extension and which are

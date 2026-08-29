@@ -62,7 +62,7 @@ links for the host by construction, and that is the only linker mbx identifies.
 ## Restored artifacts are equivalent, not always identical
 
 A restore writes this checkout's spelling of the outputs that describe where a
-compilation ran -- its dep-info and its diagnostics -- so the files cargo reads
+compilation ran — its dep-info and its diagnostics — so the files cargo reads
 name the directory it is building into.
 
 The compiled artifacts are reused as they were produced, and a few things can
@@ -75,7 +75,7 @@ the compiler ran in.
 A C or C++ object also records the absolute include directories it was given,
 which is how a `-sys` crate whose build script generates headers into
 `OUT_DIR` used to produce a different object in every target directory. With
-[`OUT_DIR` sharing](/configuration#out-dir-sharing) on -- the default -- mbx
+[`OUT_DIR` sharing](/configuration#share-out-dir) on — the default — mbx
 passes the compiler `-fdebug-prefix-map` for that directory, so the object
 records the same placeholder the key does and two target directories produce
 the same bytes. An object that keeps the path anyway, in a string the source
@@ -107,7 +107,7 @@ A cross compile is cached when the build names its own compiler, through
 `CC_<target>`, `CXX_<target>`, `TARGET_CC`, or `TARGET_CXX`: mbx wraps what
 was named rather than replacing it. A cross build that names nothing is left
 alone, because which compiler a target implies lives in the `cc` crate's own
-tables -- guessing wrong would not cost a cache hit, it would build the object
+tables — guessing wrong would not cost a cache hit, it would build the object
 with the wrong compiler. A value that is a command rather than a path, such as
 `ccache gcc`, is left alone for the same reason.
 
@@ -119,15 +119,15 @@ bypass, as does any flag the adapter does not model. A source or header that
 expands `__DATE__`, `__TIME__`, or `__TIMESTAMP__` bypasses too: its object is
 not a function of its inputs.
 
-A flag that tunes for the machine's own processor -- `-march=native` and its
-relatives -- bypasses as well, since the object it produces is not a function
+A flag that tunes for the machine's own processor — `-march=native` and its
+relatives — bypasses as well, since the object it produces is not a function
 of anything the key names.
 
 ## Shadowing is modeled by name, not by content
 
 An include directory contributes the names in it that could answer an
-`#include`: headers, sources -- `#include "generated.c"` is unusual but legal
--- names without an extension, and precompiled headers, which GCC prefers over
+`#include`: headers, sources — `#include "generated.c"` is unusual but legal —
+names without an extension, and precompiled headers, which GCC prefers over
 the header they were built from without anything on the command line saying so.
 
 What is left out is what cannot answer an `#include` at all: an object, a
@@ -155,7 +155,7 @@ cross-checkout cache sharing for their dependent crates.
 
 This covers C and C++ as well as Rust. A build script that generates headers
 into `OUT_DIR` passes that directory to its own compilations, which record it
-in debug information, so the same remapping applies -- rustc is told
+in debug information, so the same remapping applies — rustc is told
 `--remap-path-prefix` and the C compiler `-fdebug-prefix-map`, and in both
 cases an output that kept the literal path is left uncached rather than
 shared. `MBX_SHARE_OUT_DIR=0` turns both off together.

@@ -10,9 +10,9 @@ misspelled setting is an error rather than a silent no-op.
 
 mbx bounds its own disk use without being configured. The two size budgets
 default to a share of the disk holding the cache — 5% for the action store and
-10% for managed target directories — each from its floor (5GiB and 10GiB) up to
-100GiB, rounded down to a whole 5GiB. Managed targets are also collected after
-30 days unused.
+10% for managed target directories — each from its floor (5 GiB and 10 GiB) up
+to 100 GiB, rounded down to a whole 5 GiB. Managed targets are also collected
+after 30 days unused.
 
 Setting any of them outright overrides the scaling; `"none"` disables
 `target.max_size`, `target.max_age`, and `gc.max_total_size`. See
@@ -77,7 +77,7 @@ accepted from a repository-owned file. mbx reports an error instead of applying
 an unsafe or misspelled workspace setting.
 
 `share_out_dir = true` is the global default. A workspace may set it to false
-when generated source paths must remain literal in debug information -- for
+when generated source paths must remain literal in debug information — for
 C and C++ objects as well as Rust artifacts, since a build script's generated
 headers reach both.
 
@@ -122,8 +122,8 @@ The pool is memory-aware. `scheduler.cpus` permits (default: logical CPUs)
 divide `scheduler.memory` (default: 85% of physical memory, leaving headroom
 for everything that is not a compiler; `"none"` keeps plain CPU permits). In a
 container, "physical memory" means the cgroup's limit rather than the host's
-RAM — a build in a 4GiB container on a large machine is budgeted by the 4GiB,
-because the rest was never its to spend.
+RAM — a build in a 4 GiB container on a large machine is budgeted by the
+4 GiB, because the rest was never its to spend.
 Native links start at two permits, and every compilation is thereafter
 weighted by what it actually used, so the predicted memory of everything
 running stays inside the budget. The two-permit start is a guess for links

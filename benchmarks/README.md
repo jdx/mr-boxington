@@ -27,8 +27,8 @@ clones a pinned checkout of [jdx/hk](https://github.com/jdx/hk) and runs the
 same `cargo build --locked` under raw cargo, mbx, and kache across the
 situations CI actually hits: a cold store, a warm store with a fresh target,
 the next commit on the branch, a second checkout at a different path, and a
-compiler change. The last of those is a correctness cell rather than a timing
--- it fails unless a different rustc leaves almost every predicted compilation
+compiler change. The last of those is a correctness cell rather than a timing —
+it fails unless a different rustc leaves almost every predicted compilation
 unlooked-up, which is the shape the hk benchmark hit when a runner image
 rolled a new Rust. Not zero hits: actions that do not depend on rustc, such as
 a build script's C objects, legitimately survive a Rust change.

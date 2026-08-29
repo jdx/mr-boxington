@@ -6,8 +6,9 @@
 cache, and it aims wider: it caches CUDA alongside Rust, C, and C++, and can
 distribute compilation across machines. mbx caches rustc, the C and C++ that
 cargo build scripts compile, the C and C++ of builds outside cargo through
-[`mbx exec`](/standalone-builds), and native links. It spends a
-scope still narrower than sccache's on problems sccache does not attempt:
+[`mbx exec`](/standalone-builds), and native links. That scope is still
+narrower than sccache's, and mbx spends it on problems sccache does not
+attempt:
 
 - **No daemon.** sccache runs a background server that builds talk to. mbx
   starts an in-process agent for each command and exits with it; there is

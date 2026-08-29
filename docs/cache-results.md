@@ -52,8 +52,8 @@ on a cache that has quietly stopped serving.
 ## Watching a build instead
 
 Everything above describes the summary printed after a build. To see the same
-outcomes as they are decided -- one row per compilation, with the crate it
-belongs to -- run [`mbx tui`](/tui) in another terminal. It reads every build on
+outcomes as they are decided — one row per compilation, with the crate it
+belongs to — run [`mbx tui`](/tui) in another terminal. It reads every build on
 the machine, including ones already running.
 
 ## Reading the hit rate
@@ -62,9 +62,11 @@ A build can report a high hit rate among attempted lookups while spending most
 of its time on actions that were not looked up or were bypassed. Read all three
 summary lines together, and compare wall-clock time when evaluating the cache.
 
-Native link steps always run, so an otherwise warm native binary build still
-has work to do. Binaries, tests, and `cdylib`s for supported self-contained
-WebAssembly targets are the exception and may be restored as hits.
+A link mbx cannot describe always runs, so a warm build of such a binary still
+has work to do. Host binaries and tests on Linux and macOS, and binaries,
+tests, and `cdylib`s for supported self-contained WebAssembly targets, may be
+restored as hits; see
+[limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
 
 ## Troubleshooting a low hit rate
 
@@ -84,9 +86,12 @@ The usual causes, roughly in the order they show up:
   members compile incrementally, those compilations bypass the cache, and the
   changed artifacts make crates above them miss too. See
   [limits](/limits#incremental-compilations-are-not-cached).
-- **Link steps always run.** Native binaries, tests, and dylibs re-link even
-  when every compilation hit, so a warm build of a large binary still takes
-  time. Self-contained WebAssembly targets are the exception.
+- **Undescribed links always run.** Host binaries and tests are cached on
+  Linux and macOS, and self-contained WebAssembly targets everywhere, but a
+  link naming a native library, a custom linker, or built on Windows re-links
+  even when every compilation hit, so a warm build of such a binary still
+  takes time. See
+  [limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
 - **The inputs actually differ.** A different toolchain, feature set, profile,
   or `RUSTFLAGS` between two checkouts is a different key, and the summary
   reports it as an ordinary miss. `cargo tree` and comparing the two commands
@@ -94,12 +99,12 @@ The usual causes, roughly in the order they show up:
 - **Build-script output paths.** A crate that embeds its `OUT_DIR` produces
   checkout-specific inputs for its dependents. mbx remaps this by default;
   `MBX_SHARE_OUT_DIR=0` disables that sharing. See
-  [limits](/limits#out_dir-sharing-remaps-generated-source-paths).
+  [limits](/limits#out-dir-sharing-remaps-generated-source-paths).
 - **A build chose its own C compiler, or is cross-compiling.** Setting `CC`,
   `HOST_CC`, or a target-specific variant leaves that build's C and C++
   compilations uncached, and so does `--target`. Bypass kinds beginning `cc-`
   report anything the C adapter declined to model. See
-  [limits](/limits#c-and-c-caching-covers-build-script-compiles-only).
+  [limits](/limits#c-and-c-caching-covers-the-host-compiles-mbx-drives).
 - **CI restored nothing.** On GitHub Actions, check that the cache step
   actually restored an entry — a changed `cache-generation` or a fresh
   repository starts empty by design. With a remote cache configured, check the
