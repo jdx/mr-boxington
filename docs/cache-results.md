@@ -99,7 +99,7 @@ The usual causes, roughly in the order they show up:
 
 - **The store is cold.** A first build has no dep-info to derive keys from, so
   "could not look up" dominates and everything is stored rather than restored.
-  The second build is the honest measurement.
+  Read the hit rate off the second build.
 - **Incremental builds are enabled.** With `MBX_INCREMENTAL=1`, workspace
   members compile incrementally, those compilations bypass the cache, and the
   changed artifacts make crates above them miss too. See

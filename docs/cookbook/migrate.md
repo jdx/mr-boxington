@@ -65,6 +65,6 @@ place.
 
 However you arrive, the first mbx build has an empty store: it restores
 nothing, stores everything, and the summary's
-[could not look up](/cache-results#could-not-look-up) line dominates. The
-second build is the honest measurement, and
+[could not look up](/cache-results#could-not-look-up) line dominates. Compare
+the second build, and
 [`mbx explain`](/cache-results#bypass) says what any remaining gap is made of.

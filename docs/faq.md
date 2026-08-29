@@ -10,8 +10,8 @@ build, never a wrong one. See [stability](/stability#the-store-is-disposable).
 ## Why wasn't my first build faster?
 
 A first build has an empty store — there is nothing to hit, so it can only
-cost time, and the summary's "could not look up" line dominates. The second
-build is the honest measurement. See
+cost time, and the summary's "could not look up" line dominates. Time the
+second build instead. See
 [cache results](/cache-results#troubleshooting-a-low-hit-rate) and the cold
 scenario in [benchmarks](/benchmarks#cold).
 

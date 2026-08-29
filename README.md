@@ -63,7 +63,7 @@ mise use -g mr-boxington
 With Cargo:
 
 ```sh
-cargo install mbx
+cargo install mbx --locked
 ```
 
 Or install the latest Linux x86-64 release archive:
