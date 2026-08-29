@@ -117,7 +117,7 @@ pub(crate) struct RawConfig {
     )]
     _learned_incremental: bool,
     /// Share eligible compilations that read `OUT_DIR`.
-    #[usage(env = "MBX_SHARE_OUT_DIR", default = false)]
+    #[usage(env = "MBX_SHARE_OUT_DIR", default = true)]
     share_out_dir: bool,
     /// Record a per-compilation event stream for `mbx tui` to watch.
     #[usage(env = "MBX_EVENTS", default = true)]
@@ -289,9 +289,9 @@ pub struct Config {
     pub incremental: bool,
     /// Let a compilation that reads `OUT_DIR` be shared between checkouts.
     ///
-    /// Off by default: it changes the compilation, remapping the generated
-    /// sources out of debug info, and its safety rests on reading the outputs
-    /// rather than on the inputs alone.
+    /// On by default: the compilation remaps generated sources to a stable
+    /// placeholder, and mbx reads the outputs before publishing to fall back
+    /// to a checkout-specific key when a crate embeds the literal path.
     pub share_out_dir: bool,
     /// Append a per-compilation event stream to the store, for `mbx tui`.
     ///
@@ -971,6 +971,7 @@ mod tests {
         assert!(config.remote.url.is_none());
         assert!(!config.verify);
         assert!(!config.incremental);
+        assert!(config.share_out_dir);
         assert!(config.store_dir().ends_with("actions"));
         assert!(config.gc.auto, "collection runs until it is turned off");
         assert_eq!(config.gc.max_bytes, 20 * GIB, "5% of a 400GiB disk");
@@ -1265,7 +1266,7 @@ mod tests {
             "incremental = true\nshare_out_dir = true\n",
         )
         .unwrap();
-        let mut config = configured(None, &[]).unwrap();
+        let mut config = configured(None, &[("MBX_SHARE_OUT_DIR", "0")]).unwrap();
 
         config
             .apply_workspace_policy_with(directory.path(), |_| true)

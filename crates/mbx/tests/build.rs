@@ -825,21 +825,22 @@ fn write_generated_project(directory: &Path, generated: Generated) {
     assert!(status.success());
 }
 
-/// A build script alone does not stop two checkouts sharing a cache. Consuming
-/// `OUT_DIR` does, because its value is an absolute path the compilation reads
-/// and could bake into the artifact.
+/// Turning sharing off preserves the old checkout-specific behavior for a
+/// compilation that consumes `OUT_DIR`, without affecting one that only uses a
+/// build-script cfg.
 #[test]
-fn out_dir_decides_whether_two_checkouts_share() {
+fn out_dir_sharing_can_be_turned_off() {
+    let disabled = [("MBX_SHARE_OUT_DIR", "0")];
     for (generated, expect_hits) in [(Generated::Cfg, true), (Generated::Include, false)] {
         assert_eq!(
-            two_checkouts_share(generated, &[]),
+            two_checkouts_share(generated, &disabled),
             expect_hits,
-            "the default should not share a compilation that reads OUT_DIR"
+            "the opt-out changed the wrong shape"
         );
     }
 }
 
-/// With sharing on, the compilation is remapped so rustc records the
+/// By default, the compilation is remapped so rustc records the
 /// placeholder instead of the real `OUT_DIR`, and the include-only shape crosses
 /// checkouts. The shape that keeps the value in a string still does not: the
 /// remapping cannot reach into the artifact, and mbx reads the outputs rather
@@ -847,13 +848,12 @@ fn out_dir_decides_whether_two_checkouts_share() {
 ///
 /// The pair is the test. Either half alone would pass for the wrong reason.
 #[test]
-fn sharing_out_dir_crosses_checkouts_only_where_the_artifact_allows_it() {
-    let sharing = [("MBX_SHARE_OUT_DIR", "1")];
+fn out_dir_crosses_checkouts_only_where_the_artifact_allows_it() {
     for (generated, expect_hits) in [(Generated::Include, true), (Generated::Text, false)] {
         assert_eq!(
-            two_checkouts_share(generated, &sharing),
+            two_checkouts_share(generated, &[]),
             expect_hits,
-            "sharing changed the wrong shape"
+            "the default shared the wrong shape"
         );
     }
 }
