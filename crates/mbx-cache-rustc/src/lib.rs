@@ -323,6 +323,7 @@ enum LinkOutput {
     Library,
     WasmExecutable,
     NativeExecutable,
+    NativeProcMacro,
 }
 
 /// What the caller is prepared to model beyond the default tier.
@@ -333,8 +334,8 @@ enum LinkOutput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct ParseOptions {
-    /// Admit natively linked test binaries and executables, given a linker
-    /// identity in the action key. Off by default.
+    /// Admit natively linked test binaries, executables, and proc macros,
+    /// given a linker identity in the action key. Off by default.
     pub cache_native_links: bool,
 }
 
@@ -378,10 +379,13 @@ impl RustcInvocation {
         Parser::new(&expanded.arguments, options).parse()
     }
 
-    /// Whether this invocation links a native program, whose key must therefore
-    /// describe the linker that produced it.
+    /// Whether this invocation links a native artifact, whose key must
+    /// therefore describe the linker that produced it.
     pub fn links_natively(&self) -> bool {
-        self.link_output == LinkOutput::NativeExecutable
+        matches!(
+            self.link_output,
+            LinkOutput::NativeExecutable | LinkOutput::NativeProcMacro
+        )
     }
 
     /// Whether the contents of native search directories cannot reach this
@@ -515,9 +519,11 @@ impl RustcInvocation {
                 "link" => match self.link_output {
                     LinkOutput::Library => ("lib", "rlib"),
                     LinkOutput::WasmExecutable => ("", "wasm"),
-                    // A linked native program has no extension of its own on
-                    // the platforms this tier admits.
                     LinkOutput::NativeExecutable => ("", ""),
+                    LinkOutput::NativeProcMacro => (
+                        std::env::consts::DLL_PREFIX,
+                        std::env::consts::DLL_SUFFIX.trim_start_matches('.'),
+                    ),
                 },
                 "metadata" => ("lib", "rmeta"),
                 _ => continue,
@@ -1429,9 +1435,13 @@ impl<'a> Parser<'a> {
             // and libc shipped in the Rust toolchain. Unlike native linking,
             // there are no implicit host inputs outside compiler identity.
             LinkOutput::WasmExecutable
-        } else if self.options.cache_native_links && self.links_a_native_program() {
+        } else if self.options.cache_native_links && self.links_a_native_artifact() {
             self.check_native_link_is_portable()?;
-            LinkOutput::NativeExecutable
+            if matches!(self.crate_types.as_slice(), [kind] if kind == "proc-macro") {
+                LinkOutput::NativeProcMacro
+            } else {
+                LinkOutput::NativeExecutable
+            }
         } else if self.test {
             return Err(BypassReason::UnsupportedCrateType("test".into()));
         } else {
@@ -1461,7 +1471,7 @@ impl<'a> Parser<'a> {
         // adapter cannot vouch for, exactly like the arguments above.
         if !matches!(
             link_output,
-            LinkOutput::Library | LinkOutput::NativeExecutable
+            LinkOutput::Library | LinkOutput::NativeExecutable | LinkOutput::NativeProcMacro
         ) && self
             .parsed
             .iter()
@@ -1537,13 +1547,13 @@ impl Parser<'_> {
         })
     }
 
-    /// Whether this invocation links a program for the host.
+    /// Whether this invocation links an artifact for the host.
     ///
     /// An explicit `--target` bypasses even when it spells the host triple:
     /// rustc without one links for the host by construction, which is the
     /// cheapest description of "the linker this adapter can identify", and
     /// cargo omits it for host builds anyway.
-    fn links_a_native_program(&self) -> bool {
+    fn links_a_native_artifact(&self) -> bool {
         self.target.is_none()
             // A compilation that emits no linked artifact did not link, so it
             // needs no linker to describe it. `cargo check --tests` asks for
@@ -1551,7 +1561,7 @@ impl Parser<'_> {
             // for a linker identity and refusing flags no linker ever saw.
             && self.emits.iter().any(|emit| emit.kind == "link")
             && ((self.test && self.crate_types.is_empty())
-                || matches!(self.crate_types.as_slice(), [kind] if kind == "bin"))
+                || matches!(self.crate_types.as_slice(), [kind] if matches!(kind.as_str(), "bin" | "proc-macro")))
     }
 
     /// Reject a native link whose result depends on something the key cannot
@@ -1604,8 +1614,18 @@ impl Parser<'_> {
                 "debuginfo" if cfg!(target_os = "macos") => {
                     !matches!(value, Some("0" | "none")) && !self.oso_prefix_covers_outputs()
                 }
-                // Both embed this checkout's absolute target directory.
-                "rpath" | "prefer-dynamic" => is_enabled(value),
+                // An rpath and a dynamically linked native program embed this
+                // checkout's absolute target directory. Cargo also passes
+                // `prefer-dynamic` to proc macros, but their dynamic runtime
+                // is rustc's own sysroot (already pinned by compiler identity),
+                // while Cargo's dependencies are linked into the macro. There
+                // is no checkout rpath to carry; keep rejecting an explicit
+                // `rpath` independently.
+                "rpath" => is_enabled(value),
+                "prefer-dynamic" => {
+                    is_enabled(value)
+                        && !matches!(self.crate_types.as_slice(), [kind] if kind == "proc-macro")
+                }
                 // The CRT objects a self-contained link uses come from
                 // somewhere other than where the driver reports.
                 "link-self-contained" => true,

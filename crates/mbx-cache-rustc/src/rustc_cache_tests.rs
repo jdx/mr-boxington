@@ -1492,20 +1492,62 @@ fn linked_artifacts_still_bypass_when_nothing_admits_them() {
         ])),
         Err(BypassReason::UnsupportedCrateType("bin".into()))
     );
-    // Even with native links modeled, a proc macro is a dylib nobody admits.
+}
+
+#[test]
+fn linked_proc_macro_uses_the_native_link_tier() {
+    let invocation = RustcInvocation::parse_with(
+        &args(&[
+            "--crate-name=widget",
+            "--crate-type=proc-macro",
+            "--emit=dep-info,metadata,link",
+            "--out-dir=target/debug/deps",
+            "src/lib.rs",
+        ]),
+        native_links(),
+    )
+    .unwrap();
+
+    assert!(invocation.links_natively());
     assert_eq!(
-        RustcInvocation::parse_with(
-            &args(&[
-                "--crate-name=widget",
-                "--crate-type=proc-macro",
-                "--emit=dep-info,metadata,link",
-                "--out-dir=target/debug/deps",
-                "src/lib.rs",
+        invocation.outputs(&absolute(&["workspace"])).unwrap().files,
+        [
+            absolute(&[
+                "workspace",
+                "target",
+                "debug",
+                "deps",
+                &format!(
+                    "{}widget{}",
+                    std::env::consts::DLL_PREFIX,
+                    std::env::consts::DLL_SUFFIX
+                ),
             ]),
-            native_links()
-        ),
-        Err(BypassReason::UnsupportedCrateType("proc-macro".into()))
+            absolute(&["workspace", "target", "debug", "deps", "libwidget.rmeta"]),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn proc_macro_prefer_dynamic_is_pinned_by_the_compiler_identity() {
+    let invocation = RustcInvocation::parse_with(
+        &args(&[
+            "--crate-name=widget",
+            "--crate-type=proc-macro",
+            "--emit=dep-info,metadata,link",
+            "--codegen=prefer-dynamic",
+            "--out-dir=target/debug/deps",
+            "src/lib.rs",
+        ]),
+        native_links(),
+    )
+    .unwrap();
+
+    assert!(invocation.links_natively());
 }
 
 /// A native library is a linker input, and the reason it bypasses -- mbx does

@@ -387,7 +387,7 @@ class Runner:
             # and stops a draining daemon from writing into a tree that is
             # about to be removed.
             subprocess.run(
-                [kache, "daemon", "stop"],
+                [shutil.which("kache") or "kache", "daemon", "stop"],
                 cwd=checkout,
                 env=environment,
                 text=True,
