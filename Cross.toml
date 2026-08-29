@@ -5,7 +5,7 @@
 image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:0.2.5"
 
 [target.x86_64-unknown-linux-gnu.env]
-passthrough = ["RUSTFLAGS"]
+passthrough = ["RUSTFLAGS", "CARGO_PROFILE_RELEASE_STRIP"]
 
 [target.aarch64-unknown-linux-gnu]
 image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5"

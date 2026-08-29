@@ -64,6 +64,7 @@ jobs:
             bin: mbx
             cross: true
             pgo: true
+            bolt: true
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             runner: namespace-profile-endev-linux-amd64
@@ -110,6 +111,10 @@ jobs:
       - name: Install LLVM profiling tools
         if: matrix.pgo
         run: rustup component add llvm-tools
+
+      - name: Install BOLT
+        if: matrix.bolt
+        run: sudo apt-get update && sudo apt-get install -y bolt-19
 
       - name: Import macOS signing certificate
         if: runner.os == 'macOS'
@@ -163,6 +168,9 @@ jobs:
         env:
           MBX_PGO_BUILD_TOOL: ${{ matrix.cross && 'cross' || 'cargo' }}
           MBX_PGO_TARGET: ${{ matrix.target }}
+          MBX_PGO_BOLT: ${{ matrix.bolt && '1' || '' }}
+          LLVM_BOLT: llvm-bolt-19
+          MERGE_FDATA: merge-fdata-19
           CC_x86_64_unknown_linux_musl: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
           # cc-rs mirrors Rust's PGO flags into the C compiler. Apple clang's

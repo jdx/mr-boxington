@@ -115,6 +115,10 @@ run = "cargo build --release --locked -p mbx"
 description = "Build a profile-guided mbx release binary"
 run = "benchmarks/pgo.bash"
 
+[tasks."build:bolt"]
+description = "Build a PGO and BOLT optimized mbx release binary"
+run = "MBX_PGO_BOLT=1 benchmarks/pgo.bash"
+
 [tasks.perf]
 description = "Measure instruction-counted performance benchmarks"
 depends = ["perf:prepare"]

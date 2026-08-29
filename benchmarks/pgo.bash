@@ -10,6 +10,7 @@ cd "$repo_root"
 pgo_target="${MBX_PGO_TARGET:-}"
 pgo_build_tool="${MBX_PGO_BUILD_TOOL:-cargo}"
 pgo_profile="${MBX_PGO_PROFILE:-release}"
+pgo_bolt="${MBX_PGO_BOLT:-}"
 pgo_data_dir="$repo_root/target/pgo-data"
 profraw_dir="$pgo_data_dir/profraw"
 merged_profile="$pgo_data_dir/merged.profdata"
@@ -66,9 +67,27 @@ echo ">>> [3/3] merging profiles and rebuilding mbx"
 "$llvm_profdata" merge -o "$merged_profile" "$profraw_dir"
 test -s "$merged_profile"
 
+# BOLT needs the final link's relocation table so it can safely move blocks
+# and functions. The table is useful only on the GNU x86_64 BOLT release row.
+final_rustflags="${base_rustflags:+$base_rustflags }-Cprofile-use=$merged_profile -Cllvm-args=-pgo-warn-missing-function=false"
+if [ -n "$pgo_bolt" ]; then
+	final_rustflags="$final_rustflags -C link-arg=-Wl,--emit-relocs"
+fi
+
 # shellcheck disable=SC2086 # An empty target_arg must disappear.
-RUSTFLAGS="${base_rustflags:+$base_rustflags }-Cprofile-use=$merged_profile -Cllvm-args=-pgo-warn-missing-function=false" \
-	"$pgo_build_tool" build --profile "$pgo_profile" $target_arg --locked --package mbx
+if [ -n "$pgo_bolt" ]; then
+	# rust-lld rejects --strip-all together with --emit-relocs. BOLT strips the
+	# rewritten result after it has consumed the relocation table.
+	CARGO_PROFILE_RELEASE_STRIP=none RUSTFLAGS="$final_rustflags" \
+		"$pgo_build_tool" build --profile "$pgo_profile" $target_arg --locked --package mbx
+else
+	RUSTFLAGS="$final_rustflags" \
+		"$pgo_build_tool" build --profile "$pgo_profile" $target_arg --locked --package mbx
+fi
 
 "$instrumented" --version
 ls -lh "$instrumented"
+
+if [ -n "$pgo_bolt" ]; then
+	"$script_dir/bolt.bash" "$instrumented"
+fi
