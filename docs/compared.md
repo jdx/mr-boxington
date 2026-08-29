@@ -6,7 +6,7 @@
 cache, and it aims wider: it caches CUDA alongside Rust, C, and C++, and can
 distribute compilation across machines. mbx caches rustc, the C and C++ that
 cargo build scripts compile, the C and C++ of builds outside cargo through
-[`mbx exec`](/standalone-builds), and optionally native links. It spends a
+[`mbx exec`](/standalone-builds), and native links. It spends a
 scope still narrower than sccache's on problems sccache does not attempt:
 
 - **No daemon.** sccache runs a background server that builds talk to. mbx
@@ -89,9 +89,9 @@ hits — do not match. The differences are in the mechanics:
   `clang`, `clang++`) on Unix, leaving a versioned or cross toolchain to the
   build that chose it; kache covers Windows as well.
 - **Executable caching.** Both cache linked binaries on Linux and macOS. In
-  mbx it is opt-in (`MBX_CACHE_LINKS=1`) and experimental, and the key
-  includes the resolved linker, startup objects, libc, and SDK rather than
-  dep-info alone.
+  mbx the key includes the resolved linker, startup objects, libc, and SDK
+  rather than dep-info alone, so a host mbx cannot describe that precisely
+  links normally instead of sharing a binary it cannot stand behind.
 - **A store other tools embed.** The extraction from mise went both ways:
   mise now embeds mbx's cache crates, so a task run through mise and a
   direct mbx build fill and hit the same shared action store and speak the

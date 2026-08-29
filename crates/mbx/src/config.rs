@@ -132,14 +132,14 @@ pub(crate) struct RawConfig {
         choices("quips", "plain", "off")
     )]
     savings: String,
-    /// Cache natively linked test binaries and executables. Experimental:
-    /// qualify it on your own workload with MBX_VERIFY=1 before relying on it.
-    /// On macOS this also passes ld64 `-oso_prefix` so a debug-info link's
-    /// debug map stops naming this checkout, which is what lets it cache.
+    /// Cache natively linked test binaries and executables. On macOS this
+    /// also passes ld64 `-oso_prefix` so a debug-info link's debug map stops
+    /// naming this checkout, which is what lets it cache. Linux and macOS
+    /// only, and a link mbx cannot describe exactly still links normally.
     #[usage(
         key = "cache_links",
         env = "MBX_CACHE_LINKS",
-        default = false,
+        default = true,
         scope = "env"
     )]
     cache_links: bool,
@@ -470,7 +470,7 @@ impl Default for CliSettings {
             retention: RetentionSettings::default(),
             savings: SavingsStyle::default(),
             learned_incremental: true,
-            cache_links: false,
+            cache_links: true,
         }
     }
 }

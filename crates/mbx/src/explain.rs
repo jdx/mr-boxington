@@ -114,7 +114,7 @@ fn guidance(kind: &str) -> &'static str {
             "The invocation uses an `@response-file`; mbx does not model response-file contents yet."
         }
         "unsupported-crate-type" => {
-            "This linked artifact type is outside mbx's current cacheability tier. Compilations that link nothing -- what `cargo check` and clippy run -- are cached whatever their crate type. Dynamic libraries still link normally; `MBX_CACHE_LINKS=1` adds native test binaries and executables."
+            "This linked artifact type is outside mbx's current cacheability tier. Compilations that link nothing -- what `cargo check` and clippy run -- are cached whatever their crate type, and native test binaries and executables are cached where the linker can be identified. Dynamic libraries and proc macros still link normally."
         }
         "ambiguous-output-name" => {
             "This output is named like a library but is a program, so mbx cannot tell which permissions to restore it with."

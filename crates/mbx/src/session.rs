@@ -2041,10 +2041,11 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
 
 /// Whether a bypassed invocation will run a linker.
 ///
-/// Read off the raw arguments because there is no parsed invocation here: this
-/// is the path a compilation takes when the cache could not model it, and
-/// native links are exactly that path today -- they bypass by default. They
-/// are also the compilations that run a machine out of memory, so the
+/// Read off the raw arguments because there is no parsed invocation here:
+/// this is the path a compilation takes when the cache could not model it,
+/// and a link mbx cannot describe exactly -- an unidentifiable linker, a
+/// native library, a flag that would embed this checkout -- still lands here.
+/// They are also the compilations that run a machine out of memory, so the
 /// scheduler has to recognize one without the parser's help.
 ///
 /// A test harness links a program whatever its crate type says, which is why
@@ -2183,16 +2184,20 @@ pub fn cache_links_supported() -> bool {
     cfg!(any(target_os = "linux", target_os = "macos"))
 }
 
-/// Whether the shim may cache a natively linked program. Read the same way as
-/// verify mode.
+/// Whether the shim may cache a natively linked program.
+///
+/// Unset means on, which is the one place this differs from verify mode: a
+/// shim installed by `mbx setup` is driven by plain cargo, with no session to
+/// have written the variable, and reading absence as "off" there would leave
+/// the persistent wrapper on a default nobody chose. A session always states
+/// the answer explicitly, so `MBX_CACHE_LINKS=0` still turns it off for both.
 ///
 /// The platform is checked here rather than trusted from whoever set the
-/// variable: a shim installed by `mbx setup` is driven by plain cargo, with no
-/// session to have applied the gate, so the value it reads is whatever the
-/// developer exported.
+/// variable, for the same reason: the standalone shim has no session to have
+/// applied the gate.
 pub(crate) fn cache_links_requested() -> bool {
     cache_links_supported()
-        && std::env::var_os(CACHE_LINKS_ENV).is_some_and(|value| !value.is_empty() && value != "0")
+        && std::env::var_os(CACHE_LINKS_ENV).is_none_or(|value| !value.is_empty() && value != "0")
 }
 
 /// Whether the shim may make a compilation independent of its `OUT_DIR` so two
