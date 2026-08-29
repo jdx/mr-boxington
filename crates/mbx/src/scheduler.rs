@@ -492,10 +492,10 @@ fn bytes_per_permit(memory_bytes: Option<u64>, cpus: u64) -> u64 {
 /// Record what the compiler that just ran cost, for the next admission.
 ///
 /// Crates that fit inside one permit are not worth remembering -- except
-/// links, whose measurement is what retires the static floor they are
-/// otherwise charged. A compiler killed by SIGKILL -- the Linux OOM killer's
-/// signature -- is recorded *heavier* than it measured, so the retry runs
-/// with more room instead of repeating the crash.
+/// links that succeeded, whose measurement is what retires the static floor
+/// they are otherwise charged. A compiler killed by SIGKILL -- the Linux OOM
+/// killer's signature -- is recorded *heavier* than it measured, so the retry
+/// runs with more room instead of repeating the crash.
 pub(crate) fn record_compiler_memory(demand: &Demand, status: &ExitStatus) {
     let Some(pool) = pool() else {
         return;
@@ -757,6 +757,7 @@ impl Pool {
             measured,
             oom_killed(status),
             demand.links,
+            status.success(),
             self.bytes_per_permit,
         ) else {
             return;
@@ -848,13 +849,29 @@ fn scan_leases(leases: &Path) -> Result<Vec<u64>> {
 /// What the ledger should remember about one finished compilation.
 ///
 /// `None` means nothing worth writing: the compile fit comfortably inside a
-/// single permit and carried no static weight worth correcting. A link is
-/// always recorded, even light, because an unmeasured link is charged a
-/// deliberately heavy floor and the measurement is what retires it. An OOM
-/// kill is recorded past what was measured -- the measurement is where the
-/// killer stopped it, not what it needed -- and past one permit, so the
-/// retry provably weighs more.
-fn ledger_peak(measured: u64, oom_killed: bool, links: bool, bytes_per_permit: u64) -> Option<u64> {
+/// single permit and carried no static weight worth correcting. An OOM kill
+/// is recorded past what was measured -- the measurement is where the killer
+/// stopped it, not what it needed -- and past one permit, so the retry
+/// provably weighs more.
+///
+/// The link case is the reason this takes an outcome at all, and the rule is
+/// deliberately asymmetric: a *successful* link is recorded whatever it
+/// measured, because that is a true reading of what linking that crate costs
+/// and it is what retires the static floor. A failed one is not. Whether an
+/// invocation links is read off its crate type, so a binary that dies in type
+/// checking never reached the linker at all -- and recording its small peak
+/// would retire the floor using a number from a compilation that never did
+/// the expensive thing, machine-wide, for every later build sharing the
+/// cache. A failure is therefore held to the ordinary bar, where it can still
+/// teach the ledger that something is *heavy* (a link that died reaching for
+/// memory) but can never argue that anything is light.
+fn ledger_peak(
+    measured: u64,
+    oom_killed: bool,
+    links: bool,
+    succeeded: bool,
+    bytes_per_permit: u64,
+) -> Option<u64> {
     if oom_killed {
         return Some(
             measured
@@ -862,7 +879,7 @@ fn ledger_peak(measured: u64, oom_killed: bool, links: bool, bytes_per_permit: u
                 .max(bytes_per_permit.saturating_add(1)),
         );
     }
-    if links {
+    if links && succeeded {
         return Some(measured);
     }
     (measured > bytes_per_permit).then_some(measured)

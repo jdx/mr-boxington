@@ -345,11 +345,12 @@ fn the_ledger_only_remembers_what_matters_and_never_shrinks_a_peak() {
     let pool = pool_at(directory.path(), 4, 1000);
 
     // Under one permit's worth of memory: not worth a ledger entry.
-    assert_eq!(ledger_peak(900, false, false, 1000), None);
+    assert_eq!(ledger_peak(900, false, false, true, 1000), None);
     // Over it: recorded as measured.
-    assert_eq!(ledger_peak(1500, false, false, 1000), Some(1500));
-    // A link is recorded even light, because that is what retires its floor.
-    assert_eq!(ledger_peak(900, false, true, 1000), Some(900));
+    assert_eq!(ledger_peak(1500, false, false, true, 1000), Some(1500));
+    // A link that succeeded is recorded even light, because that is what
+    // retires its floor.
+    assert_eq!(ledger_peak(900, false, true, true, 1000), Some(900));
 
     pool.record_peak("crate", 1500).unwrap();
     pool.record_peak("crate", 1200).unwrap();
@@ -369,11 +370,30 @@ fn the_ledger_only_remembers_what_matters_and_never_shrinks_a_peak() {
 #[test]
 fn an_oom_kill_escalates_past_what_was_measured() {
     // The killer stopped it at 1500; the record says it needs more than that.
-    assert_eq!(ledger_peak(1500, true, false, 1000), Some(3000));
+    assert_eq!(ledger_peak(1500, true, false, false, 1000), Some(3000));
     // Even a tiny measurement escalates past one permit, so the weight rises.
-    assert_eq!(ledger_peak(10, true, false, 1000), Some(1001));
+    assert_eq!(ledger_peak(10, true, false, false, 1000), Some(1001));
     // A killed link escalates too, rather than recording what it reached.
-    assert_eq!(ledger_peak(1500, true, true, 1000), Some(3000));
+    assert_eq!(ledger_peak(1500, true, true, false, 1000), Some(3000));
+}
+
+#[test]
+fn a_link_that_never_reached_the_linker_cannot_cheapen_the_ones_that_do() {
+    // Whether an invocation links is its crate type, not its outcome: a
+    // binary that dies in type checking is a "link" that never ran one. Its
+    // small peak must not retire the floor -- machine-wide, for every later
+    // build sharing the cache -- on the strength of a compilation that never
+    // did the expensive thing.
+    assert_eq!(
+        ledger_peak(900, false, true, false, 1000),
+        None,
+        "a failed link records nothing it could later be admitted on"
+    );
+    // The failure can still say something is heavy, which is the direction
+    // that keeps a link that died reaching for memory from repeating itself.
+    assert_eq!(ledger_peak(4000, false, true, false, 1000), Some(4000));
+    // And the successful link of the same shape still retires its floor.
+    assert_eq!(ledger_peak(900, false, true, true, 1000), Some(900));
 }
 
 #[test]
