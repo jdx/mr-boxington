@@ -24,5 +24,9 @@ repository = "https://github.com/jdx/mr-boxington"
 readme = "README.md"
 
 [profile.release]
-lto = "thin"
+# mbx pulls cache, transport, TLS, and TUI code into one binary. Whole-program
+# optimization removes enough otherwise-retained code and relocations to make
+# every invocation cheaper, including the rustc shim and CLI startup paths.
+lto = "fat"
+codegen-units = 1
 strip = "symbols"
