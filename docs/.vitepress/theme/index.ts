@@ -6,7 +6,7 @@ import { data as starsData } from "../stars.data";
 import BenchmarkResults from "./BenchmarkResults.vue";
 import EndevFooter from "./EndevFooter.vue";
 import EndevSponsors from "./EndevSponsors.vue";
-import HomeConcurrency from "./HomeConcurrency.vue";
+import HomeShowcase from "./HomeShowcase.vue";
 import HomeTerminal from "./HomeTerminal.vue";
 import { initBanner } from "./banner";
 import "./custom.css";
@@ -15,14 +15,8 @@ export default {
   extends: DefaultTheme,
   Layout() {
     return h(DefaultTheme.Layout, null, {
-      "home-hero-info-after": () =>
-        h(
-          "p",
-          { class: "MbxHeroConcurrency" },
-          "Run multiple Cargo builds at the same time.",
-        ),
       "home-hero-after": () => h(HomeTerminal),
-      "home-features-after": () => h(HomeConcurrency),
+      "home-features-after": () => h(HomeShowcase),
       "layout-bottom": () => [h(EndevSponsors), h(EndevFooter)],
     });
   },

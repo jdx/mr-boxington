@@ -6,8 +6,7 @@
 
 <p align="center">
   <strong>fix <code>target/</code></strong><br>
-  Put mbx in front of any cargo command. One cache warms every worktree and CI run, and prunes itself to a size budget.<br>
-  Run multiple Cargo builds at the same time.
+  Put mbx in front of any cargo command. Every build on the machine shares one self-pruning cache, and you can run multiple Cargo builds in parallel.
 </p>
 
 <p align="center">

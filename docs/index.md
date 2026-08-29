@@ -4,7 +4,7 @@ layout: home
 hero:
   name: "mr boxington"
   text: "fix <code>target/</code>"
-  tagline: Put mbx in front of any cargo command. One cache warms every worktree and CI run, and prunes itself to a size budget.
+  tagline: Put mbx in front of any cargo command. Every build on the machine shares one self-pruning cache, and you can run multiple Cargo builds in parallel.
   image:
     src: /logo.svg
     alt: Mr Boxington, a friendly cache box
@@ -40,22 +40,6 @@ features:
     details: Build in one checkout and every other worktree starts warm.
     link: /cache-results
   - icon:
-      src: /features/ci.svg
-      alt: A cloud with upload and download arrows
-      width: 64
-      height: 64
-    title: Warm CI runners
-    details: Share the same cache with CI through a remote cache or GitHub Actions.
-    link: /github-action
-  - icon:
-      src: /features/concurrency.svg
-      alt: Parallel build lanes joining one shared pool
-      width: 64
-      height: 64
-    title: Run multiple Cargo builds
-    details: Run independent CI checks at the same time. mbx gives their compilers one shared CPU and memory budget.
-    link: /getting-started#run-multiple-cargo-builds-at-the-same-time
-  - icon:
       src: /features/benchmarks.svg
       alt: A stopwatch with a rising performance line
       width: 64
@@ -63,12 +47,4 @@ features:
     title: Prove the speedup
     details: Reproducible CI benchmarks compare caching and concurrency strategies, with validity gates around every published result.
     link: /benchmarks
-  - icon:
-      src: /features/prune.svg
-      alt: A broom sweeping
-      width: 64
-      height: 64
-    title: Prune automatically
-    details: Stale or oversized target directories clean themselves up.
-    link: /managed-targets
 ---
