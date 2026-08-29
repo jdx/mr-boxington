@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.7.3](https://github.com/jdx/mr-boxington/compare/v0.7.2...v0.7.3) - 2026-08-29
+## [1.0.0](https://github.com/jdx/mr-boxington/compare/v0.7.2...v1.0.0) - 2026-08-29
 
 ### Other
 
