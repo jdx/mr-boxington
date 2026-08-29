@@ -114,16 +114,20 @@ body::after {
     radial-gradient(52rem 32rem at 0% 18%, rgb(var(--mbx-teal-rgb) / 0.12), transparent 60%);
 }
 
-.VPHero .name,
-.VPHero .text {
+.VPHero .name {
   font-family: var(--mbx-display);
   letter-spacing: -0.03em;
+}
+
+.VPHero .text {
+  font-family: var(--vp-font-family-mono);
+  letter-spacing: normal;
 }
 
 .VPHero .text code {
   background: none;
   color: inherit;
-  font-family: var(--vp-font-family-mono);
+  font-family: inherit;
   font-size: inherit;
   font-weight: inherit;
   padding: 0;
