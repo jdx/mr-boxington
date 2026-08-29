@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.9.0...mbx-cache-core-v0.9.1) - 2026-08-29
+
+### Added
+
+- *(release)* add GNU Linux artifacts ([#181](https://github.com/jdx/mr-boxington/pull/181))
+
 ## [0.9.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.8.0...mbx-cache-core-v0.9.0) - 2026-08-29
 
 ### Fixed
