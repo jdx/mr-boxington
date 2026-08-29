@@ -262,17 +262,52 @@ fn cgroup_memory_limit() -> Option<u64> {
         .or_else(|| read_cgroup_value("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
 }
 
-/// Memory the cgroup is already using, where a cgroup accounts for it.
+/// Memory the cgroup is holding that the kernel would not simply reclaim.
+///
+/// Not `memory.current`, which counts the page cache. A build fills that
+/// immediately -- every source it reads and every artifact it writes lands
+/// there -- and nearly all of it is evictable, so a container that had merely
+/// compiled something would look as though it were out of memory. Subtracting
+/// the inactive file pages leaves the working set, which is the same figure
+/// Kubernetes reports for a container and the one worth comparing a
+/// compilation's appetite against.
 #[cfg(target_os = "linux")]
 fn cgroup_memory_usage() -> Option<u64> {
-    read_cgroup_value("/sys/fs/cgroup/memory.current")
-        .or_else(|| read_cgroup_value("/sys/fs/cgroup/memory/memory.usage_in_bytes"))
+    let current = read_cgroup_amount("/sys/fs/cgroup/memory.current")
+        .or_else(|| read_cgroup_amount("/sys/fs/cgroup/memory/memory.usage_in_bytes"))?;
+    // Absent or unreadable stats leave the page cache counted, which errs
+    // toward deferring a compilation rather than toward an OOM kill.
+    let reclaimable = read_cgroup_stat("/sys/fs/cgroup/memory.stat", "inactive_file")
+        .or_else(|| read_cgroup_stat("/sys/fs/cgroup/memory/memory.stat", "total_inactive_file"))
+        .unwrap_or(0);
+    Some(current.saturating_sub(reclaimable))
 }
 
-/// One cgroup number, or `None` for absent, unparseable, or "no limit".
+/// One cgroup limit, or `None` for absent, unparseable, or "no limit".
 #[cfg(target_os = "linux")]
 fn read_cgroup_value(path: &str) -> Option<u64> {
     read_cgroup_text(&std::fs::read_to_string(path).ok()?)
+}
+
+/// One plain cgroup number, where zero is a reading rather than an absence.
+#[cfg(target_os = "linux")]
+fn read_cgroup_amount(path: &str) -> Option<u64> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// One field of a cgroup `memory.stat`, which is `name value` per line.
+#[cfg(target_os = "linux")]
+fn read_cgroup_stat(path: &str, field: &str) -> Option<u64> {
+    parse_cgroup_stat(&std::fs::read_to_string(path).ok()?, field)
+}
+
+/// The parsing half, separated so it can be tested without a cgroup mount.
+#[cfg(any(target_os = "linux", test))]
+fn parse_cgroup_stat(contents: &str, field: &str) -> Option<u64> {
+    contents.lines().find_map(|line| {
+        let (name, value) = line.split_once(' ')?;
+        (name == field).then(|| value.trim().parse().ok())?
+    })
 }
 
 /// The parsing half, separated so it can be tested without a cgroup mount.
@@ -434,6 +469,19 @@ pub fn random_string(length: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cgroup_usage_discounts_the_page_cache() {
+        // The shape of a real `memory.stat`: the field wanted is neither
+        // first nor last, and a prefix of its name must not match it.
+        let stat = "anon 1000\nfile 8000\nkernel 12\ninactive_file 7000\nslab 40\n";
+        assert_eq!(parse_cgroup_stat(stat, "inactive_file"), Some(7000));
+        assert_eq!(parse_cgroup_stat(stat, "anon"), Some(1000));
+        // `file` must not be answered by `inactive_file`.
+        assert_eq!(parse_cgroup_stat(stat, "file"), Some(8000));
+        assert_eq!(parse_cgroup_stat(stat, "absent"), None);
+        assert_eq!(parse_cgroup_stat("malformed\n", "anon"), None);
+    }
 
     #[test]
     fn cgroup_limits_are_read_and_no_limit_is_recognized() {
