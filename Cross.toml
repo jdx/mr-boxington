@@ -1,0 +1,8 @@
+# Pin the GNU release images to an old userspace rather than inheriting the
+# runner's glibc floor. These are the same 0.2.5 images mise uses for its GNU
+# release artifacts and remain compatible with glibc 2.23 and newer.
+[target.x86_64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:0.2.5"
+
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5"

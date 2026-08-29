@@ -58,10 +58,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            runner: namespace-profile-endev-linux-amd64
+            bin: mbx
+            cross: true
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             runner: namespace-profile-endev-linux-amd64
             bin: mbx
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            runner: namespace-profile-endev-linux-amd64
+            bin: mbx
+            cross: true
           - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
             runner: namespace-profile-endev-linux-arm64
@@ -88,6 +98,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - uses: taiki-e/install-action@51cd0b8c0499559d9a4d75c0f5c67bec3a894ec8 # v2
+        if: matrix.cross
+        with:
+          tool: cross
+
       - name: Import macOS signing certificate
         if: runner.os == 'macOS'
         uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466 # v7
@@ -113,6 +128,7 @@ jobs:
           sudo apt-get install -y musl-tools
 
       - name: Build
+        if: ${{ !matrix.cross }}
         shell: bash
         # rustls brings in aws-lc-sys, which compiles C: cc-rs looks for a
         # target-prefixed compiler, and Debian's musl-tools only ships
@@ -125,6 +141,13 @@ jobs:
           CC_x86_64_unknown_linux_musl: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
         run: ./target/mbx-bootstrap/mbx${{ runner.os == 'Windows' && '.exe' || '' }} build --release --locked --package mbx --target ${{ matrix.target }}
+
+      # Cross's pinned images give GNU artifacts a deliberate glibc 2.23
+      # baseline. Building them directly on the rolling runner would silently
+      # raise that floor whenever the runner image changes.
+      - name: Build GNU release
+        if: matrix.cross
+        run: cross build --release --locked --package mbx --target ${{ matrix.target }}
 
       - name: Sign macOS binary
         if: runner.os == 'macOS'
@@ -209,8 +232,15 @@ jobs:
           spctl --assess --type exec -vv "$BINARY" || true
 
       - name: Check the binary runs
+        if: ${{ !matrix.cross }}
         shell: bash
         run: ./target/${{ matrix.target }}/release/${{ matrix.bin }} --version
+
+      # The ARM64 GNU artifact is cross-compiled on the AMD64 release runner;
+      # let cross provide its matching execution environment for the smoke test.
+      - name: Check the GNU binary runs
+        if: matrix.cross
+        run: cross run --release --locked --package mbx --target ${{ matrix.target }} -- --version
 
       # The archive is flat and holds only the binary, so extracting it
       # straight into a directory on PATH is the whole install. Names carry no

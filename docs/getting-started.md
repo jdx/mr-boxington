@@ -15,7 +15,7 @@ mise use -g mr-boxington
 
 ```sh
 mkdir -p ~/.local/bin
-archive=mbx-x86_64-unknown-linux-musl.tar.gz
+archive=mbx-x86_64-unknown-linux-gnu.tar.gz
 release=https://github.com/jdx/mr-boxington/releases/latest/download
 curl -fsSLO "$release/$archive"
 curl -fsSLO "$release/SHA256SUMS"
@@ -27,7 +27,7 @@ tar -xzf "$archive" -C ~/.local/bin
 
 ```sh
 mkdir -p ~/.local/bin
-archive=mbx-aarch64-unknown-linux-musl.tar.gz
+archive=mbx-aarch64-unknown-linux-gnu.tar.gz
 release=https://github.com/jdx/mr-boxington/releases/latest/download
 curl -fsSLO "$release/$archive"
 curl -fsSLO "$release/SHA256SUMS"
@@ -83,6 +83,8 @@ Add `%LOCALAPPDATA%\Programs\mbx` to `PATH`.
 
 Every release publishes its archives and `SHA256SUMS` on
 [GitHub Releases](https://github.com/jdx/mr-boxington/releases).
+Linux also has `-musl` archives for a static binary that does not depend on a
+host glibc.
 
 ### Cargo
 
@@ -94,7 +96,7 @@ cargo install mbx
 
 Release binaries cover:
 
-- Linux x86-64 and ARM64 (static musl builds)
+- Linux x86-64 and ARM64 (GNU and static musl builds)
 - macOS on Apple Silicon
 - Windows x86-64 and ARM64
 

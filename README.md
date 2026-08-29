@@ -67,7 +67,7 @@ Or install the latest Linux x86-64 release archive:
 
 ```sh
 mkdir -p ~/.local/bin
-archive=mbx-x86_64-unknown-linux-musl.tar.gz
+archive=mbx-x86_64-unknown-linux-gnu.tar.gz
 release=https://github.com/jdx/mr-boxington/releases/latest/download
 curl -fsSLO "$release/$archive"
 curl -fsSLO "$release/SHA256SUMS"
@@ -75,8 +75,9 @@ grep "  $archive$" SHA256SUMS | sha256sum --check --strict -
 tar -xzf "$archive" -C ~/.local/bin
 ```
 
-Release archives also cover Linux ARM64, Apple Silicon, and Windows x86-64 and
-ARM64.
+Use the corresponding `-musl` archive for a static Linux binary. Release
+archives cover both libc variants on x86-64 and ARM64, plus Apple Silicon and
+Windows x86-64 and ARM64.
 Every release includes `SHA256SUMS`.
 
 [See all installation options →](https://mr-boxington.jdx.dev/getting-started)
