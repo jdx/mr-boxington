@@ -497,6 +497,9 @@ fn recognizes_the_bypassed_invocations_that_run_a_linker() {
         vec!["--crate-type=staticlib"],
         // A test harness links a program whatever its crate type says.
         vec!["--test", "--crate-type=lib"],
+        // The emit that actually links, spelled both ways cargo spells it.
+        vec!["--crate-type=bin", "--emit=dep-info,link"],
+        vec!["--test", "--emit", "link=/tmp/out"],
     ] {
         let arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
         assert!(links_natively(&arguments), "{arguments:?} links");
@@ -510,6 +513,11 @@ fn recognizes_the_bypassed_invocations_that_run_a_linker() {
         // The flag's own name is not its value: a crate called "bin" is not
         // a program.
         vec!["--crate-name", "bin"],
+        // What `cargo check` and `clippy --all-targets` run: the same binary
+        // and test targets, compiled to metadata, with no linker anywhere.
+        vec!["--crate-type=bin", "--emit=metadata"],
+        vec!["--test", "--emit", "dep-info,metadata"],
+        vec!["--crate-type=cdylib", "--emit=dep-info,metadata"],
     ] {
         let arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
         assert!(!links_natively(&arguments), "{arguments:?} does not link");

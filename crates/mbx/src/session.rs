@@ -1934,7 +1934,6 @@ pub fn run_rustc_shim() -> ExitCode {
 
 fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode {
     let crate_name = crate_name_argument(&arguments);
-    let started = Instant::now();
     // A bypassed compilation is still a real compiler process the machine has
     // to pay for. Probe invocations pass through unscheduled: cargo runs them
     // to learn about the compiler before it plans anything, so making one wait
@@ -1954,6 +1953,11 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
     let permit = demand
         .as_ref()
         .and_then(|demand| crate::scheduler::pool().and_then(|pool| pool.admit(demand)));
+    // Started after admission, matching the cached paths: waiting for the
+    // machine is not time this compilation cost, and reporting it as compiler
+    // time would make the jobs that wait longest -- bypassed links -- look
+    // like the slowest crates in the build.
+    let started = Instant::now();
     let mut command = if let Some(wrapper) = std::env::var_os(PREVIOUS_RUSTC_WRAPPER_ENV) {
         let mut command = Command::new(wrapper);
         command.arg(&rustc);
@@ -2044,15 +2048,22 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
 /// scheduler has to recognize one without the parser's help.
 ///
 /// A test harness links a program whatever its crate type says, which is why
-/// `--test` counts on its own.
+/// `--test` counts on its own -- but only once the emit says a linker runs at
+/// all. `cargo check` and `clippy --all-targets` compile those very same
+/// binary and test targets with `--emit=metadata`, and charging a check the
+/// link weight would make the cheapest stage the heaviest thing queued.
 fn links_natively(arguments: &[OsString]) -> bool {
+    let mut produces_program = false;
+    // No `--emit` at all is rustc's default, which is `link`. Cargo always
+    // passes one; something driving rustc by hand may not.
+    let mut emits_link = true;
     let mut arguments = arguments.iter();
     while let Some(argument) = arguments.next() {
         let Some(argument) = argument.to_str() else {
             continue;
         };
         if argument == "--test" {
-            return true;
+            produces_program = true;
         }
         let kinds = if argument == "--crate-type" {
             arguments.next().and_then(|kinds| kinds.to_str())
@@ -2068,10 +2079,21 @@ fn links_natively(arguments: &[OsString]) -> bool {
                 )
             })
         }) {
-            return true;
+            produces_program = true;
+        }
+        let emits = if argument == "--emit" {
+            arguments.next().and_then(|emits| emits.to_str())
+        } else {
+            argument.strip_prefix("--emit=")
+        };
+        if let Some(emits) = emits {
+            // Each kind may carry a path of its own, as `link=/some/where`.
+            emits_link = emits
+                .split(',')
+                .any(|emit| emit.split('=').next() == Some("link"));
         }
     }
-    false
+    produces_program && emits_link
 }
 
 fn crate_name_argument(arguments: &[OsString]) -> Option<String> {

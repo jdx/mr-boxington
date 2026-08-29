@@ -81,7 +81,7 @@ fn a_dead_holders_lease_is_reclaimed() {
 }
 
 #[test]
-fn an_empty_pool_admits_anything() {
+fn a_demand_heavier_than_the_pool_runs_alone_rather_than_never() {
     let directory = tempfile::tempdir().unwrap();
     let pool = pool_at(directory.path(), 2, 0);
 
@@ -90,9 +90,57 @@ fn an_empty_pool_admits_anything() {
     let mut short = pool_at(directory.path(), 2, 0);
     short.available_memory = || Some(0);
     let permit = short.try_admit(10, Some(u64::MAX)).unwrap();
-    assert!(permit.is_some(), "an empty pool admits anything");
+    assert!(permit.is_some(), "an oversized demand is admitted alone");
     // And while it runs, nothing else fits.
     assert!(pool.try_admit(1, None).unwrap().is_none());
+}
+
+#[test]
+fn low_priority_does_not_take_an_idle_pool_out_from_under_a_waiter() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut low = Pool::new(directory.path().to_path_buf(), 4, 0, SchedulerPriority::Low);
+    low.available_memory = || None;
+    std::fs::write(directory.path().join(PRIORITY_WAIT_STAMP), b"").unwrap();
+
+    // An idle pool is the ordinary state between two compilations, so it is
+    // no licence to take the whole machine: the reserve still applies.
+    assert!(
+        low.try_admit(4, None).unwrap().is_none(),
+        "the reserve holds even when nothing is running"
+    );
+    assert!(
+        low.try_admit(3, None).unwrap().is_some(),
+        "what fits beside the reserve is still admitted"
+    );
+}
+
+#[test]
+fn the_reserve_never_swallows_the_whole_pool() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join(PRIORITY_WAIT_STAMP), b"").unwrap();
+
+    // A quarter of one permit rounds up to one, which would leave a
+    // single-permit machine reserving everything -- and then the only way a
+    // low-priority build could ever run would be the oversized-demand escape,
+    // which hands it the whole machine at once. Yielding must not invert.
+    for capacity in 1..=8 {
+        let mut low = Pool::new(
+            directory.path().to_path_buf(),
+            capacity,
+            0,
+            SchedulerPriority::Low,
+        );
+        low.available_memory = || None;
+        assert!(
+            low.reserved() < capacity,
+            "capacity {capacity} reserved all of itself"
+        );
+        let permit = low.try_admit(1, None).unwrap();
+        assert!(
+            permit.is_some(),
+            "low priority makes progress at capacity {capacity}"
+        );
+    }
 }
 
 #[test]

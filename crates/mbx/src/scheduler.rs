@@ -365,16 +365,22 @@ impl Pool {
         let mut registrar = fslock::LockFile::open(&registrar_path)?;
         registrar.lock()?;
         let live = scan_leases(&leases)?;
-        // An empty pool admits anything: a crate heavier than the whole
-        // machine still has to compile, and it compiles alone.
-        if live.is_empty() {
+        let capacity = self.capacity - self.reserved();
+        let used: u64 = live.iter().sum();
+        // A demand heavier than the pool itself would never fit, so it runs
+        // alone rather than never. Conditioned on the demand rather than on
+        // the pool merely being empty: an idle pool is the normal state
+        // between two compilations, and granting unconditionally there would
+        // let a low-priority build take the whole machine in exactly the gap
+        // the reserve exists to hold open for somebody else.
+        //
+        // Measured against the whole pool rather than the share left after
+        // that reserve, for the same reason: a demand that would fit if
+        // nobody were waiting has somewhere to fit later, and waiting for it
+        // is what yielding means.
+        if used == 0 && weight > self.capacity {
             return self.grant(&leases, weight).map(Some);
         }
-        let mut capacity = self.capacity;
-        if self.priority == SchedulerPriority::Low && self.priority_wait_is_fresh() {
-            capacity = capacity.saturating_sub((self.capacity / 4).max(1));
-        }
-        let used: u64 = live.iter().sum();
         if used.saturating_add(weight) > capacity {
             return Ok(None);
         }
@@ -414,6 +420,22 @@ impl Pool {
             lock: Some(lock),
             path,
         })
+    }
+
+    /// Permits this build holds back for somebody who is waiting on them.
+    ///
+    /// Never the whole pool. A reserve equal to the capacity -- which a
+    /// single-permit machine would otherwise get -- stops a low-priority
+    /// build admitting through the ordinary path at all, leaving the
+    /// oversized-demand escape as the only way it ever runs, and that one
+    /// hands over the entire machine at once. Yielding a quarter must not
+    /// become yielding everything and then taking everything.
+    fn reserved(&self) -> u64 {
+        if self.priority == SchedulerPriority::Low && self.priority_wait_is_fresh() {
+            (self.capacity / 4).max(1).min(self.capacity - 1)
+        } else {
+            0
+        }
     }
 
     fn priority_wait_is_fresh(&self) -> bool {
@@ -525,6 +547,11 @@ fn ledger_peak(measured: u64, oom_killed: bool, bytes_per_permit: u64) -> Option
 /// Exact because a shim process runs exactly one compiler: `RUSAGE_CHILDREN`
 /// reports the largest `ru_maxrss` among reaped children, and the identity
 /// probes that also ran are orders of magnitude smaller.
+///
+/// It reaches the linker, which matters here more than anything else it
+/// measures. A link is a grandchild -- rustc runs `cc`, which runs `ld` --
+/// and the counter still covers it, because a process's own maximum is
+/// folded into its parent's children total when it is reaped, all the way up.
 #[cfg(unix)]
 fn child_peak_rss_bytes() -> Option<u64> {
     // SAFETY: `getrusage` only writes into the zeroed struct it is given.
@@ -551,6 +578,14 @@ fn child_peak_rss_bytes() -> Option<u64> {
 }
 
 /// Whether the compiler died the way the Linux OOM killer kills.
+///
+/// Only what rustc itself reports, which is the limit of this signal: a
+/// linker killed as a grandchild leaves rustc to exit non-zero with a
+/// "linking failed" message, and that is indistinguishable here from an
+/// ordinary compile error. What saves the case is that the peak is recorded
+/// whether or not the compilation succeeded, so a link that died reaching
+/// for memory still teaches the ledger roughly what it was holding; it just
+/// does not get the doubling on top.
 #[cfg(unix)]
 fn oom_killed(status: &ExitStatus) -> bool {
     use std::os::unix::process::ExitStatusExt as _;
