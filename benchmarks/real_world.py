@@ -84,25 +84,29 @@ class Skipped(Exception):
     """A cell could not run for a reason that is not a benchmark failure."""
 
 
-def tool_version(command: str) -> str | None:
+def tool_version(command: str, toolchain: str | None = None) -> str | None:
+    """What one tool calls itself, under the toolchain the builds used.
+
+    `cargo` and `rustc` are rustup shims, so asking them without pinning
+    reports the machine's default -- which is exactly the version the timed
+    builds did not use.
+    """
     executable = shutil.which(command)
     if executable is None:
         return None
+    environment = os.environ.copy()
+    if toolchain is not None:
+        environment["RUSTUP_TOOLCHAIN"] = toolchain
     for flag in ("--version", "-V"):
         try:
-            return subprocess.check_output([executable, flag], text=True).strip().splitlines()[0]
+            return (
+                subprocess.check_output([executable, flag], text=True, env=environment)
+                .strip()
+                .splitlines()[0]
+            )
         except (subprocess.CalledProcessError, OSError):
             continue
     return None
-
-
-def resolved_rustc(toolchain: str) -> str:
-    """What `rustc -V` reports under one rustup toolchain name."""
-    return subprocess.check_output(
-        ["rustc", "-V"],
-        text=True,
-        env={**os.environ, "RUSTUP_TOOLCHAIN": toolchain},
-    ).strip()
 
 
 def git(*args: str | Path, cwd: Path | None = None) -> None:
@@ -393,7 +397,9 @@ def run_scenario(
                 alternate = os.environ.get("MBX_BENCH_ALTERNATE_TOOLCHAIN")
                 if not alternate:
                     raise Skipped("set MBX_BENCH_ALTERNATE_TOOLCHAIN to a second installed Rust")
-                if resolved_rustc(alternate) == resolved_rustc(str(subject["toolchain"])):
+                if tool_version("rustc", alternate) == tool_version(
+                    "rustc", str(subject["toolchain"])
+                ):
                     raise Skipped(
                         f"MBX_BENCH_ALTERNATE_TOOLCHAIN ({alternate}) resolves to the "
                         f"pinned {subject['toolchain']}, so nothing would change"
@@ -465,10 +471,22 @@ def validate(scenarios: list[dict[str, object]]) -> list[str]:
 
     toolchain = by_name.get("toolchain")
     if toolchain:
-        for cell in toolchain["results"]:  # type: ignore[index]
-            stats = cell.get("stats")
-            if not isinstance(stats, dict):
-                continue
+        # A skipped guard is not a passed guard. The scenario was asked for, so
+        # a run that could not perform it must not publish as though the
+        # compiler-invalidation claim had been checked.
+        measured = [
+            cell
+            for cell in toolchain["results"]  # type: ignore[index]
+            if cell["tool"] == "mbx" and isinstance(cell.get("stats"), dict)
+        ]
+        if not measured:
+            failures.append(
+                "toolchain: the compiler-change guard did not run, so nothing "
+                "checked that a new rustc invalidates the cache"
+            )
+        for cell in measured:
+            stats = cell["stats"]
+            assert isinstance(stats, dict)
             predictions = int(stats.get("predictions_loaded", 0))
             if predictions <= 0:
                 failures.append(
@@ -614,8 +632,8 @@ def main() -> int:
                 if mbx
                 else None
             ),
-            "cargo": tool_version("cargo"),
-            "rustc": tool_version("rustc"),
+            "cargo": tool_version("cargo", str(subject["toolchain"])),
+            "rustc": tool_version("rustc", str(subject["toolchain"])),
             "kache": tool_version("kache"),
         },
         "passed": not failures,

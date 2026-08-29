@@ -76,7 +76,8 @@ because its numbers still render. The run fails, and nothing publishes, unless:
   files — a fast build that restored nothing was fast for some other reason;
 - each warm build beat its own cold build;
 - the toolchain-change build loaded predictions and then looked up almost
-  none of them.
+  none of them — and that it ran at all, because a guard that was skipped is
+  not a guard that passed.
 
 A run that fails these is not rendered here at all — the page shows its empty
 state rather than numbers it cannot stand behind.
@@ -90,7 +91,9 @@ mise run bench
 That builds mbx, clones the pinned subject, and runs the cold, warm, and
 next-commit scenarios. kache is included automatically when it is on `PATH`
 and skipped with a note when it is not. `mise run bench:refresh` is what CI
-runs: every scenario, writing `benchmarks/results.json`.
+runs: every scenario, writing `benchmarks/results.json`. It also needs
+`MBX_BENCH_ALTERNATE_TOOLCHAIN` set to a second installed Rust, since that is
+what the compiler-change guard switches to.
 
 The numbers on this page are refreshed by the
 [bench-refresh workflow](https://github.com/jdx/mr-boxington/actions/workflows/bench-refresh.yml),

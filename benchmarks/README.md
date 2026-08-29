@@ -41,6 +41,9 @@ nothing or were no faster than cold, because those numbers would still render.
 
 `mise run bench` runs the everyday subset; `mise run bench:refresh` runs
 everything and rewrites `results.json`, which the documentation site reads.
+The refresh needs `MBX_BENCH_ALTERNATE_TOOLCHAIN` set to a second installed
+Rust, and fails without it: a skipped guard is not a passed guard, and a run
+that could not check compiler invalidation must not publish as though it had.
 kache is used when it is on `PATH` and skipped with a note otherwise. The
 [bench-refresh workflow](../.github/workflows/bench-refresh.yml) runs it
 weekly, only when the published numbers predate the mbx on `main`, and opens a
