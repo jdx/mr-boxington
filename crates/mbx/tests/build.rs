@@ -190,6 +190,7 @@ fn build_with(
         .env_remove("MBX_INCREMENTAL")
         .env_remove("CARGO_INCREMENTAL")
         .env_remove("CI")
+        .env_remove("MBX_RELEASE")
         // Same reason: a test asserting the default cross-checkout behaviour
         // must not read an answer out of the developer's environment.
         .env_remove("MBX_SHARE_OUT_DIR")
@@ -777,6 +778,34 @@ fn a_second_checkout_starts_warm() {
     assert!(
         count(&warm, "hits") > 0,
         "a checkout at another path should reuse the first build: {warm}"
+    );
+}
+
+#[test]
+fn a_release_marker_does_not_disable_the_cache() {
+    let store = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(first.path());
+    write_project(second.path());
+
+    build_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+        &[("MBX_RELEASE", "1")],
+    );
+    let (warm, _) = build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+        &[("MBX_RELEASE", "1")],
+    );
+
+    assert!(
+        count(&warm, "hits") > 0,
+        "a release-marked build should still reuse cached output: {warm}"
     );
 }
 

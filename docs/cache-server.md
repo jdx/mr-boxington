@@ -116,7 +116,7 @@ workflow identity should write. Symmetric JWT algorithms are never accepted.
 On the client side, mbx acquires the GitHub Actions job token itself: set
 `MBX_REMOTE_OIDC_AUDIENCE`, or use
 [`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action) with
-`backend: server` as shown in [GitHub Actions](/github-actions#cache-server).
+`backend: server` as shown in [GitHub Action](/github-action#cache-server).
 
 ## Operations
 

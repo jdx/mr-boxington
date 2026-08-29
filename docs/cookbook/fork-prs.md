@@ -56,7 +56,7 @@ jobs:
 
 - **The backend expression** treats pushes and same-repository pull requests
   as trusted — both come from people with push access — and everything else
-  as a fork. Fork runs get the [GitHub Actions cache backend](/github-actions),
+  as a fork. Fork runs get the [GitHub Actions cache backend](/github-action),
   which restores without credentials and never lets a pull request save.
 - **`id-token: write` is safe to declare at the workflow level.** GitHub
   refuses to issue OIDC tokens to fork-triggered runs regardless of the

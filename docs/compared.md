@@ -115,7 +115,7 @@ mbx restores exactly the actions a build needs from a store it prunes itself.
 [`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action) uses
 GitHub Actions cache as the transport for that store, so it composes the
 per-action granularity with the platform cache you already have. See
-[GitHub Actions](/github-actions).
+[GitHub Actions](/github-action).
 
 ## Cargo's incremental compilation
 

@@ -16,8 +16,8 @@ hero:
       text: How it works
       link: /how-it-works
     - theme: alt
-      text: GitHub Actions
-      link: /github-actions
+      text: GitHub Action
+      link: /github-action
 
 features:
   - icon:
@@ -43,7 +43,7 @@ features:
       height: 64
     title: Warm CI runners
     details: Share the same cache with CI through a remote cache or GitHub Actions.
-    link: /github-actions
+    link: /github-action
   - icon:
       src: /features/prune.svg
       alt: A broom sweeping

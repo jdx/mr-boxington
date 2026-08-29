@@ -541,12 +541,6 @@ fn action_remote_cache(config: &Config, store: &Path) -> Result<Option<AgentRemo
     let Some(client) = crate::remote::remote_client(config)? else {
         return Ok(None);
     };
-    // Release builds publish artifacts that must not depend on a cache, so they
-    // do not read one either. The CLI already skips the whole session; this
-    // keeps a library caller from reaching the remote behind its back.
-    if crate::policy::release_context() {
-        return Ok(None);
-    }
     let Some(mode) = crate::policy::effective_remote_cache_mode(config.remote.mode) else {
         return Ok(None);
     };
