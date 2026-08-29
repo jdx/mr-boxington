@@ -11,15 +11,8 @@
         work already running is compiled once and restored everywhere else.
       </p>
       <div class="proof" aria-label="Measured performance improvement">
-        <strong>23–33%</strong>
-        <span>
-          less lint wall time in
-          <a
-            href="https://github.com/jdx/mise/pull/12586#issuecomment-5462290794"
-            >mise CI</a
-          >
-          on its existing large runner
-        </span>
+        <strong>Up to 44.9%</strong>
+        <span>less lint wall time on an xlarge CI runner</span>
       </div>
       <p class="validation">
         Two cold, order-reversed A/B trials compared the same Clippy commands
@@ -118,12 +111,6 @@ h2 {
 .validation {
   color: var(--vp-c-text-2);
   line-height: 1.45;
-}
-
-.proof a {
-  color: inherit;
-  text-decoration-color: rgb(var(--mbx-amber-rgb) / 0.5);
-  text-underline-offset: 3px;
 }
 
 .validation {

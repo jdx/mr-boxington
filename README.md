@@ -149,9 +149,8 @@ same action to a compatible remote such as the self-hostable
 GitHub Actions' parallel steps can start independent Clippy or test
 configurations together. Give each one a separate `CARGO_TARGET_DIR` and run
 it through mbx: the commands share one scheduler instead of each trying to
-fill the runner on its own. In mise's existing large-runner lint job, that cut
-cold wall time by 23–33% in
-[two order-reversed A/B trials](https://github.com/jdx/mise/pull/12586#issuecomment-5462290794).
+fill the runner on its own. In two cold, order-reversed A/B trials on an xlarge
+CI runner, that cut lint wall time by up to 44.9%.
 
 [Copy the parallel workflow →](https://mr-boxington.jdx.dev/github-action#parallel-cargo-steps)
 

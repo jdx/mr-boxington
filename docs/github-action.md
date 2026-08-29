@@ -48,10 +48,9 @@ compilation, one does the work and the other restores its result; unrelated
 compilations run within the shared permit pool instead of each Cargo process
 trying to fill the runner independently.
 
-This is not just a larger-runner trick. In
-[two cold, order-reversed A/B trials](https://github.com/jdx/mise/pull/12586#issuecomment-5462290794)
-on mise's existing large CI runner, parallel Clippy finished **23–33% sooner**
-than the same two commands run sequentially. The permanent
+In two cold, order-reversed A/B trials on an xlarge CI runner, parallel Clippy
+finished **up to 44.9% sooner** than the same two commands run sequentially.
+The permanent
 [contention benchmark](/benchmarks#contention) reproduces that workload and
 checks both wall time and peak compiler count. Tuning and failure behavior are
 covered under
