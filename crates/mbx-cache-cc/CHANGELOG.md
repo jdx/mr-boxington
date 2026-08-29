@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.8.0...mbx-cache-cc-v0.9.0) - 2026-08-29
+
+### Other
+
+- [**breaking**] stop rehashing inputs the session already read in full ([#164](https://github.com/jdx/mr-boxington/pull/164))
+
 ## [0.7.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.7.0...mbx-cache-cc-v0.7.1) - 2026-08-28
 
 ### Added

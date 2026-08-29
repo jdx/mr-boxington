@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.8.0...mbx-cache-rustc-v0.9.0) - 2026-08-29
+
+### Added
+
+- *(cache-rustc)* cache macOS debug links behind an oso_prefix the shim appends ([#166](https://github.com/jdx/mr-boxington/pull/166))
+
+### Fixed
+
+- *(cache-rustc)* predict a native search directory by name, not by its contents ([#162](https://github.com/jdx/mr-boxington/pull/162))
+- *(cache-rustc)* model -C link-arg where nothing links ([#161](https://github.com/jdx/mr-boxington/pull/161))
+
+### Other
+
+- [**breaking**] stop rehashing inputs the session already read in full ([#164](https://github.com/jdx/mr-boxington/pull/164))
+
 ## [0.8.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.7.1...mbx-cache-rustc-v0.8.0) - 2026-08-28
 
 ### Fixed

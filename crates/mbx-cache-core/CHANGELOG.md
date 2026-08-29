@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.8.0...mbx-cache-core-v0.9.0) - 2026-08-29
+
+### Fixed
+
+- *(cache-rustc)* predict a native search directory by name, not by its contents ([#162](https://github.com/jdx/mr-boxington/pull/162))
+
+### Other
+
+- keep outputs that already hold the cached bytes ([#165](https://github.com/jdx/mr-boxington/pull/165))
+- [**breaking**] stop rehashing inputs the session already read in full ([#164](https://github.com/jdx/mr-boxington/pull/164))
+
 ## [0.8.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.7.1...mbx-cache-core-v0.8.0) - 2026-08-28
 
 ### Fixed
