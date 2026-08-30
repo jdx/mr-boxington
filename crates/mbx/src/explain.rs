@@ -33,20 +33,31 @@ fn finish(log: &Path, status: ExitCode) -> Result<ExitCode> {
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-struct Records(BTreeMap<String, BTreeMap<String, u64>>);
+struct Records {
+    bypasses: BTreeMap<String, BypassGroup>,
+    observations: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BypassGroup {
+    records: BTreeMap<(String, Option<String>), u64>,
+}
 
 impl Records {
-    fn add(&mut self, kind: &str, detail: &str) {
-        *self
-            .0
-            .entry(kind.to_string())
-            .or_default()
-            .entry(detail.to_string())
+    fn add(&mut self, kind: &str, detail: &str, remediation: Option<&str>) {
+        let group = self.bypasses.entry(kind.to_string()).or_default();
+        *group
+            .records
+            .entry((detail.to_string(), remediation.map(str::to_string)))
             .or_default() += 1;
     }
 
     fn total(&self) -> u64 {
-        self.0.values().flat_map(BTreeMap::values).copied().sum()
+        self.bypasses
+            .values()
+            .flat_map(|group| group.records.values())
+            .copied()
+            .sum()
     }
 }
 
@@ -64,38 +75,61 @@ fn read_records(path: &Path) -> Result<Records> {
 fn parse_records(contents: &str) -> Result<Records> {
     let mut records = Records::default();
     for (index, line) in contents.lines().enumerate() {
-        let (kind, detail) = line
-            .split_once('\t')
+        let mut fields = line.splitn(3, '\t');
+        let kind = fields.next().unwrap_or_default();
+        let detail = fields
+            .next()
             .ok_or_else(|| eyre::eyre!("invalid bypass record on line {}", index + 1))?;
+        if kind == "@observation" {
+            let observation = fields.next().ok_or_else(|| {
+                eyre::eyre!("invalid cacheability observation on line {}", index + 1)
+            })?;
+            records
+                .observations
+                .insert(detail.to_string(), observation.to_string());
+            continue;
+        }
         if kind.is_empty() || detail.is_empty() {
             eyre::bail!("invalid bypass record on line {}", index + 1);
         }
-        records.add(kind, detail);
+        records.add(kind, detail, fields.next());
     }
     Ok(records)
 }
 
 fn display(records: &Records) {
-    if records.0.is_empty() {
+    if records.bypasses.is_empty() {
         crate::session::note("\ncache explanation: no compilations bypassed the cache");
-        return;
-    }
-    crate::session::note(&format!(
-        "\ncache explanation: {} compilations bypassed the cache",
-        records.total()
-    ));
-    for (kind, details) in &records.0 {
-        let count: u64 = details.values().sum();
-        crate::session::note(&format!("\n{kind} ({count})"));
-        crate::session::note(guidance(kind));
-        for (detail, occurrences) in details {
-            let suffix = if *occurrences > 1 {
-                format!(" ({occurrences} times)")
-            } else {
-                String::new()
-            };
-            crate::session::note(&format!("  - {detail}{suffix}"));
+    } else {
+        crate::session::note(&format!(
+            "\ncache explanation: {} compilations bypassed the cache",
+            records.total()
+        ));
+        for (kind, group) in &records.bypasses {
+            let count: u64 = group.records.values().sum();
+            crate::session::note(&format!("\n{kind} ({count})"));
+            let mut sections: BTreeMap<Option<&str>, Vec<(&str, u64)>> = BTreeMap::new();
+            for ((detail, remediation), occurrences) in &group.records {
+                sections
+                    .entry(remediation.as_deref())
+                    .or_default()
+                    .push((detail, *occurrences));
+            }
+            for (remediation, details) in sections {
+                crate::session::note(remediation.unwrap_or_else(|| guidance(kind)));
+                for (detail, occurrences) in details {
+                    let suffix = if occurrences > 1 {
+                        format!(" ({occurrences} times)")
+                    } else {
+                        String::new()
+                    };
+                    crate::session::note(&format!("  - {detail}{suffix}"));
+                }
+            }
         }
+    }
+    for observation in records.observations.values() {
+        crate::session::note(&format!("\ncacheability warning\n{observation}"));
     }
 }
 
@@ -187,7 +221,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(records.total(), 3);
-        assert_eq!(records.0["unsupported-crate-type"].values().sum::<u64>(), 2);
+        assert_eq!(
+            records.bypasses["unsupported-crate-type"]
+                .records
+                .values()
+                .sum::<u64>(),
+            2
+        );
         assert!(guidance("incremental").contains("MBX_INCREMENTAL=0"));
     }
 
@@ -220,5 +260,44 @@ mod tests {
     fn rejects_partial_records_instead_of_guessing() {
         let error = parse_records("missing a tab\n").unwrap_err();
         assert!(error.to_string().contains("line 1"));
+    }
+
+    #[test]
+    fn reads_remediations_and_non_bypass_observations() {
+        let records = parse_records(
+            "unportable-native-link\tnative link is not reproducible: split-debuginfo=packed\tRemove the reported option.\n\
+             @observation\tcc-compiler-override\tCC is already set, so C compiles are invisible.\n",
+        )
+        .unwrap();
+
+        assert_eq!(records.total(), 1);
+        assert!(
+            records.bypasses["unportable-native-link"]
+                .records
+                .keys()
+                .any(|(_, remediation)| remediation.as_deref()
+                    == Some("Remove the reported option."))
+        );
+        assert!(records.observations["cc-compiler-override"].contains("invisible"));
+    }
+
+    #[test]
+    fn one_kind_keeps_distinct_remediations_with_their_details() {
+        let records = parse_records(
+            "unportable-native-link\tnative link: split-debuginfo=packed\tRemove the option.\n\
+             unportable-native-link\tthe linker could not be identified\tConfigure the linker.\n",
+        )
+        .unwrap();
+
+        let group = &records.bypasses["unportable-native-link"];
+        assert_eq!(group.records.len(), 2);
+        assert!(group.records.contains_key(&(
+            "native link: split-debuginfo=packed".into(),
+            Some("Remove the option.".into())
+        )));
+        assert!(group.records.contains_key(&(
+            "the linker could not be identified".into(),
+            Some("Configure the linker.".into())
+        )));
     }
 }

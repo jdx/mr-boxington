@@ -35,6 +35,23 @@ fn bypass_kinds_are_stable_and_field_independent() {
     );
 }
 
+#[test]
+fn actionable_bypasses_carry_remediation() {
+    let codegen_remediation = BypassReason::UnportableNativeLink("split-debuginfo=packed".into())
+        .remediation()
+        .unwrap();
+    assert!(codegen_remediation.contains("Cargo profile"));
+    assert!(codegen_remediation.contains("RUSTFLAGS"));
+
+    let linker_remediation =
+        BypassReason::UnportableNativeLink("the linker could not be identified".into())
+            .remediation()
+            .unwrap();
+    assert!(linker_remediation.contains("linker"));
+    assert!(!linker_remediation.contains("RUSTFLAGS"));
+    assert!(BypassReason::CompilerQuery.remediation().is_none());
+}
+
 #[cfg(unix)]
 #[test]
 fn path_mappings_resolve_symlinked_roots_for_missing_outputs() {

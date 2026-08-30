@@ -267,6 +267,18 @@ impl CacheSession {
         match host_chosen {
             Some(name) => {
                 debug!("{name} is already set; host C and C++ compilations are not cached");
+                let value = environment
+                    .get(*name)
+                    .cloned()
+                    .or_else(|| std::env::var(name).ok())
+                    .unwrap_or_else(|| "<non-UTF-8 value>".into());
+                append_cacheability_observation(
+                    environment,
+                    "cc-compiler-override",
+                    &format!(
+                        "{name} is already set to `{value}`, so host C and C++ compilations do not pass through mbx; unset it for this build to make them visible to the cache"
+                    ),
+                );
             }
             // `HOST_CC` rather than `CC`, because of where each sits in the
             // `cc` crate's lookup order: it reads `CC_<target>`, then
@@ -1131,10 +1143,13 @@ pub(crate) fn learned_incremental_requested() -> bool {
 /// outside a debug build. Reported by reason kind rather than message, since
 /// several reasons carry a path or a flag.
 fn record_bypass(error: &eyre::Report) {
-    let kind = error
-        .downcast_ref::<mbx_cache_rustc::BypassReason>()
-        .map_or("other", mbx_cache_rustc::BypassReason::kind);
-    append_bypass_log(kind, error);
+    let reason = error.downcast_ref::<mbx_cache_rustc::BypassReason>();
+    let kind = reason.map_or("other", mbx_cache_rustc::BypassReason::kind);
+    append_bypass_log(
+        kind,
+        error,
+        reason.and_then(mbx_cache_rustc::BypassReason::remediation),
+    );
     // A shim running outside a session has nowhere to report, which is fine.
     let _ = request_agent(&[AgentRequest::RecordBypass { kind: kind.into() }]);
 }
@@ -1144,13 +1159,16 @@ fn record_bypass(error: &eyre::Report) {
 /// Kinds are prefixed so that a reason the two adapters share by name, such as
 /// an unmodeled flag, does not merge into one statistic covering both.
 fn record_cc_bypass(error: &eyre::Report) {
-    let kind = error
-        .downcast_ref::<mbx_cache_cc::CcBypassReason>()
-        .map_or_else(
-            || "cc-other".to_string(),
-            |reason| format!("cc-{}", reason.kind()),
-        );
-    append_bypass_log(&kind, error);
+    let reason = error.downcast_ref::<mbx_cache_cc::CcBypassReason>();
+    let kind = reason.map_or_else(
+        || "cc-other".to_string(),
+        |reason| format!("cc-{}", reason.kind()),
+    );
+    append_bypass_log(
+        &kind,
+        error,
+        reason.and_then(mbx_cache_cc::CcBypassReason::remediation),
+    );
     // A shim running outside a session has nowhere to report, which is fine.
     let _ = request_agent(&[AgentRequest::RecordBypass { kind }]);
 }
@@ -1179,7 +1197,7 @@ pub(crate) fn record_compiler_invocation(
 /// or path caused each one. It exists because stderr cannot be relied on:
 /// cargo swallows the output of its own probe invocations, so some bypasses are
 /// invisible there.
-fn append_bypass_log(kind: &str, error: &eyre::Report) {
+fn append_bypass_log(kind: &str, error: &eyre::Report, remediation: Option<&str>) {
     let Some(path) = std::env::var_os(BYPASS_LOG_ENV).filter(|path| !path.is_empty()) else {
         return;
     };
@@ -1187,7 +1205,8 @@ fn append_bypass_log(kind: &str, error: &eyre::Report) {
     // record is what keeps parallel shims from splicing their lines together.
     // Records are a single short line for that reason: a write the kernel had
     // to break up could still interleave, and nothing here can prevent it.
-    let line = format!("{kind}\t{error:#}\n");
+    let suffix = remediation.map_or_else(String::new, |text| format!("\t{text}"));
+    let line = format!("{kind}\t{error:#}{suffix}\n");
     if let Err(problem) = append_line(&path, &line) {
         // Say so once. This runs per compilation and a destination that cannot
         // be written now will fail for every later record too, so warning each
@@ -1203,7 +1222,27 @@ fn append_bypass_log(kind: &str, error: &eyre::Report) {
     }
 }
 
-fn append_line(path: &OsString, line: &str) -> std::io::Result<()> {
+/// Record a cacheability problem that prevents compiler invocations from ever
+/// reaching a shim. It is separate from bypasses because there is no observed
+/// compilation to count.
+fn append_cacheability_observation(
+    environment: &BTreeMap<String, String>,
+    kind: &str,
+    detail: &str,
+) {
+    let Some(path) = environment
+        .get(BYPASS_LOG_ENV)
+        .filter(|path| !path.is_empty())
+    else {
+        return;
+    };
+    let line = format!("@observation\t{kind}\t{detail}\n");
+    if let Err(problem) = append_line(OsStr::new(path), &line) {
+        debug!("cacheability observation was not recorded: {problem}");
+    }
+}
+
+fn append_line(path: &OsStr, line: &str) -> std::io::Result<()> {
     use std::io::Write as _;
     let mut file = std::fs::OpenOptions::new()
         .create(true)

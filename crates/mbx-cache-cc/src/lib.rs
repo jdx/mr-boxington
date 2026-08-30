@@ -219,6 +219,36 @@ impl CcBypassReason {
     pub fn kind(&self) -> &'static str {
         self.into()
     }
+
+    /// A concrete change that can make this invocation cacheable, when one is
+    /// available.
+    ///
+    /// Expected compiler probes and failures that require adapter support
+    /// return `None`; callers can still explain those from
+    /// [`CcBypassReason::kind`].
+    pub fn remediation(&self) -> Option<&'static str> {
+        match self {
+            Self::UnsupportedEnvironment(_) => Some(
+                "Unset the reported environment variable for this build so the compiler invocation describes all of its inputs.",
+            ),
+            Self::LocalCpuTarget(_) => Some(
+                "Replace the reported local-CPU option with an explicit architecture or CPU name.",
+            ),
+            Self::EmbeddedTimestampMacro(_) => Some(
+                "Remove the reported timestamp macro, or keep this compilation uncached if its changing value is intentional.",
+            ),
+            Self::SearchPathModifiedDuringCompilation(_) => Some(
+                "Generate headers before compilation instead of changing an include directory while the compiler is running.",
+            ),
+            Self::UnknownFlag(_) | Self::ToolPassthrough(_) => Some(
+                "Remove the reported compiler option, or upgrade mbx if the option should be modeled.",
+            ),
+            Self::UnmappedAbsolutePath(_) => Some(
+                "Move the input under a mapped project or system root, or keep this compilation uncached.",
+            ),
+            _ => None,
+        }
+    }
 }
 
 /// Reason a C or C++ invocation cannot safely use the action cache.

@@ -61,6 +61,35 @@ impl BypassReason {
     pub fn kind(&self) -> &'static str {
         self.into()
     }
+
+    /// A concrete change that can make this invocation cacheable, when one is
+    /// available.
+    ///
+    /// Expected probes and failures that require adapter support return
+    /// `None`; callers can still explain those from [`BypassReason::kind`].
+    pub fn remediation(&self) -> Option<&'static str> {
+        match self {
+            Self::Incremental => Some(
+                "Set `MBX_INCREMENTAL=0`; mbx will then disable Cargo incremental state and cache the compilation.",
+            ),
+            Self::UnportableNativeLink(detail) if detail.contains("linker") => Some(
+                "Make the native linker resolvable on `PATH`, or configure a linker mbx can identify for this target.",
+            ),
+            Self::UnportableNativeLink(_) => Some(
+                "Remove the reported `-C` option from the active Cargo profile or `RUSTFLAGS` to make these links cacheable.",
+            ),
+            Self::UnknownFlag(_) | Self::UnknownCodegenOption(_) => Some(
+                "Remove the reported compiler option, or upgrade mbx if the option should be modeled.",
+            ),
+            Self::UnmodeledLinkArgument(_) => Some(
+                "Remove the reported linker argument, or keep these links uncached if the argument is required.",
+            ),
+            Self::UnmappedAbsolutePath(_) => Some(
+                "Move the input under the workspace, target, Cargo, toolchain, or home roots so mbx can give it a portable cache name.",
+            ),
+            _ => None,
+        }
+    }
 }
 
 impl From<PathNormalizationError> for BypassReason {
