@@ -122,6 +122,7 @@ EOF
   local global_config="$BATS_TEST_TMPDIR/legacy-global.toml"
   local project="$BATS_TEST_TMPDIR/legacy-project"
   mkdir -p "$fake_bin" "$project"
+  project="$(cd "$project" && pwd -P)"
   cat >"$fake_bin/mise" <<'EOF'
 #!/bin/sh
 if [ "$1 $2 $3" = "config set --help" ]; then
