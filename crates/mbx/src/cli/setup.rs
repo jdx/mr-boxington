@@ -492,7 +492,7 @@ pub(crate) fn cargo_shim_target(install_dir: &Path) -> Option<PathBuf> {
     }) {
         return Some(target);
     }
-    configured_cargo_shim_target(install_dir)
+    configured_cargo_shim_target(install_dir).filter(|target| target.is_file())
 }
 
 #[cfg(windows)]
@@ -511,7 +511,7 @@ fn configured_cargo_shim_target(install_dir: &Path) -> Option<PathBuf> {
         return None;
     }
     let target = PathBuf::from(target);
-    (target.is_absolute() && target.is_file()).then_some(target)
+    target.is_absolute().then_some(target)
 }
 
 fn write_cargo_shim_target(install_dir: &Path, executable: &Path) -> Result<()> {

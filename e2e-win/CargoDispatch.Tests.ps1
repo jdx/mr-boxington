@@ -82,7 +82,18 @@ mbx-probe = "new --vcs none"
             Test-Path -LiteralPath (Join-Path $shimDir 'mbx-target') | Should -BeTrue
             $statusOutput = & $mbx setup --status 2>&1 | Out-String
             $LASTEXITCODE | Should -Be 0 -Because $statusOutput
-            $env:PATH = "$shimDir;$originalPath"
+
+            # A versioned installer may remove the exact binary setup recorded.
+            # The shim and status checks should then follow the active mbx on PATH.
+            $missingTarget = Join-Path $shimDir 'removed-version\mbx.exe'
+            $targetBytes = [Text.Encoding]::Unicode.GetBytes($missingTarget)
+            [IO.File]::WriteAllBytes((Join-Path $shimDir 'mbx-target'), $targetBytes)
+            $mbxDir = Split-Path -Parent $mbx
+            $env:PATH = "$mbxDir;$originalPath"
+            $statusOutput = & $mbx setup --status 2>&1 | Out-String
+            $LASTEXITCODE | Should -Be 0 -Because $statusOutput
+
+            $env:PATH = "$shimDir;$mbxDir;$originalPath"
             $env:MBX_DISABLE = '1'
             $version = & cargo.exe --version 2>&1 | Out-String
             $LASTEXITCODE | Should -Be 0 -Because $version
