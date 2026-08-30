@@ -110,12 +110,63 @@ fn setup_preserves_an_existing_rust_analyzer_command() {
 }
 
 #[test]
+fn setup_preserves_existing_rust_analyzer_check_settings() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("rust-analyzer.toml");
+    let original = "# keep me\n[check]\ncommand = \"clippy\"\nfeatures = [\"editor\"]\n";
+    std::fs::write(&config, original).unwrap();
+
+    configure_rust_analyzer(
+        &config,
+        &directory.path().join("bin/cargo"),
+        SetupAction::Install,
+    )
+    .unwrap();
+
+    assert_eq!(std::fs::read_to_string(config).unwrap(), original);
+}
+
+#[test]
+fn project_rust_analyzer_config_follows_the_active_cargo_workspace() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    let crate_root = project.join("crates/app");
+    let source = crate_root.join("src");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(crate_root.join("Cargo.toml"), "[workspace]\n").unwrap();
+    let mise_config = project.join("mise.toml");
+    std::fs::write(&mise_config, "").unwrap();
+
+    assert_eq!(
+        rust_analyzer_config_path_from(
+            &MiseScope::File(mise_config),
+            SetupAction::Install,
+            &source,
+        )
+        .unwrap(),
+        crate_root.join("rust-analyzer.toml")
+    );
+
+    let local_config = crate_root.join("rust-analyzer.toml");
+    std::fs::write(&local_config, "").unwrap();
+    assert_eq!(
+        rust_analyzer_config_path_from(&MiseScope::None, SetupAction::Status, &source).unwrap(),
+        local_config
+    );
+}
+
+#[test]
 fn setup_uninstall_removes_only_its_rust_analyzer_command() {
     let directory = tempfile::tempdir().unwrap();
     let config = directory.path().join("rust-analyzer.toml");
     let shim = directory.path().join("bin/cargo");
-    std::fs::write(&config, "[check]\nignore = [\"dead_code\"]\n").unwrap();
     configure_rust_analyzer(&config, &shim, SetupAction::Install).unwrap();
+    let mut document = std::fs::read_to_string(&config)
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    document["check"]["ignore"] = toml_edit::value(toml_edit::Array::from_iter(["dead_code"]));
+    std::fs::write(&config, document.to_string()).unwrap();
 
     configure_rust_analyzer(&config, &shim, SetupAction::Uninstall).unwrap();
 

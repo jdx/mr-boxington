@@ -90,7 +90,7 @@ pub(super) fn run(args: &SetupArgs, action: SetupAction) -> Result<ExitCode> {
     let install_dir = setup_install_dir()
         .ok_or_else(|| eyre::eyre!("the platform data directory could not be located"))?;
     let scope = setup_scope(args, action)?;
-    let rust_analyzer_config = rust_analyzer_config_path(&scope)?;
+    let rust_analyzer_config = rust_analyzer_config_path(&scope, action)?;
     setup_with_rust_analyzer(
         &executable,
         &install_dir,
@@ -212,7 +212,15 @@ pub(super) fn setup_with_rust_analyzer(
 }
 
 /// Match rust-analyzer's configuration scope to setup's activation scope.
-fn rust_analyzer_config_path(scope: &MiseScope) -> Result<PathBuf> {
+fn rust_analyzer_config_path(scope: &MiseScope, action: SetupAction) -> Result<PathBuf> {
+    rust_analyzer_config_path_from(scope, action, &std::env::current_dir()?)
+}
+
+pub(super) fn rust_analyzer_config_path_from(
+    scope: &MiseScope,
+    action: SetupAction,
+    cwd: &Path,
+) -> Result<PathBuf> {
     let global = || {
         dirs::config_dir()
             .map(|directory| {
@@ -222,17 +230,27 @@ fn rust_analyzer_config_path(scope: &MiseScope) -> Result<PathBuf> {
             })
             .ok_or_else(|| eyre::eyre!("the platform configuration directory could not be located"))
     };
+    let local = || Ok(crate::util::workspace_root(cwd).join(RUST_ANALYZER_CONFIG_FILE));
+    let active_workspace = || -> Option<PathBuf> {
+        let root = crate::util::workspace_root(cwd);
+        (root.join("Cargo.toml").is_file() || root.join("Cargo.lock").is_file())
+            .then(|| root.join(RUST_ANALYZER_CONFIG_FILE))
+    };
     match scope {
-        MiseScope::Global | MiseScope::None => global(),
-        MiseScope::Local => {
-            let cwd = std::env::current_dir()?;
-            Ok(crate::util::workspace_root(&cwd).join(RUST_ANALYZER_CONFIG_FILE))
+        MiseScope::Global => global(),
+        MiseScope::None if action != SetupAction::Install => {
+            let local = local()?;
+            if local.is_file() { Ok(local) } else { global() }
         }
+        MiseScope::None => global(),
+        MiseScope::Local => local(),
         MiseScope::File(path) => {
             if mise_scope_config_path(&MiseScope::Global)
                 .is_ok_and(|global_config| global_config == *path)
             {
                 global()
+            } else if let Some(config) = active_workspace() {
+                Ok(config)
             } else {
                 let directory = path.parent().ok_or_else(|| {
                     eyre::eyre!("mise configuration path has no parent: {}", path.display())
@@ -263,11 +281,11 @@ pub(super) fn configure_rust_analyzer(
         .parse::<toml_edit::DocumentMut>()
         .wrap_err_with(|| format!("failed to parse {}", path.display()))?;
     let expected = rust_analyzer_command(shim);
-    let configured = document
+    let check = document
         .get("check")
-        .and_then(toml_edit::Item::as_table_like)
-        .and_then(|check| check.get("overrideCommand"));
-    let has_configuration = configured.is_some();
+        .and_then(toml_edit::Item::as_table_like);
+    let configured = check.and_then(|check| check.get("overrideCommand"));
+    let has_check_settings = check.is_some_and(|check| !check.is_empty());
     let owns_configuration =
         configured
             .and_then(toml_edit::Item::as_array)
@@ -284,9 +302,9 @@ pub(super) fn configure_rust_analyzer(
             println!("rust-analyzer checks run through mbx: {}", path.display());
             Ok(ExitCode::SUCCESS)
         }
-        SetupAction::Status if has_configuration => {
+        SetupAction::Status if has_check_settings => {
             println!(
-                "rust-analyzer keeps its existing check.overrideCommand in {}",
+                "rust-analyzer keeps its existing check settings in {}",
                 path.display()
             );
             Ok(ExitCode::SUCCESS)
@@ -317,9 +335,9 @@ pub(super) fn configure_rust_analyzer(
             Ok(ExitCode::SUCCESS)
         }
         SetupAction::Install if owns_configuration => Ok(ExitCode::SUCCESS),
-        SetupAction::Install if has_configuration => {
+        SetupAction::Install if has_check_settings => {
             println!(
-                "left {} unchanged: rust-analyzer.check.overrideCommand is already configured",
+                "left {} unchanged: rust-analyzer check settings are already configured",
                 path.display()
             );
             Ok(ExitCode::SUCCESS)

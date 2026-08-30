@@ -115,8 +115,8 @@ on `PATH`, with the setup-time mbx path as a fallback.
 Setup also configures rust-analyzer's background check in the matching global
 or project scope. The editor invokes the stable Cargo shim by its absolute path,
 so its build shares mbx's cache and machine-wide compiler pool even when the
-editor did not inherit mise's `PATH`. An existing
-`rust-analyzer.check.overrideCommand` is always left unchanged.
+editor did not inherit mise's `PATH`. Existing rust-analyzer check settings are
+always left unchanged rather than silently changing commands or features.
 
 After installing from a release archive, run `$HOME/.local/bin/mbx setup` on
 Unix. On Windows, run
