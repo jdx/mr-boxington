@@ -108,6 +108,14 @@ struct ChurnState {
     streak: u32,
 }
 
+#[derive(Serialize)]
+struct BuildScriptBinaryIdentity<'a> {
+    digest: &'a CacheDigest,
+    kind: &'static str,
+    output_name: &'a str,
+    version: u8,
+}
+
 /// What every step of one compilation needs to identify it.
 struct Compilation<'a> {
     rustc: &'a OsStr,
@@ -485,9 +493,25 @@ fn compile_execution_only_build_script(
     if output.status.success()
         && let Some(executable) = outputs.build_script_executable(invocation.crate_name())
     {
-        let installed = CacheDigest::blake3_file(executable)
-            .wrap_err("failed to identify the build-script binary")
-            .and_then(|binary| crate::build_script::install(executable, &binary));
+        let installed = (|| -> Result<()> {
+            let digest = CacheDigest::blake3_file(executable)
+                .wrap_err("failed to identify the build-script binary")?;
+            // Cargo's extra-filename disambiguator is stable across equivalent
+            // checkouts and distinct between package units. Pair it with the
+            // exact executable bytes so identical build.rs sources from two
+            // crates cannot share execution results accidentally.
+            let output_name = executable
+                .file_name()
+                .and_then(OsStr::to_str)
+                .ok_or_else(|| eyre::eyre!("build-script output name is not UTF-8"))?;
+            let binary = CacheDigest::blake3(&canonical_json(&BuildScriptBinaryIdentity {
+                digest: &digest,
+                kind: "build-script-binary",
+                output_name,
+                version: 1,
+            })?);
+            crate::build_script::install(executable, &binary)
+        })();
         if let Err(error) = installed {
             session::report_shim_warning(&format!(
                 "build-script shim was not installed: {error:#}"

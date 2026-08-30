@@ -775,11 +775,11 @@ pub(crate) fn find_build_script_real_path(executable: &Path) -> Option<PathBuf> 
         return Some(direct);
     }
     let parent = executable.parent()?;
-    std::fs::read_dir(parent)
+    let mut matches = std::fs::read_dir(parent)
         .ok()?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|path| {
+        .filter(|path| {
             path.is_file()
                 && path
                     .file_name()
@@ -788,7 +788,9 @@ pub(crate) fn find_build_script_real_path(executable: &Path) -> Option<PathBuf> 
                         name.starts_with("build_script_build-")
                             && name.ends_with(BUILD_SCRIPT_REAL_SUFFIX)
                     })
-        })
+        });
+    let found = matches.next()?;
+    matches.next().is_none().then_some(found)
 }
 
 /// Run Cargo's build script through the execution cache.
@@ -796,7 +798,7 @@ pub fn run_build_script_shim() -> ExitCode {
     // The wrapper lives in Cargo's target directory, so it can outlive the mbx
     // session that installed it. A later plain `cargo` invocation must remain
     // a transparent build-script call.
-    if session_socket().is_none() {
+    if session_socket().is_none() || !build_script_execution_requested() {
         return crate::build_script::run_real();
     }
     match crate::build_script::run() {

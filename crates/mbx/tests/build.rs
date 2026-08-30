@@ -1047,6 +1047,7 @@ fn write_execution_cached_project(directory: &Path, declares_inputs: bool) {
                  fs::create_dir_all(out.join(\"nested\")).unwrap();\n\
                  fs::write(out.join(\"generated.rs\"), format!(\"pub const VALUE: &str = {{:?}};\\n\", input)).unwrap();\n\
                  fs::write(out.join(\"nested/header.h\"), input).unwrap();\n\
+                 println!(\"cargo:rustc-env=MANIFEST_COPY={{}}\", env::var(\"CARGO_MANIFEST_DIR\").unwrap());\n\
                  {declaration}\n\
              }}\n"
         ),
@@ -1054,7 +1055,8 @@ fn write_execution_cached_project(directory: &Path, declares_inputs: bool) {
     .unwrap();
     std::fs::write(
         directory.join("src/lib.rs"),
-        "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\n",
+        "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\n\
+         pub const MANIFEST_COPY: &str = env!(\"MANIFEST_COPY\");\n",
     )
     .unwrap();
     let status = Command::new(cargo())
@@ -1107,10 +1109,27 @@ fn build_script_execution_and_out_dir_restore_across_checkouts() {
         })
         .expect("nested OUT_DIR output should be restored");
     assert_eq!(std::fs::read_to_string(header).unwrap(), "first\n");
+    let replayed = second
+        .path()
+        .join("target/debug/build")
+        .read_dir()
+        .unwrap()
+        .find_map(|entry| {
+            let path = entry.ok()?.path().join("output");
+            path.is_file()
+                .then(|| std::fs::read_to_string(path).ok())
+                .flatten()
+        })
+        .expect("Cargo should retain the replayed build-script directives");
     assert!(
-        count(&warm, "hits") >= 2,
-        "build script and Rust crate should hit: {warm}"
+        replayed.contains(second.path().to_string_lossy().as_ref()),
+        "replayed directives should name the restoring checkout: {replayed}"
     );
+    assert!(
+        !replayed.contains(first.path().to_string_lossy().as_ref()),
+        "replayed directives retained the publishing checkout: {replayed}"
+    );
+    assert!(count(&warm, "hits") >= 1, "build script should hit: {warm}");
 }
 
 #[test]
@@ -1186,26 +1205,24 @@ fn build_script_without_declared_inputs_bypasses_execution_cache() {
 fn build_script_execution_cache_can_be_turned_off() {
     let store = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();
-    let first = tempfile::tempdir().unwrap();
-    let second = tempfile::tempdir().unwrap();
-    write_execution_cached_project(first.path(), true);
-    write_execution_cached_project(second.path(), true);
+    let project = tempfile::tempdir().unwrap();
+    write_execution_cached_project(project.path(), true);
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("enabled.json"),
+    );
+    std::fs::write(project.path().join("input.txt"), "second\n").unwrap();
     let disabled = [("MBX_BUILD_SCRIPT_EXECUTION", "0")];
     build_with(
-        first.path(),
+        project.path(),
         store.path(),
-        &reports.path().join("first.json"),
-        &disabled,
-    );
-    build_with(
-        second.path(),
-        store.path(),
-        &reports.path().join("second.json"),
+        &reports.path().join("disabled.json"),
         &disabled,
     );
     assert_eq!(
-        std::fs::read_to_string(second.path().join("runs")).unwrap(),
-        "1"
+        std::fs::read_to_string(project.path().join("runs")).unwrap(),
+        "2"
     );
 }
 

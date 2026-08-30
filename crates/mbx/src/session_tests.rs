@@ -1,5 +1,25 @@
 use super::*;
 
+#[test]
+fn ambiguous_build_script_sidecars_are_refused() {
+    let directory = tempfile::tempdir().unwrap();
+    let invoked = directory.path().join(format!(
+        "build-script-build{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    std::fs::write(&invoked, "shim").unwrap();
+    for hash in ["one", "two"] {
+        let name = format!(
+            "build_script_build-{hash}{}{}",
+            std::env::consts::EXE_SUFFIX,
+            BUILD_SCRIPT_REAL_SUFFIX
+        );
+        std::fs::write(directory.path().join(name), "real").unwrap();
+    }
+
+    assert_eq!(find_build_script_real_path(&invoked), None);
+}
+
 fn test_config(cache_dir: &Path) -> Config {
     Config {
         cache_dir: cache_dir.to_path_buf(),

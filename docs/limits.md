@@ -7,10 +7,12 @@ mr boxington favors correct uncached work over risky cache reuse.
 mbx caches running `build.rs`, not only compiling it. After a successful first
 run, the script's `cargo:rerun-if-changed` and `cargo:rerun-if-env-changed`
 directives become the input prediction for later runs. The build-script binary,
-the recursively hashed declared paths, and the declared environment values form
-the action key. A hit restores the complete `OUT_DIR` tree and replays the
-script's stdout directives and stderr without starting the script. Directories
-and missing paths are inputs too, matching Cargo's directive model.
+Cargo's implicit unit environment (target, profile, features, configuration,
+and package metadata), the recursively hashed declared paths, and the declared
+environment values form the action key. A hit restores the complete `OUT_DIR`
+tree and replays the script's stdout directives and stderr without starting the
+script. Directories and missing paths are inputs too, matching Cargo's directive
+model.
 
 Set `build_script_execution = false` or `MBX_BUILD_SCRIPT_EXECUTION=0` to turn
 off this layer while retaining ordinary Rust and C/C++ compilation caching.
@@ -20,8 +22,9 @@ package-wide default for such scripts is intentionally not guessed into a cache
 key: an uncached execution is cheaper than claiming an input set the script did
 not declare.
 
-Cached directives are remapped to the restoring `OUT_DIR`. Output trees that do
-not contain the literal directory path can therefore cross target directories;
+Cached directives remap both `OUT_DIR` and `CARGO_MANIFEST_DIR` to the restoring
+checkout. Output trees that do not contain the literal output directory path can
+therefore cross target directories;
 an output file that embeds that path keeps it in the action key and only reuses
 the result at the same location. A symlink that may escape `OUT_DIR` makes the
 execution uncacheable. The launcher left in a target directory is transparent

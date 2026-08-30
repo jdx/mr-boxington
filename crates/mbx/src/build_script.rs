@@ -30,6 +30,7 @@ struct Invocation<'a> {
 #[derive(Debug, Serialize)]
 struct Action<'a> {
     binary_action: &'a CacheDigest,
+    cargo_environment: &'a BTreeMap<String, Option<String>>,
     environment: &'a BTreeMap<String, Option<String>>,
     inputs: &'a BTreeMap<String, InputState>,
     kind: &'static str,
@@ -152,15 +153,20 @@ pub(crate) fn run() -> Result<ExitCode> {
         return Ok(crate::materialize::exit_code(output.status));
     }
 
-    let Some(prediction) = parse_prediction(&output.stdout)? else {
-        record_bypass("build-script-no-declared-inputs");
-        return Ok(ExitCode::SUCCESS);
-    };
-    let (action_bytes, action) = build_action(&binary_action, &prediction)?;
-    if let Err(error) = publish(&action, &action_bytes, &output.stdout, &output.stderr) {
+    let caching = (|| -> Result<()> {
+        let Some(prediction) = parse_prediction(&output.stdout)? else {
+            record_bypass("build-script-no-declared-inputs");
+            return Ok(());
+        };
+        let (action_bytes, action) = build_action(&binary_action, &prediction)?;
+        publish(&action, &action_bytes, &output.stdout, &output.stderr)?;
+        record_prediction(invocation, action, &prediction)
+    })();
+    if let Err(error) = caching {
+        // The script has already run and its streams have already reached
+        // Cargo. Cache bookkeeping may fail, but retrying the program would
+        // duplicate arbitrary side effects and every emitted directive.
         session::report_shim_warning(&format!("build-script result was not stored: {error:#}"));
-    } else {
-        record_prediction(invocation, action, &prediction)?;
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -261,6 +267,7 @@ fn build_action(
     prediction: &Prediction,
 ) -> Result<(Vec<u8>, CacheDigest)> {
     let working_dir = std::env::current_dir()?;
+    let mappings = build_script_mappings();
     let mut inputs = BTreeMap::new();
     for declared in &prediction.inputs {
         let path = Path::new(declared);
@@ -281,20 +288,23 @@ fn build_action(
                         .into_string()
                         .map_err(|_| eyre::eyre!("environment input is not UTF-8: {name}"))
                 })
-                .transpose()?;
+                .transpose()?
+                .map(|value| normalize_environment_value(&value, &mappings));
             Ok((name.clone(), value))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
+    let cargo_environment = cargo_environment(&mappings);
     let out_dir = (!prediction.portable_out_dir)
         .then(|| std::env::var("OUT_DIR"))
         .transpose()?;
     let bytes = canonical_json(&Action {
         binary_action,
+        cargo_environment: &cargo_environment,
         environment: &environment,
         inputs: &inputs,
         kind: ADAPTER,
         out_dir: out_dir.as_deref(),
-        version: 1,
+        version: 2,
     })?;
     let digest = CacheDigest::blake3(&bytes);
     Ok((bytes, digest))
@@ -397,7 +407,7 @@ fn publish(action: &CacheDigest, action_bytes: &[u8], stdout: &[u8], stderr: &[u
     let staging = staging_directory()?;
     let mut blobs = Vec::new();
     let root = store_directory(&out_dir, staging.path(), &mut blobs)?;
-    let mappings = out_dir_mapping(&out_dir);
+    let mappings = build_script_mappings();
     let stdout = stage_bytes(
         staging.path(),
         "stdout",
@@ -556,7 +566,7 @@ fn restore(action: &CacheDigest, action_bytes: &[u8]) -> Result<Option<Restored>
     let out_dir = PathBuf::from(
         std::env::var_os("OUT_DIR").ok_or_else(|| eyre::eyre!("build script has no OUT_DIR"))?,
     );
-    let mappings = out_dir_mapping(&out_dir);
+    let mappings = build_script_mappings();
     let stdout = denormalize_output_text(&stdout, &mappings);
     let stderr = denormalize_output_text(&stderr, &mappings);
     let parent = out_dir
@@ -585,8 +595,54 @@ fn restore(action: &CacheDigest, action_bytes: &[u8]) -> Result<Option<Restored>
     }))
 }
 
-fn out_dir_mapping(out_dir: &Path) -> Vec<PathMapping> {
-    vec![PathMapping::new(out_dir, "build_script_out_dir")]
+fn build_script_mappings() -> Vec<PathMapping> {
+    let mut mappings = Vec::new();
+    if let Some(out_dir) = std::env::var_os("OUT_DIR") {
+        mappings.push(PathMapping::new(out_dir, "build_script_out_dir"));
+    }
+    if let Some(manifest_dir) = std::env::var_os("CARGO_MANIFEST_DIR") {
+        mappings.push(PathMapping::new(manifest_dir, "build_script_manifest_dir"));
+    }
+    mappings
+}
+
+fn normalize_environment_value(value: &str, mappings: &[PathMapping]) -> String {
+    String::from_utf8(normalize_output_text(value.as_bytes(), mappings))
+        .expect("normalizing UTF-8 paths preserves UTF-8")
+}
+
+/// Cargo-provided values that are implicit inputs to the build-script unit.
+/// Cargo reruns the script when these change even though scripts do not emit
+/// `rerun-if-env-changed` for them, so the execution key must do the same.
+fn cargo_environment(mappings: &[PathMapping]) -> BTreeMap<String, Option<String>> {
+    const FIXED: &[&str] = &[
+        "CARGO_MANIFEST_DIR",
+        "CARGO_MANIFEST_PATH",
+        "DEBUG",
+        "HOST",
+        "OPT_LEVEL",
+        "PROFILE",
+        "TARGET",
+    ];
+    let mut names = FIXED
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<BTreeSet<_>>();
+    names.extend(std::env::vars().filter_map(|(name, _)| {
+        ["CARGO_CFG_", "CARGO_FEATURE_", "CARGO_PKG_", "DEP_"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+            .then_some(name)
+    }));
+    names
+        .into_iter()
+        .map(|name| {
+            let value = std::env::var(&name)
+                .ok()
+                .map(|value| normalize_environment_value(&value, mappings));
+            (name, value)
+        })
+        .collect()
 }
 
 fn restore_directory(digest: &CacheDigest, destination: &Path) -> Result<(u64, u64)> {
