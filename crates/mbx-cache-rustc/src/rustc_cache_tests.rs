@@ -35,6 +35,16 @@ fn bypass_kinds_are_stable_and_field_independent() {
     );
 }
 
+#[test]
+fn actionable_bypasses_carry_remediation() {
+    let remediation = BypassReason::UnportableNativeLink("split-debuginfo=packed".into())
+        .remediation()
+        .unwrap();
+    assert!(remediation.contains("Cargo profile"));
+    assert!(remediation.contains("RUSTFLAGS"));
+    assert!(BypassReason::CompilerQuery.remediation().is_none());
+}
+
 #[cfg(unix)]
 #[test]
 fn path_mappings_resolve_symlinked_roots_for_missing_outputs() {

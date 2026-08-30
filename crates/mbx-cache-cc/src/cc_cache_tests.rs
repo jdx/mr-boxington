@@ -161,6 +161,15 @@ fn bypass_kinds_are_stable_and_field_independent() {
     }
 }
 
+#[test]
+fn actionable_bypasses_carry_remediation() {
+    let remediation = CcBypassReason::UnsupportedEnvironment("CPATH".into())
+        .remediation()
+        .unwrap();
+    assert!(remediation.contains("Unset"));
+    assert!(CcBypassReason::CompilerQuery.remediation().is_none());
+}
+
 fn argv(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }

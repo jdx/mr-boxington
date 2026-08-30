@@ -51,6 +51,17 @@ Categories marked expected appear on every build and cost nothing; here the
 `incremental` group is the one the build could act on. The command preserves
 Cargo's exit status after printing the explanation.
 
+Actionable bypasses carry their remediation with the reason that produced
+them. For example, links rejected because of `split-debuginfo=packed` point to
+the active Cargo profile or `RUSTFLAGS`, while C compilations affected by
+`CPATH` name the environment variable to unset.
+
+`mbx explain` also reports cacheability problems that prevent a compilation
+from reaching mbx at all. If `CC`, `CXX`, `HOST_CC`, or `HOST_CXX` was already
+set when the build began, the report names the variable and value and explains
+that host C and C++ compiles are invisible to the cache. These are warnings,
+not bypass counts, because mbx never observed the compiler invocations.
+
 ## Remote failure
 
 A remote cache request failed and the build carried on without it: unreachable
