@@ -220,7 +220,10 @@ fn probe_windows(linker: &Path) -> Result<LinkerIdentity> {
 /// `PATH`, and that path may contain an unrelated GNU `link.exe`. Visual
 /// Studio's environment variables name the selected toolset unambiguously.
 fn msvc_tool(name: &str) -> Result<PathBuf> {
-    if let Some(root) = std::env::var_os("VCToolsInstallDir") {
+    let tools = std::env::var_os("VCToolsInstallDir")
+        .map(PathBuf::from)
+        .or_else(visual_studio_tools_dir);
+    if let Some(root) = tools {
         let host = std::env::var("VSCMD_ARG_HOST_ARCH")
             .ok()
             .filter(|value| !value.is_empty())
@@ -229,7 +232,7 @@ fn msvc_tool(name: &str) -> Result<PathBuf> {
             .ok()
             .filter(|value| !value.is_empty())
             .unwrap_or_else(native_msvc_arch);
-        let candidate = PathBuf::from(root)
+        let candidate = root
             .join("bin")
             .join(format!("Host{host}"))
             .join(target)
@@ -239,6 +242,42 @@ fn msvc_tool(name: &str) -> Result<PathBuf> {
         }
     }
     Ok(which::which(name)?)
+}
+
+/// Ask Visual Studio Installer which MSVC toolset rustc will use when no
+/// developer-shell environment has been exported.
+fn visual_studio_tools_dir() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let program_files =
+        std::env::var_os("ProgramFiles(x86)").or_else(|| std::env::var_os("ProgramFiles"))?;
+    let vswhere = PathBuf::from(program_files)
+        .join("Microsoft Visual Studio")
+        .join("Installer")
+        .join("vswhere.exe");
+    let output = Command::new(vswhere)
+        .args([
+            "-latest",
+            "-products",
+            "*",
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-property",
+            "installationPath",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let installation = String::from_utf8(output.stdout).ok()?;
+    let installation = PathBuf::from(installation.trim());
+    let version = std::fs::read_to_string(
+        installation.join("VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt"),
+    )
+    .ok()?;
+    Some(installation.join("VC/Tools/MSVC").join(version.trim()))
 }
 
 fn native_msvc_arch() -> String {
