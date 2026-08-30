@@ -1449,12 +1449,14 @@ fn a_program_named_like_a_library_is_not_cacheable() {
         "src/lib.rs",
     ]);
     let invocation = RustcInvocation::parse_with(&arguments, native_links()).unwrap();
+    let mut ambiguous = workspace().join("target/debug/deps/widget.rlib");
+    if !std::env::consts::EXE_EXTENSION.is_empty() {
+        ambiguous.set_extension(format!("rlib.{}", std::env::consts::EXE_EXTENSION));
+    }
 
     assert_eq!(
         invocation.outputs(&workspace()),
-        Err(BypassReason::AmbiguousOutputName(
-            workspace().join("target/debug/deps/widget.rlib")
-        ))
+        Err(BypassReason::AmbiguousOutputName(ambiguous))
     );
 
     // A library by that name is exactly what it claims to be.
