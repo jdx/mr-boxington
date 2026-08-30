@@ -45,31 +45,6 @@ EOF
   assert_output --partial "does not edit shell startup files"
 }
 
-@test "setup migrates its legacy rustc wrapper without touching another wrapper" {
-  mkdir -p "$MBX_SHIM_DIR"
-  touch "$MBX_SHIM_DIR/mbx-rustc"
-  cat >"$CARGO_HOME/config.toml" <<EOF
-# keep me
-[build]
-rustc-wrapper = "$MBX_SHIM_DIR/mbx-rustc"
-EOF
-  run "$MBX_BIN" setup
-  assert_success
-  assert_output --partial "removed the legacy rustc wrapper"
-  assert_file_contains "$CARGO_HOME/config.toml" "# keep me"
-  run grep -F "rustc-wrapper" "$CARGO_HOME/config.toml"
-  assert_failure
-
-  cat >"$CARGO_HOME/config.toml" <<'EOF'
-[build]
-rustc-wrapper = "sccache"
-EOF
-  run "$MBX_BIN" setup
-  assert_success
-  assert_output --partial "will defer compilation caching"
-  assert_file_contains "$CARGO_HOME/config.toml" 'rustc-wrapper = "sccache"'
-}
-
 @test "setup status refresh and uninstall cover the shim lifecycle" {
   run "$MBX_BIN" setup --status
   assert_failure

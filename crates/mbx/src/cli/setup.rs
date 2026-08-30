@@ -80,26 +80,11 @@ impl std::fmt::Display for MiseScope {
 pub(super) fn run(args: &SetupArgs, action: SetupAction) -> Result<ExitCode> {
     args.validate()?;
     let executable = std::env::current_exe().wrap_err("failed to locate the mbx executable")?;
-    let (install_dir, cargo_config) = setup_paths()?;
-    let shim = install_dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
-    let scope = setup_scope(args, action, shim.is_file())?;
-    setup_at_action(&executable, &install_dir, &cargo_config, &scope, action)
-}
-
-fn setup_paths() -> Result<(PathBuf, PathBuf)> {
     let install_dir = setup_install_dir()
         .ok_or_else(|| eyre::eyre!("the platform data directory could not be located"))?;
-    let cargo_home = std::env::var_os("CARGO_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".cargo")))
-        .ok_or_else(|| eyre::eyre!("Cargo's configuration directory could not be located"))?;
-    let config_path =
-        if cargo_home.join("config.toml").exists() || !cargo_home.join("config").exists() {
-            cargo_home.join("config.toml")
-        } else {
-            cargo_home.join("config")
-        };
-    Ok((install_dir, config_path))
+    let shim = install_dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
+    let scope = setup_scope(args, action, shim.is_file())?;
+    setup_at_action(&executable, &install_dir, &scope, action)
 }
 
 /// The stable directory that holds the Cargo shim installed by setup.
@@ -112,11 +97,10 @@ pub(crate) fn setup_install_dir() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-pub(super) fn setup_at(executable: &Path, install_dir: &Path, config_path: &Path) -> Result<()> {
+pub(super) fn setup_at(executable: &Path, install_dir: &Path) -> Result<()> {
     setup_at_action(
         executable,
         install_dir,
-        config_path,
         &MiseScope::None,
         SetupAction::Install,
     )?;
@@ -126,7 +110,6 @@ pub(super) fn setup_at(executable: &Path, install_dir: &Path, config_path: &Path
 pub(super) fn setup_at_action(
     executable: &Path,
     install_dir: &Path,
-    cargo_config: &Path,
     scope: &MiseScope,
     action: SetupAction,
 ) -> Result<ExitCode> {
@@ -157,7 +140,6 @@ pub(super) fn setup_at_action(
             if !matches!(scope, MiseScope::None) {
                 activation_removed = update_mise_path(scope, "--remove", &configured_path)?;
             }
-            remove_legacy_rustc_wrapper(cargo_config, install_dir)?;
             if activation_removed {
                 println!(
                     "removed mbx Cargo activation; {} was left in place for other scopes",
@@ -179,7 +161,6 @@ pub(super) fn setup_at_action(
         }
     }
 
-    remove_legacy_rustc_wrapper(cargo_config, install_dir)?;
     let activated = if !matches!(scope, MiseScope::None) {
         update_mise_path(scope, "--append", &configured_path)?
     } else {
@@ -390,43 +371,6 @@ fn mise_path_file_is_configured(config: &Path, path: &str) -> Result<bool> {
         || value
             .as_array()
             .is_some_and(|array| array.iter().any(|entry| entry.as_str() == Some(path))))
-}
-
-fn remove_legacy_rustc_wrapper(config_path: &Path, install_dir: &Path) -> Result<()> {
-    let contents = match std::fs::read_to_string(config_path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    let mut document = contents
-        .parse::<toml_edit::DocumentMut>()
-        .wrap_err_with(|| format!("failed to parse {}", config_path.display()))?;
-    let expected = install_dir.join(if cfg!(windows) {
-        format!("{}.exe", crate::session::RUSTC_SHIM_STEM)
-    } else {
-        crate::session::RUSTC_SHIM_STEM.into()
-    });
-    let configured = document
-        .get("build")
-        .and_then(toml_edit::Item::as_table_like)
-        .and_then(|build| build.get("rustc-wrapper"))
-        .and_then(toml_edit::Item::as_str);
-    if configured.is_some_and(|configured| Path::new(configured) == expected) {
-        let build = document["build"]
-            .as_table_like_mut()
-            .expect("the build table was inspected above");
-        build.remove("rustc-wrapper");
-        crate::util::write_atomic(config_path, document.to_string().as_bytes())?;
-        println!(
-            "removed the legacy rustc wrapper from {}",
-            config_path.display()
-        );
-    } else if let Some(configured) = configured {
-        eprintln!(
-            "mbx[warning]: Cargo already uses rustc-wrapper {configured}; mbx will defer compilation caching to it"
-        );
-    }
-    Ok(())
 }
 
 fn print_manual_activation(path: &Path) {

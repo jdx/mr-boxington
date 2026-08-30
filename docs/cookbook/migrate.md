@@ -57,9 +57,9 @@ Then check the result:
 mbx doctor
 ```
 
-The `setup` check reports the installed Cargo shim. Running `mbx setup` removes
-an mbx-owned legacy wrapper; if another wrapper such as sccache is configured,
-setup leaves it untouched and warns that compilation caching defers to it.
+The `setup` check reports the installed Cargo shim. Existing compiler-wrapper
+configuration remains your responsibility; `mbx setup` does not edit Cargo's
+TOML configuration.
 
 ## The first build measures nothing
 
