@@ -332,7 +332,7 @@ EOF
   run env MBX_TEST_CARGO_LOG="$cargo_log" PATH="$MBX_SHIM_DIR:$real_bin:/usr/bin:/bin" cargo clean
   assert_success
   assert_output "clean"
-  run wc -l <"$cargo_log"
+  run grep -c '^clean$' "$cargo_log"
   assert_success
   assert_output "1"
 }
