@@ -336,7 +336,8 @@ pub fn import_archive(store: &Path, archive: &Path) -> Result<TransferOutcome> {
     let mut seen = BTreeSet::new();
     for entry in bundle.entries()? {
         let mut entry = entry?;
-        if !entry.header().entry_type().is_file() {
+        let entry_type = entry.header().entry_type();
+        if !entry_type.is_file() && !entry_type.is_gnu_sparse() {
             eyre::bail!("cache export contains a non-file entry");
         }
         let path = entry.path()?.into_owned();
