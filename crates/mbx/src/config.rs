@@ -119,6 +119,10 @@ pub(crate) struct RawConfig {
     /// Share eligible compilations that read `OUT_DIR`.
     #[usage(env = "MBX_SHARE_OUT_DIR", default = true)]
     share_out_dir: bool,
+    /// Cache executions of build scripts that declare their inputs. This may
+    /// also be set in workspace `.mbx.toml`; the environment variable wins.
+    #[usage(env = "MBX_BUILD_SCRIPT_EXECUTION", default = true)]
+    build_script_execution: bool,
     /// Record a per-compilation event stream for `mbx tui` to watch.
     #[usage(env = "MBX_EVENTS", default = true)]
     events: bool,
@@ -293,6 +297,8 @@ pub struct Config {
     /// placeholder, and mbx reads the outputs before publishing to fall back
     /// to a checkout-specific key when a crate embeds the literal path.
     pub share_out_dir: bool,
+    /// Cache build-script execution when the script declares rerun inputs.
+    pub build_script_execution: bool,
     /// Append a per-compilation event stream to the store, for `mbx tui`.
     ///
     /// On by default: one small buffered append per accounted compilation, with
@@ -322,6 +328,7 @@ impl Config {
             verify: false,
             incremental: false,
             share_out_dir: false,
+            build_script_execution: false,
             events: false,
             // Off like the rest: a test that says nothing about C compilation
             // should not have compiler shims installed underneath it.
@@ -710,6 +717,7 @@ impl Config {
             verify: raw.verify,
             incremental: raw.incremental,
             share_out_dir: raw.share_out_dir,
+            build_script_execution: raw.build_script_execution,
             events: raw.events,
             cc: raw.cc,
             remote: RemoteSettings {
@@ -761,9 +769,12 @@ impl Config {
             .wrap_err_with(|| format!("failed to parse {}", path.display()))?;
 
         for (key, value) in document.iter() {
-            if !matches!(key, "incremental" | "share_out_dir" | "cc") {
+            if !matches!(
+                key,
+                "incremental" | "share_out_dir" | "build_script_execution" | "cc"
+            ) {
                 bail!(
-                    "{} contains unsupported workspace setting {key:?}; only incremental, share_out_dir, and cc are allowed",
+                    "{} contains unsupported workspace setting {key:?}; only incremental, share_out_dir, build_script_execution, and cc are allowed",
                     path.display()
                 );
             }
@@ -777,10 +788,13 @@ impl Config {
                 "share_out_dir" if !environment_contains("MBX_SHARE_OUT_DIR") => {
                     self.share_out_dir = value;
                 }
+                "build_script_execution" if !environment_contains("MBX_BUILD_SCRIPT_EXECUTION") => {
+                    self.build_script_execution = value;
+                }
                 "cc" if !environment_contains("MBX_CC") => {
                     self.cc = value;
                 }
-                "incremental" | "share_out_dir" | "cc" => {}
+                "incremental" | "share_out_dir" | "build_script_execution" | "cc" => {}
                 _ => unreachable!("workspace policy keys were validated above"),
             }
         }
@@ -972,6 +986,7 @@ mod tests {
         assert!(!config.verify);
         assert!(!config.incremental);
         assert!(config.share_out_dir);
+        assert!(config.build_script_execution);
         assert!(config.store_dir().ends_with("actions"));
         assert!(config.gc.auto, "collection runs until it is turned off");
         assert_eq!(config.gc.max_bytes, 20 * GIB, "5% of a 400GiB disk");
@@ -1244,11 +1259,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(
             directory.path().join(".mbx.toml"),
-            "incremental = true\nshare_out_dir = true\n",
+            "incremental = true\nshare_out_dir = true\nbuild_script_execution = true\n",
         )
         .unwrap();
-        let mut config =
-            configured(Some("incremental = false\nshare_out_dir = false"), &[]).unwrap();
+        let mut config = configured(
+            Some("incremental = false\nshare_out_dir = false\nbuild_script_execution = false"),
+            &[],
+        )
+        .unwrap();
 
         config
             .apply_workspace_policy_with(directory.path(), |_| false)
@@ -1256,6 +1274,7 @@ mod tests {
 
         assert!(config.incremental);
         assert!(config.share_out_dir);
+        assert!(config.build_script_execution);
     }
 
     #[test]
@@ -1263,10 +1282,17 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(
             directory.path().join(".mbx.toml"),
-            "incremental = true\nshare_out_dir = true\n",
+            "incremental = true\nshare_out_dir = true\nbuild_script_execution = true\n",
         )
         .unwrap();
-        let mut config = configured(None, &[("MBX_SHARE_OUT_DIR", "0")]).unwrap();
+        let mut config = configured(
+            None,
+            &[
+                ("MBX_SHARE_OUT_DIR", "0"),
+                ("MBX_BUILD_SCRIPT_EXECUTION", "0"),
+            ],
+        )
+        .unwrap();
 
         config
             .apply_workspace_policy_with(directory.path(), |_| true)
@@ -1274,6 +1300,7 @@ mod tests {
 
         assert!(!config.incremental);
         assert!(!config.share_out_dir);
+        assert!(!config.build_script_execution);
     }
 
     #[test]

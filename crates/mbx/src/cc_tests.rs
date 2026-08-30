@@ -133,6 +133,7 @@ fn a_divergence_says_which_of_the_things_it_compares_differed() {
     std::fs::write(&object, b"compiled").unwrap();
 
     let cached = |stdout: &[u8], stderr: &[u8], digest: CacheDigest| CachedCompilation {
+        action: CacheDigest::blake3(b"action"),
         stdout: stdout.to_vec(),
         stderr: stderr.to_vec(),
         outputs: vec![CachedOutput {

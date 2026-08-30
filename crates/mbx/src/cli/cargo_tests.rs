@@ -262,6 +262,7 @@ pub(super) fn managed_target_config(root: &Path) -> Config {
         verify: false,
         incremental: false,
         share_out_dir: false,
+        build_script_execution: false,
         events: false,
         cc: false,
         remote: Default::default(),

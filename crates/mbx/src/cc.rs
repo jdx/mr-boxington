@@ -1038,6 +1038,7 @@ fn restore_result(
     }
     restore.duration_ns = duration_ns(materialization_started.elapsed());
     Ok(Some(CachedCompilation {
+        action: action.digest.clone(),
         stdout,
         stderr,
         outputs: vec![CachedOutput {

@@ -217,6 +217,7 @@ fn build_with(
         // Same reason: a test asserting the default cross-checkout behaviour
         // must not read an answer out of the developer's environment.
         .env_remove("MBX_SHARE_OUT_DIR")
+        .env_remove("MBX_BUILD_SCRIPT_EXECUTION")
         .env_remove("MBX_LEARNED_INCREMENTAL")
         // Native links are cached by default and several counts here include
         // one, so an inherited answer would decide them.
@@ -237,7 +238,9 @@ fn build_with(
         .env_remove("TARGET_CC")
         .env_remove("TARGET_CXX")
         .env_remove("MBX_REAL_CC")
-        .env_remove("MBX_REAL_CXX");
+        .env_remove("MBX_REAL_CXX")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER");
     for (name, value) in settings {
         command.env(name, value);
     }
@@ -1013,6 +1016,245 @@ enum Generated {
     /// Keeps `OUT_DIR` in a string constant. That lands in the artifact itself,
     /// where no remapping reaches it.
     Text,
+}
+
+/// Write a build-script fixture that leaves an observable execution count and
+/// a nested output tree. The count is deliberately outside `OUT_DIR`, so a
+/// restore cannot counterfeit an execution.
+fn write_execution_cached_project(directory: &Path, declares_inputs: bool) {
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::write(
+        directory.join("Cargo.toml"),
+        "[package]\nname = \"execution-cache-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(directory.join("input.txt"), "first\n").unwrap();
+    let declaration = if declares_inputs {
+        "println!(\"cargo:rerun-if-changed=input.txt\");\n    println!(\"cargo:rerun-if-env-changed=EXECUTION_CACHE_MODE\");"
+    } else {
+        "println!(\"cargo:rustc-cfg=generated\");"
+    };
+    std::fs::write(
+        directory.join("build.rs"),
+        format!(
+            "use std::{{env, fs, path::PathBuf}};\n\
+             fn main() {{\n\
+                 let count = PathBuf::from(\"runs\");\n\
+                 let runs = fs::read_to_string(&count).ok().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0) + 1;\n\
+                 fs::write(count, runs.to_string()).unwrap();\n\
+                 let input = fs::read_to_string(\"input.txt\").unwrap();\n\
+                 let out = PathBuf::from(env::var_os(\"OUT_DIR\").unwrap());\n\
+                 fs::create_dir_all(out.join(\"nested\")).unwrap();\n\
+                 fs::write(out.join(\"generated.rs\"), format!(\"pub const VALUE: &str = {{:?}};\\n\", input)).unwrap();\n\
+                 fs::write(out.join(\"nested/header.h\"), input).unwrap();\n\
+                 println!(\"cargo:rustc-env=MANIFEST_COPY={{}}\", env::var(\"CARGO_MANIFEST_DIR\").unwrap());\n\
+                 {declaration}\n\
+             }}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("src/lib.rs"),
+        "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\n\
+         pub const MANIFEST_COPY: &str = env!(\"MANIFEST_COPY\");\n",
+    )
+    .unwrap();
+    let status = Command::new(cargo())
+        .current_dir(directory)
+        .args(["generate-lockfile", "--offline"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[test]
+fn build_script_execution_and_out_dir_restore_across_checkouts() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    write_execution_cached_project(first.path(), true);
+    write_execution_cached_project(second.path(), true);
+
+    let no_link_cache = [("MBX_CACHE_LINKS", "0")];
+    build_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+        &no_link_cache,
+    );
+    let (warm, stderr) = build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+        &no_link_cache,
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(first.path().join("runs")).unwrap(),
+        "1"
+    );
+    assert!(
+        !second.path().join("runs").exists(),
+        "the second checkout ran its build script instead of restoring it: {warm}\n{stderr}"
+    );
+    let header = second
+        .path()
+        .join("target/debug/build")
+        .read_dir()
+        .unwrap()
+        .find_map(|entry| {
+            let path = entry.ok()?.path().join("out/nested/header.h");
+            path.is_file().then_some(path)
+        })
+        .expect("nested OUT_DIR output should be restored");
+    assert_eq!(std::fs::read_to_string(header).unwrap(), "first\n");
+    let replayed = second
+        .path()
+        .join("target/debug/build")
+        .read_dir()
+        .unwrap()
+        .find_map(|entry| {
+            let path = entry.ok()?.path().join("output");
+            path.is_file()
+                .then(|| std::fs::read_to_string(path).ok())
+                .flatten()
+        })
+        .expect("Cargo should retain the replayed build-script directives");
+    assert!(
+        replayed.contains(second.path().to_string_lossy().as_ref()),
+        "replayed directives should name the restoring checkout: {replayed}"
+    );
+    assert!(
+        !replayed.contains(first.path().to_string_lossy().as_ref()),
+        "replayed directives retained the publishing checkout: {replayed}"
+    );
+    assert!(count(&warm, "hits") >= 1, "build script should hit: {warm}");
+}
+
+#[test]
+fn changed_declared_input_executes_build_script_again() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_execution_cached_project(project.path(), true);
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+    );
+    std::fs::write(project.path().join("input.txt"), "second\n").unwrap();
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("runs")).unwrap(),
+        "2"
+    );
+}
+
+#[test]
+fn changed_declared_environment_executes_build_script_again() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_execution_cached_project(project.path(), true);
+    build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+        &[("EXECUTION_CACHE_MODE", "first")],
+    );
+    build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+        &[("EXECUTION_CACHE_MODE", "second")],
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("runs")).unwrap(),
+        "2"
+    );
+}
+
+#[test]
+fn build_script_without_declared_inputs_bypasses_execution_cache() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_execution_cached_project(project.path(), false);
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+    );
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("runs")).unwrap(),
+        "2"
+    );
+}
+
+#[test]
+fn build_script_execution_cache_can_be_turned_off() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    write_execution_cached_project(first.path(), true);
+    write_execution_cached_project(second.path(), true);
+    build(
+        first.path(),
+        store.path(),
+        &reports.path().join("enabled.json"),
+    );
+    let disabled = [("MBX_BUILD_SCRIPT_EXECUTION", "0")];
+    build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("disabled.json"),
+        &disabled,
+    );
+    assert_eq!(
+        std::fs::read_to_string(second.path().join("runs")).unwrap(),
+        "1",
+        "the opt-out should execute the build script instead of restoring it"
+    );
+}
+
+#[test]
+fn installed_build_script_wrapper_is_transparent_outside_an_mbx_session() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_execution_cached_project(project.path(), true);
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+    );
+    std::fs::write(project.path().join("input.txt"), "second\n").unwrap();
+
+    let status = Command::new(cargo())
+        .current_dir(project.path())
+        .args(["build", "--offline"])
+        .env_remove("MBX_SOCKET")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("CARGO_TARGET_DIR")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("runs")).unwrap(),
+        "2"
+    );
 }
 
 /// Write a fixture whose build script generates code, used as `generated` says.
@@ -1850,7 +2092,10 @@ fn main() {
         .status()
         .expect("the C compiler should run");
     assert!(status.success(), "the fixture's C should compile");
-    println!("cargo:rerun-if-changed=src/hello.c");
+    // This fixture tests the C action itself. Declaring no build-script inputs
+    // deliberately keeps execution caching out of the way, so the second
+    // checkout reaches the compiler shim whose behavior is under test.
+    println!("cargo:rustc-cfg=c_compiled");
 }
 "#,
     )

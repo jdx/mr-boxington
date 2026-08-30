@@ -108,6 +108,14 @@ struct ChurnState {
     streak: u32,
 }
 
+#[derive(Serialize)]
+struct BuildScriptBinaryIdentity<'a> {
+    digest: &'a CacheDigest,
+    kind: &'static str,
+    output_name: &'a str,
+    version: u8,
+}
+
 /// What every step of one compilation needs to identify it.
 struct Compilation<'a> {
     rustc: &'a OsStr,
@@ -123,11 +131,19 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     // The orchestrated session supplies the target root. A persistent wrapper
     // has no parent session, so first parse just enough of the invocation to
     // learn its output directory and use that as the stable target mapping.
-    let options = ParseOptions::caching_native_links(session::cache_links_requested());
+    let cache_native_links = session::cache_links_requested();
+    let execution_only_build_script = session::build_script_execution_requested()
+        && session::crate_name_argument(arguments).as_deref() == Some("build_script_build")
+        && !cache_native_links;
+    // A platform without native-link action caching still needs to observe a
+    // build-script executable so execution caching can key it by its exact
+    // bytes. Parsing it is safe: the linked output itself is not published.
+    let options =
+        ParseOptions::caching_native_links(cache_native_links || execution_only_build_script);
     // Appended before anything parses: the debug-map rule inside the parser is
     // exactly what this flag satisfies, so an invocation that would bypass
     // without it has to carry it going in.
-    let arguments = with_oso_prefix(arguments, session::cache_links_requested());
+    let arguments = with_oso_prefix(arguments, cache_native_links || execution_only_build_script);
     let arguments = arguments.as_ref();
     let initial_invocation = RustcInvocation::parse_with(arguments, options)?;
     let initial_outputs = initial_invocation.outputs(&working_dir)?;
@@ -139,6 +155,17 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     let arguments = portable.applied_to(arguments);
     let invocation = RustcInvocation::parse_with(&arguments, options)?;
     let outputs = invocation.outputs(&working_dir)?;
+
+    if execution_only_build_script {
+        return compile_execution_only_build_script(
+            rustc,
+            &arguments,
+            &working_dir,
+            &invocation,
+            &outputs,
+            &portable,
+        );
+    }
 
     let verify = session::verify_requested();
     // A shadow compilation compares its result against a cached one, which an
@@ -183,6 +210,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                     verification = Some(cached);
                 } else {
                     record_action_hit(&action, cached.restore, invocation.crate_name());
+                    install_build_script_shim(&invocation, &outputs, &action);
                     let _ = replay_bytes(&cached.stdout, &cached.stderr);
                     return Ok(ExitCode::SUCCESS);
                 }
@@ -209,6 +237,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                 if verify {
                     verification = Some(cached);
                 } else {
+                    install_build_script_shim(&invocation, &outputs, &cached.action);
                     let _ = replay_bytes(&cached.stdout, &cached.stderr);
                     return Ok(ExitCode::SUCCESS);
                 }
@@ -251,6 +280,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             &mut learned,
         ) {
             Ok(Some(cached)) => {
+                install_build_script_shim(&invocation, &outputs, &cached.action);
                 let _ = replay_bytes(&cached.stdout, &cached.stderr);
                 return Ok(ExitCode::SUCCESS);
             }
@@ -412,6 +442,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                     &portable.mappings,
                 )?
             };
+            install_build_script_shim(&invocation, &outputs, &action.digest);
             // The flight prediction is only left behind a *published* result:
             // an incremental artifact was withheld from the store, so a
             // waiter restoring through its key could only miss.
@@ -433,6 +464,106 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
         }
     }
     Ok(exit_code(output.status))
+}
+
+/// Compile a build script whose native link cannot be action-cached, then
+/// install the execution-cache launcher keyed by its compilation action.
+fn compile_execution_only_build_script(
+    rustc: &OsStr,
+    arguments: &[OsString],
+    working_dir: &Path,
+    invocation: &RustcInvocation,
+    outputs: &RustcOutputs,
+    portable: &Portable,
+) -> Result<ExitCode> {
+    let demand = crate::scheduler::Demand::new(invocation.crate_name(), true);
+    let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
+    let started = Instant::now();
+    let output = Command::new(rustc)
+        .args(arguments)
+        .current_dir(working_dir)
+        .output()
+        .wrap_err("failed to execute rustc")?;
+    drop(permit);
+    crate::scheduler::record_compiler_memory(&demand, &output.status);
+    session::record_compiler_invocation(
+        "bypass",
+        Some(invocation.crate_name()),
+        started.elapsed().as_nanos().try_into().unwrap_or(u64::MAX),
+    );
+    let _ = replay_output(&output);
+    if output.status.success()
+        && let Some(executable) = outputs.build_script_executable(invocation.crate_name())
+    {
+        let installed = (|| -> Result<()> {
+            // Prefer the modeled compilation action. Unlike linked executable
+            // bytes on Windows, this is reproducible across equivalent
+            // checkouts while still naming every compiler, source,
+            // environment, and linker input that can affect the program. If
+            // this host's native link cannot be modeled, exact bytes remain a
+            // conservative local fallback.
+            let modeled = (|| -> Result<CacheDigest> {
+                let compilation = Compilation {
+                    rustc,
+                    invocation,
+                    working_dir,
+                    portable,
+                    linker: linker_for(invocation)?,
+                };
+                Ok(
+                    action_from_current_dep_info(&compilation, &outputs.dep_info)?
+                        .0
+                        .literal
+                        .digest,
+                )
+            })();
+            // Cargo's extra-filename disambiguator distinguishes package units
+            // but can vary across equivalent Windows checkouts. The modeled
+            // action already contains Cargo's compilation metadata; retain the
+            // output name only for the conservative exact-byte fallback, where
+            // portability has already been surrendered.
+            let output_name = executable
+                .file_name()
+                .and_then(OsStr::to_str)
+                .ok_or_else(|| eyre::eyre!("build-script output name is not UTF-8"))?;
+            let binary = match modeled {
+                Ok(action) => action,
+                Err(_) => {
+                    let digest = CacheDigest::blake3_file(executable)
+                        .wrap_err("failed to identify the build-script binary")?;
+                    CacheDigest::blake3(&canonical_json(&BuildScriptBinaryIdentity {
+                        digest: &digest,
+                        kind: "build-script-binary",
+                        output_name,
+                        version: 1,
+                    })?)
+                }
+            };
+            crate::build_script::install(executable, &binary)
+        })();
+        if let Err(error) = installed {
+            session::report_shim_warning(&format!(
+                "build-script shim was not installed: {error:#}"
+            ));
+        }
+    }
+    Ok(exit_code(output.status))
+}
+
+fn install_build_script_shim(
+    invocation: &RustcInvocation,
+    outputs: &RustcOutputs,
+    binary_action: &CacheDigest,
+) {
+    if !session::build_script_execution_requested() {
+        return;
+    }
+    let Some(executable) = outputs.build_script_executable(invocation.crate_name()) else {
+        return;
+    };
+    if let Err(error) = crate::build_script::install(executable, binary_action) {
+        session::report_shim_warning(&format!("build-script shim was not installed: {error:#}"));
+    }
 }
 
 /// Decide whether a missed compilation should carry its own incremental state.
@@ -1365,6 +1496,7 @@ fn restore_result(
         .try_into()
         .unwrap_or(u64::MAX);
     Ok(Some(CachedCompilation {
+        action: action.digest.clone(),
         stdout,
         stderr,
         outputs: cached_outputs,

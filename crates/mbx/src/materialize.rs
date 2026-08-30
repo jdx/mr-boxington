@@ -21,6 +21,7 @@ use std::process::{ExitCode, ExitStatus};
 
 /// A compilation reconstructed from the cache.
 pub(crate) struct CachedCompilation {
+    pub(crate) action: CacheDigest,
     pub(crate) stdout: Vec<u8>,
     pub(crate) stderr: Vec<u8>,
     pub(crate) outputs: Vec<CachedOutput>,

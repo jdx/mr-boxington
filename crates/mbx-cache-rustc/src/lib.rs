@@ -746,6 +746,15 @@ impl RustcInvocation {
 }
 
 impl RustcOutputs {
+    /// The linked executable Cargo will run as a build script, when this is a
+    /// build-script compilation.
+    pub fn build_script_executable(&self, crate_name: &str) -> Option<&Path> {
+        (crate_name == "build_script_build")
+            .then(|| self.files.iter().find(|path| self.is_executable(path)))
+            .flatten()
+            .map(PathBuf::as_path)
+    }
+
     /// Whether `path` is a linked program whose executable permission is part
     /// of the declared output contract.
     /// A program is whatever this invocation emitted that is not a library

@@ -64,12 +64,14 @@ pub(crate) const STAGING_ENV: &str = "MBX_STAGING_DIR";
 pub(crate) const BUILD_ENV: &str = "MBX_BUILD";
 pub(crate) const VERIFY_ENV: &str = "MBX_VERIFY";
 pub(crate) const SHARE_OUT_DIR_ENV: &str = "MBX_SHARE_OUT_DIR";
+pub(crate) const BUILD_SCRIPT_EXECUTION_ENV: &str = "MBX_BUILD_SCRIPT_EXECUTION";
 pub(crate) const LEARNED_INCREMENTAL_ENV: &str = "MBX_LEARNED_INCREMENTAL";
 pub const CACHE_LINKS_ENV: &str = "MBX_CACHE_LINKS";
 /// Group completed builds for one later cache export, used by CI actions.
 pub const CACHE_EXPORT_GROUP_ENV: &str = "MBX_CACHE_EXPORT_GROUP";
 pub(crate) const WORKSPACE_ROOT_ENV: &str = "MBX_WORKSPACE_ROOT";
 pub(crate) const TARGET_DIR_ENV: &str = "MBX_TARGET_DIR";
+pub(crate) const BUILD_SCRIPT_REAL_SUFFIX: &str = ".mbx-real";
 const PREVIOUS_RUSTC_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WRAPPER";
 const REAL_RUSTDOC_ENV: &str = "MBX_REAL_RUSTDOC";
 pub(crate) const BYPASS_LOG_ENV: &str = "MBX_BYPASS_LOG";
@@ -87,6 +89,7 @@ pub struct CacheSession {
     verify: bool,
     incremental: bool,
     share_out_dir: bool,
+    build_script_execution: bool,
     agent: CacheAgent,
     /// The stream `mbx tui` watches, when event recording is on.
     events: Option<EventStream>,
@@ -145,6 +148,7 @@ impl CacheSession {
             verify: config.verify,
             incremental: config.incremental,
             share_out_dir: config.share_out_dir,
+            build_script_execution: config.build_script_execution,
             agent,
             events,
             scheduler_env: crate::scheduler::session_environment(config),
@@ -226,6 +230,15 @@ impl CacheSession {
         environment.insert(
             SHARE_OUT_DIR_ENV.into(),
             if self.share_out_dir { "1" } else { "0" }.into(),
+        );
+        environment.insert(
+            BUILD_SCRIPT_EXECUTION_ENV.into(),
+            if self.build_script_execution {
+                "1"
+            } else {
+                "0"
+            }
+            .into(),
         );
         for (name, value) in &self.scheduler_env {
             environment.insert(name.clone(), value.clone());
@@ -730,6 +743,73 @@ fn run_transparent_rustdoc(rustdoc: OsString, arguments: Vec<OsString>) -> ExitC
     }
 }
 
+/// Whether this process replaced a Cargo build-script executable.
+pub fn is_build_script_shim() -> bool {
+    let Some(invoked) = std::env::args_os().next().map(PathBuf::from) else {
+        return false;
+    };
+    invoked
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .is_some_and(|stem| stem == "build-script-build")
+        && find_build_script_real_path(&invoked).is_some()
+}
+
+pub(crate) fn build_script_real_path(executable: &Path) -> PathBuf {
+    let mut name = executable.as_os_str().to_os_string();
+    name.push(BUILD_SCRIPT_REAL_SUFFIX);
+    PathBuf::from(name)
+}
+
+pub(crate) fn build_script_execution_requested() -> bool {
+    std::env::var_os(BUILD_SCRIPT_EXECUTION_ENV)
+        .is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+/// Locate the preserved binary. Cargo runs an un-hashed hard link named
+/// `build-script-build`, while rustc produced and mbx wrapped the hashed
+/// `build_script_build-<unit>` sibling.
+pub(crate) fn find_build_script_real_path(executable: &Path) -> Option<PathBuf> {
+    let direct = build_script_real_path(executable);
+    if direct.is_file() {
+        return Some(direct);
+    }
+    let parent = executable.parent()?;
+    let mut matches = std::fs::read_dir(parent)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|name| {
+                        name.starts_with("build_script_build-")
+                            && name.ends_with(BUILD_SCRIPT_REAL_SUFFIX)
+                    })
+        });
+    let found = matches.next()?;
+    matches.next().is_none().then_some(found)
+}
+
+/// Run Cargo's build script through the execution cache.
+pub fn run_build_script_shim() -> ExitCode {
+    // The wrapper lives in Cargo's target directory, so it can outlive the mbx
+    // session that installed it. A later plain `cargo` invocation must remain
+    // a transparent build-script call.
+    if session_socket().is_none() || !build_script_execution_requested() {
+        return crate::build_script::run_real();
+    }
+    match crate::build_script::run() {
+        Ok(code) => code,
+        Err(error) => {
+            report_shim_warning(&format!("build-script cache bypassed: {error:#}"));
+            crate::build_script::run_real()
+        }
+    }
+}
+
 /// Compiler names the standalone shim directory stands in for, and the
 /// language each name selects.
 ///
@@ -1117,7 +1197,7 @@ fn links_natively(arguments: &[OsString]) -> bool {
     produces_program && emits_link
 }
 
-fn crate_name_argument(arguments: &[OsString]) -> Option<String> {
+pub(crate) fn crate_name_argument(arguments: &[OsString]) -> Option<String> {
     let mut arguments = arguments.iter();
     while let Some(argument) = arguments.next() {
         if argument == "--crate-name" {

@@ -1,6 +1,9 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    if mbx::session::is_build_script_shim() {
+        return mbx::session::run_build_script_shim();
+    }
     // Cargo invokes the rustc shim thousands of times per build. Dispatch on
     // argv0 before any runtime, logging, or configuration setup.
     if mbx::session::is_rustc_shim() {

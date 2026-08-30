@@ -46,6 +46,7 @@ pub mod tui;
 #[doc(hidden)]
 pub mod util;
 
+mod build_script;
 mod cc;
 mod linker;
 mod materialize;
