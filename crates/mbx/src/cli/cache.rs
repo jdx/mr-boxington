@@ -180,7 +180,7 @@ pub(super) fn cache_projects(config: &Config) -> Result<()> {
     for project in projects {
         let state = if project.live { "live" } else { "stale" };
         println!(
-            "{}\t{} actions\t{} targets\t{} identities\t{state}",
+            "{}\t{} action cache\t{} managed targets\t{} identities\t{state}",
             project.workspace_root.display(),
             ByteSize::b(project.action_bytes).display().iec(),
             ByteSize::b(project.target_bytes).display().iec(),

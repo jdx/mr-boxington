@@ -273,6 +273,18 @@ fn workspace_root(start: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    fn cargo_fixture() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(directory.path().join("src")).unwrap();
+        std::fs::write(directory.path().join("src/lib.rs"), "").unwrap();
+        directory
+    }
+
     #[test]
     fn lockfile_makes_identity_independent_of_checkout_path() {
         let left = tempfile::tempdir().unwrap();
@@ -298,5 +310,97 @@ mod tests {
             invocation_dir(cargo_arguments(&args), Path::new("/work")),
             PathBuf::from("/work")
         );
+    }
+
+    #[test]
+    fn target_directory_flags_and_environment_are_recorded_as_explicit() {
+        let directory = cargo_fixture();
+        let root = directory.path();
+        let cargo = OsStr::new("cargo-that-does-not-exist");
+        let plain = ["build".to_string()];
+
+        let default = resolve(cargo, &plain, root, None);
+        assert_eq!(default.target_dir, root.join("target"));
+        assert!(!default.target_dir_requested);
+
+        for arguments in [
+            vec!["build".into(), "--target-dir=target".into()],
+            vec!["build".into(), "--target-dir".into(), "target".into()],
+        ] {
+            let resolved = resolve(cargo, &arguments, root, None);
+            assert_eq!(resolved.target_dir, root.join("target"));
+            assert!(resolved.target_dir_requested);
+        }
+
+        let from_environment = resolve(cargo, &plain, root, Some("elsewhere".into()));
+        assert_eq!(from_environment.target_dir, root.join("elsewhere"));
+        assert!(from_environment.target_dir_requested);
+
+        let empty_environment = resolve(cargo, &plain, root, Some("".into()));
+        assert!(!empty_environment.target_dir_requested);
+
+        let dangling = ["build".into(), "--target-dir".into()];
+        assert!(!resolve(cargo, &dangling, root, None).target_dir_requested);
+    }
+
+    #[test]
+    fn project_config_that_names_the_default_target_is_still_explicit() {
+        let directory = cargo_fixture();
+        let root = directory.path();
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::write(
+            root.join(".cargo/config.toml"),
+            "[build]\ntarget-dir = \"target\"\n",
+        )
+        .unwrap();
+
+        let resolved = resolve(
+            OsStr::new("cargo-that-does-not-exist"),
+            &["build".into()],
+            root,
+            None,
+        );
+
+        assert_eq!(resolved.target_dir, root.join("target"));
+        assert!(resolved.target_dir_requested);
+    }
+
+    #[test]
+    fn command_line_config_include_may_set_the_target_directory() {
+        let directory = cargo_fixture();
+        let arguments = [
+            "build".into(),
+            "--config".into(),
+            "include='target-config.toml'".into(),
+        ];
+
+        let resolved = resolve(
+            OsStr::new("cargo-that-does-not-exist"),
+            &arguments,
+            directory.path(),
+            None,
+        );
+
+        assert!(resolved.target_dir_requested);
+    }
+
+    #[test]
+    fn command_line_target_config_reaches_the_cargo_probe() {
+        let directory = cargo_fixture();
+        let root = directory.path();
+        let configured = root.join("configured-target");
+        let arguments = [
+            "build".into(),
+            "--offline".into(),
+            "--manifest-path".into(),
+            root.join("Cargo.toml").display().to_string(),
+            "--config".into(),
+            format!("build.target-dir='{}'", configured.display()),
+        ];
+
+        let resolved = resolve(OsStr::new("cargo"), &arguments, root, None);
+
+        assert_eq!(resolved.target_dir, configured);
+        assert!(resolved.target_dir_requested);
     }
 }

@@ -31,22 +31,6 @@ fn falls_back_to_the_starting_directory() {
 }
 
 #[test]
-fn reads_both_flag_spellings() {
-    let joined = ["build".to_string(), "--target-dir=/tmp/out".to_string()];
-    let split = [
-        "build".to_string(),
-        "--target-dir".to_string(),
-        "/tmp/out".to_string(),
-    ];
-    let dangling = ["build".to_string(), "--target-dir".to_string()];
-
-    assert_eq!(target_dir_argument(&joined), Some("/tmp/out"));
-    assert_eq!(target_dir_argument(&split), Some("/tmp/out"));
-    assert_eq!(target_dir_argument(&dangling), None);
-    assert_eq!(target_dir_argument(&["build".to_string()]), None);
-}
-
-#[test]
 fn reads_the_roots_cargo_reports() {
     let metadata = br#"{
             "workspace_root": "/elsewhere/project",
@@ -61,47 +45,6 @@ fn reads_the_roots_cargo_reports() {
             target_dir: PathBuf::from("/var/cache/shared-target"),
             target_dir_requested: false,
         }
-    );
-}
-
-#[test]
-fn records_whether_anyone_asked_where_the_target_directory_goes() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path();
-    let plain = ["build".to_string(), "--offline".to_string()];
-
-    assert!(
-        !resolve_roots_with(std::ffi::OsStr::new("cargo"), &plain, root, None).target_dir_requested,
-        "nothing asked, so placement is free to move it"
-    );
-
-    // The value is the default location, and the flag still means the caller
-    // chose it. Cargo prefers the flag over the `CARGO_TARGET_DIR` a
-    // placement would set, so this is the case that must not be moved.
-    let flagged = [
-        "build".to_string(),
-        "--offline".to_string(),
-        "--target-dir".to_string(),
-        "target".to_string(),
-    ];
-    assert!(
-        resolve_roots_with(std::ffi::OsStr::new("cargo"), &flagged, root, None)
-            .target_dir_requested
-    );
-
-    assert!(
-        resolve_roots_with(
-            std::ffi::OsStr::new("cargo"),
-            &plain,
-            root,
-            Some("/somewhere/else".into())
-        )
-        .target_dir_requested
-    );
-    assert!(
-        !resolve_roots_with(std::ffi::OsStr::new("cargo"), &plain, root, Some("".into()))
-            .target_dir_requested,
-        "an empty variable names nothing, which is how cargo reads it too"
     );
 }
 
@@ -210,136 +153,6 @@ fn forwards_repeated_and_attached_global_flags() {
             .iter()
             .all(|argument| argument != "--release")
     );
-}
-
-#[test]
-fn rustc_flags_after_the_separator_are_not_cargo_globals() {
-    let arguments = [
-        "build",
-        "--config",
-        "build.jobs=2",
-        "--",
-        "-C",
-        "opt-level=3",
-        "-Zunstable-thing",
-        "--config",
-        "not.cargos=1",
-    ]
-    .map(String::from);
-
-    // Only the flag before `--` belongs to cargo. Forwarding rustc's `-C`
-    // would send the probe looking for a directory called "opt-level=3".
-    assert_eq!(
-        forwarded_flags(cargo_arguments(&arguments), &PROBE_GLOBAL_FLAGS),
-        ["--config", "build.jobs=2"]
-    );
-    let working_dir = Path::new("/workspace");
-    assert_eq!(
-        invocation_dir(cargo_arguments(&arguments), working_dir),
-        working_dir
-    );
-    // Without the separator the same tokens are cargo's, and -C wins.
-    let no_separator: Vec<String> = arguments
-        .iter()
-        .filter(|argument| *argument != "--")
-        .cloned()
-        .collect();
-    assert_eq!(
-        invocation_dir(cargo_arguments(&no_separator), working_dir),
-        Path::new("/workspace/opt-level=3")
-    );
-}
-
-#[test]
-fn a_config_set_target_dir_reaches_the_probe() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path();
-    std::fs::write(
-        root.join("Cargo.toml"),
-        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-    )
-    .unwrap();
-    std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::write(root.join("src/lib.rs"), "").unwrap();
-    let manifest = root.join("Cargo.toml");
-    let configured = root.join("configured-target");
-
-    // Without the override cargo reports the default; with it the probe has
-    // to report the same directory the build will write to, or the outputs
-    // go unmapped and every action bypasses the cache.
-    //
-    // Both halves resolve as if `CARGO_TARGET_DIR` were unset. Cargo lets
-    // that variable outrank a config-set `build.target-dir`, so leaving the
-    // ambient one in place would make the probe correctly report it instead
-    // of what is under test -- and the test would fail for anyone who
-    // exports it, which plenty of developers do.
-    let arguments = [
-        "build".to_string(),
-        "--offline".to_string(),
-        "--manifest-path".to_string(),
-        manifest.display().to_string(),
-    ];
-    let default = resolve_roots_with(std::ffi::OsStr::new("cargo"), &arguments, root, None);
-    assert_eq!(default.target_dir, root.join("target"));
-
-    let overridden = [
-        arguments.to_vec(),
-        vec![
-            "--config".to_string(),
-            // A TOML literal string: a Windows path's backslashes are
-            // escape sequences inside a basic string, which silently
-            // mangled the value and left the probe reporting the default.
-            format!("build.target-dir='{}'", configured.display()),
-        ],
-    ]
-    .concat();
-    let roots = resolve_roots_with(std::ffi::OsStr::new("cargo"), &overridden, root, None);
-    assert_eq!(roots.target_dir, configured);
-    assert!(roots.target_dir_requested);
-}
-
-#[test]
-fn a_cargo_config_that_names_the_default_target_is_still_explicit() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path();
-    std::fs::write(
-        root.join("Cargo.toml"),
-        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-    )
-    .unwrap();
-    std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::write(root.join("src/lib.rs"), "").unwrap();
-    std::fs::create_dir_all(root.join(".cargo")).unwrap();
-    std::fs::write(
-        root.join(".cargo/config.toml"),
-        "[build]\ntarget-dir = \"target\"\n",
-    )
-    .unwrap();
-    let arguments = ["build".to_string(), "--offline".to_string()];
-
-    let roots = resolve_roots_with(
-        std::ffi::OsStr::new("cargo-that-does-not-exist"),
-        &arguments,
-        root,
-        None,
-    );
-
-    assert_eq!(roots.target_dir, root.join("target"));
-    assert!(roots.target_dir_requested);
-}
-
-#[test]
-fn a_command_line_config_include_may_set_the_target_dir() {
-    let arguments = [
-        "build".to_string(),
-        "--config".to_string(),
-        "include='target-config.toml'".to_string(),
-    ];
-
-    assert!(cargo_config_may_set_target_dir(
-        &arguments,
-        Path::new("/workspace")
-    ));
 }
 
 #[test]

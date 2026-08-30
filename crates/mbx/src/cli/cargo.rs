@@ -527,21 +527,6 @@ pub(super) const PROBE_GLOBAL_FLAGS: [&str; 3] = ["-C", "--config", "-Z"];
 /// stay away from.
 pub(super) const PROBE_MANIFEST_TOGGLES: [&str; 3] = ["--offline", "--frozen", "--locked"];
 
-/// Cargo's own arguments, stopping at the `--` that hands the rest to rustc.
-///
-/// The separator matters more than it looks: past it, `-C` is a codegen option,
-/// not a directory for cargo to run in, and `-C opt-level=3` is ordinary. Reading
-/// one as the other would point the probe and the path mapping at a directory
-/// that does not exist, so every action would bypass.
-#[cfg(test)]
-pub(super) fn cargo_arguments(arguments: &[String]) -> &[String] {
-    let end = arguments
-        .iter()
-        .position(|argument| argument == "--")
-        .unwrap_or(arguments.len());
-    &arguments[..end]
-}
-
 /// Collect the occurrences of `flags` from `arguments`, preserving order and
 /// repeats. Cargo allows `--flag value`, `--flag=value`, and, for the short
 /// forms, `-Zvalue`.
@@ -568,14 +553,6 @@ pub(super) fn forwarded_flags(arguments: &[String], flags: &[&str]) -> Vec<Strin
         }
     }
     forwarded
-}
-
-/// The directory cargo resolves relative paths against, which `-C` can move.
-#[cfg(test)]
-pub(super) fn invocation_dir(arguments: &[String], working_dir: &Path) -> PathBuf {
-    flag_value(arguments, "-C")
-        .map(|value| absolute(working_dir, value))
-        .unwrap_or_else(|| working_dir.to_path_buf())
 }
 
 pub(super) fn cargo_roots(
@@ -621,80 +598,6 @@ pub(super) fn parse_cargo_roots(metadata: &[u8]) -> Option<Roots> {
         // configuration answer that, and `resolve_roots_with` reads them itself.
         target_dir_requested: false,
     })
-}
-
-#[cfg(test)]
-pub(super) fn target_dir_argument(arguments: &[String]) -> Option<&str> {
-    flag_value(arguments, "--target-dir")
-}
-
-/// Whether Cargo configuration may have named the target directory.
-///
-/// `cargo metadata` reports only the resolved path, so an explicit
-/// `build.target-dir = "target"` is otherwise indistinguishable from Cargo's
-/// default. Any explicit config file passed on the command line is treated
-/// conservatively because it may include another file.
-#[cfg(test)]
-pub(super) fn cargo_config_may_set_target_dir(arguments: &[String], invocation_dir: &Path) -> bool {
-    if std::env::var_os("CARGO_BUILD_TARGET_DIR").is_some_and(|value| !value.is_empty()) {
-        return true;
-    }
-    if config_arguments(arguments).any(|value| {
-        value
-            .split_once('=')
-            .is_none_or(|(key, _)| matches!(key.trim(), "build.target-dir" | "include"))
-    }) {
-        return true;
-    }
-
-    let project_configs = invocation_dir.ancestors().flat_map(|directory| {
-        let cargo = directory.join(".cargo");
-        [cargo.join("config.toml"), cargo.join("config")]
-    });
-    let home_configs = std::env::var_os("CARGO_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".cargo")))
-        .into_iter()
-        .flat_map(|cargo| [cargo.join("config.toml"), cargo.join("config")]);
-    project_configs
-        .chain(home_configs)
-        .any(|path| cargo_config_file_may_set_target_dir(&path))
-}
-
-#[cfg(test)]
-pub(super) fn config_arguments(arguments: &[String]) -> impl Iterator<Item = &str> {
-    let mut values = Vec::new();
-    let mut remaining = arguments.iter();
-    while let Some(argument) = remaining.next() {
-        if let Some(value) = argument.strip_prefix("--config=") {
-            values.push(value);
-        } else if argument == "--config"
-            && let Some(value) = remaining.next()
-        {
-            values.push(value.as_str());
-        }
-    }
-    values.into_iter()
-}
-
-#[cfg(test)]
-pub(super) fn cargo_config_file_may_set_target_dir(path: &Path) -> bool {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
-        Err(_) => return true,
-    };
-    let Ok(config) = toml::from_str::<toml::Value>(&contents) else {
-        // Cargo will reject it, but mbx must not mutate a target directory on
-        // the way to that error.
-        return true;
-    };
-    config
-        .get("build")
-        .and_then(|build| build.get("target-dir"))
-        .is_some()
-        // An included file may contain the setting; Cargo owns that merge.
-        || config.get("include").is_some()
 }
 
 /// Read `--flag <value>` or `--flag=<value>` out of cargo's arguments.
