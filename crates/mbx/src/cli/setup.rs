@@ -90,7 +90,7 @@ pub(super) fn run(args: &SetupArgs, action: SetupAction) -> Result<ExitCode> {
     let install_dir = setup_install_dir()
         .ok_or_else(|| eyre::eyre!("the platform data directory could not be located"))?;
     let scope = setup_scope(args, action)?;
-    let rust_analyzer_config = rust_analyzer_config_path(&scope, action)?;
+    let rust_analyzer_config = rust_analyzer_config_path(&scope)?;
     setup_with_rust_analyzer(
         &executable,
         &install_dir,
@@ -212,15 +212,11 @@ pub(super) fn setup_with_rust_analyzer(
 }
 
 /// Match rust-analyzer's configuration scope to setup's activation scope.
-fn rust_analyzer_config_path(scope: &MiseScope, action: SetupAction) -> Result<PathBuf> {
-    rust_analyzer_config_path_from(scope, action, &std::env::current_dir()?)
+fn rust_analyzer_config_path(scope: &MiseScope) -> Result<PathBuf> {
+    rust_analyzer_config_path_from(scope, &std::env::current_dir()?)
 }
 
-pub(super) fn rust_analyzer_config_path_from(
-    scope: &MiseScope,
-    action: SetupAction,
-    cwd: &Path,
-) -> Result<PathBuf> {
+pub(super) fn rust_analyzer_config_path_from(scope: &MiseScope, cwd: &Path) -> Result<PathBuf> {
     let global = || {
         dirs::config_dir()
             .map(|directory| {
@@ -237,12 +233,7 @@ pub(super) fn rust_analyzer_config_path_from(
             .then(|| root.join(RUST_ANALYZER_CONFIG_FILE))
     };
     match scope {
-        MiseScope::Global => global(),
-        MiseScope::None if action != SetupAction::Install => {
-            let local = local()?;
-            if local.is_file() { Ok(local) } else { global() }
-        }
-        MiseScope::None => global(),
+        MiseScope::Global | MiseScope::None => global(),
         MiseScope::Local => local(),
         MiseScope::File(path) => {
             if mise_scope_config_path(&MiseScope::Global)

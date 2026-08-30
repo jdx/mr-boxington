@@ -138,20 +138,8 @@ fn project_rust_analyzer_config_follows_the_active_cargo_workspace() {
     std::fs::write(&mise_config, "").unwrap();
 
     assert_eq!(
-        rust_analyzer_config_path_from(
-            &MiseScope::File(mise_config),
-            SetupAction::Install,
-            &source,
-        )
-        .unwrap(),
+        rust_analyzer_config_path_from(&MiseScope::File(mise_config), &source,).unwrap(),
         crate_root.join("rust-analyzer.toml")
-    );
-
-    let local_config = crate_root.join("rust-analyzer.toml");
-    std::fs::write(&local_config, "").unwrap();
-    assert_eq!(
-        rust_analyzer_config_path_from(&MiseScope::None, SetupAction::Status, &source).unwrap(),
-        local_config
     );
 }
 
