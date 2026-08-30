@@ -4,8 +4,10 @@ use eyre::{Context, Result};
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::{Command, ExitCode};
+use std::sync::OnceLock;
 
 const CARGO_SHIM_STEM: &str = "cargo";
+static PATH_BEFORE_SHIM_EXCLUSION: OnceLock<OsString> = OnceLock::new();
 
 /// Whether this process was installed under Cargo's name by `mbx setup`.
 pub fn is_cargo_shim() -> bool {
@@ -151,11 +153,19 @@ fn exclude_shim_from_path(shim: &Path) -> Result<()> {
     let Some(path) = std::env::var_os("PATH") else {
         return Ok(());
     };
+    PATH_BEFORE_SHIM_EXCLUSION.get_or_init(|| path.clone());
     let path = path_without_shim(shim, &path)?;
     // SAFETY: CLI dispatch is single-threaded here, before any child process
     // or cache session has started.
     unsafe { std::env::set_var("PATH", path) };
     Ok(())
+}
+
+pub(super) fn activation_path() -> Option<OsString> {
+    PATH_BEFORE_SHIM_EXCLUSION
+        .get()
+        .cloned()
+        .or_else(|| std::env::var_os("PATH"))
 }
 
 fn path_without_shim(shim: &Path, path: &OsStr) -> Result<OsString> {

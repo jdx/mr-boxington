@@ -252,7 +252,7 @@ fn setup_check() -> Check {
     setup_check_at(
         &executable,
         &expected_shim,
-        std::env::var_os("PATH").as_deref(),
+        crate::cli::cargo_activation_path().as_deref(),
     )
 }
 
