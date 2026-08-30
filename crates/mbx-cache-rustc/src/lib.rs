@@ -405,6 +405,35 @@ impl RustcInvocation {
         )
     }
 
+    /// Linker selected with `-C linker`, if the invocation overrides rustc's
+    /// platform default.
+    pub fn linker_override(&self) -> Option<&Path> {
+        self.arguments.iter().find_map(|argument| {
+            let Argument::Plain(value) = argument else {
+                return None;
+            };
+            value.strip_prefix("--codegen=linker=").map(Path::new)
+        })
+    }
+
+    fn emits_windows_pdb(&self) -> bool {
+        if !cfg!(windows) || !self.links_natively() {
+            return false;
+        }
+        let mut enabled = false;
+        for argument in &self.arguments {
+            let Argument::Plain(value) = argument else {
+                continue;
+            };
+            if value == "-g" {
+                enabled = true;
+            } else if let Some(value) = value.strip_prefix("--codegen=debuginfo=") {
+                enabled = !matches!(value, "0" | "none");
+            }
+        }
+        enabled
+    }
+
     /// Whether the contents of native search directories cannot reach this
     /// invocation's outputs.
     ///
@@ -536,7 +565,7 @@ impl RustcInvocation {
                 "link" => match self.link_output {
                     LinkOutput::Library => ("lib", "rlib"),
                     LinkOutput::WasmExecutable => ("", "wasm"),
-                    LinkOutput::NativeExecutable => ("", ""),
+                    LinkOutput::NativeExecutable => ("", std::env::consts::EXE_EXTENSION),
                     LinkOutput::NativeProcMacro => (
                         std::env::consts::DLL_PREFIX,
                         std::env::consts::DLL_SUFFIX.trim_start_matches('.'),
@@ -573,6 +602,9 @@ impl RustcInvocation {
                 )
             {
                 return Err(BypassReason::AmbiguousOutputName(path));
+            }
+            if emit.kind == "link" && self.emits_windows_pdb() {
+                files.insert(path.with_extension("pdb"));
             }
             files.insert(path);
         }
@@ -1390,7 +1422,9 @@ impl<'a> Parser<'a> {
         if name == "incremental" {
             return Err(BypassReason::Incremental);
         }
-        if SUPPORTED_CODEGEN_OPTIONS.binary_search(&name).is_err() {
+        if SUPPORTED_CODEGEN_OPTIONS.binary_search(&name).is_err()
+            && !(cfg!(windows) && name == "linker")
+        {
             return Err(BypassReason::UnknownCodegenOption(name.into()));
         }
         // `-oso_prefix` names a checkout-specific path, so it is parsed

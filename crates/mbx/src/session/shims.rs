@@ -124,7 +124,7 @@ pub(super) const CC_CRATE_ENV: &[&str] = &["CC", "CXX", "HOST_CC", "HOST_CXX"];
 /// one compiler, and so a machine with no C compiler simply gets no shims
 /// instead of a build script that fails differently than it would have.
 pub(super) fn install_cc_shims(shims_dir: &Path) -> Result<Option<CcShims>> {
-    if !cfg!(unix) {
+    if !cfg!(any(unix, windows)) {
         return Ok(None);
     }
     let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
@@ -253,7 +253,7 @@ pub struct PathShims {
 /// running through the cache rather than around it. Nothing is added to any
 /// `PATH` but the one handed to a single `mbx exec` command.
 pub fn install_path_shims(directory: &Path) -> Result<Option<PathShims>> {
-    if !cfg!(unix) {
+    if !cfg!(any(unix, windows)) {
         return Ok(None);
     }
     let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
@@ -321,7 +321,26 @@ fn link_path_shim(executable: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn link_path_shim(executable: &Path, destination: &Path) -> Result<()> {
+    // Windows cannot replace an executable while another process has it open,
+    // so a stable existing shim is preferable to a racy in-place upgrade. A
+    // missing shim is pinned to this binary by hard link, with copy fallback.
+    if destination.is_file() {
+        return Ok(());
+    }
+    if let Err(link_error) = std::fs::hard_link(executable, destination) {
+        std::fs::copy(executable, destination).wrap_err_with(|| {
+            format!(
+                "failed to install the shim {} by hard link ({link_error}) or copy",
+                destination.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn link_path_shim(_executable: &Path, _destination: &Path) -> Result<()> {
     eyre::bail!("PATH shims are not supported on this platform")
 }

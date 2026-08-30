@@ -20,12 +20,14 @@ nothing is installed globally.
 
 ## What `mbx exec` does
 
-While the command runs, mbx puts wrappers for the common Unix compiler names
-at the front of `PATH`:
+While the command runs, mbx puts wrappers for the common compiler names at the
+front of `PATH`:
 
 ```text
 cc  c++  gcc  g++  clang  clang++
 ```
+
+On Windows it wraps `cl.exe` instead.
 
 When the build tool calls one of those names, mbx checks the cache first. On a
 hit, it restores the object file. On a miss, it runs the compiler that would
@@ -59,13 +61,13 @@ real compiler without using the cache.
 
 ## What gets cached
 
-mbx caches ordinary gcc- and clang-style compile commands that compile one C
-or C++ source file into an object with `-c`. It does not cache links,
+mbx caches ordinary gcc-, clang-, and MSVC-style compile commands that compile
+one C or C++ source file into an object. It does not cache links,
 multi-source compiler calls, or commands whose behavior it cannot model
 safely. Those commands still run normally; the session summary reports why
 they bypassed the cache.
 
-`mbx exec` only intercepts the six unversioned compiler names listed above. It
+`mbx exec` only intercepts the unversioned compiler names listed above. It
 leaves commands such as `gcc-13`, absolute compiler paths, and explicitly
 selected cross-compilers alone.
 

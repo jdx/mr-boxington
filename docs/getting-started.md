@@ -120,12 +120,11 @@ differences, which the pages they belong to also note in place:
 - The managed `target` link needs Developer Mode or a privileged process;
   where Windows refuses to create it, Cargo keeps its ordinary target
   directory. See [managed target directories](/managed-targets).
-- rustc compilations are cached as on every platform, but there is no
-  native-link tier: host programs and tests link as they always did, and only
-  the self-contained WebAssembly targets restore linked binaries. See
+- rustc compilations and native host links are cached; native-link keys bind
+  the selected MSVC/LLVM linker, Windows SDK, and CRT. See
   [limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
-- No C or C++ shims are installed, and MSVC invocations are never modeled, so
-  build-script C and `mbx exec` caching are Unix-only. See
+- MSVC C and C++ compiles from build scripts and `mbx exec` are cached through
+  a conservative `cl.exe` adapter. See
   [limits](/limits#c-and-c-caching-covers-the-host-compiles-mbx-drives).
 
 ## Run a build

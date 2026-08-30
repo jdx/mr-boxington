@@ -20,7 +20,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Environment that selects what the probes below report.
-const IDENTITY_ENVIRONMENT: &[&str] = &["SDKROOT", "MACOSX_DEPLOYMENT_TARGET"];
+const IDENTITY_ENVIRONMENT: &[&str] = &[
+    "SDKROOT",
+    "MACOSX_DEPLOYMENT_TARGET",
+    "LIB",
+    "UCRTVersion",
+    "UniversalCRTSdkDir",
+    "VCToolsInstallDir",
+    "VCToolsVersion",
+    "WindowsSdkDir",
+    "WindowsSDKVersion",
+];
 
 /// What the driver is asked to place, and which of it a key cannot do without.
 ///
@@ -87,8 +97,29 @@ fn file_probes() -> FileProbes {
 ///
 /// Memoized through the agent for the life of the build, since the answer is
 /// the same for every link in it and the probes are several processes.
-pub(crate) fn identity() -> Result<LinkerIdentity> {
-    let driver = which::which("cc").wrap_err("failed to find the linker driver `cc`")?;
+/// Describe the default linker, or a recognized Windows linker override.
+pub(crate) fn identity_for(override_linker: Option<&Path>) -> Result<LinkerIdentity> {
+    let driver = if let Some(linker) = override_linker {
+        if !cfg!(windows)
+            || !linker
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    matches!(
+                        name.to_ascii_lowercase().as_str(),
+                        "link" | "link.exe" | "lld-link" | "lld-link.exe"
+                    )
+                })
+        {
+            bail!("the selected linker is not one mbx can identify");
+        }
+        which::which(linker)
+            .wrap_err_with(|| format!("failed to find linker `{}`", linker.display()))?
+    } else if cfg!(windows) {
+        which::which("link.exe").wrap_err("failed to find the linker `link.exe`")?
+    } else {
+        which::which("cc").wrap_err("failed to find the linker driver `cc`")?
+    };
     let environment = IDENTITY_ENVIRONMENT
         .iter()
         .map(|name| ((*name).into(), std::env::var(name).ok()))
@@ -135,6 +166,9 @@ fn record(
 }
 
 fn probe(driver: &Path) -> Result<LinkerIdentity> {
+    if cfg!(windows) {
+        return probe_windows(driver);
+    }
     Ok(LinkerIdentity {
         driver: driver
             .to_str()
@@ -146,6 +180,109 @@ fn probe(driver: &Path) -> Result<LinkerIdentity> {
         sdk: sdk_identity()?,
         deployment_target: std::env::var("MACOSX_DEPLOYMENT_TARGET").ok(),
     })
+}
+
+/// Bind a Windows link to the MSVC/LLVM linker, toolset, SDK, and CRT import
+/// libraries selected by the developer environment.
+fn probe_windows(linker: &Path) -> Result<LinkerIdentity> {
+    let is_lld = linker
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().starts_with("lld-link"));
+    let linker_report = run_allowing_status(linker, if is_lld { &["--version"] } else { &["/?"] })?;
+    let linker_version = linker_report
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let cl = which::which("cl.exe")
+        .wrap_err("failed to find `cl.exe` for the MSVC toolchain identity")?;
+    let compiler_version = run_allowing_status(&cl, &["/Bv"])?;
+    let crt_objects = windows_crt_objects()?;
+    let sdk = windows_sdk_identity()?;
+    Ok(LinkerIdentity {
+        driver: linker
+            .to_str()
+            .ok_or_else(|| eyre::eyre!("the linker path is not valid UTF-8"))?
+            .to_owned(),
+        driver_version: compiler_version,
+        linker_version,
+        crt_objects,
+        sdk: Some(sdk),
+        deployment_target: None,
+    })
+}
+
+fn run_allowing_status(program: &Path, arguments: &[&str]) -> Result<String> {
+    let output = Command::new(program)
+        .args(arguments)
+        .output()
+        .wrap_err_with(|| format!("failed to run {}", program.display()))?;
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    let reported = text.trim();
+    if reported.is_empty() {
+        bail!("{} {arguments:?} reported nothing", program.display());
+    }
+    Ok(reported.to_owned())
+}
+
+fn windows_sdk_identity() -> Result<String> {
+    windows_sdk_identity_for(|name| std::env::var(name).ok())
+}
+
+fn windows_sdk_identity_for(lookup: impl Fn(&str) -> Option<String>) -> Result<String> {
+    let values = ["VCToolsVersion", "WindowsSDKVersion", "UCRTVersion"]
+        .into_iter()
+        .filter_map(|name| {
+            lookup(name)
+                .filter(|value| !value.is_empty())
+                .map(|value| format!("{name}={value}"))
+        })
+        .collect::<Vec<_>>();
+    if values.len() < 2 {
+        bail!("the MSVC toolset and Windows SDK versions could not be identified");
+    }
+    Ok(values.join("; "))
+}
+
+fn windows_crt_objects() -> Result<BTreeMap<String, CacheDigest>> {
+    let directories = std::env::var_os("LIB")
+        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .unwrap_or_default();
+    windows_crt_objects_in(&directories)
+}
+
+fn windows_crt_objects_in(directories: &[PathBuf]) -> Result<BTreeMap<String, CacheDigest>> {
+    let names = [
+        "libcmt.lib",
+        "libcmtd.lib",
+        "msvcrt.lib",
+        "msvcrtd.lib",
+        "vcruntime.lib",
+        "vcruntimed.lib",
+        "ucrt.lib",
+        "ucrtd.lib",
+    ];
+    let mut resolved = BTreeMap::<String, CacheDigest>::new();
+    for name in names {
+        if let Some(path) = directories
+            .iter()
+            .map(|dir| dir.join(name))
+            .find(|path| path.is_file())
+        {
+            let digest = CacheDigest::blake3_file(&path)
+                .wrap_err_with(|| format!("failed to hash CRT library {}", path.display()))?;
+            resolved.insert(name.into(), digest);
+        }
+    }
+    if !resolved.keys().any(|name| name.starts_with("vcruntime"))
+        || !resolved.keys().any(|name| name.starts_with("ucrt"))
+    {
+        bail!("the MSVC and Universal CRT libraries could not both be identified");
+    }
+    Ok(resolved)
 }
 
 /// Version of the linker the driver selects, as opposed to the driver itself.

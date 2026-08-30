@@ -1141,10 +1141,10 @@ fn native_links_are_admitted_only_when_the_caller_models_them() {
     assert!(RustcInvocation::parse_with(&binary, native_links()).is_ok());
 }
 
-/// A linked program has no extension, and its executable bit is part of what
-/// the cache promises to restore.
+/// A linked program has the host executable extension, and its executable bit
+/// is part of what the cache promises to restore.
 #[test]
-fn a_native_program_is_named_without_an_extension() {
+fn a_native_program_uses_the_host_executable_name() {
     let working_dir = workspace();
     let invocation = RustcInvocation::parse_with(
         &args(&[
@@ -1158,13 +1158,50 @@ fn a_native_program_is_named_without_an_extension() {
         native_links(),
     )
     .unwrap();
-    let linked = working_dir.join("target/debug/deps/widget-abc123");
+    let name = if std::env::consts::EXE_EXTENSION.is_empty() {
+        "widget-abc123".into()
+    } else {
+        format!("widget-abc123.{}", std::env::consts::EXE_EXTENSION)
+    };
+    let linked = working_dir.join("target/debug/deps").join(name);
 
     let outputs = invocation.outputs(&working_dir).unwrap();
 
     assert_eq!(outputs.files, vec![linked.clone()]);
     assert!(outputs.is_executable(&linked));
     assert!(invocation.links_natively());
+}
+
+#[cfg(windows)]
+#[test]
+fn a_debug_native_program_caches_its_pdb() {
+    let working_dir = workspace();
+    let invocation = RustcInvocation::parse_with(
+        &args(&[
+            "--crate-name=widget",
+            "--test",
+            "--emit=dep-info,link",
+            "--out-dir=target/debug/deps",
+            "-Cdebuginfo=2",
+            "src/lib.rs",
+        ]),
+        native_links(),
+    )
+    .unwrap();
+
+    let outputs = invocation.outputs(&working_dir).unwrap();
+    assert!(
+        outputs
+            .files
+            .iter()
+            .any(|path| path.extension().is_some_and(|ext| ext == "exe"))
+    );
+    assert!(
+        outputs
+            .files
+            .iter()
+            .any(|path| path.extension().is_some_and(|ext| ext == "pdb"))
+    );
 }
 
 /// rustc without `--target` links for the host by construction, which is the
