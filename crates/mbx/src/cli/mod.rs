@@ -139,6 +139,7 @@ pub fn run() -> Result<ExitCode> {
         args.command = original_exec_arguments(&original)?;
     }
     if let Commands::Doctor(args) = &cli.command {
+        shim::prepare_explicit_cargo()?;
         return doctor::run(args, toolchain);
     }
     let (config, settings) = Config::load_for_cli()?;
