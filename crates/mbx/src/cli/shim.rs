@@ -149,8 +149,24 @@ pub(super) fn prepare_explicit_cargo() -> Result<()> {
 
 fn resolve_real_cargo(current: &Path) -> Result<OsString> {
     let configured = std::env::var_os("CARGO");
+    if let Some(cargo) = configured_real_cargo(current, configured.as_deref()) {
+        return Ok(cargo);
+    }
     let path = std::env::var_os("PATH").ok_or_else(|| eyre::eyre!("PATH is not set"))?;
-    resolve_real_cargo_from(current, configured.as_deref(), &path)
+    resolve_real_cargo_from(current, None, &path)
+}
+
+fn configured_real_cargo(current: &Path, configured: Option<&OsStr>) -> Option<OsString> {
+    let configured = Path::new(configured?);
+    let current_dir = current.parent();
+    (configured.is_absolute()
+        && configured.is_file()
+        && current_dir.is_none_or(|current_dir| {
+            configured
+                .parent()
+                .is_some_and(|parent| !same_path(parent, current_dir))
+        }))
+    .then(|| configured.as_os_str().to_owned())
 }
 
 fn resolve_real_cargo_from(
@@ -159,16 +175,8 @@ fn resolve_real_cargo_from(
     path: &OsStr,
 ) -> Result<OsString> {
     let current_dir = current.parent();
-    if let Some(configured) = configured {
-        let configured_path = Path::new(&configured);
-        if configured_path.is_absolute()
-            && configured_path.is_file()
-            && current_dir.is_none_or(|current_dir| {
-                !same_path(configured_path.parent().unwrap(), current_dir)
-            })
-        {
-            return Ok(configured.to_owned());
-        }
+    if let Some(cargo) = configured_real_cargo(current, configured) {
+        return Ok(cargo);
     }
     let name = if cfg!(windows) { "cargo.exe" } else { "cargo" };
     for directory in std::env::split_paths(path) {
@@ -262,6 +270,25 @@ mod tests {
         assert_eq!(
             resolve_real_cargo_from(&shim, Some(shim.as_os_str()), &path).unwrap(),
             real.into_os_string()
+        );
+    }
+
+    #[test]
+    fn configured_real_cargo_does_not_need_a_path_search() {
+        let directory = tempfile::tempdir().unwrap();
+        let shim_dir = directory.path().join("shim");
+        let real_dir = directory.path().join("real");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let name = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+        let shim = shim_dir.join(name);
+        let real = real_dir.join(name);
+        std::fs::write(&shim, b"shim").unwrap();
+        std::fs::write(&real, b"real").unwrap();
+
+        assert_eq!(
+            configured_real_cargo(&shim, Some(real.as_os_str())),
+            Some(real.into_os_string())
         );
     }
 
