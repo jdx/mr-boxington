@@ -1,8 +1,8 @@
 use mbx_cache_core::{
-    ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE, AGENT_PROTOCOL_VERSION,
-    ActionPrediction, AgentRequest, AgentResponse, BLOB_MEDIA_TYPE, BLOB_PACK_MEDIA_TYPE,
-    BLOB_PACK_RECEIPT_MEDIA_TYPE, CLIENT_METADATA_MEDIA_TYPE, CacheDigest, CacheDirectory,
-    CacheFileNode, CcMetadata, DIRECTORY_MEDIA_TYPE, FileDigestScope, FileIdentity,
+    ACTION_PROMISE_MEDIA_TYPE, ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE,
+    AGENT_PROTOCOL_VERSION, ActionPrediction, AgentRequest, AgentResponse, BLOB_MEDIA_TYPE,
+    BLOB_PACK_MEDIA_TYPE, BLOB_PACK_RECEIPT_MEDIA_TYPE, CLIENT_METADATA_MEDIA_TYPE, CacheDigest,
+    CacheDirectory, CacheFileNode, CcMetadata, DIRECTORY_MEDIA_TYPE, FileDigestScope, FileIdentity,
     PROTOCOL_VERSION, RecordedFileDigest, RemoteActionResult, RestoreStats, RustcMetadata,
     TASK_ACTION_MANIFEST_MEDIA_TYPE, canonical_json,
 };
@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v5.jsonl");
+const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v6.jsonl");
 
 fn digest() -> CacheDigest {
     CacheDigest {
@@ -99,7 +99,7 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
         (
             "request.hello",
             AgentRequest::Hello {
-                protocol: 5,
+                protocol: 6,
                 client_version: "0.3.0".into(),
             },
         ),
@@ -225,6 +225,20 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
                 }],
             },
         ),
+        (
+            "request.join_action_promise",
+            AgentRequest::JoinActionPromise {
+                adapter: "rustc".into(),
+                invocation: digest(),
+            },
+        ),
+        (
+            "request.complete_action_promise",
+            AgentRequest::CompleteActionPromise {
+                claim: "claim-1".into(),
+                prediction: prediction(),
+            },
+        ),
     ]
 }
 
@@ -233,7 +247,7 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
         (
             "response.hello",
             AgentResponse::Hello {
-                protocol: 5,
+                protocol: 6,
                 agent_version: "0.3.0".into(),
             },
         ),
@@ -337,6 +351,31 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
             "response.file_digests_recorded",
             AgentResponse::FileDigestsRecorded,
         ),
+        (
+            "response.action_promise_claimed",
+            AgentResponse::ActionPromise {
+                claim: Some("claim-1".into()),
+                prediction: None,
+            },
+        ),
+        (
+            "response.action_promise_complete",
+            AgentResponse::ActionPromise {
+                claim: None,
+                prediction: Some(prediction()),
+            },
+        ),
+        (
+            "response.action_promise_unavailable",
+            AgentResponse::ActionPromise {
+                claim: None,
+                prediction: None,
+            },
+        ),
+        (
+            "response.action_promise_completed",
+            AgentResponse::ActionPromiseCompleted,
+        ),
     ]
 }
 
@@ -360,7 +399,7 @@ fn assert_fixture<T: Serialize>(expected: &mut BTreeMap<&str, &str>, name: &str,
 }
 
 #[test]
-fn agent_protocol_v3_shapes_match_the_conformance_fixture() {
+fn agent_protocol_v6_shapes_match_the_conformance_fixture() {
     let mut expected = fixture();
     for line in AGENT_FIXTURE.lines() {
         let (name, json) = line
@@ -438,7 +477,7 @@ fn agent_protocol_v3_shapes_match_the_conformance_fixture() {
 
 #[test]
 fn protocol_constants_match_the_contract() {
-    assert_eq!(AGENT_PROTOCOL_VERSION, 5);
+    assert_eq!(AGENT_PROTOCOL_VERSION, 6);
     assert_eq!(PROTOCOL_VERSION, 1);
     assert_eq!(
         ACTION_RESULT_MEDIA_TYPE,
@@ -464,6 +503,10 @@ fn protocol_constants_match_the_contract() {
     assert_eq!(
         ACTION_RESULT_BATCH_MEDIA_TYPE,
         "application/vnd.mbx.cache-action-result-batch.v1+json"
+    );
+    assert_eq!(
+        ACTION_PROMISE_MEDIA_TYPE,
+        "application/vnd.mbx.cache-action-promise.v1+json"
     );
     assert_eq!(
         BLOB_PACK_RECEIPT_MEDIA_TYPE,
@@ -492,6 +535,8 @@ define_variant_coverage!(request_variant_name, EXPECTED_REQUEST_VARIANTS, AgentR
     AgentRequest::StoreExecutableIdentity { .. } => "store_executable_identity",
     AgentRequest::FindFileDigests { .. } => "find_file_digests",
     AgentRequest::RecordFileDigests { .. } => "record_file_digests",
+    AgentRequest::JoinActionPromise { .. } => "join_action_promise",
+    AgentRequest::CompleteActionPromise { .. } => "complete_action_promise",
 });
 
 define_variant_coverage!(response_variant_name, EXPECTED_RESPONSE_VARIANTS, AgentResponse, {
@@ -515,4 +560,6 @@ define_variant_coverage!(response_variant_name, EXPECTED_RESPONSE_VARIANTS, Agen
     AgentResponse::Error { .. } => "error",
     AgentResponse::FileDigests { .. } => "file_digests",
     AgentResponse::FileDigestsRecorded => "file_digests_recorded",
+    AgentResponse::ActionPromise { .. } => "action_promise",
+    AgentResponse::ActionPromiseCompleted => "action_promise_completed",
 });

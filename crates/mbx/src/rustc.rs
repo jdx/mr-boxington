@@ -260,6 +260,72 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             }
         }
     }
+    let mut remote_claim = None;
+    if let Some(flight) = &flight
+        // Incremental artifacts are deliberately never published, so they
+        // must not acquire a fleet lease whose promise they cannot fulfill.
+        && !learned.engaged()
+    {
+        match session::request_agent(&[AgentRequest::JoinActionPromise {
+            adapter: "rustc".into(),
+            invocation: flight.invocation.clone(),
+        }]) {
+            Ok(responses) => match responses.into_iter().next() {
+                Some(AgentResponse::ActionPromise {
+                    claim: Some(claim),
+                    prediction: None,
+                }) => remote_claim = Some(claim),
+                Some(AgentResponse::ActionPromise {
+                    claim: None,
+                    prediction: Some(prediction),
+                }) if prediction.adapter == "rustc"
+                    && prediction.invocation == flight.invocation =>
+                {
+                    let context = base_action_context(
+                        compilation.rustc,
+                        compilation.working_dir,
+                        compilation.portable,
+                    );
+                    let restored = context.and_then(|context| {
+                        restore_prediction_payload(
+                            &compilation,
+                            &outputs,
+                            context,
+                            &flight.invocation,
+                            &prediction.payload,
+                            Some(&prediction.action),
+                            true,
+                            &mut action_lookup_attempted,
+                            learned_enabled,
+                            &mut learned,
+                        )
+                    });
+                    match restored {
+                        Ok(Some(cached)) => {
+                            // Mirror the successful fleet handoff locally:
+                            // the remote promise is ephemeral, while this
+                            // record survives for the next local flight.
+                            flight.flight.leave(&prediction.payload);
+                            let _ = replay_bytes(&cached.stdout, &cached.stderr);
+                            return Ok(ExitCode::SUCCESS);
+                        }
+                        Ok(None) => {}
+                        Err(error) => eprintln!(
+                            "mbx[warning]: a remote flight prediction was not restored: {error:#}"
+                        ),
+                    }
+                }
+                Some(AgentResponse::ActionPromise { .. }) => {}
+                Some(AgentResponse::Error { message }) => {
+                    eprintln!("mbx[warning]: remote flight coordination failed: {message}")
+                }
+                _ => {}
+            },
+            Err(error) => {
+                eprintln!("mbx[warning]: remote flight coordination failed: {error:#}")
+            }
+        }
+    }
     // No usable action key, and now no flight prediction either: this
     // compilation runs without an action-result lookup ever being made, which
     // is not a miss and has to be counted as its own thing or the summary
@@ -358,6 +424,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                     .as_ref()
                     .filter(|_| !learned.engaged())
                     .map(|flight| &flight.flight),
+                remote_claim.as_deref().filter(|_| !learned.engaged()),
             );
             Ok(())
         })();
@@ -579,6 +646,11 @@ fn restore_predicted_result(
         context,
         &invocation_digest,
         &prediction.payload,
+        // A manifest prediction intentionally survives source changes: its
+        // payload is rehashed to derive the action for the current inputs.
+        // Only a completed remote promise must still name the exact action it
+        // promised before any of that action's outputs may be materialized.
+        None,
         restore_outputs,
         action_lookup_attempted,
         learned_enabled,
@@ -599,6 +671,7 @@ fn restore_prediction_payload(
     mut context: ActionContext,
     invocation_digest: &CacheDigest,
     payload: &str,
+    expected_action: Option<&CacheDigest>,
     restore_outputs: bool,
     action_lookup_attempted: &mut bool,
     learned_enabled: bool,
@@ -621,6 +694,9 @@ fn restore_prediction_payload(
     )?;
     discovered.clone().apply_to(&mut context)?;
     let candidates = ActionCandidates::build(invocation, context, compilation.linker.clone())?;
+    if expected_action.is_some_and(|expected| !candidates.contains(expected)) {
+        bail!("the action prediction no longer matches its predicted inputs");
+    }
     // From this point onward, every return follows at least one action-result
     // request, including error responses from a corrupt local record.
     *action_lookup_attempted = true;
@@ -694,6 +770,13 @@ impl ActionCandidates {
                 .transpose()?,
             literal: invocation.action_linked_by(literal_context, linker)?,
         })
+    }
+
+    fn contains(&self, digest: &CacheDigest) -> bool {
+        self.portable
+            .as_ref()
+            .is_some_and(|action| &action.digest == digest)
+            || &self.literal.digest == digest
     }
 
     /// The key this compilation is published under.
@@ -868,6 +951,7 @@ fn record_prediction(
     discovered: &DiscoveredInputs,
     timing: &CompileTiming,
     flight: Option<&crate::scheduler::Flight>,
+    remote_claim: Option<&str>,
 ) {
     let result = (|| {
         let invocation = compilation.invocation;
@@ -887,11 +971,23 @@ fn record_prediction(
             flight.leave(&payload);
         }
         record_prediction_value(
-            invocation_digest,
+            invocation_digest.clone(),
             action.clone(),
-            payload,
+            payload.clone(),
             invocation.crate_name(),
         );
+        if let Some(claim) = remote_claim {
+            let prediction = ActionPrediction {
+                invocation: invocation_digest,
+                action: action.clone(),
+                adapter: "rustc".into(),
+                payload,
+            };
+            let _ = session::request_agent(&[AgentRequest::CompleteActionPromise {
+                claim: claim.to_string(),
+                prediction,
+            }]);
+        }
         Result::<()>::Ok(())
     })();
     if let Err(error) = result {
@@ -949,6 +1045,7 @@ fn restore_flight_prediction(
         context,
         invocation_digest,
         payload,
+        None,
         true,
         action_lookup_attempted,
         learned_enabled,

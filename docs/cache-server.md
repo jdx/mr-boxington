@@ -139,6 +139,13 @@ as labels. The server has no deletion endpoint; retention and disaster
 recovery are administrative concerns (back up PostgreSQL, use bucket
 versioning or replication as required).
 
+A server advertising action promises can coordinate identical cold
+compilations across replicas. Claims are short-lived database leases scoped by
+namespace and invocation digest; completion is accepted only after the named
+action result is durable. This state is coordination rather than cache content:
+abandoned claims expire, completed promises are immutable for their retention
+window, and no promise endpoint bypasses the namespace's write authorization.
+
 ## Protocol
 
 The wire protocol — endpoints, media types, canonical hashing, and the

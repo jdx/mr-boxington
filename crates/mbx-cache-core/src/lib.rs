@@ -54,15 +54,17 @@ pub use agent::{
 pub use client::BlockingAgentClient;
 pub use local::{LocalActionCache, LocalCas};
 pub use mbx_cache_protocol::{
-    ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE, ActionPrediction,
+    ACTION_PROMISE_MEDIA_TYPE, ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE,
+    ActionPrediction, ActionPromiseCompletion, ActionPromiseJoin, ActionPromiseState,
     ActionResult as RemoteActionResult, BLOB_MEDIA_TYPE, BLOB_PACK_BLOBS_HEADER,
     BLOB_PACK_BYTES_HEADER, BLOB_PACK_HEADER_BYTES, BLOB_PACK_MAGIC, BLOB_PACK_MEDIA_TYPE,
     BLOB_PACK_RECEIPT_MEDIA_TYPE, CLIENT_METADATA_MEDIA_TYPE, Capabilities, CapabilityFeatures,
     CapabilityLimits, CapabilityProtocol, CcMetadata, DIGEST_LIST_MEDIA_TYPE, DIRECTORY_MEDIA_TYPE,
     Digest as CacheDigest, DigestAlgorithm, Directory as CacheDirectory,
     DirectoryNode as CacheDirectoryNode, FileNode as CacheFileNode, MAX_ACTION_PREDICTION_PAYLOAD,
-    NAMESPACE_HEADER, PROTOCOL_HEADER, PROTOCOL_VERSION, RustcMetadata,
-    SymlinkNode as CacheSymlinkNode, TASK_ACTION_MANIFEST_MEDIA_TYPE, TaskActionManifest,
+    MAX_ACTION_PROMISE_CLAIM_BYTES, NAMESPACE_HEADER, PROTOCOL_HEADER, PROTOCOL_VERSION,
+    RustcMetadata, SymlinkNode as CacheSymlinkNode, TASK_ACTION_MANIFEST_MEDIA_TYPE,
+    TaskActionManifest,
 };
 pub use path_mapping::{
     PathMapping, PathNormalizationError, normalize_mapped_path, normalize_resolved_mapped_path,
@@ -374,6 +376,34 @@ impl RemoteCacheClient {
         match &self.backend {
             Backend::Http(client) => client.put_action_result(result).await,
             Backend::S3(store) => store.put_action_result(result).await,
+        }
+    }
+
+    /// Atomically join or claim a server-wide compilation promise.
+    ///
+    /// `None` means this backend does not support ephemeral coordination.
+    pub async fn join_action_promise(
+        &self,
+        invocation: &CacheDigest,
+        adapter: &str,
+    ) -> Result<Option<ActionPromiseState>> {
+        match &self.backend {
+            Backend::Http(client) => client.join_action_promise(invocation, adapter).await,
+            Backend::S3(_) => Ok(None),
+        }
+    }
+
+    /// Complete a claimed promise after its action result has been published.
+    ///
+    /// `false` means this backend does not support ephemeral coordination.
+    pub async fn complete_action_promise(
+        &self,
+        invocation: &CacheDigest,
+        completion: &ActionPromiseCompletion,
+    ) -> Result<bool> {
+        match &self.backend {
+            Backend::Http(client) => client.complete_action_promise(invocation, completion).await,
+            Backend::S3(_) => Ok(false),
         }
     }
 

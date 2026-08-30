@@ -46,7 +46,8 @@ is pruned to, and when a `target/` directory becomes collectable.
   and teammates. Pull requests never publish remote objects.
 - **Run multiple Cargo builds at the same time.** They share one machine-wide
   CPU and memory budget. Identical cold compilations already running are
-  compiled once and restored into every other build.
+  compiled once and restored into every other build. With a compatible cache
+  server, the same in-flight deduplication extends across CI runners.
 - **See the whole result.** mbx reports hits, misses, actions it could not look
   up, and actions it deliberately bypassed. A high hit rate cannot hide work
   that never entered the cache. `mbx tui` shows the same outcomes as they
