@@ -190,6 +190,12 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
                         Some(&prediction.action),
                     ) {
                         Ok(Some((action, cached))) => {
+                            // Mirror the successful fleet handoff locally:
+                            // the remote promise is ephemeral, while this
+                            // record survives for the next local flight.
+                            if let Some(flight) = &flight {
+                                flight.leave(&prediction.payload);
+                            }
                             replay_bytes(&cached.stdout, &cached.stderr)?;
                             record_action_hit(
                                 &action,

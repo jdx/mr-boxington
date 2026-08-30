@@ -305,6 +305,10 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                     });
                     match restored {
                         Ok(Some(cached)) => {
+                            // Mirror the successful fleet handoff locally:
+                            // the remote promise is ephemeral, while this
+                            // record survives for the next local flight.
+                            flight.flight.leave(&prediction.payload);
                             let _ = replay_bytes(&cached.stdout, &cached.stderr);
                             return Ok(ExitCode::SUCCESS);
                         }
