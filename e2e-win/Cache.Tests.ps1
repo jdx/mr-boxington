@@ -81,14 +81,15 @@ edition = "2024"
     }
 
     It 'restores an MSVC object compiled through mbx exec' {
-        'int answer(void) { return 42; }' | Set-Content -Encoding ascii hello.c
+        New-Item -ItemType Directory -Path src | Out-Null
+        'int answer(void) { return 42; }' | Set-Content -Encoding ascii src\hello.c
 
-        $cold = & mbx exec cl.exe /nologo /Z7 /Brepro /Fohello.obj /c hello.c 2>&1 | Out-String
+        $cold = & mbx exec cl.exe /nologo /Z7 /Brepro /Fohello.obj /c src\hello.c 2>&1 | Out-String
         $LASTEXITCODE | Should -Be 0 -Because $cold
         Test-Path hello.obj | Should -BeTrue
 
         Remove-Item hello.obj
-        $warm = & mbx exec cl.exe /nologo /Z7 /Brepro /Fohello.obj /c hello.c 2>&1 | Out-String
+        $warm = & mbx exec cl.exe /nologo /Z7 /Brepro /Fohello.obj /c src\hello.c 2>&1 | Out-String
         $LASTEXITCODE | Should -Be 0 -Because $warm
         $warm | Should -Match 'mbx\[cache\]: 1 hit'
         Test-Path hello.obj | Should -BeTrue
