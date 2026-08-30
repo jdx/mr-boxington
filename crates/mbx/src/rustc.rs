@@ -183,6 +183,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                     verification = Some(cached);
                 } else {
                     record_action_hit(&action, cached.restore, invocation.crate_name());
+                    install_build_script_shim(&invocation, &outputs, &action);
                     let _ = replay_bytes(&cached.stdout, &cached.stderr);
                     return Ok(ExitCode::SUCCESS);
                 }
@@ -209,6 +210,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                 if verify {
                     verification = Some(cached);
                 } else {
+                    install_build_script_shim(&invocation, &outputs, &cached.action);
                     let _ = replay_bytes(&cached.stdout, &cached.stderr);
                     return Ok(ExitCode::SUCCESS);
                 }
@@ -251,6 +253,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             &mut learned,
         ) {
             Ok(Some(cached)) => {
+                install_build_script_shim(&invocation, &outputs, &cached.action);
                 let _ = replay_bytes(&cached.stdout, &cached.stderr);
                 return Ok(ExitCode::SUCCESS);
             }
@@ -412,6 +415,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                     &portable.mappings,
                 )?
             };
+            install_build_script_shim(&invocation, &outputs, &action.digest);
             // The flight prediction is only left behind a *published* result:
             // an incremental artifact was withheld from the store, so a
             // waiter restoring through its key could only miss.
@@ -433,6 +437,19 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
         }
     }
     Ok(exit_code(output.status))
+}
+
+fn install_build_script_shim(
+    invocation: &RustcInvocation,
+    outputs: &RustcOutputs,
+    binary_action: &CacheDigest,
+) {
+    let Some(executable) = outputs.build_script_executable(invocation.crate_name()) else {
+        return;
+    };
+    if let Err(error) = crate::build_script::install(executable, binary_action) {
+        session::report_shim_warning(&format!("build-script shim was not installed: {error:#}"));
+    }
 }
 
 /// Decide whether a missed compilation should carry its own incremental state.
@@ -1365,6 +1382,7 @@ fn restore_result(
         .try_into()
         .unwrap_or(u64::MAX);
     Ok(Some(CachedCompilation {
+        action: action.digest.clone(),
         stdout,
         stderr,
         outputs: cached_outputs,

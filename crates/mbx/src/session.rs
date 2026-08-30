@@ -70,6 +70,7 @@ pub const CACHE_LINKS_ENV: &str = "MBX_CACHE_LINKS";
 pub const CACHE_EXPORT_GROUP_ENV: &str = "MBX_CACHE_EXPORT_GROUP";
 pub(crate) const WORKSPACE_ROOT_ENV: &str = "MBX_WORKSPACE_ROOT";
 pub(crate) const TARGET_DIR_ENV: &str = "MBX_TARGET_DIR";
+pub(crate) const BUILD_SCRIPT_REAL_SUFFIX: &str = ".mbx-real";
 const PREVIOUS_RUSTC_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WRAPPER";
 const REAL_RUSTDOC_ENV: &str = "MBX_REAL_RUSTDOC";
 pub(crate) const BYPASS_LOG_ENV: &str = "MBX_BYPASS_LOG";
@@ -726,6 +727,66 @@ fn run_transparent_rustdoc(rustdoc: OsString, arguments: Vec<OsString>) -> ExitC
         Err(error) => {
             eprintln!("mbx[error]: the rustdoc shim failed to execute rustdoc: {error}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Whether this process replaced a Cargo build-script executable.
+pub fn is_build_script_shim() -> bool {
+    let Some(invoked) = std::env::args_os().next().map(PathBuf::from) else {
+        return false;
+    };
+    invoked
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .is_some_and(|stem| stem == "build-script-build")
+        && find_build_script_real_path(&invoked).is_some()
+}
+
+pub(crate) fn build_script_real_path(executable: &Path) -> PathBuf {
+    let mut name = executable.as_os_str().to_os_string();
+    name.push(BUILD_SCRIPT_REAL_SUFFIX);
+    PathBuf::from(name)
+}
+
+/// Locate the preserved binary. Cargo runs an un-hashed hard link named
+/// `build-script-build`, while rustc produced and mbx wrapped the hashed
+/// `build_script_build-<unit>` sibling.
+pub(crate) fn find_build_script_real_path(executable: &Path) -> Option<PathBuf> {
+    let direct = build_script_real_path(executable);
+    if direct.is_file() {
+        return Some(direct);
+    }
+    let parent = executable.parent()?;
+    std::fs::read_dir(parent)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|name| {
+                        name.starts_with("build_script_build-")
+                            && name.ends_with(BUILD_SCRIPT_REAL_SUFFIX)
+                    })
+        })
+}
+
+/// Run Cargo's build script through the execution cache.
+pub fn run_build_script_shim() -> ExitCode {
+    // The wrapper lives in Cargo's target directory, so it can outlive the mbx
+    // session that installed it. A later plain `cargo` invocation must remain
+    // a transparent build-script call.
+    if session_socket().is_none() {
+        return crate::build_script::run_real();
+    }
+    match crate::build_script::run() {
+        Ok(code) => code,
+        Err(error) => {
+            report_shim_warning(&format!("build-script cache bypassed: {error:#}"));
+            crate::build_script::run_real()
         }
     }
 }
