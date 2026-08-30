@@ -1279,6 +1279,95 @@ async fn prefetch_does_not_block_task_initialization() {
 }
 
 #[tokio::test]
+async fn local_predictions_start_prefetching_while_the_remote_manifest_loads() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    mock_agent_capabilities(&mut server, serde_json::json!({})).await;
+    let task = "5".repeat(64);
+    let action_bytes = b"locally predicted action";
+    let action = CacheDigest::blake3(action_bytes);
+    let prediction = ActionPrediction {
+        invocation: CacheDigest::blake3(b"local invocation"),
+        action: action.clone(),
+        adapter: "rustc".into(),
+        payload: "{}".into(),
+    };
+    let manifest_value = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: vec![prediction],
+    };
+    let manifest_bytes = canonical_json(&manifest_value).unwrap();
+    let manifest_etag = blake3::hash(&manifest_bytes).to_hex().to_string();
+    let (_, selector) = CacheAgent::task_manifest_selector(&task).unwrap();
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let response_release = release.clone();
+    let remote_manifest = server
+        .mock("GET", action_manifest_path(&selector).as_str())
+        .with_status(200)
+        .with_header("etag", &format!("\"{manifest_etag}\""))
+        .with_chunked_body(move |writer| {
+            while !response_release.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::io::Write::write_all(writer, &manifest_bytes)
+        })
+        .expect(1)
+        .create_async()
+        .await;
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let response_started = started.clone();
+    let result = RemoteActionResult {
+        action: action.clone(),
+        metadata: None,
+        output_root: None,
+        version: 1,
+    };
+    let action_result = server
+        .mock("GET", action_path(&action).as_str())
+        .with_status(200)
+        .with_header("content-type", ACTION_RESULT_MEDIA_TYPE)
+        .with_chunked_body(move |writer| {
+            response_started.store(true, Ordering::Release);
+            std::io::Write::write_all(writer, &serde_json::to_vec(&result).unwrap())
+        })
+        .expect(1)
+        .create_async()
+        .await;
+    let action_blob = server
+        .mock("GET", blob_path(&action).as_str())
+        .with_status(200)
+        .with_body(action_bytes)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().join("reader"),
+        RemoteCacheMode::ReadOnly,
+    );
+    agent.persist_task_manifest(&manifest_value).unwrap();
+
+    let begin_agent = agent.clone();
+    let begin_task = tokio::spawn(async move { begin_agent.begin_task(&task).await });
+    let prefetched_before_manifest = tokio::time::timeout(Duration::from_secs(2), async {
+        while !started.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    release.store(true, Ordering::Release);
+    prefetched_before_manifest.expect("local prefetch waited for the remote manifest");
+    begin_task.await.unwrap().unwrap();
+    agent.wait_for_prefetches().await;
+
+    remote_manifest.assert_async().await;
+    action_result.assert_async().await;
+    action_blob.assert_async().await;
+    assert!(agent.actions.find(&action).unwrap().is_some());
+}
+
+#[tokio::test]
 async fn prefetches_complete_actions_in_directory_wave_blob_packs() {
     let directory = tempfile::tempdir().unwrap();
     let mut server = mockito::Server::new_async().await;
@@ -2433,6 +2522,32 @@ async fn prefetch_resolves_predicted_actions_in_one_lookup() {
         assert!(agent.actions.find(&result.action).unwrap().is_some());
     }
     assert_eq!(agent.stats().remote_action_lookups, 1);
+}
+
+#[tokio::test]
+async fn prefetch_skips_remote_negotiation_when_every_action_is_local() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = mockito::Server::new_async().await;
+    let action = CacheDigest::blake3(b"already local action");
+    let result = RemoteActionResult {
+        action: action.clone(),
+        metadata: None,
+        output_root: None,
+        version: 1,
+    };
+    let agent = remote_agent(
+        &server,
+        directory.path().join("reader"),
+        RemoteCacheMode::ReadOnly,
+    );
+    let action_source = directory.path().join("already-local-action");
+    fs::write(&action_source, b"already local action").unwrap();
+    agent.cas.store_file(&action, &action_source).unwrap();
+    agent.actions.store(&result).unwrap();
+    let actions = BTreeMap::from([(action, "rustc".into())]);
+
+    assert!(agent.prefetch_action_batches(&actions).await.unwrap());
+    assert_eq!(agent.stats().remote_action_lookups, 0);
 }
 
 #[tokio::test]

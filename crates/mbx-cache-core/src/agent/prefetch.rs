@@ -99,12 +99,6 @@ impl CacheAgent {
         &self,
         actions: &BTreeMap<CacheDigest, String>,
     ) -> Result<bool> {
-        let Some(remote) = self.remote.as_deref() else {
-            return Ok(false);
-        };
-        let Some(limit) = remote.action_batch_limit().await? else {
-            return Ok(false);
-        };
         let wanted: Vec<CacheDigest> = actions
             .keys()
             .filter(|action| !self.action_is_staged(action))
@@ -113,6 +107,16 @@ impl CacheAgent {
         if wanted.is_empty() {
             return Ok(true);
         }
+        // A warm local store needs no remote capability negotiation. Keep this
+        // check ahead of the first await: on a high-latency cache, asking what
+        // batch shape it supports can otherwise add a full network round trip
+        // to a build that has nothing left to download.
+        let Some(remote) = self.remote.as_deref() else {
+            return Ok(false);
+        };
+        let Some(limit) = remote.action_batch_limit().await? else {
+            return Ok(false);
+        };
         let mut chunks: Vec<Vec<CacheDigest>> = Vec::new();
         for chunk in wanted.chunks(limit) {
             chunks.push(chunk.to_vec());
