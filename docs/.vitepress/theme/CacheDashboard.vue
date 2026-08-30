@@ -32,6 +32,7 @@ const showGrant = ref(false);
 const selectedGrant = ref("production-deploy");
 const tokenName = ref("");
 const tokenScope = ref("Read + write");
+const tokenNamespace = ref("acme/*");
 const revealedToken = ref("");
 
 const nav: { id: Section; label: string; icon: IconName }[] = [
@@ -94,16 +95,17 @@ function notify(message: string) {
 
 function createToken() {
   if (!tokenName.value.trim()) return;
+  const token = "mbx_tk_" + Array.from({ length: 4 }, () => Math.random().toString(36).slice(2, 10)).join("");
   grants.value.unshift({
     name: tokenName.value.trim(),
     kind: "Token",
-    identity: "mbx_tk_••••••••" + Math.random().toString(16).slice(2, 6),
-    scope: "acme/*",
+    identity: "mbx_tk_••••••••" + token.slice(-4),
+    scope: tokenNamespace.value.trim() || "acme/*",
     access: tokenScope.value,
     used: "Never",
     status: "active",
   });
-  revealedToken.value = "mbx_tk_" + Array.from({ length: 4 }, () => Math.random().toString(36).slice(2, 10)).join("");
+  revealedToken.value = token;
 }
 
 async function copyToken() {
@@ -116,11 +118,18 @@ function closeTokenModal() {
   tokenName.value = "";
   revealedToken.value = "";
   tokenScope.value = "Read + write";
+  tokenNamespace.value = "acme/*";
 }
 
 function inspectGrant(name: string) {
   selectedGrant.value = name;
   showGrant.value = true;
+}
+
+function revokeGrant() {
+  grants.value = grants.value.filter((grant) => grant.name !== selectedGrant.value);
+  showGrant.value = false;
+  notify("Grant revoked");
 }
 </script>
 
@@ -263,7 +272,7 @@ function inspectGrant(name: string) {
           <span class="modal-icon"><Icon name="key" /></span><h2 id="token-title">Create access token</h2><p>Use a scoped token for machines that cannot authenticate with OIDC.</p>
           <label>Token name<input v-model="tokenName" autofocus placeholder="e.g. staging-runner" /></label>
           <label>Permission<select v-model="tokenScope"><option>Read + write</option><option>Read only</option></select></label>
-          <label>Namespace pattern<input value="acme/*" /></label>
+          <label>Namespace pattern<input v-model="tokenNamespace" /></label>
           <div class="modal-actions"><button class="secondary-button" @click="closeTokenModal">Cancel</button><button class="primary-button" :disabled="!tokenName.trim()" @click="createToken">Create token</button></div>
         </template>
         <template v-else>
@@ -275,7 +284,7 @@ function inspectGrant(name: string) {
     </div>
 
     <div v-if="showGrant" class="modal-backdrop" @click.self="showGrant = false">
-      <section class="modal grant-modal" role="dialog" aria-modal="true"><button class="modal-close" aria-label="Close" @click="showGrant = false"><Icon name="x" /></button><span class="modal-icon"><Icon :name="selectedGrantData?.kind === 'OIDC' ? 'shield' : 'key'" /></span><h2>{{ selectedGrantData?.name }}</h2><p>{{ selectedGrantData?.identity }}</p><dl><div><dt>Type</dt><dd>{{ selectedGrantData?.kind }}</dd></div><div><dt>Namespace</dt><dd><code>{{ selectedGrantData?.scope }}</code></dd></div><div><dt>Permission</dt><dd>{{ selectedGrantData?.access }}</dd></div><div><dt>Last used</dt><dd>{{ selectedGrantData?.used }}</dd></div></dl><div class="modal-actions"><button class="danger-button" @click="showGrant = false; notify('Grant revoked')">Revoke grant</button><button class="primary-button" @click="showGrant = false">Done</button></div></section>
+      <section class="modal grant-modal" role="dialog" aria-modal="true"><button class="modal-close" aria-label="Close" @click="showGrant = false"><Icon name="x" /></button><span class="modal-icon"><Icon :name="selectedGrantData?.kind === 'OIDC' ? 'shield' : 'key'" /></span><h2>{{ selectedGrantData?.name }}</h2><p>{{ selectedGrantData?.identity }}</p><dl><div><dt>Type</dt><dd>{{ selectedGrantData?.kind }}</dd></div><div><dt>Namespace</dt><dd><code>{{ selectedGrantData?.scope }}</code></dd></div><div><dt>Permission</dt><dd>{{ selectedGrantData?.access }}</dd></div><div><dt>Last used</dt><dd>{{ selectedGrantData?.used }}</dd></div></dl><div class="modal-actions"><button class="danger-button" @click="revokeGrant">Revoke grant</button><button class="primary-button" @click="showGrant = false">Done</button></div></section>
     </div>
   </div>
 </template>
