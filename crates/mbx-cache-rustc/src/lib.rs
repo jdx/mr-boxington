@@ -29,8 +29,8 @@
 #![deny(missing_docs)]
 
 use mbx_cache_core::{
-    CacheDigest, FileDigestCache, PathNormalizationError, canonical_json,
-    normalize_mapped_path as normalize_shared_path,
+    CacheDigest, FileDigestCache, PathMapping as SharedPathMapping, PathNormalizationError,
+    canonical_json, normalize_mapped_path as normalize_shared_path,
     normalize_resolved_mapped_path as normalize_resolved_shared_path, resolve_path_mappings,
 };
 use serde::{Deserialize, Serialize};
@@ -42,7 +42,6 @@ use thiserror::Error;
 mod dep_info;
 
 pub use dep_info::{DepInfoCommand, DiscoveredInputs, RustcDepInfo};
-pub use mbx_cache_core::PathMapping;
 
 /// Schema version embedded in canonical rustc action descriptors.
 pub const ACTION_SCHEMA_VERSION: u8 = 1;
@@ -692,6 +691,40 @@ impl RustcOutputs {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Mapping from a host-specific absolute root to a stable key placeholder.
+pub struct PathMapping {
+    /// Absolute host path to replace.
+    pub root: PathBuf,
+    /// Placeholder name without the surrounding `${...}` syntax.
+    pub placeholder: String,
+}
+
+impl PathMapping {
+    /// Map an absolute host path to a stable cache-key placeholder.
+    pub fn new(root: impl Into<PathBuf>, placeholder: impl Into<String>) -> Self {
+        Self {
+            root: root.into(),
+            placeholder: placeholder.into(),
+        }
+    }
+
+    /// Order mappings deepest root first, which is what normalization needs:
+    /// a target directory inside the workspace has to win over the workspace.
+    pub fn ordered(mappings: &[PathMapping]) -> Vec<PathMapping> {
+        let mut ordered = mappings.to_vec();
+        ordered.sort_by_key(|mapping| std::cmp::Reverse(mapping.root.components().count()));
+        ordered
+    }
+}
+
+fn shared_path_mappings(mappings: &[PathMapping]) -> Vec<SharedPathMapping> {
+    mappings
+        .iter()
+        .map(|mapping| SharedPathMapping::new(&mapping.root, &mapping.placeholder))
+        .collect()
+}
+
 /// Map an absolute path to its cache-key placeholder form.
 ///
 /// `mappings` must already be ordered by [`PathMapping::ordered`]. Exposed for
@@ -703,7 +736,7 @@ pub fn normalize_mapped_path(
     working_dir: &Path,
     mappings: &[PathMapping],
 ) -> Result<String, BypassReason> {
-    normalize_shared_path(path, working_dir, mappings).map_err(Into::into)
+    normalize_shared_path(path, working_dir, &shared_path_mappings(mappings)).map_err(Into::into)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1578,14 +1611,14 @@ fn parse_emits(value: &str) -> Vec<Emit> {
 struct ActionBuilder<'a> {
     invocation: &'a RustcInvocation,
     context: ActionContext,
-    mappings: Vec<PathMapping>,
+    mappings: Vec<SharedPathMapping>,
     linker: Option<LinkerIdentity>,
 }
 
 impl<'a> ActionBuilder<'a> {
     fn new(invocation: &'a RustcInvocation, mut context: ActionContext) -> Self {
         context.path_mappings = PathMapping::ordered(&context.path_mappings);
-        let mappings = resolve_path_mappings(&context.path_mappings);
+        let mappings = resolve_path_mappings(&shared_path_mappings(&context.path_mappings));
         Self {
             linker: None,
             invocation,
