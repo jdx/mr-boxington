@@ -690,6 +690,9 @@ fn restore_prediction_payload(
     )?;
     discovered.clone().apply_to(&mut context)?;
     let candidates = ActionCandidates::build(invocation, context, compilation.linker.clone())?;
+    if expected_action.is_some_and(|expected| !candidates.contains(expected)) {
+        bail!("the action prediction no longer matches its predicted inputs");
+    }
     // From this point onward, every return follows at least one action-result
     // request, including error responses from a corrupt local record.
     *action_lookup_attempted = true;
@@ -702,9 +705,6 @@ fn restore_prediction_payload(
     )?;
     match restored {
         Some((action, mut cached)) => {
-            if expected_action.is_some_and(|expected| expected != &action) {
-                bail!("the action prediction no longer matches its predicted inputs");
-            }
             cached.restore.avoided_compiler_duration_ns = input_prediction.compiler_duration_ns;
             if restore_outputs {
                 record_action_hit(&action, cached.restore, invocation.crate_name());
@@ -766,6 +766,13 @@ impl ActionCandidates {
                 .transpose()?,
             literal: invocation.action_linked_by(literal_context, linker)?,
         })
+    }
+
+    fn contains(&self, digest: &CacheDigest) -> bool {
+        self.portable
+            .as_ref()
+            .is_some_and(|action| &action.digest == digest)
+            || &self.literal.digest == digest
     }
 
     /// The key this compilation is published under.
