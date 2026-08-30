@@ -29,7 +29,10 @@ async fn session_environment_directs_cargo_at_the_shim() {
         .unwrap();
 
     let workspace = tempfile::tempdir().unwrap();
-    let mut values = BTreeMap::from([("RUSTC_WRAPPER".into(), "existing".into())]);
+    let mut values = BTreeMap::from([
+        ("RUSTC_WRAPPER".into(), "existing".into()),
+        ("RUSTDOC".into(), "custom-rustdoc".into()),
+    ]);
     let run = session
         .begin(
             workspace.path(),
@@ -47,10 +50,33 @@ async fn session_environment_directs_cargo_at_the_shim() {
     let wrapper = Path::new(values.get("RUSTC_WRAPPER").unwrap());
     assert_eq!(wrapper.file_stem().unwrap(), RUSTC_SHIM_STEM);
     assert_eq!(values.get(PREVIOUS_RUSTC_WRAPPER_ENV).unwrap(), "existing");
+    assert_eq!(values.get(REAL_RUSTDOC_ENV).unwrap(), "custom-rustdoc");
+    assert_eq!(
+        Path::new(values.get("RUSTDOC").unwrap())
+            .file_stem()
+            .unwrap(),
+        RUSTDOC_SHIM_STEM
+    );
     assert_eq!(values.get("CARGO_INCREMENTAL").unwrap(), "0");
     assert_eq!(values.get(VERIFY_ENV).unwrap(), "0");
 
     session.finish().await.unwrap();
+}
+
+#[test]
+fn nested_sessions_unwrap_the_outer_rustdoc_shim() {
+    let values = BTreeMap::from([
+        (
+            "RUSTDOC".into(),
+            Path::new("outer-session")
+                .join(shim_file_name(RUSTDOC_SHIM_STEM))
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        (REAL_RUSTDOC_ENV.into(), "custom-rustdoc".into()),
+    ]);
+
+    assert_eq!(configured_rustdoc(&values), "custom-rustdoc");
 }
 
 /// Build scripts may hand HOST_CC to CMake, which records its absolute path in

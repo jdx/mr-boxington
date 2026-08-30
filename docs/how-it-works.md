@@ -66,6 +66,17 @@ prediction for later invocations. A genuinely cold compilation may therefore
 have no key to look up yet. It still gets stored after compiling and can warm
 the next build.
 
+## Rustdoc actions
+
+Cargo invokes rustdoc through a separate shim. Each documentation action keys
+the rustdoc version and arguments, the package source tree, explicit compiler
+artifacts, and Cargo's compile-time environment. Rustdoc's mergeable-output
+mode separates deterministic per-crate pages from files such as the search
+index that combine every documented crate. mbx caches the former with the
+crate's merge metadata and runs rustdoc's inexpensive finalization step after
+restoring them, so cached dependency documentation remains composable and the
+shared indexes do not depend on restore order.
+
 ## Copy-on-write output restoration
 
 The cache agent verifies each local CAS blob against its digest before returning

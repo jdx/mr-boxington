@@ -156,10 +156,11 @@ sooner this way.
 
 ## How it works
 
-An `mbx` Cargo command starts an in-process cache agent, points Cargo at a rustc shim with
-`RUSTC_WRAPPER`, and exits the agent with the build — there is no daemon. The shim
-derives an action key, restores cached outputs when possible, or runs the real
-compiler and publishes a successful result.
+An `mbx` Cargo command starts an in-process cache agent, points Cargo at rustc and
+rustdoc shims, and exits the agent with the build — there is no daemon. The shims
+derive action keys, restore cached outputs when possible, or run the real tool and
+publish a successful result. That includes `cargo doc`: rendered crate pages are
+cached independently, then rustdoc cheaply rebuilds their shared search indexes.
 
 Anything mbx cannot model exactly bypasses the cache. A native link is cached
 only when the linker itself can enter the key: host binaries and tests on Linux

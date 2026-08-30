@@ -6,6 +6,9 @@ fn main() -> ExitCode {
     if mbx::session::is_rustc_shim() {
         return mbx::session::run_rustc_shim();
     }
+    if mbx::session::is_rustdoc_shim() {
+        return mbx::session::run_rustdoc_shim();
+    }
     if let Some(language) = mbx::session::is_cc_shim() {
         return mbx::session::run_cc_shim(language);
     }
