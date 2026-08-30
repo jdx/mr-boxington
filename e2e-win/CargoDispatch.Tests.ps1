@@ -67,4 +67,30 @@ mbx-probe = "new --vcs none"
         $status | Should -Not -Be 0
         $output | Should -Match 'no such command: .*command-added-after-mbx'
     }
+
+    It 'installs and dispatches the cargo.exe shim' {
+        $mbx = (Get-Command mbx).Source
+        $originalPath = $env:PATH
+        $originalDisable = $env:MBX_DISABLE
+        try {
+            $output = & $mbx setup 2>&1 | Out-String
+            $LASTEXITCODE | Should -Be 0 -Because $output
+
+            $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+            $shimDir = Join-Path $localAppData 'mbx\bin'
+            Test-Path -LiteralPath (Join-Path $shimDir 'cargo.exe') | Should -BeTrue
+            $env:PATH = "$shimDir;$originalPath"
+            $env:MBX_DISABLE = '1'
+            $version = & cargo.exe --version 2>&1 | Out-String
+            $LASTEXITCODE | Should -Be 0 -Because $version
+            $version | Should -Match '^cargo '
+        } finally {
+            $env:PATH = $originalPath
+            if ($null -eq $originalDisable) {
+                Remove-Item Env:MBX_DISABLE -ErrorAction Ignore
+            } else {
+                $env:MBX_DISABLE = $originalDisable
+            }
+        }
+    }
 }

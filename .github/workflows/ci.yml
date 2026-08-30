@@ -127,6 +127,7 @@ jobs:
       - name: Run Bats behavioral tests
         if: runner.os != 'Windows'
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           MBX_BIN: ${{ github.workspace }}/target/mbx-bootstrap/mbx
         run: test/bats/bin/bats test
       - name: Windows end-to-end tests

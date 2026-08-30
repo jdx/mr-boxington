@@ -1,7 +1,7 @@
 # How it works
 
 mbx is a Cargo wrapper, not a Cargo replacement. Run Cargo subcommands directly
-through it: `mbx build`, `mbx test`, `mbx clippy`, or any installed Cargo
+through it: `cargo build`, `cargo test`, `cargo clippy`, or any installed Cargo
 subcommand.
 
 1. mbx resolves the workspace and target roots through Cargo metadata.
@@ -13,8 +13,8 @@ subcommand.
 6. The agent exits with the build, draining any remote uploads it still owes.
    There is no persistent daemon.
 
-Every mbx command works this way; there is no separate mode to turn on and no
-component to keep up to date.
+The installed Cargo shim and explicit `mbx <cargo-command>` fallback both work
+this way. Running `mbx setup` again refreshes the stable shim after mbx is upgraded.
 
 That wrapper boundary also covers multiple Cargo builds running at the same
 time. Their compiler shims share a machine-wide permit pool and an

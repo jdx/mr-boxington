@@ -1,7 +1,8 @@
 # Migrate from rust-cache or sccache
 
-Both migrations end in the same place: `mbx` in front of the Cargo command and
-nothing else standing between Cargo and rustc. What has to be removed differs.
+Both migrations end in the same place: ordinary Cargo commands entering mbx
+through its Cargo shim, with nothing else standing between Cargo and rustc.
+What has to be removed differs.
 
 ## From rust-cache or `actions/cache` over `target/`
 
@@ -56,10 +57,9 @@ Then check the result:
 mbx doctor
 ```
 
-The `setup` check reports `no plain-cargo wrapper installed; mbx wraps cargo
-directly` once nothing else is configured, and warns
-`Cargo uses another wrapper: sccache` while the old configuration is still in
-place.
+The `setup` check reports the installed Cargo shim. Running `mbx setup` removes
+an mbx-owned legacy wrapper; if another wrapper such as sccache is configured,
+setup leaves it untouched and warns that compilation caching defers to it.
 
 ## The first build measures nothing
 

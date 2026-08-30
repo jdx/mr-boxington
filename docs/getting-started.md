@@ -5,8 +5,23 @@
 ### mise
 
 ```sh
-mise use -g mr-boxington
+mise use -g --postinstall "mbx setup --yes" mr-boxington
 ```
+
+Drop `-g` to activate mbx only while that project's mise configuration is
+active. The postinstall hook selects the same configuration as `mise use`.
+
+On a mise release without `--postinstall`, use the two-step form:
+
+```sh
+mise use -g mr-boxington
+mbx setup --global
+```
+
+For project-local activation, omit `-g` and use `mbx setup --local`. If mise
+does not yet support safe collection updates, mbx prints the exact
+`env._.path` entry and selected config path for you to edit; it does not modify
+the TOML itself.
 
 ### Release archive
 
@@ -90,7 +105,17 @@ host glibc.
 
 ```sh
 cargo install mbx --locked
+mbx setup
 ```
+
+`mbx setup` asks whether mise should activate the Cargo shim globally, only in
+the current project, or not at all. Use `mbx setup --yes` to accept global
+activation when mise is available. Without mise, setup prints the exact
+shell-specific `PATH` change; it never edits a shell startup file.
+
+After installing from a release archive, run `$HOME/.local/bin/mbx setup` on
+Unix. On Windows, run
+`& "$env:LOCALAPPDATA\Programs\mbx\mbx.exe" setup` in PowerShell.
 
 ## Supported platforms
 
@@ -129,12 +154,12 @@ differences, which the pages they belong to also note in place:
 
 ## Run a build
 
-Put `mbx` before cargo's subcommand:
+After setup, use Cargo normally:
 
 ```sh
-mbx build
-mbx test --workspace --all-features
-mbx clippy --workspace --all-targets
+cargo build
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets
 ```
 
 The command and its arguments are passed to Cargo unchanged. Cargo still owns
@@ -142,16 +167,16 @@ dependency resolution, feature unification, build planning, and linking. mbx
 also forwards Cargo aliases and installed subcommands. Nothing goes into
 Cargo's configuration, and there is nothing to tune before the first build.
 
-A toolchain goes where rustup expects it, in front of the command:
+A toolchain goes where rustup expects it:
 
 ```sh
-mbx +1.91 check --workspace
+cargo +1.91 check --workspace
 ```
 
-mbx reads that word rather than passing it along unexamined, so it means the
-same thing in front of mbx's own commands: `mbx +1.91 doctor` reports on 1.91,
-and `mbx +1.91 explain check` diagnoses a build under it. Commands that never
-reach a compiler, such as `mbx gc`, refuse a toolchain instead of ignoring one.
+The shim preserves Cargo aliases, installed subcommands, and toolchain
+selection. `MBX_DISABLE=1 cargo …` bypasses mbx for one invocation. The
+explicit `mbx +1.91 check` spelling remains available as a fallback, and mbx's
+own `tui`, `cache`, `gc`, `doctor`, and diagnostic commands stay under `mbx`.
 
 ## Run multiple Cargo builds at the same time
 
@@ -209,16 +234,17 @@ mbx doctor
   ok  cache        /home/you/.cache/mbx is writable
   ok  config       50.0 GiB budget, automatic gc enabled, managed targets enabled at /home/you/.cache/mbx/targets
   ok  reflink      supported by the cache filesystem
-  ok  setup        no plain-cargo wrapper installed; mbx wraps cargo directly
+  ok  setup        Cargo shim is active and current at /home/you/.local/share/mbx/bin/cargo
   ok  remote       not configured; using the local cache
 
 0 failures, 0 warnings
 ```
 
-Doctor checks the Cargo and rustc executables, cache write access, filesystem
-reflink support, effective remote policy, and remote protocol connectivity.
-Warnings describe optional features or fallbacks; failures make the command
-exit unsuccessfully.
+Doctor checks that the installed Cargo shim matches the running mbx and is the
+first `cargo` on `PATH`, along with the Cargo and rustc executables, cache write
+access, filesystem reflink support, effective remote policy, and remote protocol
+connectivity. Warnings describe setup problems, optional features, or fallbacks;
+failures make the command exit unsuccessfully.
 
 ## Read the result
 
@@ -267,8 +293,8 @@ them rarely needs a follow-up question:
 
 ```sh
 mbx doctor --json           # environment, store, and setup state
-MBX_LOG=debug mbx build     # mbx's own diagnostics for the run
-MBX_BYPASS_LOG=bypass.log mbx build   # why each compilation was not cached
+MBX_LOG=debug cargo build     # mbx's own diagnostics for the run
+MBX_BYPASS_LOG=bypass.log cargo build   # why each compilation was not cached
 ```
 
 All three describe your machine: `mbx doctor --json` reports absolute cache

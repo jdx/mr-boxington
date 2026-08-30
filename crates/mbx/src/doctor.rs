@@ -238,74 +238,101 @@ fn reflink_check(cache_dir: &Path) -> Check {
     }
 }
 
-/// Report the optional plain-cargo wrapper.
-///
-/// Its absence is not a problem to fix: `mbx <cargo command>` is how mbx is
-/// meant to be used, and it does strictly more. Only a half-installed or
-/// displaced wrapper warns, because that is a state somebody meant to be in
-/// and is not.
+/// Report the persistent Cargo shim installed by `mbx setup`.
 fn setup_check() -> Check {
-    let Some((config_path, expected_shim)) = setup_paths() else {
-        return Check::warn("setup", "platform Cargo paths could not be determined");
-    };
-    let contents = match std::fs::read_to_string(&config_path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Check::pass("setup", NO_PLAIN_CARGO_WRAPPER);
-        }
-        Err(error) => {
-            return Check::warn(
-                "setup",
-                format!("{} could not be read: {error}", config_path.display()),
-            );
-        }
-    };
-    let document = match contents.parse::<toml_edit::DocumentMut>() {
-        Ok(document) => document,
-        Err(error) => {
-            return Check::warn(
-                "setup",
-                format!("{} is invalid TOML: {error}", config_path.display()),
-            );
-        }
-    };
-    let wrapper = document
-        .get("build")
-        .and_then(toml_edit::Item::as_table_like)
-        .and_then(|build| build.get("rustc-wrapper"))
-        .and_then(toml_edit::Item::as_str);
-    match wrapper {
-        Some(wrapper) if Path::new(wrapper) == expected_shim && expected_shim.is_file() => {
-            Check::pass("setup", format!("{} is installed", expected_shim.display()))
-        }
-        Some(wrapper) if Path::new(wrapper) == expected_shim => Check::warn(
+    let Some(expected_shim) = setup_path() else {
+        return Check::warn(
             "setup",
-            format!("configured wrapper is missing: {}", expected_shim.display()),
+            "the platform data directory could not be determined",
+        );
+    };
+    let Ok(executable) = std::env::current_exe() else {
+        return Check::warn("setup", "could not locate the running mbx executable");
+    };
+    setup_check_at(
+        &executable,
+        &expected_shim,
+        std::env::var_os("PATH").as_deref(),
+    )
+}
+
+fn setup_check_at(executable: &Path, expected_shim: &Path, path: Option<&OsStr>) -> Check {
+    if !expected_shim.is_file() {
+        return Check::warn("setup", "Cargo shim not installed; run `mbx setup`");
+    }
+    match same_file_contents(executable, expected_shim) {
+        Ok(false) => {
+            return Check::warn("setup", "Cargo shim is outdated; run `mbx setup`");
+        }
+        Err(error) => {
+            return Check::warn("setup", format!("Cargo shim could not be checked: {error}"));
+        }
+        Ok(true) => {}
+    }
+
+    let active_cargo = path.and_then(cargo_on_path);
+    if active_cargo
+        .as_deref()
+        .is_none_or(|cargo| !same_path(cargo, expected_shim))
+    {
+        let resolved = active_cargo
+            .as_deref()
+            .map(|cargo| cargo.display().to_string())
+            .unwrap_or_else(|| "nothing".into());
+        return Check::warn(
+            "setup",
+            format!(
+                "Cargo shim is current but not active; PATH resolves cargo to {resolved}; prepend {} to PATH",
+                expected_shim.parent().unwrap_or(expected_shim).display()
+            ),
+        );
+    }
+
+    Check::pass(
+        "setup",
+        format!(
+            "Cargo shim is active and current at {}",
+            expected_shim.display()
         ),
-        Some(wrapper) => Check::warn("setup", format!("Cargo uses another wrapper: {wrapper}")),
-        None => Check::pass("setup", NO_PLAIN_CARGO_WRAPPER),
+    )
+}
+
+fn cargo_on_path(path: &OsStr) -> Option<PathBuf> {
+    let name = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+    std::env::split_paths(path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+fn same_file_contents(left: &Path, right: &Path) -> Result<bool> {
+    let left_metadata = std::fs::metadata(left)?;
+    let right_metadata = std::fs::metadata(right)?;
+    if left_metadata.len() != right_metadata.len() {
+        return Ok(false);
+    }
+    Ok(mbx_cache_core::CacheDigest::blake3_file(left)?
+        == mbx_cache_core::CacheDigest::blake3_file(right)?)
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => {
+            #[cfg(windows)]
+            {
+                left.to_string_lossy()
+                    .eq_ignore_ascii_case(&right.to_string_lossy())
+            }
+            #[cfg(not(windows))]
+            {
+                left == right
+            }
+        }
+        _ => false,
     }
 }
 
-/// Said when nothing is installed, which is the ordinary case.
-const NO_PLAIN_CARGO_WRAPPER: &str = "no plain-cargo wrapper installed; mbx wraps cargo directly";
-
-fn setup_paths() -> Option<(PathBuf, PathBuf)> {
-    let data = dirs::data_local_dir()?;
-    let cargo_home = std::env::var_os("CARGO_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".cargo")))?;
-    let config = if cargo_home.join("config.toml").exists() || !cargo_home.join("config").exists() {
-        cargo_home.join("config.toml")
-    } else {
-        cargo_home.join("config")
-    };
-    let shim = data.join("mbx").join("bin").join(if cfg!(windows) {
-        format!("{}.exe", crate::session::RUSTC_SHIM_STEM)
-    } else {
-        crate::session::RUSTC_SHIM_STEM.into()
-    });
-    Some((config, shim))
+fn setup_path() -> Option<PathBuf> {
+    Some(crate::cli::setup_install_dir()?.join(if cfg!(windows) { "cargo.exe" } else { "cargo" }))
 }
 
 async fn remote_checks(config: &Config) -> Vec<Check> {
@@ -410,6 +437,43 @@ mod tests {
             failure_detail(&arguments, status, b"  \n"),
             "+1.91 --version exited with exit status: 1"
         );
+    }
+
+    #[test]
+    fn setup_requires_a_current_shim_that_wins_path_resolution() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("mbx");
+        let shim_dir = directory.path().join("shim");
+        let shim = shim_dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
+        let real_dir = directory.path().join("real");
+        let real_cargo = real_dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::fs::write(&executable, b"current mbx").unwrap();
+        std::fs::write(&real_cargo, b"real cargo").unwrap();
+
+        let real_first = std::env::join_paths([&real_dir, &shim_dir]).unwrap();
+        assert_eq!(
+            setup_check_at(&executable, &shim, Some(&real_first)).detail,
+            "Cargo shim not installed; run `mbx setup`"
+        );
+
+        std::fs::write(&shim, b"old mbx").unwrap();
+        assert_eq!(
+            setup_check_at(&executable, &shim, Some(&real_first)).detail,
+            "Cargo shim is outdated; run `mbx setup`"
+        );
+
+        std::fs::write(&shim, b"current mbx").unwrap();
+        let inactive = setup_check_at(&executable, &shim, Some(&real_first));
+        assert_eq!(inactive.severity, Severity::Warn);
+        assert!(inactive.detail.contains("current but not active"));
+        assert!(inactive.detail.contains(&real_cargo.display().to_string()));
+
+        let shim_first = std::env::join_paths([&shim_dir, &real_dir]).unwrap();
+        let active = setup_check_at(&executable, &shim, Some(&shim_first));
+        assert_eq!(active.severity, Severity::Pass);
+        assert!(active.detail.contains("active and current"));
     }
 
     #[test]

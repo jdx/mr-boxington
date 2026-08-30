@@ -20,9 +20,12 @@ mod explain;
 mod gc;
 mod prefetch;
 mod setup;
+mod shim;
 mod tui;
 
 pub(crate) use cargo::{cargo_with_bypass_log, cargo_with_settings_and_bypass_log};
+pub(crate) use setup::setup_install_dir;
+pub use shim::{is_cargo_shim, run_cargo_shim};
 
 #[cfg(test)]
 use prefetch::validate_prefetch_config;
@@ -35,7 +38,7 @@ use {cache::*, cargo::*, exec::*, gc::*, setup::*};
     version,
     config = crate::config::RawConfig,
     about = "A build cache for Rust projects",
-    long_about = "Put mbx in front of any Cargo command. The subcommand and all of its arguments are passed through unchanged, including Cargo aliases and installed subcommands, while compiled work is shared across every checkout and build storage prunes itself. mbx's own subcommands, such as `cache` and `gc`, are reserved.\n\nExamples:\n  mbx build --release\n  mbx test --workspace\n  mbx clippy --all-targets -- -D warnings\n  mbx gc --dry-run",
+    long_about = "Run `mbx setup` once, then keep using Cargo normally. Compiled work is shared across every checkout and build storage prunes itself. Use mbx directly for its own commands, such as `tui`, `cache`, `gc`, and `doctor`, or as an explicit fallback for Cargo commands.\n\nExamples:\n  mbx setup\n  cargo build --release\n  cargo test --workspace\n  cargo clippy --all-targets -- -D warnings\n  mbx gc --dry-run",
     unknown_flags = "error"
 )]
 struct Cli {
@@ -60,13 +63,7 @@ enum Commands {
     Doctor(doctor::DoctorArgs),
     /// Run a Cargo command and explain every compilation mbx cannot cache.
     Explain(explain::ExplainArgs),
-    // Hidden, not removed: `mbx <cargo command>` is the supported path and gets
-    // the remote cache, statistics, managed targets, and collection that the
-    // standalone wrapper cannot, but setups already relying on this keep
-    // working. A plain comment rather than a doc comment, because the generated
-    // CLI reference renders those and this is a note to the next reader here.
-    /// Install a persistent rustc wrapper for plain Cargo commands.
-    #[usage(hide)]
+    /// Make plain Cargo commands run through mbx.
     Setup(setup::SetupArgs),
     /// Collect stale managed targets and evict cached objects until the store fits a size budget.
     ///
@@ -148,7 +145,7 @@ pub fn run() -> Result<ExitCode> {
     match cli.command {
         Commands::Doctor(_) => unreachable!("doctor was handled before configuration loading"),
         Commands::Explain(args) => explain::run(&config, &settings, args, toolchain),
-        Commands::Setup(args) => setup::run(args.action()?),
+        Commands::Setup(args) => setup::run(&args, args.action()?),
         Commands::Gc(args) => gc::run(
             &config,
             args.max_size

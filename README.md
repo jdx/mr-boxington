@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>fix <code>target/</code></strong><br>
-  Put mbx in front of any cargo command. Every build on the machine shares one self-pruning cache, and you can run multiple Cargo builds in parallel.
+  Keep using cargo. Every build on the machine shares one self-pruning cache, and you can run multiple Cargo builds in parallel.
 </p>
 
 <p align="center">
@@ -17,14 +17,13 @@
 
 `mbx` wraps ordinary Cargo commands with a content-addressed rustc cache. Cargo
 still resolves dependencies, plans builds, and links outputs; mbx restores
-supported compilations it has seen before. There is nothing to configure and
-nothing to install into Cargo: put `mbx` in front of the command you already
-run.
+supported compilations it has seen before. Run `mbx setup` once and keep using
+the Cargo commands you already run.
 
 ```sh
-mbx build                  # cargo build, with caching
-mbx test --all-features    # cargo test --all-features, with caching
-mbx clippy --workspace     # cargo clippy --workspace, with caching
+cargo build                # cached by mbx
+cargo test --all-features  # cached by mbx
+cargo clippy --workspace   # cached by mbx
 mbx tui                    # watch every build's cache activity live
 mbx gc --dry-run           # preview what cleanup would reclaim
 ```
@@ -58,13 +57,25 @@ is pruned to, and when a `target/` directory becomes collectable.
 With [mise](https://mise.jdx.dev):
 
 ```sh
-mise use -g mr-boxington
+mise use -g --postinstall "mbx setup --yes" mr-boxington
 ```
+
+Older mise releases can use the two-step equivalent:
+
+```sh
+mise use -g mr-boxington
+mbx setup --global
+```
+
+Drop both global flags for project-local activation.
+If the installed mise also lacks safe collection updates, `mbx setup` prints
+the exact `env._.path` entry and config path to edit without modifying the file.
 
 With Cargo:
 
 ```sh
 cargo install mbx --locked
+mbx setup
 ```
 
 Or install the latest Linux x86-64 release archive:
@@ -83,6 +94,10 @@ Use the corresponding `-musl` archive for a static Linux binary. Release
 archives cover both libc variants on x86-64 and ARM64, plus Apple Silicon and
 Windows x86-64 and ARM64.
 Every release includes `SHA256SUMS`.
+
+After installing from an archive, run `$HOME/.local/bin/mbx setup`. Without
+mise it prints the appropriate `PATH` command and does not edit your shell
+startup files.
 
 [See all installation options →](https://mr-boxington.jdx.dev/getting-started)
 
@@ -121,7 +136,7 @@ For a checkout without an existing `target/`, managed target directories are
 enabled automatically:
 
 ```sh
-mbx build
+cargo build
 ```
 
 mbx places the target directory under its cache root and leaves `target` as a
