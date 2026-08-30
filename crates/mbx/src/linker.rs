@@ -228,10 +228,7 @@ fn msvc_tool(name: &str) -> Result<PathBuf> {
             .ok()
             .filter(|value| !value.is_empty())
             .unwrap_or_else(native_msvc_arch);
-        let target = std::env::var("VSCMD_ARG_TGT_ARCH")
-            .ok()
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(native_msvc_arch);
+        let target = selected_msvc_arch();
         let candidate = root
             .join("bin")
             .join(format!("Host{host}"))
@@ -242,6 +239,13 @@ fn msvc_tool(name: &str) -> Result<PathBuf> {
         }
     }
     Ok(which::which(name)?)
+}
+
+fn selected_msvc_arch() -> String {
+    std::env::var("VSCMD_ARG_TGT_ARCH")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(native_msvc_arch)
 }
 
 /// Ask Visual Studio Installer which MSVC toolset rustc will use when no
@@ -305,9 +309,39 @@ fn run_allowing_status(program: &Path, arguments: &[&str]) -> Result<String> {
 }
 
 fn windows_sdk_identity() -> Result<String> {
-    windows_sdk_identity_for(|name| std::env::var(name).ok())
+    let mut values = ["VCToolsVersion", "WindowsSDKVersion", "UCRTVersion"]
+        .into_iter()
+        .filter_map(|name| {
+            std::env::var(name)
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(|value| format!("{name}={value}"))
+        })
+        .collect::<Vec<_>>();
+    if !values
+        .iter()
+        .any(|value| value.starts_with("VCToolsVersion="))
+        && let Some(version) = std::env::var_os("VCToolsInstallDir")
+            .map(PathBuf::from)
+            .or_else(visual_studio_tools_dir)
+            .and_then(|path| path.file_name().map(|name| name.to_owned()))
+    {
+        values.push(format!("VCToolsVersion={}", version.to_string_lossy()));
+    }
+    if !values
+        .iter()
+        .any(|value| value.starts_with("WindowsSDKVersion="))
+        && let Some((_, version)) = windows_sdk_root_and_version()
+    {
+        values.push(format!("WindowsSDKVersion={version}"));
+    }
+    if values.len() < 2 {
+        bail!("the MSVC toolset and Windows SDK versions could not be identified");
+    }
+    Ok(values.join("; "))
 }
 
+#[cfg(test)]
 fn windows_sdk_identity_for(lookup: impl Fn(&str) -> Option<String>) -> Result<String> {
     let values = ["VCToolsVersion", "WindowsSDKVersion", "UCRTVersion"]
         .into_iter()
@@ -324,10 +358,46 @@ fn windows_sdk_identity_for(lookup: impl Fn(&str) -> Option<String>) -> Result<S
 }
 
 fn windows_crt_objects() -> Result<BTreeMap<String, CacheDigest>> {
-    let directories = std::env::var_os("LIB")
+    let mut directories = std::env::var_os("LIB")
         .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
         .unwrap_or_default();
+    let arch = selected_msvc_arch();
+    if let Some(tools) = std::env::var_os("VCToolsInstallDir")
+        .map(PathBuf::from)
+        .or_else(visual_studio_tools_dir)
+    {
+        directories.push(tools.join("lib").join(&arch));
+    }
+    if let Some((sdk, version)) = windows_sdk_root_and_version() {
+        directories.push(sdk.join("Lib").join(version).join("ucrt").join(&arch));
+    }
     windows_crt_objects_in(&directories)
+}
+
+fn windows_sdk_root_and_version() -> Option<(PathBuf, String)> {
+    let root = std::env::var_os("WindowsSdkDir")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("ProgramFiles(x86)")
+                .or_else(|| std::env::var_os("ProgramFiles"))
+                .map(PathBuf::from)
+                .map(|path| path.join("Windows Kits/10"))
+        })?;
+    let version = std::env::var("WindowsSDKVersion")
+        .ok()
+        .map(|version| version.trim_matches(['/', '\\']).to_owned())
+        .filter(|version| !version.is_empty())
+        .or_else(|| {
+            let mut versions = std::fs::read_dir(root.join("Lib"))
+                .ok()?
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().join("ucrt").is_dir())
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .collect::<Vec<_>>();
+            versions.sort();
+            versions.pop()
+        })?;
+    Some((root, version))
 }
 
 fn windows_crt_objects_in(directories: &[PathBuf]) -> Result<BTreeMap<String, CacheDigest>> {
