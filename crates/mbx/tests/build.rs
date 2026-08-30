@@ -238,7 +238,9 @@ fn build_with(
         .env_remove("TARGET_CC")
         .env_remove("TARGET_CXX")
         .env_remove("MBX_REAL_CC")
-        .env_remove("MBX_REAL_CXX");
+        .env_remove("MBX_REAL_CXX")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER");
     for (name, value) in settings {
         command.env(name, value);
     }
