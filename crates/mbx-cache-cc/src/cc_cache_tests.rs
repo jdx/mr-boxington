@@ -639,10 +639,21 @@ fn parses_a_typical_msvc_cc_crate_invocation() {
 }
 
 #[test]
+fn msvc_processor_and_floating_point_flags_are_admitted() {
+    for flag in ["/favor:AMD64", "/fp:precise", "/fp:fast"] {
+        let arguments = argv(&[flag, "/Foout.obj", "/c", "a.c"]);
+        CcInvocation::parse_msvc(&arguments)
+            .unwrap_or_else(|reason| panic!("{flag} should be admitted: {reason}"));
+    }
+}
+
+#[test]
 fn msvc_unmodeled_outputs_and_dependency_flags_bypass() {
     for flag in [
         "/showIncludes",
         "/sourceDependencies",
+        "/Faassembly.asm",
+        "/Fpheader.pch",
         "/Zi",
         "/Fdcompile.pdb",
     ] {

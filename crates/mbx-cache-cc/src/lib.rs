@@ -1561,10 +1561,16 @@ impl<'a> MsvcParser<'a> {
         if matches!(lower.as_str(), "e" | "ep" | "p") {
             return Err(CcBypassReason::NonObjectOutput(value.into()));
         }
-        if lower.starts_with("fa") || lower.starts_with("fd") || lower.starts_with("zi") {
+        if (lower.starts_with("fa") && !lower.starts_with("favor:"))
+            || lower.starts_with("fd")
+            || lower.starts_with("zi")
+        {
             return Err(CcBypassReason::SplitDebugOutput(value.into()));
         }
-        if lower.starts_with("yc") || lower.starts_with("yu") || lower.starts_with("fp") {
+        if lower.starts_with("yc")
+            || lower.starts_with("yu")
+            || (lower.starts_with("fp") && !lower.starts_with("fp:"))
+        {
             return Err(CcBypassReason::PrecompiledHeader(value.into()));
         }
         if lower == "link" || lower.starts_with("bt+") || lower.starts_with("analyze") {
