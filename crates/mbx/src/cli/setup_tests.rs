@@ -125,3 +125,17 @@ fn setup_uninstall_keeps_the_shared_shim() {
     )
     .unwrap();
 }
+
+#[test]
+fn mise_config_selection_finds_the_first_config_that_defines_mbx() {
+    let configs = br#"[
+        {"path":"/project/mise.toml","tools":["rust","github:jdx/mr-boxington"]},
+        {"path":"/global/config.toml","tools":["mr-boxington"]}
+    ]"#;
+
+    assert_eq!(
+        mbx_mise_config_from_json(configs),
+        Some(PathBuf::from("/project/mise.toml"))
+    );
+    assert_eq!(mbx_mise_config_from_json(b"not json"), None);
+}

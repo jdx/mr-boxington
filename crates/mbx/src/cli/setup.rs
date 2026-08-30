@@ -58,7 +58,7 @@ impl SetupArgs {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum MiseScope {
     File(PathBuf),
     Global,
@@ -82,8 +82,7 @@ pub(super) fn run(args: &SetupArgs, action: SetupAction) -> Result<ExitCode> {
     let executable = std::env::current_exe().wrap_err("failed to locate the mbx executable")?;
     let install_dir = setup_install_dir()
         .ok_or_else(|| eyre::eyre!("the platform data directory could not be located"))?;
-    let shim = install_dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
-    let scope = setup_scope(args, action, shim.is_file())?;
+    let scope = setup_scope(args, action)?;
     setup_at_action(&executable, &install_dir, &scope, action)
 }
 
@@ -177,10 +176,9 @@ pub(super) fn setup_at_action(
     Ok(ExitCode::SUCCESS)
 }
 
-fn setup_scope(args: &SetupArgs, action: SetupAction, shim_exists: bool) -> Result<MiseScope> {
+fn setup_scope(args: &SetupArgs, action: SetupAction) -> Result<MiseScope> {
     if let Some(path) = std::env::var_os("MISE_CONFIG_FILE")
-        && (args.yes
-            || (!args.global && !args.local && (action != SetupAction::Install || !shim_exists)))
+        && (args.yes || (!args.global && !args.local && action != SetupAction::Install))
     {
         return Ok(MiseScope::File(path.into()));
     }
@@ -191,36 +189,98 @@ fn setup_scope(args: &SetupArgs, action: SetupAction, shim_exists: bool) -> Resu
         return Ok(MiseScope::Local);
     }
     if args.yes {
-        return Ok(if command_exists("mise") {
-            MiseScope::Global
-        } else {
-            MiseScope::None
-        });
+        return Ok(recommended_mise_scope().unwrap_or(MiseScope::None));
     }
-    if action == SetupAction::Uninstall && command_exists("mise") {
-        return Ok(MiseScope::Global);
+    if action != SetupAction::Install {
+        return Ok(recommended_mise_scope().unwrap_or(MiseScope::None));
     }
-    if action != SetupAction::Install || shim_exists || !command_exists("mise") {
+    if !mise_is_activated() {
         return Ok(MiseScope::None);
     }
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         return Ok(MiseScope::None);
     }
+    let recommended = recommended_mise_scope().unwrap_or(MiseScope::Global);
     use demand::{DemandOption, Select};
-    match Select::new("Where should plain cargo commands use mbx?")
-        .option(
-            DemandOption::new(MiseScope::Global)
-                .label("Everywhere mise is active")
-                .selected(true),
-        )
-        .option(DemandOption::new(MiseScope::Local).label("Only in this project"))
-        .option(DemandOption::new(MiseScope::None).label("Create the shim without activating it"))
-        .run()
-    {
+    let mut select = Select::new("Where should plain cargo commands use mbx?");
+    match &recommended {
+        MiseScope::Global => {
+            select = select.option(
+                DemandOption::new(MiseScope::Global)
+                    .label("Everywhere mise is active")
+                    .selected(true),
+            );
+            select =
+                select.option(DemandOption::new(MiseScope::Local).label("Only in this project"));
+        }
+        MiseScope::File(_) => {
+            select = select.option(
+                DemandOption::new(recommended.clone())
+                    .label("The project mise config that applies here")
+                    .selected(true),
+            );
+            select = select
+                .option(DemandOption::new(MiseScope::Global).label("Everywhere mise is active"));
+        }
+        MiseScope::Local | MiseScope::None => unreachable!("recommended scope is concrete"),
+    }
+    select = select
+        .option(DemandOption::new(MiseScope::None).label("Create the shim without activating it"));
+    match select.run() {
         Ok(scope) => Ok(scope),
         Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Ok(MiseScope::None),
         Err(error) => Err(error.into()),
     }
+}
+
+fn mise_is_activated() -> bool {
+    command_exists("mise") && std::env::var_os("MISE_SHELL").is_some()
+}
+
+fn recommended_mise_scope() -> Option<MiseScope> {
+    if !mise_is_activated() {
+        return None;
+    }
+    if let Some(path) = mbx_mise_config() {
+        let global = mise_scope_config_path(&MiseScope::Global).ok();
+        return Some(if global.as_deref() == Some(path.as_path()) {
+            MiseScope::Global
+        } else {
+            MiseScope::File(path)
+        });
+    }
+    nearest_project_config()
+        .map(MiseScope::File)
+        .or(Some(MiseScope::Global))
+}
+
+fn mbx_mise_config() -> Option<PathBuf> {
+    let output = Command::new("mise")
+        .args(["config", "ls", "--json"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    mbx_mise_config_from_json(&output.stdout)
+}
+
+pub(super) fn mbx_mise_config_from_json(json: &[u8]) -> Option<PathBuf> {
+    let value = serde_json::from_slice::<serde_json::Value>(json).ok()?;
+    value.as_array()?.iter().find_map(|config| {
+        let tools = config.get("tools")?.as_array()?;
+        let defines_mbx = tools
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|tool| {
+                tool == "mr-boxington"
+                    || tool
+                        .rsplit([':', '/'])
+                        .next()
+                        .is_some_and(|name| name == "mr-boxington")
+            });
+        defines_mbx.then(|| config.get("path")?.as_str().map(PathBuf::from))?
+    })
 }
 
 fn command_exists(name: &str) -> bool {
@@ -316,24 +376,34 @@ fn mise_scope_config_path(scope: &MiseScope) -> Result<PathBuf> {
         }
         MiseScope::Local => {
             let cwd = std::env::current_dir()?;
+            if let Some(config) = nearest_project_config() {
+                return Ok(config);
+            }
             let filename = std::env::var_os("MISE_DEFAULT_CONFIG_FILENAME")
                 .unwrap_or_else(|| "mise.toml".into());
-            for directory in cwd.ancestors() {
-                let candidate = directory.join(&filename);
-                if candidate.is_file() {
-                    return Ok(candidate);
-                }
-                for alternate in ["mise.toml", ".mise.toml"] {
-                    let candidate = directory.join(alternate);
-                    if candidate.is_file() {
-                        return Ok(candidate);
-                    }
-                }
-            }
             Ok(cwd.join(filename))
         }
         MiseScope::None => eyre::bail!("mise activation has no selected config"),
     }
+}
+
+fn nearest_project_config() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let filename =
+        std::env::var_os("MISE_DEFAULT_CONFIG_FILENAME").unwrap_or_else(|| "mise.toml".into());
+    for directory in cwd.ancestors() {
+        let candidate = directory.join(&filename);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        for alternate in ["mise.toml", ".mise.toml"] {
+            let candidate = directory.join(alternate);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 fn mise_path_is_configured(scope: &MiseScope, path: &str) -> Result<bool> {

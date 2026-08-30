@@ -96,11 +96,13 @@ cargo install mbx --locked
 mbx setup
 ```
 
-`mbx setup` prompts for global mise activation, project-local mise activation,
-or no activation. During `mise use --postinstall`, `mbx setup --yes` activates
-the configuration named by `MISE_CONFIG_FILE`. Outside a postinstall hook,
-`--yes` selects global activation. Without mise, setup prints the exact
-shell-specific `PATH` change; it never edits a shell startup file.
+During `mise use --postinstall`, `mbx setup --yes` activates the configuration
+named by `MISE_CONFIG_FILE`. Otherwise, setup only integrates with mise when
+mise is activated in the current shell. It recommends the config that defines
+`mr-boxington`, then the nearest project config, and finally the global config.
+`mbx setup` prompts before using that recommendation; `--yes` accepts it.
+Without an active mise shell, setup prints the exact shell-specific `PATH`
+change and never edits a shell startup file.
 
 After installing from a release archive, run `$HOME/.local/bin/mbx setup` on
 Unix. On Windows, run

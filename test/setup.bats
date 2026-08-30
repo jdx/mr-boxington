@@ -14,6 +14,7 @@ setup() {
   export MBX_SHIM_DIR="$XDG_DATA_HOME/mbx/bin"
   export MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR"
   unset MISE_CONFIG_FILE
+  unset MISE_SHELL
   mkdir -p "$CARGO_HOME"
 }
 
@@ -90,6 +91,9 @@ printf '%s\n' "$*" >>"$MBX_TEST_MISE_LOG"
 if [ "$1 $2 $3" = "config set --help" ]; then
   printf '%s\n' '--append --remove --global'
 fi
+if [ "$1 $2 $3" = "config ls --json" ]; then
+  printf '%s\n' "${MBX_TEST_MISE_CONFIGS:-[]}"
+fi
 if [ "$1 $2" = "config get" ]; then
   printf '%s\n' "$MBX_TEST_SHIM_DIR"
 fi
@@ -102,18 +106,46 @@ EOF
   assert_success
   assert_file_contains "$mise_log" "config set --append --file $project_config env._.path"
 
-  run env -u MISE_CONFIG_FILE PATH="$fake_bin:$PATH" MBX_TEST_MISE_LOG="$mise_log" \
-    MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR" "$MBX_BIN" setup --yes
+  run env -u MISE_CONFIG_FILE PATH="$fake_bin:$PATH" MISE_SHELL=zsh \
+    MISE_GLOBAL_CONFIG_FILE="$BATS_TEST_TMPDIR/global.toml" \
+    MBX_TEST_MISE_CONFIGS="[{\"path\":\"$BATS_TEST_TMPDIR/global.toml\",\"tools\":[\"mr-boxington\"]}]" \
+    MBX_TEST_MISE_LOG="$mise_log" MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR" \
+    "$MBX_BIN" setup --yes
   assert_success
   assert_file_contains "$mise_log" "config set --append --global env._.path"
+
+  run env -u MISE_CONFIG_FILE PATH="$fake_bin:$PATH" MISE_SHELL=zsh \
+    MBX_TEST_MISE_CONFIGS="[{\"path\":\"$project_config\",\"tools\":[\"mr-boxington\"]}]" \
+    MBX_TEST_MISE_LOG="$mise_log" MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR" \
+    "$MBX_BIN" setup --yes
+  assert_success
+  assert_file_contains "$mise_log" "config set --append --file $project_config env._.path"
+
+  cd "$(dirname "$project_config")"
+  run env -u MISE_CONFIG_FILE PATH="$fake_bin:$PATH" MISE_SHELL=zsh \
+    MBX_TEST_MISE_CONFIGS='[]' MBX_TEST_MISE_LOG="$mise_log" \
+    MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR" "$MBX_BIN" setup --yes
+  assert_success
+  assert_file_contains "$mise_log" "config set --append --file $project_config env._.path"
+
+  : >"$mise_log"
+  run env -u MISE_CONFIG_FILE -u MISE_SHELL PATH="$fake_bin:$PATH" \
+    MBX_TEST_MISE_LOG="$mise_log" MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR" \
+    "$MBX_BIN" setup --yes
+  assert_success
+  run grep -F "config set --append" "$mise_log"
+  assert_failure
 
   run env PATH="$fake_bin:$PATH" MBX_TEST_MISE_LOG="$mise_log" \
     MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR" "$MBX_BIN" setup --local
   assert_success
   assert_file_contains "$mise_log" "config set --append env._.path"
 
-  run env PATH="$fake_bin:$PATH" MBX_TEST_MISE_LOG="$mise_log" \
-    MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR" "$MBX_BIN" setup --uninstall
+  run env PATH="$fake_bin:$PATH" MISE_SHELL=zsh \
+    MISE_GLOBAL_CONFIG_FILE="$BATS_TEST_TMPDIR/global.toml" \
+    MBX_TEST_MISE_CONFIGS="[{\"path\":\"$BATS_TEST_TMPDIR/global.toml\",\"tools\":[\"mr-boxington\"]}]" \
+    MBX_TEST_MISE_LOG="$mise_log" MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR" \
+    "$MBX_BIN" setup --uninstall
   assert_success
   assert_file_contains "$mise_log" "config set --remove --global env._.path"
 }
