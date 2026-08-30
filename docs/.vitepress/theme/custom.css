@@ -98,6 +98,21 @@ body::after {
   z-index: 999;
 }
 
+/* The cache dashboard is a full-bleed application surface. */
+.mbx-dashboard-page .VPPage {
+  padding: 0;
+}
+
+.mbx-dashboard-page .VPContent {
+  padding: 0 !important;
+}
+
+.mbx-dashboard-page .VPLocalNav,
+.mbx-dashboard-page .EndevSponsors,
+.mbx-dashboard-page .EndevFooter {
+  display: none;
+}
+
 /* ---------- navbar ---------- */
 
 .VPNavBarTitle .title {

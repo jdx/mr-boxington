@@ -4,6 +4,7 @@ import { enhanceAppWithTabs } from "vitepress-plugin-tabs/client";
 import { h, onMounted, onUnmounted } from "vue";
 import { data as starsData } from "../stars.data";
 import BenchmarkResults from "./BenchmarkResults.vue";
+import CacheDashboard from "./CacheDashboard.vue";
 import EndevFooter from "./EndevFooter.vue";
 import EndevSponsors from "./EndevSponsors.vue";
 import HomeShowcase from "./HomeShowcase.vue";
@@ -23,6 +24,7 @@ export default {
   enhanceApp({ app }) {
     enhanceAppWithTabs(app);
     app.component("BenchmarkResults", BenchmarkResults);
+    app.component("CacheDashboard", CacheDashboard);
     initBanner();
   },
   setup() {
