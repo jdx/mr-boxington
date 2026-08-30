@@ -12,7 +12,11 @@ setup() {
   export XDG_DATA_HOME="$BATS_TEST_TMPDIR/data-home"
   export MBX_CACHE_DIR="$BATS_TEST_TMPDIR/mbx-cache"
   export MBX_SHIM_DIR="$XDG_DATA_HOME/mbx/bin"
-  export MBX_RA_CONFIG="$XDG_CONFIG_HOME/rust-analyzer/rust-analyzer.toml"
+  if [[ "$(uname -s)" == Darwin ]]; then
+    export MBX_RA_CONFIG="$HOME/Library/Application Support/rust-analyzer/rust-analyzer.toml"
+  else
+    export MBX_RA_CONFIG="$XDG_CONFIG_HOME/rust-analyzer/rust-analyzer.toml"
+  fi
   export MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR"
   unset MISE_CONFIG_FILE
   unset MISE_SHELL
