@@ -958,7 +958,7 @@ impl RustcInputPrediction {
         path_mappings: &[PathMapping],
         digests: &dyn FileDigestCache,
     ) -> Result<DiscoveredInputs, BypassReason> {
-        if !matches!(self.version, 1..=4) {
+        if !matches!(self.version, 2..=4) {
             return Err(BypassReason::UnsupportedPrediction);
         }
         if self.inputs.len() > MAX_PREDICTED_INPUTS || self.environment.len() > 4 * 1024 {

@@ -763,15 +763,19 @@ fn a_native_search_directory_is_predicted_by_name_not_by_its_contents() {
 }
 
 #[test]
-fn reads_prediction_v1_without_timing_hints() {
-    let payload = r#"{"environment":[],"inputs":[],"version":1}"#;
-    let prediction: RustcInputPrediction = serde_json::from_str(payload).unwrap();
-    assert_eq!(prediction.compiler_duration_ns, 0);
-    assert!(prediction.crate_name.is_empty());
+fn prediction_v1_is_unsupported() {
+    let prediction: RustcInputPrediction =
+        serde_json::from_str(r#"{"environment":[],"inputs":[],"version":1}"#).unwrap();
     assert_eq!(
-        String::from_utf8(canonical_json(&prediction).unwrap()).unwrap(),
-        payload,
-        "pre-timing canonical predictions must remain canonical"
+        prediction
+            .discover(
+                Path::new("/work/one"),
+                &[],
+                &mbx_cache_core::NoFileDigestCache,
+            )
+            .unwrap_err()
+            .kind(),
+        "unsupported-prediction"
     );
 }
 

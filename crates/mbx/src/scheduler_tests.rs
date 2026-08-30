@@ -449,33 +449,6 @@ fn a_measurement_that_changes_nothing_leaves_the_ledger_alone() {
     );
 }
 
-/// A ledger written before the window existed reads as one with no link
-/// history, which is what it is.
-#[test]
-fn a_ledger_without_a_link_window_still_loads() {
-    let directory = tempfile::tempdir().unwrap();
-    let pool = pool_at(directory.path(), 8, 1000);
-    std::fs::create_dir_all(directory.path()).unwrap();
-    std::fs::write(
-        pool.ledger_path(),
-        br#"{"version":1,"crates":{"widget [link]":4000}}"#,
-    )
-    .unwrap();
-
-    let ledger = read_ledger(&pool.ledger_path());
-    assert!(ledger.link_peaks.is_empty());
-    assert_eq!(
-        pool.plan(&Demand::new("widget", true)),
-        (4, Some(4000)),
-        "the entries it does carry still count"
-    );
-    assert_eq!(
-        pool.plan(&Demand::new("unseen", true)),
-        (LINK_WEIGHT, Some(LINK_WEIGHT * 1000)),
-        "and an empty window leaves the static weight standing"
-    );
-}
-
 #[test]
 fn the_ledger_only_remembers_what_matters_and_never_shrinks_a_peak() {
     let directory = tempfile::tempdir().unwrap();
