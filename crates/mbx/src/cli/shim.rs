@@ -115,6 +115,10 @@ fn cargo_proxy_passthrough(arguments: &[OsString]) -> bool {
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
+    let (left, right) = match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => (left, right),
+        _ => (left.to_path_buf(), right.to_path_buf()),
+    };
     #[cfg(windows)]
     {
         left.to_string_lossy()
@@ -124,6 +128,23 @@ fn same_path(left: &Path, right: &Path) -> bool {
     {
         left == right
     }
+}
+
+/// Keep explicit `mbx build`-style commands from rediscovering the persistent
+/// Cargo shim after setup has placed it first on PATH.
+pub(super) fn prepare_explicit_cargo() -> Result<()> {
+    let Some(shim_dir) = super::setup_install_dir() else {
+        return Ok(());
+    };
+    let shim = shim_dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
+    if !shim.is_file() {
+        return Ok(());
+    }
+    let cargo = resolve_real_cargo(&shim)?;
+    // SAFETY: CLI dispatch is single-threaded here, before the cache session
+    // or any child process has started.
+    unsafe { std::env::set_var("CARGO", cargo) };
+    Ok(())
 }
 
 fn resolve_real_cargo(current: &Path) -> Result<OsString> {
@@ -240,6 +261,30 @@ mod tests {
 
         assert_eq!(
             resolve_real_cargo_from(&shim, Some(shim.as_os_str()), &path).unwrap(),
+            real.into_os_string()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cargo_resolution_excludes_a_symlink_to_the_shim_directory() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let shim_dir = directory.path().join("shim");
+        let shim_link = directory.path().join("linked-shim");
+        let real_dir = directory.path().join("real");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        std::fs::create_dir_all(&real_dir).unwrap();
+        symlink(&shim_dir, &shim_link).unwrap();
+        let shim = shim_dir.join("cargo");
+        let real = real_dir.join("cargo");
+        std::fs::write(&shim, b"shim").unwrap();
+        std::fs::write(&real, b"real").unwrap();
+        let path = std::env::join_paths([&shim_link, &real_dir]).unwrap();
+
+        assert_eq!(
+            resolve_real_cargo_from(&shim, None, &path).unwrap(),
             real.into_os_string()
         );
     }

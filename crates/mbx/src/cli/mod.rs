@@ -144,7 +144,10 @@ pub fn run() -> Result<ExitCode> {
     let (config, settings) = Config::load_for_cli()?;
     match cli.command {
         Commands::Doctor(_) => unreachable!("doctor was handled before configuration loading"),
-        Commands::Explain(args) => explain::run(&config, &settings, args, toolchain),
+        Commands::Explain(args) => {
+            shim::prepare_explicit_cargo()?;
+            explain::run(&config, &settings, args, toolchain)
+        }
         Commands::Setup(args) => setup::run(&args, args.action()?),
         Commands::Gc(args) => gc::run(
             &config,
@@ -157,9 +160,13 @@ pub fn run() -> Result<ExitCode> {
         .map(|()| ExitCode::SUCCESS),
         Commands::Cache(args) => cache::run(&config, args.command),
         Commands::Tui(args) => tui::run(&config, args),
-        Commands::Prefetch(args) => prefetch::run(&config, &args.cargo_args),
+        Commands::Prefetch(args) => {
+            shim::prepare_explicit_cargo()?;
+            prefetch::run(&config, &args.cargo_args)
+        }
         Commands::Exec(args) => exec::run(&config, &settings, &args),
         Commands::Cargo(arguments) => {
+            shim::prepare_explicit_cargo()?;
             cargo::run(&config, &settings, &with_toolchain(toolchain, arguments))
         }
     }

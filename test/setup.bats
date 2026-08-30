@@ -263,6 +263,18 @@ EOF
   assert_output "+nightly --version"
 }
 
+@test "explicit mbx Cargo commands do not reenter the installed shim" {
+  local project="$BATS_TEST_TMPDIR/explicit-mbx-project"
+  write_project "$project"
+  "$MBX_BIN" setup >/dev/null
+
+  run env PATH="$MBX_SHIM_DIR:$PATH" \
+    CARGO_TARGET_DIR="$BATS_TEST_TMPDIR/explicit-mbx-target" \
+    "$MBX_BIN" check --offline --manifest-path "$project/Cargo.toml"
+  assert_success
+  refute_output --partial "RUSTC_WRAPPER is already set"
+}
+
 @test "plain Cargo restores a second checkout through a full mbx session" {
   local first="$BATS_TEST_TMPDIR/first-checkout"
   local second="$BATS_TEST_TMPDIR/second-checkout"
