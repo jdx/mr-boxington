@@ -11,18 +11,6 @@ mise use -g --postinstall "mbx setup --yes" mr-boxington
 Drop `-g` to activate mbx only while that project's mise configuration is
 active. The postinstall hook selects the same configuration as `mise use`.
 
-On a mise release without `--postinstall`, use the two-step form:
-
-```sh
-mise use -g mr-boxington
-mbx setup --global
-```
-
-For project-local activation, omit `-g` and use `mbx setup --local`. If mise
-does not yet support safe collection updates, mbx prints the exact
-`env._.path` entry and selected config path for you to edit; it does not modify
-the TOML itself.
-
 ### Release archive
 
 :::tabs

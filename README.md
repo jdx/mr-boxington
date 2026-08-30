@@ -60,17 +60,6 @@ With [mise](https://mise.jdx.dev):
 mise use -g --postinstall "mbx setup --yes" mr-boxington
 ```
 
-Older mise releases can use the two-step equivalent:
-
-```sh
-mise use -g mr-boxington
-mbx setup --global
-```
-
-Drop both global flags for project-local activation.
-If the installed mise also lacks safe collection updates, `mbx setup` prints
-the exact `env._.path` entry and config path to edit without modifying the file.
-
 With Cargo:
 
 ```sh
