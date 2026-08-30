@@ -64,6 +64,7 @@ pub(crate) const STAGING_ENV: &str = "MBX_STAGING_DIR";
 pub(crate) const BUILD_ENV: &str = "MBX_BUILD";
 pub(crate) const VERIFY_ENV: &str = "MBX_VERIFY";
 pub(crate) const SHARE_OUT_DIR_ENV: &str = "MBX_SHARE_OUT_DIR";
+pub(crate) const BUILD_SCRIPT_EXECUTION_ENV: &str = "MBX_BUILD_SCRIPT_EXECUTION";
 pub(crate) const LEARNED_INCREMENTAL_ENV: &str = "MBX_LEARNED_INCREMENTAL";
 pub const CACHE_LINKS_ENV: &str = "MBX_CACHE_LINKS";
 /// Group completed builds for one later cache export, used by CI actions.
@@ -88,6 +89,7 @@ pub struct CacheSession {
     verify: bool,
     incremental: bool,
     share_out_dir: bool,
+    build_script_execution: bool,
     agent: CacheAgent,
     /// The stream `mbx tui` watches, when event recording is on.
     events: Option<EventStream>,
@@ -146,6 +148,7 @@ impl CacheSession {
             verify: config.verify,
             incremental: config.incremental,
             share_out_dir: config.share_out_dir,
+            build_script_execution: config.build_script_execution,
             agent,
             events,
             scheduler_env: crate::scheduler::session_environment(config),
@@ -227,6 +230,15 @@ impl CacheSession {
         environment.insert(
             SHARE_OUT_DIR_ENV.into(),
             if self.share_out_dir { "1" } else { "0" }.into(),
+        );
+        environment.insert(
+            BUILD_SCRIPT_EXECUTION_ENV.into(),
+            if self.build_script_execution {
+                "1"
+            } else {
+                "0"
+            }
+            .into(),
         );
         for (name, value) in &self.scheduler_env {
             environment.insert(name.clone(), value.clone());
@@ -747,6 +759,11 @@ pub(crate) fn build_script_real_path(executable: &Path) -> PathBuf {
     let mut name = executable.as_os_str().to_os_string();
     name.push(BUILD_SCRIPT_REAL_SUFFIX);
     PathBuf::from(name)
+}
+
+pub(crate) fn build_script_execution_requested() -> bool {
+    std::env::var_os(BUILD_SCRIPT_EXECUTION_ENV)
+        .is_some_and(|value| !value.is_empty() && value != "0")
 }
 
 /// Locate the preserved binary. Cargo runs an un-hashed hard link named

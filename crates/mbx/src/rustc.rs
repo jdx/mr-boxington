@@ -444,6 +444,9 @@ fn install_build_script_shim(
     outputs: &RustcOutputs,
     binary_action: &CacheDigest,
 ) {
+    if !session::build_script_execution_requested() {
+        return;
+    }
     let Some(executable) = outputs.build_script_executable(invocation.crate_name()) else {
         return;
     };

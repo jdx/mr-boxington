@@ -34,6 +34,7 @@ Every value below is optional; these are shown set explicitly.
 cache_dir = "/var/cache/mbx"
 incremental = false
 share_out_dir = true
+build_script_execution = true
 cc = true
 savings = "quips"        # or "plain", "off"
 
@@ -69,12 +70,13 @@ priority = "normal"      # or "low"
 
 ## Workspace policy
 
-A repository may check in a `.mbx.toml` containing only the three build-policy
+A repository may check in a `.mbx.toml` containing only the four build-policy
 switches below:
 
 ```toml
 incremental = false
 share_out_dir = false
+build_script_execution = true
 cc = true
 ```
 
@@ -87,6 +89,10 @@ an unsafe or misspelled workspace setting.
 when generated source paths must remain literal in debug information — for
 C and C++ objects as well as Rust artifacts, since a build script's generated
 headers reach both.
+
+`build_script_execution = true` (`MBX_BUILD_SCRIPT_EXECUTION`) caches eligible
+`build.rs` executions. Set it to false to keep compilation caching while every
+build script runs normally.
 
 ## Build-script C and C++
 

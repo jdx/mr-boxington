@@ -12,6 +12,9 @@ the action key. A hit restores the complete `OUT_DIR` tree and replays the
 script's stdout directives and stderr without starting the script. Directories
 and missing paths are inputs too, matching Cargo's directive model.
 
+Set `build_script_execution = false` or `MBX_BUILD_SCRIPT_EXECUTION=0` to turn
+off this layer while retaining ordinary Rust and C/C++ compilation caching.
+
 A script that emits neither kind of rerun directive always runs. Cargo's
 package-wide default for such scripts is intentionally not guessed into a cache
 key: an uncached execution is cheaper than claiming an input set the script did

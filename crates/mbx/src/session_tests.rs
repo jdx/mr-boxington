@@ -7,6 +7,7 @@ fn test_config(cache_dir: &Path) -> Config {
         verify: false,
         incremental: false,
         share_out_dir: false,
+        build_script_execution: false,
         events: false,
         cc: false,
         remote: Default::default(),
@@ -59,6 +60,7 @@ async fn session_environment_directs_cargo_at_the_shim() {
     );
     assert_eq!(values.get("CARGO_INCREMENTAL").unwrap(), "0");
     assert_eq!(values.get(VERIFY_ENV).unwrap(), "0");
+    assert_eq!(values.get(BUILD_SCRIPT_EXECUTION_ENV).unwrap(), "0");
 
     session.finish().await.unwrap();
 }

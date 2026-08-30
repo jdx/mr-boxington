@@ -217,6 +217,7 @@ fn build_with(
         // Same reason: a test asserting the default cross-checkout behaviour
         // must not read an answer out of the developer's environment.
         .env_remove("MBX_SHARE_OUT_DIR")
+        .env_remove("MBX_BUILD_SCRIPT_EXECUTION")
         .env_remove("MBX_LEARNED_INCREMENTAL")
         // Native links are cached by default and several counts here include
         // one, so an inherited answer would decide them.
@@ -1173,6 +1174,33 @@ fn build_script_without_declared_inputs_bypasses_execution_cache() {
     assert_eq!(
         std::fs::read_to_string(project.path().join("runs")).unwrap(),
         "2"
+    );
+}
+
+#[test]
+fn build_script_execution_cache_can_be_turned_off() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    write_execution_cached_project(first.path(), true);
+    write_execution_cached_project(second.path(), true);
+    let disabled = [("MBX_BUILD_SCRIPT_EXECUTION", "0")];
+    build_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+        &disabled,
+    );
+    build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+        &disabled,
+    );
+    assert_eq!(
+        std::fs::read_to_string(second.path().join("runs")).unwrap(),
+        "1"
     );
 }
 
