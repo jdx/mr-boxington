@@ -39,6 +39,7 @@ use url::Url;
 mod agent;
 mod client;
 mod local;
+mod path_mapping;
 mod remote_http;
 mod remote_s3;
 mod sigv4;
@@ -62,6 +63,10 @@ pub use mbx_cache_protocol::{
     DirectoryNode as CacheDirectoryNode, FileNode as CacheFileNode, MAX_ACTION_PREDICTION_PAYLOAD,
     NAMESPACE_HEADER, PROTOCOL_HEADER, PROTOCOL_VERSION, RustcMetadata,
     SymlinkNode as CacheSymlinkNode, TASK_ACTION_MANIFEST_MEDIA_TYPE, TaskActionManifest,
+};
+pub use path_mapping::{
+    PathMapping, PathNormalizationError, normalize_mapped_path, normalize_resolved_mapped_path,
+    resolve_path_mappings,
 };
 use remote_http::HttpRemoteCache;
 #[cfg(feature = "fuzzing")]

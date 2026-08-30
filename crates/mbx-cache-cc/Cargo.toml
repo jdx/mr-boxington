@@ -16,7 +16,6 @@ all-features = true
 
 [dependencies]
 mbx-cache-core = { path = "../mbx-cache-core", version = "0.9.4", default-features = false }
-mbx-cache-rustc = { path = "../mbx-cache-rustc", version = "0.9.4", default-features = false }
 serde = { version = "1", features = ["derive"] }
 strum = { version = "0.28", features = ["derive"] }
 thiserror = "2"
@@ -27,9 +26,6 @@ tempfile = "3"
 
 [features]
 default = ["rustls"]
-native-tls = ["mbx-cache-core/native-tls", "mbx-cache-rustc/native-tls"]
-rustls = ["mbx-cache-core/rustls", "mbx-cache-rustc/rustls"]
-rustls-native-roots = [
-  "mbx-cache-core/rustls-native-roots",
-  "mbx-cache-rustc/rustls-native-roots",
-]
+native-tls = ["mbx-cache-core/native-tls"]
+rustls = ["mbx-cache-core/rustls"]
+rustls-native-roots = ["mbx-cache-core/rustls-native-roots"]
