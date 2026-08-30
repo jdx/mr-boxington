@@ -62,7 +62,6 @@ pub enum AgentRequest {
         /// Restoration work performed by the adapter.
         restore: RestoreStats,
         /// Compiler crate name, when the invocation supplied one.
-        #[serde(default)]
         crate_name: Option<String>,
     },
     /// A compilation the adapter declined to cache, grouped by reason.

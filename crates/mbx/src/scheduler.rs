@@ -428,10 +428,6 @@ struct MemoryLedger {
     version: u8,
     crates: BTreeMap<String, u64>,
     /// Recent link measurements, newest last, whatever crate they came from.
-    ///
-    /// Defaulted rather than versioned: a ledger written before this existed
-    /// reads as one with no link history, which is exactly what it is.
-    #[serde(default)]
     link_peaks: Vec<u64>,
 }
 

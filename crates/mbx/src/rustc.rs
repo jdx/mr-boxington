@@ -884,7 +884,6 @@ fn record_prediction(
         )?;
         let invocation_digest = invocation.invocation_digest(&context)?;
         let mut prediction = invocation.prediction(&context, discovered)?;
-        prediction.version = prediction.version.max(2);
         prediction.compiler_duration_ns = timing.duration_ns;
         prediction.crate_name.clone_from(&timing.crate_name);
         let payload = String::from_utf8(canonical_json(&prediction)?)?;
@@ -1005,7 +1004,6 @@ fn refresh_prediction(
     // build just saved any less real.
     let recorded = (|| {
         let mut prediction = compilation.invocation.prediction(&context, discovered)?;
-        prediction.version = prediction.version.max(2);
         prediction.compiler_duration_ns = timing.duration_ns;
         prediction.crate_name.clone_from(&timing.crate_name);
         let payload = String::from_utf8(canonical_json(&prediction)?)?;
@@ -1036,7 +1034,7 @@ fn decode_prediction_timing(
         bail!("cache agent returned an incompatible rustc timing prediction");
     }
     let timing: RustcInputPrediction = serde_json::from_str(&prediction.payload)?;
-    if !matches!(timing.version, 1..=4)
+    if !matches!(timing.version, 2..=4)
         || timing.crate_name.len() > 256
         || timing.crate_name.contains(['\0', '\n', '\r'])
         || String::from_utf8(canonical_json(&timing)?)? != prediction.payload
