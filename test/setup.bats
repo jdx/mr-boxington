@@ -352,3 +352,30 @@ EOF
   assert_success
   assert_output "1"
 }
+
+@test "plain Cargo restores rustdoc output through the installed shim" {
+  local first="$BATS_TEST_TMPDIR/first-doc-checkout"
+  local second="$BATS_TEST_TMPDIR/second-doc-checkout"
+  local cold_report="$BATS_TEST_TMPDIR/cold-doc.json"
+  local warm_report="$BATS_TEST_TMPDIR/warm-doc.json"
+  write_project "$first"
+  write_project "$second"
+  "$MBX_BIN" setup >/dev/null
+
+  run env PATH="$MBX_SHIM_DIR:$PATH" \
+    CARGO_TARGET_DIR="$BATS_TEST_TMPDIR/first-doc-target" \
+    MBX_STATS_REPORT="$cold_report" \
+    cargo doc --offline --no-deps --manifest-path "$first/Cargo.toml"
+  assert_success
+  run grep -E '"misses"[[:space:]]*:[[:space:]]*[1-9]' "$cold_report"
+  assert_success
+
+  run env PATH="$MBX_SHIM_DIR:$PATH" \
+    CARGO_TARGET_DIR="$BATS_TEST_TMPDIR/second-doc-target" \
+    MBX_STATS_REPORT="$warm_report" \
+    cargo doc --offline --no-deps --manifest-path "$second/Cargo.toml"
+  assert_success
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*[1-9]' "$warm_report"
+  assert_success
+  assert_file_exists "$BATS_TEST_TMPDIR/second-doc-target/doc/fixture/index.html"
+}
