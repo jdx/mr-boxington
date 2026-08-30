@@ -72,6 +72,9 @@ impl BypassReason {
             Self::Incremental => Some(
                 "Set `MBX_INCREMENTAL=0`; mbx will then disable Cargo incremental state and cache the compilation.",
             ),
+            Self::UnportableNativeLink(detail) if detail.contains("linker") => Some(
+                "Make the native linker resolvable on `PATH`, or configure a linker mbx can identify for this target.",
+            ),
             Self::UnportableNativeLink(_) => Some(
                 "Remove the reported `-C` option from the active Cargo profile or `RUSTFLAGS` to make these links cacheable.",
             ),
