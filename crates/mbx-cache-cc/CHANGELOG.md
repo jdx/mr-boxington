@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.9.4...mbx-cache-cc-v0.10.0) - 2026-08-30
+
+### Added
+
+- *(cache)* deduplicate in-flight work across runners ([#223](https://github.com/jdx/mr-boxington/pull/223))
+- cache Windows links and MSVC compiles ([#224](https://github.com/jdx/mr-boxington/pull/224))
+- cache rustdoc actions ([#226](https://github.com/jdx/mr-boxington/pull/226))
+- *(mbx)* prescribe fixes for cache bypasses ([#222](https://github.com/jdx/mr-boxington/pull/222))
+
+### Other
+
+- share cache path mapping ([#215](https://github.com/jdx/mr-boxington/pull/215))
+
 ## [0.9.4](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.9.3...mbx-cache-cc-v0.9.4) - 2026-08-29
 
 ### Fixed
