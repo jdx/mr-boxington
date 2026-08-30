@@ -42,9 +42,16 @@ struct Action<'a> {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum InputState {
     Missing,
-    File { digest: CacheDigest },
-    Directory { digest: CacheDigest },
-    Symlink { target: String },
+    File {
+        digest: CacheDigest,
+    },
+    Directory {
+        digest: CacheDigest,
+    },
+    Symlink {
+        target: String,
+        referent: Box<InputState>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,6 +241,7 @@ fn record_prediction(
 
 fn parse_prediction(stdout: &[u8]) -> Result<Option<Prediction>> {
     let text = std::str::from_utf8(stdout).wrap_err("build-script stdout is not UTF-8")?;
+    let mappings = build_script_mappings();
     let mut inputs = BTreeSet::new();
     let mut environment = BTreeSet::new();
     for line in text.lines() {
@@ -242,9 +250,12 @@ fn parse_prediction(stdout: &[u8]) -> Result<Option<Prediction>> {
             .or_else(|| line.strip_prefix("cargo:"));
         let Some(directive) = directive else { continue };
         if let Some(path) = directive.strip_prefix("rerun-if-changed=") {
-            if !path.is_empty() {
-                inputs.insert(path.to_string());
+            // Cargo treats the empty path as an always-rerun declaration. No
+            // finite action key can preserve that contract.
+            if path.is_empty() {
+                return Ok(None);
             }
+            inputs.insert(normalize_environment_value(path, &mappings));
         } else if let Some(name) = directive.strip_prefix("rerun-if-env-changed=")
             && !name.is_empty()
         {
@@ -270,13 +281,16 @@ fn build_action(
     let mappings = build_script_mappings();
     let mut inputs = BTreeMap::new();
     for declared in &prediction.inputs {
-        let path = Path::new(declared);
+        let resolved_name =
+            String::from_utf8(denormalize_output_text(declared.as_bytes(), &mappings))
+                .expect("denormalizing UTF-8 paths preserves UTF-8");
+        let path = Path::new(&resolved_name);
         let resolved = if path.is_absolute() {
             path.to_path_buf()
         } else {
             working_dir.join(path)
         };
-        inputs.insert(declared.clone(), input_state(&resolved)?);
+        inputs.insert(declared.clone(), input_state(&resolved, &mappings)?);
     }
     let environment = prediction
         .environment
@@ -310,7 +324,15 @@ fn build_action(
     Ok((bytes, digest))
 }
 
-fn input_state(path: &Path) -> Result<InputState> {
+fn input_state(path: &Path, mappings: &[PathMapping]) -> Result<InputState> {
+    input_state_at(path, mappings, 0)
+}
+
+fn input_state_at(
+    path: &Path,
+    mappings: &[PathMapping],
+    symlink_depth: usize,
+) -> Result<InputState> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -319,8 +341,18 @@ fn input_state(path: &Path) -> Result<InputState> {
         Err(error) => return Err(error.into()),
     };
     if metadata.file_type().is_symlink() {
+        if symlink_depth >= 64 {
+            bail!("declared build-script input contains a symlink cycle");
+        }
+        let target = std::fs::read_link(path)?;
+        let resolved = if target.is_absolute() {
+            target.clone()
+        } else {
+            path.parent().unwrap_or_else(|| Path::new("")).join(&target)
+        };
         return Ok(InputState::Symlink {
-            target: std::fs::read_link(path)?.to_string_lossy().into_owned(),
+            target: normalize_environment_value(&target.to_string_lossy(), mappings),
+            referent: Box::new(input_state_at(&resolved, mappings, symlink_depth + 1)?),
         });
     }
     if metadata.is_file() {
@@ -336,7 +368,7 @@ fn input_state(path: &Path) -> Result<InputState> {
             .map(|entry| {
                 Ok((
                     entry.file_name().to_string_lossy().into_owned(),
-                    input_state(&entry.path())?,
+                    input_state_at(&entry.path(), mappings, symlink_depth)?,
                 ))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
@@ -354,7 +386,18 @@ fn out_dir_is_portable() -> Result<bool> {
     let Some(out_dir) = std::env::var_os("OUT_DIR") else {
         return Ok(false);
     };
-    let needle = out_dir.to_string_lossy();
+    let needles = [
+        "OUT_DIR",
+        "CARGO_MANIFEST_DIR",
+        session::WORKSPACE_ROOT_ENV,
+        session::TARGET_DIR_ENV,
+        "CARGO_HOME",
+    ]
+    .into_iter()
+    .filter_map(std::env::var_os)
+    .map(|value| value.to_string_lossy().into_owned())
+    .filter(|value| !value.is_empty())
+    .collect::<BTreeSet<_>>();
     let root = PathBuf::from(&out_dir);
     if !root.is_dir() {
         return Ok(true);
@@ -366,17 +409,23 @@ fn out_dir_is_portable() -> Result<bool> {
             let kind = entry.file_type()?;
             if kind.is_dir() {
                 pending.push(entry.path());
-            } else if kind.is_symlink()
-                && std::fs::read_link(entry.path())?
-                    .to_string_lossy()
-                    .contains(needle.as_ref())
-            {
-                return Ok(false);
+            } else if kind.is_symlink() {
+                let target = std::fs::read_link(entry.path())?;
+                if needles
+                    .iter()
+                    .any(|needle| target.to_string_lossy().contains(needle))
+                {
+                    return Ok(false);
+                }
             }
         }
     }
     for path in walk_files(&root)? {
-        if memchr::memmem::find(&std::fs::read(path)?, needle.as_bytes()).is_some() {
+        let contents = std::fs::read(path)?;
+        if needles
+            .iter()
+            .any(|needle| memchr::memmem::find(&contents, needle.as_bytes()).is_some())
+        {
             return Ok(false);
         }
     }
@@ -732,5 +781,32 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn an_empty_changed_path_bypasses_even_beside_other_inputs() {
+        assert!(
+            parse_prediction(
+                b"cargo:rerun-if-changed=input.h\ncargo:rerun-if-changed=\ncargo:rerun-if-env-changed=MODE\n"
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_input_includes_its_referent_contents() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let referent = directory.path().join("referent");
+        let link = directory.path().join("input");
+        std::fs::write(&referent, "first").unwrap();
+        symlink("referent", &link).unwrap();
+        let first = input_state(&link, &[]).unwrap();
+        std::fs::write(referent, "second").unwrap();
+        let second = input_state(&link, &[]).unwrap();
+        assert_ne!(first, second);
     }
 }
