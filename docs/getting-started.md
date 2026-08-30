@@ -159,10 +159,12 @@ aliases, installed subcommands, and toolchain selection are preserved:
 cargo +1.91 check --workspace
 ```
 
-`MBX_DISABLE=1 cargo …` bypasses mbx for one invocation. You can also skip
-setup and run `mbx +1.91 check` directly as a zero-config alternative; only
-commands prefixed with `mbx` use caching in that mode. mbx's own `tui`, `cache`,
-`gc`, `doctor`, and diagnostic commands stay under `mbx`.
+`MBX_DISABLE=1 cargo …` bypasses mbx for one invocation in a POSIX shell. In
+PowerShell, set `$env:MBX_DISABLE = "1"`, run Cargo, then remove it with
+`Remove-Item Env:MBX_DISABLE`. You can also skip setup and run
+`mbx +1.91 check` directly as a zero-config alternative; only commands prefixed
+with `mbx` use caching in that mode. mbx's own `tui`, `cache`, `gc`, `doctor`,
+and diagnostic commands stay under `mbx`.
 
 ## Run multiple Cargo builds at the same time
 
