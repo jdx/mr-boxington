@@ -646,7 +646,11 @@ fn restore_predicted_result(
         context,
         &invocation_digest,
         &prediction.payload,
-        Some(&prediction.action),
+        // A manifest prediction intentionally survives source changes: its
+        // payload is rehashed to derive the action for the current inputs.
+        // Only a completed remote promise must still name the exact action it
+        // promised before any of that action's outputs may be materialized.
+        None,
         restore_outputs,
         action_lookup_attempted,
         learned_enabled,
