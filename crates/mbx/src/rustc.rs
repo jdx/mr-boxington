@@ -123,11 +123,19 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     // The orchestrated session supplies the target root. A persistent wrapper
     // has no parent session, so first parse just enough of the invocation to
     // learn its output directory and use that as the stable target mapping.
-    let options = ParseOptions::caching_native_links(session::cache_links_requested());
+    let cache_native_links = session::cache_links_requested();
+    let execution_only_build_script = session::build_script_execution_requested()
+        && session::crate_name_argument(arguments).as_deref() == Some("build_script_build")
+        && !cache_native_links;
+    // A platform without native-link action caching still needs to observe a
+    // build-script executable so execution caching can key it by its exact
+    // bytes. Parsing it is safe: the linked output itself is not published.
+    let options =
+        ParseOptions::caching_native_links(cache_native_links || execution_only_build_script);
     // Appended before anything parses: the debug-map rule inside the parser is
     // exactly what this flag satisfies, so an invocation that would bypass
     // without it has to carry it going in.
-    let arguments = with_oso_prefix(arguments, session::cache_links_requested());
+    let arguments = with_oso_prefix(arguments, cache_native_links || execution_only_build_script);
     let arguments = arguments.as_ref();
     let initial_invocation = RustcInvocation::parse_with(arguments, options)?;
     let initial_outputs = initial_invocation.outputs(&working_dir)?;
@@ -139,6 +147,16 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     let arguments = portable.applied_to(arguments);
     let invocation = RustcInvocation::parse_with(&arguments, options)?;
     let outputs = invocation.outputs(&working_dir)?;
+
+    if execution_only_build_script {
+        return compile_execution_only_build_script(
+            rustc,
+            &arguments,
+            &working_dir,
+            &invocation,
+            &outputs,
+        );
+    }
 
     let verify = session::verify_requested();
     // A shadow compilation compares its result against a cached one, which an
@@ -434,6 +452,46 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
         })();
         if let Err(error) = publication {
             eprintln!("mbx[warning]: result was not stored: {error:#}");
+        }
+    }
+    Ok(exit_code(output.status))
+}
+
+/// Compile a build script whose native link cannot be action-cached, then
+/// install the execution-cache launcher keyed by the resulting binary bytes.
+fn compile_execution_only_build_script(
+    rustc: &OsStr,
+    arguments: &[OsString],
+    working_dir: &Path,
+    invocation: &RustcInvocation,
+    outputs: &RustcOutputs,
+) -> Result<ExitCode> {
+    let demand = crate::scheduler::Demand::new(invocation.crate_name(), true);
+    let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
+    let started = Instant::now();
+    let output = Command::new(rustc)
+        .args(arguments)
+        .current_dir(working_dir)
+        .output()
+        .wrap_err("failed to execute rustc")?;
+    drop(permit);
+    crate::scheduler::record_compiler_memory(&demand, &output.status);
+    session::record_compiler_invocation(
+        "bypass",
+        Some(invocation.crate_name()),
+        started.elapsed().as_nanos().try_into().unwrap_or(u64::MAX),
+    );
+    let _ = replay_output(&output);
+    if output.status.success()
+        && let Some(executable) = outputs.build_script_executable(invocation.crate_name())
+    {
+        let installed = CacheDigest::blake3_file(executable)
+            .wrap_err("failed to identify the build-script binary")
+            .and_then(|binary| crate::build_script::install(executable, &binary));
+        if let Err(error) = installed {
+            session::report_shim_warning(&format!(
+                "build-script shim was not installed: {error:#}"
+            ));
         }
     }
     Ok(exit_code(output.status))

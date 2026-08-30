@@ -1074,16 +1074,18 @@ fn build_script_execution_and_out_dir_restore_across_checkouts() {
     write_execution_cached_project(first.path(), true);
     write_execution_cached_project(second.path(), true);
 
-    build(
+    let no_link_cache = [("MBX_CACHE_LINKS", "0")];
+    build_with(
         first.path(),
         store.path(),
         &reports.path().join("first.json"),
+        &no_link_cache,
     );
     let (warm, stderr) = build_with(
         second.path(),
         store.path(),
         &reports.path().join("second.json"),
-        &[],
+        &no_link_cache,
     );
 
     assert_eq!(

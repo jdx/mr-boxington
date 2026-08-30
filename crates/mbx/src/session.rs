@@ -1195,7 +1195,7 @@ fn links_natively(arguments: &[OsString]) -> bool {
     produces_program && emits_link
 }
 
-fn crate_name_argument(arguments: &[OsString]) -> Option<String> {
+pub(crate) fn crate_name_argument(arguments: &[OsString]) -> Option<String> {
     let mut arguments = arguments.iter();
     while let Some(argument) = arguments.next() {
         if argument == "--crate-name" {
