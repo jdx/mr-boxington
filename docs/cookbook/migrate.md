@@ -1,9 +1,5 @@
 # Migrate from rust-cache or sccache
 
-Both migrations end in the same place: ordinary Cargo commands entering mbx
-through its Cargo shim, with nothing else standing between Cargo and rustc.
-What has to be removed differs.
-
 ## From rust-cache or `actions/cache` over `target/`
 
 A tarball cache and mbx solve the same problem, so replace the step rather
@@ -56,10 +52,6 @@ Then check the result:
 ```sh
 mbx doctor
 ```
-
-The `setup` check reports the installed Cargo shim. Existing compiler-wrapper
-configuration remains your responsibility; `mbx setup` does not edit Cargo's
-TOML configuration.
 
 ## The first build measures nothing
 

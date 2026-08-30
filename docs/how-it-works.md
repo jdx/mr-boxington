@@ -13,8 +13,9 @@ subcommand.
 6. The agent exits with the build, draining any remote uploads it still owes.
    There is no persistent daemon.
 
-The installed Cargo shim and explicit `mbx <cargo-command>` fallback both work
-this way. Running `mbx setup` again refreshes the stable shim after mbx is upgraded.
+The installed Cargo shim and the zero-config `mbx <cargo-command>` form both
+work this way. Running `mbx setup` again refreshes the stable shim after mbx is
+upgraded.
 
 That wrapper boundary also covers multiple Cargo builds running at the same
 time. Their compiler shims share a machine-wide permit pool and an

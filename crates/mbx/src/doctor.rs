@@ -258,7 +258,10 @@ fn setup_check() -> Check {
 
 fn setup_check_at(executable: &Path, expected_shim: &Path, path: Option<&OsStr>) -> Check {
     if !expected_shim.is_file() {
-        return Check::warn("setup", "Cargo shim not installed; run `mbx setup`");
+        return Check::warn(
+            "setup",
+            "Cargo shim is not installed; plain Cargo bypasses mbx, while explicit `mbx <cargo-command>` still works",
+        );
     }
     match same_file_contents(executable, expected_shim) {
         Ok(false) => {
@@ -474,7 +477,7 @@ mod tests {
         let real_first = std::env::join_paths([&real_dir, &shim_dir]).unwrap();
         assert_eq!(
             setup_check_at(&executable, &shim, Some(&real_first)).detail,
-            "Cargo shim not installed; run `mbx setup`"
+            "Cargo shim is not installed; plain Cargo bypasses mbx, while explicit `mbx <cargo-command>` still works"
         );
 
         std::fs::write(&shim, b"old mbx").unwrap();

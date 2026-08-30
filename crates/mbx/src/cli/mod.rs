@@ -38,7 +38,7 @@ use {cache::*, cargo::*, exec::*, gc::*, setup::*};
     version,
     config = crate::config::RawConfig,
     about = "A build cache for Rust projects",
-    long_about = "Run `mbx setup` once, then keep using Cargo normally. Compiled work is shared across every checkout and build storage prunes itself. Use mbx directly for its own commands, such as `tui`, `cache`, `gc`, and `doctor`, or as an explicit fallback for Cargo commands.\n\nExamples:\n  mbx setup\n  cargo build --release\n  cargo test --workspace\n  cargo clippy --all-targets -- -D warnings\n  mbx gc --dry-run",
+    long_about = "Run `mbx setup` once, then keep using Cargo normally. Compiled work is shared across every checkout and build storage prunes itself. Use mbx directly for its own commands, such as `tui`, `cache`, `gc`, and `doctor`, or prefix Cargo commands with `mbx` for zero-config use.\n\nExamples:\n  mbx setup\n  cargo build --release\n  cargo test --workspace\n  cargo clippy --all-targets -- -D warnings\n  mbx gc --dry-run",
     unknown_flags = "error"
 )]
 struct Cli {

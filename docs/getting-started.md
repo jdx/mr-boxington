@@ -8,8 +8,8 @@
 mise use --global --postinstall "mbx setup --yes" mr-boxington
 ```
 
-Drop `--global` to activate mbx only while that project's mise configuration is
-active. The postinstall hook selects the same configuration as `mise use`.
+With `--global`, mise activates mbx in its global configuration. Drop
+`--global` to activate it only in the current project's configuration.
 
 ### Release archive
 
@@ -96,9 +96,10 @@ cargo install mbx --locked
 mbx setup
 ```
 
-`mbx setup` asks whether mise should activate the Cargo shim globally, only in
-the current project, or not at all. Use `mbx setup --yes` to accept global
-activation when mise is available. Without mise, setup prints the exact
+`mbx setup` prompts for global mise activation, project-local mise activation,
+or no activation. During `mise use --postinstall`, `mbx setup --yes` activates
+the configuration named by `MISE_CONFIG_FILE`. Outside a postinstall hook,
+`--yes` selects global activation. Without mise, setup prints the exact
 shell-specific `PATH` change; it never edits a shell startup file.
 
 After installing from a release archive, run `$HOME/.local/bin/mbx setup` on
@@ -151,20 +152,17 @@ cargo clippy --workspace --all-targets
 ```
 
 The command and its arguments are passed to Cargo unchanged. Cargo still owns
-dependency resolution, feature unification, build planning, and linking. mbx
-also forwards Cargo aliases and installed subcommands. Nothing goes into
-Cargo's configuration, and there is nothing to tune before the first build.
-
-A toolchain goes where rustup expects it:
+dependency resolution, feature unification, build planning, and linking. Cargo
+aliases, installed subcommands, and toolchain selection are preserved:
 
 ```sh
 cargo +1.91 check --workspace
 ```
 
-The shim preserves Cargo aliases, installed subcommands, and toolchain
-selection. `MBX_DISABLE=1 cargo …` bypasses mbx for one invocation. The
-explicit `mbx +1.91 check` spelling remains available as a fallback, and mbx's
-own `tui`, `cache`, `gc`, `doctor`, and diagnostic commands stay under `mbx`.
+`MBX_DISABLE=1 cargo …` bypasses mbx for one invocation. You can also skip
+setup and run `mbx +1.91 check` directly as a zero-config alternative; only
+commands prefixed with `mbx` use caching in that mode. mbx's own `tui`, `cache`,
+`gc`, `doctor`, and diagnostic commands stay under `mbx`.
 
 ## Run multiple Cargo builds at the same time
 
