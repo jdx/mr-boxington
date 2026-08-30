@@ -370,7 +370,7 @@ impl Portable {
             else {
                 continue;
             };
-            let mut flag = OsString::from(if family == CcCompilerFamily::Msvc {
+            let mut flag = OsString::from(if family.is_msvc() {
                 "/pathmap:"
             } else {
                 "-fdebug-prefix-map="
@@ -602,7 +602,7 @@ fn compiler_identity(compiler: &OsStr, language: CcLanguage) -> Result<CcCompile
         probe_executable(&executable, &["-v"], &executable)?
     };
     let family = CcCompilerFamily::classify(&probe)?;
-    let target = if family == CcCompilerFamily::Msvc {
+    let target = if family.is_msvc() {
         std::env::var("VSCMD_ARG_TGT_ARCH").unwrap_or_default()
     } else {
         probe

@@ -593,6 +593,7 @@ fn compiler_families_classify_from_probe_text() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn msvc_style_probe_output_selects_the_msvc_adapter() {
     let probe = "Microsoft (R) C/C++ Optimizing Compiler Version 19.38\n";
@@ -607,6 +608,7 @@ fn only_gcc_carries_an_external_assembler_in_its_identity() {
     assert!(CcCompilerFamily::Gcc.uses_external_assembler());
     assert!(!CcCompilerFamily::Clang.uses_external_assembler());
     assert!(!CcCompilerFamily::AppleClang.uses_external_assembler());
+    #[cfg(windows)]
     assert!(!CcCompilerFamily::Msvc.uses_external_assembler());
 }
 
@@ -624,14 +626,14 @@ fn parses_a_typical_msvc_cc_crate_invocation() {
         "/c",
         "src\\widget.c",
     ]);
-    let invocation = CcInvocation::parse_for(&arguments, CcCompilerFamily::Msvc)
-        .expect("MSVC invocation should be admitted");
+    let invocation =
+        CcInvocation::parse_msvc(&arguments).expect("MSVC invocation should be admitted");
     assert_eq!(invocation.source(), Path::new("src\\widget.c"));
     assert_eq!(invocation.output(), Path::new("out\\widget.obj"));
     assert_eq!(invocation.include_dirs(), [PathBuf::from("include")]);
     assert_eq!(invocation.language(), CcLanguage::C);
     assert_eq!(
-        invocation.dependency_arguments_for(Path::new("deps.json"), CcCompilerFamily::Msvc),
+        invocation.msvc_dependency_arguments(Path::new("deps.json")),
         argv(&["/sourceDependencies", "deps.json"])
     );
 }
@@ -646,7 +648,7 @@ fn msvc_unmodeled_outputs_and_dependency_flags_bypass() {
     ] {
         let arguments = argv(&[flag, "/Foout.obj", "/c", "a.c"]);
         assert!(
-            CcInvocation::parse_for(&arguments, CcCompilerFamily::Msvc).is_err(),
+            CcInvocation::parse_msvc(&arguments).is_err(),
             "{flag} should bypass"
         );
     }

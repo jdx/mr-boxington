@@ -1258,17 +1258,27 @@ fn unportable_native_links_still_bypass() {
             "-Clink-self-contained",
             BypassReason::UnportableNativeLink("link-self-contained".into()),
         ),
-        // Not modeled at all, so it never reaches the portability question.
-        (
-            "-Clinker=/usr/bin/false",
-            BypassReason::UnknownCodegenOption("linker".into()),
-        ),
     ] {
         let arguments = args(&["--test", "--emit=dep-info,link", flag, "src/lib.rs"]);
         assert_eq!(
             RustcInvocation::parse_with(&arguments, native_links()),
             Err(expected),
             "{flag} should not be cacheable"
+        );
+    }
+
+    let linker = args(&[
+        "--test",
+        "--emit=dep-info,link",
+        "-Clinker=/usr/bin/false",
+        "src/lib.rs",
+    ]);
+    if cfg!(windows) {
+        assert!(RustcInvocation::parse_with(&linker, native_links()).is_ok());
+    } else {
+        assert_eq!(
+            RustcInvocation::parse_with(&linker, native_links()),
+            Err(BypassReason::UnknownCodegenOption("linker".into()))
         );
     }
 

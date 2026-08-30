@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-cc"
-version = "0.10.0"
+version = "0.9.4"
 dependencies = [
  "mbx-cache-core",
  "serde",

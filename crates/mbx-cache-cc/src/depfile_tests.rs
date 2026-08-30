@@ -457,7 +457,7 @@ fn parses_msvc_source_dependencies() {
     )
     .expect("write dependency JSON");
 
-    let dependencies = CcDepfile::read_for(&path, CcCompilerFamily::Msvc).expect("parse");
+    let dependencies = CcDepfile::read_msvc(&path).expect("parse");
     assert_eq!(
         dependencies.files,
         [

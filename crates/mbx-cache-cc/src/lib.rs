@@ -436,6 +436,7 @@ pub enum CcCompilerFamily {
     /// Apple's clang distribution.
     AppleClang,
     /// Microsoft's `cl.exe` driver.
+    #[cfg(windows)]
     Msvc,
 }
 
@@ -446,6 +447,7 @@ impl CcCompilerFamily {
             Self::Gcc => "gcc",
             Self::Clang => "clang",
             Self::AppleClang => "apple-clang",
+            #[cfg(windows)]
             Self::Msvc => "msvc",
         }
     }
@@ -456,16 +458,30 @@ impl CcCompilerFamily {
         matches!(self, Self::Gcc)
     }
 
+    /// Whether this is Microsoft's `cl.exe` driver.
+    pub fn is_msvc(self) -> bool {
+        #[cfg(windows)]
+        {
+            matches!(self, Self::Msvc)
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
     /// Classify a driver from its verbose probe output.
     pub fn classify(probe: &str) -> Result<Self, CcBypassReason> {
+        #[cfg(windows)]
+        if probe.contains("Microsoft (R) C/C++ Optimizing Compiler") {
+            return Ok(Self::Msvc);
+        }
         if probe.contains("Apple clang version") {
             Ok(Self::AppleClang)
         } else if probe.contains("clang version") {
             Ok(Self::Clang)
         } else if probe.contains("gcc version") {
             Ok(Self::Gcc)
-        } else if probe.contains("Microsoft (R) C/C++ Optimizing Compiler") {
-            Ok(Self::Msvc)
         } else {
             Err(CcBypassReason::UnsupportedCompilerDriver(
                 probe.lines().next().unwrap_or_default().into(),
@@ -625,11 +641,16 @@ impl CcInvocation {
         arguments: &[OsString],
         family: CcCompilerFamily,
     ) -> Result<Self, CcBypassReason> {
-        if family == CcCompilerFamily::Msvc {
+        if family.is_msvc() {
             MsvcParser::new(arguments).parse()
         } else {
             Self::parse(arguments)
         }
+    }
+
+    /// Parse a command line using Microsoft `cl.exe` syntax.
+    pub fn parse_msvc(arguments: &[OsString]) -> Result<Self, CcBypassReason> {
+        MsvcParser::new(arguments).parse()
     }
 
     /// Source file this invocation compiles.
@@ -687,11 +708,16 @@ impl CcInvocation {
         depfile: &Path,
         family: CcCompilerFamily,
     ) -> Vec<OsString> {
-        if family == CcCompilerFamily::Msvc {
+        if family.is_msvc() {
             vec!["/sourceDependencies".into(), depfile.into()]
         } else {
             self.dependency_arguments(depfile)
         }
+    }
+
+    /// Arguments to append so `cl.exe` writes `/sourceDependencies` JSON.
+    pub fn msvc_dependency_arguments(&self, depfile: &Path) -> Vec<OsString> {
+        vec!["/sourceDependencies".into(), depfile.into()]
     }
 
     /// Digest of the pre-input fingerprint, used to look up a prediction.
@@ -864,7 +890,7 @@ where
         }
         environment.insert((*name).to_string(), lookup(name));
     }
-    if family == CcCompilerFamily::Msvc {
+    if family.is_msvc() {
         // INCLUDE changes header resolution without appearing in argv. The
         // toolset and SDK versions make the otherwise machine-local paths
         // meaningful when action records move between hosts.

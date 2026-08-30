@@ -40,7 +40,7 @@ impl CcDepfile {
 
     /// Read the dependency output emitted by the selected compiler family.
     pub fn read_for(path: &Path, family: CcCompilerFamily) -> Result<Self, CcBypassReason> {
-        if family == CcCompilerFamily::Msvc {
+        if family.is_msvc() {
             Self::read_msvc(path)
         } else {
             Self::read(path)
@@ -48,7 +48,7 @@ impl CcDepfile {
     }
 
     /// Read MSVC's `/sourceDependencies` JSON output.
-    fn read_msvc(path: &Path) -> Result<Self, CcBypassReason> {
+    pub fn read_msvc(path: &Path) -> Result<Self, CcBypassReason> {
         let contents = std::fs::read(path).map_err(|error| CcBypassReason::DepfileRead {
             path: path.to_path_buf(),
             message: error.to_string(),

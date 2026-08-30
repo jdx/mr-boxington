@@ -594,12 +594,19 @@ impl RustcInvocation {
             // so a program that answers to a library's name would be restored
             // without the permission that makes it runnable. Nothing cargo
             // emits looks like this; a hand-built invocation could.
+            let has_library_extension = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| matches!(extension, "rlib" | "rmeta"))
+                || (cfg!(windows)
+                    && path
+                        .file_stem()
+                        .and_then(|stem| Path::new(stem).extension())
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| matches!(extension, "rlib" | "rmeta")));
             if emit.kind == "link"
                 && !matches!(self.link_output, LinkOutput::Library)
-                && matches!(
-                    path.extension().and_then(|extension| extension.to_str()),
-                    Some("rlib" | "rmeta")
-                )
+                && has_library_extension
             {
                 return Err(BypassReason::AmbiguousOutputName(path));
             }
@@ -1546,6 +1553,14 @@ impl<'a> Parser<'a> {
             && let Some(option) = self.first_link_argument()
         {
             return Err(BypassReason::UnmodeledLinkArgument(option.to_owned()));
+        }
+        if self.parsed.iter().any(|argument| {
+            matches!(argument, Argument::Plain(value) if value.starts_with("--codegen=linker="))
+        }) && !matches!(
+            link_output,
+            LinkOutput::NativeExecutable | LinkOutput::NativeProcMacro
+        ) {
+            return Err(BypassReason::UnknownCodegenOption("linker".into()));
         }
         // `-oso_prefix` is modeled, but only where ld64 is the linker reading
         // it: a native macOS link. Any other linker sees an option this
