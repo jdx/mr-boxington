@@ -492,6 +492,11 @@ pub(crate) fn cargo_shim_target(install_dir: &Path) -> Option<PathBuf> {
     }) {
         return Some(target);
     }
+    configured_cargo_shim_target(install_dir)
+}
+
+#[cfg(windows)]
+fn configured_cargo_shim_target(install_dir: &Path) -> Option<PathBuf> {
     use std::os::windows::ffi::OsStringExt as _;
 
     let bytes = std::fs::read(install_dir.join(super::CARGO_SHIM_TARGET_FILE)).ok()?;
@@ -528,8 +533,12 @@ fn write_cargo_shim_target(install_dir: &Path, executable: &Path) -> Result<()> 
 
 pub(crate) fn cargo_shim_is_current(executable: &Path, shim: &Path) -> Result<bool> {
     #[cfg(windows)]
-    if let Some(target) = shim.parent().and_then(cargo_shim_target) {
-        return Ok(same_path(&target, executable));
+    if let Some(install_dir) = shim.parent()
+        && let Some(configured) = configured_cargo_shim_target(install_dir)
+    {
+        return Ok(same_path(&configured, executable)
+            || cargo_shim_target(install_dir)
+                .is_some_and(|target| same_path(&target, executable)));
     }
     same_file_contents(executable, shim)
 }
