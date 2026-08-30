@@ -14,8 +14,7 @@ subcommand.
    There is no persistent daemon.
 
 The installed Cargo shim and the zero-config `mbx <cargo-command>` form both
-work this way. Running `mbx setup` again refreshes the stable shim after mbx is
-upgraded.
+work this way. The installed shim follows the active mbx when mbx is upgraded.
 
 That wrapper boundary also covers multiple Cargo builds running at the same
 time. Their compiler shims share a machine-wide permit pool and an
