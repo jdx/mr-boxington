@@ -11,6 +11,8 @@ Inspect the local store.
 ## Subcommands
 
 - [`mbx cache dir [--json]`](/cli/cache/dir.md)
+- [`mbx cache export [--group <GROUP>] <ARCHIVE>`](/cli/cache/export.md)
+- [`mbx cache import <ARCHIVE>`](/cli/cache/import.md)
 - [`mbx cache largest [--limit <LIMIT>]`](/cli/cache/largest.md)
 - [`mbx cache projects`](/cli/cache/projects.md)
 - [`mbx cache remove <WORKSPACE>`](/cli/cache/remove.md)

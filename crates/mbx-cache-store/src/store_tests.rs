@@ -54,6 +54,16 @@ fn store_result(store: &Path, name: &str, outputs: &[CacheDigest]) -> CacheDiges
 /// and `mbx_cache_core`'s own tests write a manifest through the agent and
 /// read it back with the same accessor this uses, so drift shows up there.
 fn record_build(store: &Path, identity: &str, workspace_root: &Path, actions: &[CacheDigest]) {
+    record_build_in_group(store, identity, workspace_root, actions, None);
+}
+
+fn record_build_in_group(
+    store: &Path,
+    identity: &str,
+    workspace_root: &Path,
+    actions: &[CacheDigest],
+    group: Option<&str>,
+) {
     record_checkout(
         store,
         identity,
@@ -74,13 +84,15 @@ fn record_build(store: &Path, identity: &str, workspace_root: &Path, actions: &[
     let manifest = serde_json::json!({
         "version": 1,
         "task": identity,
-        "predictions": predictions,
+        "predictions": &predictions,
     });
     let path = store
         .join("task-manifests")
         .join("v1")
         .join(format!("{identity}.json"));
     write_atomic(&path, &serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let run = CacheDigest::blake3(format!("run-{identity}-{group:?}").as_bytes()).hash;
+    record_build_receipt(store, &run, identity, workspace_root, group, predictions).unwrap();
 }
 
 #[test]
@@ -288,6 +300,172 @@ fn removes_only_the_requested_workspaces_checkout_claims() {
     let remaining = projects(directory.path()).unwrap();
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].workspace_root, second);
+}
+
+#[test]
+fn exports_and_imports_the_last_builds_complete_closure() {
+    let source = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let workspace = source.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let output = store_object(source.path(), b"compiled artifact");
+    let action = store_result(
+        source.path(),
+        "compile action",
+        std::slice::from_ref(&output),
+    );
+    let identity = "a".repeat(64);
+    record_build(
+        source.path(),
+        &identity,
+        &workspace,
+        std::slice::from_ref(&action),
+    );
+    let archive = source.path().join("build.tar");
+
+    let exported = export_checkout(source.path(), &workspace, &archive).unwrap();
+    let imported = import_archive(destination.path(), &archive).unwrap();
+
+    assert_eq!(exported.actions, 1);
+    assert_eq!(imported.actions, 1);
+    assert_eq!(exported.objects, 3);
+    assert_eq!(imported.objects, 3);
+    assert!(
+        LocalCas::new(destination.path())
+            .find(&output)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        LocalActionCache::new(destination.path())
+            .find(&action)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        task_manifest_actions(destination.path(), &identity).unwrap(),
+        vec![action]
+    );
+}
+
+#[test]
+fn export_refuses_an_incomplete_build_closure() {
+    let source = tempfile::tempdir().unwrap();
+    let workspace = source.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let output = store_object(source.path(), b"compiled artifact");
+    let action = store_result(
+        source.path(),
+        "compile action",
+        std::slice::from_ref(&output),
+    );
+    record_build(source.path(), &"b".repeat(64), &workspace, &[action]);
+    std::fs::remove_file(LocalCas::new(source.path()).path_for(&output).unwrap()).unwrap();
+    let archive = source.path().join("incomplete.tar");
+
+    let error = export_checkout(source.path(), &workspace, &archive).unwrap_err();
+
+    assert!(
+        error.to_string().contains("cache object is missing"),
+        "{error:?}"
+    );
+    assert!(!archive.exists());
+}
+
+#[test]
+fn export_requires_a_build_from_the_current_checkout() {
+    let source = tempfile::tempdir().unwrap();
+    let workspace = source.path().join("never-built");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let error =
+        export_checkout(source.path(), &workspace, &source.path().join("empty.tar")).unwrap_err();
+
+    assert!(
+        error.to_string().contains("no completed mbx build"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn export_uses_only_the_checkouts_most_recent_build() {
+    let source = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let workspace = source.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let old_action = store_result(source.path(), "old build", &[]);
+    let old_identity = "c".repeat(64);
+    record_build(
+        source.path(),
+        &old_identity,
+        &workspace,
+        std::slice::from_ref(&old_action),
+    );
+    let new_action = store_result(source.path(), "new build", &[]);
+    let new_identity = "d".repeat(64);
+    record_build(
+        source.path(),
+        &new_identity,
+        &workspace,
+        std::slice::from_ref(&new_action),
+    );
+    let archive = source.path().join("latest.tar");
+
+    export_checkout(source.path(), &workspace, &archive).unwrap();
+    import_archive(destination.path(), &archive).unwrap();
+
+    let cache = LocalActionCache::new(destination.path());
+    assert!(cache.find(&new_action).unwrap().is_some());
+    assert!(cache.find(&old_action).unwrap().is_none());
+    assert!(
+        !task_manifest_path(destination.path(), &old_identity).exists(),
+        "an older build's prediction manifest should not be bundled"
+    );
+}
+
+#[test]
+fn grouped_export_unions_parallel_build_receipts() {
+    let source = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let first_workspace = source.path().join("first-workspace");
+    let second_workspace = source.path().join("second-workspace");
+    std::fs::create_dir_all(&first_workspace).unwrap();
+    std::fs::create_dir_all(&second_workspace).unwrap();
+    let first_action = store_result(source.path(), "first grouped build", &[]);
+    let second_action = store_result(source.path(), "second grouped build", &[]);
+    let unrelated_action = store_result(source.path(), "unrelated build", &[]);
+    record_build_in_group(
+        source.path(),
+        &"e".repeat(64),
+        &first_workspace,
+        std::slice::from_ref(&first_action),
+        Some("github-run-42/test"),
+    );
+    record_build_in_group(
+        source.path(),
+        &"f".repeat(64),
+        &second_workspace,
+        std::slice::from_ref(&second_action),
+        Some("github-run-42/test"),
+    );
+    record_build_in_group(
+        source.path(),
+        &"1".repeat(64),
+        &first_workspace,
+        std::slice::from_ref(&unrelated_action),
+        Some("another-job"),
+    );
+    let archive = source.path().join("job.tar");
+
+    let exported = export_group(source.path(), "github-run-42/test", &archive).unwrap();
+    let imported = import_archive(destination.path(), &archive).unwrap();
+
+    assert_eq!(exported.actions, 2);
+    assert_eq!(imported.actions, 2);
+    let cache = LocalActionCache::new(destination.path());
+    assert!(cache.find(&first_action).unwrap().is_some());
+    assert!(cache.find(&second_action).unwrap().is_some());
+    assert!(cache.find(&unrelated_action).unwrap().is_none());
 }
 
 #[test]

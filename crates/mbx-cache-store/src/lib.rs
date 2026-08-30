@@ -1,23 +1,24 @@
 //! Store inspection and garbage collection.
 //!
-//! The store holds five trees: `cas/v1` for content-addressed objects,
+//! The store holds six trees: `cas/v1` for content-addressed objects,
 //! `action-results/v1` for the results that reference them, `task-manifests/v1`
 //! for the prediction index, `checkouts/v1` for the checkouts that have built
-//! each identity, and `sessions/v1` for per-build event streams. Only the first
-//! two are collected for size; manifests are small and make cold builds fast,
-//! checkout records expire with their checkout claims, and session streams are
-//! bounded by age and count because they are history rather than cache content.
+//! each identity, `build-receipts/v1` for exact completed build closures, and
+//! `sessions/v1` for per-build event streams. Only the first two are collected
+//! for size; manifests and receipts are small, checkout records expire with
+//! their checkout claims, and session streams are bounded by age and count
+//! because they are history rather than cache content.
 
 mod events;
 
 use eyre::{Context, Result};
 use mbx_cache_core::{
-    CacheDigest, CacheDirectory, LocalCas, RemoteActionResult, RustcMetadata, is_task_identity,
-    task_manifest_actions,
+    ActionPrediction, CacheDigest, CacheDirectory, LocalCas, RemoteActionResult, RustcMetadata,
+    TaskActionManifest, is_task_identity, task_manifest_actions,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CAS_DIR: &str = "cas/v1";
@@ -26,6 +27,10 @@ const CHECKOUTS_DIR: &str = "checkouts/v1";
 const SWEEP_STAMP: &str = "gc/v1/last-sweep";
 const SWEEP_LOCK: &str = "gc/v1/sweep.lock";
 const CHECKOUT_RECORD_VERSION: u8 = 1;
+const BUILD_RECEIPTS_DIR: &str = "build-receipts/v1";
+const BUILD_RECEIPT_VERSION: u8 = 1;
+const EXPORT_MANIFEST: &str = "mbx-cache-export-v1.json";
+const EXPORT_VERSION: u8 = 1;
 
 const SESSION_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const MAX_SESSIONS: usize = 256;
@@ -99,6 +104,436 @@ pub struct VerifyOutcome {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct RemoveProjectOutcome {
     pub removed_checkout_records: u64,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct TransferOutcome {
+    pub actions: u64,
+    pub objects: u64,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportManifest {
+    version: u8,
+    tasks: Vec<TaskActionManifest>,
+    actions: Vec<CacheDigest>,
+}
+
+/// The exact cache predictions completed by one top-level build command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuildReceipt {
+    version: u8,
+    workspace_root: PathBuf,
+    identity: String,
+    completed_nanos: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    group: Option<String>,
+    predictions: Vec<ActionPrediction>,
+}
+
+/// Record an exact completed build for checkout and grouped exports.
+pub fn record_build_receipt(
+    store: &Path,
+    run: &str,
+    identity: &str,
+    workspace_root: &Path,
+    group: Option<&str>,
+    predictions: Vec<ActionPrediction>,
+) -> Result<()> {
+    if !is_task_identity(run) || !is_task_identity(identity) {
+        eyre::bail!("invalid build receipt identity");
+    }
+    if !(TaskActionManifest {
+        version: 1,
+        task: identity.to_owned(),
+        predictions: predictions.clone(),
+    })
+    .validate()
+    {
+        eyre::bail!("invalid build receipt prediction");
+    }
+    if let Some(group) = group {
+        validate_export_group(group)?;
+    }
+    let key = workspace_key(workspace_root);
+    let lock_path = store
+        .join(BUILD_RECEIPTS_DIR)
+        .join("locks")
+        .join(format!("{key}.lock"));
+    std::fs::create_dir_all(lock_path.parent().expect("receipt lock has a parent"))?;
+    let mut lock = fslock::LockFile::open(&lock_path)?;
+    lock.lock()?;
+    let completed_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos().try_into().unwrap_or(u64::MAX))
+        .unwrap_or_default();
+    let receipt = BuildReceipt {
+        version: BUILD_RECEIPT_VERSION,
+        workspace_root: workspace_root.to_path_buf(),
+        identity: identity.to_owned(),
+        completed_nanos,
+        group: group.map(str::to_owned),
+        predictions,
+    };
+    let bytes = serde_json::to_vec(&receipt)?;
+    write_atomic(&latest_receipt_path(store, workspace_root), &bytes)?;
+    if let Some(group) = group {
+        write_atomic(&group_receipt_path(store, group, run), &bytes)?;
+    }
+    Ok(())
+}
+
+fn workspace_key(workspace_root: &Path) -> String {
+    CacheDigest::blake3(workspace_root.to_string_lossy().as_bytes()).hash
+}
+
+fn latest_receipt_path(store: &Path, workspace_root: &Path) -> PathBuf {
+    store
+        .join(BUILD_RECEIPTS_DIR)
+        .join("checkouts")
+        .join(format!("{}.json", workspace_key(workspace_root)))
+}
+
+fn group_receipt_path(store: &Path, group: &str, run: &str) -> PathBuf {
+    store
+        .join(BUILD_RECEIPTS_DIR)
+        .join("groups")
+        .join(group_key(group))
+        .join(format!("{run}.json"))
+}
+
+fn group_key(group: &str) -> String {
+    CacheDigest::blake3(group.as_bytes()).hash
+}
+
+fn read_build_receipt(path: &Path) -> Option<BuildReceipt> {
+    let bytes = std::fs::read(path).ok()?;
+    let receipt = serde_json::from_slice::<BuildReceipt>(&bytes).ok()?;
+    let valid = TaskActionManifest {
+        version: 1,
+        task: receipt.identity.clone(),
+        predictions: receipt.predictions.clone(),
+    }
+    .validate();
+    (receipt.version == BUILD_RECEIPT_VERSION && valid).then_some(receipt)
+}
+
+fn validate_export_group(group: &str) -> Result<()> {
+    if group.is_empty() || group.len() > 256 || group.chars().any(char::is_control) {
+        eyre::bail!("invalid build export group");
+    }
+    Ok(())
+}
+
+/// Export the complete local cache closure of this checkout's most recent build.
+pub fn export_checkout(
+    store: &Path,
+    workspace_root: &Path,
+    archive: &Path,
+) -> Result<TransferOutcome> {
+    let receipt = read_build_receipt(&latest_receipt_path(store, workspace_root))
+        .filter(|receipt| receipt.workspace_root == workspace_root)
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "no completed mbx build is recorded for {}",
+                workspace_root.display()
+            )
+        })?;
+    export_receipts(store, vec![receipt], archive)
+}
+
+/// Export the union of every completed build recorded under one CI group.
+pub fn export_group(store: &Path, group: &str, archive: &Path) -> Result<TransferOutcome> {
+    validate_export_group(group)?;
+    let root = store
+        .join(BUILD_RECEIPTS_DIR)
+        .join("groups")
+        .join(group_key(group));
+    let receipts = walk_files(&root)?
+        .into_iter()
+        .filter_map(|entry| read_build_receipt(&entry.path))
+        .filter(|receipt| receipt.group.as_deref() == Some(group))
+        .collect::<Vec<_>>();
+    if receipts.is_empty() {
+        eyre::bail!("no completed mbx builds are recorded for export group {group:?}");
+    }
+    export_receipts(store, receipts, archive)
+}
+
+fn export_receipts(
+    store: &Path,
+    mut receipts: Vec<BuildReceipt>,
+    archive: &Path,
+) -> Result<TransferOutcome> {
+    receipts.sort_by_key(|receipt| receipt.completed_nanos);
+    let mut actions = BTreeSet::new();
+    let mut tasks = BTreeMap::new();
+    for receipt in receipts {
+        actions.extend(
+            receipt
+                .predictions
+                .iter()
+                .map(|prediction| prediction.action.clone()),
+        );
+        // One task manifest can carry only one action per invocation. The
+        // newest run of the same task is the useful prediction set to import;
+        // every older action remains in `actions` and therefore in the bundle.
+        tasks.insert(
+            receipt.identity.clone(),
+            TaskActionManifest {
+                version: 1,
+                task: receipt.identity,
+                predictions: receipt.predictions,
+            },
+        );
+    }
+    let tasks = tasks.into_values().collect::<Vec<_>>();
+    let (objects, result_paths) = strict_closure(store, &actions)?;
+    let parent = archive
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".mbx-export-")
+        .tempfile_in(parent)?;
+    let mut builder = tar::Builder::new(temporary.reopen()?);
+    append_bytes(
+        &mut builder,
+        Path::new(EXPORT_MANIFEST),
+        &serde_json::to_vec(&ExportManifest {
+            version: EXPORT_VERSION,
+            tasks,
+            actions: actions.iter().cloned().collect(),
+        })?,
+    )?;
+    for path in objects.iter().chain(result_paths.iter()) {
+        append_file(&mut builder, store, path)?;
+    }
+    builder.finish()?;
+    drop(builder);
+    temporary
+        .persist(archive)
+        .map_err(|error| error.error)
+        .wrap_err_with(|| format!("failed to publish {}", archive.display()))?;
+    let bytes = std::fs::metadata(archive)?.len();
+    Ok(TransferOutcome {
+        actions: actions.len() as u64,
+        objects: objects.len() as u64,
+        bytes,
+    })
+}
+
+/// Validate a cache export in isolation, then publish its objects and actions.
+pub fn import_archive(store: &Path, archive: &Path) -> Result<TransferOutcome> {
+    let staging = tempfile::tempdir()?;
+    let file = std::fs::File::open(archive)
+        .wrap_err_with(|| format!("failed to open {}", archive.display()))?;
+    let mut bundle = tar::Archive::new(file);
+    let mut seen = BTreeSet::new();
+    for entry in bundle.entries()? {
+        let mut entry = entry?;
+        if !entry.header().entry_type().is_file() {
+            eyre::bail!("cache export contains a non-file entry");
+        }
+        let path = entry.path()?.into_owned();
+        validate_archive_path(&path)?;
+        if !seen.insert(path.clone()) {
+            eyre::bail!("cache export contains duplicate entry {}", path.display());
+        }
+        let destination = staging.path().join(&path);
+        std::fs::create_dir_all(destination.parent().expect("entry has a parent"))?;
+        let mut output = std::fs::File::create(&destination)?;
+        std::io::copy(&mut entry, &mut output)?;
+    }
+    let manifest: ExportManifest =
+        serde_json::from_slice(&std::fs::read(staging.path().join(EXPORT_MANIFEST))?)?;
+    let actions = manifest.actions.iter().cloned().collect::<BTreeSet<_>>();
+    let task_identities = manifest
+        .tasks
+        .iter()
+        .map(|task| task.task.as_str())
+        .collect::<BTreeSet<_>>();
+    if manifest.version != EXPORT_VERSION
+        || manifest.tasks.is_empty()
+        || actions.len() != manifest.actions.len()
+        || task_identities.len() != manifest.tasks.len()
+        || manifest.tasks.iter().any(|task| !task.validate())
+        || manifest
+            .actions
+            .iter()
+            .any(|action| action.algorithm != "blake3" || action.validate().is_err())
+        || manifest.tasks.iter().any(|task| {
+            task.predictions
+                .iter()
+                .any(|prediction| !actions.contains(&prediction.action))
+        })
+    {
+        eyre::bail!("unsupported or invalid cache export manifest");
+    }
+    let (objects, result_paths) = strict_closure(staging.path(), &actions)
+        .wrap_err("cache export is incomplete or corrupt")?;
+
+    let cas = LocalCas::new(store);
+    for path in &objects {
+        let relative = path.strip_prefix(staging.path())?;
+        let source = staging.path().join(relative);
+        let digest = addressed_digest(staging.path(), &source, false)
+            .ok_or_else(|| eyre::eyre!("invalid cache object path {}", relative.display()))?;
+        cas.store_file(&digest, &source)?;
+    }
+    let action_cache = mbx_cache_core::LocalActionCache::new(store);
+    for path in &result_paths {
+        let result: RemoteActionResult = serde_json::from_slice(&std::fs::read(path)?)?;
+        action_cache.store(&result)?;
+    }
+    for task in manifest.tasks {
+        merge_imported_manifest(store, task)?;
+    }
+    Ok(TransferOutcome {
+        actions: actions.len() as u64,
+        objects: objects.len() as u64,
+        bytes: std::fs::metadata(archive)?.len(),
+    })
+}
+
+fn strict_closure(
+    store: &Path,
+    actions: &BTreeSet<CacheDigest>,
+) -> Result<(BTreeSet<PathBuf>, BTreeSet<PathBuf>)> {
+    let cas = LocalCas::new(store);
+    let action_cache = mbx_cache_core::LocalActionCache::new(store);
+    let mut objects = BTreeSet::new();
+    let mut results = BTreeSet::new();
+    let mut directories = BTreeSet::new();
+    for action in actions {
+        let result = action_cache
+            .find(action)?
+            .ok_or_else(|| eyre::eyre!("action result is missing for {}", action.hash))?;
+        results.insert(action_cache.path_for(action)?);
+        require_object(&cas, &mut objects, &result.action)?;
+        if let Some(metadata) = &result.metadata {
+            require_object(&cas, &mut objects, metadata)?;
+            let captured: CapturedOutput =
+                serde_json::from_slice(&std::fs::read(cas.path_for(metadata)?)?)
+                    .wrap_err("action metadata is invalid")?;
+            require_object(&cas, &mut objects, &captured.stdout)?;
+            require_object(&cas, &mut objects, &captured.stderr)?;
+        }
+        if let Some(root) = &result.output_root {
+            require_object(&cas, &mut objects, root)?;
+            let mut pending = vec![root.clone()];
+            while let Some(digest) = pending.pop() {
+                if !directories.insert(digest.clone()) {
+                    continue;
+                }
+                let directory: CacheDirectory =
+                    serde_json::from_slice(&std::fs::read(cas.path_for(&digest)?)?)
+                        .wrap_err("output directory is invalid")?;
+                for file in directory.files {
+                    require_object(&cas, &mut objects, &file.digest)?;
+                }
+                for child in directory.directories {
+                    require_object(&cas, &mut objects, &child.digest)?;
+                    pending.push(child.digest);
+                }
+            }
+        }
+    }
+    Ok((objects, results))
+}
+
+#[derive(Deserialize)]
+struct CapturedOutput {
+    stdout: CacheDigest,
+    stderr: CacheDigest,
+}
+
+fn merge_imported_manifest(destination: &Path, mut imported: TaskActionManifest) -> Result<()> {
+    let identity = imported.task.clone();
+    let destination_path = task_manifest_path(destination, &identity);
+    if let Ok(bytes) = std::fs::read(&destination_path)
+        && let Ok(existing) = serde_json::from_slice::<TaskActionManifest>(&bytes)
+        && existing.task == identity
+        && existing.validate()
+    {
+        let mut predictions = imported
+            .predictions
+            .into_iter()
+            .map(|prediction| (prediction.invocation.clone(), prediction))
+            .collect::<BTreeMap<_, _>>();
+        predictions.extend(
+            existing
+                .predictions
+                .iter()
+                .cloned()
+                .map(|prediction| (prediction.invocation.clone(), prediction)),
+        );
+        imported.predictions = predictions.into_values().collect();
+        if !imported.validate() {
+            return Ok(());
+        }
+    }
+    write_atomic(&destination_path, &serde_json::to_vec(&imported)?)
+}
+
+fn require_object(
+    cas: &LocalCas,
+    objects: &mut BTreeSet<PathBuf>,
+    digest: &CacheDigest,
+) -> Result<()> {
+    let path = cas
+        .find(digest)?
+        .ok_or_else(|| eyre::eyre!("cache object is missing for {}", digest.hash))?;
+    objects.insert(path);
+    Ok(())
+}
+
+fn task_manifest_path(store: &Path, identity: &str) -> PathBuf {
+    store
+        .join("task-manifests/v1")
+        .join(format!("{identity}.json"))
+}
+
+fn append_file(builder: &mut tar::Builder<std::fs::File>, root: &Path, path: &Path) -> Result<()> {
+    let name = path.strip_prefix(root)?;
+    builder.append_path_with_name(path, name)?;
+    Ok(())
+}
+
+fn append_bytes(
+    builder: &mut tar::Builder<std::fs::File>,
+    name: &Path,
+    bytes: &[u8],
+) -> Result<()> {
+    let mut header = tar::Header::new_gnu();
+    header.set_size(bytes.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder.append_data(&mut header, name, bytes)?;
+    Ok(())
+}
+
+fn validate_archive_path(path: &Path) -> Result<()> {
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        eyre::bail!("cache export contains unsafe path {}", path.display());
+    }
+    let text = path.to_string_lossy();
+    if text != EXPORT_MANIFEST
+        && !text.starts_with("cas/v1/")
+        && !text.starts_with("action-results/v1/")
+    {
+        eyre::bail!("cache export contains unexpected path {}", path.display());
+    }
+    Ok(())
 }
 
 /// One checkout's claim on the actions a build identity recorded.
@@ -279,6 +714,11 @@ pub fn remove_project(store: &Path, workspace_root: &Path) -> Result<RemoveProje
                 let _ = std::fs::remove_dir(parent);
             }
         }
+    }
+    match std::fs::remove_file(latest_receipt_path(store, workspace_root)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     Ok(outcome)
 }

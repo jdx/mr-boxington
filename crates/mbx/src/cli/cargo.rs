@@ -181,7 +181,7 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
         if let Some(run) = run
             && let Err(error) = run.commit().await
         {
-            log::warn!("the build manifest was not committed: {error}");
+            log::warn!("the completed build was not fully recorded: {error}");
         }
 
         let stats = match session.finish().await {
