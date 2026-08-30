@@ -63,6 +63,22 @@ async fn session_environment_directs_cargo_at_the_shim() {
     session.finish().await.unwrap();
 }
 
+#[test]
+fn nested_sessions_unwrap_the_outer_rustdoc_shim() {
+    let values = BTreeMap::from([
+        (
+            "RUSTDOC".into(),
+            Path::new("outer-session")
+                .join(shim_file_name(RUSTDOC_SHIM_STEM))
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        (REAL_RUSTDOC_ENV.into(), "custom-rustdoc".into()),
+    ]);
+
+    assert_eq!(configured_rustdoc(&values), "custom-rustdoc");
+}
+
 /// Build scripts may hand HOST_CC to CMake, which records its absolute path in
 /// CMakeCache.txt and reuses it on later cargo invocations. That path must
 /// therefore outlive the temporary mbx session that first configured CMake.

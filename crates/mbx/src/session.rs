@@ -235,11 +235,7 @@ impl CacheSession {
             );
             environment.insert(PREVIOUS_RUSTC_WRAPPER_ENV.into(), previous);
         }
-        let rustdoc = environment
-            .get("RUSTDOC")
-            .cloned()
-            .or_else(|| std::env::var("RUSTDOC").ok())
-            .unwrap_or_else(|| "rustdoc".into());
+        let rustdoc = configured_rustdoc(environment);
         environment.insert(REAL_RUSTDOC_ENV.into(), rustdoc);
         environment.insert(
             "RUSTDOC".into(),
@@ -423,6 +419,29 @@ impl CacheSession {
             events.0.finished(totals);
         }
         Ok(stats)
+    }
+}
+
+/// Select the rustdoc behind any session shim already present in the caller.
+///
+/// Integration tests (and nested `mbx` commands in general) can begin a cache
+/// session from inside another one. Chaining the outer rustdoc shim would make
+/// it name itself as the real rustdoc and recurse; unwrap it just as the rustc
+/// path preserves and explicitly models an existing wrapper.
+fn configured_rustdoc(environment: &BTreeMap<String, String>) -> String {
+    let configured = environment
+        .get("RUSTDOC")
+        .cloned()
+        .or_else(|| std::env::var("RUSTDOC").ok())
+        .unwrap_or_else(|| "rustdoc".into());
+    if Path::new(&configured).file_stem() == Some(OsStr::new(RUSTDOC_SHIM_STEM)) {
+        environment
+            .get(REAL_RUSTDOC_ENV)
+            .cloned()
+            .or_else(|| std::env::var(REAL_RUSTDOC_ENV).ok())
+            .unwrap_or_else(|| "rustdoc".into())
+    } else {
+        configured
     }
 }
 
