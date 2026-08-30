@@ -12,7 +12,7 @@ Read from, in ascending precedence — the last one that names a setting wins:
 - **Default:** `true`
 - **Set with:** `MBX_BUILD_SCRIPT_EXECUTION`
 
-Cache executions of build scripts that declare their inputs.
+Cache executions of build scripts that declare their inputs. This may also be set in workspace `.mbx.toml`; the environment variable wins.
 
 ### `bypass_log`
 

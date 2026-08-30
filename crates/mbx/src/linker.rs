@@ -190,6 +190,12 @@ fn probe_windows(linker: &Path) -> Result<LinkerIdentity> {
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.to_ascii_lowercase().starts_with("lld-link"));
     let linker_report = run_allowing_status(linker, if is_lld { &["--version"] } else { &["/?"] })?;
+    if !is_lld && !linker_report.contains("Microsoft (R) Incremental Linker") {
+        bail!(
+            "{} is not the MSVC linker, so the link cannot be identified",
+            linker.display()
+        );
+    }
     let linker_version = linker_report
         .lines()
         .find(|line| !line.trim().is_empty())

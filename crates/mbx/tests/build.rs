@@ -1205,24 +1205,26 @@ fn build_script_without_declared_inputs_bypasses_execution_cache() {
 fn build_script_execution_cache_can_be_turned_off() {
     let store = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();
-    let project = tempfile::tempdir().unwrap();
-    write_execution_cached_project(project.path(), true);
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    write_execution_cached_project(first.path(), true);
+    write_execution_cached_project(second.path(), true);
     build(
-        project.path(),
+        first.path(),
         store.path(),
         &reports.path().join("enabled.json"),
     );
-    std::fs::write(project.path().join("input.txt"), "second\n").unwrap();
     let disabled = [("MBX_BUILD_SCRIPT_EXECUTION", "0")];
     build_with(
-        project.path(),
+        second.path(),
         store.path(),
         &reports.path().join("disabled.json"),
         &disabled,
     );
     assert_eq!(
-        std::fs::read_to_string(project.path().join("runs")).unwrap(),
-        "2"
+        std::fs::read_to_string(second.path().join("runs")).unwrap(),
+        "1",
+        "the opt-out should execute the build script instead of restoring it"
     );
 }
 

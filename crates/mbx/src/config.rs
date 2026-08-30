@@ -119,7 +119,8 @@ pub(crate) struct RawConfig {
     /// Share eligible compilations that read `OUT_DIR`.
     #[usage(env = "MBX_SHARE_OUT_DIR", default = true)]
     share_out_dir: bool,
-    /// Cache executions of build scripts that declare their inputs.
+    /// Cache executions of build scripts that declare their inputs. This may
+    /// also be set in workspace `.mbx.toml`; the environment variable wins.
     #[usage(env = "MBX_BUILD_SCRIPT_EXECUTION", default = true)]
     build_script_execution: bool,
     /// Record a per-compilation event stream for `mbx tui` to watch.
