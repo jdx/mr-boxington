@@ -40,23 +40,22 @@ struct Records {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct BypassGroup {
-    details: BTreeMap<String, u64>,
-    remediation: Option<String>,
+    records: BTreeMap<(String, Option<String>), u64>,
 }
 
 impl Records {
     fn add(&mut self, kind: &str, detail: &str, remediation: Option<&str>) {
         let group = self.bypasses.entry(kind.to_string()).or_default();
-        *group.details.entry(detail.to_string()).or_default() += 1;
-        if group.remediation.is_none() {
-            group.remediation = remediation.map(str::to_string);
-        }
+        *group
+            .records
+            .entry((detail.to_string(), remediation.map(str::to_string)))
+            .or_default() += 1;
     }
 
     fn total(&self) -> u64 {
         self.bypasses
             .values()
-            .flat_map(|group| group.details.values())
+            .flat_map(|group| group.records.values())
             .copied()
             .sum()
     }
@@ -107,21 +106,25 @@ fn display(records: &Records) {
             records.total()
         ));
         for (kind, group) in &records.bypasses {
-            let count: u64 = group.details.values().sum();
+            let count: u64 = group.records.values().sum();
             crate::session::note(&format!("\n{kind} ({count})"));
-            crate::session::note(
-                group
-                    .remediation
-                    .as_deref()
-                    .unwrap_or_else(|| guidance(kind)),
-            );
-            for (detail, occurrences) in &group.details {
-                let suffix = if *occurrences > 1 {
-                    format!(" ({occurrences} times)")
-                } else {
-                    String::new()
-                };
-                crate::session::note(&format!("  - {detail}{suffix}"));
+            let mut sections: BTreeMap<Option<&str>, Vec<(&str, u64)>> = BTreeMap::new();
+            for ((detail, remediation), occurrences) in &group.records {
+                sections
+                    .entry(remediation.as_deref())
+                    .or_default()
+                    .push((detail, *occurrences));
+            }
+            for (remediation, details) in sections {
+                crate::session::note(remediation.unwrap_or_else(|| guidance(kind)));
+                for (detail, occurrences) in details {
+                    let suffix = if occurrences > 1 {
+                        format!(" ({occurrences} times)")
+                    } else {
+                        String::new()
+                    };
+                    crate::session::note(&format!("  - {detail}{suffix}"));
+                }
             }
         }
     }
@@ -220,7 +223,7 @@ mod tests {
         assert_eq!(records.total(), 3);
         assert_eq!(
             records.bypasses["unsupported-crate-type"]
-                .details
+                .records
                 .values()
                 .sum::<u64>(),
             2
@@ -268,12 +271,33 @@ mod tests {
         .unwrap();
 
         assert_eq!(records.total(), 1);
-        assert_eq!(
+        assert!(
             records.bypasses["unportable-native-link"]
-                .remediation
-                .as_deref(),
-            Some("Remove the reported option.")
+                .records
+                .keys()
+                .any(|(_, remediation)| remediation.as_deref()
+                    == Some("Remove the reported option."))
         );
         assert!(records.observations["cc-compiler-override"].contains("invisible"));
+    }
+
+    #[test]
+    fn one_kind_keeps_distinct_remediations_with_their_details() {
+        let records = parse_records(
+            "unportable-native-link\tnative link: split-debuginfo=packed\tRemove the option.\n\
+             unportable-native-link\tthe linker could not be identified\tConfigure the linker.\n",
+        )
+        .unwrap();
+
+        let group = &records.bypasses["unportable-native-link"];
+        assert_eq!(group.records.len(), 2);
+        assert!(group.records.contains_key(&(
+            "native link: split-debuginfo=packed".into(),
+            Some("Remove the option.".into())
+        )));
+        assert!(group.records.contains_key(&(
+            "the linker could not be identified".into(),
+            Some("Configure the linker.".into())
+        )));
     }
 }
