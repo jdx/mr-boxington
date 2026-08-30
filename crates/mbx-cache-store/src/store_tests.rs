@@ -348,6 +348,54 @@ fn exports_and_imports_the_last_builds_complete_closure() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn imports_sparse_files_emitted_by_the_exporter() {
+    use std::io::{Seek, Write};
+
+    let source = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let workspace = source.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut contents = vec![0; 8 * 1024 * 1024];
+    *contents.last_mut().unwrap() = 1;
+    let output = CacheDigest::blake3(&contents);
+    let output_path = LocalCas::new(source.path()).path_for(&output).unwrap();
+    std::fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+    let mut sparse = std::fs::File::create(&output_path).unwrap();
+    sparse.set_len(contents.len() as u64).unwrap();
+    sparse.seek(std::io::SeekFrom::End(-1)).unwrap();
+    sparse.write_all(&[1]).unwrap();
+    drop(sparse);
+    let action = store_result(
+        source.path(),
+        "sparse output",
+        std::slice::from_ref(&output),
+    );
+    record_build(
+        source.path(),
+        &"9".repeat(64),
+        &workspace,
+        std::slice::from_ref(&action),
+    );
+    let archive = source.path().join("sparse.tar");
+
+    export_checkout(source.path(), &workspace, &archive).unwrap();
+    let mut tar = tar::Archive::new(std::fs::File::open(&archive).unwrap());
+    assert!(
+        tar.entries()
+            .unwrap()
+            .any(|entry| entry.unwrap().header().entry_type().is_gnu_sparse()),
+        "test fixture must exercise a GNU sparse tar entry"
+    );
+    import_archive(destination.path(), &archive).unwrap();
+
+    assert_eq!(
+        std::fs::read(LocalCas::new(destination.path()).path_for(&output).unwrap()).unwrap(),
+        contents
+    );
+}
+
 #[test]
 fn export_refuses_an_incomplete_build_closure() {
     let source = tempfile::tempdir().unwrap();
