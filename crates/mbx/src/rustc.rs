@@ -1036,7 +1036,7 @@ fn decode_prediction_timing(
         bail!("cache agent returned an incompatible rustc timing prediction");
     }
     let timing: RustcInputPrediction = serde_json::from_str(&prediction.payload)?;
-    if !matches!(timing.version, 1..=3)
+    if !matches!(timing.version, 1..=4)
         || timing.crate_name.len() > 256
         || timing.crate_name.contains(['\0', '\n', '\r'])
         || String::from_utf8(canonical_json(&timing)?)? != prediction.payload

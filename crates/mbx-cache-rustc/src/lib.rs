@@ -33,7 +33,7 @@ use mbx_cache_core::{
     canonical_json, normalize_mapped_path as normalize_shared_path,
     normalize_resolved_mapped_path as normalize_resolved_shared_path, resolve_path_mappings,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
@@ -109,6 +109,10 @@ const SUPPORTED_CODEGEN_OPTIONS: &[&str] = &[
 
 const NATIVE_DIRECTORY_PREDICTION_PREFIX: &str = "@native-directory:";
 const MAX_PREDICTED_INPUTS: usize = 16 * 1024;
+// A compact payload is capped on the wire by the protocol. Bound its expanded
+// form too, so a hostile prefix chain cannot turn a small manifest into an
+// unreasonable allocation while it is being decoded.
+const MAX_DECODED_PREDICTION_BYTES: usize = 16 * 1024 * 1024;
 const MAX_NATIVE_INPUT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Built-in WebAssembly targets whose default linkers and CRT inputs ship in
@@ -658,14 +662,13 @@ impl RustcInvocation {
                 inputs.insert(normalized);
             }
         }
-        let has_native_directory = !native_directories.is_empty();
         inputs.extend(
             native_directories
                 .into_iter()
                 .map(|directory| format!("{NATIVE_DIRECTORY_PREDICTION_PREFIX}{directory}")),
         );
         Ok(RustcInputPrediction {
-            version: if has_native_directory { 3 } else { 1 },
+            version: 4,
             inputs: inputs.into_iter().collect(),
             environment: discovered.environment.keys().cloned().collect(),
             compiler_duration_ns: 0,
@@ -821,8 +824,7 @@ pub struct RustcAction {
 
 /// Normalized input names from the last successful execution of one modeled
 /// rustc invocation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RustcInputPrediction {
     /// Prediction schema version.
     pub version: u8,
@@ -832,11 +834,115 @@ pub struct RustcInputPrediction {
     pub environment: Vec<String>,
     /// Compiler wall time from the successful invocation that produced this
     /// prediction. Zero means no timing hint was recorded.
-    #[serde(default, skip_serializing_if = "is_zero")]
     pub compiler_duration_ns: u64,
     /// Crate name associated with the timing hint.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub crate_name: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RustcInputPredictionWire {
+    version: u8,
+    inputs: Vec<String>,
+    environment: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    compiler_duration_ns: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    crate_name: String,
+}
+
+impl Serialize for RustcInputPrediction {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RustcInputPredictionWire {
+            version: self.version,
+            inputs: if self.version == 4 {
+                compact_prediction_inputs(&self.inputs)
+            } else {
+                self.inputs.clone()
+            },
+            environment: self.environment.clone(),
+            compiler_duration_ns: self.compiler_duration_ns,
+            crate_name: self.crate_name.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RustcInputPrediction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = RustcInputPredictionWire::deserialize(deserializer)?;
+        let inputs = if wire.version == 4 {
+            expand_prediction_inputs(&wire.inputs).map_err(serde::de::Error::custom)?
+        } else {
+            wire.inputs
+        };
+        Ok(Self {
+            version: wire.version,
+            inputs,
+            environment: wire.environment,
+            compiler_duration_ns: wire.compiler_duration_ns,
+            crate_name: wire.crate_name,
+        })
+    }
+}
+
+fn compact_prediction_inputs(inputs: &[String]) -> Vec<String> {
+    let mut previous = "";
+    inputs
+        .iter()
+        .map(|input| {
+            let mut shared = previous
+                .bytes()
+                .zip(input.bytes())
+                .take_while(|(left, right)| left == right)
+                .count();
+            while !input.is_char_boundary(shared) {
+                shared -= 1;
+            }
+            let compact = format!("{shared}:{}", &input[shared..]);
+            previous = input;
+            compact
+        })
+        .collect()
+}
+
+fn expand_prediction_inputs(inputs: &[String]) -> Result<Vec<String>, &'static str> {
+    let mut expanded: Vec<String> = Vec::with_capacity(inputs.len());
+    let mut decoded_bytes = 0_usize;
+    for input in inputs {
+        let (shared_text, suffix) = input
+            .split_once(':')
+            .ok_or("compact rustc prediction input has no prefix length")?;
+        let shared: usize = shared_text
+            .parse()
+            .map_err(|_| "compact rustc prediction prefix length is invalid")?;
+        if shared.to_string() != shared_text
+            || shared > expanded.last().map_or(0, String::len)
+            || expanded
+                .last()
+                .is_some_and(|previous| !previous.is_char_boundary(shared))
+        {
+            return Err("compact rustc prediction prefix is not canonical");
+        }
+        let mut path = expanded
+            .last()
+            .map_or_else(String::new, |previous| previous[..shared].to_string());
+        path.push_str(suffix);
+        decoded_bytes = decoded_bytes
+            .checked_add(path.len())
+            .ok_or("compact rustc prediction is too large")?;
+        if decoded_bytes > MAX_DECODED_PREDICTION_BYTES {
+            return Err("compact rustc prediction is too large");
+        }
+        expanded.push(path);
+    }
+    Ok(expanded)
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -852,7 +958,7 @@ impl RustcInputPrediction {
         path_mappings: &[PathMapping],
         digests: &dyn FileDigestCache,
     ) -> Result<DiscoveredInputs, BypassReason> {
-        if !matches!(self.version, 1..=3) {
+        if !matches!(self.version, 1..=4) {
             return Err(BypassReason::UnsupportedPrediction);
         }
         if self.inputs.len() > MAX_PREDICTED_INPUTS || self.environment.len() > 4 * 1024 {

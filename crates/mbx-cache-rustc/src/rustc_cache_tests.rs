@@ -195,7 +195,7 @@ fn tracks_native_search_path_contents_but_still_rejects_native_libraries() {
         ..context(&[])
     };
     let prediction = invocation.prediction(&action_context, &discovered).unwrap();
-    assert_eq!(prediction.version, 3);
+    assert_eq!(prediction.version, 4);
     std::fs::write(native.join("added.lib"), "second").unwrap();
     let predicted = prediction
         .discover(
@@ -773,6 +773,56 @@ fn reads_prediction_v1_without_timing_hints() {
         payload,
         "pre-timing canonical predictions must remain canonical"
     );
+}
+
+#[test]
+fn compact_prediction_keeps_large_source_lists_recordable() {
+    let inputs = (0..4_000)
+        .map(|index| {
+            format!(
+                "${{workspace}}/src/commands/very_long_module_name_{index:0>5}/implementation.rs"
+            )
+        })
+        .collect::<Vec<_>>();
+    let prediction = RustcInputPrediction {
+        version: 4,
+        inputs,
+        environment: vec!["OUT_DIR".into()],
+        compiler_duration_ns: 42,
+        crate_name: "mise".into(),
+    };
+
+    let mut uncompressed = prediction.clone();
+    uncompressed.version = 3;
+    let uncompressed_payload = canonical_json(&uncompressed).unwrap();
+    assert!(
+        uncompressed_payload.len() > mbx_cache_core::MAX_ACTION_PREDICTION_PAYLOAD,
+        "the fixture must reproduce the old payload rejection"
+    );
+    let payload = canonical_json(&prediction).unwrap();
+    assert!(
+        payload.len() <= mbx_cache_core::MAX_ACTION_PREDICTION_PAYLOAD,
+        "a compact prediction must fit the protocol payload limit, got {} bytes",
+        payload.len()
+    );
+    assert!(
+        payload.len() * 2 < uncompressed_payload.len(),
+        "front coding should materially reduce a source-heavy prediction"
+    );
+    assert_eq!(
+        serde_json::from_slice::<RustcInputPrediction>(&payload).unwrap(),
+        prediction
+    );
+}
+
+#[test]
+fn rejects_noncanonical_compact_prediction_prefixes() {
+    for payload in [
+        r#"{"version":4,"inputs":["1:path"],"environment":[]}"#,
+        r#"{"version":4,"inputs":["0:path","01:other"],"environment":[]}"#,
+    ] {
+        assert!(serde_json::from_str::<RustcInputPrediction>(payload).is_err());
+    }
 }
 
 #[test]
