@@ -25,10 +25,9 @@ use mbx_cache_cc::{
 };
 use mbx_cache_core::{
     ActionPrediction, AgentRequest, AgentResponse, CacheDigest, CacheDirectory, CacheFileNode,
-    CcMetadata, FileDigestScope, FileIdentity, RecordedFileDigest, RemoteActionResult,
-    RestoreStats, canonical_json,
+    CcMetadata, FileDigestScope, FileIdentity, PathMapping, RecordedFileDigest, RemoteActionResult,
+    RestoreStats, canonical_json, normalize_mapped_path,
 };
-use mbx_cache_rustc::{PathMapping, normalize_mapped_path};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -547,6 +546,13 @@ fn path_mappings(working_dir: &Path) -> Vec<PathMapping> {
     mappings
 }
 
+fn rustc_path_mappings(mappings: &[PathMapping]) -> Vec<mbx_cache_rustc::PathMapping> {
+    mappings
+        .iter()
+        .map(|mapping| mbx_cache_rustc::PathMapping::new(&mapping.root, &mapping.placeholder))
+        .collect()
+}
+
 fn session_path(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
         .filter(|value| !value.is_empty())
@@ -742,6 +748,7 @@ fn restore_result(
     restore_outputs: bool,
     mappings: &[PathMapping],
 ) -> Result<Option<CachedCompilation>> {
+    let text_mappings = rustc_path_mappings(mappings);
     let responses = session::request_agent(&[AgentRequest::FindActionResult {
         action: action.digest.clone(),
     }])?;
@@ -793,11 +800,11 @@ fn restore_result(
     // that belong to the checkout that published it.
     let stdout = denormalize_output_text(
         &read_verified_blob(&blobs[0], &metadata.stdout, "stdout")?,
-        mappings,
+        &text_mappings,
     );
     let stderr = denormalize_output_text(
         &read_verified_blob(&blobs[1], &metadata.stderr, "stderr")?,
-        mappings,
+        &text_mappings,
     );
 
     let materialization_started = Instant::now();
@@ -902,6 +909,7 @@ fn publish_result(
     output: &Output,
     mappings: &[PathMapping],
 ) -> Result<()> {
+    let text_mappings = rustc_path_mappings(mappings);
     let object = invocation.output();
     let metadata = std::fs::metadata(object)
         .wrap_err_with(|| format!("failed to inspect cc output {}", object.display()))?;
@@ -913,12 +921,12 @@ fn publish_result(
     let stdout = staged_bytes(
         staging.path(),
         "stdout",
-        &normalize_output_text(&output.stdout, mappings),
+        &normalize_output_text(&output.stdout, &text_mappings),
     )?;
     let stderr = staged_bytes(
         staging.path(),
         "stderr",
-        &normalize_output_text(&output.stderr, mappings),
+        &normalize_output_text(&output.stderr, &text_mappings),
     )?;
     blobs.extend([stdout.clone(), stderr.clone()]);
 

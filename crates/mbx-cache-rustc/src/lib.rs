@@ -28,7 +28,11 @@
 //! ```
 #![deny(missing_docs)]
 
-use mbx_cache_core::{CacheDigest, FileDigestCache, canonical_json};
+use mbx_cache_core::{
+    CacheDigest, FileDigestCache, PathMapping as SharedPathMapping, PathNormalizationError,
+    canonical_json, normalize_mapped_path as normalize_shared_path,
+    normalize_resolved_mapped_path as normalize_resolved_shared_path, resolve_path_mappings,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -56,6 +60,15 @@ impl BypassReason {
     /// aggregated; statistics group by this instead.
     pub fn kind(&self) -> &'static str {
         self.into()
+    }
+}
+
+impl From<PathNormalizationError> for BypassReason {
+    fn from(reason: PathNormalizationError) -> Self {
+        match reason {
+            PathNormalizationError::UnmappedAbsolutePath(path) => Self::UnmappedAbsolutePath(path),
+            PathNormalizationError::NonUtf8Path(path) => Self::NonUtf8Path(path),
+        }
     }
 }
 
@@ -705,6 +718,13 @@ impl PathMapping {
     }
 }
 
+fn shared_path_mappings(mappings: &[PathMapping]) -> Vec<SharedPathMapping> {
+    mappings
+        .iter()
+        .map(|mapping| SharedPathMapping::new(&mapping.root, &mapping.placeholder))
+        .collect()
+}
+
 /// Map an absolute path to its cache-key placeholder form.
 ///
 /// `mappings` must already be ordered by [`PathMapping::ordered`]. Exposed for
@@ -716,86 +736,7 @@ pub fn normalize_mapped_path(
     working_dir: &Path,
     mappings: &[PathMapping],
 ) -> Result<String, BypassReason> {
-    let mappings = mappings
-        .iter()
-        .map(|mapping| PathMapping {
-            root: resolve_mapping_root(&mapping.root),
-            placeholder: mapping.placeholder.clone(),
-        })
-        .collect::<Vec<_>>();
-    normalize_resolved_mapped_path(path, working_dir, &mappings)
-}
-
-fn normalize_resolved_mapped_path(
-    path: &Path,
-    working_dir: &Path,
-    mappings: &[PathMapping],
-) -> Result<String, BypassReason> {
-    let absolute = if path.is_absolute() {
-        normalize_components(path)
-    } else {
-        normalize_components(&working_dir.join(path))
-    };
-    let resolved = if absolute.is_absolute() {
-        resolve_path_aliases(&absolute)
-    } else {
-        absolute.clone()
-    };
-    for mapping in mappings {
-        if let Ok(relative) = resolved.strip_prefix(&mapping.root) {
-            let suffix = slash_path(relative)?;
-            return Ok(if suffix.is_empty() {
-                format!("${{{}}}", mapping.placeholder)
-            } else {
-                format!("${{{}}}/{suffix}", mapping.placeholder)
-            });
-        }
-    }
-    Err(BypassReason::UnmappedAbsolutePath(absolute))
-}
-
-/// Resolve aliases in the existing prefix while preserving a not-yet-created
-/// output suffix. Cargo and rustc may spell the same macOS temporary directory
-/// as `/var/...` and `/private/var/...`; comparing only lexical paths makes a
-/// target mapping miss even though both names identify the same directory.
-#[cfg(unix)]
-fn resolve_path_aliases(path: &Path) -> PathBuf {
-    let mut existing = path;
-    let mut missing = Vec::new();
-    loop {
-        match std::fs::canonicalize(existing) {
-            Ok(mut resolved) => {
-                for component in missing.iter().rev() {
-                    resolved.push(component);
-                }
-                return normalize_components(&resolved);
-            }
-            Err(_) => {
-                let Some(name) = existing.file_name() else {
-                    return path.to_path_buf();
-                };
-                missing.push(name.to_os_string());
-                let Some(parent) = existing.parent() else {
-                    return path.to_path_buf();
-                };
-                existing = parent;
-            }
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn resolve_path_aliases(path: &Path) -> PathBuf {
-    path.to_path_buf()
-}
-
-fn resolve_mapping_root(root: &Path) -> PathBuf {
-    let root = normalize_components(root);
-    if root.is_absolute() {
-        resolve_path_aliases(&root)
-    } else {
-        root
-    }
+    normalize_shared_path(path, working_dir, &shared_path_mappings(mappings)).map_err(Into::into)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1670,21 +1611,14 @@ fn parse_emits(value: &str) -> Vec<Emit> {
 struct ActionBuilder<'a> {
     invocation: &'a RustcInvocation,
     context: ActionContext,
-    mappings: Vec<PathMapping>,
+    mappings: Vec<SharedPathMapping>,
     linker: Option<LinkerIdentity>,
 }
 
 impl<'a> ActionBuilder<'a> {
     fn new(invocation: &'a RustcInvocation, mut context: ActionContext) -> Self {
         context.path_mappings = PathMapping::ordered(&context.path_mappings);
-        let mappings = context
-            .path_mappings
-            .iter()
-            .map(|mapping| PathMapping {
-                root: resolve_mapping_root(&mapping.root),
-                placeholder: mapping.placeholder.clone(),
-            })
-            .collect();
+        let mappings = resolve_path_mappings(&shared_path_mappings(&context.path_mappings));
         Self {
             linker: None,
             invocation,
@@ -1893,7 +1827,8 @@ impl<'a> ActionBuilder<'a> {
     }
 
     fn normalize_path(&self, path: &Path) -> Result<String, BypassReason> {
-        normalize_resolved_mapped_path(path, &self.context.working_dir, &self.mappings)
+        normalize_resolved_shared_path(path, &self.context.working_dir, &self.mappings)
+            .map_err(Into::into)
     }
 }
 
@@ -1955,21 +1890,6 @@ fn absolute_path(path: &Path, working_dir: &Path) -> PathBuf {
     } else {
         normalize_components(&working_dir.join(path))
     }
-}
-
-fn slash_path(path: &Path) -> Result<String, BypassReason> {
-    path.components()
-        .filter_map(|component| match component {
-            Component::Normal(value) => Some(
-                value
-                    .to_str()
-                    .map(ToOwned::to_owned)
-                    .ok_or_else(|| BypassReason::NonUtf8Path(path.to_path_buf())),
-            ),
-            _ => None,
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map(|components| components.join("/"))
 }
 
 #[cfg(test)]

@@ -1435,7 +1435,6 @@ name = "mbx-cache-cc"
 version = "0.9.4"
 dependencies = [
  "mbx-cache-core",
- "mbx-cache-rustc",
  "serde",
  "serde_json",
  "strum",

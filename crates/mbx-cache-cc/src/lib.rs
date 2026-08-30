@@ -17,8 +17,10 @@
 //! roots are checkout-specific.
 #![deny(missing_docs)]
 
-use mbx_cache_core::{CacheDigest, FileDigestCache, canonical_json};
-use mbx_cache_rustc::{BypassReason as RustcBypassReason, PathMapping, normalize_mapped_path};
+use mbx_cache_core::{
+    CacheDigest, FileDigestCache, PathMapping, PathNormalizationError, canonical_json,
+    normalize_mapped_path,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -385,14 +387,11 @@ pub enum CcBypassReason {
     Serialization(String),
 }
 
-impl From<RustcBypassReason> for CcBypassReason {
-    /// Translate the shared path-normalization errors into this adapter's own
-    /// reasons, so a cc bypass never reports a rustc kind.
-    fn from(reason: RustcBypassReason) -> Self {
+impl From<PathNormalizationError> for CcBypassReason {
+    fn from(reason: PathNormalizationError) -> Self {
         match reason {
-            RustcBypassReason::UnmappedAbsolutePath(path) => Self::UnmappedAbsolutePath(path),
-            RustcBypassReason::NonUtf8Path(path) => Self::NonUtf8Path(path),
-            other => Self::UnknownFlag(other.kind().into()),
+            PathNormalizationError::UnmappedAbsolutePath(path) => Self::UnmappedAbsolutePath(path),
+            PathNormalizationError::NonUtf8Path(path) => Self::NonUtf8Path(path),
         }
     }
 }
