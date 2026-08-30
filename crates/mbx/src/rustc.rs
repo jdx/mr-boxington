@@ -260,6 +260,71 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             }
         }
     }
+    let mut remote_claim = None;
+    if let Some(flight) = &flight
+        // Incremental artifacts are deliberately never published, so they
+        // must not acquire a fleet lease whose promise they cannot fulfill.
+        && !learned.engaged()
+    {
+        match session::request_agent(&[AgentRequest::JoinActionPromise {
+            adapter: "rustc".into(),
+            invocation: flight.invocation.clone(),
+        }]) {
+            Ok(responses) => match responses.into_iter().next() {
+                Some(AgentResponse::ActionPromise {
+                    claim: Some(claim),
+                    prediction: None,
+                }) => remote_claim = Some(claim),
+                Some(AgentResponse::ActionPromise {
+                    claim: None,
+                    prediction: Some(prediction),
+                }) if prediction.adapter == "rustc"
+                    && prediction.invocation == flight.invocation =>
+                {
+                    let context = base_action_context(
+                        compilation.rustc,
+                        compilation.working_dir,
+                        compilation.portable,
+                    );
+                    let restored = context.and_then(|context| {
+                        restore_prediction_payload(
+                            &compilation,
+                            &outputs,
+                            context,
+                            &flight.invocation,
+                            &prediction.payload,
+                            // A promise is not part of this task's manifest.
+                            // Record a successful restore so the next build
+                            // does not need the ephemeral promise again.
+                            None,
+                            true,
+                            &mut action_lookup_attempted,
+                            learned_enabled,
+                            &mut learned,
+                        )
+                    });
+                    match restored {
+                        Ok(Some(cached)) => {
+                            let _ = replay_bytes(&cached.stdout, &cached.stderr);
+                            return Ok(ExitCode::SUCCESS);
+                        }
+                        Ok(None) => {}
+                        Err(error) => eprintln!(
+                            "mbx[warning]: a remote flight prediction was not restored: {error:#}"
+                        ),
+                    }
+                }
+                Some(AgentResponse::ActionPromise { .. }) => {}
+                Some(AgentResponse::Error { message }) => {
+                    eprintln!("mbx[warning]: remote flight coordination failed: {message}")
+                }
+                _ => {}
+            },
+            Err(error) => {
+                eprintln!("mbx[warning]: remote flight coordination failed: {error:#}")
+            }
+        }
+    }
     // No usable action key, and now no flight prediction either: this
     // compilation runs without an action-result lookup ever being made, which
     // is not a miss and has to be counted as its own thing or the summary
@@ -358,6 +423,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                     .as_ref()
                     .filter(|_| !learned.engaged())
                     .map(|flight| &flight.flight),
+                remote_claim.as_deref().filter(|_| !learned.engaged()),
             );
             Ok(())
         })();
@@ -868,6 +934,7 @@ fn record_prediction(
     discovered: &DiscoveredInputs,
     timing: &CompileTiming,
     flight: Option<&crate::scheduler::Flight>,
+    remote_claim: Option<&str>,
 ) {
     let result = (|| {
         let invocation = compilation.invocation;
@@ -887,11 +954,23 @@ fn record_prediction(
             flight.leave(&payload);
         }
         record_prediction_value(
-            invocation_digest,
+            invocation_digest.clone(),
             action.clone(),
-            payload,
+            payload.clone(),
             invocation.crate_name(),
         );
+        if let Some(claim) = remote_claim {
+            let prediction = ActionPrediction {
+                invocation: invocation_digest,
+                action: action.clone(),
+                adapter: "rustc".into(),
+                payload,
+            };
+            let _ = session::request_agent(&[AgentRequest::CompleteActionPromise {
+                claim: claim.to_string(),
+                prediction,
+            }]);
+        }
         Result::<()>::Ok(())
     })();
     if let Err(error) = result {

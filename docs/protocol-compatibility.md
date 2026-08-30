@@ -14,7 +14,7 @@ the handshake and do not exchange cache requests. Adding, removing, or changing
 a request or response therefore requires incrementing `AGENT_PROTOCOL_VERSION`.
 
 `crates/mbx-cache-core/tests/agent_protocol.rs` exercises every request and
-response variant against `tests/fixtures/agent-protocol-v5.jsonl`. Its exhaustive
+response variant against `tests/fixtures/agent-protocol-v6.jsonl`. Its exhaustive
 matches make a newly added variant fail to compile until the fixture and the
 protocol-version decision are reviewed together.
 
@@ -27,6 +27,9 @@ stderr its caller reads as an answer, so it cannot write there itself, and the
 agent prints each distinct message once from the process that owns the build.
 v5 adds `find_file_digests` and `record_file_digests`, which let a shim reuse
 the digest of a file the session already read in full instead of rehashing it.
+v6 adds `join_action_promise` and `complete_action_promise`, carrying the local
+shim's invocation identity and the server lease or completed prediction needed
+for fleet-wide in-flight deduplication.
 The client and agent still require exact protocol and application-version
 equality, including when different applications ship them.
 
@@ -48,6 +51,7 @@ uses these resources:
 | action result | `GET`/`PUT /v1/action-results/{algorithm}/{hash}/{size}` | `application/vnd.mbx.cache-action-result.v1+json` |
 | action manifest | `GET`/`PUT /v1/action-manifests/{algorithm}/{hash}/{size}` | `application/vnd.mbx.cache-task-action-manifest.v1+json` |
 | action result batch | `POST /v1/action-results:batch` | `application/vnd.mbx.cache-action-result-batch.v1+json` |
+| action promise | `POST`/`PUT /v1/action-promises/{algorithm}/{hash}/{size}` | `application/vnd.mbx.cache-action-promise.v1+json` |
 | blob | `GET`/`PUT /v1/blobs/{algorithm}/{hash}/{size}` | media type requested by the caller |
 | blob pack | `POST /v1/blobs:pack` | `application/vnd.mbx.cache-blob-pack.v1` |
 | blob pack upload | `POST /v1/blobs:pack-upload` | `application/vnd.mbx.cache-blob-pack-receipt.v1+json` |
@@ -58,6 +62,15 @@ Both batched resources are extensions, gated on their own capability
 single-object resources when a feature is not advertised, and also when an
 advertised endpoint answers `404`, `405`, or `501` — after which it stops asking
 for the rest of the session. Neither is required to serve the baseline.
+
+Action promises are gated by `features.action_promises`. `POST` atomically
+returns a claim token, a bounded retry delay while another lease is live, or a
+completed `ActionPrediction`. `PUT` presents the claim token and prediction to
+complete the promise. A server must authorize both operations as writes, expire
+abandoned claims, refuse a completion whose action result is not already
+durable, and make the first valid completion immutable. Claim tokens are opaque
+bearer values and clients cap them at 256 bytes. As with other extensions,
+`404`, `405`, or `501` disables promises for the rest of the client session.
 
 A batched action-result response carries only the records the service holds, in
 no order, so each one is bound to its request by the action digest inside it

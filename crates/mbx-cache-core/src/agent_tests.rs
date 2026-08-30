@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
-    ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE, BLOB_PACK_BLOBS_HEADER,
-    MAX_ACTION_PREDICTION_PAYLOAD,
+    ACTION_PROMISE_MEDIA_TYPE, ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE,
+    BLOB_PACK_BLOBS_HEADER, MAX_ACTION_PREDICTION_PAYLOAD,
 };
 use std::time::Duration;
 
@@ -3133,6 +3133,199 @@ fn remote_agent_url_with_limit(
         },
         max_remote_download_bytes,
     )
+}
+
+#[tokio::test]
+async fn a_read_write_agent_claims_an_advertised_action_promise() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let invocation = CacheDigest::blake3(b"fleet invocation");
+    let capabilities = server
+        .mock("GET", "/v1/capabilities")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            serde_json::json!({
+                "protocol":{"major":1},
+                "features":{"action_promises":true}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let promise_path = format!(
+        "/v1/action-promises/blake3/{}/{}",
+        invocation.hash, invocation.size
+    );
+    let claim = server
+        .mock("POST", promise_path.as_str())
+        .with_status(200)
+        .with_header("content-type", ACTION_PROMISE_MEDIA_TYPE)
+        .with_body(r#"{"state":"claimed","claim":"fleet-lease"}"#)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().to_path_buf(),
+        RemoteCacheMode::ReadWrite,
+    );
+
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::JoinActionPromise {
+                adapter: "rustc".into(),
+                invocation,
+            })
+            .await,
+        AgentResponse::ActionPromise {
+            claim: Some(claim),
+            prediction: None,
+        } if claim == "fleet-lease"
+    ));
+    capabilities.assert_async().await;
+    claim.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_read_only_agent_never_claims_fleet_work() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = mockito::Server::new_async().await;
+    let agent = remote_agent(
+        &server,
+        directory.path().to_path_buf(),
+        RemoteCacheMode::ReadOnly,
+    );
+
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::JoinActionPromise {
+                adapter: "rustc".into(),
+                invocation: CacheDigest::blake3(b"read-only invocation"),
+            })
+            .await,
+        AgentResponse::ActionPromise {
+            claim: None,
+            prediction: None,
+        }
+    ));
+}
+
+#[tokio::test]
+async fn completing_a_fleet_promise_waits_for_its_action_upload() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let invocation = CacheDigest::blake3(b"promised invocation");
+    let action = CacheDigest::blake3(b"promised action");
+    let output_root = CacheDigest::blake3(b"promised output root");
+    let result = RemoteActionResult {
+        version: 1,
+        action: action.clone(),
+        output_root: Some(output_root.clone()),
+        metadata: None,
+    };
+    let prediction = ActionPrediction {
+        invocation: invocation.clone(),
+        action: action.clone(),
+        adapter: "rustc".into(),
+        payload: "{}".into(),
+    };
+    let capabilities = server
+        .mock("GET", "/v1/capabilities")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            serde_json::json!({
+                "protocol":{"major":1},
+                "features":{"action_promises":true}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let upload = server
+        .mock("PUT", action_path(&action).as_str())
+        .with_status(201)
+        .expect(1)
+        .create_async()
+        .await;
+    let action_blob_upload = server
+        .mock("PUT", blob_path(&action).as_str())
+        .with_status(201)
+        .expect(1)
+        .create_async()
+        .await;
+    let output_blob_upload = server
+        .mock("PUT", blob_path(&output_root).as_str())
+        .with_status(201)
+        .expect(1)
+        .create_async()
+        .await;
+    let promise_path = format!(
+        "/v1/action-promises/blake3/{}/{}",
+        invocation.hash, invocation.size
+    );
+    let complete = server
+        .mock("PUT", promise_path.as_str())
+        .match_body(mockito::Matcher::Json(
+            serde_json::to_value(ActionPromiseCompletion {
+                claim: "fleet-lease".into(),
+                prediction: prediction.clone(),
+            })
+            .unwrap(),
+        ))
+        .with_status(204)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().to_path_buf(),
+        RemoteCacheMode::ReadWrite,
+    );
+
+    let action_source = directory.path().join("action-source");
+    let output_source = directory.path().join("output-source");
+    std::fs::write(&action_source, b"promised action").unwrap();
+    std::fs::write(&output_source, b"promised output root").unwrap();
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::StoreBlob {
+                digest: action.clone(),
+                source: action_source,
+            })
+            .await,
+        AgentResponse::Stored { .. }
+    ));
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::StoreBlob {
+                digest: output_root,
+                source: output_source,
+            })
+            .await,
+        AgentResponse::Stored { .. }
+    ));
+
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::StoreActionResult { result })
+            .await,
+        AgentResponse::ActionStored { .. }
+    ));
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::CompleteActionPromise {
+                claim: "fleet-lease".into(),
+                prediction,
+            })
+            .await,
+        AgentResponse::ActionPromiseCompleted
+    ));
+    capabilities.assert_async().await;
+    action_blob_upload.assert_async().await;
+    output_blob_upload.assert_async().await;
+    upload.assert_async().await;
+    complete.assert_async().await;
 }
 
 fn blob_path(digest: &CacheDigest) -> String {

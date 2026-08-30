@@ -40,6 +40,8 @@ pub const DIGEST_LIST_MEDIA_TYPE: &str = "application/vnd.mbx.cache-digests.v1+j
 /// carries only the results a service actually holds.
 pub const ACTION_RESULT_BATCH_MEDIA_TYPE: &str =
     "application/vnd.mbx.cache-action-result-batch.v1+json";
+/// Media type for ephemeral, invocation-keyed compilation promises.
+pub const ACTION_PROMISE_MEDIA_TYPE: &str = "application/vnd.mbx.cache-action-promise.v1+json";
 /// Media type for the receipt describing an accepted blob-pack upload.
 pub const BLOB_PACK_RECEIPT_MEDIA_TYPE: &str =
     "application/vnd.mbx.cache-blob-pack-receipt.v1+json";
@@ -57,6 +59,8 @@ pub const MAX_BATCH_ITEMS: usize = 10_000;
 pub const MAX_TASK_ACTION_PREDICTIONS: usize = 16 * 1024;
 /// Maximum serialized adapter payload in one action prediction.
 pub const MAX_ACTION_PREDICTION_PAYLOAD: usize = 256 * 1024;
+/// Maximum opaque lease-token length accepted for an action promise.
+pub const MAX_ACTION_PROMISE_CLAIM_BYTES: usize = 256;
 
 /// Serialize a protocol record using the JSON Canonicalization Scheme.
 pub fn canonical_json(value: &impl Serialize) -> serde_json::Result<Vec<u8>> {
@@ -354,6 +358,85 @@ pub struct ActionPrediction {
     pub payload: String,
 }
 
+/// Request to join or claim one invocation-wide compilation promise.
+///
+/// The invocation digest lives in the endpoint URL. The adapter remains in
+/// the body so a server can reject a client trying to join a promise created
+/// by a different action adapter under the same digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionPromiseJoin {
+    /// Action adapter that will interpret the completed prediction.
+    pub adapter: String,
+}
+
+/// State returned when a client joins an invocation-wide promise.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+#[non_exhaustive]
+pub enum ActionPromiseState {
+    /// This client owns the lease and should perform the compilation.
+    Claimed {
+        /// Opaque bearer token required to complete this claim.
+        claim: String,
+    },
+    /// Another client owns the lease; retry after the stated delay.
+    Pending {
+        /// Minimum delay before asking again.
+        retry_after_ms: u64,
+    },
+    /// The owner published a prediction through which this client can restore.
+    Complete {
+        /// Prediction for reconstructing and looking up the final action key.
+        prediction: ActionPrediction,
+    },
+}
+
+/// Immutable completion of an invocation-wide compilation promise.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionPromiseCompletion {
+    /// Opaque token returned to the client that claimed the promise.
+    pub claim: String,
+    /// Prediction naming the action result that was published first.
+    pub prediction: ActionPrediction,
+}
+
+impl ActionPromiseJoin {
+    /// Whether the join names a valid action adapter.
+    pub fn validate(&self) -> eyre::Result<()> {
+        if !valid_adapter_name(&self.adapter) {
+            eyre::bail!("invalid action promise adapter name");
+        }
+        Ok(())
+    }
+}
+
+impl ActionPromiseState {
+    /// Check the bounds and prediction invariants of a server response.
+    pub fn validate(&self) -> eyre::Result<()> {
+        match self {
+            Self::Claimed { claim }
+                if claim.is_empty() || claim.len() > MAX_ACTION_PROMISE_CLAIM_BYTES =>
+            {
+                eyre::bail!("invalid action promise claim token")
+            }
+            Self::Complete { prediction } => prediction.validate(),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl ActionPromiseCompletion {
+    /// Check the claim-token bound and completed prediction.
+    pub fn validate(&self) -> eyre::Result<()> {
+        if self.claim.is_empty() || self.claim.len() > MAX_ACTION_PROMISE_CLAIM_BYTES {
+            eyre::bail!("invalid action promise claim token");
+        }
+        self.prediction.validate()
+    }
+}
+
 /// Predictions associated with one stable task identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -435,11 +518,7 @@ impl ActionPrediction {
         if self.adapter.is_empty() {
             return Some("adapter name is empty".into());
         }
-        if !self
-            .adapter
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        {
+        if !valid_adapter_name(&self.adapter) {
             return Some(format!(
                 "adapter name {:?} is not alphanumeric, '-', or '_'",
                 self.adapter
@@ -456,6 +535,13 @@ impl ActionPrediction {
         }
         None
     }
+}
+
+fn valid_adapter_name(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn valid_task_identity(value: &str) -> bool {
@@ -536,6 +622,9 @@ pub struct CapabilityFeatures {
     /// Delegated transfers are available.
     #[serde(default)]
     pub delegated_transfers: bool,
+    /// Invocation-wide claim and promise endpoints are available.
+    #[serde(default)]
+    pub action_promises: bool,
 }
 
 /// Server-advertised request and object limits.

@@ -5,7 +5,8 @@
 //! batched-lookup extensions that only a protocol server offers.
 
 use crate::{
-    ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE, BLOB_MEDIA_TYPE,
+    ACTION_PROMISE_MEDIA_TYPE, ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE,
+    ActionPromiseCompletion, ActionPromiseJoin, ActionPromiseState, BLOB_MEDIA_TYPE,
     BLOB_PACK_BLOBS_HEADER, BLOB_PACK_BYTES_HEADER, BLOB_PACK_HEADER_BYTES, BLOB_PACK_MAGIC,
     BLOB_PACK_MEDIA_TYPE, BLOB_PACK_RECEIPT_MEDIA_TYPE, BLOB_PACK_TIMEOUT_BYTES_PER_UNIT,
     BLOB_PACK_TIMEOUT_ITEMS_PER_UNIT, BlobPackReceipt, BlobSource, BlobUpload, CacheDigest,
@@ -133,6 +134,7 @@ struct NegotiatedCapabilities {
     blob_pack_uploads: Option<BlobPackLimits>,
     action_batches: Option<usize>,
     zstd_uploads: bool,
+    action_promises: bool,
 }
 
 #[derive(Serialize)]
@@ -165,6 +167,7 @@ pub(crate) struct HttpRemoteCache {
     blob_packs_disabled: AtomicBool,
     blob_pack_uploads_disabled: AtomicBool,
     action_batches_disabled: AtomicBool,
+    action_promises_disabled: AtomicBool,
 }
 
 impl HttpRemoteCache {
@@ -196,6 +199,7 @@ impl HttpRemoteCache {
             blob_packs_disabled: AtomicBool::new(false),
             blob_pack_uploads_disabled: AtomicBool::new(false),
             action_batches_disabled: AtomicBool::new(false),
+            action_promises_disabled: AtomicBool::new(false),
         })
     }
 
@@ -256,6 +260,17 @@ impl HttpRemoteCache {
         Ok(self
             .base_url
             .join(&format!("v{PROTOCOL_VERSION}/action-results:batch"))?)
+    }
+
+    fn action_promise_endpoint(&self, invocation: &CacheDigest) -> Result<Url> {
+        invocation.validate()?;
+        if invocation.algorithm != "blake3" {
+            bail!("remote cache invocation keys must use blake3");
+        }
+        Ok(self.base_url.join(&format!(
+            "v{PROTOCOL_VERSION}/action-promises/{}/{}/{}",
+            invocation.algorithm, invocation.hash, invocation.size
+        ))?)
     }
 
     async fn request(
@@ -359,7 +374,84 @@ impl HttpRemoteCache {
             blob_pack_uploads,
             action_batches,
             zstd_uploads,
+            action_promises: capabilities.features.action_promises,
         })
+    }
+
+    pub(crate) async fn join_action_promise(
+        &self,
+        invocation: &CacheDigest,
+        adapter: &str,
+    ) -> Result<Option<ActionPromiseState>> {
+        if self.action_promises_disabled.load(Ordering::Relaxed)
+            || !self.negotiated_capabilities().await?.action_promises
+        {
+            return Ok(None);
+        }
+        let url = self.action_promise_endpoint(invocation)?;
+        let join = ActionPromiseJoin {
+            adapter: adapter.to_string(),
+        };
+        join.validate()?;
+        let body = serde_json::to_vec(&join)?;
+        let response = self
+            .request(reqwest::Method::POST, url, ACTION_PROMISE_MEDIA_TYPE)
+            .await?
+            .header(CONTENT_TYPE, ACTION_PROMISE_MEDIA_TYPE)
+            .body(body)
+            .send()
+            .await?;
+        if matches!(
+            response.status(),
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_IMPLEMENTED
+        ) {
+            self.action_promises_disabled.store(true, Ordering::Relaxed);
+            return Ok(None);
+        }
+        let bytes = read_bounded_json(response.error_for_status()?, "action promise").await?;
+        let state: ActionPromiseState = serde_json::from_slice(&bytes)?;
+        state.validate()?;
+        if let ActionPromiseState::Complete { prediction } = &state {
+            prediction.validate()?;
+            if &prediction.invocation != invocation || prediction.adapter != adapter {
+                bail!("remote cache action promise returned an incompatible prediction");
+            }
+        }
+        Ok(Some(state))
+    }
+
+    pub(crate) async fn complete_action_promise(
+        &self,
+        invocation: &CacheDigest,
+        completion: &ActionPromiseCompletion,
+    ) -> Result<bool> {
+        if self.action_promises_disabled.load(Ordering::Relaxed)
+            || !self.negotiated_capabilities().await?.action_promises
+        {
+            return Ok(false);
+        }
+        completion.validate()?;
+        if &completion.prediction.invocation != invocation {
+            bail!("remote cache action promise completion names another invocation");
+        }
+        let url = self.action_promise_endpoint(invocation)?;
+        let body = serde_json::to_vec(completion)?;
+        let response = self
+            .request(reqwest::Method::PUT, url, ACTION_PROMISE_MEDIA_TYPE)
+            .await?
+            .header(CONTENT_TYPE, ACTION_PROMISE_MEDIA_TYPE)
+            .body(body)
+            .send()
+            .await?;
+        if matches!(
+            response.status(),
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_IMPLEMENTED
+        ) {
+            self.action_promises_disabled.store(true, Ordering::Relaxed);
+            return Ok(false);
+        }
+        response.error_for_status()?;
+        Ok(true)
     }
 
     pub(crate) async fn get_blob_pack(

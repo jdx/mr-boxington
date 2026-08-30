@@ -148,6 +148,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
             &task,
             &invocation_digest,
             &mut looked_up,
+            None,
         ) {
             Ok(Some((action, cached))) => {
                 replay_bytes(&cached.stdout, &cached.stderr)?;
@@ -160,6 +161,58 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
                     "a flight prediction was not restored: {error:#}"
                 ));
             }
+        }
+    }
+    let mut remote_claim = None;
+    if flight.is_some() {
+        match session::request_agent(&[AgentRequest::JoinActionPromise {
+            adapter: ADAPTER.into(),
+            invocation: invocation_digest.clone(),
+        }]) {
+            Ok(responses) => match responses.into_iter().next() {
+                Some(AgentResponse::ActionPromise {
+                    claim: Some(claim),
+                    prediction: None,
+                }) => remote_claim = Some(claim),
+                Some(AgentResponse::ActionPromise {
+                    claim: None,
+                    prediction: Some(prediction),
+                }) if prediction.adapter == ADAPTER
+                    && prediction.invocation == invocation_digest =>
+                {
+                    match restore_flight_prediction(
+                        &prediction.payload,
+                        &invocation,
+                        &context,
+                        &task,
+                        &invocation_digest,
+                        &mut looked_up,
+                        Some(&prediction.action),
+                    ) {
+                        Ok(Some((action, cached))) => {
+                            replay_bytes(&cached.stdout, &cached.stderr)?;
+                            record_action_hit(
+                                &action,
+                                cached.restore,
+                                &compilation_name(&invocation),
+                            );
+                            return Ok(ExitCode::SUCCESS);
+                        }
+                        Ok(None) => {}
+                        Err(error) => session::report_shim_warning(&format!(
+                            "a remote flight prediction was not restored: {error:#}"
+                        )),
+                    }
+                }
+                Some(AgentResponse::ActionPromise { .. }) => {}
+                Some(AgentResponse::Error { message }) => session::report_shim_warning(&format!(
+                    "remote flight coordination failed: {message}"
+                )),
+                _ => {}
+            },
+            Err(error) => session::report_shim_warning(&format!(
+                "remote flight coordination failed: {error:#}"
+            )),
         }
     }
     // Recorded here rather than where the prediction came up empty, because
@@ -231,6 +284,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         &searchable,
         before,
         flight.as_ref(),
+        remote_claim.as_deref(),
         &portable,
     ) {
         #[cfg(debug_assertions)]
@@ -256,6 +310,7 @@ fn publish(
     searchable: &BTreeSet<PathBuf>,
     before: Option<BTreeMap<PathBuf, CacheDigest>>,
     flight: Option<&crate::scheduler::Flight>,
+    remote_claim: Option<&str>,
     portable: &Portable,
 ) -> Result<()> {
     let discovered = discover(invocation, context, depfile)?;
@@ -273,7 +328,14 @@ fn publish(
     let action = invocation.action(context.clone())?;
     publish_result(&action, invocation, output, &context.path_mappings)?;
     let prediction = invocation.prediction(context, duration_ns)?;
-    record_prediction(task, invocation_digest, &action.digest, &prediction, flight);
+    record_prediction(
+        task,
+        invocation_digest,
+        &action.digest,
+        &prediction,
+        flight,
+        remote_claim,
+    );
     Ok(())
 }
 
@@ -291,6 +353,7 @@ fn restore_flight_prediction(
     task: &str,
     invocation_digest: &CacheDigest,
     looked_up: &mut bool,
+    recorded_action: Option<&CacheDigest>,
 ) -> Result<Option<(CacheDigest, CachedCompilation)>> {
     let prediction: CcInputPrediction = serde_json::from_str(payload)?;
     let discovered = prediction.discover(
@@ -301,6 +364,9 @@ fn restore_flight_prediction(
     let mut candidate = context.clone();
     discovered.clone().apply_to(&mut candidate)?;
     let action = invocation.action(candidate)?;
+    if recorded_action.is_some_and(|recorded| recorded != &action.digest) {
+        bail!("the action promise no longer matches its predicted inputs");
+    }
     *looked_up = true;
     let restored = restore_result(
         &action,
@@ -312,7 +378,14 @@ fn restore_flight_prediction(
     let Some(cached) = restored else {
         return Ok(None);
     };
-    record_prediction(task, invocation_digest, &action.digest, &prediction, None);
+    record_prediction(
+        task,
+        invocation_digest,
+        &action.digest,
+        &prediction,
+        None,
+        None,
+    );
     Ok(Some((action.digest, cached)))
 }
 
@@ -704,6 +777,7 @@ fn record_prediction(
     action: &CacheDigest,
     prediction: &CcInputPrediction,
     flight: Option<&crate::scheduler::Flight>,
+    remote_claim: Option<&str>,
 ) {
     let Ok(payload) = serde_json::to_string(prediction) else {
         return;
@@ -713,15 +787,22 @@ fn record_prediction(
     if let Some(flight) = flight {
         flight.leave(&payload);
     }
+    let wire_prediction = ActionPrediction {
+        invocation: invocation.clone(),
+        action: action.clone(),
+        adapter: ADAPTER.into(),
+        payload,
+    };
     let _ = session::request_agent(&[AgentRequest::RecordActionPrediction {
         task: task.to_string(),
-        prediction: ActionPrediction {
-            invocation: invocation.clone(),
-            action: action.clone(),
-            adapter: ADAPTER.into(),
-            payload,
-        },
+        prediction: wire_prediction.clone(),
     }]);
+    if let Some(claim) = remote_claim {
+        let _ = session::request_agent(&[AgentRequest::CompleteActionPromise {
+            claim: claim.to_string(),
+            prediction: wire_prediction,
+        }]);
+    }
 }
 
 /// Task identity for a compilation's predictions.

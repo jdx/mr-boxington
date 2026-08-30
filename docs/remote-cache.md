@@ -85,8 +85,9 @@ can be published under a key naming different content, and because writes are
 create-only nothing later overwrites it: every machine that downloads it fails
 verification and recompiles. `mbx cache verify` finds such an object locally.
 
-A bucket also does not answer batched lookups, stream blob packs,
-or negotiate compression. mbx asks for none of them against S3 and falls back
+A bucket also does not coordinate in-flight compilations, answer batched
+lookups, stream blob packs, or negotiate compression. mbx asks for none of
+them against S3 and falls back
 to per-object requests, which is what every version of the protocol has done
 against a server without the extensions. Expect more requests for the same
 build, and no compression on the wire.
@@ -138,6 +139,22 @@ Configured mode is constrained by the environment:
 This policy prevents untrusted code from publishing objects that later builds
 would trust. The server should still authenticate and authorize requests; the
 client-side policy is defense in depth, not an access-control boundary.
+
+### In-flight deduplication
+
+When a cache server advertises action promises, read-write runners atomically
+claim a cold compiler invocation before starting it. One runner compiles and
+publishes the result; other runners wait for its promise, rebuild the final
+action key from the promised input prediction, verify every input, and restore
+the published result. The prediction is only fulfilled after the action result
+and all referenced blobs are remotely durable.
+
+Claims are keyed by the pre-discovery invocation digest because a cold runner
+does not yet know the compiler-discovered inputs in the final action key. They
+are leases: a runner that dies or cannot publish leaves no durable cache record,
+and the server expires its claim so another runner can compile. Any endpoint
+error, unsupported server, read-only policy, or expired client wait degrades to
+an ordinary compilation. Read-only runners never acquire claims.
 
 ## GitLab CI
 

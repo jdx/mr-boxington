@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Wire protocol version used between an in-process cache agent and its shims.
-pub const AGENT_PROTOCOL_VERSION: u8 = 5;
+pub const AGENT_PROTOCOL_VERSION: u8 = 6;
 /// Largest single protocol request the agent will read.
 ///
 /// Requests are small JSON objects; the largest legitimate ones carry an output
@@ -155,6 +155,20 @@ pub enum AgentRequest {
         scope: FileDigestScope,
         /// Hashed files and the identities their digests describe.
         entries: Vec<RecordedFileDigest>,
+    },
+    /// Join or claim an invocation-wide promise through the cache server.
+    JoinActionPromise {
+        /// Adapter that owns the invocation and prediction payload.
+        adapter: String,
+        /// Digest of the compiler invocation before input discovery.
+        invocation: CacheDigest,
+    },
+    /// Fulfill a claimed promise after its action result is remotely durable.
+    CompleteActionPromise {
+        /// Opaque claim token returned by [`Self::JoinActionPromise`].
+        claim: String,
+        /// Prediction through which waiters reconstruct the final action key.
+        prediction: ActionPrediction,
     },
 }
 
@@ -321,4 +335,13 @@ pub enum AgentResponse {
     },
     /// File digests were recorded.
     FileDigestsRecorded,
+    /// State of an optional server-wide compilation promise.
+    ActionPromise {
+        /// Opaque lease owned by this client, when it should compile.
+        claim: Option<String>,
+        /// Completed prediction, when another client compiled first.
+        prediction: Option<ActionPrediction>,
+    },
+    /// A server-wide compilation promise was fulfilled or safely skipped.
+    ActionPromiseCompleted,
 }

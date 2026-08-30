@@ -84,6 +84,93 @@ fn action_result_keys_require_blake3() {
 }
 
 #[tokio::test]
+async fn joins_an_advertised_action_promise() {
+    let mut server = mockito::Server::new_async().await;
+    mock_capabilities(&mut server, serde_json::json!({ "action_promises": true })).await;
+    let invocation = CacheDigest::blake3(b"rustc invocation");
+    let endpoint = format!(
+        "/v1/action-promises/blake3/{}/{}",
+        invocation.hash, invocation.size
+    );
+    let join = server
+        .mock("POST", endpoint.as_str())
+        .match_header(PROTOCOL_HEADER, "1")
+        .match_header(NAMESPACE_HEADER, "test")
+        .match_header("content-type", ACTION_PROMISE_MEDIA_TYPE)
+        .match_body(mockito::Matcher::Json(
+            serde_json::json!({"adapter":"rustc"}),
+        ))
+        .with_status(200)
+        .with_header("content-type", ACTION_PROMISE_MEDIA_TYPE)
+        .with_body(r#"{"state":"claimed","claim":"lease-1"}"#)
+        .create_async()
+        .await;
+
+    assert_eq!(
+        test_client(&server)
+            .join_action_promise(&invocation, "rustc")
+            .await
+            .unwrap(),
+        Some(ActionPromiseState::Claimed {
+            claim: "lease-1".into()
+        })
+    );
+    join.assert_async().await;
+}
+
+#[tokio::test]
+async fn completes_an_action_promise_with_a_bound_prediction() {
+    let mut server = mockito::Server::new_async().await;
+    mock_capabilities(&mut server, serde_json::json!({ "action_promises": true })).await;
+    let invocation = CacheDigest::blake3(b"cc invocation");
+    let prediction = ActionPrediction {
+        invocation: invocation.clone(),
+        action: CacheDigest::blake3(b"cc action"),
+        adapter: "cc".into(),
+        payload: "{}".into(),
+    };
+    let completion = ActionPromiseCompletion {
+        claim: "lease-2".into(),
+        prediction: prediction.clone(),
+    };
+    let endpoint = format!(
+        "/v1/action-promises/blake3/{}/{}",
+        invocation.hash, invocation.size
+    );
+    let complete = server
+        .mock("PUT", endpoint.as_str())
+        .match_header("content-type", ACTION_PROMISE_MEDIA_TYPE)
+        .match_body(mockito::Matcher::Json(
+            serde_json::to_value(&completion).unwrap(),
+        ))
+        .with_status(204)
+        .create_async()
+        .await;
+
+    assert!(
+        test_client(&server)
+            .complete_action_promise(&invocation, &completion)
+            .await
+            .unwrap()
+    );
+    complete.assert_async().await;
+}
+
+#[tokio::test]
+async fn does_not_probe_action_promises_without_the_capability() {
+    let mut server = mockito::Server::new_async().await;
+    mock_capabilities(&mut server, serde_json::json!({})).await;
+    let invocation = CacheDigest::blake3(b"uncoordinated invocation");
+    assert_eq!(
+        test_client(&server)
+            .join_action_promise(&invocation, "rustc")
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
 async fn downloads_negotiated_blob_packs_and_omits_missing_objects() {
     let mut server = mockito::Server::new_async().await;
     let first_bytes = b"first packed blob";

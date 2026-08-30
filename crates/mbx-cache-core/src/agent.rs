@@ -1,9 +1,9 @@
 use crate::uploads::{ConnectionUploads, UploadQueue, UploadSink};
 use crate::{
-    ActionPrediction, BlobPackLimits, CacheDigest, CacheDirectory, LocalActionCache, LocalCas,
-    MAX_STAGED_BLOB_PACK_BYTES, MAX_STAGED_BLOB_PACK_ITEMS, ManifestPutOutcome, RemoteActionResult,
-    RemoteCacheClient, RemoteCacheMode, RustcMetadata, TaskActionManifest, blob_pack_chunk,
-    canonical_json,
+    ActionPrediction, ActionPromiseCompletion, ActionPromiseState, BlobPackLimits, CacheDigest,
+    CacheDirectory, LocalActionCache, LocalCas, MAX_STAGED_BLOB_PACK_BYTES,
+    MAX_STAGED_BLOB_PACK_ITEMS, ManifestPutOutcome, RemoteActionResult, RemoteCacheClient,
+    RemoteCacheMode, RustcMetadata, TaskActionManifest, blob_pack_chunk, canonical_json,
 };
 use eyre::{Context, Result, bail};
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream};
@@ -14,6 +14,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
+
+/// Fleet claims are leases rather than correctness locks. This only bounds how
+/// long one shim waits through repeated pending responses before degrading to
+/// an ordinary compilation; the server independently expires abandoned claims.
+const ACTION_PROMISE_WAIT: Duration = Duration::from_secs(60 * 60);
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 mod file_digest;
@@ -1067,6 +1072,13 @@ impl CacheAgent {
             }
             AgentRequest::RecordWarning { message } => self.record_warning(message),
             AgentRequest::FindFileDigests { scope, files } => self.find_file_digests(scope, files),
+            AgentRequest::JoinActionPromise {
+                adapter,
+                invocation,
+            } => self.join_action_promise(&adapter, &invocation).await,
+            AgentRequest::CompleteActionPromise { claim, prediction } => {
+                self.complete_action_promise(&claim, &prediction).await
+            }
             AgentRequest::RecordFileDigests { scope, entries } => {
                 self.record_file_digests(scope, entries)
             }
@@ -1292,6 +1304,113 @@ impl CacheAgent {
             uploads.queue_action_result(result, connection);
         }
         Ok(AgentResponse::ActionStored { path })
+    }
+
+    async fn join_action_promise(
+        &self,
+        adapter: &str,
+        invocation: &CacheDigest,
+    ) -> Result<AgentResponse> {
+        if !self.remote_mode.reads() || !self.remote_mode.writes() {
+            return Ok(AgentResponse::ActionPromise {
+                claim: None,
+                prediction: None,
+            });
+        }
+        let Some(remote) = &self.remote else {
+            return Ok(AgentResponse::ActionPromise {
+                claim: None,
+                prediction: None,
+            });
+        };
+        let deadline = Instant::now() + ACTION_PROMISE_WAIT;
+        loop {
+            let _permit = self.remote_transfers.acquire().await?;
+            let state = remote.join_action_promise(invocation, adapter).await;
+            drop(_permit);
+            match state {
+                Ok(Some(ActionPromiseState::Claimed { claim })) => {
+                    return Ok(AgentResponse::ActionPromise {
+                        claim: Some(claim),
+                        prediction: None,
+                    });
+                }
+                Ok(Some(ActionPromiseState::Complete { prediction })) => {
+                    return Ok(AgentResponse::ActionPromise {
+                        claim: None,
+                        prediction: Some(prediction),
+                    });
+                }
+                Ok(Some(ActionPromiseState::Pending { retry_after_ms }))
+                    if Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(retry_after_ms.clamp(10, 5_000)))
+                        .await;
+                }
+                Ok(Some(ActionPromiseState::Pending { .. }) | None) => {
+                    return Ok(AgentResponse::ActionPromise {
+                        claim: None,
+                        prediction: None,
+                    });
+                }
+                Ok(Some(_)) => {
+                    return Ok(AgentResponse::ActionPromise {
+                        claim: None,
+                        prediction: None,
+                    });
+                }
+                Err(error) => {
+                    self.note_remote_failure();
+                    warn!(
+                        "remote cache action promise failed for {}: {error}",
+                        invocation.hash
+                    );
+                    return Ok(AgentResponse::ActionPromise {
+                        claim: None,
+                        prediction: None,
+                    });
+                }
+            }
+        }
+    }
+
+    async fn complete_action_promise(
+        &self,
+        claim: &str,
+        prediction: &ActionPrediction,
+    ) -> Result<AgentResponse> {
+        prediction.validate()?;
+        let Some(remote) = &self.remote else {
+            return Ok(AgentResponse::ActionPromiseCompleted);
+        };
+        let Some(uploads) = &self.uploads else {
+            return Ok(AgentResponse::ActionPromiseCompleted);
+        };
+        if uploads
+            .wait_for_actions(std::slice::from_ref(&prediction.action))
+            .await
+            .contains(&prediction.action)
+        {
+            // Never promise an action result the server does not hold. The
+            // server lease expires and another runner gets to repair it.
+            return Ok(AgentResponse::ActionPromiseCompleted);
+        }
+        let completion = ActionPromiseCompletion {
+            claim: claim.to_string(),
+            prediction: prediction.clone(),
+        };
+        let _permit = self.remote_transfers.acquire().await?;
+        if let Err(error) = remote
+            .complete_action_promise(&prediction.invocation, &completion)
+            .await
+        {
+            self.note_remote_failure();
+            warn!(
+                "remote cache action promise completion failed for {}: {error}",
+                prediction.invocation.hash
+            );
+        }
+        Ok(AgentResponse::ActionPromiseCompleted)
     }
 
     /// Record that a remote operation failed and the build carried on without it.
