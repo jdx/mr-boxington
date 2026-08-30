@@ -65,6 +65,8 @@ pub(crate) const VERIFY_ENV: &str = "MBX_VERIFY";
 pub(crate) const SHARE_OUT_DIR_ENV: &str = "MBX_SHARE_OUT_DIR";
 pub(crate) const LEARNED_INCREMENTAL_ENV: &str = "MBX_LEARNED_INCREMENTAL";
 pub const CACHE_LINKS_ENV: &str = "MBX_CACHE_LINKS";
+/// Group completed builds for one later cache export, used by CI actions.
+pub const CACHE_EXPORT_GROUP_ENV: &str = "MBX_CACHE_EXPORT_GROUP";
 pub(crate) const WORKSPACE_ROOT_ENV: &str = "MBX_WORKSPACE_ROOT";
 pub(crate) const TARGET_DIR_ENV: &str = "MBX_TARGET_DIR";
 const PREVIOUS_RUSTC_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WRAPPER";
@@ -182,6 +184,10 @@ impl CacheSession {
                 run.clone(),
                 Some(ActionRun {
                     run,
+                    identity: identity.clone(),
+                    workspace_root: workspace_root.to_path_buf(),
+                    export_group: std::env::var(CACHE_EXPORT_GROUP_ENV).ok(),
+                    store: self.store.clone(),
                     agent: self.agent.clone(),
                 }),
             ),
@@ -320,6 +326,10 @@ impl CacheSession {
                 run.clone(),
                 Some(ActionRun {
                     run,
+                    identity: identity.clone(),
+                    workspace_root: project_root.to_path_buf(),
+                    export_group: std::env::var(CACHE_EXPORT_GROUP_ENV).ok(),
+                    store: self.store.clone(),
                     agent: self.agent.clone(),
                 }),
             ),
@@ -481,12 +491,24 @@ impl AgentEventObserver for EventStream {
 /// An in-flight build's completed action manifest.
 pub struct ActionRun {
     run: String,
+    identity: String,
+    workspace_root: PathBuf,
+    export_group: Option<String>,
+    store: PathBuf,
     agent: CacheAgent,
 }
 
 impl ActionRun {
     pub async fn commit(self) -> Result<()> {
-        self.agent.commit_task(&self.run).await
+        let predictions = self.agent.commit_task_actions(&self.run).await?;
+        crate::store::record_build_receipt(
+            &self.store,
+            &self.run,
+            &self.identity,
+            &self.workspace_root,
+            self.export_group.as_deref(),
+            predictions,
+        )
     }
 }
 

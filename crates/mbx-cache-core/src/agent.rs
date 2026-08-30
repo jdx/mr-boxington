@@ -637,6 +637,15 @@ impl CacheAgent {
 
     /// Atomically publish the completed actions collected by a task run.
     pub async fn commit_task(&self, run: &str) -> Result<()> {
+        self.commit_task_actions(run).await.map(|_| ())
+    }
+
+    /// Publish a task run and return exactly the predictions completed by it.
+    ///
+    /// The persisted task manifest also carries predictions inherited from
+    /// earlier runs. Callers that need a receipt for this one run must not
+    /// mistake that cumulative manifest for the work the run completed.
+    pub async fn commit_task_actions(&self, run: &str) -> Result<Vec<ActionPrediction>> {
         validate_task_identity(run)?;
         let state = self
             .task_actions
@@ -650,6 +659,11 @@ impl CacheAgent {
         }
         let task = state.manifest;
         validate_task_identity(&task)?;
+        let completed = state
+            .pending_predictions
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
         let (manifest, introduced) = {
             let _write_guard = self.manifest_write_lock.lock().unwrap();
             let _file_guard = self.lock_task_manifest(&task)?;
@@ -749,7 +763,7 @@ impl CacheAgent {
                 }
             }
         }
-        Ok(())
+        Ok(completed)
     }
 
     fn task_manifest_path(&self, task: &str) -> PathBuf {

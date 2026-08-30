@@ -72,19 +72,20 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     // with the same stale prediction failing the same way on every later build.
     // Falling through compiles and republishes, which replaces it.
     let usable = find_prediction(&task, &invocation_digest)?.and_then(|prediction| {
-        prediction
+        let discovered = prediction
             .discover(
                 &working_dir,
                 &context.path_mappings,
                 session::file_digest_cache(),
             )
-            .ok()
+            .ok()?;
+        Some((prediction, discovered))
     });
     // Whether an action lookup actually ran. A cold compilation has no
     // prediction to build a key from, so nothing was ever asked of the cache --
     // which the summary and the TUI report separately from a lookup that missed.
     let mut looked_up = false;
-    if let Some(discovered) = usable {
+    if let Some((prediction, discovered)) = usable {
         let mut candidate = context.clone();
         discovered.clone().apply_to(&mut candidate)?;
         let action = invocation.action(candidate)?;
@@ -108,6 +109,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         };
         if let Some(cached) = restored {
             if !verify {
+                record_prediction(&task, &invocation_digest, &action.digest, &prediction, None);
                 replay_bytes(&cached.stdout, &cached.stderr)?;
                 record_action_hit(
                     &action.digest,

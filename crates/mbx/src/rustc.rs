@@ -579,7 +579,6 @@ fn restore_predicted_result(
         context,
         &invocation_digest,
         &prediction.payload,
-        Some(&prediction.action),
         restore_outputs,
         action_lookup_attempted,
         learned_enabled,
@@ -600,7 +599,6 @@ fn restore_prediction_payload(
     mut context: ActionContext,
     invocation_digest: &CacheDigest,
     payload: &str,
-    recorded_action: Option<&CacheDigest>,
     restore_outputs: bool,
     action_lookup_attempted: &mut bool,
     learned_enabled: bool,
@@ -639,19 +637,15 @@ fn restore_prediction_payload(
             if restore_outputs {
                 record_action_hit(&action, cached.restore, invocation.crate_name());
             }
-            // The payload being recorded is the one just used, so the only
-            // news a rewrite could carry is a different action digest -- the
-            // other candidate key hit, or the record came from outside this
-            // manifest entirely. An identical record is inherited by the
-            // committed manifest without being re-sent.
-            if recorded_action != Some(&action) {
-                record_prediction_value(
-                    invocation_digest.clone(),
-                    action,
-                    payload.to_string(),
-                    invocation.crate_name(),
-                );
-            }
+            // Re-record even an identical manifest prediction: the cumulative
+            // manifest already inherits it, but this run's build receipt must
+            // say that the restored action was actually used.
+            record_prediction_value(
+                invocation_digest.clone(),
+                action,
+                payload.to_string(),
+                invocation.crate_name(),
+            );
             Ok(Some(cached))
         }
         None => {
@@ -956,7 +950,6 @@ fn restore_flight_prediction(
         context,
         invocation_digest,
         payload,
-        None,
         true,
         action_lookup_attempted,
         learned_enabled,
@@ -966,11 +959,9 @@ fn restore_flight_prediction(
 
 /// Refresh the stored prediction behind a hit and recover the timing it holds.
 ///
-/// One fetch serves both needs: the stored payload carries the compiler time
-/// this hit avoided, and comparing it against the freshly built payload says
-/// whether anything needs rewriting. On a warm hit nothing does -- the inputs
-/// that produced the key are the inputs the prediction already names -- so the
-/// rewrite, the largest request a hit sends, is skipped.
+/// A hit is recorded even when its prediction is byte-for-byte unchanged. The
+/// task manifest merge makes that an idempotent write, while the run's exact
+/// prediction set becomes its build receipt and must include restored actions.
 fn refresh_prediction(
     compilation: &Compilation<'_>,
     action: &CacheDigest,
@@ -1009,17 +1000,12 @@ fn refresh_prediction(
         prediction.compiler_duration_ns = timing.duration_ns;
         prediction.crate_name.clone_from(&timing.crate_name);
         let payload = String::from_utf8(canonical_json(&prediction)?)?;
-        let unchanged = stored
-            .as_ref()
-            .is_some_and(|stored| stored.action == *action && stored.payload == payload);
-        if !unchanged {
-            record_prediction_value(
-                invocation_digest,
-                action.clone(),
-                payload,
-                compilation.invocation.crate_name(),
-            );
-        }
+        record_prediction_value(
+            invocation_digest,
+            action.clone(),
+            payload,
+            compilation.invocation.crate_name(),
+        );
         Result::<()>::Ok(())
     })();
     if let Err(error) = recorded {

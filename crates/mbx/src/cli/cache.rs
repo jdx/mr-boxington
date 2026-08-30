@@ -1,4 +1,5 @@
 use super::cargo::{absolute, cargo_roots};
+use super::exec::discover_project_root;
 use crate::config::Config;
 use crate::{store, target};
 use bytesize::ByteSize;
@@ -24,6 +25,10 @@ pub(super) enum CacheCommands {
     Largest(LargestArgs),
     /// Verify local objects and action results.
     Verify,
+    /// Export the cache closure of this checkout's last build.
+    Export(ExportArgs),
+    /// Import a cache export into the local store.
+    Import(ImportArgs),
     /// Remove one workspace's managed target and cache claims.
     Remove(RemoveCacheArgs),
 }
@@ -40,6 +45,21 @@ pub(super) struct LargestArgs {
     /// Maximum entries to print.
     #[usage(long, default = "20")]
     limit: usize,
+}
+
+#[derive(usage::Args)]
+pub(super) struct ExportArgs {
+    /// Export every build that set MBX_CACHE_EXPORT_GROUP to this CI group.
+    #[usage(long, value_name = "GROUP")]
+    group: Option<String>,
+    /// Tar archive to write.
+    archive: PathBuf,
+}
+
+#[derive(usage::Args)]
+pub(super) struct ImportArgs {
+    /// Tar archive to import.
+    archive: PathBuf,
 }
 
 #[derive(usage::Args)]
@@ -67,10 +87,51 @@ pub(super) fn run(config: &Config, command: CacheCommands) -> Result<ExitCode> {
             cache_largest(config, args.limit).map(|()| ExitCode::SUCCESS)
         }
         CacheCommands::Verify => cache_verify(config),
+        CacheCommands::Export(args) => {
+            cache_export(config, &args.archive, args.group.as_deref()).map(|()| ExitCode::SUCCESS)
+        }
+        CacheCommands::Import(args) => {
+            cache_import(config, &args.archive).map(|()| ExitCode::SUCCESS)
+        }
         CacheCommands::Remove(args) => {
             cache_remove(config, &args.workspace).map(|()| ExitCode::SUCCESS)
         }
     }
+}
+
+pub(super) fn cache_export(config: &Config, archive: &Path, group: Option<&str>) -> Result<()> {
+    let working_dir = std::env::current_dir()?;
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let workspace = cargo_roots(&cargo, &[], None)
+        .map(|roots| roots.workspace_root)
+        .unwrap_or_else(|| discover_project_root(&working_dir));
+    let outcome = match group {
+        Some(group) => store::export_group(&config.store_dir(), group, archive)?,
+        None => store::export_checkout(&config.store_dir(), &workspace, archive)?,
+    };
+    let subject = group.map_or_else(
+        || workspace.display().to_string(),
+        |group| format!("export group {group:?}"),
+    );
+    println!(
+        "exported {} actions and {} objects ({}) for {subject}",
+        outcome.actions,
+        outcome.objects,
+        ByteSize::b(outcome.bytes).display().iec(),
+    );
+    Ok(())
+}
+
+pub(super) fn cache_import(config: &Config, archive: &Path) -> Result<()> {
+    let outcome = store::import_archive(&config.store_dir(), archive)?;
+    println!(
+        "imported {} actions and {} objects from {} ({})",
+        outcome.actions,
+        outcome.objects,
+        archive.display(),
+        ByteSize::b(outcome.bytes).display().iec()
+    );
+    Ok(())
 }
 
 pub(super) fn cache_stats(config: &Config, json: bool) -> Result<()> {

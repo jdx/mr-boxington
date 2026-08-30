@@ -660,6 +660,53 @@ async fn begin_task_reports_how_many_predictions_were_loaded() {
 }
 
 #[tokio::test]
+async fn commit_receipt_contains_this_runs_predictions_not_its_baseline() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let task = "9".repeat(64);
+    let first = ActionPrediction {
+        invocation: CacheDigest::blake3(b"first invocation"),
+        action: CacheDigest::blake3(b"first action"),
+        adapter: "rustc".into(),
+        payload: "{}".into(),
+    };
+    let seed = CacheAgent::new(&cache, "test-version");
+    let seed_run = seed.begin_task(&task).await.unwrap();
+    assert!(matches!(
+        seed.respond(AgentRequest::RecordActionPrediction {
+            task: seed_run.clone(),
+            prediction: first,
+        })
+        .await,
+        AgentResponse::ActionPredictionRecorded
+    ));
+    seed.commit_task(&seed_run).await.unwrap();
+
+    let second = ActionPrediction {
+        invocation: CacheDigest::blake3(b"second invocation"),
+        action: CacheDigest::blake3(b"second action"),
+        adapter: "rustc".into(),
+        payload: "{}".into(),
+    };
+    let agent = CacheAgent::new(&cache, "test-version");
+    let run = agent.begin_task(&task).await.unwrap();
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::RecordActionPrediction {
+                task: run.clone(),
+                prediction: second.clone(),
+            })
+            .await,
+        AgentResponse::ActionPredictionRecorded
+    ));
+
+    let completed = agent.commit_task_actions(&run).await.unwrap();
+
+    assert_eq!(completed, vec![second]);
+    assert_eq!(task_manifest_actions(&cache, &task).unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn a_refused_prediction_reports_the_constraint_the_shim_should_print() {
     // The shim prints whatever this error says. "invalid action prediction"
     // on its own left an oversized payload from one crate looking identical

@@ -198,6 +198,9 @@ fn build_with(
         // Native links are cached by default and several counts here include
         // one, so an inherited answer would decide them.
         .env_remove("MBX_CACHE_LINKS")
+        // An action may group every build in the surrounding job. Individual
+        // tests opt into that explicitly rather than leaking into its group.
+        .env_remove(mbx::session::CACHE_EXPORT_GROUP_ENV)
         // The C shims are on by default; a test that says nothing about them
         // must not inherit a different answer from the developer's shell. The
         // compiler variables matter just as much: this suite is itself run
@@ -299,6 +302,85 @@ fn corrupt_action_results(store: &Path) -> usize {
         }
     }
     corrupted
+}
+
+#[test]
+fn a_ci_export_group_collects_every_build_in_the_job() {
+    let source_store = tempfile::tempdir().unwrap();
+    let destination_store = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_named_project(first.path(), "first-fixture");
+    write_named_project(second.path(), "second-fixture");
+    let group = "github-run-42/test-linux";
+    build_with(
+        first.path(),
+        source_store.path(),
+        &reports.path().join("first.json"),
+        &[(mbx::session::CACHE_EXPORT_GROUP_ENV, group)],
+    );
+    build_with(
+        second.path(),
+        source_store.path(),
+        &reports.path().join("second.json"),
+        &[(mbx::session::CACHE_EXPORT_GROUP_ENV, group)],
+    );
+    wipe_target(first.path());
+    wipe_target(second.path());
+    let warm_group = "github-run-43/test-linux";
+    let first_warm = build_with(
+        first.path(),
+        source_store.path(),
+        &reports.path().join("first-warm.json"),
+        &[(mbx::session::CACHE_EXPORT_GROUP_ENV, warm_group)],
+    )
+    .0;
+    let second_warm = build_with(
+        second.path(),
+        source_store.path(),
+        &reports.path().join("second-warm.json"),
+        &[(mbx::session::CACHE_EXPORT_GROUP_ENV, warm_group)],
+    )
+    .0;
+    assert!(count(&first_warm, "hits") > 0);
+    assert!(count(&second_warm, "hits") > 0);
+    let archive = reports.path().join("job.tar");
+
+    let export = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        .current_dir(first.path())
+        .args(["cache", "export", "--group", warm_group])
+        .arg(&archive)
+        .env("MBX_CACHE_DIR", source_store.path())
+        .output()
+        .unwrap();
+    assert!(
+        export.status.success(),
+        "group export failed: {}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+    let import = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        .args(["cache", "import"])
+        .arg(&archive)
+        .env("MBX_CACHE_DIR", destination_store.path())
+        .output()
+        .unwrap();
+    assert!(
+        import.status.success(),
+        "group import failed: {}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+    let stats: serde_json::Value = serde_json::from_str(&mbx(
+        destination_store.path(),
+        &["cache", "stats", "--json"],
+    ))
+    .unwrap();
+    assert!(
+        stats["action_results"].as_u64().unwrap() >= 2,
+        "both builds should seed the destination store: {stats}; export: {}; import: {}",
+        String::from_utf8_lossy(&export.stdout),
+        String::from_utf8_lossy(&import.stdout),
+    );
 }
 
 #[test]

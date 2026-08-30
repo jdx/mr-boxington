@@ -64,7 +64,7 @@ pub(super) fn run(config: &Config, settings: &CliSettings, args: &ExecArgs) -> R
         if let Some(run) = run
             && let Err(error) = run.commit().await
         {
-            log::warn!("the build manifest was not committed: {error}");
+            log::warn!("the completed build was not fully recorded: {error}");
         }
         let stats = match session.finish().await {
             Ok(stats) => {
