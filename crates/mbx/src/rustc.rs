@@ -163,6 +163,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             &working_dir,
             &invocation,
             &outputs,
+            &portable,
         );
     }
 
@@ -466,13 +467,14 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
 }
 
 /// Compile a build script whose native link cannot be action-cached, then
-/// install the execution-cache launcher keyed by the resulting binary bytes.
+/// install the execution-cache launcher keyed by its compilation action.
 fn compile_execution_only_build_script(
     rustc: &OsStr,
     arguments: &[OsString],
     working_dir: &Path,
     invocation: &RustcInvocation,
     outputs: &RustcOutputs,
+    portable: &Portable,
 ) -> Result<ExitCode> {
     let demand = crate::scheduler::Demand::new(invocation.crate_name(), true);
     let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
@@ -494,12 +496,35 @@ fn compile_execution_only_build_script(
         && let Some(executable) = outputs.build_script_executable(invocation.crate_name())
     {
         let installed = (|| -> Result<()> {
-            let digest = CacheDigest::blake3_file(executable)
-                .wrap_err("failed to identify the build-script binary")?;
+            // Prefer the modeled compilation action. Unlike linked executable
+            // bytes on Windows, this is reproducible across equivalent
+            // checkouts while still naming every compiler, source,
+            // environment, and linker input that can affect the program. If
+            // this host's native link cannot be modeled, exact bytes remain a
+            // conservative local fallback.
+            let digest = (|| -> Result<CacheDigest> {
+                let compilation = Compilation {
+                    rustc,
+                    invocation,
+                    working_dir,
+                    portable,
+                    linker: linker_for(invocation)?,
+                };
+                Ok(
+                    action_from_current_dep_info(&compilation, &outputs.dep_info)?
+                        .0
+                        .literal
+                        .digest,
+                )
+            })()
+            .or_else(|_| {
+                CacheDigest::blake3_file(executable)
+                    .wrap_err("failed to identify the build-script binary")
+            })?;
             // Cargo's extra-filename disambiguator is stable across equivalent
             // checkouts and distinct between package units. Pair it with the
-            // exact executable bytes so identical build.rs sources from two
-            // crates cannot share execution results accidentally.
+            // compilation identity so otherwise identical build.rs sources
+            // from two crates cannot share execution results accidentally.
             let output_name = executable
                 .file_name()
                 .and_then(OsStr::to_str)
