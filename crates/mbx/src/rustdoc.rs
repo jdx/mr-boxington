@@ -37,7 +37,43 @@ const REMOVED_ENVIRONMENT: &[&str] = &[
     "MBX_STAGING_DIR",
     "MBX_VERIFY",
     "RUSTC_WRAPPER",
+    "RUSTC_BOOTSTRAP",
     "RUSTDOC",
+];
+const HOST_ENVIRONMENT: &[&str] = &[
+    "_",
+    "CI",
+    "CARGO_HOME",
+    "CODEBUILD_BUILD_ID",
+    "COMSPEC",
+    "GITHUB_ACTIONS",
+    "HOME",
+    "HOSTNAME",
+    "NUMBER_OF_PROCESSORS",
+    "OLDPWD",
+    "PATH",
+    "PATHEXT",
+    "PWD",
+    "RUSTUP_HOME",
+    "SHLVL",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "USER",
+    "USERDOMAIN",
+    "USERNAME",
+    "USERPROFILE",
+];
+const HOST_ENVIRONMENT_PREFIXES: &[&str] = &[
+    "ACTIONS_",
+    "BUILDKITE_",
+    "CIRCLE_",
+    "GITHUB_",
+    "JENKINS_",
+    "RUNNER_",
+    "TEAMCITY_",
+    "TF_BUILD",
 ];
 
 #[derive(Serialize)]
@@ -106,12 +142,14 @@ pub(crate) fn document(rustdoc: &OsStr, arguments: &[OsString]) -> Result<ExitCo
     prepare_command(&mut command);
     let output = command.output().wrap_err("failed to run rustdoc")?;
     let duration = duration_ns(started.elapsed());
-    if !output.status.success() {
-        bail!("mergeable rustdoc invocation failed");
-    }
-    session::record_compiler_invocation("miss", Some(&invocation.crate_name), duration);
     std::io::stdout().write_all(&output.stdout)?;
     std::io::stderr().write_all(&output.stderr)?;
+    if !output.status.success() {
+        return Ok(ExitCode::from(
+            u8::try_from(output.status.code().unwrap_or(1)).unwrap_or(1),
+        ));
+    }
+    session::record_compiler_invocation("miss", Some(&invocation.crate_name), duration);
 
     let archive = generated.path().join("rustdoc.archive");
     write_archive(&archive, &[(&doc, "doc"), (&parts, "parts")])?;
@@ -230,17 +268,20 @@ fn action_descriptor(rustdoc: &OsStr, invocation: &Invocation) -> Result<Vec<u8>
         .iter()
         .map(|arg| normalize(&arg.to_string_lossy(), &mappings))
         .collect();
-    let mut environment = BTreeMap::new();
-    for (name, value) in std::env::vars() {
-        if !name.starts_with("MBX_") && !REMOVED_ENVIRONMENT.contains(&name.as_str()) {
-            environment.insert(name, normalize(&value, &mappings));
-        }
-    }
+    let environment = action_environment(std::env::vars(), &mappings);
     let mut inputs = BTreeMap::new();
     let target = std::env::var_os(session::TARGET_DIR_ENV).map(PathBuf::from);
+    let workspace = std::env::var_os(session::WORKSPACE_ROOT_ENV).map(PathBuf::from);
+    let (input_root, portable_root) = workspace
+        .as_deref()
+        .filter(|workspace| invocation.manifest.starts_with(workspace))
+        .map_or((invocation.manifest.as_path(), "${package}"), |workspace| {
+            (workspace, "${workspace}")
+        });
     collect_tree(
-        &invocation.manifest,
-        &invocation.manifest,
+        input_root,
+        input_root,
+        portable_root,
         target.as_deref(),
         &mut inputs,
     )?;
@@ -253,6 +294,24 @@ fn action_descriptor(rustdoc: &OsStr, invocation: &Invocation) -> Result<Vec<u8>
         environment,
         inputs,
     })
+}
+
+fn action_environment(
+    environment: impl IntoIterator<Item = (String, String)>,
+    mappings: &[(String, String)],
+) -> BTreeMap<String, String> {
+    environment
+        .into_iter()
+        .filter(|(name, _)| {
+            !name.starts_with("MBX_")
+                && !REMOVED_ENVIRONMENT.contains(&name.as_str())
+                && !HOST_ENVIRONMENT.contains(&name.as_str())
+                && !HOST_ENVIRONMENT_PREFIXES
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+        })
+        .map(|(name, value)| (name, normalize(&value, mappings)))
+        .collect()
 }
 
 fn path_mappings(invocation: &Invocation) -> Vec<(String, String)> {
@@ -287,6 +346,7 @@ fn normalize(value: &str, mappings: &[(String, String)]) -> String {
 fn collect_tree(
     root: &Path,
     directory: &Path,
+    portable_root: &str,
     excluded: Option<&Path>,
     inputs: &mut BTreeMap<String, CacheDigest>,
 ) -> Result<()> {
@@ -294,23 +354,29 @@ fn collect_tree(
         let entry = entry?;
         let path = entry.path();
         let name = entry.file_name();
-        if entry.file_type()?.is_symlink() {
+        let file_type = entry.file_type()?;
+        // Managed target views are symlinks, so exclude generated output by
+        // name and configured location before applying the conservative source
+        // symlink check.
+        if (name == "target" && (file_type.is_dir() || file_type.is_symlink()))
+            || excluded.is_some_and(|excluded| path == excluded || path.starts_with(excluded))
+        {
+            continue;
+        }
+        if file_type.is_symlink() {
             bail!(
-                "package input tree contains a symbolic link: {}",
+                "rustdoc input tree contains a symbolic link: {}",
                 path.display()
             );
         }
-        if excluded.is_some_and(|excluded| path == excluded || path.starts_with(excluded)) {
-            continue;
-        }
         if path.is_dir() {
-            if name != ".git" && name != "target" {
-                collect_tree(root, &path, excluded, inputs)?;
+            if name != ".git" {
+                collect_tree(root, &path, portable_root, excluded, inputs)?;
             }
         } else if path.is_file() {
             let relative = path.strip_prefix(root)?;
             inputs.insert(
-                format!("${{package}}/{}", relative.to_string_lossy()),
+                format!("{portable_root}/{}", relative.to_string_lossy()),
                 CacheDigest::blake3_file(&path)?,
             );
         }
@@ -724,6 +790,46 @@ fn finalize_arguments(arguments: &[OsString]) -> Vec<OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_environment_omits_host_identity_but_keeps_compile_inputs() {
+        let environment = action_environment(
+            [
+                ("GITHUB_RUN_ID".into(), "123".into()),
+                ("HOME".into(), "/home/one".into()),
+                ("CARGO_PKG_VERSION".into(), "1.2.3".into()),
+                ("DOCS_RS".into(), "1".into()),
+            ],
+            &[],
+        );
+
+        assert!(!environment.contains_key("GITHUB_RUN_ID"));
+        assert!(!environment.contains_key("HOME"));
+        assert_eq!(environment.get("CARGO_PKG_VERSION").unwrap(), "1.2.3");
+        assert_eq!(environment.get("DOCS_RS").unwrap(), "1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_target_symlinks_are_excluded_before_source_symlinks_are_rejected() {
+        let package = tempfile::tempdir().unwrap();
+        let managed = tempfile::tempdir().unwrap();
+        std::fs::write(package.path().join("lib.rs"), "pub fn value() {}\n").unwrap();
+        std::os::unix::fs::symlink(managed.path(), package.path().join("target")).unwrap();
+        let mut inputs = BTreeMap::new();
+
+        collect_tree(
+            package.path(),
+            package.path(),
+            "${package}",
+            Some(managed.path()),
+            &mut inputs,
+        )
+        .unwrap();
+
+        assert_eq!(inputs.len(), 1);
+        assert!(inputs.contains_key("${package}/lib.rs"));
+    }
 
     #[test]
     fn archive_round_trip_installs_crate_pages_and_parts() {

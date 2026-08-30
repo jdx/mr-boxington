@@ -48,13 +48,18 @@ fn write_dependent_project(directory: &Path) {
     )
     .unwrap();
     std::fs::write(
+        directory.join("README.md"),
+        "shared workspace documentation\n",
+    )
+    .unwrap();
+    std::fs::write(
         directory.join("base/Cargo.toml"),
         "[package]\nname = \"base\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
     )
     .unwrap();
     std::fs::write(
         directory.join("base/src/lib.rs"),
-        "pub fn value() -> u32 { 0 }\n",
+        "#![doc = include_str!(\"../../README.md\")]\npub fn value() -> u32 { 0 }\n",
     )
     .unwrap();
     std::fs::write(
@@ -169,7 +174,6 @@ fn document(project: &Path, store: &Path, report: &Path) -> serde_json::Value {
         .args(["doc", "--offline", "--no-deps"])
         .env("MBX_CACHE_DIR", store)
         .env("MBX_STATS_REPORT", report)
-        .env("MBX_TARGET_VIEWS", "0")
         .env_remove("CARGO_TARGET_DIR")
         .output()
         .expect("mbx should run");
@@ -300,9 +304,11 @@ fn rustdoc_pages_restore_and_rebuild_the_shared_index() {
     let store = tempfile::tempdir().unwrap();
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
+    let changed = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();
     write_dependent_project(first.path());
     write_dependent_project(second.path());
+    write_dependent_project(changed.path());
 
     let cold = document(
         first.path(),
@@ -327,6 +333,58 @@ fn rustdoc_pages_restore_and_rebuild_the_shared_index() {
         index.contains("base") && index.contains("above"),
         "the finalized index should name both crates"
     );
+
+    std::fs::write(
+        changed.path().join("README.md"),
+        "changed workspace documentation\n",
+    )
+    .unwrap();
+    let changed_stats = document(
+        changed.path(),
+        store.path(),
+        &reports.path().join("changed-doc.json"),
+    );
+    assert!(
+        count(&changed_stats, "misses") >= 2,
+        "a workspace-level doc input should invalidate the cached pages: {changed_stats}"
+    );
+    let changed_page =
+        std::fs::read_to_string(changed.path().join("target/doc/base/index.html")).unwrap();
+    assert!(changed_page.contains("changed workspace documentation"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_mergeable_render_is_not_run_again_transparently() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let project = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let wrapper = project.path().join("count-rustdoc");
+    let count = project.path().join("rustdoc-count");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\nif [ \"$1\" = \"-Vv\" ]; then exec \"$TEST_REAL_RUSTDOC\" \"$@\"; fi\nprintf x >> \"$TEST_RUSTDOC_COUNT\"\nprintf 'one rustdoc failure\\n' >&2\nexit 7\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&wrapper).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&wrapper, permissions).unwrap();
+    let rustdoc = which::which("rustdoc").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        .current_dir(project.path())
+        .args(["doc", "--offline", "--no-deps"])
+        .env("MBX_CACHE_DIR", store.path())
+        .env("RUSTDOC", &wrapper)
+        .env("TEST_REAL_RUSTDOC", rustdoc)
+        .env("TEST_RUSTDOC_COUNT", &count)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert_eq!(std::fs::read(&count).unwrap(), b"x");
 }
 
 /// Remove the outputs behind a target link so the next build must restore.
