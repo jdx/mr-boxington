@@ -118,10 +118,8 @@ successful releases:
   its key and issuer identifiers. It has to be a team key rather than an
   individual one: `notarytool` takes an issuer only for team keys and rejects it
   for individual keys. The macOS job submits the signed binary to Apple's
-  notary service with them. These three are the one optional entry in this list:
-  without them the release still ships, the binary is still signed, and the
-  build annotates a warning instead of failing. What it loses is Gatekeeper
-  approval for anyone who downloads the archive through a browser — see
+  notary service with them. All three are required: the release fails rather
+  than publishing a macOS binary without Gatekeeper approval. See
   [Notarization](#notarization).
 - **A crates.io Trusted Publisher for every published crate** — `mbx`,
   `mbx-cache-cargo`, `mbx-cache-cc`, `mbx-cache-core`, `mbx-cache-protocol`,
