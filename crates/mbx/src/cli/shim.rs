@@ -123,7 +123,7 @@ fn cargo_proxy_passthrough(arguments: &[OsString]) -> bool {
             return None;
         }
         let argument = argument.to_str()?;
-        if matches!(argument, "--color" | "--config" | "-Z") {
+        if matches!(argument, "--color" | "--config" | "-Z" | "-C") {
             skip_value = true;
             return None;
         }
@@ -302,6 +302,11 @@ mod tests {
             "--color".into(),
             "always".into(),
             "build".into()
+        ]));
+        assert!(cargo_proxy_passthrough(&[
+            "-C".into(),
+            "project".into(),
+            "clean".into()
         ]));
         assert!(!cargo_proxy_passthrough(&["cache".into(), "stats".into()]));
         assert!(cargo_proxy_passthrough(&[
