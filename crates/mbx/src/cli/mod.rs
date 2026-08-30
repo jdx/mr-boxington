@@ -225,5 +225,16 @@ fn strings(arguments: &[std::ffi::OsString]) -> Result<Vec<String>> {
 }
 
 #[cfg(test)]
-#[path = "../cli_tests.rs"]
-mod tests;
+mod cache_tests;
+#[cfg(test)]
+mod cargo_tests;
+#[cfg(test)]
+mod dispatch_tests;
+#[cfg(test)]
+mod exec_tests;
+#[cfg(test)]
+mod gc_tests;
+#[cfg(test)]
+mod prefetch_tests;
+#[cfg(test)]
+mod setup_tests;
