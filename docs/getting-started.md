@@ -108,9 +108,11 @@ mise is activated in the current shell. It recommends the config that defines
 Without an active mise shell, setup prints the exact shell-specific `PATH`
 change and never edits a shell startup file.
 
-On Unix, the Cargo shim is a symlink to mbx, so replacing mbx updates plain
-Cargo commands immediately. On Windows, `cargo.exe` forwards to the active mbx
-on `PATH`, with the setup-time mbx path as a fallback.
+On Unix, the stable `cargo` launcher uses the setup-time mbx while it exists,
+then resolves the active `mbx` from `PATH` after an upgrade removes that path.
+Windows `cargo.exe` resolves the active mbx from `PATH`, with the setup-time
+path as a fallback. Upgrading a mise-managed mbx does not require running setup
+again.
 
 Setup also configures rust-analyzer's background check in the matching global
 or project scope. The editor invokes the stable Cargo shim by its absolute path,

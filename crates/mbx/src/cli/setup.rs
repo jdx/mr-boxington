@@ -4,7 +4,23 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+#[cfg(windows)]
 const CARGO_SHIM_STEM: &str = "cargo";
+#[cfg(unix)]
+pub(crate) const CARGO_SHIM_LAUNCHER: &[u8] = br#"#!/bin/sh
+shim_dir=$(dirname "$0")
+IFS= read -r mbx_executable <"$shim_dir/mbx-target"
+if [ ! -x "$mbx_executable" ]; then
+  mbx_executable=$(command -v mbx 2>/dev/null)
+fi
+if [ -z "$mbx_executable" ] || [ ! -x "$mbx_executable" ]; then
+  echo 'mbx cargo shim: mbx is not active on PATH; activate or install mbx, then run `mbx setup`' >&2
+  exit 127
+fi
+MBX_CARGO_SHIM_MODE=1
+export MBX_CARGO_SHIM_MODE
+exec "$mbx_executable" "$@"
+"#;
 const RUST_ANALYZER_CONFIG_FILE: &str = "rust-analyzer.toml";
 const RUST_ANALYZER_CHECK_ARGUMENTS: [&str; 4] = [
     "check",
@@ -33,7 +49,7 @@ pub(super) struct SetupArgs {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SetupAction {
+pub(crate) enum SetupAction {
     Install,
     Status,
     Uninstall,
@@ -66,7 +82,7 @@ impl SetupArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum MiseScope {
+pub(crate) enum MiseScope {
     File(PathBuf),
     Global,
     Local,
@@ -120,7 +136,7 @@ pub(super) fn setup_at(executable: &Path, install_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn setup_at_action(
+pub(crate) fn setup_at_action(
     executable: &Path,
     install_dir: &Path,
     scope: &MiseScope,
@@ -163,12 +179,15 @@ pub(super) fn setup_at_action(
         }
         SetupAction::Install => {
             std::fs::create_dir_all(install_dir)?;
+            #[cfg(windows)]
             crate::session::install_shim_named(
                 executable,
                 install_dir,
                 CARGO_SHIM_STEM,
                 crate::session::ShimLink::Tracking,
             )?;
+            #[cfg(unix)]
+            install_cargo_shim_launcher(&shim)?;
             write_cargo_shim_target(install_dir, executable)?;
         }
     }
@@ -189,6 +208,17 @@ pub(super) fn setup_at_action(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(unix)]
+fn install_cargo_shim_launcher(shim: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    crate::util::write_atomic(shim, CARGO_SHIM_LAUNCHER)?;
+    let mut permissions = std::fs::metadata(shim)?.permissions();
+    permissions.set_mode(permissions.mode() | 0o100);
+    std::fs::set_permissions(shim, permissions)?;
+    Ok(())
 }
 
 /// Keep rust-analyzer's private Cargo process in the same mbx pool as shells.
@@ -697,20 +727,29 @@ fn write_cargo_shim_target(install_dir: &Path, executable: &Path) -> Result<()> 
         std::fs::write(install_dir.join(super::CARGO_SHIM_TARGET_FILE), target)?;
     }
     #[cfg(not(windows))]
-    let _ = (install_dir, executable);
+    {
+        let mut target = executable.as_os_str().as_encoded_bytes().to_vec();
+        target.push(b'\n');
+        crate::util::write_atomic(&install_dir.join(super::CARGO_SHIM_TARGET_FILE), &target)?;
+    }
     Ok(())
 }
 
-pub(crate) fn cargo_shim_is_current(executable: &Path, shim: &Path) -> Result<bool> {
+pub(crate) fn cargo_shim_is_current(_executable: &Path, shim: &Path) -> Result<bool> {
     #[cfg(windows)]
     if let Some(install_dir) = shim.parent()
         && let Some(configured) = configured_cargo_shim_target(install_dir)
     {
-        return Ok(same_path(&configured, executable)
+        return Ok(same_path(&configured, _executable)
             || cargo_shim_target(install_dir)
-                .is_some_and(|target| same_path(&target, executable)));
+                .is_some_and(|target| same_path(&target, _executable)));
     }
-    same_file_contents(executable, shim)
+    #[cfg(unix)]
+    {
+        return Ok(std::fs::read(shim)? == CARGO_SHIM_LAUNCHER);
+    }
+    #[allow(unreachable_code)]
+    same_file_contents(_executable, shim)
 }
 
 #[cfg(windows)]

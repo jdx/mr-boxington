@@ -42,7 +42,7 @@ EOF
   run "$MBX_BIN" setup
   assert_success
   assert_file_executable "$MBX_SHIM_DIR/cargo"
-  [ -L "$MBX_SHIM_DIR/cargo" ]
+  [ ! -L "$MBX_SHIM_DIR/cargo" ]
   assert_file_contains "$MBX_RA_CONFIG" "$MBX_SHIM_DIR/cargo"
   assert_file_contains "$MBX_RA_CONFIG" 'message-format=json'
   assert_output --partial "export PATH=\"$MBX_SHIM_DIR"
@@ -53,6 +53,24 @@ EOF
   assert_file_executable "$fish_shim_dir/cargo"
   assert_output --partial "set -gx PATH '$fish_shim_dir' \$PATH"
   assert_output --partial "does not edit shell startup files"
+}
+
+@test "the Unix Cargo launcher survives removal of the setup-time mbx" {
+  if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]]; then
+    skip "Unix launcher coverage"
+  fi
+  local old_mbx="$BATS_TEST_TMPDIR/versioned/mbx"
+  local active_bin
+  active_bin="$(dirname "$MBX_BIN")"
+  mkdir -p "$(dirname "$old_mbx")"
+  cp "$MBX_BIN" "$old_mbx"
+  chmod +x "$old_mbx"
+  "$old_mbx" setup >/dev/null
+  rm "$old_mbx"
+
+  run env PATH="$MBX_SHIM_DIR:$active_bin:$PATH" cargo --version
+  assert_success
+  assert_output --regexp '^cargo [0-9]'
 }
 
 @test "setup status refresh and uninstall cover the shim lifecycle" {

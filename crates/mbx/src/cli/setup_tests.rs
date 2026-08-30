@@ -24,7 +24,7 @@ fn setup_installs_the_cargo_shim() {
         use std::os::unix::fs::PermissionsExt as _;
 
         assert!(
-            std::fs::symlink_metadata(&wrapper)
+            !std::fs::symlink_metadata(&wrapper)
                 .unwrap()
                 .file_type()
                 .is_symlink()
@@ -35,7 +35,7 @@ fn setup_installs_the_cargo_shim() {
         );
         std::fs::remove_file(&executable).unwrap();
         std::fs::write(&executable, b"new mbx binary").unwrap();
-        assert_eq!(std::fs::read(&wrapper).unwrap(), b"new mbx binary");
+        assert_eq!(std::fs::read(&wrapper).unwrap(), CARGO_SHIM_LAUNCHER);
     }
 }
 
@@ -246,7 +246,7 @@ fn setup_status_detects_and_setup_refreshes_a_replaced_wrapper() {
         SetupAction::Install,
     )
     .unwrap();
-    assert!(same_file_contents(&executable, &shim).unwrap());
+    assert!(cargo_shim_is_current(&executable, &shim).unwrap());
 }
 
 #[test]

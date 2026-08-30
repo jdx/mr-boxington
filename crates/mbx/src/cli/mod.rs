@@ -23,7 +23,6 @@ mod setup;
 mod shim;
 mod tui;
 
-#[cfg(windows)]
 const CARGO_SHIM_TARGET_FILE: &str = "mbx-target";
 
 pub(crate) use cargo::{cargo_with_bypass_log, cargo_with_settings_and_bypass_log};
@@ -36,6 +35,13 @@ pub(crate) fn cargo_activation_path() -> Option<std::ffi::OsString> {
 
 #[cfg(test)]
 use prefetch::validate_prefetch_config;
+#[cfg(all(test, unix))]
+pub(crate) use setup::CARGO_SHIM_LAUNCHER as DOCTOR_CARGO_SHIM_LAUNCHER;
+#[cfg(test)]
+pub(crate) use setup::{
+    MiseScope as DoctorMiseScope, SetupAction as DoctorSetupAction,
+    setup_at_action as doctor_setup_at_action,
+};
 #[cfg(test)]
 use {cache::*, cargo::*, exec::*, gc::*, setup::*};
 
