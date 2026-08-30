@@ -347,8 +347,10 @@ pub fn import_archive(store: &Path, archive: &Path) -> Result<TransferOutcome> {
         }
         let destination = staging.path().join(&path);
         std::fs::create_dir_all(destination.parent().expect("entry has a parent"))?;
-        let mut output = std::fs::File::create(&destination)?;
-        std::io::copy(&mut entry, &mut output)?;
+        // `unpack` understands GNU sparse maps. A plain stream copy expands
+        // holes into physical zeroes, which is both slower and much larger for
+        // Rust artifacts containing sparse sections.
+        entry.unpack(&destination)?;
     }
     let manifest: ExportManifest =
         serde_json::from_slice(&std::fs::read(staging.path().join(EXPORT_MANIFEST))?)?;
