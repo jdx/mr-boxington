@@ -502,7 +502,7 @@ fn compile_execution_only_build_script(
             // environment, and linker input that can affect the program. If
             // this host's native link cannot be modeled, exact bytes remain a
             // conservative local fallback.
-            let digest = (|| -> Result<CacheDigest> {
+            let modeled = (|| -> Result<CacheDigest> {
                 let compilation = Compilation {
                     rustc,
                     invocation,
@@ -516,25 +516,29 @@ fn compile_execution_only_build_script(
                         .literal
                         .digest,
                 )
-            })()
-            .or_else(|_| {
-                CacheDigest::blake3_file(executable)
-                    .wrap_err("failed to identify the build-script binary")
-            })?;
-            // Cargo's extra-filename disambiguator is stable across equivalent
-            // checkouts and distinct between package units. Pair it with the
-            // compilation identity so otherwise identical build.rs sources
-            // from two crates cannot share execution results accidentally.
+            })();
+            // Cargo's extra-filename disambiguator distinguishes package units
+            // but can vary across equivalent Windows checkouts. The modeled
+            // action already contains Cargo's compilation metadata; retain the
+            // output name only for the conservative exact-byte fallback, where
+            // portability has already been surrendered.
             let output_name = executable
                 .file_name()
                 .and_then(OsStr::to_str)
                 .ok_or_else(|| eyre::eyre!("build-script output name is not UTF-8"))?;
-            let binary = CacheDigest::blake3(&canonical_json(&BuildScriptBinaryIdentity {
-                digest: &digest,
-                kind: "build-script-binary",
-                output_name,
-                version: 1,
-            })?);
+            let binary = match modeled {
+                Ok(action) => action,
+                Err(_) => {
+                    let digest = CacheDigest::blake3_file(executable)
+                        .wrap_err("failed to identify the build-script binary")?;
+                    CacheDigest::blake3(&canonical_json(&BuildScriptBinaryIdentity {
+                        digest: &digest,
+                        kind: "build-script-binary",
+                        output_name,
+                        version: 1,
+                    })?)
+                }
+            };
             crate::build_script::install(executable, &binary)
         })();
         if let Err(error) = installed {
