@@ -186,7 +186,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     let compilation_started = SystemTime::now();
     let mut command = Command::new(compiler);
     command.args(arguments);
-    command.args(invocation.dependency_arguments(&depfile, context.compiler.family));
+    command.args(invocation.dependency_arguments_for(&depfile, context.compiler.family));
     let output = command
         .output()
         .wrap_err_with(|| format!("failed to run {}", Path::new(compiler).display()))?;

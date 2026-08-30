@@ -631,7 +631,7 @@ fn parses_a_typical_msvc_cc_crate_invocation() {
     assert_eq!(invocation.include_dirs(), [PathBuf::from("include")]);
     assert_eq!(invocation.language(), CcLanguage::C);
     assert_eq!(
-        invocation.dependency_arguments(Path::new("deps.json"), CcCompilerFamily::Msvc),
+        invocation.dependency_arguments_for(Path::new("deps.json"), CcCompilerFamily::Msvc),
         argv(&["/sourceDependencies", "deps.json"])
     );
 }

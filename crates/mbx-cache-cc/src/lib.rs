@@ -676,11 +676,21 @@ impl CcInvocation {
     /// `-MD` rather than `-MMD`: system headers are exactly the inputs most
     /// likely to change without any other key component noticing, because the
     /// compiler identity does not cover the C library or the platform SDK.
-    pub fn dependency_arguments(&self, depfile: &Path, family: CcCompilerFamily) -> Vec<OsString> {
+    pub fn dependency_arguments(&self, depfile: &Path) -> Vec<OsString> {
+        vec!["-MD".into(), "-MF".into(), depfile.into()]
+    }
+
+    /// Arguments to append so a driver from `family` writes its dependency
+    /// list beside the object.
+    pub fn dependency_arguments_for(
+        &self,
+        depfile: &Path,
+        family: CcCompilerFamily,
+    ) -> Vec<OsString> {
         if family == CcCompilerFamily::Msvc {
             vec!["/sourceDependencies".into(), depfile.into()]
         } else {
-            vec!["-MD".into(), "-MF".into(), depfile.into()]
+            self.dependency_arguments(depfile)
         }
     }
 
