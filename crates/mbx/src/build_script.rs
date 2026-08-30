@@ -621,10 +621,13 @@ fn normalize_environment_value(value: &str, mappings: &[PathMapping]) -> String 
 /// `rerun-if-env-changed` for them, so the execution key must do the same.
 fn cargo_environment(mappings: &[PathMapping]) -> BTreeMap<String, Option<String>> {
     const FIXED: &[&str] = &[
+        "CARGO_ENCODED_RUSTFLAGS",
         "CARGO_MANIFEST_DIR",
+        "CARGO_MANIFEST_LINKS",
         "CARGO_MANIFEST_PATH",
         "DEBUG",
         "HOST",
+        "NUM_JOBS",
         "OPT_LEVEL",
         "PROFILE",
         "TARGET",
