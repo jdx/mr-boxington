@@ -40,6 +40,105 @@ fn setup_installs_the_cargo_shim() {
 }
 
 #[test]
+fn setup_puts_rust_analyzer_checks_through_the_stable_cargo_shim() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = directory
+        .path()
+        .join(if cfg!(windows) { "mbx.exe" } else { "mbx" });
+    std::fs::write(&executable, b"mbx binary").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+    }
+    let install = directory.path().join("data/bin");
+    let config = directory
+        .path()
+        .join("config/rust-analyzer/rust-analyzer.toml");
+
+    setup_with_rust_analyzer(
+        &executable,
+        &install,
+        &MiseScope::None,
+        &config,
+        SetupAction::Install,
+    )
+    .unwrap();
+
+    let document = std::fs::read_to_string(&config)
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    let command = document["check"]["overrideCommand"].as_array().unwrap();
+    let shim = install.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
+    assert!(command.iter().map(|value| value.as_str().unwrap()).eq([
+        shim.to_str().unwrap(),
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--message-format=json",
+    ]));
+    assert_eq!(
+        configure_rust_analyzer(&config, &shim, SetupAction::Status).unwrap(),
+        ExitCode::SUCCESS
+    );
+}
+
+#[test]
+fn setup_preserves_an_existing_rust_analyzer_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("rust-analyzer.toml");
+    let original = "# keep me\n[check]\noverrideCommand = [\"cargo\", \"clippy\"]\n";
+    std::fs::write(&config, original).unwrap();
+
+    configure_rust_analyzer(
+        &config,
+        &directory.path().join("bin/cargo"),
+        SetupAction::Install,
+    )
+    .unwrap();
+    configure_rust_analyzer(
+        &config,
+        &directory.path().join("bin/cargo"),
+        SetupAction::Uninstall,
+    )
+    .unwrap();
+
+    assert_eq!(std::fs::read_to_string(config).unwrap(), original);
+}
+
+#[test]
+fn setup_uninstall_removes_only_its_rust_analyzer_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("rust-analyzer.toml");
+    let shim = directory.path().join("bin/cargo");
+    std::fs::write(&config, "[check]\nignore = [\"dead_code\"]\n").unwrap();
+    configure_rust_analyzer(&config, &shim, SetupAction::Install).unwrap();
+
+    configure_rust_analyzer(&config, &shim, SetupAction::Uninstall).unwrap();
+
+    let written = std::fs::read_to_string(config).unwrap();
+    assert!(written.contains("ignore"));
+    assert!(!written.contains("overrideCommand"));
+}
+
+#[test]
+fn setup_status_detects_a_missing_rust_analyzer_command() {
+    let directory = tempfile::tempdir().unwrap();
+    assert_eq!(
+        configure_rust_analyzer(
+            &directory.path().join("rust-analyzer.toml"),
+            &directory.path().join("bin/cargo"),
+            SetupAction::Status,
+        )
+        .unwrap(),
+        ExitCode::FAILURE
+    );
+}
+
+#[test]
 fn setup_flags_are_mutually_exclusive() {
     let args = SetupArgs {
         yes: false,

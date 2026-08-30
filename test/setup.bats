@@ -12,6 +12,7 @@ setup() {
   export XDG_DATA_HOME="$BATS_TEST_TMPDIR/data-home"
   export MBX_CACHE_DIR="$BATS_TEST_TMPDIR/mbx-cache"
   export MBX_SHIM_DIR="$XDG_DATA_HOME/mbx/bin"
+  export MBX_RA_CONFIG="$XDG_CONFIG_HOME/rust-analyzer/rust-analyzer.toml"
   export MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR"
   unset MISE_CONFIG_FILE
   unset MISE_SHELL
@@ -38,6 +39,8 @@ EOF
   assert_success
   assert_file_executable "$MBX_SHIM_DIR/cargo"
   [ -L "$MBX_SHIM_DIR/cargo" ]
+  assert_file_contains "$MBX_RA_CONFIG" "$MBX_SHIM_DIR/cargo"
+  assert_file_contains "$MBX_RA_CONFIG" 'message-format=json'
   assert_output --partial "export PATH=\"$MBX_SHIM_DIR"
   assert_output --partial ':$PATH"'
   local fish_shim_dir="$BATS_TEST_TMPDIR/Application Support/mbx/bin"
@@ -79,6 +82,8 @@ EOF
   assert_success
   assert_file_executable "$MBX_SHIM_DIR/cargo"
   assert_output --partial "left in place for other scopes"
+  run grep -F 'overrideCommand' "$MBX_RA_CONFIG"
+  assert_failure
 }
 
 @test "yes setup follows postinstall, global, and local mise scopes" {
@@ -107,6 +112,7 @@ EOF
     "$MBX_BIN" setup --yes
   assert_success
   assert_file_contains "$mise_log" "config set --append --file $project_config env._.path"
+  assert_file_contains "$(dirname "$project_config")/rust-analyzer.toml" "$MBX_SHIM_DIR/cargo"
 
   run env -u MISE_CONFIG_FILE PATH="$fake_bin:$PATH" MISE_SHELL=zsh \
     MISE_GLOBAL_CONFIG_FILE="$BATS_TEST_TMPDIR/global.toml" \
@@ -115,6 +121,7 @@ EOF
     "$MBX_BIN" setup --yes
   assert_success
   assert_file_contains "$mise_log" "config set --append --global env._.path"
+  assert_file_contains "$MBX_RA_CONFIG" "$MBX_SHIM_DIR/cargo"
 
   run env -u MISE_CONFIG_FILE PATH="$fake_bin:$PATH" MISE_SHELL=zsh \
     MBX_TEST_MISE_CONFIGS="[{\"path\":\"$project_config\",\"tools\":[\"mr-boxington\"]}]" \

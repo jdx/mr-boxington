@@ -5,6 +5,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 const CARGO_SHIM_STEM: &str = "cargo";
+const RUST_ANALYZER_CONFIG_FILE: &str = "rust-analyzer.toml";
+const RUST_ANALYZER_CHECK_ARGUMENTS: [&str; 4] = [
+    "check",
+    "--workspace",
+    "--all-targets",
+    "--message-format=json",
+];
 
 #[derive(usage::Args)]
 pub(super) struct SetupArgs {
@@ -83,7 +90,14 @@ pub(super) fn run(args: &SetupArgs, action: SetupAction) -> Result<ExitCode> {
     let install_dir = setup_install_dir()
         .ok_or_else(|| eyre::eyre!("the platform data directory could not be located"))?;
     let scope = setup_scope(args, action)?;
-    setup_at_action(&executable, &install_dir, &scope, action)
+    let rust_analyzer_config = rust_analyzer_config_path(&scope)?;
+    setup_with_rust_analyzer(
+        &executable,
+        &install_dir,
+        &scope,
+        &rust_analyzer_config,
+        action,
+    )
 }
 
 /// The stable directory that holds the Cargo shim installed by setup.
@@ -175,6 +189,153 @@ pub(super) fn setup_at_action(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Keep rust-analyzer's private Cargo process in the same mbx pool as shells.
+///
+/// The override names the stable Cargo shim by absolute path. Editors launched
+/// outside an activated mise shell therefore do not need to inherit its PATH,
+/// and upgrading mbx does not leave the editor pointing at an old executable.
+pub(super) fn setup_with_rust_analyzer(
+    executable: &Path,
+    install_dir: &Path,
+    scope: &MiseScope,
+    config_path: &Path,
+    action: SetupAction,
+) -> Result<ExitCode> {
+    let status = setup_at_action(executable, install_dir, scope, action)?;
+    if status != ExitCode::SUCCESS {
+        return Ok(status);
+    }
+    let shim = install_dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
+    configure_rust_analyzer(config_path, &shim, action)
+}
+
+/// Match rust-analyzer's configuration scope to setup's activation scope.
+fn rust_analyzer_config_path(scope: &MiseScope) -> Result<PathBuf> {
+    let global = || {
+        dirs::config_dir()
+            .map(|directory| {
+                directory
+                    .join("rust-analyzer")
+                    .join(RUST_ANALYZER_CONFIG_FILE)
+            })
+            .ok_or_else(|| eyre::eyre!("the platform configuration directory could not be located"))
+    };
+    match scope {
+        MiseScope::Global | MiseScope::None => global(),
+        MiseScope::Local => {
+            let cwd = std::env::current_dir()?;
+            Ok(crate::util::workspace_root(&cwd).join(RUST_ANALYZER_CONFIG_FILE))
+        }
+        MiseScope::File(path) => {
+            if mise_scope_config_path(&MiseScope::Global)
+                .is_ok_and(|global_config| global_config == *path)
+            {
+                global()
+            } else {
+                let directory = path.parent().ok_or_else(|| {
+                    eyre::eyre!("mise configuration path has no parent: {}", path.display())
+                })?;
+                Ok(crate::util::workspace_root(directory).join(RUST_ANALYZER_CONFIG_FILE))
+            }
+        }
+    }
+}
+
+fn rust_analyzer_command(shim: &Path) -> Vec<String> {
+    std::iter::once(shim.to_string_lossy().into_owned())
+        .chain(RUST_ANALYZER_CHECK_ARGUMENTS.map(str::to_owned))
+        .collect()
+}
+
+pub(super) fn configure_rust_analyzer(
+    path: &Path,
+    shim: &Path,
+    action: SetupAction,
+) -> Result<ExitCode> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let mut document = contents
+        .parse::<toml_edit::DocumentMut>()
+        .wrap_err_with(|| format!("failed to parse {}", path.display()))?;
+    let expected = rust_analyzer_command(shim);
+    let configured = document
+        .get("check")
+        .and_then(toml_edit::Item::as_table_like)
+        .and_then(|check| check.get("overrideCommand"));
+    let has_configuration = configured.is_some();
+    let owns_configuration =
+        configured
+            .and_then(toml_edit::Item::as_array)
+            .is_some_and(|command| {
+                command.len() == expected.len()
+                    && command
+                        .iter()
+                        .zip(&expected)
+                        .all(|(actual, expected)| actual.as_str() == Some(expected))
+            });
+
+    match action {
+        SetupAction::Status if owns_configuration => {
+            println!("rust-analyzer checks run through mbx: {}", path.display());
+            Ok(ExitCode::SUCCESS)
+        }
+        SetupAction::Status if has_configuration => {
+            println!(
+                "rust-analyzer keeps its existing check.overrideCommand in {}",
+                path.display()
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        SetupAction::Status => {
+            println!(
+                "rust-analyzer checks do not use mbx; run `mbx setup` to configure {}",
+                path.display()
+            );
+            Ok(ExitCode::FAILURE)
+        }
+        SetupAction::Uninstall => {
+            if owns_configuration {
+                let check = document
+                    .get_mut("check")
+                    .and_then(toml_edit::Item::as_table_like_mut)
+                    .expect("the configuration was inspected above");
+                check.remove("overrideCommand");
+                if check.is_empty() {
+                    document.remove("check");
+                }
+                crate::util::write_atomic(path, document.to_string().as_bytes())?;
+                println!(
+                    "removed mbx's rust-analyzer check command from {}",
+                    path.display()
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        SetupAction::Install if owns_configuration => Ok(ExitCode::SUCCESS),
+        SetupAction::Install if has_configuration => {
+            println!(
+                "left {} unchanged: rust-analyzer.check.overrideCommand is already configured",
+                path.display()
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        SetupAction::Install => {
+            let mut command = toml_edit::Array::new();
+            command.extend(expected);
+            document["check"]["overrideCommand"] = toml_edit::value(command);
+            crate::util::write_atomic(path, document.to_string().as_bytes())?;
+            println!(
+                "rust-analyzer background checks now run through mbx: {}",
+                path.display()
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+    }
 }
 
 fn setup_scope(args: &SetupArgs, action: SetupAction) -> Result<MiseScope> {
