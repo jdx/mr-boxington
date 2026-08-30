@@ -301,7 +301,25 @@ fn cargo_on_path(path: &OsStr) -> Option<PathBuf> {
     let name = if cfg!(windows) { "cargo.exe" } else { "cargo" };
     std::env::split_paths(path)
         .map(|directory| directory.join(name))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_executable_file(candidate))
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 fn same_file_contents(left: &Path, right: &Path) -> Result<bool> {
@@ -451,6 +469,7 @@ mod tests {
         std::fs::create_dir_all(&real_dir).unwrap();
         std::fs::write(&executable, b"current mbx").unwrap();
         std::fs::write(&real_cargo, b"real cargo").unwrap();
+        make_executable(&real_cargo);
 
         let real_first = std::env::join_paths([&real_dir, &shim_dir]).unwrap();
         assert_eq!(
@@ -465,6 +484,7 @@ mod tests {
         );
 
         std::fs::write(&shim, b"current mbx").unwrap();
+        make_executable(&shim);
         let inactive = setup_check_at(&executable, &shim, Some(&real_first));
         assert_eq!(inactive.severity, Severity::Warn);
         assert!(inactive.detail.contains("current but not active"));
@@ -475,6 +495,34 @@ mod tests {
         assert_eq!(active.severity, Severity::Pass);
         assert!(active.detail.contains("active and current"));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_warns_when_the_shim_is_not_executable() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("mbx");
+        let shim_dir = directory.path().join("shim");
+        let shim = shim_dir.join("cargo");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        std::fs::write(&executable, b"current mbx").unwrap();
+        std::fs::write(&shim, b"current mbx").unwrap();
+
+        let check = setup_check_at(&executable, &shim, Some(shim_dir.as_os_str()));
+        assert_eq!(check.severity, Severity::Warn);
+        assert!(check.detail.contains("current but not active"));
+        assert!(check.detail.contains("PATH resolves cargo to nothing"));
+    }
+
+    #[cfg(unix)]
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = path.metadata().unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &Path) {}
 
     #[test]
     fn missing_remote_namespace_fails() {
