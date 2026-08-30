@@ -292,6 +292,9 @@ EOF
   mkdir -p "$real_bin"
   cat >"$real_bin/cargo" <<'EOF'
 #!/bin/sh
+if [ -n "${MBX_TEST_CARGO_LOG:-}" ]; then
+  printf '%s\n' "$*" >>"$MBX_TEST_CARGO_LOG"
+fi
 printf '%s\n' "$*"
 EOF
   chmod +x "$real_bin/cargo"
@@ -306,6 +309,14 @@ EOF
   run env PATH="$MBX_SHIM_DIR:$real_bin:/usr/bin:/bin" cargo +nightly --version
   assert_success
   assert_output "+nightly --version"
+
+  local cargo_log="$BATS_TEST_TMPDIR/cargo.log"
+  run env MBX_TEST_CARGO_LOG="$cargo_log" PATH="$MBX_SHIM_DIR:$real_bin:/usr/bin:/bin" cargo clean
+  assert_success
+  assert_output "clean"
+  run wc -l <"$cargo_log"
+  assert_success
+  assert_output "1"
 }
 
 @test "explicit mbx Cargo commands do not reenter the installed shim" {

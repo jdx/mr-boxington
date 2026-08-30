@@ -104,10 +104,11 @@ fn mbx_disabled_value(value: Option<&OsStr>) -> bool {
 }
 
 fn cargo_proxy_passthrough(arguments: &[OsString]) -> bool {
-    let mut cargo_arguments = arguments
+    let cargo_arguments = arguments
         .iter()
-        .take_while(|argument| argument.as_os_str() != OsStr::new("--"));
-    if cargo_arguments.clone().any(|argument| {
+        .take_while(|argument| argument.as_os_str() != OsStr::new("--"))
+        .collect::<Vec<_>>();
+    if cargo_arguments.iter().any(|argument| {
         matches!(
             argument.to_str(),
             Some("--version" | "-V" | "--help" | "-h")
@@ -115,36 +116,56 @@ fn cargo_proxy_passthrough(arguments: &[OsString]) -> bool {
     }) {
         return true;
     }
-    let command = cargo_arguments.find_map(|argument| {
+    let mut skip_value = false;
+    let command = cargo_arguments.into_iter().find_map(|argument| {
+        if skip_value {
+            skip_value = false;
+            return None;
+        }
         let argument = argument.to_str()?;
+        if matches!(argument, "--color" | "--config" | "-Z") {
+            skip_value = true;
+            return None;
+        }
         (!argument.starts_with('-') && !argument.starts_with('+')).then_some(argument)
     });
-    matches!(
-        command,
-        Some(
-            "help"
-                | "new"
-                | "init"
-                | "add"
-                | "remove"
-                | "update"
-                | "fetch"
-                | "tree"
-                | "search"
-                | "info"
-                | "login"
-                | "logout"
-                | "owner"
-                | "package"
-                | "publish"
-                | "install"
-                | "uninstall"
-                | "yank"
-                | "locate-project"
-                | "metadata"
-                | "generate-lockfile"
+    command.is_none()
+        || matches!(
+            command,
+            Some(
+                "help"
+                    | "new"
+                    | "init"
+                    | "add"
+                    | "remove"
+                    | "update"
+                    | "fetch"
+                    | "clean"
+                    | "config"
+                    | "fmt"
+                    | "tree"
+                    | "search"
+                    | "info"
+                    | "login"
+                    | "logout"
+                    | "owner"
+                    | "package"
+                    | "publish"
+                    | "install"
+                    | "uninstall"
+                    | "yank"
+                    | "locate-project"
+                    | "metadata"
+                    | "generate-lockfile"
+                    | "pkgid"
+                    | "read-manifest"
+                    | "report"
+                    | "vendor"
+                    | "verify-project"
+                    | "version"
+                    | "git-checkout"
+            )
         )
-    )
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
@@ -271,6 +292,17 @@ mod tests {
 
     #[test]
     fn cargo_shim_passthrough_preserves_cargo_namespace_and_toolchains() {
+        assert!(cargo_proxy_passthrough(&[]));
+        assert!(cargo_proxy_passthrough(&["--verbose".into()]));
+        assert!(cargo_proxy_passthrough(&[
+            "--color".into(),
+            "always".into()
+        ]));
+        assert!(!cargo_proxy_passthrough(&[
+            "--color".into(),
+            "always".into(),
+            "build".into()
+        ]));
         assert!(!cargo_proxy_passthrough(&["cache".into(), "stats".into()]));
         assert!(cargo_proxy_passthrough(&[
             "install".into(),
@@ -293,6 +325,29 @@ mod tests {
             "--".into(),
             "--help".into()
         ]));
+        for command in [
+            "clean",
+            "config",
+            "fmt",
+            "pkgid",
+            "read-manifest",
+            "report",
+            "vendor",
+            "verify-project",
+        ] {
+            assert!(
+                cargo_proxy_passthrough(&[command.into()]),
+                "{command} should not start an mbx session"
+            );
+        }
+        for command in [
+            "build", "check", "test", "bench", "run", "rustc", "rustdoc", "doc", "clippy", "fix",
+        ] {
+            assert!(
+                !cargo_proxy_passthrough(&[command.into()]),
+                "{command} should start an mbx session"
+            );
+        }
     }
 
     #[test]
