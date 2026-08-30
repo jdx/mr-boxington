@@ -28,6 +28,7 @@ fn is_cargo_shim_path(path: &OsStr) -> bool {
 /// Run an invocation received through the persistent Cargo shim.
 pub fn run_cargo_shim() -> Result<ExitCode> {
     let current = std::env::current_exe().wrap_err("failed to locate the Cargo shim")?;
+    exclude_shim_from_path(&current)?;
     let real_cargo = resolve_real_cargo(&current)?;
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     if mbx_disabled() || cargo_proxy_passthrough(&arguments) {
@@ -51,9 +52,7 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
                 .collect::<Vec<_>>(),
         );
     }
-    // Every probe and the final child must name Cargo directly. Leaving the
-    // shim on PATH is harmless once CARGO is absolute and avoids mutating the
-    // environment inherited by build scripts.
+    // Every probe and the final child must name Cargo directly.
     unsafe { std::env::set_var("CARGO", &real_cargo) };
     let (config, settings) = Config::load_for_cli()?;
     super::cargo::run(&config, &settings, &string_arguments)
@@ -140,11 +139,33 @@ pub(super) fn prepare_explicit_cargo() -> Result<()> {
     if !shim.is_file() {
         return Ok(());
     }
+    exclude_shim_from_path(&shim)?;
     let cargo = resolve_real_cargo(&shim)?;
     // SAFETY: CLI dispatch is single-threaded here, before the cache session
     // or any child process has started.
     unsafe { std::env::set_var("CARGO", cargo) };
     Ok(())
+}
+
+fn exclude_shim_from_path(shim: &Path) -> Result<()> {
+    let Some(path) = std::env::var_os("PATH") else {
+        return Ok(());
+    };
+    let path = path_without_shim(shim, &path)?;
+    // SAFETY: CLI dispatch is single-threaded here, before any child process
+    // or cache session has started.
+    unsafe { std::env::set_var("PATH", path) };
+    Ok(())
+}
+
+fn path_without_shim(shim: &Path, path: &OsStr) -> Result<OsString> {
+    let Some(shim_dir) = shim.parent() else {
+        return Ok(path.to_owned());
+    };
+    std::env::join_paths(
+        std::env::split_paths(path).filter(|directory| !same_path(directory, shim_dir)),
+    )
+    .map_err(Into::into)
 }
 
 fn resolve_real_cargo(current: &Path) -> Result<OsString> {
@@ -289,6 +310,23 @@ mod tests {
         assert_eq!(
             configured_real_cargo(&shim, Some(real.as_os_str())),
             Some(real.into_os_string())
+        );
+    }
+
+    #[test]
+    fn cargo_resolution_removes_the_shim_directory_from_child_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let shim_dir = directory.path().join("shim");
+        let real_dir = directory.path().join("real");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let name = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+        let shim = shim_dir.join(name);
+        let path = std::env::join_paths([&shim_dir, &real_dir]).unwrap();
+
+        assert_eq!(
+            std::env::split_paths(&path_without_shim(&shim, &path).unwrap()).collect::<Vec<_>>(),
+            vec![real_dir]
         );
     }
 
