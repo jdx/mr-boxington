@@ -293,10 +293,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                             context,
                             &flight.invocation,
                             &prediction.payload,
-                            // A promise is not part of this task's manifest.
-                            // Record a successful restore so the next build
-                            // does not need the ephemeral promise again.
-                            None,
+                            Some(&prediction.action),
                             true,
                             &mut action_lookup_attempted,
                             learned_enabled,
@@ -649,6 +646,7 @@ fn restore_predicted_result(
         context,
         &invocation_digest,
         &prediction.payload,
+        Some(&prediction.action),
         restore_outputs,
         action_lookup_attempted,
         learned_enabled,
@@ -669,6 +667,7 @@ fn restore_prediction_payload(
     mut context: ActionContext,
     invocation_digest: &CacheDigest,
     payload: &str,
+    expected_action: Option<&CacheDigest>,
     restore_outputs: bool,
     action_lookup_attempted: &mut bool,
     learned_enabled: bool,
@@ -703,6 +702,9 @@ fn restore_prediction_payload(
     )?;
     match restored {
         Some((action, mut cached)) => {
+            if expected_action.is_some_and(|expected| expected != &action) {
+                bail!("the action prediction no longer matches its predicted inputs");
+            }
             cached.restore.avoided_compiler_duration_ns = input_prediction.compiler_duration_ns;
             if restore_outputs {
                 record_action_hit(&action, cached.restore, invocation.crate_name());
@@ -1032,6 +1034,7 @@ fn restore_flight_prediction(
         context,
         invocation_digest,
         payload,
+        None,
         true,
         action_lookup_attempted,
         learned_enabled,

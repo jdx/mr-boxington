@@ -109,7 +109,14 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         };
         if let Some(cached) = restored {
             if !verify {
-                record_prediction(&task, &invocation_digest, &action.digest, &prediction, None);
+                record_prediction(
+                    &task,
+                    &invocation_digest,
+                    &action.digest,
+                    &prediction,
+                    None,
+                    None,
+                );
                 replay_bytes(&cached.stdout, &cached.stderr)?;
                 record_action_hit(
                     &action.digest,
