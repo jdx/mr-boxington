@@ -1077,10 +1077,11 @@ fn build_script_execution_and_out_dir_restore_across_checkouts() {
         store.path(),
         &reports.path().join("first.json"),
     );
-    let warm = build(
+    let (warm, stderr) = build_with(
         second.path(),
         store.path(),
         &reports.path().join("second.json"),
+        &[],
     );
 
     assert_eq!(
@@ -1089,7 +1090,7 @@ fn build_script_execution_and_out_dir_restore_across_checkouts() {
     );
     assert!(
         !second.path().join("runs").exists(),
-        "the second checkout ran its build script instead of restoring it"
+        "the second checkout ran its build script instead of restoring it: {warm}\n{stderr}"
     );
     let header = second
         .path()

@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 #[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::path::Path;
 
 /// Serve a persistent Cargo wrapper directly from the local store.
