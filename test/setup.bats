@@ -38,10 +38,11 @@ EOF
   assert_file_executable "$MBX_SHIM_DIR/cargo"
   assert_output --partial "export PATH=\"$MBX_SHIM_DIR"
   assert_output --partial ':$PATH"'
-  rm "$MBX_SHIM_DIR/cargo"
-  run env SHELL=/usr/bin/fish "$MBX_BIN" setup
+  local fish_shim_dir="$BATS_TEST_TMPDIR/Application Support/mbx/bin"
+  run env SHELL=/usr/bin/fish MBX_TEST_SHIM_DIR="$fish_shim_dir" "$MBX_BIN" setup
   assert_success
-  assert_output --partial "fish_add_path $MBX_SHIM_DIR"
+  assert_file_executable "$fish_shim_dir/cargo"
+  assert_output --partial "set -gx PATH '$fish_shim_dir' \$PATH"
   assert_output --partial "does not edit shell startup files"
 }
 
@@ -112,7 +113,7 @@ EOF
   assert_file_contains "$mise_log" "config set --append env._.path"
 
   run env PATH="$fake_bin:$PATH" MBX_TEST_MISE_LOG="$mise_log" \
-    MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR" "$MBX_BIN" setup --global --uninstall
+    MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR" "$MBX_BIN" setup --uninstall
   assert_success
   assert_file_contains "$mise_log" "config set --remove --global env._.path"
 }

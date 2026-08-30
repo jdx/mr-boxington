@@ -136,10 +136,8 @@ pub(super) fn setup_at_action(
             return Ok(ExitCode::FAILURE);
         }
         SetupAction::Uninstall => {
-            let mut activation_removed = true;
-            if !matches!(scope, MiseScope::None) {
-                activation_removed = update_mise_path(scope, "--remove", &configured_path)?;
-            }
+            let activation_removed = !matches!(scope, MiseScope::None)
+                && update_mise_path(scope, "--remove", &configured_path)?;
             if activation_removed {
                 println!(
                     "removed mbx Cargo activation; {} was left in place for other scopes",
@@ -198,6 +196,9 @@ fn setup_scope(args: &SetupArgs, action: SetupAction, shim_exists: bool) -> Resu
         } else {
             MiseScope::None
         });
+    }
+    if action == SetupAction::Uninstall && command_exists("mise") {
+        return Ok(MiseScope::Global);
     }
     if action != SetupAction::Install || shim_exists || !command_exists("mise") {
         return Ok(MiseScope::None);
@@ -374,7 +375,7 @@ fn mise_path_file_is_configured(config: &Path, path: &str) -> Result<bool> {
 }
 
 fn print_manual_activation(path: &Path) {
-    let path = path.display();
+    let path = path.display().to_string();
     if cfg!(windows) {
         println!("prepend the shim for this PowerShell session:");
         println!("  $env:Path = \"{path};$env:Path\"");
@@ -386,7 +387,7 @@ fn print_manual_activation(path: &Path) {
             .and_then(OsStr::to_str);
         println!("prepend the Cargo shim to PATH in your shell:");
         match shell {
-            Some("fish") => println!("  fish_add_path {path}"),
+            Some("fish") => println!("  set -gx PATH {} $PATH", fish_quote(&path)),
             Some("nu") | Some("nushell") => {
                 println!("  $env.PATH = ($env.PATH | prepend '{path}')")
             }
@@ -394,6 +395,10 @@ fn print_manual_activation(path: &Path) {
         }
     }
     println!("mbx does not edit shell startup files");
+}
+
+fn fish_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
 pub(super) fn same_file_contents(left: &Path, right: &Path) -> Result<bool> {
