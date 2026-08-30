@@ -26,8 +26,6 @@ const IDENTITY_ENVIRONMENT: &[&str] = &[
     "LIB",
     "UCRTVersion",
     "UniversalCRTSdkDir",
-    "VSCMD_ARG_HOST_ARCH",
-    "VSCMD_ARG_TGT_ARCH",
     "VCToolsInstallDir",
     "VCToolsVersion",
     "WindowsSdkDir",
