@@ -37,7 +37,7 @@ use client::validate_handshake_response;
 use client::{request_agent_at, request_standalone_agent};
 pub(crate) use diagnostics::{note, report_shim_warning, reserve_stderr_for_compiler};
 use server::spawn_server;
-use shims::{CC_CRATE_ENV, CcShims, install_cc_shims, install_session_shim};
+use shims::{CC_CRATE_ENV, CcShims, install_cc_shims, install_session_shims};
 pub use shims::{
     PathShims, ShimLink, install_path_shims, install_shim, install_shim_named, shim_file_name,
 };
@@ -53,6 +53,7 @@ pub(crate) use stats::session_was_active;
 use stats::{cache_misses, should_display_stats, stale_manifest_note, write_stats_report};
 
 pub const RUSTC_SHIM_STEM: &str = "mbx-rustc";
+pub const RUSTDOC_SHIM_STEM: &str = "mbx-rustdoc";
 pub const CC_SHIM_STEM: &str = "mbx-cc";
 pub const CXX_SHIM_STEM: &str = "mbx-cxx";
 pub(crate) const PATH_SHIMS_ENV: &str = "MBX_CC_SHIM_COMPILERS";
@@ -68,6 +69,7 @@ pub const CACHE_LINKS_ENV: &str = "MBX_CACHE_LINKS";
 pub(crate) const WORKSPACE_ROOT_ENV: &str = "MBX_WORKSPACE_ROOT";
 pub(crate) const TARGET_DIR_ENV: &str = "MBX_TARGET_DIR";
 const PREVIOUS_RUSTC_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WRAPPER";
+const REAL_RUSTDOC_ENV: &str = "MBX_REAL_RUSTDOC";
 pub(crate) const BYPASS_LOG_ENV: &str = "MBX_BYPASS_LOG";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg(unix)]
@@ -77,6 +79,7 @@ static SHIM_STAGING_NONCE: AtomicU64 = AtomicU64::new(0);
 pub struct CacheSession {
     socket: String,
     rustc_shim: PathBuf,
+    rustdoc_shim: PathBuf,
     cc_shims: Option<CcShims>,
     staging: PathBuf,
     verify: bool,
@@ -99,7 +102,7 @@ impl CacheSession {
     /// `session_dir` holds the shim, socket, and staging directory, and is
     /// expected to be a temporary directory owned by the caller.
     pub async fn start(session_dir: &Path, config: &Config) -> Result<Self> {
-        let shim = install_session_shim(session_dir)?;
+        let (shim, rustdoc_shim) = install_session_shims(session_dir)?;
         let cc_shims = if config.cc {
             // Build systems such as CMake persist HOST_CC as an absolute
             // compiler path. Keep the C/C++ shims outside the temporary
@@ -134,6 +137,7 @@ impl CacheSession {
         Ok(Self {
             socket,
             rustc_shim: shim,
+            rustdoc_shim,
             cc_shims,
             staging,
             verify: config.verify,
@@ -231,6 +235,16 @@ impl CacheSession {
             );
             environment.insert(PREVIOUS_RUSTC_WRAPPER_ENV.into(), previous);
         }
+        let rustdoc = environment
+            .get("RUSTDOC")
+            .cloned()
+            .or_else(|| std::env::var("RUSTDOC").ok())
+            .unwrap_or_else(|| "rustdoc".into());
+        environment.insert(REAL_RUSTDOC_ENV.into(), rustdoc);
+        environment.insert(
+            "RUSTDOC".into(),
+            self.rustdoc_shim.to_string_lossy().into_owned(),
+        );
         self.begin_cc(environment);
         if self.incremental {
             // Hand the decision back to cargo, which compiles local packages
@@ -635,6 +649,44 @@ pub fn is_rustc_shim() -> bool {
         .map(Path::new)
         .and_then(Path::file_stem)
         .is_some_and(|stem| stem == OsStr::new(RUSTC_SHIM_STEM))
+}
+
+/// Whether this process was invoked as the rustdoc shim.
+pub fn is_rustdoc_shim() -> bool {
+    std::env::args_os()
+        .next()
+        .as_deref()
+        .map(Path::new)
+        .and_then(Path::file_stem)
+        .is_some_and(|stem| stem == OsStr::new(RUSTDOC_SHIM_STEM))
+}
+
+/// Ultra-early argv0 path used by Cargo's `RUSTDOC` integration.
+pub fn run_rustdoc_shim() -> ExitCode {
+    let rustdoc = std::env::var_os(REAL_RUSTDOC_ENV).unwrap_or_else(|| "rustdoc".into());
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    match crate::rustdoc::document(&rustdoc, &arguments) {
+        Ok(code) => code,
+        Err(error) => {
+            let _ = request_agent(&[AgentRequest::RecordBypass {
+                kind: "rustdoc".into(),
+            }]);
+            #[cfg(debug_assertions)]
+            eprintln!("mbx[warning]: rustdoc cache bypassed: {error:#}");
+            run_transparent_rustdoc(rustdoc, arguments)
+        }
+    }
+}
+
+fn run_transparent_rustdoc(rustdoc: OsString, arguments: Vec<OsString>) -> ExitCode {
+    let status = Command::new(&rustdoc).args(arguments).status();
+    match status {
+        Ok(status) => ExitCode::from(u8::try_from(status.code().unwrap_or(1)).unwrap_or(1)),
+        Err(error) => {
+            eprintln!("mbx[error]: the rustdoc shim failed to execute rustdoc: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Compiler names the standalone shim directory stands in for, and the

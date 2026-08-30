@@ -163,6 +163,25 @@ fn build(project: &Path, store: &Path, report: &Path) -> serde_json::Value {
     build_with(project, store, report, &[]).0
 }
 
+fn document(project: &Path, store: &Path, report: &Path) -> serde_json::Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        .current_dir(project)
+        .args(["doc", "--offline", "--no-deps"])
+        .env("MBX_CACHE_DIR", store)
+        .env("MBX_STATS_REPORT", report)
+        .env("MBX_TARGET_VIEWS", "0")
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .expect("mbx should run");
+    assert!(
+        output.status.success(),
+        "documentation failed ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap()
+}
+
 /// Build as `build` does, with `settings` added to the environment.
 ///
 /// Returns what the build said on stderr alongside its statistics, because some
@@ -274,6 +293,40 @@ fn count(stats: &serde_json::Value, field: &str) -> u64 {
     stats[field]
         .as_u64()
         .unwrap_or_else(|| panic!("{field} should be a number"))
+}
+
+#[test]
+fn rustdoc_pages_restore_and_rebuild_the_shared_index() {
+    let store = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_dependent_project(first.path());
+    write_dependent_project(second.path());
+
+    let cold = document(
+        first.path(),
+        store.path(),
+        &reports.path().join("cold-doc.json"),
+    );
+    assert!(
+        count(&cold, "misses") >= 2,
+        "both crates should render: {cold}"
+    );
+    let warm = document(
+        second.path(),
+        store.path(),
+        &reports.path().join("warm-doc.json"),
+    );
+
+    assert!(count(&warm, "hits") >= 2, "rustdoc should restore: {warm}");
+    assert!(second.path().join("target/doc/base/index.html").is_file());
+    assert!(second.path().join("target/doc/above/index.html").is_file());
+    let index = std::fs::read_to_string(second.path().join("target/doc/crates.js")).unwrap();
+    assert!(
+        index.contains("base") && index.contains("above"),
+        "the finalized index should name both crates"
+    );
 }
 
 /// Remove the outputs behind a target link so the next build must restore.

@@ -1,6 +1,8 @@
 #[cfg(unix)]
 use super::SHIM_STAGING_NONCE;
-use super::{PATH_SHIM_NAMES, REAL_CC_ENV, REAL_CXX_ENV, RUSTC_SHIM_STEM, is_same_binary};
+use super::{
+    PATH_SHIM_NAMES, REAL_CC_ENV, REAL_CXX_ENV, RUSTC_SHIM_STEM, RUSTDOC_SHIM_STEM, is_same_binary,
+};
 use eyre::{Context, Result};
 use log::debug;
 use mbx_cache_cc::CcLanguage;
@@ -366,9 +368,16 @@ fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-pub(super) fn install_session_shim(session_dir: &Path) -> Result<PathBuf> {
+pub(super) fn install_session_shims(session_dir: &Path) -> Result<(PathBuf, PathBuf)> {
     let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
-    install_shim(&executable, session_dir, ShimLink::Tracking)
+    let rustc = install_shim(&executable, session_dir, ShimLink::Tracking)?;
+    let rustdoc = install_shim_named(
+        &executable,
+        session_dir,
+        RUSTDOC_SHIM_STEM,
+        ShimLink::Tracking,
+    )?;
+    Ok((rustc, rustdoc))
 }
 
 /// How an installed shim refers to the mbx binary behind it.
