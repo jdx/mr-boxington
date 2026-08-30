@@ -522,6 +522,23 @@ impl CacheAgent {
 
     async fn begin_task_with_remote_errors(&self, task: &str, strict: bool) -> Result<String> {
         validate_task_identity(task)?;
+        // The local manifest is already enough to start useful work. Do not
+        // leave those predictions idle while a high-latency remote answers the
+        // manifest lookup; the authoritative snapshot is loaded again below
+        // before it is merged, so another process can still update it while
+        // this request is in flight.
+        let early_predictions = {
+            let _write_guard = self.manifest_write_lock.lock().unwrap();
+            let _file_guard = self.lock_task_manifest(task)?;
+            self.load_task_manifest(task)?
+                .map(|manifest| manifest.predictions)
+                .unwrap_or_default()
+        };
+        let early_actions: BTreeSet<_> = early_predictions
+            .iter()
+            .map(|prediction| prediction.action.clone())
+            .collect();
+        self.spawn_prefetch_predictions(early_predictions);
         let (remote_manifest, mut remote_etag) = if self.remote_mode.reads() {
             match self.get_remote_task_manifest(task).await {
                 Ok(Some((manifest, etag))) => (Some(manifest), Some(etag)),
@@ -591,7 +608,15 @@ impl CacheAgent {
             state.predictions.len().try_into().unwrap_or(u64::MAX),
             Ordering::Relaxed,
         );
-        let predictions = state.predictions.values().cloned().collect();
+        // The early local wave already owns these actions. Only launch a
+        // second wave for predictions learned from the remote or from a local
+        // writer that committed while its lookup was in flight.
+        let predictions = state
+            .predictions
+            .values()
+            .filter(|prediction| !early_actions.contains(&prediction.action))
+            .cloned()
+            .collect();
         self.task_actions.lock().unwrap().insert(run.clone(), state);
         self.spawn_prefetch_predictions(predictions);
         Ok(run)
