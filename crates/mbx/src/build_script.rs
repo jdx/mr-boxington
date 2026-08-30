@@ -85,9 +85,6 @@ pub(crate) fn install(executable: &Path, binary_action: &CacheDigest) -> Result<
 
     let mbx = std::env::current_exe().wrap_err("failed to locate the mbx shim")?;
     let _ = std::fs::remove_file(executable);
-    #[cfg(unix)]
-    let installed = std::os::unix::fs::symlink(&mbx, executable);
-    #[cfg(not(unix))]
     let installed = std::fs::copy(&mbx, executable).map(|_| ());
     if let Err(error) = installed {
         let _ = std::fs::rename(&real, executable);
