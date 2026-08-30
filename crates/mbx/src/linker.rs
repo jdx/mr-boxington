@@ -26,6 +26,8 @@ const IDENTITY_ENVIRONMENT: &[&str] = &[
     "LIB",
     "UCRTVersion",
     "UniversalCRTSdkDir",
+    "VSCMD_ARG_HOST_ARCH",
+    "VSCMD_ARG_TGT_ARCH",
     "VCToolsInstallDir",
     "VCToolsVersion",
     "WindowsSdkDir",
@@ -116,7 +118,7 @@ pub(crate) fn identity_for(override_linker: Option<&Path>) -> Result<LinkerIdent
         which::which(linker)
             .wrap_err_with(|| format!("failed to find linker `{}`", linker.display()))?
     } else if cfg!(windows) {
-        which::which("link.exe").wrap_err("failed to find the linker `link.exe`")?
+        msvc_tool("link.exe").wrap_err("failed to find the linker `link.exe`")?
     } else {
         which::which("cc").wrap_err("failed to find the linker driver `cc`")?
     };
@@ -196,8 +198,8 @@ fn probe_windows(linker: &Path) -> Result<LinkerIdentity> {
         .unwrap_or_default()
         .trim()
         .to_owned();
-    let cl = which::which("cl.exe")
-        .wrap_err("failed to find `cl.exe` for the MSVC toolchain identity")?;
+    let cl =
+        msvc_tool("cl.exe").wrap_err("failed to find `cl.exe` for the MSVC toolchain identity")?;
     let compiler_version = run_allowing_status(&cl, &["/Bv"])?;
     let crt_objects = windows_crt_objects()?;
     let sdk = windows_sdk_identity()?;
@@ -212,6 +214,43 @@ fn probe_windows(linker: &Path) -> Result<LinkerIdentity> {
         sdk: Some(sdk),
         deployment_target: None,
     })
+}
+
+/// Locate one MSVC tool in the developer environment rustc itself uses.
+///
+/// GitHub's Windows runners do not consistently put `cl.exe` on the Git Bash
+/// `PATH`, and that path may contain an unrelated GNU `link.exe`. Visual
+/// Studio's environment variables name the selected toolset unambiguously.
+fn msvc_tool(name: &str) -> Result<PathBuf> {
+    if let Some(root) = std::env::var_os("VCToolsInstallDir") {
+        let host = std::env::var("VSCMD_ARG_HOST_ARCH")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(native_msvc_arch);
+        let target = std::env::var("VSCMD_ARG_TGT_ARCH")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(native_msvc_arch);
+        let candidate = PathBuf::from(root)
+            .join("bin")
+            .join(format!("Host{host}"))
+            .join(target)
+            .join(name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Ok(which::which(name)?)
+}
+
+fn native_msvc_arch() -> String {
+    match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "x86" => "x86",
+        "aarch64" => "arm64",
+        other => other,
+    }
+    .to_owned()
 }
 
 fn run_allowing_status(program: &Path, arguments: &[&str]) -> Result<String> {
