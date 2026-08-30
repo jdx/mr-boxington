@@ -434,6 +434,35 @@ impl RustcInvocation {
         )
     }
 
+    /// Linker selected with `-C linker`, if the invocation overrides rustc's
+    /// platform default.
+    pub fn linker_override(&self) -> Option<&Path> {
+        self.arguments.iter().find_map(|argument| {
+            let Argument::Plain(value) = argument else {
+                return None;
+            };
+            value.strip_prefix("--codegen=linker=").map(Path::new)
+        })
+    }
+
+    fn emits_windows_pdb(&self) -> bool {
+        if !cfg!(windows) || !self.links_natively() {
+            return false;
+        }
+        let mut enabled = false;
+        for argument in &self.arguments {
+            let Argument::Plain(value) = argument else {
+                continue;
+            };
+            if value == "-g" {
+                enabled = true;
+            } else if let Some(value) = value.strip_prefix("--codegen=debuginfo=") {
+                enabled = !matches!(value, "0" | "none");
+            }
+        }
+        enabled
+    }
+
     /// Whether the contents of native search directories cannot reach this
     /// invocation's outputs.
     ///
@@ -565,7 +594,7 @@ impl RustcInvocation {
                 "link" => match self.link_output {
                     LinkOutput::Library => ("lib", "rlib"),
                     LinkOutput::WasmExecutable => ("", "wasm"),
-                    LinkOutput::NativeExecutable => ("", ""),
+                    LinkOutput::NativeExecutable => ("", std::env::consts::EXE_EXTENSION),
                     LinkOutput::NativeProcMacro => (
                         std::env::consts::DLL_PREFIX,
                         std::env::consts::DLL_SUFFIX.trim_start_matches('.'),
@@ -594,14 +623,24 @@ impl RustcInvocation {
             // so a program that answers to a library's name would be restored
             // without the permission that makes it runnable. Nothing cargo
             // emits looks like this; a hand-built invocation could.
+            let has_library_extension = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| matches!(extension, "rlib" | "rmeta"))
+                || (cfg!(windows)
+                    && path
+                        .file_stem()
+                        .and_then(|stem| Path::new(stem).extension())
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| matches!(extension, "rlib" | "rmeta")));
             if emit.kind == "link"
                 && !matches!(self.link_output, LinkOutput::Library)
-                && matches!(
-                    path.extension().and_then(|extension| extension.to_str()),
-                    Some("rlib" | "rmeta")
-                )
+                && has_library_extension
             {
                 return Err(BypassReason::AmbiguousOutputName(path));
+            }
+            if emit.kind == "link" && self.emits_windows_pdb() {
+                files.insert(path.with_extension("pdb"));
             }
             files.insert(path);
         }
@@ -1419,7 +1458,9 @@ impl<'a> Parser<'a> {
         if name == "incremental" {
             return Err(BypassReason::Incremental);
         }
-        if SUPPORTED_CODEGEN_OPTIONS.binary_search(&name).is_err() {
+        if SUPPORTED_CODEGEN_OPTIONS.binary_search(&name).is_err()
+            && !(cfg!(windows) && name == "linker")
+        {
             return Err(BypassReason::UnknownCodegenOption(name.into()));
         }
         // `-oso_prefix` names a checkout-specific path, so it is parsed
@@ -1541,6 +1582,14 @@ impl<'a> Parser<'a> {
             && let Some(option) = self.first_link_argument()
         {
             return Err(BypassReason::UnmodeledLinkArgument(option.to_owned()));
+        }
+        if self.parsed.iter().any(|argument| {
+            matches!(argument, Argument::Plain(value) if value.starts_with("--codegen=linker="))
+        }) && !matches!(
+            link_output,
+            LinkOutput::NativeExecutable | LinkOutput::NativeProcMacro
+        ) {
+            return Err(BypassReason::UnknownCodegenOption("linker".into()));
         }
         // `-oso_prefix` is modeled, but only where ld64 is the linker reading
         // it: a native macOS link. Any other linker sees an option this

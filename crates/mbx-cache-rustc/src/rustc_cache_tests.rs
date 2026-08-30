@@ -1162,10 +1162,10 @@ fn native_links_are_admitted_only_when_the_caller_models_them() {
     assert!(RustcInvocation::parse_with(&binary, native_links()).is_ok());
 }
 
-/// A linked program has no extension, and its executable bit is part of what
-/// the cache promises to restore.
+/// A linked program has the host executable extension, and its executable bit
+/// is part of what the cache promises to restore.
 #[test]
-fn a_native_program_is_named_without_an_extension() {
+fn a_native_program_uses_the_host_executable_name() {
     let working_dir = workspace();
     let invocation = RustcInvocation::parse_with(
         &args(&[
@@ -1179,13 +1179,50 @@ fn a_native_program_is_named_without_an_extension() {
         native_links(),
     )
     .unwrap();
-    let linked = working_dir.join("target/debug/deps/widget-abc123");
+    let name = if std::env::consts::EXE_EXTENSION.is_empty() {
+        "widget-abc123".into()
+    } else {
+        format!("widget-abc123.{}", std::env::consts::EXE_EXTENSION)
+    };
+    let linked = working_dir.join("target/debug/deps").join(name);
 
     let outputs = invocation.outputs(&working_dir).unwrap();
 
     assert_eq!(outputs.files, vec![linked.clone()]);
     assert!(outputs.is_executable(&linked));
     assert!(invocation.links_natively());
+}
+
+#[cfg(windows)]
+#[test]
+fn a_debug_native_program_caches_its_pdb() {
+    let working_dir = workspace();
+    let invocation = RustcInvocation::parse_with(
+        &args(&[
+            "--crate-name=widget",
+            "--test",
+            "--emit=dep-info,link",
+            "--out-dir=target/debug/deps",
+            "-Cdebuginfo=2",
+            "src/lib.rs",
+        ]),
+        native_links(),
+    )
+    .unwrap();
+
+    let outputs = invocation.outputs(&working_dir).unwrap();
+    assert!(
+        outputs
+            .files
+            .iter()
+            .any(|path| path.extension().is_some_and(|ext| ext == "exe"))
+    );
+    assert!(
+        outputs
+            .files
+            .iter()
+            .any(|path| path.extension().is_some_and(|ext| ext == "pdb"))
+    );
 }
 
 /// rustc without `--target` links for the host by construction, which is the
@@ -1242,17 +1279,27 @@ fn unportable_native_links_still_bypass() {
             "-Clink-self-contained",
             BypassReason::UnportableNativeLink("link-self-contained".into()),
         ),
-        // Not modeled at all, so it never reaches the portability question.
-        (
-            "-Clinker=/usr/bin/false",
-            BypassReason::UnknownCodegenOption("linker".into()),
-        ),
     ] {
         let arguments = args(&["--test", "--emit=dep-info,link", flag, "src/lib.rs"]);
         assert_eq!(
             RustcInvocation::parse_with(&arguments, native_links()),
             Err(expected),
             "{flag} should not be cacheable"
+        );
+    }
+
+    let linker = args(&[
+        "--test",
+        "--emit=dep-info,link",
+        "-Clinker=/usr/bin/false",
+        "src/lib.rs",
+    ]);
+    if cfg!(windows) {
+        assert!(RustcInvocation::parse_with(&linker, native_links()).is_ok());
+    } else {
+        assert_eq!(
+            RustcInvocation::parse_with(&linker, native_links()),
+            Err(BypassReason::UnknownCodegenOption("linker".into()))
         );
     }
 
@@ -1423,12 +1470,14 @@ fn a_program_named_like_a_library_is_not_cacheable() {
         "src/lib.rs",
     ]);
     let invocation = RustcInvocation::parse_with(&arguments, native_links()).unwrap();
+    let mut ambiguous = workspace().join("target/debug/deps/widget.rlib");
+    if !std::env::consts::EXE_EXTENSION.is_empty() {
+        ambiguous.set_extension(format!("rlib.{}", std::env::consts::EXE_EXTENSION));
+    }
 
     assert_eq!(
         invocation.outputs(&workspace()),
-        Err(BypassReason::AmbiguousOutputName(
-            workspace().join("target/debug/deps/widget.rlib")
-        ))
+        Err(BypassReason::AmbiguousOutputName(ambiguous))
     );
 
     // A library by that name is exactly what it claims to be.

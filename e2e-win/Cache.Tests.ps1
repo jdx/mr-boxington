@@ -57,4 +57,41 @@ fn main() {
         $LASTEXITCODE | Should -Be 0 -Because $warm
         $warm | Should -Match 'mbx\[cache\]: [1-9][0-9]* hits'
     }
+
+    It 'restores a natively linked executable' {
+        New-Item -ItemType Directory -Path src | Out-Null
+        @'
+[package]
+name = "native-link-fixture"
+version = "0.1.0"
+edition = "2024"
+'@ | Set-Content -Encoding utf8 Cargo.toml
+        'fn main() { println!("linked"); }' | Set-Content -Encoding utf8 src\main.rs
+
+        $lockfile = & cargo generate-lockfile 2>&1 | Out-String
+        $LASTEXITCODE | Should -Be 0 -Because $lockfile
+        $cold = & mbx build --release 2>&1 | Out-String
+        $LASTEXITCODE | Should -Be 0 -Because $cold
+
+        Remove-Item -Recurse -Force target
+        $warm = & mbx build --release 2>&1 | Out-String
+        $LASTEXITCODE | Should -Be 0 -Because $warm
+        $warm | Should -Match 'mbx\[cache\]: [1-9][0-9]* hits'
+        Test-Path target\release\native-link-fixture.exe | Should -BeTrue
+    }
+
+    It 'restores an MSVC object compiled through mbx exec' {
+        New-Item -ItemType Directory -Path src | Out-Null
+        'int answer(void) { return 42; }' | Set-Content -Encoding ascii src\hello.c
+
+        $cold = & mbx exec cl.exe /nologo /Z7 /Brepro /Fohello.obj /c src\hello.c 2>&1 | Out-String
+        $LASTEXITCODE | Should -Be 0 -Because $cold
+        Test-Path hello.obj | Should -BeTrue
+
+        Remove-Item hello.obj
+        $warm = & mbx exec cl.exe /nologo /Z7 /Brepro /Fohello.obj /c src\hello.c 2>&1 | Out-String
+        $LASTEXITCODE | Should -Be 0 -Because $warm
+        $warm | Should -Match 'mbx\[cache\]: 1 hit'
+        Test-Path hello.obj | Should -BeTrue
+    }
 }

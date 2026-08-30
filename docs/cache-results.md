@@ -93,7 +93,7 @@ summary lines together, and compare wall-clock time when evaluating the cache.
 
 A link mbx cannot describe always runs, so its downstream crates may have work
 to do on an otherwise warm build. Native executables, tests, and proc macros on
-Linux and macOS, plus binaries, tests, and `cdylib`s for supported self-contained
+Linux, macOS, and Windows, plus binaries, tests, and `cdylib`s for supported self-contained
 WebAssembly targets, may be restored as hits; see
 [limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
 
@@ -116,9 +116,8 @@ The usual causes, roughly in the order they show up:
   changed artifacts make crates above them miss too. See
   [limits](/limits#incremental-compilations-are-not-cached).
 - **A link could not be described.** Native executables, tests, and proc macros
-  are cached on Linux and macOS, and self-contained WebAssembly targets
-  everywhere, but native links with custom or unmodeled inputs and links built
-  on Windows still run. A rebuilt dylib can also change the keys of its
+  are cached on Linux, macOS, and Windows, and self-contained WebAssembly targets
+  everywhere, but native links with custom or unmodeled inputs still run. A rebuilt dylib can also change the keys of its
   downstream crates. `mbx explain` reports why the link bypassed; see
   [limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
 - **The inputs actually differ.** A different toolchain, feature set, profile,

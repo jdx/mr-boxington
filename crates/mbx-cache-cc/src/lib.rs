@@ -446,6 +446,9 @@ impl CcLanguage {
 
     /// Default driver name to fall back to when no real compiler is pinned.
     pub fn default_driver(self) -> &'static str {
+        if cfg!(windows) {
+            return "cl.exe";
+        }
         match self {
             Self::C => "cc",
             Self::Cxx => "c++",
@@ -462,6 +465,9 @@ pub enum CcCompilerFamily {
     Clang,
     /// Apple's clang distribution.
     AppleClang,
+    /// Microsoft's `cl.exe` driver.
+    #[cfg(windows)]
+    Msvc,
 }
 
 impl CcCompilerFamily {
@@ -471,6 +477,8 @@ impl CcCompilerFamily {
             Self::Gcc => "gcc",
             Self::Clang => "clang",
             Self::AppleClang => "apple-clang",
+            #[cfg(windows)]
+            Self::Msvc => "msvc",
         }
     }
 
@@ -480,8 +488,24 @@ impl CcCompilerFamily {
         matches!(self, Self::Gcc)
     }
 
+    /// Whether this is Microsoft's `cl.exe` driver.
+    pub fn is_msvc(self) -> bool {
+        #[cfg(windows)]
+        {
+            matches!(self, Self::Msvc)
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
     /// Classify a driver from its verbose probe output.
     pub fn classify(probe: &str) -> Result<Self, CcBypassReason> {
+        #[cfg(windows)]
+        if probe.contains("Microsoft (R) C/C++ Optimizing Compiler") {
+            return Ok(Self::Msvc);
+        }
         if probe.contains("Apple clang version") {
             Ok(Self::AppleClang)
         } else if probe.contains("clang version") {
@@ -642,6 +666,23 @@ impl CcInvocation {
         Parser::new(arguments).parse()
     }
 
+    /// Parse a command line using the syntax of `family`.
+    pub fn parse_for(
+        arguments: &[OsString],
+        family: CcCompilerFamily,
+    ) -> Result<Self, CcBypassReason> {
+        if family.is_msvc() {
+            MsvcParser::new(arguments).parse()
+        } else {
+            Self::parse(arguments)
+        }
+    }
+
+    /// Parse a command line using Microsoft `cl.exe` syntax.
+    pub fn parse_msvc(arguments: &[OsString]) -> Result<Self, CcBypassReason> {
+        MsvcParser::new(arguments).parse()
+    }
+
     /// Source file this invocation compiles.
     pub fn source(&self) -> &Path {
         &self.source
@@ -688,6 +729,25 @@ impl CcInvocation {
     /// compiler identity does not cover the C library or the platform SDK.
     pub fn dependency_arguments(&self, depfile: &Path) -> Vec<OsString> {
         vec!["-MD".into(), "-MF".into(), depfile.into()]
+    }
+
+    /// Arguments to append so a driver from `family` writes its dependency
+    /// list beside the object.
+    pub fn dependency_arguments_for(
+        &self,
+        depfile: &Path,
+        family: CcCompilerFamily,
+    ) -> Vec<OsString> {
+        if family.is_msvc() {
+            vec!["/sourceDependencies".into(), depfile.into()]
+        } else {
+            self.dependency_arguments(depfile)
+        }
+    }
+
+    /// Arguments to append so `cl.exe` writes `/sourceDependencies` JSON.
+    pub fn msvc_dependency_arguments(&self, depfile: &Path) -> Vec<OsString> {
+        vec!["/sourceDependencies".into(), depfile.into()]
     }
 
     /// Digest of the pre-input fingerprint, used to look up a prediction.
@@ -834,6 +894,18 @@ pub fn environment_inputs<F>(
 where
     F: Fn(&str) -> Option<String>,
 {
+    environment_inputs_for(lookup, sysroot, CcCompilerFamily::Clang)
+}
+
+/// Read the modeled environment for a particular compiler family.
+pub fn environment_inputs_for<F>(
+    lookup: F,
+    sysroot: Option<&Path>,
+    family: CcCompilerFamily,
+) -> Result<BTreeMap<String, Option<String>>, CcBypassReason>
+where
+    F: Fn(&str) -> Option<String>,
+{
     for name in BYPASS_ENVIRONMENT {
         if lookup(name).is_some() {
             return Err(CcBypassReason::UnsupportedEnvironment((*name).into()));
@@ -847,6 +919,24 @@ where
             continue;
         }
         environment.insert((*name).to_string(), lookup(name));
+    }
+    if family.is_msvc() {
+        // INCLUDE changes header resolution without appearing in argv. The
+        // toolset and SDK versions make the otherwise machine-local paths
+        // meaningful when action records move between hosts.
+        for name in [
+            "INCLUDE",
+            "VCToolsVersion",
+            "WindowsSDKVersion",
+            "UCRTVersion",
+        ] {
+            environment.insert(name.into(), lookup(name));
+        }
+        for name in ["CL", "_CL_"] {
+            if lookup(name).is_some() {
+                return Err(CcBypassReason::UnsupportedEnvironment(name.into()));
+            }
+        }
     }
     Ok(environment)
 }
@@ -1374,6 +1464,252 @@ impl<'a> Parser<'a> {
         }
         self.parsed.push(Argument::Plain(value.into()));
         Ok(())
+    }
+}
+
+/// Conservative parser for the command lines emitted by the `cc` crate for
+/// Microsoft's compiler. It intentionally admits only flags whose effects are
+/// either present in argv or covered by dependency discovery.
+struct MsvcParser<'a> {
+    arguments: &'a [OsString],
+    index: usize,
+    parsed: Vec<Argument>,
+    source: Option<PathBuf>,
+    output: Option<PathBuf>,
+    include_dirs: Vec<PathBuf>,
+    required_inputs: Vec<PathBuf>,
+    explicit_language: Option<CcLanguage>,
+    compiling: bool,
+}
+
+impl<'a> MsvcParser<'a> {
+    fn new(arguments: &'a [OsString]) -> Self {
+        Self {
+            arguments,
+            index: 0,
+            parsed: Vec::new(),
+            source: None,
+            output: None,
+            include_dirs: Vec::new(),
+            required_inputs: Vec::new(),
+            explicit_language: None,
+            compiling: false,
+        }
+    }
+
+    fn parse(mut self) -> Result<CcInvocation, CcBypassReason> {
+        while self.index < self.arguments.len() {
+            let value = self.current()?.to_owned();
+            self.index += 1;
+            if let Some(file) = value.strip_prefix('@') {
+                return Err(CcBypassReason::ResponseFile(file.into()));
+            }
+            if value.starts_with('/') || value.starts_with('-') {
+                self.parse_flag(&value)?;
+            } else {
+                self.add_source(&value)?;
+            }
+        }
+        if !self.compiling {
+            return Err(CcBypassReason::NotACompile);
+        }
+        let source = self.source.clone().ok_or(CcBypassReason::MissingInput)?;
+        let output = self.output.clone().ok_or(CcBypassReason::MissingOutput)?;
+        let language = self.explicit_language.unwrap_or_else(|| {
+            if source
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("c"))
+            {
+                CcLanguage::C
+            } else {
+                CcLanguage::Cxx
+            }
+        });
+        self.required_inputs.push(source.clone());
+        Ok(CcInvocation {
+            arguments: self.parsed,
+            source,
+            output,
+            include_dirs: self.include_dirs,
+            required_inputs: self.required_inputs,
+            language,
+            sysroot: None,
+        })
+    }
+
+    fn current(&self) -> Result<&str, CcBypassReason> {
+        self.arguments[self.index]
+            .to_str()
+            .ok_or(CcBypassReason::NonUtf8Argument { index: self.index })
+    }
+
+    fn value(&mut self, flag: &str, attached: &str) -> Result<String, CcBypassReason> {
+        if !attached.is_empty() {
+            return Ok(attached.into());
+        }
+        if self.index == self.arguments.len() {
+            return Err(CcBypassReason::MissingValue(flag.into()));
+        }
+        let value = self.current()?.to_owned();
+        self.index += 1;
+        Ok(value)
+    }
+
+    fn add_source(&mut self, value: &str) -> Result<(), CcBypassReason> {
+        if self.source.is_some() {
+            return Err(CcBypassReason::MultipleInputs);
+        }
+        let path = PathBuf::from(value);
+        if self.explicit_language.is_none()
+            && !path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| {
+                    matches!(
+                        value.to_ascii_lowercase().as_str(),
+                        "c" | "cc" | "cpp" | "cxx"
+                    )
+                })
+        {
+            return Err(CcBypassReason::UnsupportedLanguage(value.into()));
+        }
+        self.source = Some(path.clone());
+        self.parsed.push(Argument::Source(path));
+        Ok(())
+    }
+
+    fn parse_flag(&mut self, value: &str) -> Result<(), CcBypassReason> {
+        let option = value.trim_start_matches(['/', '-']);
+        let lower = option.to_ascii_lowercase();
+        if matches!(lower.as_str(), "?" | "help") {
+            return Err(CcBypassReason::CompilerQuery);
+        }
+        if lower == "showincludes" || lower.starts_with("sourcedependencies") {
+            return Err(CcBypassReason::CallerDependencyFlags(value.into()));
+        }
+        if matches!(lower.as_str(), "e" | "ep" | "p") {
+            return Err(CcBypassReason::NonObjectOutput(value.into()));
+        }
+        if (lower.starts_with("fa") && !lower.starts_with("favor:"))
+            || lower.starts_with("fd")
+            || lower.starts_with("zi")
+        {
+            return Err(CcBypassReason::SplitDebugOutput(value.into()));
+        }
+        if lower.starts_with("yc")
+            || lower.starts_with("yu")
+            || (lower.starts_with("fp") && !lower.starts_with("fp:"))
+        {
+            return Err(CcBypassReason::PrecompiledHeader(value.into()));
+        }
+        if lower == "link" || lower.starts_with("bt+") || lower.starts_with("analyze") {
+            return Err(CcBypassReason::ToolPassthrough(value.into()));
+        }
+        if matches!(lower.as_str(), "ld" | "ldd") {
+            return Err(CcBypassReason::NotACompile);
+        }
+        if lower == "c" {
+            self.compiling = true;
+            self.parsed.push(Argument::Plain("/c".into()));
+            return Ok(());
+        }
+        for (prefix, canonical) in [("Fo", "/Fo"), ("I", "/I"), ("FI", "/FI")] {
+            if let Some(attached) = option.strip_prefix(prefix) {
+                let path = PathBuf::from(self.value(canonical, attached)?);
+                if prefix == "Fo" {
+                    self.output = Some(path.clone());
+                } else if prefix == "I" {
+                    self.include_dirs.push(path.clone());
+                }
+                self.parsed.push(Argument::Path {
+                    flag: canonical.into(),
+                    path,
+                });
+                return Ok(());
+            }
+        }
+        if lower.starts_with("external:i") {
+            let path = PathBuf::from(self.value("/external:I", &option[10..])?);
+            self.include_dirs.push(path.clone());
+            self.parsed.push(Argument::Path {
+                flag: "/external:I".into(),
+                path,
+            });
+            return Ok(());
+        }
+        if option.starts_with("Tc") || option.starts_with("Tp") {
+            let c = option.starts_with("Tc");
+            let path = self.value(if c { "/Tc" } else { "/Tp" }, &option[2..])?;
+            self.explicit_language = Some(if c { CcLanguage::C } else { CcLanguage::Cxx });
+            return self.add_source(&path);
+        }
+        if lower.starts_with("pathmap:") {
+            let rest = &option[8..];
+            let (from, to) = rest.split_once('=').unwrap_or((rest, ""));
+            self.parsed.push(Argument::PrefixMap {
+                flag: "/pathmap".into(),
+                from: PathBuf::from(from),
+                to: to.into(),
+            });
+            return Ok(());
+        }
+        if matches!(option, "D" | "U") {
+            let definition = self.value(value, "")?;
+            self.parsed
+                .push(Argument::Plain(format!("/{option}{definition}")));
+            return Ok(());
+        }
+        // Definitions and the ordinary code-generation/diagnostic switches
+        // produced by cc-rs are self-contained text and can be keyed verbatim.
+        let definition = option.starts_with('D') || option.starts_with('U');
+        let warning = matches!(lower.as_str(), "wall" | "wx" | "wx-")
+            || lower
+                .strip_prefix('w')
+                .is_some_and(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+            || ["wd", "we", "wo"].iter().any(|prefix| {
+                lower
+                    .strip_prefix(prefix)
+                    .is_some_and(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+            });
+        let admitted = definition
+            || warning
+            || lower.starts_with("std:")
+            || lower.starts_with("arch:")
+            || lower.starts_with("favor:")
+            || lower.starts_with("volatile:")
+            || lower.starts_with("fp:")
+            || lower.starts_with("eh")
+            || lower.starts_with('o')
+            || lower.starts_with("ob")
+            || lower.starts_with("oi")
+            || lower.starts_with("ot")
+            || lower.starts_with("oy")
+            || lower.starts_with("gs")
+            || lower.starts_with("gr")
+            || lower.starts_with("gy")
+            || lower.starts_with("gw")
+            || lower.starts_with("gl")
+            || lower.starts_with("zc:")
+            || lower.starts_with("diagnostics:")
+            || matches!(
+                lower.as_str(),
+                "nologo"
+                    | "brepro"
+                    | "bigobj"
+                    | "utf-8"
+                    | "permissive-"
+                    | "z7"
+                    | "md"
+                    | "mdd"
+                    | "mt"
+                    | "mtd"
+            );
+        if admitted {
+            self.parsed.push(Argument::Plain(value.into()));
+            return Ok(());
+        }
+        Err(CcBypassReason::UnknownFlag(value.into()))
     }
 }
 

@@ -3345,16 +3345,27 @@ async fn memoizes_client_observed_executable_identities() {
     ));
 }
 
-/// A linker driver's identity depends on the SDK it builds against, so those
-/// names key an identity too. Everything else stays refused: a name that does
-/// not select what the probe reports would let one key stand for two answers.
+/// A linker driver's identity depends on the SDK and toolchain environment it
+/// builds against, so those names key an identity too. Everything else stays
+/// refused: a name that does not select what the probe reports would let one
+/// key stand for two answers.
 #[tokio::test]
 async fn identity_keys_admit_only_names_that_select_the_answer() {
     let directory = tempfile::tempdir().unwrap();
     let agent = CacheAgent::new(directory.path(), "test-version");
     let executable = directory.path().join("cc");
 
-    for name in ["SDKROOT", "MACOSX_DEPLOYMENT_TARGET"] {
+    for name in [
+        "SDKROOT",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "LIB",
+        "UCRTVersion",
+        "UniversalCRTSdkDir",
+        "VCToolsInstallDir",
+        "VCToolsVersion",
+        "WindowsSdkDir",
+        "WindowsSDKVersion",
+    ] {
         let response = agent
             .respond(AgentRequest::StoreExecutableIdentity {
                 executable: executable.clone(),

@@ -18,7 +18,7 @@ scenario in [benchmarks](/benchmarks#cold).
 ## Why does a fully warm build still take time?
 
 Links mbx cannot describe always run — a large binary re-links even when every
-compilation hit. Host binaries and tests are restored on Linux and macOS, and
+compilation hit. Host binaries and tests are restored on Linux, macOS, and Windows, and
 self-contained WebAssembly targets everywhere; the rest is
 [limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
 

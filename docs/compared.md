@@ -48,7 +48,7 @@ it is safe to let CI write.
   publish cannot, and one that may publish still cannot rewrite or remove
   what an earlier build wrote.
 
-If you need CUDA, distributed compilation, or C and C++ on Windows and MSVC,
+If you need CUDA or distributed compilation,
 sccache is the right tool. Both wrap rustc through `RUSTC_WRAPPER`, so they
 cannot be combined for the same build.
 
@@ -65,7 +65,7 @@ requests. The differences below are mostly those three goals.
 
 Like mbx, kache is a content-addressed `RUSTC_WRAPPER` cache built for sharing
 compilations across worktrees, with C and C++ compiler shims, S3-compatible
-and filesystem remotes, and executable caching on Linux and macOS.
+and filesystem remotes, and executable caching on Linux, macOS, and Windows.
 
 - **Nothing to install or keep running.** `kache init` installs an OS service
   by default, with a `--no-service` opt-out. mbx starts an in-process agent
@@ -115,16 +115,16 @@ and filesystem remotes, and executable caching on Linux and macOS.
   kache installs them alongside its service, so once they are on `PATH` every
   build on the machine goes through the cache; mbx puts them on `PATH` for a
   single [`mbx exec`](/standalone-builds) command, so a build is cached when
-  it asks to be and untouched otherwise. kache covers Windows;
-  mbx shims only the plain Unix driver names.
-- **Linked binaries.** Both cache them on Linux and macOS. mbx keys on the
+  it asks to be and untouched otherwise. Both cover Windows; mbx intercepts
+  `cl.exe` there and the plain gcc/clang driver names on Unix.
+- **Linked binaries.** Both cache them on Linux, macOS, and Windows. mbx keys on the
   resolved linker, startup objects, libc, and SDK rather than dep-info alone,
   because a binary linked against a different libc or SDK is a different
   binary. On a host mbx cannot describe that precisely, it links normally
   rather than handing back one it cannot vouch for.
 
-If you build on Windows, or want the C and C++ shims installed once rather
-than wrapping the commands that should use them, kache is worth evaluating.
+If you want the C and C++ shims installed once rather than wrapping the
+commands that should use them, kache is worth evaluating.
 Both tools wrap rustc through `RUSTC_WRAPPER`, so they cannot be combined for
 the same build.
 

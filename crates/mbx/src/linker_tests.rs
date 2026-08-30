@@ -140,6 +140,26 @@ fn a_platform_that_places_nothing_is_still_identified() {
     assert!(probe_files(&probes, |_| None).unwrap().is_empty());
 }
 
+#[test]
+fn a_windows_identity_requires_toolset_sdk_and_both_crts() {
+    let version = windows_sdk_identity_for(|name| match name {
+        "VCToolsVersion" => Some("14.40".into()),
+        "WindowsSDKVersion" => Some("10.0.26100.0".into()),
+        _ => None,
+    })
+    .unwrap();
+    assert!(version.contains("VCToolsVersion=14.40"));
+    assert!(windows_sdk_identity_for(|_| None).is_err());
+
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("vcruntime.lib"), b"vc runtime").unwrap();
+    std::fs::write(directory.path().join("ucrt.lib"), b"universal crt").unwrap();
+    let identity = windows_crt_objects_in(&[directory.path().to_path_buf()]).unwrap();
+    assert_eq!(identity.len(), 2);
+    std::fs::remove_file(directory.path().join("ucrt.lib")).unwrap();
+    assert!(windows_crt_objects_in(&[directory.path().to_path_buf()]).is_err());
+}
+
 /// `SDKROOT` names the SDK a link is made against, so it has to be the SDK
 /// every part of the identity describes. Reporting the default SDK's version
 /// beside another SDK's path would put an SDK nothing was built against in the
@@ -169,7 +189,7 @@ fn the_sdk_identity_follows_sdkroot() {
 fn the_platform_gate_does_not_depend_on_who_set_the_variable() {
     assert_eq!(
         crate::session::cache_links_supported(),
-        cfg!(any(target_os = "linux", target_os = "macos"))
+        cfg!(any(target_os = "linux", target_os = "macos", windows))
     );
     // Whatever the environment says, an unsupported host never admits links.
     if !crate::session::cache_links_supported() {

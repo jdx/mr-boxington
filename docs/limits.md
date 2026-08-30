@@ -30,16 +30,17 @@ linker, so it is cached on every platform:
 mbx caches those links because all explicit artifacts are modeled inputs and
 the linker, CRT objects, and bundled libc are covered by the Rust toolchain
 identity. Custom target specifications, external WebAssembly toolchains,
-native libraries, custom linkers, disabled WASI CRT bundling, and
+native libraries, unrecognized custom linkers, disabled WASI CRT bundling, and
 non-affirmative `link-self-contained` modes remain uncached.
 
-Host test binaries and executables are cached on Linux and macOS, by putting
+Host test binaries and executables are cached on Linux, macOS, and Windows, by putting
 the rest of the link into the key: the resolved `cc` driver and its version,
 the linker it selects, the startup objects and libc it resolves (hashed), and
-on macOS the SDK. Two hosts that differ in any of those produce different keys
+on macOS the SDK. On Windows the key identifies `link.exe` or `lld-link`, the
+MSVC toolset and Windows SDK versions, and the selected VC and Universal CRT
+libraries. Two hosts that differ in any of those produce different keys
 and miss, rather than sharing a binary neither of them built. `cache_links`
-(`MBX_CACHE_LINKS=0`) turns it off; Windows has no such tier, and a build
-there links its programs as it always did.
+(`MBX_CACHE_LINKS=0`) turns it off.
 
 Some hosts cannot be described at all. mbx asks the driver to place a startup
 object and a libc, and a host where neither resolves gets no linker identity
@@ -97,11 +98,12 @@ mbx caches the C and C++ a cargo build script compiles for the host through
 the `cc` crate, and the C and C++ of a command run under
 [`mbx exec`](/standalone-builds), which puts shims for the plain driver names
 on `PATH` for that command alone. A compile mbx never stood in for — one
-outside both paths, or on Windows, where no shims are installed — is not
+outside both paths — is not
 reached. Neither are cross compilations: a cargo build installs the shims as
 `HOST_CC` and `HOST_CXX`, which the `cc` crate consults only when host and
 target agree, and `mbx exec` shims only `cc`, `c++`, `gcc`, `g++`, `clang`,
-and `clang++`, leaving a versioned toolchain to the build that chose it.
+and `clang++` on Unix, plus `cl.exe` on Windows, leaving a versioned toolchain
+to the build that chose it.
 
 A cross compile is cached when the build names its own compiler, through
 `CC_<target>`, `CXX_<target>`, `TARGET_CC`, or `TARGET_CXX`: mbx wraps what
@@ -111,11 +113,12 @@ tables — guessing wrong would not cost a cache hit, it would build the object
 with the wrong compiler. A value that is a command rather than a path, such as
 `ccache gcc`, is left alone for the same reason.
 
-Only a plain single-source `-c` compile through a gcc-style or clang-style
+Only a plain single-source object compile through a gcc-, clang-, or MSVC-style
 driver is admitted. Linking, preprocessing, assembly, Objective-C, precompiled
 headers, coverage instrumentation, compiler plugins, options forwarded to a
-sub-tool with `-Wp,`/`-Wa,`/`-Wl,`/`-Xclang`, response files, and MSVC all
-bypass, as does any flag the adapter does not model. A source or header that
+sub-tool with `-Wp,`/`-Wa,`/`-Wl,`/`-Xclang`, and response files all bypass,
+as does any flag the adapter does not model. MSVC compiler PDBs, modules, and
+other extra outputs also bypass. A source or header that
 expands `__DATE__`, `__TIME__`, or `__TIMESTAMP__` bypasses too: its object is
 not a function of its inputs.
 

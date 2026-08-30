@@ -1531,7 +1531,17 @@ impl CacheAgent {
         if !environment.keys().all(|name| {
             matches!(
                 name.as_str(),
-                "RUSTUP_HOME" | "RUSTUP_TOOLCHAIN" | "SDKROOT" | "MACOSX_DEPLOYMENT_TARGET"
+                "RUSTUP_HOME"
+                    | "RUSTUP_TOOLCHAIN"
+                    | "SDKROOT"
+                    | "MACOSX_DEPLOYMENT_TARGET"
+                    | "LIB"
+                    | "UCRTVersion"
+                    | "UniversalCRTSdkDir"
+                    | "VCToolsInstallDir"
+                    | "VCToolsVersion"
+                    | "WindowsSdkDir"
+                    | "WindowsSDKVersion"
             )
         }) {
             bail!("executable identity contains an unsupported environment variable");

@@ -446,3 +446,23 @@ fn a_vouched_cc_input_skips_the_scan_it_already_passed() {
             .unwrap_err();
     assert_eq!(reason.kind(), "embedded-timestamp-macro");
 }
+
+#[test]
+fn parses_msvc_source_dependencies() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("deps.json");
+    std::fs::write(
+        &path,
+        r#"{"Version":"1.2","Data":{"Source":"src\\a.c","ProvidedModule":"","ImportedModules":[],"Includes":["include\\a.h","C:\\SDK\\stdio.h"]}}"#,
+    )
+    .expect("write dependency JSON");
+
+    let dependencies = CcDepfile::read_msvc(&path).expect("parse");
+    assert_eq!(
+        dependencies.files,
+        [
+            PathBuf::from("include\\a.h"),
+            PathBuf::from("C:\\SDK\\stdio.h")
+        ]
+    );
+}

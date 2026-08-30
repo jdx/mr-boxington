@@ -20,7 +20,7 @@ use crate::session;
 use eyre::{Context, Result, bail};
 use mbx_cache_cc::{
     CcAction, CcActionContext, CcBypassReason, CcCompilerFamily, CcCompilerIdentity, CcDepfile,
-    CcDiscoveredInputs, CcInputPrediction, CcInvocation, CcLanguage, environment_inputs,
+    CcDiscoveredInputs, CcInputPrediction, CcInvocation, CcLanguage, environment_inputs_for,
     is_system_path, manifest_snapshot,
 };
 use mbx_cache_core::{
@@ -45,14 +45,18 @@ const ADAPTER: &str = "cc";
 pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -> Result<ExitCode> {
     let working_dir = std::env::current_dir()?;
     let mappings = path_mappings(&working_dir);
+    let identity = compiler_identity(compiler, language)?;
     // Appended before anything parses, so the flag is part of the key the same
     // way the caller's own prefix maps are.
-    let portable = Portable::detect(&mappings);
+    let portable = Portable::detect(&mappings, identity.family);
     let arguments = portable.applied_to(arguments);
     let arguments = arguments.as_ref();
-    let invocation = CcInvocation::parse(arguments)?;
-    let environment = environment_inputs(|name| std::env::var(name).ok(), invocation.sysroot())?;
-    let identity = compiler_identity(compiler, language)?;
+    let invocation = CcInvocation::parse_for(arguments, identity.family)?;
+    let environment = environment_inputs_for(
+        |name| std::env::var(name).ok(),
+        invocation.sysroot(),
+        identity.family,
+    )?;
     let mut context = CcActionContext {
         compiler: identity,
         working_dir: working_dir.clone(),
@@ -184,7 +188,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     let compilation_started = SystemTime::now();
     let mut command = Command::new(compiler);
     command.args(arguments);
-    command.args(invocation.dependency_arguments(&depfile));
+    command.args(invocation.dependency_arguments_for(&depfile, context.compiler.family));
     let output = command
         .output()
         .wrap_err_with(|| format!("failed to run {}", Path::new(compiler).display()))?;
@@ -346,7 +350,7 @@ struct Portable {
 }
 
 impl Portable {
-    fn detect(mappings: &[PathMapping]) -> Self {
+    fn detect(mappings: &[PathMapping], family: CcCompilerFamily) -> Self {
         let mut portable = Self {
             arguments: Vec::new(),
             values: Vec::new(),
@@ -368,7 +372,11 @@ impl Portable {
             else {
                 continue;
             };
-            let mut flag = OsString::from("-fdebug-prefix-map=");
+            let mut flag = OsString::from(if family.is_msvc() {
+                "/pathmap:"
+            } else {
+                "-fdebug-prefix-map="
+            });
             flag.push(&value);
             flag.push("=");
             flag.push(&placeholder);
@@ -418,7 +426,7 @@ fn discover(
     context: &CcActionContext,
     depfile: &Path,
 ) -> Result<CcDiscoveredInputs> {
-    let dependencies = CcDepfile::read(depfile)?;
+    let dependencies = CcDepfile::read_for(depfile, context.compiler.family)?;
     let mut files = BTreeSet::new();
     for path in dependencies
         .files
@@ -454,7 +462,7 @@ fn searchable_directories(invocation: &CcInvocation, working_dir: &Path) -> BTre
                 .parent()
                 .map(|parent| absolute(parent, working_dir)),
         )
-        .filter(|directory| !is_system_path(directory))
+        .filter(|directory| !is_system_include_path(directory))
         .collect()
 }
 
@@ -501,7 +509,7 @@ fn manifest_directories(
                 .iter()
                 .filter_map(|file| file.parent().map(Path::to_path_buf)),
         )
-        .filter(|directory| !is_system_path(directory))
+        .filter(|directory| !is_system_include_path(directory))
         .collect()
 }
 
@@ -544,8 +552,26 @@ fn path_mappings(working_dir: &Path) -> Vec<PathMapping> {
         "rustup_home",
     );
     add(dirs::home_dir(), "home");
+    add(std::env::var_os("VCINSTALLDIR").map(PathBuf::from), "msvc");
+    add(
+        std::env::var_os("WindowsSdkDir").map(PathBuf::from),
+        "windows_sdk",
+    );
+    add(
+        std::env::var_os("UniversalCRTSdkDir").map(PathBuf::from),
+        "ucrt_sdk",
+    );
     let _ = working_dir;
     mappings
+}
+
+fn is_system_include_path(path: &Path) -> bool {
+    is_system_path(path)
+        || ["VCINSTALLDIR", "WindowsSdkDir", "UniversalCRTSdkDir"]
+            .iter()
+            .filter_map(std::env::var_os)
+            .map(PathBuf::from)
+            .any(|root| path.starts_with(root))
 }
 
 fn rustc_path_mappings(mappings: &[PathMapping]) -> Vec<mbx_cache_rustc::PathMapping> {
@@ -568,13 +594,25 @@ fn session_path(name: &str) -> Option<PathBuf> {
 /// the compiler just to ask its version.
 fn compiler_identity(compiler: &OsStr, language: CcLanguage) -> Result<CcCompilerIdentity> {
     let executable = resolve_executable(compiler)?;
-    let probe = probe_executable(&executable, &["-v"], &executable)?;
+    let is_cl = executable
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("cl"));
+    let probe = if is_cl {
+        probe_msvc(&executable)?
+    } else {
+        probe_executable(&executable, &["-v"], &executable)?
+    };
     let family = CcCompilerFamily::classify(&probe)?;
-    let target = probe
-        .lines()
-        .find_map(|line| line.strip_prefix("Target: "))
-        .unwrap_or_default()
-        .to_string();
+    let target = if family.is_msvc() {
+        std::env::var("VSCMD_ARG_TGT_ARCH").unwrap_or_default()
+    } else {
+        probe
+            .lines()
+            .find_map(|line| line.strip_prefix("Target: "))
+            .unwrap_or_default()
+            .to_string()
+    };
     let assembler = if family.uses_external_assembler() {
         assembler_identity(&executable)
     } else {
@@ -587,6 +625,40 @@ fn compiler_identity(compiler: &OsStr, language: CcLanguage) -> Result<CcCompile
         target,
         assembler,
     })
+}
+
+/// MSVC prints its detailed `/Bv` identity before complaining that no source
+/// was supplied. That non-zero exit is a property of the query shape, not a
+/// failed identity probe, so accept it only when the expected banner is there.
+fn probe_msvc(executable: &Path) -> Result<String> {
+    let environment = BTreeMap::new();
+    if let Ok(responses) = session::request_agent(&[AgentRequest::FindExecutableIdentity {
+        executable: executable.to_path_buf(),
+        environment: environment.clone(),
+    }]) && let Some(AgentResponse::ExecutableIdentity { stdout: Some(text) }) =
+        responses.into_iter().next()
+    {
+        return Ok(String::from_utf8_lossy(&text).into_owned());
+    }
+    let output = Command::new(executable)
+        .arg("/Bv")
+        .output()
+        .map_err(|error| CcBypassReason::CompilerIdentityUnavailable(error.to_string()))?;
+    let mut text = String::from_utf8_lossy(&output.stderr).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stdout));
+    if !text.contains("Microsoft (R) C/C++ Optimizing Compiler") {
+        return Err(CcBypassReason::CompilerIdentityUnavailable(format!(
+            "{} did not report an MSVC compiler identity",
+            executable.display()
+        ))
+        .into());
+    }
+    let _ = session::request_agent(&[AgentRequest::StoreExecutableIdentity {
+        executable: executable.to_path_buf(),
+        environment,
+        stdout: text.clone().into_bytes(),
+    }]);
+    Ok(text)
 }
 
 /// The assembler path a driver named, if it named one at all.

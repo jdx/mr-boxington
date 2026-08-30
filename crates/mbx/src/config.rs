@@ -134,8 +134,8 @@ pub(crate) struct RawConfig {
     savings: String,
     /// Cache natively linked test binaries, executables, and proc macros. On macOS this
     /// also passes ld64 `-oso_prefix` so a debug-info link's debug map stops
-    /// naming this checkout, which is what lets it cache. Linux and macOS
-    /// only, and a link mbx cannot describe exactly still links normally.
+    /// naming this checkout, which is what lets it cache. Supported on Linux,
+    /// macOS, and Windows; a link mbx cannot describe exactly still links normally.
     #[usage(
         key = "cache_links",
         env = "MBX_CACHE_LINKS",

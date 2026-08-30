@@ -743,6 +743,7 @@ const PATH_SHIM_NAMES: &[(&str, CcLanguage)] = &[
     ("c++", CcLanguage::Cxx),
     ("g++", CcLanguage::Cxx),
     ("clang++", CcLanguage::Cxx),
+    ("cl.exe", CcLanguage::Cxx),
 ];
 
 /// The language a standalone shim name selects, if the name is one.
@@ -765,6 +766,7 @@ pub fn is_cc_shim() -> Option<CcLanguage> {
     match stem.as_str() {
         CC_SHIM_STEM => Some(CcLanguage::C),
         CXX_SHIM_STEM => Some(CcLanguage::Cxx),
+        "cl" if cfg!(windows) => Some(CcLanguage::Cxx),
         // `mbx-cxx-...` is tested first: `mbx-cc-` is not a prefix of it, but
         // reading it the other way round invites the mistake.
         other if other.starts_with(&format!("{CXX_SHIM_STEM}-")) => Some(CcLanguage::Cxx),
@@ -1199,7 +1201,7 @@ pub(crate) fn record_file_digests(scope: FileDigestScope, entries: Vec<RecordedF
 /// cannot describe would otherwise key a link as though the linker did not
 /// matter.
 pub fn cache_links_supported() -> bool {
-    cfg!(any(target_os = "linux", target_os = "macos"))
+    cfg!(any(target_os = "linux", target_os = "macos", windows))
 }
 
 /// Whether the shim may cache a natively linked program.

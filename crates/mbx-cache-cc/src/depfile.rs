@@ -1,8 +1,8 @@
 //! Dependency-list parsing and input discovery for C and C++ compiles.
 
 use crate::{
-    CcActionContext, CcActionInput, CcBypassReason, MAX_INPUT_BYTES, MAX_MANIFEST_ENTRIES,
-    MAX_PREDICTED_INPUTS, normalize_components,
+    CcActionContext, CcActionInput, CcBypassReason, CcCompilerFamily, MAX_INPUT_BYTES,
+    MAX_MANIFEST_ENTRIES, MAX_PREDICTED_INPUTS, normalize_components,
 };
 use mbx_cache_core::{
     CacheDigest, FileDigestCache, FileDigestScope, FileIdentity, RecordedFileDigest,
@@ -36,6 +36,54 @@ impl CcDepfile {
                 message: error.to_string(),
             })?;
         Self::parse(&contents)
+    }
+
+    /// Read the dependency output emitted by the selected compiler family.
+    pub fn read_for(path: &Path, family: CcCompilerFamily) -> Result<Self, CcBypassReason> {
+        if family.is_msvc() {
+            Self::read_msvc(path)
+        } else {
+            Self::read(path)
+        }
+    }
+
+    /// Read MSVC's `/sourceDependencies` JSON output.
+    pub fn read_msvc(path: &Path) -> Result<Self, CcBypassReason> {
+        let contents = std::fs::read(path).map_err(|error| CcBypassReason::DepfileRead {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let value: serde_json::Value = serde_json::from_slice(&contents)
+            .map_err(|error| CcBypassReason::MalformedDepfile(error.to_string()))?;
+        let data = value
+            .get("Data")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| CcBypassReason::MalformedDepfile("missing Data object".into()))?;
+        if data
+            .get("ImportedModules")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|modules| !modules.is_empty())
+            || data.get("ProvidedModule").is_some_and(|module| {
+                !module.is_null() && module.as_str().is_none_or(|s| !s.is_empty())
+            })
+        {
+            return Err(CcBypassReason::MalformedDepfile(
+                "C++ module dependencies are not modeled".into(),
+            ));
+        }
+        let includes = data
+            .get("Includes")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| CcBypassReason::MalformedDepfile("missing Includes array".into()))?;
+        let files = includes
+            .iter()
+            .map(|entry| {
+                entry.as_str().map(PathBuf::from).ok_or_else(|| {
+                    CcBypassReason::MalformedDepfile("non-string include path".into())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { files })
     }
 
     /// Parse a GNU-style dependency list.
