@@ -597,11 +597,16 @@ fn restore(action: &CacheDigest, action_bytes: &[u8]) -> Result<Option<Restored>
 
 fn build_script_mappings() -> Vec<PathMapping> {
     let mut mappings = Vec::new();
-    if let Some(out_dir) = std::env::var_os("OUT_DIR") {
-        mappings.push(PathMapping::new(out_dir, "build_script_out_dir"));
-    }
-    if let Some(manifest_dir) = std::env::var_os("CARGO_MANIFEST_DIR") {
-        mappings.push(PathMapping::new(manifest_dir, "build_script_manifest_dir"));
+    for (name, placeholder) in [
+        ("OUT_DIR", "build_script_out_dir"),
+        ("CARGO_MANIFEST_DIR", "build_script_manifest_dir"),
+        (session::WORKSPACE_ROOT_ENV, "workspace"),
+        (session::TARGET_DIR_ENV, "target"),
+        ("CARGO_HOME", "cargo_home"),
+    ] {
+        if let Some(root) = std::env::var_os(name) {
+            mappings.push(PathMapping::new(root, placeholder));
+        }
     }
     mappings
 }

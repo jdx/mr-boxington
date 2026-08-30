@@ -1244,6 +1244,7 @@ fn installed_build_script_wrapper_is_transparent_outside_an_mbx_session() {
         .args(["build", "--offline"])
         .env_remove("MBX_SOCKET")
         .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .env_remove("CARGO_TARGET_DIR")
         .status()
         .unwrap();

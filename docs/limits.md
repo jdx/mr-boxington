@@ -22,9 +22,9 @@ package-wide default for such scripts is intentionally not guessed into a cache
 key: an uncached execution is cheaper than claiming an input set the script did
 not declare.
 
-Cached directives remap both `OUT_DIR` and `CARGO_MANIFEST_DIR` to the restoring
-checkout. Output trees that do not contain the literal output directory path can
-therefore cross target directories;
+Cached directives remap `OUT_DIR`, manifest/workspace and target roots, and
+`CARGO_HOME` to the restoring environment. Output trees that do not contain the
+literal output directory path can therefore cross target directories;
 an output file that embeds that path keeps it in the action key and only reuses
 the result at the same location. A symlink that may escape `OUT_DIR` makes the
 execution uncacheable. The launcher left in a target directory is transparent
