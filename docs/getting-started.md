@@ -5,10 +5,10 @@
 ### mise
 
 ```sh
-mise use -g --postinstall "mbx setup --yes" mr-boxington
+mise use --global --postinstall "mbx setup --yes" mr-boxington
 ```
 
-Drop `-g` to activate mbx only while that project's mise configuration is
+Drop `--global` to activate mbx only while that project's mise configuration is
 active. The postinstall hook selects the same configuration as `mise use`.
 
 ### Release archive

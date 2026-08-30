@@ -57,7 +57,7 @@ is pruned to, and when a `target/` directory becomes collectable.
 With [mise](https://mise.jdx.dev):
 
 ```sh
-mise use -g --postinstall "mbx setup --yes" mr-boxington
+mise use --global --postinstall "mbx setup --yes" mr-boxington
 ```
 
 With Cargo:
