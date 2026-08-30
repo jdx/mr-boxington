@@ -263,7 +263,7 @@ fn setup_check_at(executable: &Path, expected_shim: &Path, path: Option<&OsStr>)
             "Cargo shim is not installed; plain Cargo bypasses mbx, while explicit `mbx <cargo-command>` still works",
         );
     }
-    match same_file_contents(executable, expected_shim) {
+    match crate::cli::cargo_shim_is_current(executable, expected_shim) {
         Ok(false) => {
             return Check::warn("setup", "Cargo shim is outdated; run `mbx setup`");
         }
@@ -323,16 +323,6 @@ fn is_executable_file(path: &Path) -> bool {
     {
         true
     }
-}
-
-fn same_file_contents(left: &Path, right: &Path) -> Result<bool> {
-    let left_metadata = std::fs::metadata(left)?;
-    let right_metadata = std::fs::metadata(right)?;
-    if left_metadata.len() != right_metadata.len() {
-        return Ok(false);
-    }
-    Ok(mbx_cache_core::CacheDigest::blake3_file(left)?
-        == mbx_cache_core::CacheDigest::blake3_file(right)?)
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {

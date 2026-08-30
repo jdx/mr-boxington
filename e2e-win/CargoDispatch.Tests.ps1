@@ -79,6 +79,9 @@ mbx-probe = "new --vcs none"
             $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
             $shimDir = Join-Path $localAppData 'mbx\bin'
             Test-Path -LiteralPath (Join-Path $shimDir 'cargo.exe') | Should -BeTrue
+            Test-Path -LiteralPath (Join-Path $shimDir 'mbx-target') | Should -BeTrue
+            $statusOutput = & $mbx setup --status 2>&1 | Out-String
+            $LASTEXITCODE | Should -Be 0 -Because $statusOutput
             $env:PATH = "$shimDir;$originalPath"
             $env:MBX_DISABLE = '1'
             $version = & cargo.exe --version 2>&1 | Out-String

@@ -122,7 +122,7 @@ pub(super) fn setup_at_action(
                 println!("mbx setup is not installed: {} is missing", shim.display());
                 return Ok(ExitCode::FAILURE);
             }
-            if !same_file_contents(executable, &shim)? {
+            if !cargo_shim_is_current(executable, &shim)? {
                 println!("mbx setup is outdated; run `mbx setup`");
                 return Ok(ExitCode::FAILURE);
             }
@@ -153,8 +153,9 @@ pub(super) fn setup_at_action(
                 executable,
                 install_dir,
                 CARGO_SHIM_STEM,
-                crate::session::ShimLink::Pinned,
+                crate::session::ShimLink::Tracking,
             )?;
+            write_cargo_shim_target(install_dir, executable)?;
         }
     }
 
@@ -479,4 +480,71 @@ pub(super) fn same_file_contents(left: &Path, right: &Path) -> Result<bool> {
     }
     Ok(mbx_cache_core::CacheDigest::blake3_file(left)?
         == mbx_cache_core::CacheDigest::blake3_file(right)?)
+}
+
+#[cfg(windows)]
+pub(crate) fn cargo_shim_target(install_dir: &Path) -> Option<PathBuf> {
+    if let Some(target) = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .filter(|directory| !same_path(directory, install_dir))
+            .map(|directory| directory.join("mbx.exe"))
+            .find(|candidate| candidate.is_file())
+    }) {
+        return Some(target);
+    }
+    use std::os::windows::ffi::OsStringExt as _;
+
+    let bytes = std::fs::read(install_dir.join(super::CARGO_SHIM_TARGET_FILE)).ok()?;
+    let mut chunks = bytes.chunks_exact(2);
+    let target = std::ffi::OsString::from_wide(
+        &chunks
+            .by_ref()
+            .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+            .collect::<Vec<_>>(),
+    );
+    if !chunks.remainder().is_empty() {
+        return None;
+    }
+    let target = PathBuf::from(target);
+    (target.is_absolute() && target.is_file()).then_some(target)
+}
+
+fn write_cargo_shim_target(install_dir: &Path, executable: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+
+        let target = executable
+            .as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        std::fs::write(install_dir.join(super::CARGO_SHIM_TARGET_FILE), target)?;
+    }
+    #[cfg(not(windows))]
+    let _ = (install_dir, executable);
+    Ok(())
+}
+
+pub(crate) fn cargo_shim_is_current(executable: &Path, shim: &Path) -> Result<bool> {
+    #[cfg(windows)]
+    if let Some(target) = shim.parent().and_then(cargo_shim_target) {
+        return Ok(same_path(&target, executable));
+    }
+    same_file_contents(executable, shim)
+}
+
+#[cfg(windows)]
+fn same_path(left: &Path, right: &Path) -> bool {
+    let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
 }

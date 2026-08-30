@@ -438,11 +438,10 @@ pub fn shim_file_name(stem: &str) -> String {
 /// fsyncing it and its directory, and taking the first exec ourselves to spend
 /// the race were all tried, and none of them helped.
 ///
-/// So [`ShimLink::Tracking`] is for the session shim, which cargo execs a few
-/// milliseconds after it is installed to ask `rustc -vV` what compiler it has.
-/// [`ShimLink::Pinned`] is for the plain-cargo wrapper `mbx setup` installs,
-/// where nothing execs the shim for as long as it takes to type another command
-/// and a hard link keeps working even if the binary it was made from is deleted.
+/// [`ShimLink::Tracking`] is used for shims that should follow a replaced mbx
+/// binary, including the session shim and the persistent Cargo shim on Unix.
+/// [`ShimLink::Pinned`] remains available for callers that need the installed
+/// bytes to survive deletion of the original path.
 ///
 /// The one thing tracking gives up: replace the mbx binary underneath a running
 /// build and the session shim follows it, so cargo either execs nothing (the

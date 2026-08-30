@@ -37,6 +37,7 @@ EOF
   run "$MBX_BIN" setup
   assert_success
   assert_file_executable "$MBX_SHIM_DIR/cargo"
+  [ -L "$MBX_SHIM_DIR/cargo" ]
   assert_output --partial "export PATH=\"$MBX_SHIM_DIR"
   assert_output --partial ':$PATH"'
   local fish_shim_dir="$BATS_TEST_TMPDIR/Application Support/mbx/bin"
@@ -64,6 +65,7 @@ EOF
   assert_success
   assert_output --partial "Cargo shim is active and current"
 
+  rm "$MBX_SHIM_DIR/cargo"
   printf 'stale shim\n' >"$MBX_SHIM_DIR/cargo"
   chmod +x "$MBX_SHIM_DIR/cargo"
   run "$MBX_BIN" setup --status

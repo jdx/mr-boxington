@@ -7,6 +7,13 @@ fn setup_installs_the_cargo_shim() {
         .path()
         .join(if cfg!(windows) { "mbx.exe" } else { "mbx" });
     std::fs::write(&executable, b"mbx binary").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+    }
     let install = directory.path().join("data/bin");
     setup_at(&executable, &install).unwrap();
 
@@ -16,10 +23,19 @@ fn setup_installs_the_cargo_shim() {
     {
         use std::os::unix::fs::PermissionsExt as _;
 
+        assert!(
+            std::fs::symlink_metadata(&wrapper)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_ne!(
             std::fs::metadata(&wrapper).unwrap().permissions().mode() & 0o100,
             0
         );
+        std::fs::remove_file(&executable).unwrap();
+        std::fs::write(&executable, b"new mbx binary").unwrap();
+        assert_eq!(std::fs::read(&wrapper).unwrap(), b"new mbx binary");
     }
 }
 
@@ -59,7 +75,7 @@ fn setup_flags_are_mutually_exclusive() {
 }
 
 #[test]
-fn setup_status_detects_and_setup_refreshes_a_stale_wrapper() {
+fn setup_status_detects_and_setup_refreshes_a_replaced_wrapper() {
     let directory = tempfile::tempdir().unwrap();
     let executable = directory.path().join("mbx");
     std::fs::write(&executable, b"first mbx binary").unwrap();
@@ -76,8 +92,11 @@ fn setup_status_detects_and_setup_refreshes_a_stale_wrapper() {
         ExitCode::SUCCESS
     );
 
-    std::fs::remove_file(&executable).unwrap();
-    std::fs::write(&executable, b"new mbx binary with another size").unwrap();
+    let shim = install.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
+    std::fs::remove_file(&shim).unwrap();
+    std::fs::write(&shim, b"stale mbx binary").unwrap();
+    #[cfg(windows)]
+    std::fs::remove_file(install.join(super::CARGO_SHIM_TARGET_FILE)).unwrap();
     assert_eq!(
         setup_at_action(&executable, &install, &MiseScope::None, SetupAction::Status,).unwrap(),
         ExitCode::FAILURE
@@ -89,7 +108,6 @@ fn setup_status_detects_and_setup_refreshes_a_stale_wrapper() {
         SetupAction::Install,
     )
     .unwrap();
-    let shim = install.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
     assert!(same_file_contents(&executable, &shim).unwrap());
 }
 

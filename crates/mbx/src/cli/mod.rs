@@ -23,8 +23,11 @@ mod setup;
 mod shim;
 mod tui;
 
+#[cfg(windows)]
+const CARGO_SHIM_TARGET_FILE: &str = "mbx-target";
+
 pub(crate) use cargo::{cargo_with_bypass_log, cargo_with_settings_and_bypass_log};
-pub(crate) use setup::setup_install_dir;
+pub(crate) use setup::{cargo_shim_is_current, setup_install_dir};
 pub use shim::{is_cargo_shim, run_cargo_shim};
 
 pub(crate) fn cargo_activation_path() -> Option<std::ffi::OsString> {

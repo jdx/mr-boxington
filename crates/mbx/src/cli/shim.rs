@@ -7,10 +7,15 @@ use std::process::{Command, ExitCode};
 use std::sync::OnceLock;
 
 const CARGO_SHIM_STEM: &str = "cargo";
+const CARGO_SHIM_MODE_ENV: &str = "MBX_CARGO_SHIM_MODE";
 static PATH_BEFORE_SHIM_EXCLUSION: OnceLock<OsString> = OnceLock::new();
 
 /// Whether this process was installed under Cargo's name by `mbx setup`.
 pub fn is_cargo_shim() -> bool {
+    invoked_as_cargo() || std::env::var_os(CARGO_SHIM_MODE_ENV).is_some_and(|value| value == "1")
+}
+
+fn invoked_as_cargo() -> bool {
     std::env::args_os()
         .next()
         .as_deref()
@@ -29,9 +34,20 @@ fn is_cargo_shim_path(path: &OsStr) -> bool {
 
 /// Run an invocation received through the persistent Cargo shim.
 pub fn run_cargo_shim() -> Result<ExitCode> {
-    let current = std::env::current_exe().wrap_err("failed to locate the Cargo shim")?;
-    exclude_shim_from_path(&current)?;
-    let real_cargo = resolve_real_cargo(&current)?;
+    // The Windows launcher uses this only to select dispatch in the target mbx.
+    // Do not leak it into Cargo, build scripts, or nested mbx commands.
+    unsafe { std::env::remove_var(CARGO_SHIM_MODE_ENV) };
+    #[cfg(windows)]
+    if invoked_as_cargo()
+        && let Some(code) = forward_to_current_mbx()?
+    {
+        return Ok(code);
+    }
+    let shim_dir = super::setup_install_dir()
+        .ok_or_else(|| eyre::eyre!("the platform data directory could not be located"))?;
+    let shim = shim_dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
+    exclude_shim_from_path(&shim)?;
+    let real_cargo = resolve_real_cargo(&shim)?;
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     if mbx_disabled() || cargo_proxy_passthrough(&arguments) {
         return run_real_cargo(&real_cargo, &arguments);
@@ -58,6 +74,22 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
     unsafe { std::env::set_var("CARGO", &real_cargo) };
     let (config, settings) = Config::load_for_cli()?;
     super::cargo::run(&config, &settings, &string_arguments)
+}
+
+#[cfg(windows)]
+fn forward_to_current_mbx() -> Result<Option<ExitCode>> {
+    let Some(install_dir) = super::setup_install_dir() else {
+        return Ok(None);
+    };
+    let Some(target) = super::setup::cargo_shim_target(&install_dir) else {
+        return Ok(None);
+    };
+    let status = Command::new(&target)
+        .args(std::env::args_os().skip(1))
+        .env(CARGO_SHIM_MODE_ENV, "1")
+        .status()
+        .wrap_err_with(|| format!("failed to run the current mbx at {}", target.display()))?;
+    Ok(Some(exit_code(status)))
 }
 
 fn mbx_disabled() -> bool {

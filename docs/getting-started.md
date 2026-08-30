@@ -104,6 +104,10 @@ mise is activated in the current shell. It recommends the config that defines
 Without an active mise shell, setup prints the exact shell-specific `PATH`
 change and never edits a shell startup file.
 
+On Unix, the Cargo shim is a symlink to mbx, so replacing mbx updates plain
+Cargo commands immediately. On Windows, `cargo.exe` forwards to the active mbx
+on `PATH`, with the setup-time mbx path as a fallback.
+
 After installing from a release archive, run `$HOME/.local/bin/mbx setup` on
 Unix. On Windows, run
 `& "$env:LOCALAPPDATA\Programs\mbx\mbx.exe" setup` in PowerShell.
