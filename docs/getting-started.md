@@ -8,6 +8,10 @@
 mise use --global --postinstall "mbx setup --yes" mr-boxington
 ```
 
+::: info Requires mise 2026.8.15 or newer
+The `--postinstall` setup hook requires mise 2026.8.15 or newer.
+:::
+
 With `--global`, mise activates mbx in its global configuration. Drop
 `--global` to activate it only in the current project's configuration.
 

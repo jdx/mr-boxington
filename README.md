@@ -60,6 +60,9 @@ With [mise](https://mise.jdx.dev):
 mise use --global --postinstall "mbx setup --yes" mr-boxington
 ```
 
+> [!NOTE]
+> The `--postinstall` setup hook requires mise 2026.8.15 or newer.
+
 With Cargo:
 
 ```sh
