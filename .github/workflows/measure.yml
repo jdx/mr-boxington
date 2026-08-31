@@ -1,30 +1,27 @@
-name: performance history and correctness
+name: performance history
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
-  schedule:
-    # One bounded weekly canary, away from the top of the hour.
-    - cron: "17 6 * * 1"
 
+permissions: {}
 concurrency:
   group: performance-history
   cancel-in-progress: false
-
-permissions: {}
-
 env:
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
+  CARGO_INCREMENTAL: "0"
+  TAK_RUNNER: jdx-perf-v1-ubuntu24.04-x64-mr-boxington-rust1.97.1
 
 jobs:
-  record:
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
+  measure:
+    runs-on: [self-hosted, jdx-perf-v1]
+    container:
+      image: ghcr.io/jdx/perf-runner@sha256:6f35a3dec67758d195d8fd01103f10f6c7aeaf8815dd41bf2aa2726fa3e9d4a9
+      options: --cpuset-cpus 0-7
+    timeout-minutes: 30
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -33,22 +30,85 @@ jobs:
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           cache: false
-      - name: Install Valgrind
+        env:
+          MISE_LOCKED: "1"
+      - name: Runner metadata
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends valgrind
-      - name: Measure and record
-        run: mise run perf:record
-      - name: Push measurements
-        if: github.ref == 'refs/heads/main'
+          {
+            echo '### Runner metadata'
+            echo '```text'
+            echo 'environment-revision: perf-runner@6ab972a'
+            echo 'image: ghcr.io/jdx/perf-runner@sha256:6f35a3dec67758d195d8fd01103f10f6c7aeaf8815dd41bf2aa2726fa3e9d4a9'
+            uname -a
+            lscpu
+            mise --version
+            rustc --version
+            cargo --version
+            valgrind --version
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Build and measure
+        run: |
+          mise run perf:prepare
+          taskset -c 0-3 mise run perf:record
+      - name: Package measurement
+        run: |
+          mkdir -p /tmp/tak-out
+          git notes --ref=tak show HEAD > /tmp/tak-out/note
+          git rev-parse HEAD > /tmp/tak-out/sha
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tak-measurement
+          path: /tmp/tak-out
+          retention-days: 1
+          if-no-files-found: error
+      - run: tak history >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    needs: measure
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tak-measurement
+          path: /tmp/tak-out
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Publish refs/notes/tak
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPOSITORY}.git"
-          tak push
-      - name: Publish history
-        run: tak history >> "$GITHUB_STEP_SUMMARY"
+          sha=$(cat /tmp/tak-out/sha)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin +refs/notes/tak:refs/notes/tak-remote || true
+          if git rev-parse --verify --quiet refs/notes/tak-remote >/dev/null; then
+            git update-ref refs/notes/tak refs/notes/tak-remote
+          fi
+          {
+            git notes --ref=tak show "$sha" 2>/dev/null || true
+            cat /tmp/tak-out/note
+          } | LC_ALL=C sort -u > /tmp/tak-out/merged-note
+          git notes --ref=tak add -f -F /tmp/tak-out/merged-note "$sha"
+
+          remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPOSITORY}.git"
+          for attempt in 1 2 3 4 5; do
+            if git push --quiet "$remote" refs/notes/tak:refs/notes/tak; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "::error::could not publish refs/notes/tak after five attempts"
+              exit 1
+            fi
+            git fetch --quiet "$remote" +refs/notes/tak:refs/notes/tak-remote
+            git notes --ref=tak merge -s cat_sort_uniq refs/notes/tak-remote
+          done
 
   verify:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
