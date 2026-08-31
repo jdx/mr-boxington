@@ -148,7 +148,7 @@ impl CacheAgent {
                 let agent = self.clone();
                 tasks.spawn(async move { agent.resolve_prefetch_action(action, adapter).await });
             }
-            if resolved.len() == MAX_PREFETCH_ACTION_BATCH {
+            if resolved.len() == MAX_PREFETCH_ACTION_WAVE {
                 self.prefetch_resolved_actions(std::mem::take(&mut resolved))
                     .await;
             }
@@ -244,7 +244,7 @@ impl CacheAgent {
         // sit behind minutes of artifact transfer.
         while !resolved.is_empty() {
             let wave = resolved
-                .drain(..resolved.len().min(MAX_PREFETCH_ACTION_BATCH))
+                .drain(..resolved.len().min(MAX_PREFETCH_ACTION_WAVE))
                 .collect();
             self.prefetch_resolved_actions(wave).await;
         }
