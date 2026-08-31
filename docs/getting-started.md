@@ -110,11 +110,18 @@ change and never edits a shell startup file.
 
 ### Verify plain Cargo
 
-Open a new shell after setup and verify which Cargo it finds:
+Open a new shell after setup and verify which Cargo it finds. On Unix:
 
 ```sh
 command -v cargo
 # ~/.local/share/mbx/bin/cargo on Linux
+```
+
+On Windows, use PowerShell or `where.exe`:
+
+```powershell
+(Get-Command cargo).Path
+where.exe cargo
 ```
 
 mise activation supplies that path to shells where mise is active. SSH

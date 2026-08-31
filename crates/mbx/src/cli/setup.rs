@@ -211,8 +211,15 @@ pub(crate) fn setup_at_action(
     Ok(ExitCode::SUCCESS)
 }
 
+/// Explain how to verify activation, including shells that do not load mise.
 fn print_activation_verification(shim: &Path) {
     let directory = shim.parent().unwrap_or(shim);
+    #[cfg(windows)]
+    println!(
+        "verify new shells with `Get-Command cargo` in PowerShell or `where.exe cargo`; expected {}",
+        shim.display()
+    );
+    #[cfg(not(windows))]
     println!(
         "verify new shells with `command -v cargo`; expected {}",
         shim.display()

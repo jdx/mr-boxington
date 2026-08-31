@@ -8,16 +8,21 @@ _common_setup() {
   # Setup tests begin with transparent Cargo inactive. Developers may already
   # have mbx enabled globally, so keep that host configuration out of the
   # isolated test PATH.
-  local inherited_cargo
-  inherited_cargo="$(command -v cargo)"
-  if [[ "$inherited_cargo" == */mbx/bin/cargo ]]; then
-    local inherited_shim_dir="${inherited_cargo%/cargo}"
-    PATH=":$PATH:"
-    PATH="${PATH//:$inherited_shim_dir:/:}"
-    PATH="${PATH#:}"
-    PATH="${PATH%:}"
-    export PATH
-  fi
+  local path_entry remaining_path="$PATH:" filtered_path="" first_path_entry=1
+  while [[ "$remaining_path" == *:* ]]; do
+    path_entry="${remaining_path%%:*}"
+    remaining_path="${remaining_path#*:}"
+    if [[ "$path_entry" == */mbx/bin ]]; then
+      continue
+    fi
+    if ((first_path_entry)); then
+      filtered_path="$path_entry"
+      first_path_entry=0
+    else
+      filtered_path+=":$path_entry"
+    fi
+  done
+  export PATH="$filtered_path"
 
   export PROJECT_ROOT
   PROJECT_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
