@@ -108,6 +108,37 @@ mise is activated in the current shell. It recommends the config that defines
 Without an active mise shell, setup prints the exact shell-specific `PATH`
 change and never edits a shell startup file.
 
+### Verify plain Cargo
+
+Open a new shell after setup and verify which Cargo it finds. On Unix:
+
+```sh
+command -v cargo
+# ~/.local/share/mbx/bin/cargo on Linux
+```
+
+On Windows, use PowerShell or `where.exe`:
+
+```powershell
+(Get-Command cargo).Path
+where.exe cargo
+```
+
+mise activation supplies that path to shells where mise is active. SSH
+commands, coding agents, editors, and other non-interactive tools may use a
+startup path that does not activate mise. In that case, prepend the directory
+printed by `mbx setup` in a startup file those processes read. For zsh,
+`~/.zshenv` applies to interactive and non-interactive shells:
+
+```sh
+export PATH="$HOME/.local/share/mbx/bin:$PATH"
+```
+
+Start a new process and run `command -v cargo` again. Once it resolves to the
+shim, ordinary `cargo build`, `cargo test`, and `cargo check` commands use mbx
+automatically. Explicit `mbx cargo …` commands remain supported, but users and
+tools do not need to remember a special prefix.
+
 On Unix, the stable `cargo` launcher uses the setup-time mbx while it exists,
 then resolves the active `mbx` from `PATH` after an upgrade removes that path.
 Windows `cargo.exe` resolves the active mbx from `PATH`, with the setup-time
