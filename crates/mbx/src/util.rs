@@ -18,8 +18,29 @@ pub fn workspace_root(start: &Path) -> std::path::PathBuf {
         if directory.join("Cargo.toml").is_file() {
             manifest = Some(directory.to_path_buf());
         }
+        // Delta checkouts are independent source trees nested below the
+        // original repository's `.delta/worktrees` directory. Do not let a
+        // lockfile in that enclosing repository replace the checkout's own
+        // workspace root.
+        if is_delta_worktree_root(directory) {
+            break;
+        }
     }
     lockfile.or(manifest).unwrap_or_else(|| start.to_path_buf())
+}
+
+/// Whether `directory` is the root of a Delta-managed checkout.
+///
+/// Delta worktrees are not Git worktrees and do not carry a `.git` marker.
+/// Their checkout directory itself is the project boundary.
+pub fn is_delta_worktree_root(directory: &Path) -> bool {
+    directory
+        .parent()
+        .is_some_and(|parent| parent.file_name() == Some(std::ffi::OsStr::new("worktrees")))
+        && directory
+            .parent()
+            .and_then(Path::parent)
+            .is_some_and(|parent| parent.file_name() == Some(std::ffi::OsStr::new(".delta")))
 }
 
 /// Write `contents` to `path` so readers never observe a partial file.
