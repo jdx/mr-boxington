@@ -18,10 +18,12 @@ pub fn workspace_root(start: &Path) -> std::path::PathBuf {
         if directory.join("Cargo.toml").is_file() {
             manifest = Some(directory.to_path_buf());
         }
-        // A nested checkout is an independent source tree. Do not let a
-        // lockfile in its enclosing repository replace the checkout's own
-        // workspace root.
-        if is_checkout_root(directory) {
+        // Delta checkouts are independent source trees nested below the
+        // original repository's `.delta/worktrees` directory. Do not let a
+        // lockfile in that enclosing repository replace the checkout's own
+        // workspace root. Ordinary VCS markers are not boundaries here: a
+        // Cargo workspace may legitimately contain a nested repository.
+        if is_delta_worktree_root(directory) {
             break;
         }
     }
