@@ -1,6 +1,6 @@
 [package]
 name = "mbx-cache-protocol"
-version = "0.5.9"
+version = "0.5.10"
 description = "Shared wire contract for mbx remote cache clients and servers"
 edition.workspace = true
 rust-version.workspace = true
