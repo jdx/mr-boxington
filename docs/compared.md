@@ -131,7 +131,7 @@ the same build.
 ## Tarball CI caches
 
 ::: warning Current GitHub Actions results
-The finer-grained model described below is not currently faster in our
+The finer-grained model described below is not consistently faster in our
 GitHub-hosted runner benchmarks. In a warm `jdx/hk` comparison, rust-cache
 completed the measured build substantially sooner on Linux, macOS, and
 Windows than mbx using the cache server. Large transfers and incomplete
@@ -143,6 +143,11 @@ A separately seeded test of mbx's GitHub-cache backend narrowed the difference
 but still lost to rust-cache on all three operating systems, both for the
 measured Cargo build and for the complete job. See the
 [GitHub Action guide](/github-action) for the runs and timings.
+
+It is workload-dependent: GitHub-backed mbx beat rust-cache on Linux in a
+warm `jdx/mise` comparison, but lost on macOS and Windows. This is why the
+recommendation is to measure each complete workflow rather than assume either
+cache always wins.
 
 mbx may still be the better trade when the cache must span local worktrees and
 CI, concurrent builds should share scheduling and in-flight work, granular
