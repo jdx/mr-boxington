@@ -24,6 +24,9 @@ concurrency:
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
+  # Rust 1.97.1 is part of the digest-pinned benchmark image.
+  MISE_DISABLE_TOOLS: rust
+  RUSTUP_TOOLCHAIN: 1.97.1
 
 jobs:
   # Only benchmark when the mbx that produced the published numbers is older
@@ -75,7 +78,7 @@ jobs:
     # with every other jdx performance job.
     runs-on: [self-hosted, jdx-perf-v1]
     container:
-      image: ghcr.io/jdx/perf-runner@sha256:6f35a3dec67758d195d8fd01103f10f6c7aeaf8815dd41bf2aa2726fa3e9d4a9
+      image: ghcr.io/jdx/perf-runner@sha256:0f4ee40929472883a32cc29bcd4bd22068c4382b72697da299d6769475b263b5
       options: --cpuset-cpus 0-7
     # The full refresh also runs every cache scenario and the toolchain guard.
     timeout-minutes: 180
@@ -96,8 +99,8 @@ jobs:
           {
             echo '### Runner metadata'
             echo '```text'
-            echo 'environment-revision: perf-runner@6ab972a'
-            echo 'image: ghcr.io/jdx/perf-runner@sha256:6f35a3dec67758d195d8fd01103f10f6c7aeaf8815dd41bf2aa2726fa3e9d4a9'
+            echo 'environment-revision: perf-runner@34a523e'
+            echo 'image: ghcr.io/jdx/perf-runner@sha256:0f4ee40929472883a32cc29bcd4bd22068c4382b72697da299d6769475b263b5'
             uname -a
             lscpu
             mise --version
@@ -106,20 +109,15 @@ jobs:
             valgrind --version
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Install Clippy for the benchmark toolchain
-        run: rustup component add clippy
       # Pinned: the comparison is only fair while both caches are the versions
       # the published numbers name.
       - name: Install kache
         run: cargo install kache --locked --version 0.16.0
-      # The compiler-change guard needs a second Rust to switch to. `stable`
-      # is whatever the runner image ships; the benchmark skips the guard,
-      # loudly, if that ever resolves to the subject's own pin.
-      - name: Install the alternate toolchain
-        run: rustup toolchain install --profile minimal stable
+      # Clippy for 1.97.1 and the alternate 1.96.0 toolchain are part of the
+      # pinned image, so this job never needs static.rust-lang.org at runtime.
       - name: Refresh benchmarks
         env:
-          MBX_BENCH_ALTERNATE_TOOLCHAIN: stable
+          MBX_BENCH_ALTERNATE_TOOLCHAIN: 1.96.0
         run: mise run bench:refresh
       - name: Publish job summary
         if: always()
