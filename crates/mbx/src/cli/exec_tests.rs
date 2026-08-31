@@ -25,3 +25,16 @@ fn discovers_a_nested_git_project_root() {
 
     assert_eq!(discover_project_root(&nested), inner);
 }
+
+#[test]
+/// A Delta-managed checkout is a project boundary despite having no VCS marker.
+fn discovers_a_delta_worktree_project_root() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = directory.path().join("project");
+    let worktree = repository.join(".delta/worktrees/thread");
+    let nested = worktree.join("src/build");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir(repository.join(".git")).unwrap();
+
+    assert_eq!(discover_project_root(&nested), worktree);
+}

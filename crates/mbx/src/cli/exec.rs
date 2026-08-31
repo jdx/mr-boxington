@@ -1,6 +1,7 @@
 use super::cargo::{absolute, account_session, inherited_environment, run_cargo};
 use crate::config::{CliSettings, Config};
 use crate::session::{self, CacheSession};
+use crate::util::is_delta_worktree_root;
 use eyre::Result;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -89,7 +90,12 @@ pub(super) fn discover_project_root(working_dir: &Path) -> PathBuf {
     loop {
         // `.git` may be a plain file in a linked worktree. Jujutsu's marker is
         // a directory today, but existence is the useful distinction for both.
-        if directory.join(".git").exists() || directory.join(".jj").exists() {
+        // Delta-managed worktrees have no marker of their own: their location
+        // below `.delta/worktrees` establishes the checkout boundary.
+        if directory.join(".git").exists()
+            || directory.join(".jj").exists()
+            || is_delta_worktree_root(directory)
+        {
             return directory.to_path_buf();
         }
         match directory.parent() {

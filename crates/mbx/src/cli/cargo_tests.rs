@@ -14,6 +14,22 @@ fn prefers_the_outermost_lockfile_as_the_workspace_root() {
 }
 
 #[test]
+fn keeps_workspace_discovery_inside_a_delta_worktree() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = directory.path().join("project");
+    let worktree = repository.join(".delta/worktrees/thread");
+    let member = worktree.join("crates/member");
+    std::fs::create_dir_all(&member).unwrap();
+    std::fs::write(repository.join("Cargo.lock"), "outer").unwrap();
+    std::fs::write(repository.join("Cargo.toml"), "[workspace]\n").unwrap();
+    std::fs::write(worktree.join("Cargo.lock"), "inner").unwrap();
+    std::fs::write(worktree.join("Cargo.toml"), "[workspace]\n").unwrap();
+    std::fs::write(member.join("Cargo.toml"), "[package]\n").unwrap();
+
+    assert_eq!(workspace_root(&member), worktree);
+}
+
+#[test]
 fn falls_back_to_a_manifest_without_a_lockfile() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
