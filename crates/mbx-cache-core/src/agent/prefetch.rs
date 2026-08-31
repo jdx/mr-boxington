@@ -74,6 +74,25 @@ fn ranked_prefetch_actions(
         .collect()
 }
 
+fn rank_resolved_prefetch_actions(
+    actions: &BTreeMap<CacheDigest, PrefetchCandidate>,
+    resolved: &mut [PrefetchedAction],
+) {
+    resolved.sort_unstable_by(|left, right| {
+        let left_priority = actions
+            .get(&left.result.action)
+            .map(|candidate| candidate.priority)
+            .unwrap_or_default();
+        let right_priority = actions
+            .get(&right.result.action)
+            .map(|candidate| candidate.priority)
+            .unwrap_or_default();
+        right_priority
+            .cmp(&left_priority)
+            .then_with(|| left.result.action.cmp(&right.result.action))
+    });
+}
+
 impl CacheAgent {
     pub(super) fn spawn_prefetch_predictions(&self, predictions: Vec<ActionPrediction>) {
         if predictions.is_empty() || !self.remote_mode.reads() || self.remote.is_none() {
@@ -242,6 +261,9 @@ impl CacheAgent {
         // keeps pack bookkeeping from competing with later action batches for
         // the server's database pool, and means serial batch requests do not
         // sit behind minutes of artifact transfer.
+        // Batch results are unordered, so restore prediction priority before
+        // dividing the output downloads into progressive waves.
+        rank_resolved_prefetch_actions(actions, &mut resolved);
         while !resolved.is_empty() {
             let wave = resolved
                 .drain(..resolved.len().min(MAX_PREFETCH_ACTION_WAVE))
@@ -936,5 +958,40 @@ mod selection_tests {
 
         assert_eq!(selected.len(), MAX_PREFETCH_ACTIONS);
         assert!(selected.contains_key(&task.action));
+    }
+
+    #[test]
+    fn unordered_batch_results_are_restored_to_prediction_priority() {
+        let predictions = (0..MAX_PREFETCH_ACTION_WAVE + 2)
+            .map(|index| prediction(index, index as u64))
+            .collect::<Vec<_>>();
+        let actions = select_prefetch_actions(predictions.iter());
+        let mut resolved = predictions
+            .iter()
+            .map(|prediction| PrefetchedAction {
+                adapter: prediction.adapter.clone(),
+                result: RemoteActionResult {
+                    action: prediction.action.clone(),
+                    metadata: None,
+                    output_root: None,
+                    version: 1,
+                },
+            })
+            .collect::<Vec<_>>();
+
+        rank_resolved_prefetch_actions(&actions, &mut resolved);
+
+        let expected = predictions
+            .iter()
+            .rev()
+            .map(|prediction| &prediction.action)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            resolved
+                .iter()
+                .map(|action| &action.result.action)
+                .collect::<Vec<_>>(),
+            expected
+        );
     }
 }
