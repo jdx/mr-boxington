@@ -270,6 +270,13 @@ EOF
   assert_file_contains "$project/mise.toml" 'command = "mbx"'
   assert_file_contains "$project/mise.toml" 'MBX_CARGO_SHIM_MODE = "1"'
 
+  local mbx_tool_dir
+  mbx_tool_dir="$(mise where mr-boxington)"
+  run env PATH="$MISE_DATA_DIR/command-wrappers/bin:$mbx_tool_dir:$real_cargo_dir:/usr/bin:/bin" \
+    cargo --version
+  assert_success
+  assert_output --regexp '^cargo [0-9]'
+
   run mise exec -- sh -c 'command -v cargo'
   assert_success
   assert_output "$MISE_DATA_DIR/command-wrappers/bin/cargo"
@@ -277,6 +284,9 @@ EOF
     "$MBX_BIN" doctor
   assert_success
   assert_output --partial "mise Cargo wrapper is active"
+  run mise exec -- env PATH="$MISE_DATA_DIR/command-wrappers/bin:$PATH:$real_cargo_dir" \
+    "$MBX_BIN" metadata --manifest-path "$first/Cargo.toml" --no-deps --format-version 1 --offline
+  assert_success
 
   run mise exec -- env PATH="$MISE_DATA_DIR/command-wrappers/bin:$PATH:$real_cargo_dir" \
     CARGO_INCREMENTAL=0 \
