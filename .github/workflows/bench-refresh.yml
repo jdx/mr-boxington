@@ -30,8 +30,9 @@ env:
 
 jobs:
   # Only benchmark when the mbx that produced the published numbers is older
-  # than the one on main. A docs or chore push does not invalidate a timing,
-  # and rerunning anyway would republish noise as though it were a change.
+  # than the latest release. A docs or chore push does not invalidate a timing,
+  # and benchmarking an unreleased checkout would publish numbers users cannot
+  # reproduce with the version they can install.
   check:
     name: Check version drift
     runs-on: ubuntu-24.04
@@ -40,29 +41,28 @@ jobs:
       contents: read
     outputs:
       drift: ${{ steps.drift.outputs.drift }}
-      workspace: ${{ steps.drift.outputs.workspace }}
+      release: ${{ steps.drift.outputs.release }}
       bench: ${{ steps.drift.outputs.bench }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Compare workspace against published benchmark
+      - name: Compare latest release against published benchmark
         id: drift
         env:
           FORCE_REFRESH: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # `mbx` states its own version literally; release-plz writes it. That
-          # is cheaper and more reliable here than resolving a dependency graph.
-          WORKSPACE=$(sed -n '/^\[package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' crates/mbx/Cargo.toml)
+          RELEASE=$(gh release view --json tagName --jq '.tagName | ltrimstr("v")')
           # Absent until the first refresh lands, which is itself drift.
           BENCH=$(jq -r '.versions.mbx // empty' benchmarks/results.json 2>/dev/null || true)
-          if [ -z "$WORKSPACE" ]; then
-            echo "::error::Could not read the mbx version from crates/mbx/Cargo.toml"
+          if [ -z "$RELEASE" ]; then
+            echo "::error::Could not resolve the latest mbx release"
             exit 1
           fi
-          echo "workspace=$WORKSPACE" >> "$GITHUB_OUTPUT"
+          echo "release=$RELEASE" >> "$GITHUB_OUTPUT"
           echo "bench=$BENCH" >> "$GITHUB_OUTPUT"
-          if [ "$FORCE_REFRESH" = "true" ] || [ "$BENCH" != "$WORKSPACE" ]; then
+          if [ "$FORCE_REFRESH" = "true" ] || [ "$BENCH" != "$RELEASE" ]; then
             echo "drift=true" >> "$GITHUB_OUTPUT"
           else
             echo "drift=false" >> "$GITHUB_OUTPUT"
@@ -113,12 +113,33 @@ jobs:
       # the published numbers name.
       - name: Install kache
         run: cargo install kache --locked --version 0.16.0
+      - name: Install released mbx
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: v${{ needs.check.outputs.release }}
+        run: |
+          archive=mbx-x86_64-unknown-linux-gnu.tar.gz
+          install_dir="$RUNNER_TEMP/mbx-release"
+          mkdir -p "$install_dir"
+          gh release download "$RELEASE" \
+            --pattern "$archive" \
+            --pattern SHA256SUMS \
+            --dir "$install_dir"
+          grep "  $archive$" "$install_dir/SHA256SUMS" \
+            | (cd "$install_dir" && sha256sum --check --strict -)
+          tar -xzf "$install_dir/$archive" -C "$install_dir"
+          echo "MBX_BENCH_BINARY=$install_dir/mbx" >> "$GITHUB_ENV"
       # Clippy for 1.97.1 and the alternate 1.96.0 toolchain are part of the
       # pinned image, so this job never needs static.rust-lang.org at runtime.
       - name: Refresh benchmarks
         env:
           MBX_BENCH_ALTERNATE_TOOLCHAIN: 1.96.0
-        run: mise run bench:refresh
+        run: |
+          python3 benchmarks/real_world.py \
+            --mbx "$MBX_BENCH_BINARY" \
+            --scenarios cold,warm,commit,worktree,toolchain,contention \
+            --output target/benchmarks \
+            --write-results benchmarks/results.json
       - name: Publish job summary
         if: always()
         # A run that failed before writing its summary has already reported
@@ -203,14 +224,14 @@ jobs:
           # The default token cannot: this repository does not let Actions
           # create them, and one it opened would not start CI anyway.
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
-          WORKSPACE: ${{ needs.check.outputs.workspace }}
+          RELEASE: ${{ needs.check.outputs.release }}
           BENCH: ${{ needs.check.outputs.bench }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           cat > "$RUNNER_TEMP/body.md" <<EOF
           ## Refreshed real-world benchmarks
 
-          \`benchmarks/results.json\` was measured with \`${BENCH:-no previous run}\`; the workspace is now \`mbx ${WORKSPACE}\`. Re-ran \`mise run bench:refresh\` on the fixed Namespace Linux xlarge profile: a pinned checkout of jdx/hk built under raw cargo, mbx, and kache across the cold, warm, next-commit, cross-worktree, toolchain-change, and six-job contention scenarios.
+          \`benchmarks/results.json\` was measured with \`${BENCH:-no previous run}\`; the latest release is now \`mbx ${RELEASE}\`. Re-ran the benchmark with that release on the dedicated performance runner: a pinned checkout of jdx/hk built under raw cargo, mbx, and kache across the cold, warm, next-commit, cross-worktree, toolchain-change, and six-job contention scenarios.
 
           The [run summary](${RUN_URL}) has the table these numbers came from, and the run's artifacts have the per-build logs.
 
@@ -220,7 +241,7 @@ jobs:
           Generated by the \`bench-refresh\` workflow.
           EOF
           EXISTING=$(gh pr list --state open --head bench-refresh --json number --jq '.[0].number // empty')
-          TITLE="chore: refresh real-world benchmarks for mbx v${WORKSPACE}"
+          TITLE="chore: refresh real-world benchmarks for mbx v${RELEASE}"
           if [ -n "$EXISTING" ]; then
             gh pr edit "$EXISTING" --title "$TITLE" --body-file "$RUNNER_TEMP/body.md"
           else
