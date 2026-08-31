@@ -132,19 +132,6 @@ shim, ordinary `cargo build`, `cargo test`, and `cargo check` commands use mbx
 automatically. Explicit `mbx cargo …` commands remain supported, but users and
 tools do not need to remember a special prefix.
 
-Coding agents generally need no mbx-specific skill or project instruction: the
-Cargo commands they already issue take the cached path. A project that wants to
-make the transparent behavior explicit can add this small note:
-
-```md
-Mr Boxington transparently caches ordinary `cargo` commands. No special command
-is required to use the shared cache.
-```
-
-Add that instruction to `AGENTS.md` only when the project wants to enforce the
-convention for every contributor. `mbx setup` does not edit repository-owned
-instruction files.
-
 On Unix, the stable `cargo` launcher uses the setup-time mbx while it exists,
 then resolves the active `mbx` from `PATH` after an upgrade removes that path.
 Windows `cargo.exe` resolves the active mbx from `PATH`, with the setup-time
