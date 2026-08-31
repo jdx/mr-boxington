@@ -30,6 +30,22 @@ fn keeps_workspace_discovery_inside_a_delta_worktree() {
 }
 
 #[test]
+fn vcs_markers_do_not_override_the_cargo_workspace() {
+    for marker in [".git", ".jj", ".hg", ".sl"] {
+        let directory = tempfile::tempdir().unwrap();
+        let outer = directory.path();
+        let member = outer.join("crates/member");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::create_dir(member.join(marker)).unwrap();
+        std::fs::write(outer.join("Cargo.lock"), "version = 4\n").unwrap();
+        std::fs::write(outer.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(member.join("Cargo.toml"), "[package]\n").unwrap();
+
+        assert_eq!(workspace_root(&member), outer, "marker: {marker}");
+    }
+}
+
+#[test]
 fn falls_back_to_a_manifest_without_a_lockfile() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

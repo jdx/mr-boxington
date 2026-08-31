@@ -38,3 +38,19 @@ fn discovers_a_delta_worktree_project_root() {
 
     assert_eq!(discover_project_root(&nested), worktree);
 }
+
+#[test]
+/// Native Mercurial and Sapling markers establish project boundaries.
+fn discovers_mercurial_and_sapling_project_roots() {
+    for marker in [".hg", ".sl"] {
+        let directory = tempfile::tempdir().unwrap();
+        let outer = directory.path();
+        let checkout = outer.join(marker.trim_start_matches('.'));
+        let nested = checkout.join("src/build");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir(outer.join(".git")).unwrap();
+        std::fs::create_dir(checkout.join(marker)).unwrap();
+
+        assert_eq!(discover_project_root(&nested), checkout, "marker: {marker}");
+    }
+}

@@ -342,6 +342,15 @@ fn reads_the_origin_from_jujutsu_remote_output() {
 }
 
 #[test]
+fn reads_mercurial_and_sapling_default_paths_as_origins() {
+    assert_eq!(
+        origin_marker_from_output(b"https://example.com/project\n"),
+        Some("origin\0https://example.com/project".to_string())
+    );
+    assert_eq!(origin_marker_from_output(b"\n"), None);
+}
+
+#[test]
 /// A nested Git checkout must not inherit an enclosing Jujutsu remote.
 fn a_nested_git_checkout_does_not_query_jujutsu() {
     let directory = tempfile::tempdir().unwrap();
@@ -352,6 +361,37 @@ fn a_nested_git_checkout_does_not_query_jujutsu() {
     std::fs::create_dir(inner.join(".git")).unwrap();
 
     assert_eq!(jj_origin_marker(&inner), None);
+}
+
+#[test]
+fn native_checkouts_do_not_inherit_an_enclosing_git_origin() {
+    for marker in [".hg", ".sl"] {
+        let directory = tempfile::tempdir().unwrap();
+        let outer = directory.path();
+        let inner = outer.join("vendor");
+        std::fs::create_dir(&inner).unwrap();
+        std::fs::create_dir(inner.join(marker)).unwrap();
+        assert!(
+            Command::new("git")
+                .arg("init")
+                .arg("--quiet")
+                .arg(outer)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(outer)
+                .args(["remote", "add", "origin", "https://example.com/outer.git"])
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        assert_eq!(project_origin_marker(&inner), None, "marker: {marker}");
+    }
 }
 
 #[cfg(unix)]

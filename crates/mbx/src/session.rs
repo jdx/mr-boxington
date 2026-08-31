@@ -623,14 +623,24 @@ fn exec_marker(project_root: &Path) -> String {
 }
 
 /// The origin URL names a project the same way in every worktree and clone,
-/// which a checkout's directory name does not. Try Git first so colocated
-/// Jujutsu repositories keep exactly the identity they had before.
+/// which a checkout's directory name does not. Try Git first for colocated
+/// repositories so they keep exactly the identity they had before.
 fn project_origin_marker(project_root: &Path) -> Option<String> {
-    if project_root.join(".jj").exists() && !project_root.join(".git").exists() {
-        jj_origin_marker(project_root)
-    } else {
-        git_origin_marker(project_root).or_else(|| jj_origin_marker(project_root))
+    if !project_root.join(".git").exists() {
+        if project_root.join(".jj").exists() {
+            return jj_origin_marker(project_root);
+        }
+        if project_root.join(".sl").exists() {
+            return sapling_origin_marker(project_root);
+        }
+        if project_root.join(".hg").exists() {
+            return mercurial_origin_marker(project_root);
+        }
     }
+    git_origin_marker(project_root)
+        .or_else(|| jj_origin_marker(project_root))
+        .or_else(|| sapling_origin_marker(project_root))
+        .or_else(|| mercurial_origin_marker(project_root))
 }
 
 /// Read Git's origin without imposing a repository layout on explicit roots.
@@ -644,8 +654,7 @@ fn git_origin_marker(project_root: &Path) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!url.is_empty()).then(|| format!("origin\0{url}"))
+    origin_marker_from_output(&output.stdout)
 }
 
 /// Read Jujutsu's origin only from a root that is itself a Jujutsu checkout.
@@ -679,6 +688,44 @@ fn jj_origin_url(remotes: &str) -> Option<&str> {
             None
         }
     })
+}
+
+/// Read the default source from a native Sapling checkout.
+fn sapling_origin_marker(project_root: &Path) -> Option<String> {
+    default_path_origin_marker("sl", project_root, &["config", "paths.default"], ".sl")
+}
+
+/// Read the default source from a Mercurial checkout.
+fn mercurial_origin_marker(project_root: &Path) -> Option<String> {
+    default_path_origin_marker("hg", project_root, &["paths", "default"], ".hg")
+}
+
+fn default_path_origin_marker(
+    program: &str,
+    project_root: &Path,
+    arguments: &[&str],
+    marker: &str,
+) -> Option<String> {
+    // Without this gate the command may discover an unrelated enclosing
+    // checkout, just as Jujutsu would.
+    if !project_root.join(marker).exists() {
+        return None;
+    }
+    let output = Command::new(program)
+        .arg("-R")
+        .arg(project_root)
+        .args(arguments)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    origin_marker_from_output(&output.stdout)
+}
+
+fn origin_marker_from_output(output: &[u8]) -> Option<String> {
+    let url = String::from_utf8_lossy(output).trim().to_string();
+    (!url.is_empty()).then(|| format!("origin\0{url}"))
 }
 
 fn action_remote_cache(config: &Config, store: &Path) -> Result<Option<AgentRemoteCache>> {
