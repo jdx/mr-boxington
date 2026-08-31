@@ -19,6 +19,13 @@ hosted runner, with rust-cache restoring a `target/` archive and mbx restoring
 individual actions from a remote server. They do show that you should not
 replace rust-cache with mbx solely for CI speed today. Benchmark the complete
 job, including setup and transfer time, before migrating.
+
+The tradeoff can still favor mbx when the cache also serves local worktrees,
+when several builds benefit from shared scheduling and in-flight
+deduplication, when fine-grained reuse across changed builds matters more than
+restoring one target archive, or when detailed diagnostics and a controlled
+self-hosted remote are requirements. A nearby remote can also change the
+transfer tradeoff.
 :::
 
 ## GitHub Actions cache

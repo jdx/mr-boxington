@@ -138,6 +138,12 @@ Windows than mbx using the cache server. Large transfers and incomplete
 prediction coverage from a fresh `target/` outweighed the compiler work mbx
 avoided. Keep rust-cache when CI wall-clock time is the deciding factor, unless
 your own end-to-end benchmark shows otherwise.
+
+mbx may still be the better trade when the cache must span local worktrees and
+CI, concurrent builds should share scheduling and in-flight work, granular
+results should survive changes that invalidate a target archive, or cache
+diagnostics and self-hosted policy controls matter more than the fastest
+single hosted-runner job.
 :::
 
 Actions such as `actions/cache` over `target/` (or `Swatinem/rust-cache`)

@@ -29,4 +29,10 @@ mbx is not currently as fast as
 GitHub-hosted runner benchmarks. Do not replace rust-cache solely for CI speed;
 benchmark your workflow first. The [GitHub Action guide](/github-action)
 describes the current results and limitations.
+
+mbx can still be preferable when one cache needs to work across local
+worktrees and CI, several builds run concurrently, fine-grained reuse matters,
+or detailed cache diagnostics and self-hosted control are requirements. Those
+benefits do not currently translate into a faster conventional hosted-runner
+job.
 :::
