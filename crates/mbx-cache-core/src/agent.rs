@@ -72,9 +72,11 @@ const MAX_PREFETCH_TRANSFERS: usize = 48;
 ///
 /// Manifests deliberately retain predictions across compatible builds, so a
 /// large workspace can describe far more actions than the next invocation
-/// will request. Keep the most expensive recorded rustc actions warm and let
-/// foreground lookups fetch the long tail on demand.
-const MAX_PREFETCH_ACTIONS: usize = 512;
+/// will request. Keep the most expensive recorded actions warm and let
+/// foreground lookups fetch the long tail on demand. A 256-action ceiling also
+/// bounds speculative output transfer: real Cargo manifests commonly contain
+/// predictions for build-script work made unnecessary by an earlier cache hit.
+const MAX_PREFETCH_ACTIONS: usize = 256;
 const MAX_PREFETCH_ACTION_BATCH: usize = 256;
 /// Batched action lookups issued at once.
 ///
