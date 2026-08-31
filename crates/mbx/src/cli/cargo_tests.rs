@@ -30,6 +30,25 @@ fn keeps_workspace_discovery_inside_a_delta_worktree() {
 }
 
 #[test]
+fn keeps_workspace_discovery_inside_mercurial_and_sapling_checkouts() {
+    for marker in [".hg", ".sl"] {
+        let directory = tempfile::tempdir().unwrap();
+        let outer = directory.path();
+        let checkout = outer.join(marker.trim_start_matches('.'));
+        let member = checkout.join("crates/member");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::create_dir(checkout.join(marker)).unwrap();
+        std::fs::write(outer.join("Cargo.lock"), "outer").unwrap();
+        std::fs::write(outer.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(checkout.join("Cargo.lock"), "inner").unwrap();
+        std::fs::write(checkout.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(member.join("Cargo.toml"), "[package]\n").unwrap();
+
+        assert_eq!(workspace_root(&member), checkout, "marker: {marker}");
+    }
+}
+
+#[test]
 fn falls_back_to_a_manifest_without_a_lockfile() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
