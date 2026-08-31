@@ -130,6 +130,14 @@ the same build.
 
 ## Tarball CI caches
 
+::: warning Current GitHub Actions results
+mbx performs well for local development. Remote caching works and is actively
+improving, but does not yet consistently outperform
+[Swatinem/rust-cache](https://github.com/Swatinem/rust-cache) on GitHub-hosted
+runners. Benchmark your complete workflow before switching. Investigations,
+discussions, and pull requests to improve it are welcome.
+:::
+
 Actions such as `actions/cache` over `target/` (or `Swatinem/rust-cache`)
 save and restore the whole directory as one archive. That is simple and needs
 no extra tooling, but the archive is all-or-nothing: one changed crate still

@@ -5,6 +5,14 @@ installs mbx and connects it to either GitHub Actions cache or an mbx-compatible
 server. The examples below show the inputs that matter for each backend; the
 action's repository documents the complete list.
 
+::: warning Current performance
+mbx performs well for local development. Remote caching works and is actively
+improving, but does not yet consistently outperform
+[Swatinem/rust-cache](https://github.com/Swatinem/rust-cache) on GitHub-hosted
+runners. Benchmark your complete workflow before switching. Investigations,
+discussions, and pull requests to improve it are welcome.
+:::
+
 ## GitHub Actions cache
 
 The default backend restores mbx's local store on every run and saves an entry
