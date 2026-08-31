@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0](https://github.com/jdx/mr-boxington/compare/v1.1.0...v1.2.0) - 2026-08-31
+
+### Added
+
+- support Mercurial and Sapling checkouts ([#232](https://github.com/jdx/mr-boxington/pull/232))
+
+### Fixed
+
+- *(setup)* prevent Cargo shim recursion after HOME changes ([#234](https://github.com/jdx/mr-boxington/pull/234))
+- document Cargo shim activation for agents ([#233](https://github.com/jdx/mr-boxington/pull/233))
+- support Delta worktrees ([#231](https://github.com/jdx/mr-boxington/pull/231))
+
+### Other
+
+- bound remote cache prefetch work ([#239](https://github.com/jdx/mr-boxington/pull/239))
+
 ## [1.1.0](https://github.com/jdx/mr-boxington/compare/v1.0.1...v1.1.0) - 2026-08-30
 
 ### Added

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.10.0...mbx-cache-core-v0.10.1) - 2026-08-31
+
+### Fixed
+
+- document Cargo shim activation for agents ([#233](https://github.com/jdx/mr-boxington/pull/233))
+
+### Other
+
+- bound remote cache prefetch work ([#239](https://github.com/jdx/mr-boxington/pull/239))
+
 ## [0.10.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.9.4...mbx-cache-core-v0.10.0) - 2026-08-30
 
 ### Added

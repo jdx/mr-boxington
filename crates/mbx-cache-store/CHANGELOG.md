@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.8...mbx-cache-store-v0.1.9) - 2026-08-31
+
+### Fixed
+
+- document Cargo shim activation for agents ([#233](https://github.com/jdx/mr-boxington/pull/233))
+
 ## [0.1.8](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.7...mbx-cache-store-v0.1.8) - 2026-08-30
 
 ### Added

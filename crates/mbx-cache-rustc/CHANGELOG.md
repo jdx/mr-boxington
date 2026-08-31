@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.10.0...mbx-cache-rustc-v0.10.1) - 2026-08-31
+
+### Fixed
+
+- *(cache)* model rustc frontend parallelism flags ([#238](https://github.com/jdx/mr-boxington/pull/238))
+- document Cargo shim activation for agents ([#233](https://github.com/jdx/mr-boxington/pull/233))
+
 ## [0.10.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.9.4...mbx-cache-rustc-v0.10.0) - 2026-08-30
 
 ### Added
