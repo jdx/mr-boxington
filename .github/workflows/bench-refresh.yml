@@ -71,8 +71,12 @@ jobs:
     if: needs.check.outputs.drift == 'true'
     # Keep the runner class fixed: the six-job contention scenario needs enough
     # CPU to reproduce the large parallel CI job it models, and timings cannot
-    # be compared across machine classes.
-    runs-on: namespace-profile-endev-linux-amd64-xlarge
+    # be compared across machine classes. The host-wide lease serializes this
+    # with every other jdx performance job.
+    runs-on: [self-hosted, jdx-perf-v1]
+    container:
+      image: ghcr.io/jdx/perf-runner@sha256:6f35a3dec67758d195d8fd01103f10f6c7aeaf8815dd41bf2aa2726fa3e9d4a9
+      options: --cpuset-cpus 0-7
     # The full refresh also runs every cache scenario and the toolchain guard.
     timeout-minutes: 180
     permissions:
@@ -85,6 +89,23 @@ jobs:
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           cache: false
+        env:
+          MISE_LOCKED: "1"
+      - name: Runner metadata
+        run: |
+          {
+            echo '### Runner metadata'
+            echo '```text'
+            echo 'environment-revision: perf-runner@6ab972a'
+            echo 'image: ghcr.io/jdx/perf-runner@sha256:6f35a3dec67758d195d8fd01103f10f6c7aeaf8815dd41bf2aa2726fa3e9d4a9'
+            uname -a
+            lscpu
+            mise --version
+            rustc --version
+            cargo --version
+            valgrind --version
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Install Clippy for the benchmark toolchain
         run: rustup component add clippy
       # Pinned: the comparison is only fair while both caches are the versions
