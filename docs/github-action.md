@@ -5,6 +5,22 @@ installs mbx and connects it to either GitHub Actions cache or an mbx-compatible
 server. The examples below show the inputs that matter for each backend; the
 action's repository documents the complete list.
 
+::: warning Current performance
+mbx is not currently as fast as
+[Swatinem/rust-cache](https://github.com/Swatinem/rust-cache) in our
+GitHub-hosted runner benchmarks. A
+[warm-cache run in jdx/hk](https://github.com/jdx/hk/actions/runs/33395159164)
+finished the measured Cargo build with rust-cache in 16.6 seconds on Linux,
+17.6 seconds on macOS, and 121 seconds on Windows. The server-backed mbx jobs
+took 211, 212, and 320 seconds respectively.
+
+Those results are not a claim about every environment: they measure a fresh
+hosted runner, with rust-cache restoring a `target/` archive and mbx restoring
+individual actions from a remote server. They do show that you should not
+replace rust-cache with mbx solely for CI speed today. Benchmark the complete
+job, including setup and transfer time, before migrating.
+:::
+
 ## GitHub Actions cache
 
 The default backend restores mbx's local store on every run and saves an entry

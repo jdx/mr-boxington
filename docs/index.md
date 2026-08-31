@@ -22,3 +22,11 @@ hero:
       text: Benchmarks
       link: /benchmarks
 ---
+
+::: warning GitHub Actions performance
+mbx is not currently as fast as
+[Swatinem/rust-cache](https://github.com/Swatinem/rust-cache) in our
+GitHub-hosted runner benchmarks. Do not replace rust-cache solely for CI speed;
+benchmark your workflow first. The [GitHub Action guide](/github-action)
+describes the current results and limitations.
+:::

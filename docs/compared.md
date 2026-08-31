@@ -130,6 +130,16 @@ the same build.
 
 ## Tarball CI caches
 
+::: warning Current GitHub Actions results
+The finer-grained model described below is not currently faster in our
+GitHub-hosted runner benchmarks. In a warm `jdx/hk` comparison, rust-cache
+completed the measured build substantially sooner on Linux, macOS, and
+Windows than mbx using the cache server. Large transfers and incomplete
+prediction coverage from a fresh `target/` outweighed the compiler work mbx
+avoided. Keep rust-cache when CI wall-clock time is the deciding factor, unless
+your own end-to-end benchmark shows otherwise.
+:::
+
 Actions such as `actions/cache` over `target/` (or `Swatinem/rust-cache`)
 save and restore the whole directory as one archive. That is simple and needs
 no extra tooling, but the archive is all-or-nothing: one changed crate still
