@@ -57,6 +57,7 @@ enum InputState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Prediction {
+    default_package: bool,
     environment: Vec<String>,
     inputs: Vec<String>,
     portable_out_dir: bool,
@@ -162,7 +163,7 @@ pub(crate) fn run() -> Result<ExitCode> {
 
     let caching = (|| -> Result<()> {
         let Some(prediction) = parse_prediction(&output.stdout)? else {
-            record_bypass("build-script-no-declared-inputs");
+            record_bypass("build-script-always-rerun");
             return Ok(());
         };
         let (action_bytes, action) = build_action(&binary_action, &prediction)?;
@@ -205,7 +206,12 @@ fn find_prediction(invocation: &CacheDigest) -> Result<Option<Prediction>> {
             prediction: Some(found),
         }) if found.adapter == ADAPTER && found.invocation == *invocation => {
             let prediction: Prediction = serde_json::from_str(&found.payload)?;
-            if prediction.version != 1 || canonical_json(&prediction)? != found.payload.as_bytes() {
+            if prediction.version != 2
+                || (prediction.default_package
+                    && (prediction.inputs != ["${build_script_manifest_dir}"]
+                        || !prediction.environment.is_empty()))
+                || canonical_json(&prediction)? != found.payload.as_bytes()
+            {
                 bail!("cached build-script prediction is unsupported");
             }
             Ok(Some(prediction))
@@ -262,14 +268,19 @@ fn parse_prediction(stdout: &[u8]) -> Result<Option<Prediction>> {
             environment.insert(name.to_string());
         }
     }
-    if inputs.is_empty() && environment.is_empty() {
-        return Ok(None);
+    let default_package = inputs.is_empty() && environment.is_empty();
+    if default_package {
+        // With no rerun directives Cargo treats the complete package source as
+        // the build script's input. Keep that implicit declaration explicit in
+        // the prediction so equivalent package trees can share the execution.
+        inputs.insert("${build_script_manifest_dir}".into());
     }
     Ok(Some(Prediction {
+        default_package,
         inputs: inputs.into_iter().collect(),
         environment: environment.into_iter().collect(),
         portable_out_dir: out_dir_is_portable()?,
-        version: 1,
+        version: 2,
     }))
 }
 
@@ -290,7 +301,12 @@ fn build_action(
         } else {
             working_dir.join(path)
         };
-        inputs.insert(declared.clone(), input_state(&resolved, &mappings)?);
+        let state = if prediction.default_package {
+            package_input_state(&resolved, &mappings)?
+        } else {
+            input_state(&resolved, &mappings)?
+        };
+        inputs.insert(declared.clone(), state);
     }
     let environment = prediction
         .environment
@@ -325,12 +341,24 @@ fn build_action(
 }
 
 fn input_state(path: &Path, mappings: &[PathMapping]) -> Result<InputState> {
-    input_state_at(path, mappings, 0)
+    input_state_at(path, mappings, &[], 0)
+}
+
+fn package_input_state(path: &Path, mappings: &[PathMapping]) -> Result<InputState> {
+    let mut excluded = vec![path.join(".git"), path.join("target")];
+    if let Some(target) = std::env::var_os(session::TARGET_DIR_ENV) {
+        let target = std::path::absolute(target)?;
+        if target.starts_with(path) {
+            excluded.push(target);
+        }
+    }
+    input_state_at(path, mappings, &excluded, 0)
 }
 
 fn input_state_at(
     path: &Path,
     mappings: &[PathMapping],
+    excluded: &[PathBuf],
     symlink_depth: usize,
 ) -> Result<InputState> {
     let metadata = match std::fs::symlink_metadata(path) {
@@ -352,7 +380,12 @@ fn input_state_at(
         };
         return Ok(InputState::Symlink {
             target: normalize_environment_value(&target.to_string_lossy(), mappings),
-            referent: Box::new(input_state_at(&resolved, mappings, symlink_depth + 1)?),
+            referent: Box::new(input_state_at(
+                &resolved,
+                mappings,
+                excluded,
+                symlink_depth + 1,
+            )?),
         });
     }
     if metadata.is_file() {
@@ -365,10 +398,11 @@ fn input_state_at(
         entries.sort_by_key(std::fs::DirEntry::file_name);
         let children = entries
             .into_iter()
+            .filter(|entry| !excluded.iter().any(|excluded| entry.path() == *excluded))
             .map(|entry| {
                 Ok((
                     entry.file_name().to_string_lossy().into_owned(),
-                    input_state_at(&entry.path(), mappings, symlink_depth)?,
+                    input_state_at(&entry.path(), mappings, excluded, symlink_depth)?,
                 ))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
@@ -770,17 +804,36 @@ mod tests {
     #[test]
     fn directives_are_deduplicated_and_both_cargo_spellings_are_accepted() {
         let parsed = parse_prediction(b"cargo:rerun-if-changed=src/a.h\ncargo::rerun-if-changed=src/a.h\ncargo:rerun-if-env-changed=MODE\n").unwrap().unwrap();
+        assert!(!parsed.default_package);
         assert_eq!(parsed.inputs, ["src/a.h"]);
         assert_eq!(parsed.environment, ["MODE"]);
     }
 
     #[test]
-    fn no_declared_inputs_bypasses_execution_caching() {
-        assert!(
-            parse_prediction(b"cargo:rustc-cfg=hello\n")
-                .unwrap()
-                .is_none()
-        );
+    fn no_declared_inputs_use_cargos_package_default() {
+        let parsed = parse_prediction(b"cargo:rustc-cfg=hello\n")
+            .unwrap()
+            .unwrap();
+        assert!(parsed.default_package);
+        assert_eq!(parsed.inputs, ["${build_script_manifest_dir}"]);
+    }
+
+    #[test]
+    fn cargos_package_default_excludes_generated_and_vcs_trees() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("input"), "same").unwrap();
+        std::fs::create_dir(directory.path().join("target")).unwrap();
+        std::fs::create_dir(directory.path().join(".git")).unwrap();
+        std::fs::write(directory.path().join("target/output"), "first").unwrap();
+        std::fs::write(directory.path().join(".git/HEAD"), "first").unwrap();
+        let first = package_input_state(directory.path(), &[]).unwrap();
+        std::fs::write(directory.path().join("target/output"), "second").unwrap();
+        std::fs::write(directory.path().join(".git/HEAD"), "second").unwrap();
+        let second = package_input_state(directory.path(), &[]).unwrap();
+        assert_eq!(first, second);
+        std::fs::write(directory.path().join("input"), "changed").unwrap();
+        let changed = package_input_state(directory.path(), &[]).unwrap();
+        assert_ne!(second, changed);
     }
 
     #[test]

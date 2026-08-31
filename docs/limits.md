@@ -2,7 +2,7 @@
 
 mr boxington favors correct uncached work over risky cache reuse.
 
-## Build-script execution needs declared inputs
+## Build-script execution follows Cargo's freshness inputs
 
 mbx caches running `build.rs`, not only compiling it. After a successful first
 run, the script's `cargo:rerun-if-changed` and `cargo:rerun-if-env-changed`
@@ -17,10 +17,10 @@ model.
 Set `build_script_execution = false` or `MBX_BUILD_SCRIPT_EXECUTION=0` to turn
 off this layer while retaining ordinary Rust and C/C++ compilation caching.
 
-A script that emits neither kind of rerun directive always runs. Cargo's
-package-wide default for such scripts is intentionally not guessed into a cache
-key: an uncached execution is cheaper than claiming an input set the script did
-not declare.
+A script that emits neither kind of rerun directive uses Cargo's package-wide
+default. mbx hashes the package tree into the action key, excluding the target
+directory and version-control metadata. This content key is stricter than
+Cargo's timestamp check while remaining portable across equivalent checkouts.
 
 Cached directives remap `OUT_DIR`, manifest/workspace and target roots, and
 `CARGO_HOME` to the restoring environment. Output trees that do not contain the

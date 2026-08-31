@@ -1067,6 +1067,46 @@ fn write_execution_cached_project(directory: &Path, declares_inputs: bool) {
     assert!(status.success());
 }
 
+/// Write a fixture that relies on Cargo's implicit package-wide build-script
+/// input. Its execution log lives outside the package so observing a run does
+/// not itself invalidate that input.
+fn write_default_input_project(directory: &Path, execution_log: &Path) {
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::write(
+        directory.join("Cargo.toml"),
+        "[package]\nname = \"default-input-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(directory.join("input.txt"), "first\n").unwrap();
+    let build_script =
+        "use std::{env, fs, path::PathBuf};\n\
+         fn main() {\n\
+             let log = PathBuf::from($EXECUTION_LOG);\n\
+             let mut runs = fs::read_to_string(&log).unwrap_or_default();\n\
+             runs.push_str(\"run\\n\");\n\
+             fs::write(log, runs).unwrap();\n\
+             let input = fs::read_to_string(\"input.txt\").unwrap();\n\
+             let out = PathBuf::from(env::var_os(\"OUT_DIR\").unwrap());\n\
+             fs::write(out.join(\"generated.rs\"), format!(\"pub const VALUE: &str = {:?};\\n\", input)).unwrap();\n\
+         }\n"
+            .replace(
+                "$EXECUTION_LOG",
+                &format!("{:?}", execution_log.to_str().unwrap()),
+            );
+    std::fs::write(directory.join("build.rs"), build_script).unwrap();
+    std::fs::write(
+        directory.join("src/lib.rs"),
+        "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\n",
+    )
+    .unwrap();
+    let status = Command::new(cargo())
+        .current_dir(directory)
+        .args(["generate-lockfile", "--offline"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
 #[test]
 fn build_script_execution_and_out_dir_restore_across_checkouts() {
     let store = tempfile::tempdir().unwrap();
@@ -1180,25 +1220,48 @@ fn changed_declared_environment_executes_build_script_again() {
 }
 
 #[test]
-fn build_script_without_declared_inputs_bypasses_execution_cache() {
+fn build_script_without_declared_inputs_uses_the_package_tree() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    write_default_input_project(first.path(), log.path());
+    write_default_input_project(second.path(), log.path());
+    build(
+        first.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+    );
+    let (warm, _) = build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+        &[],
+    );
+    assert_eq!(std::fs::read_to_string(log.path()).unwrap(), "run\n");
+    assert!(count(&warm, "hits") >= 1, "build script should hit: {warm}");
+}
+
+#[test]
+fn a_changed_implicit_package_input_executes_the_build_script_again() {
     let store = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
-    write_execution_cached_project(project.path(), false);
+    let log = tempfile::NamedTempFile::new().unwrap();
+    write_default_input_project(project.path(), log.path());
     build(
         project.path(),
         store.path(),
         &reports.path().join("first.json"),
     );
+    std::fs::write(project.path().join("input.txt"), "second\n").unwrap();
     build(
         project.path(),
         store.path(),
         &reports.path().join("second.json"),
     );
-    assert_eq!(
-        std::fs::read_to_string(project.path().join("runs")).unwrap(),
-        "2"
-    );
+    assert_eq!(std::fs::read_to_string(log.path()).unwrap(), "run\nrun\n");
 }
 
 #[test]
@@ -1341,10 +1404,13 @@ fn two_checkouts_share(generated: Generated, settings: &[(&str, &str)]) -> bool 
     write_generated_project(first.path(), generated);
     write_generated_project(second.path(), generated);
 
-    let settings: Vec<(&str, &str)> = [("MBX_CACHE_LINKS", "0")]
-        .into_iter()
-        .chain(settings.iter().copied())
-        .collect();
+    let settings: Vec<(&str, &str)> = [
+        ("MBX_CACHE_LINKS", "0"),
+        ("MBX_BUILD_SCRIPT_EXECUTION", "0"),
+    ]
+    .into_iter()
+    .chain(settings.iter().copied())
+    .collect();
     build_with(
         first.path(),
         store.path(),
@@ -2092,9 +2158,8 @@ fn main() {
         .status()
         .expect("the C compiler should run");
     assert!(status.success(), "the fixture's C should compile");
-    // This fixture tests the C action itself. Declaring no build-script inputs
-    // deliberately keeps execution caching out of the way, so the second
-    // checkout reaches the compiler shim whose behavior is under test.
+    // The tests disable build-script execution caching so the second checkout
+    // reaches the compiler shim whose behavior is under test.
     println!("cargo:rustc-cfg=c_compiled");
 }
 "#,
@@ -2152,17 +2217,21 @@ fn warm_checkout_hits(settings: &[(&str, &str)]) -> u64 {
     write_c_project(first.path());
     write_c_project(second.path());
 
+    let settings: Vec<(&str, &str)> = [("MBX_BUILD_SCRIPT_EXECUTION", "0")]
+        .into_iter()
+        .chain(settings.iter().copied())
+        .collect();
     build_with(
         first.path(),
         store.path(),
         &reports.path().join("first.json"),
-        settings,
+        &settings,
     );
     let (warm, _) = build_with(
         second.path(),
         store.path(),
         &reports.path().join("second.json"),
-        settings,
+        &settings,
     );
     count(&warm, "hits")
 }
@@ -2263,13 +2332,13 @@ fn objects_landing_beside_a_generated_header_still_cross_checkouts() {
         first.path(),
         store.path(),
         &reports.path().join("cold.json"),
-        &[],
+        &[("MBX_BUILD_SCRIPT_EXECUTION", "0")],
     );
     let (warm, _) = build_with(
         second.path(),
         store.path(),
         &reports.path().join("warm.json"),
-        &[],
+        &[("MBX_BUILD_SCRIPT_EXECUTION", "0")],
     );
     assert_eq!(
         count(&warm, "hits"),
