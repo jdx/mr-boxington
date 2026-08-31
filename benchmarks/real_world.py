@@ -743,7 +743,12 @@ def contention_permits() -> int:
     The scenario is about the default anyone would actually run under, so this
     is the CPU count rather than a number chosen to make the bound look tight.
     """
-    return os.cpu_count() or 1
+    try:
+        # Python 3.12's os.cpu_count() reports the host total inside a cpuset.
+        # Affinity is the set this benchmark process can actually schedule on.
+        return len(os.sched_getaffinity(0))
+    except AttributeError:
+        return os.cpu_count() or 1
 
 
 def validate(scenarios: list[dict[str, object]]) -> list[str]:
