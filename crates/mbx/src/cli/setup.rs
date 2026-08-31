@@ -23,6 +23,9 @@ export MBX_CARGO_SHIM_MODE MBX_CARGO_SHIM_PATH
 exec "$mbx_executable" "$@"
 "#;
 const RUST_ANALYZER_CONFIG_FILE: &str = "rust-analyzer.toml";
+const MISE_WRAPPERS_MINIMUM_VERSION: (u64, u64, u64) = (2026, 8, 16);
+const MISE_WRAPPERS_MINIMUM_VERSION_DISPLAY: &str = "2026.8.16";
+const CARGO_WRAPPER_MODE_ENV: &str = "MBX_CARGO_SHIM_MODE";
 const RUST_ANALYZER_CHECK_ARGUMENTS: [&str; 4] = [
     "check",
     "--workspace",
@@ -35,10 +38,10 @@ pub(super) struct SetupArgs {
     /// Accept the recommended activation scope without prompting.
     #[usage(long)]
     pub(super) yes: bool,
-    /// Activate the Cargo shim in mise's global configuration.
+    /// Activate the Cargo wrapper in mise's global configuration.
     #[usage(long)]
     pub(super) global: bool,
-    /// Activate the Cargo shim in the current project's mise configuration.
+    /// Activate the Cargo wrapper in the current project's mise configuration.
     #[usage(long)]
     pub(super) local: bool,
     /// Report whether plain Cargo integration is installed and current.
@@ -145,7 +148,6 @@ pub(crate) fn setup_at_action(
 ) -> Result<ExitCode> {
     let shim = install_dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
     let was_installed = shim.is_file();
-    let configured_path = portable_home_path(install_dir);
 
     match action {
         SetupAction::Status => {
@@ -157,7 +159,8 @@ pub(crate) fn setup_at_action(
                 println!("mbx setup is outdated; run `mbx setup`");
                 return Ok(ExitCode::FAILURE);
             }
-            if matches!(scope, MiseScope::None) || mise_path_is_configured(scope, &configured_path)?
+            if matches!(scope, MiseScope::None)
+                || (mise_wrappers_available() && mise_wrapper_is_configured(scope)?)
             {
                 println!("mbx setup is installed and current: {}", shim.display());
                 return Ok(ExitCode::SUCCESS);
@@ -166,8 +169,8 @@ pub(crate) fn setup_at_action(
             return Ok(ExitCode::FAILURE);
         }
         SetupAction::Uninstall => {
-            let activation_removed = !matches!(scope, MiseScope::None)
-                && update_mise_path(scope, "--remove", &configured_path)?;
+            let activation_removed =
+                !matches!(scope, MiseScope::None) && update_mise_wrapper(scope, action)?;
             if activation_removed {
                 println!(
                     "removed mbx Cargo activation; {} was left in place for other scopes",
@@ -194,7 +197,7 @@ pub(crate) fn setup_at_action(
     }
 
     let activated = if !matches!(scope, MiseScope::None) {
-        update_mise_path(scope, "--append", &configured_path)?
+        update_mise_wrapper(scope, action)?
     } else {
         false
     };
@@ -217,13 +220,11 @@ fn print_activation_verification(shim: &Path) {
     let directory = shim.parent().unwrap_or(shim);
     #[cfg(windows)]
     println!(
-        "verify new shells with `Get-Command cargo` in PowerShell or `where.exe cargo`; expected {}",
-        shim.display()
+        "verify new shells with `Get-Command cargo` in PowerShell or `where.exe cargo`; it should resolve through mise's command-wrappers directory"
     );
     #[cfg(not(windows))]
     println!(
-        "verify new shells with `command -v cargo`; expected {}",
-        shim.display()
+        "verify new shells with `command -v cargo`; it should resolve through mise's command-wrappers directory"
     );
     println!(
         "tools and non-interactive shells that do not activate mise need {} prepended to PATH",
@@ -519,91 +520,95 @@ fn command_exists(name: &str) -> bool {
     })
 }
 
-fn portable_home_path(path: &Path) -> String {
-    dirs::home_dir()
-        .and_then(|home| path.strip_prefix(home).ok())
-        .map(|relative| Path::new("~").join(relative).display().to_string())
-        .unwrap_or_else(|| path.display().to_string())
-}
-
-fn mise_scope_arguments(scope: &MiseScope, command: &mut Command) {
-    match scope {
-        MiseScope::File(path) => {
-            command.args(["--file".as_ref(), path.as_os_str()]);
-        }
-        MiseScope::Global => {
-            command.arg("--global");
-        }
-        MiseScope::Local | MiseScope::None => {}
-    }
-}
-
-fn update_mise_path(scope: &MiseScope, operation: &str, path: &str) -> Result<bool> {
-    if !mise_supports_collection_updates() {
-        let config = mise_scope_config_path(scope)?;
-        eprintln!(
-            "mbx[setup]: this mise cannot update env._.path without replacing existing entries"
-        );
-        let action = match operation {
-            "--append" => "add",
-            "--remove" => "remove",
-            _ => eyre::bail!("unsupported mise path update: {operation}"),
-        };
-        eprintln!(
-            "mbx[setup]: {action} {path:?} {} env._.path in {}",
-            if operation == "--append" {
-                "to"
-            } else {
-                "from"
-            },
-            config.display()
-        );
+fn update_mise_wrapper(scope: &MiseScope, action: SetupAction) -> Result<bool> {
+    if !mise_wrappers_available() {
         return Ok(false);
     }
-    // `mise use` runs postinstall before writing a new config. Seed the exact
-    // path it provided, and trust it only for the `mise config set` subprocess.
-    let created_config = if operation == "--append"
-        && let MiseScope::File(config) = scope
-        && !config.exists()
-    {
-        if let Some(parent) = config.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(config)
-        {
-            Ok(_) => Some(config),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
-            Err(error) => return Err(error.into()),
-        }
-    } else {
-        None
+    let config = mise_scope_config_path(scope)?;
+    let contents = match std::fs::read_to_string(&config) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
     };
-    let mut command = Command::new("mise");
-    command.args(["config", "set", operation]);
-    mise_scope_arguments(scope, &mut command);
-    if let Some(config) = created_config {
-        command.env("MISE_TRUSTED_CONFIG_PATHS", config);
+    let mut document = contents
+        .parse::<toml_edit::DocumentMut>()
+        .wrap_err_with(|| format!("failed to parse {}", config.display()))?;
+    let configured = mise_wrapper_is_configured_in(&document);
+
+    match action {
+        SetupAction::Status => return Ok(configured),
+        SetupAction::Install if configured => return Ok(true),
+        SetupAction::Install => {
+            if document
+                .get("wrappers")
+                .and_then(toml_edit::Item::as_table_like)
+                .and_then(|wrappers| wrappers.get("cargo"))
+                .is_some()
+            {
+                eprintln!(
+                    "mbx[setup]: left {} unchanged because wrappers.cargo is already configured",
+                    config.display()
+                );
+                return Ok(false);
+            }
+            document["wrappers"]["cargo"]["command"] = toml_edit::value("mbx");
+            document["wrappers"]["cargo"]["env"][CARGO_WRAPPER_MODE_ENV] = toml_edit::value("1");
+        }
+        SetupAction::Uninstall if !configured => return Ok(false),
+        SetupAction::Uninstall => {
+            let wrappers = document
+                .get_mut("wrappers")
+                .and_then(toml_edit::Item::as_table_like_mut)
+                .expect("the configured wrapper has a wrappers table");
+            wrappers.remove("cargo");
+            if wrappers.is_empty() {
+                document.remove("wrappers");
+            }
+        }
     }
-    command.args(["env._.path", path]);
-    let status = command
+
+    crate::util::write_atomic(&config, document.to_string().as_bytes())?;
+    let status = Command::new("mise")
+        .arg("reshim")
+        .env("MISE_CONFIG_FILE", &config)
+        .env("MISE_TRUSTED_CONFIG_PATHS", &config)
         .status()
-        .wrap_err("failed to run `mise config set`")?;
+        .wrap_err("failed to run `mise reshim`")?;
     if !status.success() {
-        eyre::bail!("mise could not update env._.path");
+        eyre::bail!("mise could not refresh command wrappers");
     }
     Ok(true)
 }
 
-fn mise_supports_collection_updates() -> bool {
+fn mise_supports_wrappers() -> bool {
     Command::new("mise")
-        .args(["config", "set", "--help"])
+        .arg("--version")
         .output()
-        .is_ok_and(|output| {
-            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("--append")
-        })
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| mise_version_from_output(&output.stdout))
+        .is_some_and(|version| version >= MISE_WRAPPERS_MINIMUM_VERSION)
+}
+
+fn mise_wrappers_available() -> bool {
+    let available = mise_supports_wrappers();
+    if !available {
+        eprintln!(
+            "mbx[setup]: mise {MISE_WRAPPERS_MINIMUM_VERSION_DISPLAY} or newer is required for [wrappers]; upgrade mise to activate plain cargo commands"
+        );
+    }
+    available
+}
+
+pub(super) fn mise_version_from_output(output: &[u8]) -> Option<(u64, u64, u64)> {
+    let version = String::from_utf8_lossy(output);
+    let version = version.split_whitespace().next()?.trim_start_matches('v');
+    let mut parts = version.split('.').map(str::parse);
+    Some((
+        parts.next()?.ok()?,
+        parts.next()?.ok()?,
+        parts.next()?.ok()?,
+    ))
 }
 
 fn mise_scope_config_path(scope: &MiseScope) -> Result<PathBuf> {
@@ -652,22 +657,9 @@ fn nearest_project_config() -> Option<PathBuf> {
     None
 }
 
-fn mise_path_is_configured(scope: &MiseScope, path: &str) -> Result<bool> {
-    if !mise_supports_collection_updates() {
-        return mise_path_file_is_configured(&mise_scope_config_path(scope)?, path);
-    }
-    let mut command = Command::new("mise");
-    command.args(["config", "get"]);
-    mise_scope_arguments(scope, &mut command);
-    command.arg("env._.path");
-    let output = command
-        .output()
-        .wrap_err("failed to run `mise config get`")?;
-    Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).contains(path))
-}
-
-fn mise_path_file_is_configured(config: &Path, path: &str) -> Result<bool> {
-    let contents = match std::fs::read_to_string(config) {
+fn mise_wrapper_is_configured(scope: &MiseScope) -> Result<bool> {
+    let config = mise_scope_config_path(scope)?;
+    let contents = match std::fs::read_to_string(&config) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error.into()),
@@ -675,19 +667,26 @@ fn mise_path_file_is_configured(config: &Path, path: &str) -> Result<bool> {
     let document = contents
         .parse::<toml_edit::DocumentMut>()
         .wrap_err_with(|| format!("failed to parse {}", config.display()))?;
-    let Some(value) = document
+    Ok(mise_wrapper_is_configured_in(&document))
+}
+
+pub(super) fn mise_wrapper_is_configured_in(document: &toml_edit::DocumentMut) -> bool {
+    let Some(cargo) = document
+        .get("wrappers")
+        .and_then(toml_edit::Item::as_table_like)
+        .and_then(|wrappers| wrappers.get("cargo"))
+        .and_then(toml_edit::Item::as_table_like)
+    else {
+        return false;
+    };
+    let command_is_mbx = cargo.get("command").and_then(toml_edit::Item::as_str) == Some("mbx");
+    let shim_mode_is_set = cargo
         .get("env")
         .and_then(toml_edit::Item::as_table_like)
-        .and_then(|env| env.get("_"))
-        .and_then(toml_edit::Item::as_table_like)
-        .and_then(|paths| paths.get("path"))
-    else {
-        return Ok(false);
-    };
-    Ok(value.as_str() == Some(path)
-        || value
-            .as_array()
-            .is_some_and(|array| array.iter().any(|entry| entry.as_str() == Some(path))))
+        .and_then(|env| env.get(CARGO_WRAPPER_MODE_ENV))
+        .and_then(toml_edit::Item::as_str)
+        == Some("1");
+    command_is_mbx && shim_mode_is_set
 }
 
 fn print_manual_activation(path: &Path) {

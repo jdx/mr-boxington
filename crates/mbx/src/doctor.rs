@@ -253,10 +253,16 @@ fn setup_check() -> Check {
         &executable,
         &expected_shim,
         crate::cli::cargo_activation_path().as_deref(),
+        mise_cargo_wrapper_is_configured(),
     )
 }
 
-fn setup_check_at(executable: &Path, expected_shim: &Path, path: Option<&OsStr>) -> Check {
+fn setup_check_at(
+    executable: &Path,
+    expected_shim: &Path,
+    path: Option<&OsStr>,
+    mise_wrapper_configured: bool,
+) -> Check {
     if !expected_shim.is_file() {
         return Check::warn(
             "setup",
@@ -274,6 +280,19 @@ fn setup_check_at(executable: &Path, expected_shim: &Path, path: Option<&OsStr>)
     }
 
     let active_cargo = path.and_then(cargo_on_path);
+    if mise_wrapper_configured
+        && active_cargo
+            .as_deref()
+            .is_some_and(crate::cli::is_mise_command_wrapper_path)
+    {
+        return Check::pass(
+            "setup",
+            format!(
+                "mise Cargo wrapper is active and the fallback shim is current at {}",
+                expected_shim.display()
+            ),
+        );
+    }
     if active_cargo
         .as_deref()
         .is_none_or(|cargo| !same_path(cargo, expected_shim))
@@ -298,6 +317,19 @@ fn setup_check_at(executable: &Path, expected_shim: &Path, path: Option<&OsStr>)
             expected_shim.display()
         ),
     )
+}
+
+fn mise_cargo_wrapper_is_configured() -> bool {
+    let config_value = |key: &str| {
+        Command::new("mise")
+            .args(["config", "get", key])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    config_value("wrappers.cargo.command").as_deref() == Some("mbx")
+        && config_value("wrappers.cargo.env.MBX_CARGO_SHIM_MODE").as_deref() == Some("1")
 }
 
 fn cargo_on_path(path: &OsStr) -> Option<PathBuf> {
@@ -466,13 +498,13 @@ mod tests {
 
         let real_first = std::env::join_paths([&real_dir, &shim_dir]).unwrap();
         assert_eq!(
-            setup_check_at(&executable, &shim, Some(&real_first)).detail,
+            setup_check_at(&executable, &shim, Some(&real_first), false).detail,
             "Cargo shim is not installed; plain Cargo bypasses mbx, while explicit `mbx <cargo-command>` still works"
         );
 
         std::fs::write(&shim, b"old mbx").unwrap();
         assert_eq!(
-            setup_check_at(&executable, &shim, Some(&real_first)).detail,
+            setup_check_at(&executable, &shim, Some(&real_first), false).detail,
             "Cargo shim is outdated; run `mbx setup`"
         );
 
@@ -483,15 +515,25 @@ mod tests {
             crate::cli::DoctorSetupAction::Install,
         )
         .unwrap();
-        let inactive = setup_check_at(&executable, &shim, Some(&real_first));
+        let inactive = setup_check_at(&executable, &shim, Some(&real_first), false);
         assert_eq!(inactive.severity, Severity::Warn);
         assert!(inactive.detail.contains("current but not active"));
         assert!(inactive.detail.contains(&real_cargo.display().to_string()));
 
         let shim_first = std::env::join_paths([&shim_dir, &real_dir]).unwrap();
-        let active = setup_check_at(&executable, &shim, Some(&shim_first));
+        let active = setup_check_at(&executable, &shim, Some(&shim_first), false);
         assert_eq!(active.severity, Severity::Pass);
         assert!(active.detail.contains("active and current"));
+
+        let wrapper_dir = directory.path().join("command-wrappers/bin");
+        let wrapper = wrapper_dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
+        std::fs::create_dir_all(&wrapper_dir).unwrap();
+        std::fs::write(&wrapper, b"mise wrapper").unwrap();
+        make_executable(&wrapper);
+        let wrapper_first = std::env::join_paths([&wrapper_dir, &real_dir]).unwrap();
+        let active = setup_check_at(&executable, &shim, Some(&wrapper_first), true);
+        assert_eq!(active.severity, Severity::Pass);
+        assert!(active.detail.contains("mise Cargo wrapper is active"));
     }
 
     #[cfg(unix)]
@@ -505,7 +547,7 @@ mod tests {
         std::fs::write(&executable, b"current mbx").unwrap();
         std::fs::write(&shim, crate::cli::DOCTOR_CARGO_SHIM_LAUNCHER).unwrap();
 
-        let check = setup_check_at(&executable, &shim, Some(shim_dir.as_os_str()));
+        let check = setup_check_at(&executable, &shim, Some(shim_dir.as_os_str()), false);
         assert_eq!(check.severity, Severity::Warn);
         assert!(check.detail.contains("current but not active"));
         assert!(check.detail.contains("PATH resolves cargo to nothing"));

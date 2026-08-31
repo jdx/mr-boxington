@@ -33,6 +33,8 @@ pub(crate) fn cargo_activation_path() -> Option<std::ffi::OsString> {
     shim::activation_path()
 }
 
+pub(crate) use shim::is_mise_command_wrapper_path;
+
 #[cfg(test)]
 use prefetch::validate_prefetch_config;
 #[cfg(all(test, unix))]
