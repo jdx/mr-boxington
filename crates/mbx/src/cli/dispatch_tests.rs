@@ -211,8 +211,8 @@ fn cli_exposes_its_usage_spec() {
     // completions rather than being removed from under anyone using it.
     assert!(spec.contains("cmd setup"));
     assert!(
-        spec.contains("hide=#true"),
-        "setup should be hidden from help: {spec}"
+        !spec.contains("hide=#true"),
+        "setup should be public: {spec}"
     );
     assert!(
         spec.contains("sigil=+"),

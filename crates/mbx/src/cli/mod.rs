@@ -20,12 +20,28 @@ mod explain;
 mod gc;
 mod prefetch;
 mod setup;
+mod shim;
 mod tui;
 
+const CARGO_SHIM_TARGET_FILE: &str = "mbx-target";
+
 pub(crate) use cargo::{cargo_with_bypass_log, cargo_with_settings_and_bypass_log};
+pub(crate) use setup::{cargo_shim_is_current, setup_install_dir};
+pub use shim::{is_cargo_shim, run_cargo_shim};
+
+pub(crate) fn cargo_activation_path() -> Option<std::ffi::OsString> {
+    shim::activation_path()
+}
 
 #[cfg(test)]
 use prefetch::validate_prefetch_config;
+#[cfg(all(test, unix))]
+pub(crate) use setup::CARGO_SHIM_LAUNCHER as DOCTOR_CARGO_SHIM_LAUNCHER;
+#[cfg(test)]
+pub(crate) use setup::{
+    MiseScope as DoctorMiseScope, SetupAction as DoctorSetupAction,
+    setup_at_action as doctor_setup_at_action,
+};
 #[cfg(test)]
 use {cache::*, cargo::*, exec::*, gc::*, setup::*};
 
@@ -35,7 +51,7 @@ use {cache::*, cargo::*, exec::*, gc::*, setup::*};
     version,
     config = crate::config::RawConfig,
     about = "A build cache for Rust projects",
-    long_about = "Put mbx in front of any Cargo command. The subcommand and all of its arguments are passed through unchanged, including Cargo aliases and installed subcommands, while compiled work is shared across every checkout and build storage prunes itself. mbx's own subcommands, such as `cache` and `gc`, are reserved.\n\nExamples:\n  mbx build --release\n  mbx test --workspace\n  mbx clippy --all-targets -- -D warnings\n  mbx gc --dry-run",
+    long_about = "Run `mbx setup` once, then keep using Cargo normally. Compiled work is shared across every checkout and build storage prunes itself. Use mbx directly for its own commands, such as `tui`, `cache`, `gc`, and `doctor`, or prefix Cargo commands with `mbx` for zero-config use.\n\nExamples:\n  mbx setup\n  cargo build --release\n  cargo test --workspace\n  cargo clippy --all-targets -- -D warnings\n  mbx gc --dry-run",
     unknown_flags = "error"
 )]
 struct Cli {
@@ -60,13 +76,7 @@ enum Commands {
     Doctor(doctor::DoctorArgs),
     /// Run a Cargo command and explain every compilation mbx cannot cache.
     Explain(explain::ExplainArgs),
-    // Hidden, not removed: `mbx <cargo command>` is the supported path and gets
-    // the remote cache, statistics, managed targets, and collection that the
-    // standalone wrapper cannot, but setups already relying on this keep
-    // working. A plain comment rather than a doc comment, because the generated
-    // CLI reference renders those and this is a note to the next reader here.
-    /// Install a persistent rustc wrapper for plain Cargo commands.
-    #[usage(hide)]
+    /// Make plain Cargo commands run through mbx.
     Setup(setup::SetupArgs),
     /// Collect stale managed targets and evict cached objects until the store fits a size budget.
     ///
@@ -142,13 +152,17 @@ pub fn run() -> Result<ExitCode> {
         args.command = original_exec_arguments(&original)?;
     }
     if let Commands::Doctor(args) = &cli.command {
+        shim::prepare_explicit_cargo()?;
         return doctor::run(args, toolchain);
     }
     let (config, settings) = Config::load_for_cli()?;
     match cli.command {
         Commands::Doctor(_) => unreachable!("doctor was handled before configuration loading"),
-        Commands::Explain(args) => explain::run(&config, &settings, args, toolchain),
-        Commands::Setup(args) => setup::run(args.action()?),
+        Commands::Explain(args) => {
+            shim::prepare_explicit_cargo()?;
+            explain::run(&config, &settings, args, toolchain)
+        }
+        Commands::Setup(args) => setup::run(&args, args.action()?),
         Commands::Gc(args) => gc::run(
             &config,
             args.max_size
@@ -160,9 +174,13 @@ pub fn run() -> Result<ExitCode> {
         .map(|()| ExitCode::SUCCESS),
         Commands::Cache(args) => cache::run(&config, args.command),
         Commands::Tui(args) => tui::run(&config, args),
-        Commands::Prefetch(args) => prefetch::run(&config, &args.cargo_args),
+        Commands::Prefetch(args) => {
+            shim::prepare_explicit_cargo()?;
+            prefetch::run(&config, &args.cargo_args)
+        }
         Commands::Exec(args) => exec::run(&config, &settings, &args),
         Commands::Cargo(arguments) => {
+            shim::prepare_explicit_cargo()?;
             cargo::run(&config, &settings, &with_toolchain(toolchain, arguments))
         }
     }

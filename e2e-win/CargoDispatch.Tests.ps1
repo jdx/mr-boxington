@@ -67,4 +67,52 @@ mbx-probe = "new --vcs none"
         $status | Should -Not -Be 0
         $output | Should -Match 'no such command: .*command-added-after-mbx'
     }
+
+    It 'installs and dispatches the cargo.exe shim' {
+        $mbx = (Get-Command mbx).Source
+        $originalPath = $env:PATH
+        $originalDisable = $env:MBX_DISABLE
+        $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+        $shimDir = Join-Path $localAppData 'mbx\bin'
+        $targetFile = Join-Path $shimDir 'mbx-target'
+        $targetExisted = Test-Path -LiteralPath $targetFile
+        $originalTargetBytes = if ($targetExisted) { [IO.File]::ReadAllBytes($targetFile) } else { $null }
+        try {
+            $output = & $mbx setup 2>&1 | Out-String
+            $LASTEXITCODE | Should -Be 0 -Because $output
+
+            Test-Path -LiteralPath (Join-Path $shimDir 'cargo.exe') | Should -BeTrue
+            Test-Path -LiteralPath $targetFile | Should -BeTrue
+            $statusOutput = & $mbx setup --status 2>&1 | Out-String
+            $LASTEXITCODE | Should -Be 0 -Because $statusOutput
+
+            # A versioned installer may remove the exact binary setup recorded.
+            # The shim and status checks should then follow the active mbx on PATH.
+            $missingTarget = Join-Path $shimDir 'removed-version\mbx.exe'
+            $targetBytes = [Text.Encoding]::Unicode.GetBytes($missingTarget)
+            [IO.File]::WriteAllBytes($targetFile, $targetBytes)
+            $mbxDir = Split-Path -Parent $mbx
+            $env:PATH = "$mbxDir;$originalPath"
+            $statusOutput = & $mbx setup --status 2>&1 | Out-String
+            $LASTEXITCODE | Should -Be 0 -Because $statusOutput
+
+            $env:PATH = "$shimDir;$mbxDir;$originalPath"
+            $env:MBX_DISABLE = '1'
+            $version = & cargo.exe --version 2>&1 | Out-String
+            $LASTEXITCODE | Should -Be 0 -Because $version
+            $version | Should -Match '^cargo '
+        } finally {
+            $env:PATH = $originalPath
+            if ($targetExisted) {
+                [IO.File]::WriteAllBytes($targetFile, $originalTargetBytes)
+            } else {
+                Remove-Item -LiteralPath $targetFile -ErrorAction Ignore
+            }
+            if ($null -eq $originalDisable) {
+                Remove-Item Env:MBX_DISABLE -ErrorAction Ignore
+            } else {
+                $env:MBX_DISABLE = $originalDisable
+            }
+        }
+    }
 }

@@ -5,8 +5,15 @@
 ### mise
 
 ```sh
-mise use -g mr-boxington
+mise use --global --postinstall "mbx setup --yes" mr-boxington
 ```
+
+::: info Requires mise 2026.8.15 or newer
+The `--postinstall` setup hook requires mise 2026.8.15 or newer.
+:::
+
+With `--global`, mise activates mbx in its global configuration. Drop
+`--global` to activate it only in the current project's configuration.
 
 ### Release archive
 
@@ -90,7 +97,32 @@ host glibc.
 
 ```sh
 cargo install mbx --locked
+mbx setup
 ```
+
+During `mise use --postinstall`, `mbx setup --yes` activates the configuration
+named by `MISE_CONFIG_FILE`. Otherwise, setup only integrates with mise when
+mise is activated in the current shell. It recommends the config that defines
+`mr-boxington`, then the nearest project config, and finally the global config.
+`mbx setup` prompts before using that recommendation; `--yes` accepts it.
+Without an active mise shell, setup prints the exact shell-specific `PATH`
+change and never edits a shell startup file.
+
+On Unix, the stable `cargo` launcher uses the setup-time mbx while it exists,
+then resolves the active `mbx` from `PATH` after an upgrade removes that path.
+Windows `cargo.exe` resolves the active mbx from `PATH`, with the setup-time
+path as a fallback. Upgrading a mise-managed mbx does not require running setup
+again.
+
+Setup also configures rust-analyzer's background check in the matching global
+or project scope. The editor invokes the stable Cargo shim by its absolute path,
+so its build shares mbx's cache and machine-wide compiler pool even when the
+editor did not inherit mise's `PATH`. Existing rust-analyzer check settings are
+always left unchanged rather than silently changing commands or features.
+
+After installing from a release archive, run `$HOME/.local/bin/mbx setup` on
+Unix. On Windows, run
+`& "$env:LOCALAPPDATA\Programs\mbx\mbx.exe" setup` in PowerShell.
 
 ## Supported platforms
 
@@ -129,29 +161,33 @@ differences, which the pages they belong to also note in place:
 
 ## Run a build
 
-Put `mbx` before cargo's subcommand:
+After setup, use Cargo normally:
 
 ```sh
-mbx build
-mbx test --workspace --all-features
-mbx clippy --workspace --all-targets
+cargo build
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets
 ```
 
 The command and its arguments are passed to Cargo unchanged. Cargo still owns
-dependency resolution, feature unification, build planning, and linking. mbx
-also forwards Cargo aliases and installed subcommands. Nothing goes into
-Cargo's configuration, and there is nothing to tune before the first build.
-
-A toolchain goes where rustup expects it, in front of the command:
+dependency resolution, feature unification, build planning, and linking. Cargo
+aliases, installed subcommands, and toolchain selection are preserved:
 
 ```sh
-mbx +1.91 check --workspace
+cargo +1.91 check --workspace
 ```
 
-mbx reads that word rather than passing it along unexamined, so it means the
-same thing in front of mbx's own commands: `mbx +1.91 doctor` reports on 1.91,
-and `mbx +1.91 explain check` diagnoses a build under it. Commands that never
-reach a compiler, such as `mbx gc`, refuse a toolchain instead of ignoring one.
+`MBX_DISABLE=1 cargo …` bypasses mbx for one invocation in a POSIX shell. In
+PowerShell, set `$env:MBX_DISABLE = "1"`, run Cargo, then remove it with
+`Remove-Item Env:MBX_DISABLE`.
+
+::: tip Use mbx without setup
+Run `mbx +1.91 check` directly for zero-config use. Only commands prefixed with
+`mbx` use caching in this mode.
+:::
+
+mbx's own `tui`, `cache`, `gc`, `doctor`, and diagnostic commands stay under
+`mbx`.
 
 ## Run multiple Cargo builds at the same time
 
@@ -209,16 +245,17 @@ mbx doctor
   ok  cache        /home/you/.cache/mbx is writable
   ok  config       50.0 GiB budget, automatic gc enabled, managed targets enabled at /home/you/.cache/mbx/targets
   ok  reflink      supported by the cache filesystem
-  ok  setup        no plain-cargo wrapper installed; mbx wraps cargo directly
+  ok  setup        Cargo shim is active and current at /home/you/.local/share/mbx/bin/cargo
   ok  remote       not configured; using the local cache
 
 0 failures, 0 warnings
 ```
 
-Doctor checks the Cargo and rustc executables, cache write access, filesystem
-reflink support, effective remote policy, and remote protocol connectivity.
-Warnings describe optional features or fallbacks; failures make the command
-exit unsuccessfully.
+Doctor checks that the installed Cargo shim matches the running mbx and is the
+first `cargo` on `PATH`, along with the Cargo and rustc executables, cache write
+access, filesystem reflink support, effective remote policy, and remote protocol
+connectivity. Warnings describe setup problems, optional features, or fallbacks;
+failures make the command exit unsuccessfully.
 
 ## Read the result
 
@@ -267,8 +304,8 @@ them rarely needs a follow-up question:
 
 ```sh
 mbx doctor --json           # environment, store, and setup state
-MBX_LOG=debug mbx build     # mbx's own diagnostics for the run
-MBX_BYPASS_LOG=bypass.log mbx build   # why each compilation was not cached
+MBX_LOG=debug cargo build     # mbx's own diagnostics for the run
+MBX_BYPASS_LOG=bypass.log cargo build   # why each compilation was not cached
 ```
 
 All three describe your machine: `mbx doctor --json` reports absolute cache
