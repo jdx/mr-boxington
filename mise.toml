@@ -160,7 +160,7 @@ depends = ["perf:prepare"]
 run = "tak run --record"
 
 [tools]
-"github:jdx/tak" = "0.0.8"
+"github:jdx/tak" = "0.0.9"
 aube = "latest"
 communique = "latest"
 lychee = "0.24.2"
