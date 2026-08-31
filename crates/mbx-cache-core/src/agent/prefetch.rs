@@ -1,5 +1,79 @@
 use super::*;
 
+#[derive(Clone)]
+pub(crate) struct PrefetchCandidate {
+    adapter: String,
+    priority: u64,
+}
+
+fn prediction_priority(prediction: &ActionPrediction) -> u64 {
+    let recorded_duration = serde_json::from_str::<serde_json::Value>(&prediction.payload)
+        .ok()
+        .and_then(|payload| payload.get("compiler_duration_ns")?.as_u64());
+    match (prediction.adapter.as_str(), recorded_duration) {
+        ("rustc" | "cc", Some(duration)) => duration,
+        ("rustc" | "cc", None) => 0,
+        // Build-script and task predictions do not record compiler time. They
+        // are few and often unlock many downstream compiler actions, so retain
+        // them ahead of the capped compiler tail.
+        _ => u64::MAX,
+    }
+}
+
+pub(crate) fn select_prefetch_actions<'a>(
+    predictions: impl Iterator<Item = &'a ActionPrediction>,
+) -> BTreeMap<CacheDigest, PrefetchCandidate> {
+    let mut actions = BTreeMap::<CacheDigest, PrefetchCandidate>::new();
+    for prediction in predictions {
+        let priority = prediction_priority(prediction);
+        let candidate =
+            actions
+                .entry(prediction.action.clone())
+                .or_insert_with(|| PrefetchCandidate {
+                    adapter: prediction.adapter.clone(),
+                    priority,
+                });
+        if priority > candidate.priority {
+            candidate.adapter.clone_from(&prediction.adapter);
+            candidate.priority = priority;
+        }
+    }
+    if actions.len() <= MAX_PREFETCH_ACTIONS {
+        return actions;
+    }
+    let mut ranked = actions.into_iter().collect::<Vec<_>>();
+    ranked.sort_unstable_by(|(left_action, left), (right_action, right)| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then_with(|| left_action.cmp(right_action))
+    });
+    ranked.truncate(MAX_PREFETCH_ACTIONS);
+    ranked.into_iter().collect()
+}
+
+fn ranked_prefetch_actions(
+    actions: &BTreeMap<CacheDigest, PrefetchCandidate>,
+) -> Vec<(CacheDigest, String)> {
+    let mut ranked = actions
+        .iter()
+        .map(|(action, candidate)| {
+            (
+                action.clone(),
+                candidate.adapter.clone(),
+                candidate.priority,
+            )
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_unstable_by(|(left_action, _, left), (right_action, _, right)| {
+        right.cmp(left).then_with(|| left_action.cmp(right_action))
+    });
+    ranked
+        .into_iter()
+        .map(|(action, adapter, _)| (action, adapter))
+        .collect()
+}
+
 impl CacheAgent {
     pub(super) fn spawn_prefetch_predictions(&self, predictions: Vec<ActionPrediction>) {
         if predictions.is_empty() || !self.remote_mode.reads() || self.remote.is_none() {
@@ -21,12 +95,7 @@ impl CacheAgent {
         }
         self.stats.prefetch_runs.fetch_add(1, Ordering::Relaxed);
         let _timer = AtomicDurationTimer::start(&self.stats.prefetch_duration_ns);
-        let mut actions = BTreeMap::new();
-        for prediction in predictions {
-            actions
-                .entry(prediction.action.clone())
-                .or_insert_with(|| prediction.adapter.clone());
-        }
+        let actions = select_prefetch_actions(predictions);
         // One request per predicted action is the bulk of a prefetch's latency on
         // a large workspace, so ask for them together where the server allows it.
         match self.prefetch_action_batches(&actions).await {
@@ -37,7 +106,7 @@ impl CacheAgent {
                 warn!("remote action batch lookup failed: {error}");
             }
         }
-        let mut actions = actions.into_iter();
+        let mut actions = ranked_prefetch_actions(&actions).into_iter();
         let mut tasks = tokio::task::JoinSet::new();
         for _ in 0..MAX_PREFETCH_TRANSFERS {
             let Some((action, adapter)) = actions.next() else {
@@ -97,12 +166,12 @@ impl CacheAgent {
     /// so nothing is looked up twice.
     pub(super) async fn prefetch_action_batches(
         &self,
-        actions: &BTreeMap<CacheDigest, String>,
+        actions: &BTreeMap<CacheDigest, PrefetchCandidate>,
     ) -> Result<bool> {
-        let wanted: Vec<CacheDigest> = actions
-            .keys()
+        let wanted: Vec<CacheDigest> = ranked_prefetch_actions(actions)
+            .into_iter()
+            .map(|(action, _)| action)
             .filter(|action| !self.action_is_staged(action))
-            .cloned()
             .collect();
         if wanted.is_empty() {
             return Ok(true);
@@ -134,6 +203,7 @@ impl CacheAgent {
             })
             .buffer_unordered(MAX_PREFETCH_BATCH_LOOKUPS);
         let mut answered = true;
+        let mut resolved = Vec::new();
         while let Some(lookup) = lookups.next().await {
             let results = match lookup {
                 Ok(Some(results)) => results,
@@ -149,9 +219,11 @@ impl CacheAgent {
                     continue;
                 }
             };
-            let mut resolved = Vec::with_capacity(results.len());
             for result in results {
-                let Some(adapter) = actions.get(&result.action).cloned() else {
+                let Some(adapter) = actions
+                    .get(&result.action)
+                    .map(|candidate| candidate.adapter.clone())
+                else {
                     continue;
                 };
                 let lock = self.action_lock(&result.action);
@@ -165,12 +237,16 @@ impl CacheAgent {
                     .insert(result.action.clone(), result.clone());
                 resolved.push(PrefetchedAction { adapter, result });
             }
-            while !resolved.is_empty() {
-                let wave = resolved
-                    .drain(..resolved.len().min(MAX_PREFETCH_ACTION_BATCH))
-                    .collect();
-                self.prefetch_resolved_actions(wave).await;
-            }
+        }
+        // Finish the small metadata phase before starting any blob packs. This
+        // keeps pack bookkeeping from competing with later action batches for
+        // the server's database pool, and means serial batch requests do not
+        // sit behind minutes of artifact transfer.
+        while !resolved.is_empty() {
+            let wave = resolved
+                .drain(..resolved.len().min(MAX_PREFETCH_ACTION_BATCH))
+                .collect();
+            self.prefetch_resolved_actions(wave).await;
         }
         Ok(answered)
     }
@@ -810,5 +886,55 @@ impl CacheAgent {
             .downloaded_bytes
             .fetch_add(digest.size, Ordering::Relaxed);
         Ok(path)
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    fn prediction(index: usize, duration: u64) -> ActionPrediction {
+        ActionPrediction {
+            invocation: CacheDigest::blake3(format!("invocation-{index}").as_bytes()),
+            action: CacheDigest::blake3(format!("action-{index}").as_bytes()),
+            adapter: "rustc".into(),
+            payload: serde_json::json!({ "compiler_duration_ns": duration }).to_string(),
+        }
+    }
+
+    #[test]
+    fn prefetch_selection_keeps_the_most_expensive_predictions() {
+        let predictions = (0..MAX_PREFETCH_ACTIONS + 8)
+            .map(|index| prediction(index, index as u64))
+            .collect::<Vec<_>>();
+
+        let selected = select_prefetch_actions(predictions.iter());
+
+        assert_eq!(selected.len(), MAX_PREFETCH_ACTIONS);
+        for prediction in predictions.iter().take(8) {
+            assert!(!selected.contains_key(&prediction.action));
+        }
+        for prediction in predictions.iter().skip(8) {
+            assert!(selected.contains_key(&prediction.action));
+        }
+    }
+
+    #[test]
+    fn non_rustc_predictions_are_not_starved_by_the_rustc_cap() {
+        let mut predictions = (0..MAX_PREFETCH_ACTIONS)
+            .map(|index| prediction(index, u64::MAX - 1))
+            .collect::<Vec<_>>();
+        let task = ActionPrediction {
+            invocation: CacheDigest::blake3(b"task invocation"),
+            action: CacheDigest::blake3(b"task action"),
+            adapter: "task".into(),
+            payload: "{}".into(),
+        };
+        predictions.push(task.clone());
+
+        let selected = select_prefetch_actions(predictions.iter());
+
+        assert_eq!(selected.len(), MAX_PREFETCH_ACTIONS);
+        assert!(selected.contains_key(&task.action));
     }
 }

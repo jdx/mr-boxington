@@ -589,6 +589,8 @@ struct ExecIdentity<'a> {
     version: u8,
     project: &'a str,
     command: &'a [String],
+    os: &'static str,
+    arch: &'static str,
 }
 
 /// Identity of a standalone build: the project and the command it runs.
@@ -600,9 +602,11 @@ struct ExecIdentity<'a> {
 pub fn exec_identity(project_root: &Path, command: &[String]) -> String {
     let project = exec_marker(project_root);
     let material = ExecIdentity {
-        version: 1,
+        version: 2,
         project: &project,
         command,
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
     };
     let bytes = canonical_json(&material).expect("exec identity must serialize");
     CacheDigest::blake3(&bytes).hash
