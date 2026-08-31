@@ -77,7 +77,11 @@ const MAX_PREFETCH_TRANSFERS: usize = 48;
 /// bounds speculative output transfer: real Cargo manifests commonly contain
 /// predictions for build-script work made unnecessary by an earlier cache hit.
 const MAX_PREFETCH_ACTIONS: usize = 256;
-const MAX_PREFETCH_ACTION_BATCH: usize = 256;
+// Resolve speculative actions progressively so the most valuable predictions
+// become usable first and cancellation at the end of a build abandons a small
+// tail instead of one workspace-sized transfer wave. Action-result lookup is
+// still batched independently; this only bounds each output-closure download.
+const MAX_PREFETCH_ACTION_WAVE: usize = 32;
 /// Batched action lookups issued at once.
 ///
 /// One request already asks about hundreds of actions. Serial batches keep a
