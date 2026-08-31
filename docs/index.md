@@ -27,5 +27,6 @@ hero:
 mbx performs well for local development. Remote caching works and is actively
 improving, but does not yet consistently outperform
 [Swatinem/rust-cache](https://github.com/Swatinem/rust-cache) on GitHub-hosted
-runners. Benchmark your complete workflow before switching.
+runners. Benchmark your complete workflow before switching. Investigations,
+discussions, and pull requests to improve it are welcome.
 :::
