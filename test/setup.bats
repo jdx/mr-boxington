@@ -293,6 +293,7 @@ EOF
   run grep -F "$MBX_SHIM_DIR" "$project/mise.toml"
   assert_failure
 
+  export MISE_DATA_DIR="$BATS_TEST_TMPDIR/mise-global-data"
   cd "$outside"
   run mise use --yes --global --postinstall "$MBX_BIN setup --yes" mr-boxington
   assert_success

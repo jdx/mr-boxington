@@ -539,9 +539,33 @@ fn update_mise_path(scope: &MiseScope, operation: &str, path: &str) -> Result<bo
         );
         return Ok(false);
     }
+    // `mise use` runs postinstall before writing a new config. Seed the exact
+    // path it provided, and trust it only for the `mise config set` subprocess.
+    let created_config = if operation == "--append"
+        && let MiseScope::File(config) = scope
+        && !config.exists()
+    {
+        if let Some(parent) = config.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(config)
+        {
+            Ok(_) => Some(config),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        None
+    };
     let mut command = Command::new("mise");
     command.args(["config", "set", operation]);
     mise_scope_arguments(scope, &mut command);
+    if let Some(config) = created_config {
+        command.env("MISE_TRUSTED_CONFIG_PATHS", config);
+    }
     command.args(["env._.path", path]);
     let status = command
         .status()
