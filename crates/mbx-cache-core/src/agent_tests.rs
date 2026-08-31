@@ -2591,7 +2591,13 @@ async fn prefetch_skips_remote_negotiation_when_every_action_is_local() {
     fs::write(&action_source, b"already local action").unwrap();
     agent.cas.store_file(&action, &action_source).unwrap();
     agent.actions.store(&result).unwrap();
-    let actions = BTreeMap::from([(action, "rustc".into())]);
+    let prediction = ActionPrediction {
+        invocation: CacheDigest::blake3(b"already local invocation"),
+        action,
+        adapter: "rustc".into(),
+        payload: "{}".into(),
+    };
+    let actions = select_prefetch_actions(std::iter::once(&prediction));
 
     assert!(agent.prefetch_action_batches(&actions).await.unwrap());
     assert_eq!(agent.stats().remote_action_lookups, 0);

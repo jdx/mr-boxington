@@ -27,6 +27,9 @@ mod prefetch;
 mod stats;
 mod wire;
 
+#[cfg(test)]
+pub(crate) use prefetch::select_prefetch_actions;
+
 pub use file_digest::{
     FileDigestCache, FileDigestScope, FileIdentity, NoFileDigestCache, RecordedFileDigest,
 };
@@ -64,10 +67,21 @@ const MAX_FILE_DIGEST_BATCH: usize = 16 * 1024;
 const MAX_FILE_DIGEST_ENTRIES: usize = 1024 * 1024;
 const MAX_REMOTE_TRANSFERS: usize = 64;
 const MAX_PREFETCH_TRANSFERS: usize = 48;
+/// Most predicted actions whose complete output closures are downloaded
+/// speculatively for one task.
+///
+/// Manifests deliberately retain predictions across compatible builds, so a
+/// large workspace can describe far more actions than the next invocation
+/// will request. Keep the most expensive recorded rustc actions warm and let
+/// foreground lookups fetch the long tail on demand.
+const MAX_PREFETCH_ACTIONS: usize = 512;
 const MAX_PREFETCH_ACTION_BATCH: usize = 256;
-/// Batched action lookups issued at once, well inside the transfer budget: each
-/// asks about hundreds of actions, so a handful covers a large workspace.
-const MAX_PREFETCH_BATCH_LOOKUPS: usize = 4;
+/// Batched action lookups issued at once.
+///
+/// One request already asks about hundreds of actions. Serial batches keep a
+/// fleet of concurrent CI jobs from multiplying metadata pressure while blob
+/// transfers from earlier answers are also underway.
+const MAX_PREFETCH_BATCH_LOOKUPS: usize = 1;
 const PREFETCH_ACTION_BATCH_DELAY: Duration = Duration::from_millis(5);
 const MAX_PREFETCH_DIRECTORY_OBJECTS: usize = 100_000;
 const MAX_PREFETCH_OBJECTS_PER_WAVE: usize = 100_000;

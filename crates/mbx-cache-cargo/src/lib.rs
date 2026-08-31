@@ -71,15 +71,19 @@ struct ActionIdentity<'a> {
     version: u8,
     workspace: &'a str,
     command: &'a [String],
+    os: &'static str,
+    arch: &'static str,
 }
 
 /// Derive the prediction-manifest identity used by mbx for a Cargo command.
 pub fn build_identity(workspace_root: &Path, command: &[String]) -> String {
     let workspace = workspace_marker(workspace_root);
     let bytes = canonical_json(&ActionIdentity {
-        version: 1,
+        version: 2,
         workspace: &workspace,
         command,
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
     })
     .expect("Cargo build identity must serialize");
     CacheDigest::blake3(&bytes).hash
