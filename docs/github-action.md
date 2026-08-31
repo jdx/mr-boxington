@@ -14,9 +14,17 @@ finished the measured Cargo build with rust-cache in 16.6 seconds on Linux,
 17.6 seconds on macOS, and 121 seconds on Windows. The server-backed mbx jobs
 took 211, 212, and 320 seconds respectively.
 
-Those results are not a claim about every environment: they measure a fresh
-hosted runner, with rust-cache restoring a `target/` archive and mbx restoring
-individual actions from a remote server. They do show that you should not
+The GitHub-cache backend narrowed the gap but did not reverse it. In a
+[separately seeded warm run](https://github.com/jdx/hk/actions/runs/33439934246),
+the measured Cargo builds took 15.54 versus 22.24 seconds on Linux, 24.64
+versus 33.01 seconds on macOS, and 55.65 versus 123 seconds on Windows for
+rust-cache and mbx respectively. Including checkout, cache restore, and action
+setup, the corresponding full jobs took 24 versus 49 seconds, 45 versus 60
+seconds, and 93 versus 183 seconds.
+
+These results are not a claim about every environment: they measure fresh
+hosted runners, with rust-cache restoring a `target/` archive and mbx restoring
+fine-grained actions through either backend. They do show that you should not
 replace rust-cache with mbx solely for CI speed today. Benchmark the complete
 job, including setup and transfer time, before migrating.
 

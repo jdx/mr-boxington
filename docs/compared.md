@@ -139,6 +139,11 @@ prediction coverage from a fresh `target/` outweighed the compiler work mbx
 avoided. Keep rust-cache when CI wall-clock time is the deciding factor, unless
 your own end-to-end benchmark shows otherwise.
 
+A separately seeded test of mbx's GitHub-cache backend narrowed the difference
+but still lost to rust-cache on all three operating systems, both for the
+measured Cargo build and for the complete job. See the
+[GitHub Action guide](/github-action) for the runs and timings.
+
 mbx may still be the better trade when the cache must span local worktrees and
 CI, concurrent builds should share scheduling and in-flight work, granular
 results should survive changes that invalidate a target archive, or cache
