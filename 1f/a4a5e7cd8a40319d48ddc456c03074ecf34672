@@ -1,0 +1,2 @@
+{"v":1,"bench":"mbx_help","tool":"self","runner":"gha-ubuntu24.04-x64-valgrind3.22-rust1.97.1","ts":"2026-08-31T11:05:51Z","metrics":{"instructions":896092.0,"wall_max_ms":1.271421,"wall_mean_ms":1.1612713499999998,"wall_min_ms":1.1204260000000001,"wall_n":20.0,"wall_p50_ms":1.148529}}
+{"v":1,"bench":"startup_control","tool":"self","runner":"gha-ubuntu24.04-x64-valgrind3.22-rust1.97.1","ts":"2026-08-31T11:05:52Z","metrics":{"instructions":448801.0,"wall_max_ms":0.902446,"wall_mean_ms":0.8464636999999999,"wall_min_ms":0.7975690000000001,"wall_n":20.0,"wall_p50_ms":0.842013}}
