@@ -12,6 +12,10 @@ setup() {
   unset CARGO_TARGET_DIR MBX_INCREMENTAL CARGO_INCREMENTAL CI MBX_CC MBX_CACHE_LINKS
   unset CC CXX HOST_CC HOST_CXX TARGET_CC TARGET_CXX MBX_REAL_CC MBX_REAL_CXX
   export MBX_CACHE_DIR="$BATS_TEST_TMPDIR/store"
+  # Every test in this file measures the compiler shim a build script calls.
+  # Keep execution caching from restoring the script before it reaches that
+  # shim; build-script execution has its own Rust integration coverage.
+  export MBX_BUILD_SCRIPT_EXECUTION=0
 
   # A real compilation, not `cc -v`: that is what the adapter's identity probe
   # runs, and sharing the signal would let a regression there skip these tests
