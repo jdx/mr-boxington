@@ -1394,6 +1394,12 @@ impl<'a> Parser<'a> {
                 let value = self.take_value(&rendered_flag, inline)?;
                 self.parse_codegen(&value)
             }
+            "jobs-frontend" => {
+                let value = self.take_value(&rendered_flag, inline)?;
+                self.parsed
+                    .push(Argument::Plain(format!("{rendered_flag}={value}")));
+                Ok(())
+            }
             _ => Err(BypassReason::UnknownFlag(rendered_flag)),
         }
     }
@@ -1401,8 +1407,18 @@ impl<'a> Parser<'a> {
     fn parse_short(&mut self, value: &str) -> Result<(), BypassReason> {
         if let Some(attached) = value.strip_prefix("-Z") {
             let option = self.take_value("-Z", (!attached.is_empty()).then_some(attached))?;
-            if option == "shell-argfiles" {
-                self.parsed.push(Argument::Plain("-Zshell-argfiles".into()));
+            match option.as_str() {
+                "shell-argfiles" | "unstable-options" => {
+                    self.parsed.push(Argument::Plain(format!("-Z{option}")));
+                    return Ok(());
+                }
+                "threads" | "threads=" => {
+                    return Err(BypassReason::MissingValue("-Zthreads".into()));
+                }
+                _ => {}
+            }
+            if option.starts_with("threads=") {
+                self.parsed.push(Argument::Plain(format!("-Z{option}")));
                 return Ok(());
             }
             return Err(BypassReason::UnknownFlag(format!("-Z{option}")));

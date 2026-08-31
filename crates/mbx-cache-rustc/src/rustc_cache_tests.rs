@@ -1018,6 +1018,52 @@ fn unknown_and_incremental_options_bypass() {
 }
 
 #[test]
+fn models_parallel_frontend_options_in_the_action_key() {
+    let invocation = |parallelism: &[&str]| {
+        let mut arguments = vec![
+            "--crate-name=widget",
+            "--crate-type=lib",
+            "--emit=dep-info,metadata,link",
+        ];
+        arguments.extend_from_slice(parallelism);
+        arguments.push("src/lib.rs");
+        RustcInvocation::parse(&args(&arguments)).unwrap()
+    };
+    let key = |invocation: RustcInvocation| {
+        invocation
+            .action(context(&[("src/lib.rs", "source")]))
+            .unwrap()
+            .digest
+    };
+
+    let attached = invocation(&["-Zthreads=16"]);
+    let separate = invocation(&["-Z", "threads=16"]);
+    assert_eq!(attached, separate);
+    assert_ne!(key(attached), key(invocation(&["-Zthreads=8"])));
+
+    let jobs_frontend = invocation(&["-Zunstable-options", "--jobs-frontend=16"]);
+    assert_ne!(key(separate), key(jobs_frontend));
+    assert_eq!(
+        invocation(&["-Zunstable-options", "--jobs-frontend", "16"]),
+        invocation(&["-Zunstable-options", "--jobs-frontend=16"])
+    );
+}
+
+#[test]
+fn parallel_frontend_options_require_values() {
+    for arguments in [
+        vec!["-Zthreads", "src/lib.rs"],
+        vec!["-Zthreads=", "src/lib.rs"],
+        vec!["--jobs-frontend=", "src/lib.rs"],
+    ] {
+        assert!(matches!(
+            RustcInvocation::parse(&args(&arguments)),
+            Err(BypassReason::MissingValue(_))
+        ));
+    }
+}
+
+#[test]
 fn linked_and_unmodeled_outputs_bypass() {
     for (arguments, expected) in [
         (
