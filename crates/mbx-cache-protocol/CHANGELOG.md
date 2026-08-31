@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.10](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.5.9...mbx-cache-protocol-v0.5.10) - 2026-08-31
+
+### Added
+
+- *(setup)* use mise command wrappers ([#249](https://github.com/jdx/mr-boxington/pull/249))
+
 ## [0.5.9](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.5.8...mbx-cache-protocol-v0.5.9) - 2026-08-31
 
 ### Fixed

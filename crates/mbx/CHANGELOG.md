@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0](https://github.com/jdx/mr-boxington/compare/v1.2.0...v1.3.0) - 2026-08-31
+
+### Added
+
+- *(setup)* use mise command wrappers ([#249](https://github.com/jdx/mr-boxington/pull/249))
+
+### Other
+
+- cache build scripts with Cargo's default inputs ([#245](https://github.com/jdx/mr-boxington/pull/245))
+
 ## [1.2.0](https://github.com/jdx/mr-boxington/compare/v1.1.0...v1.2.0) - 2026-08-31
 
 ### Added

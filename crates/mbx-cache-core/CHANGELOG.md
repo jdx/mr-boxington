@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.10.1...mbx-cache-core-v0.10.2) - 2026-08-31
+
+### Added
+
+- *(setup)* use mise command wrappers ([#249](https://github.com/jdx/mr-boxington/pull/249))
+
+### Other
+
+- *(cache)* prefetch outputs in progressive waves ([#244](https://github.com/jdx/mr-boxington/pull/244))
+- *(cache)* reduce speculative action prefetch ([#242](https://github.com/jdx/mr-boxington/pull/242))
+
 ## [0.10.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.10.0...mbx-cache-core-v0.10.1) - 2026-08-31
 
 ### Fixed
