@@ -24,16 +24,8 @@ hero:
 ---
 
 ::: warning GitHub Actions performance
-mbx does not currently outperform
-[Swatinem/rust-cache](https://github.com/Swatinem/rust-cache) in our
-GitHub-hosted runner benchmarks consistently. Do not replace rust-cache solely
-for CI speed;
-benchmark your workflow first. The [GitHub Action guide](/github-action)
-describes the current results and limitations.
-
-mbx can still be preferable when one cache needs to work across local
-worktrees and CI, several builds run concurrently, fine-grained reuse matters,
-or detailed cache diagnostics and self-hosted control are requirements. Those
-benefits do not currently translate into a faster conventional hosted-runner
-job.
+mbx performs well for local development. Remote caching works and is actively
+improving, but does not yet consistently outperform
+[Swatinem/rust-cache](https://github.com/Swatinem/rust-cache) on GitHub-hosted
+runners. Benchmark your complete workflow before switching.
 :::

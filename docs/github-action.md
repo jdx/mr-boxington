@@ -6,43 +6,10 @@ server. The examples below show the inputs that matter for each backend; the
 action's repository documents the complete list.
 
 ::: warning Current performance
-mbx does not currently outperform
-[Swatinem/rust-cache](https://github.com/Swatinem/rust-cache) in our
-GitHub-hosted runner benchmarks consistently. A
-[warm-cache run in jdx/hk](https://github.com/jdx/hk/actions/runs/33395159164)
-finished the measured Cargo build with rust-cache in 16.6 seconds on Linux,
-17.6 seconds on macOS, and 121 seconds on Windows. The server-backed mbx jobs
-took 211, 212, and 320 seconds respectively.
-
-The GitHub-cache backend narrowed the gap but did not reverse it. In a
-[separately seeded warm run](https://github.com/jdx/hk/actions/runs/33439934246),
-the measured Cargo builds took 15.54 versus 22.24 seconds on Linux, 24.64
-versus 33.01 seconds on macOS, and 55.65 versus 123 seconds on Windows for
-rust-cache and mbx respectively. Including checkout, cache restore, and action
-setup, the corresponding full jobs took 24 versus 49 seconds, 45 versus 60
-seconds, and 93 versus 183 seconds.
-
-The result depends on the workload. In a
-[warm `jdx/mise` run](https://github.com/jdx/mise/actions/runs/33440683366),
-GitHub-backed mbx beat rust-cache on Linux: 38.79 versus 129 seconds for the
-Cargo build and 97 versus 163 seconds for the full job. It lost on macOS
-(307 versus 207 seconds for Cargo; 379 versus 276 seconds for the job) and
-Windows (737 versus 305 seconds for Cargo; 1,070 versus 392 seconds for the
-job). The Windows mbx job spent 199 seconds restoring and importing its cache
-before Cargo started.
-
-These results are not a claim about every environment: they measure fresh
-hosted runners, with rust-cache restoring a `target/` archive and mbx restoring
-fine-grained actions through either backend. They do show that you should not
-replace rust-cache with mbx solely for CI speed today. Benchmark the complete
-job, including setup and transfer time, before migrating.
-
-The tradeoff can still favor mbx when the cache also serves local worktrees,
-when several builds benefit from shared scheduling and in-flight
-deduplication, when fine-grained reuse across changed builds matters more than
-restoring one target archive, or when detailed diagnostics and a controlled
-self-hosted remote are requirements. A nearby remote can also change the
-transfer tradeoff.
+mbx performs well for local development. Remote caching works and is actively
+improving, but does not yet consistently outperform
+[Swatinem/rust-cache](https://github.com/Swatinem/rust-cache) on GitHub-hosted
+runners. Benchmark your complete workflow before switching.
 :::
 
 ## GitHub Actions cache
