@@ -57,6 +57,7 @@ enum InputState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Prediction {
+    #[serde(default)]
     default_package: bool,
     environment: Vec<String>,
     inputs: Vec<String>,
@@ -205,21 +206,38 @@ fn find_prediction(invocation: &CacheDigest) -> Result<Option<Prediction>> {
         Some(AgentResponse::ActionPrediction {
             prediction: Some(found),
         }) if found.adapter == ADAPTER && found.invocation == *invocation => {
-            let prediction: Prediction = serde_json::from_str(&found.payload)?;
-            if prediction.version != 2
-                || (prediction.default_package
-                    && (prediction.inputs != ["${build_script_manifest_dir}"]
-                        || !prediction.environment.is_empty()))
-                || canonical_json(&prediction)? != found.payload.as_bytes()
-            {
-                bail!("cached build-script prediction is unsupported");
-            }
-            Ok(Some(prediction))
+            Ok(Some(decode_prediction(&found.payload)?))
         }
         Some(AgentResponse::ActionPrediction { prediction: None }) => Ok(None),
         Some(AgentResponse::Error { message }) => bail!(message),
         _ => bail!("cache agent returned an unexpected build-script prediction response"),
     }
+}
+
+fn decode_prediction(payload: &str) -> Result<Prediction> {
+    let value: serde_json::Value = serde_json::from_str(payload)?;
+    if canonical_json(&value)? != payload.as_bytes() {
+        bail!("cached build-script prediction is unsupported");
+    }
+    let has_default_package = value
+        .as_object()
+        .is_some_and(|value| value.contains_key("default_package"));
+    let prediction: Prediction = serde_json::from_value(value)?;
+    let supported_version = match prediction.version {
+        // Version 1 predates Cargo-default package inputs. Every prediction it
+        // stored came from explicit rerun directives, so false is exact.
+        1 => !has_default_package && !prediction.default_package,
+        2 => has_default_package,
+        _ => false,
+    };
+    if !supported_version
+        || (prediction.default_package
+            && (prediction.inputs != ["${build_script_manifest_dir}"]
+                || !prediction.environment.is_empty()))
+    {
+        bail!("cached build-script prediction is unsupported");
+    }
+    Ok(prediction)
 }
 
 fn record_prediction(
@@ -807,6 +825,8 @@ mod tests {
         assert!(!parsed.default_package);
         assert_eq!(parsed.inputs, ["src/a.h"]);
         assert_eq!(parsed.environment, ["MODE"]);
+        let encoded = String::from_utf8(canonical_json(&parsed).unwrap()).unwrap();
+        assert_eq!(decode_prediction(&encoded).unwrap(), parsed);
     }
 
     #[test]
@@ -816,6 +836,24 @@ mod tests {
             .unwrap();
         assert!(parsed.default_package);
         assert_eq!(parsed.inputs, ["${build_script_manifest_dir}"]);
+    }
+
+    #[test]
+    fn version_one_predictions_remain_usable() {
+        let parsed = decode_prediction(
+            r#"{"environment":["MODE"],"inputs":["input.h"],"portable_out_dir":true,"version":1}"#,
+        )
+        .unwrap();
+        assert!(!parsed.default_package);
+        assert_eq!(parsed.inputs, ["input.h"]);
+        assert_eq!(parsed.environment, ["MODE"]);
+        assert!(
+            decode_prediction(
+                r#"{"environment":[],"inputs":["input.h"],"portable_out_dir":true,"version":2}"#
+            )
+            .is_err(),
+            "version 2 must carry its default-package mode"
+        );
     }
 
     #[test]
