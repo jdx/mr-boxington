@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.9.4...mbx-cache-core-v0.10.0) - 2026-08-30
+
+### Added
+
+- *(cache)* deduplicate in-flight work across runners ([#223](https://github.com/jdx/mr-boxington/pull/223))
+- cache Windows links and MSVC compiles ([#224](https://github.com/jdx/mr-boxington/pull/224))
+- cache rustdoc actions ([#226](https://github.com/jdx/mr-boxington/pull/226))
+- *(cache)* export portable build closures ([#227](https://github.com/jdx/mr-boxington/pull/227))
+
+### Other
+
+- *(cache)* start prediction prefetch earlier ([#220](https://github.com/jdx/mr-boxington/pull/220))
+- remove pre-v1 format fallbacks ([#219](https://github.com/jdx/mr-boxington/pull/219))
+- share cache path mapping ([#215](https://github.com/jdx/mr-boxington/pull/215))
+- *(core)* split cache agent modules ([#217](https://github.com/jdx/mr-boxington/pull/217))
+
 ## [0.9.4](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.9.3...mbx-cache-core-v0.9.4) - 2026-08-29
 
 ### Other

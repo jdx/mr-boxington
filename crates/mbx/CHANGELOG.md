@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0](https://github.com/jdx/mr-boxington/compare/v1.0.1...v1.1.0) - 2026-08-30
+
+### Added
+
+- cache build script execution ([#225](https://github.com/jdx/mr-boxington/pull/225))
+- *(cache)* deduplicate in-flight work across runners ([#223](https://github.com/jdx/mr-boxington/pull/223))
+- cache Windows links and MSVC compiles ([#224](https://github.com/jdx/mr-boxington/pull/224))
+- cache rustdoc actions ([#226](https://github.com/jdx/mr-boxington/pull/226))
+- *(cache)* export portable build closures ([#227](https://github.com/jdx/mr-boxington/pull/227))
+- *(mbx)* prescribe fixes for cache bypasses ([#222](https://github.com/jdx/mr-boxington/pull/222))
+
+### Fixed
+
+- *(rustc)* compact large action predictions ([#218](https://github.com/jdx/mr-boxington/pull/218))
+
+### Other
+
+- remove pre-v1 format fallbacks ([#219](https://github.com/jdx/mr-boxington/pull/219))
+- *(mbx)* split session responsibilities ([#216](https://github.com/jdx/mr-boxington/pull/216))
+- share cache path mapping ([#215](https://github.com/jdx/mr-boxington/pull/215))
+- *(mbx)* split CLI commands into modules ([#212](https://github.com/jdx/mr-boxington/pull/212))
+
 ## [1.0.1](https://github.com/jdx/mr-boxington/compare/v1.0.0...v1.0.1) - 2026-08-29
 
 ### Fixed

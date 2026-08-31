@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.7...mbx-cache-store-v0.1.8) - 2026-08-30
+
+### Added
+
+- *(cache)* deduplicate in-flight work across runners ([#223](https://github.com/jdx/mr-boxington/pull/223))
+- cache rustdoc actions ([#226](https://github.com/jdx/mr-boxington/pull/226))
+- *(cache)* export portable build closures ([#227](https://github.com/jdx/mr-boxington/pull/227))
+
+### Fixed
+
+- *(cache)* import exported sparse files ([#228](https://github.com/jdx/mr-boxington/pull/228))
+
 ## [0.1.7](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.6...mbx-cache-store-v0.1.7) - 2026-08-29
 
 ### Other
