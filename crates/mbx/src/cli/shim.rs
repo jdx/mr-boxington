@@ -35,14 +35,20 @@ fn is_cargo_shim_path(path: &OsStr) -> bool {
 
 /// Run an invocation received through the persistent Cargo shim.
 pub fn run_cargo_shim() -> Result<ExitCode> {
-    let reported_shim = std::env::var_os(CARGO_SHIM_PATH_ENV);
+    let reported_shim = std::env::var_os(CARGO_SHIM_PATH_ENV)
+        .map(PathBuf::from)
+        .or_else(|| {
+            invoked_as_cargo()
+                .then(|| std::env::current_exe().ok())
+                .flatten()
+        });
     // The Windows launcher uses this only to select dispatch in the target mbx.
     // Do not leak it into Cargo, build scripts, or nested mbx commands.
     unsafe { std::env::remove_var(CARGO_SHIM_MODE_ENV) };
     unsafe { std::env::remove_var(CARGO_SHIM_PATH_ENV) };
     #[cfg(windows)]
     if invoked_as_cargo()
-        && let Some(code) = forward_to_current_mbx()?
+        && let Some(code) = forward_to_current_mbx(reported_shim.as_deref())?
     {
         return Ok(code);
     }
@@ -51,7 +57,7 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
     let configured_shim = shim_dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
     let shim = resolve_active_cargo_shim(
         &configured_shim,
-        reported_shim.as_deref(),
+        reported_shim.as_deref().map(Path::as_os_str),
         std::env::var_os("PATH").as_deref(),
     );
     exclude_shim_from_path(&shim)?;
@@ -103,16 +109,21 @@ fn resolve_active_cargo_shim(
 }
 
 #[cfg(windows)]
-fn forward_to_current_mbx() -> Result<Option<ExitCode>> {
+fn forward_to_current_mbx(reported_shim: Option<&Path>) -> Result<Option<ExitCode>> {
     let Some(install_dir) = super::setup_install_dir() else {
         return Ok(None);
     };
     let Some(target) = super::setup::cargo_shim_target(&install_dir) else {
         return Ok(None);
     };
-    let status = Command::new(&target)
+    let mut command = Command::new(&target);
+    command
         .args(std::env::args_os().skip(1))
-        .env(CARGO_SHIM_MODE_ENV, "1")
+        .env(CARGO_SHIM_MODE_ENV, "1");
+    if let Some(reported_shim) = reported_shim {
+        command.env(CARGO_SHIM_PATH_ENV, reported_shim);
+    }
+    let status = command
         .status()
         .wrap_err_with(|| format!("failed to run the current mbx at {}", target.display()))?;
     Ok(Some(exit_code(status)))
@@ -438,6 +449,30 @@ mod tests {
         let path = std::env::join_paths([&shim_dir, &real_dir]).unwrap();
 
         let active = resolve_active_cargo_shim(&configured, None, Some(&path));
+        assert_eq!(active, shim);
+        let path = path_without_shim(&active, &path).unwrap();
+        assert_eq!(
+            resolve_real_cargo_from(&active, None, &path).unwrap(),
+            real.into_os_string()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reported_windows_shim_wins_when_real_cargo_precedes_it_on_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let configured = directory.path().join("new-home/bin/cargo.exe");
+        let shim_dir = directory.path().join("shim");
+        let real_dir = directory.path().join("real");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let shim = shim_dir.join("cargo.exe");
+        let real = real_dir.join("cargo.exe");
+        std::fs::write(&shim, b"shim").unwrap();
+        std::fs::write(&real, b"real").unwrap();
+        let path = std::env::join_paths([&real_dir, &shim_dir]).unwrap();
+
+        let active = resolve_active_cargo_shim(&configured, Some(shim.as_os_str()), Some(&path));
         assert_eq!(active, shim);
         let path = path_without_shim(&active, &path).unwrap();
         assert_eq!(
