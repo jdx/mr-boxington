@@ -2,12 +2,13 @@ use super::cargo::{CARGO_TARGET_DIR_ENV, cargo_roots, exit_code};
 use crate::config::Config;
 use eyre::{Context, Result};
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::sync::OnceLock;
 
 const CARGO_SHIM_STEM: &str = "cargo";
 const CARGO_SHIM_MODE_ENV: &str = "MBX_CARGO_SHIM_MODE";
+const CARGO_SHIM_PATH_ENV: &str = "MBX_CARGO_SHIM_PATH";
 static PATH_BEFORE_SHIM_EXCLUSION: OnceLock<OsString> = OnceLock::new();
 
 /// Whether this process was installed under Cargo's name by `mbx setup`.
@@ -34,18 +35,31 @@ fn is_cargo_shim_path(path: &OsStr) -> bool {
 
 /// Run an invocation received through the persistent Cargo shim.
 pub fn run_cargo_shim() -> Result<ExitCode> {
+    let reported_shim = std::env::var_os(CARGO_SHIM_PATH_ENV)
+        .map(PathBuf::from)
+        .or_else(|| {
+            invoked_as_cargo()
+                .then(|| std::env::current_exe().ok())
+                .flatten()
+        });
     // The Windows launcher uses this only to select dispatch in the target mbx.
     // Do not leak it into Cargo, build scripts, or nested mbx commands.
     unsafe { std::env::remove_var(CARGO_SHIM_MODE_ENV) };
+    unsafe { std::env::remove_var(CARGO_SHIM_PATH_ENV) };
     #[cfg(windows)]
     if invoked_as_cargo()
-        && let Some(code) = forward_to_current_mbx()?
+        && let Some(code) = forward_to_current_mbx(reported_shim.as_deref())?
     {
         return Ok(code);
     }
     let shim_dir = super::setup_install_dir()
         .ok_or_else(|| eyre::eyre!("the platform data directory could not be located"))?;
-    let shim = shim_dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
+    let configured_shim = shim_dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
+    let shim = resolve_active_cargo_shim(
+        &configured_shim,
+        reported_shim.as_deref().map(Path::as_os_str),
+        std::env::var_os("PATH").as_deref(),
+    );
     exclude_shim_from_path(&shim)?;
     let real_cargo = resolve_real_cargo(&shim)?;
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
@@ -76,17 +90,40 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
     super::cargo::run(&config, &settings, &string_arguments)
 }
 
+fn resolve_active_cargo_shim(
+    configured: &Path,
+    reported: Option<&OsStr>,
+    path: Option<&OsStr>,
+) -> PathBuf {
+    reported
+        .map(Path::new)
+        .filter(|shim| is_cargo_shim_path(shim.as_os_str()) && shim.is_file())
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            let name = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+            std::env::split_paths(path?)
+                .map(|dir| dir.join(name))
+                .find(|candidate| candidate.is_file())
+        })
+        .unwrap_or_else(|| configured.to_path_buf())
+}
+
 #[cfg(windows)]
-fn forward_to_current_mbx() -> Result<Option<ExitCode>> {
+fn forward_to_current_mbx(reported_shim: Option<&Path>) -> Result<Option<ExitCode>> {
     let Some(install_dir) = super::setup_install_dir() else {
         return Ok(None);
     };
     let Some(target) = super::setup::cargo_shim_target(&install_dir) else {
         return Ok(None);
     };
-    let status = Command::new(&target)
+    let mut command = Command::new(&target);
+    command
         .args(std::env::args_os().skip(1))
-        .env(CARGO_SHIM_MODE_ENV, "1")
+        .env(CARGO_SHIM_MODE_ENV, "1");
+    if let Some(reported_shim) = reported_shim {
+        command.env(CARGO_SHIM_PATH_ENV, reported_shim);
+    }
+    let status = command
         .status()
         .wrap_err_with(|| format!("failed to run the current mbx at {}", target.display()))?;
     Ok(Some(exit_code(status)))
@@ -392,6 +429,54 @@ mod tests {
 
         assert_eq!(
             resolve_real_cargo_from(&shim, Some(shim.as_os_str()), &path).unwrap(),
+            real.into_os_string()
+        );
+    }
+
+    #[test]
+    fn cargo_resolution_uses_the_active_shim_when_the_configured_home_changed() {
+        let directory = tempfile::tempdir().unwrap();
+        let configured = directory.path().join("new-home/bin/cargo");
+        let shim_dir = directory.path().join("original-home/bin");
+        let real_dir = directory.path().join("real");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let name = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+        let shim = shim_dir.join(name);
+        let real = real_dir.join(name);
+        std::fs::write(&shim, b"shim").unwrap();
+        std::fs::write(&real, b"real").unwrap();
+        let path = std::env::join_paths([&shim_dir, &real_dir]).unwrap();
+
+        let active = resolve_active_cargo_shim(&configured, None, Some(&path));
+        assert_eq!(active, shim);
+        let path = path_without_shim(&active, &path).unwrap();
+        assert_eq!(
+            resolve_real_cargo_from(&active, None, &path).unwrap(),
+            real.into_os_string()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reported_windows_shim_wins_when_real_cargo_precedes_it_on_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let configured = directory.path().join("new-home/bin/cargo.exe");
+        let shim_dir = directory.path().join("shim");
+        let real_dir = directory.path().join("real");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let shim = shim_dir.join("cargo.exe");
+        let real = real_dir.join("cargo.exe");
+        std::fs::write(&shim, b"shim").unwrap();
+        std::fs::write(&real, b"real").unwrap();
+        let path = std::env::join_paths([&real_dir, &shim_dir]).unwrap();
+
+        let active = resolve_active_cargo_shim(&configured, Some(shim.as_os_str()), Some(&path));
+        assert_eq!(active, shim);
+        let path = path_without_shim(&active, &path).unwrap();
+        assert_eq!(
+            resolve_real_cargo_from(&active, None, &path).unwrap(),
             real.into_os_string()
         );
     }

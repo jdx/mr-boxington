@@ -18,7 +18,8 @@ if [ -z "$mbx_executable" ] || [ ! -x "$mbx_executable" ]; then
   exit 127
 fi
 MBX_CARGO_SHIM_MODE=1
-export MBX_CARGO_SHIM_MODE
+MBX_CARGO_SHIM_PATH="$shim_dir/cargo"
+export MBX_CARGO_SHIM_MODE MBX_CARGO_SHIM_PATH
 exec "$mbx_executable" "$@"
 "#;
 const RUST_ANALYZER_CONFIG_FILE: &str = "rust-analyzer.toml";
