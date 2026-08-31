@@ -8,8 +8,10 @@
 mise use --global --postinstall "mbx setup --yes" mr-boxington
 ```
 
-::: info Requires mise 2026.8.15 or newer
-The `--postinstall` setup hook requires mise 2026.8.15 or newer.
+::: info Requires mise 2026.8.16 or newer
+Automatic Cargo wrapping uses mise's `[wrappers]` configuration, available in
+mise 2026.8.16 and newer. With an older mise, setup installs the standalone
+shim but only prints an upgrade warning instead of editing mise configuration.
 :::
 
 With `--global`, mise activates mbx in its global configuration. Drop
@@ -100,21 +102,24 @@ cargo install mbx --locked
 mbx setup
 ```
 
-During `mise use --postinstall`, `mbx setup --yes` activates the configuration
+During `mise use --postinstall`, `mbx setup --yes` adds a `[wrappers.cargo]`
+entry to the configuration
 named by `MISE_CONFIG_FILE`. Otherwise, setup only integrates with mise when
 mise is activated in the current shell. It recommends the config that defines
 `mr-boxington`, then the nearest project config, and finally the global config.
 `mbx setup` prompts before using that recommendation; `--yes` accepts it.
 Without an active mise shell, setup prints the exact shell-specific `PATH`
-change and never edits a shell startup file.
+change and never edits a shell startup file. Setup runs `mise reshim` after
+adding or removing the wrapper.
 
 ### Verify plain Cargo
 
-Open a new shell after setup and verify which Cargo it finds. On Unix:
+Open a new shell after setup and verify that Cargo resolves to mise's command
+wrapper. On Unix:
 
 ```sh
 command -v cargo
-# ~/.local/share/mbx/bin/cargo on Linux
+# ~/.local/share/mise/command-wrappers/bin/cargo on Linux
 ```
 
 On Windows, use PowerShell or `where.exe`:
@@ -124,7 +129,10 @@ On Windows, use PowerShell or `where.exe`:
 where.exe cargo
 ```
 
-mise activation supplies that path to shells where mise is active. SSH
+mise activation supplies the command-wrapper path to shells where mise is active.
+The wrapper invokes `mbx` with Cargo shim mode enabled, then mise removes its
+dispatch directories before mbx delegates to the configured or system Cargo.
+SSH
 commands, coding agents, editors, and other non-interactive tools may use a
 startup path that does not activate mise. In that case, prepend the directory
 printed by `mbx setup` in a startup file those processes read. For zsh,
@@ -139,11 +147,11 @@ shim, ordinary `cargo build`, `cargo test`, and `cargo check` commands use mbx
 automatically. Explicit `mbx cargo …` commands remain supported, but users and
 tools do not need to remember a special prefix.
 
-On Unix, the stable `cargo` launcher uses the setup-time mbx while it exists,
-then resolves the active `mbx` from `PATH` after an upgrade removes that path.
-Windows `cargo.exe` resolves the active mbx from `PATH`, with the setup-time
-path as a fallback. Upgrading a mise-managed mbx does not require running setup
-again.
+Outside mise activation, the stable `cargo` launcher uses the setup-time mbx
+while it exists, then resolves the active `mbx` from `PATH` after an upgrade
+removes that path. Windows `cargo.exe` resolves the active mbx from `PATH`, with
+the setup-time path as a fallback. Upgrading a mise-managed mbx does not require
+running setup again.
 
 Setup also configures rust-analyzer's background check in the matching global
 or project scope. The editor invokes the stable Cargo shim by its absolute path,
@@ -276,17 +284,18 @@ mbx doctor
   ok  cache        /home/you/.cache/mbx is writable
   ok  config       50.0 GiB budget, automatic gc enabled, managed targets enabled at /home/you/.cache/mbx/targets
   ok  reflink      supported by the cache filesystem
-  ok  setup        Cargo shim is active and current at /home/you/.local/share/mbx/bin/cargo
+  ok  setup        mise Cargo wrapper is active and the fallback shim is current at /home/you/.local/share/mbx/bin/cargo
   ok  remote       not configured; using the local cache
 
 0 failures, 0 warnings
 ```
 
-Doctor checks that the installed Cargo shim matches the running mbx and is the
-first `cargo` on `PATH`, along with the Cargo and rustc executables, cache write
-access, filesystem reflink support, effective remote policy, and remote protocol
-connectivity. Warnings describe setup problems, optional features, or fallbacks;
-failures make the command exit unsuccessfully.
+Doctor checks that mise's Cargo wrapper is active, or that the installed fallback
+shim matches the running mbx and is the first `cargo` on `PATH`. It also checks
+the Cargo and rustc executables, cache write access, filesystem reflink support,
+effective remote policy, and remote protocol connectivity. Warnings describe
+setup problems, optional features, or fallbacks; failures make the command exit
+unsuccessfully.
 
 ## Read the result
 

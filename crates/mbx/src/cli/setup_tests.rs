@@ -295,3 +295,37 @@ fn mise_config_selection_finds_the_first_config_that_defines_mbx() {
     );
     assert_eq!(mbx_mise_config_from_json(b"not json"), None);
 }
+
+#[test]
+fn mise_wrapper_version_parsing_uses_the_calendar_version() {
+    assert_eq!(
+        mise_version_from_output(b"2026.8.16 linux-x64 (2026-08-31)"),
+        Some((2026, 8, 16))
+    );
+    assert_eq!(
+        mise_version_from_output(b"v2027.1.2 windows-x64"),
+        Some((2027, 1, 2))
+    );
+    assert_eq!(mise_version_from_output(b"not-a-version"), None);
+}
+
+#[test]
+fn mise_wrapper_detection_requires_mbx_shim_mode() {
+    let configured = r#"
+[wrappers.cargo]
+command = "mbx"
+env = { MBX_CARGO_SHIM_MODE = "1" }
+"#
+    .parse::<toml_edit::DocumentMut>()
+    .unwrap();
+    assert!(mise_wrapper_is_configured_in(&configured));
+
+    for raw in [
+        "[wrappers]\ncargo = \"mbx\"\n",
+        "[wrappers.cargo]\ncommand = \"mbx\"\n",
+        "[wrappers.cargo]\ncommand = \"other\"\nenv = { MBX_CARGO_SHIM_MODE = \"1\" }\n",
+    ] {
+        let document = raw.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(!mise_wrapper_is_configured_in(&document));
+    }
+}

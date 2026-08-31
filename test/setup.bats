@@ -117,14 +117,11 @@ EOF
 cat >"$fake_bin/mise" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >>"$MBX_TEST_MISE_LOG"
-if [ "$1 $2 $3" = "config set --help" ]; then
-  printf '%s\n' '--append --remove --global'
+if [ "$1" = "--version" ]; then
+  printf '%s\n' '2026.8.16 linux-x64 (2026-08-31)'
 fi
 if [ "$1 $2 $3" = "config ls --json" ]; then
   printf '%s\n' "${MBX_TEST_MISE_CONFIGS:-[]}"
-fi
-if [ "$1 $2" = "config get" ]; then
-  printf '%s\n' "$MBX_TEST_SHIM_DIR"
 fi
 EOF
   chmod +x "$fake_bin/mise"
@@ -134,9 +131,12 @@ EOF
     "$MBX_BIN" setup --yes
   assert_success
   assert_output --partial 'verify new shells with `command -v cargo`'
-  assert_output --partial "expected $MBX_SHIM_DIR/cargo"
+  assert_output --partial "mise's command-wrappers directory"
   assert_output --partial "non-interactive shells that do not activate mise need $MBX_SHIM_DIR prepended to PATH"
-  assert_file_contains "$mise_log" "config set --append --file $project_config env._.path"
+  assert_file_contains "$project_config" '[wrappers.cargo]'
+  assert_file_contains "$project_config" 'command = "mbx"'
+  assert_file_contains "$project_config" 'MBX_CARGO_SHIM_MODE = "1"'
+  assert_file_contains "$mise_log" "reshim"
   assert_file_contains "$(dirname "$project_config")/rust-analyzer.toml" "$MBX_SHIM_DIR/cargo"
 
   run env -u MISE_CONFIG_FILE PATH="$fake_bin:$PATH" MISE_SHELL=zsh \
@@ -145,7 +145,8 @@ EOF
     MBX_TEST_MISE_LOG="$mise_log" MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR" \
     "$MBX_BIN" setup --yes
   assert_success
-  assert_file_contains "$mise_log" "config set --append --global env._.path"
+  assert_file_contains "$BATS_TEST_TMPDIR/global.toml" '[wrappers.cargo]'
+  assert_file_contains "$BATS_TEST_TMPDIR/global.toml" 'MBX_CARGO_SHIM_MODE = "1"'
   assert_file_contains "$MBX_RA_CONFIG" "$MBX_SHIM_DIR/cargo"
 
   run env -u MISE_CONFIG_FILE PATH="$fake_bin:$PATH" MISE_SHELL=zsh \
@@ -153,27 +154,27 @@ EOF
     MBX_TEST_MISE_LOG="$mise_log" MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR" \
     "$MBX_BIN" setup --yes
   assert_success
-  assert_file_contains "$mise_log" "config set --append --file $project_config env._.path"
+  assert_file_contains "$project_config" '[wrappers.cargo]'
 
   cd "$(dirname "$project_config")"
   run env -u MISE_CONFIG_FILE PATH="$fake_bin:$PATH" MISE_SHELL=zsh \
     MBX_TEST_MISE_CONFIGS='[]' MBX_TEST_MISE_LOG="$mise_log" \
     MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR" "$MBX_BIN" setup --yes
   assert_success
-  assert_file_contains "$mise_log" "config set --append --file $project_config env._.path"
+  assert_file_contains "$project_config" '[wrappers.cargo]'
 
   : >"$mise_log"
   run env -u MISE_CONFIG_FILE -u MISE_SHELL PATH="$fake_bin:$PATH" \
     MBX_TEST_MISE_LOG="$mise_log" MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR" \
     "$MBX_BIN" setup --yes
   assert_success
-  run grep -F "config set --append" "$mise_log"
+  run grep -F "reshim" "$mise_log"
   assert_failure
 
   run env PATH="$fake_bin:$PATH" MBX_TEST_MISE_LOG="$mise_log" \
     MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR" "$MBX_BIN" setup --local
   assert_success
-  assert_file_contains "$mise_log" "config set --append env._.path"
+  assert_file_contains "$project_config" '[wrappers.cargo]'
 
   run env PATH="$fake_bin:$PATH" MISE_SHELL=zsh \
     MISE_GLOBAL_CONFIG_FILE="$BATS_TEST_TMPDIR/global.toml" \
@@ -181,10 +182,11 @@ EOF
     MBX_TEST_MISE_LOG="$mise_log" MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR" \
     "$MBX_BIN" setup --uninstall
   assert_success
-  assert_file_contains "$mise_log" "config set --remove --global env._.path"
+  run grep -F '[wrappers.cargo]' "$BATS_TEST_TMPDIR/global.toml"
+  assert_failure
 }
 
-@test "setup prints config instructions for older mise clients without editing" {
+@test "setup warns for older mise clients without editing their config" {
   local fake_bin="$BATS_TEST_TMPDIR/legacy-mise-bin"
   local global_config="$BATS_TEST_TMPDIR/legacy-global.toml"
   local project="$BATS_TEST_TMPDIR/legacy-project"
@@ -192,8 +194,8 @@ EOF
   project="$(cd "$project" && pwd -P)"
   cat >"$fake_bin/mise" <<'EOF'
 #!/bin/sh
-if [ "$1 $2 $3" = "config set --help" ]; then
-  printf '%s\n' 'Usage: mise config set --file FILE KEY VALUE'
+if [ "$1" = "--version" ]; then
+  printf '%s\n' '2026.8.15 linux-x64 (2026-08-30)'
 fi
 EOF
   chmod +x "$fake_bin/mise"
@@ -203,10 +205,10 @@ EOF
   run env PATH="$fake_bin:$PATH" MISE_GLOBAL_CONFIG_FILE="$global_config" \
     "$MBX_BIN" setup --global
   assert_success
-  assert_output --partial "cannot update env._.path"
-  assert_output --partial "add \"$MBX_SHIM_DIR\" to env._.path in $global_config"
+  assert_output --partial "mise 2026.8.16 or newer is required for [wrappers]"
+  assert_output --partial "upgrade mise"
   assert_file_contains "$global_config" "# global comment"
-  run grep -F "$MBX_SHIM_DIR" "$global_config"
+  run grep -F '[wrappers.cargo]' "$global_config"
   assert_failure
   run env PATH="$fake_bin:$PATH" MISE_GLOBAL_CONFIG_FILE="$global_config" \
     "$MBX_BIN" setup --global --status
@@ -216,22 +218,11 @@ EOF
   cd "$project"
   run env PATH="$fake_bin:$PATH" "$MBX_BIN" setup --local
   assert_success
-  assert_output --partial "add \"$MBX_SHIM_DIR\" to env._.path in $project/mise.toml"
+  assert_output --partial "mise 2026.8.16 or newer is required for [wrappers]"
   assert_file_contains "$project/mise.toml" "/existing/bin"
   assert_file_contains "$project/mise.toml" "# local comment"
-  run grep -F "$MBX_SHIM_DIR" "$project/mise.toml"
+  run grep -F '[wrappers.cargo]' "$project/mise.toml"
   assert_failure
-
-  printf '# local comment\n[env]\n_.path = ["/existing/bin", "%s"]\n' \
-    "$MBX_SHIM_DIR" >"$project/mise.toml"
-  run env PATH="$fake_bin:$PATH" "$MBX_BIN" setup --local --status
-  assert_success
-  assert_output --partial "installed and current"
-  run env PATH="$fake_bin:$PATH" "$MBX_BIN" setup --local --uninstall
-  assert_success
-  assert_output --partial "remove \"$MBX_SHIM_DIR\" from env._.path in $project/mise.toml"
-  assert_file_contains "$project/mise.toml" "$MBX_SHIM_DIR"
-  assert_file_contains "$project/mise.toml" "/existing/bin"
 }
 
 @test "mise postinstall activates transparent Cargo in local and global scopes" {
@@ -242,7 +233,14 @@ EOF
   local compiler="$BATS_TEST_TMPDIR/mise-counting-rustc"
   local rustc_log="$BATS_TEST_TMPDIR/mise-rustc.log"
   local real_rustc
-  real_rustc="$(command -v rustc)"
+  local real_cargo_dir
+  if command -v rustup >/dev/null 2>&1; then
+    real_rustc="$(rustup which rustc)"
+    real_cargo_dir="$(dirname "$(rustup which cargo)")"
+  else
+    real_rustc="$(command -v rustc)"
+    real_cargo_dir="$(dirname "$(command -v cargo)")"
+  fi
   export MISE_DATA_DIR="$BATS_TEST_TMPDIR/mise-data"
   export MISE_CACHE_DIR="$BATS_TEST_TMPDIR/mise-cache"
   export MISE_GLOBAL_CONFIG_FILE="$BATS_TEST_TMPDIR/mise-global.toml"
@@ -267,22 +265,27 @@ EOF
   cd "$project"
   run mise use --yes --postinstall "$MBX_BIN setup --yes" mr-boxington
   assert_success
+  cp "$MBX_BIN" "$(mise where mr-boxington)/mbx"
   assert_file_executable "$MBX_SHIM_DIR/cargo"
-  assert_file_contains "$project/mise.toml" "$MBX_SHIM_DIR"
+  assert_file_contains "$project/mise.toml" '[wrappers.cargo]'
+  assert_file_contains "$project/mise.toml" 'MBX_CARGO_SHIM_MODE = "1"'
 
   run mise exec -- sh -c 'command -v cargo'
   assert_success
-  assert_output "$MBX_SHIM_DIR/cargo"
-  run mise exec -- "$MBX_BIN" doctor
+  assert_output "$MISE_DATA_DIR/command-wrappers/bin/cargo"
+  run mise exec -- env PATH="$MISE_DATA_DIR/command-wrappers/bin:$PATH:$real_cargo_dir" \
+    "$MBX_BIN" doctor
   assert_success
-  assert_output --partial "Cargo shim is active and current"
+  assert_output --partial "mise Cargo wrapper is active"
 
-  run mise exec -- env CARGO_INCREMENTAL=0 \
+  run mise exec -- env PATH="$MISE_DATA_DIR/command-wrappers/bin:$PATH:$real_cargo_dir" \
+    CARGO_INCREMENTAL=0 \
     CARGO_TARGET_DIR="$BATS_TEST_TMPDIR/mise-first-target" \
     MBX_TEST_REAL_RUSTC="$real_rustc" MBX_TEST_RUSTC_LOG="$rustc_log" RUSTC="$compiler" \
     sh -c 'cd "$1" && cargo build --offline' sh "$first"
   assert_success
-  run mise exec -- env CARGO_INCREMENTAL=0 \
+  run mise exec -- env PATH="$MISE_DATA_DIR/command-wrappers/bin:$PATH:$real_cargo_dir" \
+    CARGO_INCREMENTAL=0 \
     CARGO_TARGET_DIR="$BATS_TEST_TMPDIR/mise-second-target" \
     MBX_TEST_REAL_RUSTC="$real_rustc" MBX_TEST_RUSTC_LOG="$rustc_log" RUSTC="$compiler" \
     sh -c 'cd "$1" && cargo build --offline' sh "$second"
@@ -293,20 +296,22 @@ EOF
 
   run env MISE_CONFIG_FILE="$project/mise.toml" "$MBX_BIN" setup --uninstall
   assert_success
-  run grep -F "$MBX_SHIM_DIR" "$project/mise.toml"
+  run grep -F '[wrappers.cargo]' "$project/mise.toml"
   assert_failure
 
   export MISE_DATA_DIR="$BATS_TEST_TMPDIR/mise-global-data"
   cd "$outside"
   run mise use --yes --global --postinstall "$MBX_BIN setup --yes" mr-boxington
   assert_success
-  assert_file_contains "$MISE_GLOBAL_CONFIG_FILE" "$MBX_SHIM_DIR"
+  cp "$MBX_BIN" "$(mise where mr-boxington)/mbx"
+  assert_file_contains "$MISE_GLOBAL_CONFIG_FILE" '[wrappers.cargo]'
   run mise exec -- sh -c 'command -v cargo'
   assert_success
-  assert_output "$MBX_SHIM_DIR/cargo"
-  run mise exec -- "$MBX_BIN" doctor
+  assert_output "$MISE_DATA_DIR/command-wrappers/bin/cargo"
+  run mise exec -- env PATH="$MISE_DATA_DIR/command-wrappers/bin:$PATH:$real_cargo_dir" \
+    "$MBX_BIN" doctor
   assert_success
-  assert_output --partial "Cargo shim is active and current"
+  assert_output --partial "mise Cargo wrapper is active"
 }
 
 @test "the Cargo shim preserves Cargo's namespace and disable escape hatch" {

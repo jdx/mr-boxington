@@ -61,14 +61,15 @@ mise use --global --postinstall "mbx setup --yes" mr-boxington
 ```
 
 > [!NOTE]
-> The `--postinstall` setup hook requires mise 2026.8.15 or newer.
+> Automatic Cargo wrapping requires mise 2026.8.16 or newer. Older versions
+> receive an upgrade warning and are not configured.
 
-Open a new shell and verify that plain Cargo resolves to the stable mbx shim.
-On Unix:
+Open a new shell and verify that plain Cargo resolves to mise's command
+wrapper. On Unix:
 
 ```sh
 command -v cargo
-# ~/.local/share/mbx/bin/cargo on Linux
+# ~/.local/share/mise/command-wrappers/bin/cargo on Linux
 ```
 
 On Windows, use PowerShell or `where.exe`:
@@ -78,8 +79,9 @@ On Windows, use PowerShell or `where.exe`:
 where.exe cargo
 ```
 
-mise activation handles interactive shells. SSH commands, coding agents, and
-other non-interactive tools may not load that activation; prepend
+`mbx setup` writes a `[wrappers.cargo]` entry and runs `mise reshim`. mise
+activation handles interactive shells. SSH commands, coding agents, and other
+non-interactive tools may not load that activation; prepend
 `~/.local/share/mbx/bin` to `PATH` in a startup file they read (for example,
 `~/.zshenv` for zsh). Afterward, agents and people can use the ordinary `cargo`
 commands they already know; explicitly prefixing a command with `mbx` remains

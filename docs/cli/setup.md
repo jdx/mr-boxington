@@ -7,8 +7,8 @@ Make plain Cargo commands run through mbx.
 
 ## Flags
 - **`--yes`** — Accept the recommended activation scope without prompting.
-- **`--global`** — Activate the Cargo shim in mise's global configuration.
-- **`--local`** — Activate the Cargo shim in the current project's mise configuration.
+- **`--global`** — Activate the Cargo wrapper in mise's global configuration.
+- **`--local`** — Activate the Cargo wrapper in the current project's mise configuration.
 - **`--status`** — Report whether plain Cargo integration is installed and current.
 - **`--uninstall`** — Remove mbx activation from the selected scope.
 - **`-h --help`** — Print help
