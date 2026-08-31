@@ -5,6 +5,20 @@ _common_setup() {
   load "test_helper/bats-assert/load"
   load "test_helper/bats-file/load"
 
+  # Setup tests begin with transparent Cargo inactive. Developers may already
+  # have mbx enabled globally, so keep that host configuration out of the
+  # isolated test PATH.
+  local inherited_cargo
+  inherited_cargo="$(command -v cargo)"
+  if [[ "$inherited_cargo" == */mbx/bin/cargo ]]; then
+    local inherited_shim_dir="${inherited_cargo%/cargo}"
+    PATH=":$PATH:"
+    PATH="${PATH//:$inherited_shim_dir:/:}"
+    PATH="${PATH#:}"
+    PATH="${PATH%:}"
+    export PATH
+  fi
+
   export PROJECT_ROOT
   PROJECT_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   local target_dir="${CARGO_TARGET_DIR:-$PROJECT_ROOT/target}"

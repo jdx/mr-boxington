@@ -63,6 +63,20 @@ mise use --global --postinstall "mbx setup --yes" mr-boxington
 > [!NOTE]
 > The `--postinstall` setup hook requires mise 2026.8.15 or newer.
 
+Open a new shell and verify that plain Cargo resolves to the stable mbx shim:
+
+```sh
+command -v cargo
+# ~/.local/share/mbx/bin/cargo on Linux
+```
+
+mise activation handles interactive shells. SSH commands, coding agents, and
+other non-interactive tools may not load that activation; prepend
+`~/.local/share/mbx/bin` to `PATH` in a startup file they read (for example,
+`~/.zshenv` for zsh). Afterward, agents and people can use the ordinary `cargo`
+commands they already know; explicitly prefixing a command with `mbx` remains
+supported.
+
 With Cargo:
 
 ```sh

@@ -199,6 +199,7 @@ pub(crate) fn setup_at_action(
     };
     if activated {
         println!("plain cargo commands now run through mbx in this mise scope");
+        print_activation_verification(&shim);
     } else if was_installed {
         println!("refreshed the Cargo shim at {}", shim.display());
     } else {
@@ -208,6 +209,18 @@ pub(crate) fn setup_at_action(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn print_activation_verification(shim: &Path) {
+    let directory = shim.parent().unwrap_or(shim);
+    println!(
+        "verify new shells with `command -v cargo`; expected {}",
+        shim.display()
+    );
+    println!(
+        "tools and non-interactive shells that do not activate mise need {} prepended to PATH",
+        directory.display()
+    );
 }
 
 #[cfg(unix)]

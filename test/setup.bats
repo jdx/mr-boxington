@@ -133,6 +133,9 @@ EOF
     MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR" MISE_CONFIG_FILE="$project_config" \
     "$MBX_BIN" setup --yes
   assert_success
+  assert_output --partial 'verify new shells with `command -v cargo`'
+  assert_output --partial "expected $MBX_SHIM_DIR/cargo"
+  assert_output --partial "non-interactive shells that do not activate mise need $MBX_SHIM_DIR prepended to PATH"
   assert_file_contains "$mise_log" "config set --append --file $project_config env._.path"
   assert_file_contains "$(dirname "$project_config")/rust-analyzer.toml" "$MBX_SHIM_DIR/cargo"
 
