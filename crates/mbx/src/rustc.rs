@@ -193,7 +193,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
         current_diagnostic = candidates
             .ordered()
             .next()
-            .and_then(|action| action_diagnostic(action).ok());
+            .and_then(|action| compilation_action_diagnostic(&compilation, action).ok());
         action_lookup_attempted = true;
         match restore_candidates(
             &candidates,
@@ -217,7 +217,9 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                     let diagnostic = candidates
                         .ordered()
                         .find(|candidate| candidate.digest == action)
-                        .and_then(|candidate| action_diagnostic(candidate).ok());
+                        .and_then(|candidate| {
+                            compilation_action_diagnostic(&compilation, candidate).ok()
+                        });
                     record_action_hit_with_diagnostic(
                         &action,
                         cached.restore,
@@ -476,7 +478,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                     .map(|flight| &flight.flight),
                 remote_claim.as_deref().filter(|_| !learned.engaged()),
             );
-            Ok(action_diagnostic(action).ok())
+            Ok(compilation_action_diagnostic(&compilation, action).ok())
         })();
         match publication {
             Ok(diagnostic) => current_diagnostic = diagnostic,
@@ -858,7 +860,7 @@ fn restore_prediction_payload(
         *diagnostic = candidates
             .ordered()
             .next()
-            .and_then(|action| action_diagnostic(action).ok());
+            .and_then(|action| compilation_action_diagnostic(compilation, action).ok());
     }
     if expected_action.is_some_and(|expected| !candidates.contains(expected)) {
         bail!("the action prediction no longer matches its predicted inputs");
@@ -880,7 +882,9 @@ fn restore_prediction_payload(
                 let diagnostic = candidates
                     .ordered()
                     .find(|candidate| candidate.digest == action)
-                    .and_then(|candidate| action_diagnostic(candidate).ok());
+                    .and_then(|candidate| {
+                        compilation_action_diagnostic(compilation, candidate).ok()
+                    });
                 record_action_hit_with_diagnostic(
                     &action,
                     cached.restore,
@@ -977,7 +981,19 @@ impl ActionCandidates {
 /// Split a canonical rustc action into named hashes suitable for session
 /// history. The hashes preserve comparison fidelity without retaining source
 /// contents or environment values.
-fn action_diagnostic(action: &RustcAction) -> Result<ActionDiagnostic> {
+fn compilation_action_diagnostic(
+    compilation: &Compilation<'_>,
+    action: &RustcAction,
+) -> Result<ActionDiagnostic> {
+    let source = normalize_mapped_path(
+        compilation.invocation.source(),
+        compilation.working_dir,
+        &PathMapping::ordered(&compilation.portable.mappings),
+    )?;
+    action_diagnostic(action, &source)
+}
+
+fn action_diagnostic(action: &RustcAction, source: &str) -> Result<ActionDiagnostic> {
     let mut descriptor: serde_json::Map<String, serde_json::Value> =
         serde_json::from_slice(&action.bytes)?;
     let mut components = BTreeMap::new();
@@ -996,21 +1012,15 @@ fn action_diagnostic(action: &RustcAction) -> Result<ActionDiagnostic> {
             .filter(|value| {
                 value.as_str().is_some_and(|argument| {
                     argument == "--test"
-                        || [
-                            "--crate-name=",
-                            "--crate-type=",
-                            "--target=",
-                            "--codegen=metadata=",
-                            "--codegen=extra-filename=",
-                        ]
-                        .iter()
-                        .any(|prefix| argument.starts_with(prefix))
+                        || ["--crate-name=", "--crate-type=", "--target="]
+                            .iter()
+                            .any(|prefix| argument.starts_with(prefix))
                 })
             })
             .collect::<Vec<_>>();
         components.insert(
             "compilation unit".into(),
-            CacheDigest::blake3(&canonical_json(&unit_arguments)?),
+            CacheDigest::blake3(&canonical_json(&(source, unit_arguments))?),
         );
         let mut occurrences = BTreeMap::<String, usize>::new();
         for (index, value) in arguments.into_iter().enumerate() {
