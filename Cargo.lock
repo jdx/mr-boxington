@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-cargo"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "dirs",
  "mbx-cache-core",
@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-cc"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "mbx-cache-core",
  "serde",
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-core"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "async-compression",
  "base64 0.23.1",
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-rustc"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "mbx-cache-core",
  "serde",
@@ -1499,7 +1499,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-store"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "eyre",
  "filetime",
