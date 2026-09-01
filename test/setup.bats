@@ -373,7 +373,7 @@ EOF
   local wrapper_dir="$BATS_TEST_TMPDIR/mise-data/command-wrappers/bin"
   local wrapper_log="$BATS_TEST_TMPDIR/mise-wrapper.log"
   local real_cargo_dir
-  real_cargo_dir="$(dirname "$(command -v cargo)")"
+  real_cargo_dir="$(dirname "$(rustup which cargo)")"
   write_project "$project"
   mkdir -p "$wrapper_dir"
   cat >"$wrapper_dir/cargo" <<'EOF'
