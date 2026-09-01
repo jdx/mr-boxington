@@ -200,7 +200,8 @@ and publishing normally, and so does a miss on unchanged sources (a wiped
 `target/`, a first build in a new checkout). The record and state are private
 to each checkout, living under `incremental/` in mbx's cache directory so
 `cargo clean` does not discard the next edit's speedup. Each crate's
-incremental state is discarded once it passes 1 GiB.
+incremental state is discarded once it passes 1 GiB, and normal garbage
+collection removes state for deleted or expired checkouts.
 
 CI never does this, for the same reason it never compiles incrementally: there
 is no earlier state to build on. `MBX_LEARNED_INCREMENTAL=0` turns it off, and

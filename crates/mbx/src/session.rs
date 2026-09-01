@@ -218,14 +218,15 @@ impl CacheSession {
             TARGET_DIR_ENV.into(),
             target_dir.to_string_lossy().into_owned(),
         );
-        let checkout = CacheDigest::blake3(workspace_root.as_os_str().as_encoded_bytes()).key();
-        environment.insert(
-            INCREMENTAL_ROOT_ENV.into(),
-            self.incremental_root
-                .join(&checkout[..16])
-                .to_string_lossy()
-                .into_owned(),
-        );
+        match crate::incremental::touch(&self.incremental_root, workspace_root) {
+            Ok(root) => {
+                environment.insert(
+                    INCREMENTAL_ROOT_ENV.into(),
+                    root.to_string_lossy().into_owned(),
+                );
+            }
+            Err(error) => warn!("incremental state was not recorded: {error:#}"),
+        }
         environment.insert(SOCKET_ENV.into(), self.socket.clone());
         environment.insert(
             STAGING_ENV.into(),

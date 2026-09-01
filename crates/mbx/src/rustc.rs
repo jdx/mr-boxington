@@ -211,7 +211,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                         eprintln!("mbx[warning]: compiler timing was not refreshed: {error:#}");
                     }
                 }
-                if source_is_in_workspace(&compilation) {
+                if learned_enabled && source_is_in_workspace(&compilation) {
                     record_learned_baseline(&compilation, &discovered);
                 }
                 if verify {
@@ -434,7 +434,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             let (candidates, discovered) = action_from_dep_info(&compilation, &outputs.dep_info)?;
             discovered.verify_not_modified_since(compilation_started)?;
             discovered.verify()?;
-            if learned.record.is_none() && source_is_in_workspace(&compilation) {
+            if learned_enabled && learned.record.is_none() && source_is_in_workspace(&compilation) {
                 record_learned_baseline(&compilation, &discovered);
             }
             // An incremental artifact carries state from this checkout's edit
@@ -742,6 +742,11 @@ fn record_learned_baseline(compilation: &Compilation<'_>, discovered: &Discovere
             return Result::<()>::Ok(());
         };
         let sources = compilation.invocation.source_fingerprint(discovered);
+        if read_churn_state(&path)
+            .is_some_and(|recorded| recorded.sources == sources.key() && recorded.streak == 0)
+        {
+            return Ok(());
+        }
         write_churn_state(&path, &sources, 0)
     })();
     if let Err(error) = recorded {
@@ -910,7 +915,7 @@ fn restore_prediction_payload(
     match restored {
         Some((action, mut cached)) => {
             cached.restore.avoided_compiler_duration_ns = input_prediction.compiler_duration_ns;
-            if source_is_in_workspace(compilation) {
+            if learned_enabled && source_is_in_workspace(compilation) {
                 record_learned_baseline(compilation, &discovered);
             }
             if restore_outputs {
