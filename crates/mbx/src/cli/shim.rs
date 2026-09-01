@@ -242,7 +242,12 @@ pub(super) fn prepare_explicit_cargo() -> Result<()> {
     let Some(proxy) = proxy else {
         return Ok(());
     };
-    let cargo = resolve_real_cargo_from(&proxy, std::env::var_os("CARGO").as_deref(), &path)?;
+    let cargo = resolve_explicit_cargo(
+        &proxy,
+        standalone_shim.as_deref(),
+        std::env::var_os("CARGO").as_deref(),
+        &path,
+    )?;
     PATH_BEFORE_SHIM_EXCLUSION.get_or_init(|| std::env::var_os("PATH").unwrap_or_default());
     // SAFETY: CLI dispatch is single-threaded here, before the cache session
     // or any child process has started.
@@ -270,6 +275,19 @@ fn path_without_cargo_proxies(
         !is_proxy
     });
     Ok((std::env::join_paths(directories)?, first_proxy))
+}
+
+/// Resolve Cargo for an explicit command without accepting its standalone shim.
+fn resolve_explicit_cargo(
+    proxy: &Path,
+    standalone_shim: Option<&Path>,
+    configured: Option<&OsStr>,
+    path: &OsStr,
+) -> Result<OsString> {
+    let configured = configured.filter(|candidate| {
+        standalone_shim.is_none_or(|shim| !same_path(Path::new(candidate), shim))
+    });
+    resolve_real_cargo_from(proxy, configured, path)
 }
 
 fn exclude_shim_from_path(shim: &Path) -> Result<()> {
@@ -615,19 +633,23 @@ mod tests {
     fn explicit_cargo_excludes_mise_wrapper_from_child_path() {
         let directory = tempfile::tempdir().unwrap();
         let wrapper_dir = directory.path().join("command-wrappers/bin");
+        let shim_dir = directory.path().join("mbx/bin");
         let tool_dir = directory.path().join("tool/bin");
         let real_dir = directory.path().join("real");
         std::fs::create_dir_all(&wrapper_dir).unwrap();
+        std::fs::create_dir_all(&shim_dir).unwrap();
         std::fs::create_dir_all(&tool_dir).unwrap();
         std::fs::create_dir_all(&real_dir).unwrap();
         let name = if cfg!(windows) { "cargo.exe" } else { "cargo" };
         let wrapper = wrapper_dir.join(name);
+        let shim = shim_dir.join(name);
         let real = real_dir.join(name);
         std::fs::write(&wrapper, b"mise wrapper").unwrap();
+        std::fs::write(&shim, b"mbx shim").unwrap();
         std::fs::write(&real, b"real").unwrap();
-        let path = std::env::join_paths([&wrapper_dir, &tool_dir, &real_dir]).unwrap();
+        let path = std::env::join_paths([&wrapper_dir, &shim_dir, &tool_dir, &real_dir]).unwrap();
 
-        let (path, proxy) = path_without_cargo_proxies(&path, None).unwrap();
+        let (path, proxy) = path_without_cargo_proxies(&path, Some(&shim)).unwrap();
 
         assert_eq!(proxy, Some(wrapper.clone()));
         assert_eq!(
@@ -635,7 +657,7 @@ mod tests {
             vec![tool_dir, real_dir.clone()]
         );
         assert_eq!(
-            resolve_real_cargo_from(&wrapper, None, &path).unwrap(),
+            resolve_explicit_cargo(&wrapper, Some(&shim), Some(shim.as_os_str()), &path).unwrap(),
             real.into_os_string()
         );
     }
