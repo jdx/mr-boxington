@@ -116,7 +116,7 @@ pub fn normalize_resolved_mapped_path(
     Err(PathNormalizationError::UnmappedAbsolutePath(absolute))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn resolve_path_aliases(path: &Path) -> PathBuf {
     let mut existing = path;
     let mut missing = Vec::new();
@@ -142,7 +142,7 @@ fn resolve_path_aliases(path: &Path) -> PathBuf {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn resolve_path_aliases(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
@@ -183,4 +183,27 @@ fn slash_path(path: &Path) -> Result<String, PathNormalizationError> {
         })
         .collect::<Result<Vec<_>, _>>()
         .map(|components| components.join("/"))
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_verbatim_windows_paths_to_non_verbatim_roots() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("clippy.toml");
+        std::fs::write(&input, "disallowed-methods = []").unwrap();
+        let verbatim = std::fs::canonicalize(&input).unwrap();
+        assert!(verbatim.to_string_lossy().starts_with(r"\\?\"));
+
+        let normalized = normalize_mapped_path(
+            &verbatim,
+            directory.path(),
+            &[PathMapping::new(directory.path(), "workspace")],
+        )
+        .unwrap();
+
+        assert_eq!(normalized, "${workspace}/clippy.toml");
+    }
 }
