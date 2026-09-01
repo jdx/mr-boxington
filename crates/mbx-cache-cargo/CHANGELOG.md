@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.12](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.1.11...mbx-cache-cargo-v0.1.12) - 2026-09-01
+
+### Fixed
+
+- share predictions across Cargo commands ([#256](https://github.com/jdx/mr-boxington/pull/256))
+
 ## [0.1.11](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.1.10...mbx-cache-cargo-v0.1.11) - 2026-09-01
 
 ### Other
