@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::SummaryStyle;
 
 #[test]
 fn ambiguous_build_script_sidecars_are_refused() {
@@ -532,7 +533,33 @@ fn a_session_that_only_failed_its_remote_is_reportable() {
 }
 
 #[test]
-fn writes_versioned_stats_report() {
+fn short_summary_omits_routine_compiler_probe_bypasses() {
+    let routine = agent_stats(|stats| {
+        stats.bypasses =
+            BTreeMap::from([("compiler-query".into(), 2), ("standard-input".into(), 1)]);
+    });
+    assert!(!should_display_short_stats(&routine));
+
+    let mixed = agent_stats(|stats| {
+        stats.lookups = 4;
+        stats.hits = 3;
+        stats.bypasses = BTreeMap::from([
+            ("compiler-query".into(), 2),
+            ("standard-input".into(), 1),
+            ("native-library".into(), 5),
+        ]);
+    });
+    let summary = short_summary(&mixed);
+    assert!(
+        summary.contains("3 hits, 1 misses, 5 bypassed"),
+        "{summary}"
+    );
+    assert!(!summary.contains("compiler-query"), "{summary}");
+    assert!(!summary.contains("standard-input"), "{summary}");
+}
+
+#[test]
+fn an_off_summary_still_writes_the_versioned_stats_report() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("nested").join("stats.json");
     let stats = agent_stats(|stats| {
@@ -559,7 +586,9 @@ fn writes_versioned_stats_report() {
         stats.predictions_loaded = 11;
     });
 
-    write_stats_report(&path, &stats).unwrap();
+    let mut config = Config::for_test(directory.path());
+    config.stats_report = Some(path.clone());
+    display_stats(&stats, &config, SummaryStyle::Off);
     let report: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
 
     // Bumped whenever the report grows a field, so a reader can tell from the

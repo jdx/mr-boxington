@@ -102,6 +102,13 @@ pub(crate) struct RawConfig {
     /// Write a JSON build report to this path.
     #[usage(env = "MBX_STATS_REPORT")]
     stats_report: Option<PathBuf>,
+    /// Detail printed after a build: one line, the full breakdown, or nothing.
+    #[usage(
+        env = "MBX_SUMMARY",
+        default = "short",
+        choices("off", "short", "full")
+    )]
+    summary: String,
     /// Compile and consult the cache, then compare outputs.
     #[usage(env = "MBX_VERIFY", default = false, scope = "env")]
     verify: bool,
@@ -463,6 +470,7 @@ pub(crate) struct RetentionSettings {
 pub(crate) struct CliSettings {
     pub retention: RetentionSettings,
     pub savings: SavingsStyle,
+    pub summary: SummaryStyle,
     /// Whether a churning crate may compile with its own incremental state.
     pub learned_incremental: bool,
     /// Whether natively linked programs may be cached.
@@ -476,8 +484,33 @@ impl Default for CliSettings {
         Self {
             retention: RetentionSettings::default(),
             savings: SavingsStyle::default(),
+            summary: SummaryStyle::default(),
             learned_incremental: true,
             cache_links: true,
+        }
+    }
+}
+
+/// How much of the per-build cache summary is printed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SummaryStyle {
+    Off,
+    #[default]
+    Short,
+    Full,
+}
+
+impl std::str::FromStr for SummaryStyle {
+    type Err = eyre::Report;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "off" => Ok(Self::Off),
+            "short" => Ok(Self::Short),
+            "full" => Ok(Self::Full),
+            other => Err(eyre::eyre!(
+                "summary must be off, short, or full, not {other:?}"
+            )),
         }
     }
 }
@@ -739,6 +772,7 @@ impl Config {
             CliSettings {
                 retention,
                 savings: raw.savings.parse().wrap_err("invalid savings")?,
+                summary: raw.summary.parse().wrap_err("invalid summary")?,
                 learned_incremental: raw._learned_incremental,
                 cache_links: raw.cache_links,
             },
@@ -1368,6 +1402,20 @@ mod tests {
         assert_eq!(settings.savings, SavingsStyle::Off);
         assert!(
             configured_for_cli(None, &[("MBX_SAVINGS", "sarcastic")]).is_err(),
+            "an unknown style is an error, not a silent default"
+        );
+    }
+
+    #[test]
+    fn summaries_default_to_short_with_off_and_full_as_choices() {
+        let (_, settings) = configured_for_cli(None, &[]).unwrap();
+        assert_eq!(settings.summary, SummaryStyle::Short);
+        let (_, settings) = configured_for_cli(None, &[("MBX_SUMMARY", "off")]).unwrap();
+        assert_eq!(settings.summary, SummaryStyle::Off);
+        let (_, settings) = configured_for_cli(None, &[("MBX_SUMMARY", "full")]).unwrap();
+        assert_eq!(settings.summary, SummaryStyle::Full);
+        assert!(
+            configured_for_cli(None, &[("MBX_SUMMARY", "verbose")]).is_err(),
             "an unknown style is an error, not a silent default"
         );
     }

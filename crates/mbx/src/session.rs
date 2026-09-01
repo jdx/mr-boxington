@@ -47,10 +47,13 @@ use shims::{
     targeted_compiler_language,
 };
 use stats::StatsReport;
-pub use stats::display_stats;
+pub(crate) use stats::display_stats;
 pub(crate) use stats::session_was_active;
 #[cfg(test)]
-use stats::{cache_misses, should_display_stats, stale_manifest_note, write_stats_report};
+use stats::{
+    cache_misses, short_summary, should_display_short_stats, should_display_stats,
+    stale_manifest_note,
+};
 
 pub const RUSTC_SHIM_STEM: &str = "mbx-rustc";
 pub const RUSTDOC_SHIM_STEM: &str = "mbx-rustdoc";

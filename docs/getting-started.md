@@ -317,17 +317,17 @@ unsuccessfully.
 
 ## Read the result
 
-After a build that used the cache, mbx prints a summary to stderr:
+After a build that used the cache, mbx prints a one-line summary to stderr:
 
 ```text
-mbx[cache]: 139 hits, 8 misses, 147 prefetched; 312.4 MiB downloaded, 0 B uploaded, 280.1 MiB stored locally
-mbx[cache]: could not look up 4 compilations: no usable dep-info from an earlier build and no prediction to derive an action key from
-mbx[cache]: bypassed 7 compilations: 5 unsupported-crate-type, 2 unsupported-search-path
+mbx[cache]: 139 hits, 8 misses, 4 not looked up, 147 prefetched, 7 bypassed; 312.4 MiB downloaded, 0 B uploaded, 280.1 MiB stored locally
 ```
 
 These are three different outcomes: a miss means mbx looked up an action and
 found nothing, “could not look up” means it had no key yet, and a bypass means
 mbx deliberately declined to cache the action. See [Cache results](/cache-results).
+Set `MBX_SUMMARY=full` for the detailed breakdown, `MBX_SUMMARY=off` for none,
+or use Cargo's `-q`/`--quiet` for a quiet invocation.
 
 ## Inspect the store
 

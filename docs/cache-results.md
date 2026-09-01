@@ -1,6 +1,7 @@
 # Cache results
 
-The summary separates work mbx handled from work it could not safely cache.
+The short summary separates work mbx handled from work it could not safely
+cache. Set `MBX_SUMMARY=full` for the detailed breakdown described below.
 
 ## Hit
 
@@ -21,8 +22,9 @@ compilation, so calling it a miss would overstate the number of failed lookups.
 ## Bypass
 
 mbx recognized that it could not model the action exactly and ran the real
-compiler without caching it. Reasons are grouped in the summary; set
-`MBX_BYPASS_LOG` to a file path for the full per-action record.
+compiler without caching it. Reasons are grouped in the full summary
+(`MBX_SUMMARY=full`); set `MBX_BYPASS_LOG` to a file path for the full
+per-action record.
 
 Run a Cargo command through `mbx explain` to collect those records temporarily,
 group identical causes, and print guidance for every bypass category:
@@ -68,7 +70,8 @@ A remote cache request failed and the build carried on without it: unreachable
 host, refused credentials, or a response this client would not accept. mbx never
 fails a build over a remote cache, so these only ever cost hit rate — but a
 remote that is failing every request reports the same hits, misses, and bytes as
-one that was merely empty, which is why the summary counts them:
+one that was merely empty, which is why the summary counts them. The short
+summary includes the count inline; the full summary explains it:
 
 ```text
 mbx[cache]: the remote cache failed 4 of its requests; this build ran without what it could not reach, and the warnings above say why
@@ -80,16 +83,17 @@ on a cache that has quietly stopped serving.
 
 ## Watching a build instead
 
-Everything above describes the summary printed after a build. To see the same
+Everything above describes results reported after a build. To see the same
 outcomes as they are decided — one row per compilation, with the crate it
-belongs to — run [`mbx tui`](/tui) in another terminal. It reads every build on
-the machine, including ones already running.
+belongs to — run [`mbx tui`](/tui) in another terminal. It reads every build
+on the machine, including ones already running.
 
 ## Reading the hit rate
 
 A build can report a high hit rate among attempted lookups while spending most
 of its time on actions that were not looked up or were bypassed. Read all three
-summary lines together, and compare wall-clock time when evaluating the cache.
+summary counts together, and compare wall-clock time when evaluating the
+cache. Set `MBX_SUMMARY=full` when the one-line counts need a breakdown.
 
 A link mbx cannot describe always runs, so its downstream crates may have work
 to do on an otherwise warm build. Native executables, tests, and proc macros on

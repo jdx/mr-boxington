@@ -300,6 +300,20 @@ Share eligible compilations that read `OUT_DIR`.
 
 Write a JSON build report to this path.
 
+### `summary`
+
+- **Type:** `string`
+- **Default:** `short`
+- **Set with:** `MBX_SUMMARY`
+
+Detail printed after a build: one line, the full breakdown, or nothing.
+
+**Choices:**
+- `off`
+- `short`
+- `full`
+
+
 ### `target.max_age`
 
 - **Type:** `duration`

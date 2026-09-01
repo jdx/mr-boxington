@@ -36,6 +36,7 @@ incremental = false
 share_out_dir = true
 build_script_execution = true
 cc = true
+summary = "short"        # or "off", "full"
 savings = "quips"        # or "plain", "off"
 
 [gc]
@@ -176,6 +177,16 @@ before relying on it.
 from a pool of dry one-liners, `plain` states the same facts in the register
 of the other `mbx[...]` lines, and `off` keeps the totals without printing
 anything.
+
+## Build summaries
+
+`summary` controls the cache report printed to stderr after a build
+(`MBX_SUMMARY` from the environment). `short` — the default — prints one line,
+leaving routine `compiler-query` and `standard-input` probes out of its bypass
+count. `full` prints the detailed timing, compiler, bypass, transfer, and
+materialization breakdown. `off` prints no cache summary, while still writing
+`MBX_STATS_REPORT` when configured. Cargo's `-q` and `--quiet` also suppress
+the summary for that invocation.
 
 ## Incremental builds
 

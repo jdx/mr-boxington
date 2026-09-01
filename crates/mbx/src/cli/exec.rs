@@ -69,7 +69,7 @@ pub(super) fn run(config: &Config, settings: &CliSettings, args: &ExecArgs) -> R
         }
         let stats = match session.finish().await {
             Ok(stats) => {
-                crate::session::display_stats(&stats, config);
+                crate::session::display_stats(&stats, config, settings.summary);
                 Some(stats)
             }
             Err(error) => {

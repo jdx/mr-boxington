@@ -1,5 +1,5 @@
 use super::note;
-use crate::config::Config;
+use crate::config::{Config, SummaryStyle};
 use crate::util::{format_duration, write_atomic};
 use bytesize::ByteSize;
 use eyre::Result;
@@ -139,7 +139,7 @@ impl From<&AgentStats> for StatsReport {
 }
 
 /// Report a finished session to stderr, and to a JSON file when configured.
-pub fn display_stats(stats: &AgentStats, config: &Config) {
+pub(crate) fn display_stats(stats: &AgentStats, config: &Config, style: SummaryStyle) {
     if let Some(path) = &config.stats_report
         && let Err(error) = write_stats_report(path, stats)
     {
@@ -147,6 +147,16 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
             "the statistics report could not be written to {}: {error}",
             path.display()
         );
+    }
+    match style {
+        SummaryStyle::Off => return,
+        SummaryStyle::Short => {
+            if should_display_short_stats(stats) {
+                note(&short_summary(stats));
+            }
+            return;
+        }
+        SummaryStyle::Full => {}
     }
     if !should_display_stats(stats) {
         return;
@@ -284,6 +294,66 @@ pub fn display_stats(stats: &AgentStats, config: &Config) {
             stats.verifications, stats.divergences,
         ));
     }
+}
+
+/// The one-line result leaves routine compiler probes out of both its bypass
+/// count and its activity gate. Cargo and build scripts make these calls to
+/// identify a compiler or feed it source, so a no-op build should remain a
+/// no-op to somebody reading its output.
+pub(super) fn short_summary(stats: &AgentStats) -> String {
+    let unexpected_bypasses = unexpected_bypasses(stats);
+    let mut outcomes = vec![
+        format!("{} hits", stats.hits),
+        format!("{} misses", cache_misses(stats)),
+    ];
+    if stats.unconsulted > 0 {
+        outcomes.push(format!("{} not looked up", stats.unconsulted));
+    }
+    if stats.prefetched_actions > 0 {
+        outcomes.push(format!("{} prefetched", stats.prefetched_actions));
+    }
+    if unexpected_bypasses > 0 {
+        outcomes.push(format!("{unexpected_bypasses} bypassed"));
+    }
+    if stats.verifications > 0 {
+        outcomes.push(format!(
+            "{} verified, {} diverged",
+            stats.verifications, stats.divergences
+        ));
+    }
+    if stats.remote_failures > 0 {
+        outcomes.push(format!("{} remote failures", stats.remote_failures));
+    }
+    format!(
+        "mbx[cache]: {}; {} downloaded, {} uploaded, {} stored locally",
+        outcomes.join(", "),
+        ByteSize::b(stats.downloaded_bytes).display().iec(),
+        ByteSize::b(stats.uploaded_bytes).display().iec(),
+        ByteSize::b(stats.stored_bytes).display().iec(),
+    )
+}
+
+fn unexpected_bypasses(stats: &AgentStats) -> u64 {
+    stats
+        .bypasses
+        .iter()
+        .filter(|(kind, _)| !matches!(kind.as_str(), "compiler-query" | "standard-input"))
+        .map(|(_, count)| count)
+        .sum()
+}
+
+pub(super) fn should_display_short_stats(stats: &AgentStats) -> bool {
+    stats.lookups > 0
+        || stats.unconsulted > 0
+        || stats.prefetched_actions > 0
+        || stats.stores > 0
+        || stats.verifications > 0
+        || stats.downloaded_bytes > 0
+        || stats.uploaded_bytes > 0
+        || stats.background_uploads > 0
+        || unexpected_bypasses(stats) > 0
+        || stats.avoided_compiler_duration_ns > 0
+        || stats.remote_failures > 0
 }
 
 /// Explain a session that loaded a full manifest and matched none of it.
