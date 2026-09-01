@@ -105,6 +105,13 @@ pub struct CacheSession {
     started: Instant,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
     server: Mutex<Option<JoinHandle<Result<()>>>>,
+    task: Arc<SessionTask>,
+}
+
+/// The Cargo task is loaded only if a compiler shim connects.
+pub(super) struct SessionTask {
+    identity: std::sync::OnceLock<String>,
+    initialized: tokio::sync::OnceCell<bool>,
 }
 
 impl CacheSession {
@@ -122,7 +129,8 @@ impl CacheSession {
         config: &Config,
         cargo_jobs: Option<u64>,
     ) -> Result<Self> {
-        let (shim, rustdoc_shim) = install_session_shims(session_dir)?;
+        let (shim, rustdoc_shim) =
+            install_session_shims(session_dir, &config.cache_dir.join("shims"))?;
         let cc_shims = if config.cc {
             // Build systems such as CMake persist HOST_CC as an absolute
             // compiler path. Keep the C/C++ shims outside the temporary
@@ -153,7 +161,12 @@ impl CacheSession {
             None => agent,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let (socket, server) = spawn_server(session_dir, agent.clone(), shutdown_rx).await?;
+        let task = Arc::new(SessionTask {
+            identity: std::sync::OnceLock::new(),
+            initialized: tokio::sync::OnceCell::new(),
+        });
+        let (socket, server) =
+            spawn_server(session_dir, agent.clone(), Arc::clone(&task), shutdown_rx).await?;
         Ok(Self {
             socket,
             rustc_shim: shim,
@@ -172,6 +185,7 @@ impl CacheSession {
             started: Instant::now(),
             shutdown: Mutex::new(Some(shutdown_tx)),
             server: Mutex::new(Some(server)),
+            task,
         })
     }
 
@@ -203,23 +217,16 @@ impl CacheSession {
         {
             warn!("this checkout was not recorded as a cache root: {error}");
         }
-        let (protocol_build, action_run) = match self.agent.begin_task(&identity).await {
-            Ok(run) => (
-                run.clone(),
-                Some(ActionRun {
-                    run,
-                    identity: identity.clone(),
-                    workspace_root: workspace_root.to_path_buf(),
-                    export_group: std::env::var(CACHE_EXPORT_GROUP_ENV).ok(),
-                    store: self.store.clone(),
-                    agent: self.agent.clone(),
-                }),
-            ),
-            Err(error) => {
-                warn!("build action manifest was not loaded: {error}");
-                (identity, None)
-            }
-        };
+        let _ = self.task.identity.set(identity.clone());
+        let action_run = Some(ActionRun {
+            run: identity.clone(),
+            identity: identity.clone(),
+            workspace_root: workspace_root.to_path_buf(),
+            export_group: std::env::var(CACHE_EXPORT_GROUP_ENV).ok(),
+            store: self.store.clone(),
+            agent: self.agent.clone(),
+            initialized: Some(Arc::clone(&self.task)),
+        });
         let shim = self.rustc_shim.to_string_lossy().into_owned();
         // The shim maps these roots out of its cache keys; a dependency compiles
         // with its working directory in the registry, so it cannot find them.
@@ -255,7 +262,7 @@ impl CacheSession {
             STAGING_ENV.into(),
             self.staging.to_string_lossy().into_owned(),
         );
-        environment.insert(BUILD_ENV.into(), protocol_build);
+        environment.insert(BUILD_ENV.into(), identity);
         // Always state this explicitly: removing the key would leave the shim
         // inheriting whatever the parent environment had.
         environment.insert(
@@ -417,6 +424,7 @@ impl CacheSession {
                     export_group: std::env::var(CACHE_EXPORT_GROUP_ENV).ok(),
                     store: self.store.clone(),
                     agent: self.agent.clone(),
+                    initialized: None,
                 }),
             ),
             Err(error) => {
@@ -656,10 +664,18 @@ pub struct ActionRun {
     export_group: Option<String>,
     store: PathBuf,
     agent: CacheAgent,
+    initialized: Option<Arc<SessionTask>>,
 }
 
 impl ActionRun {
     pub async fn commit(self) -> Result<()> {
+        if self
+            .initialized
+            .as_ref()
+            .is_some_and(|task| task.initialized.get() != Some(&true))
+        {
+            return Ok(());
+        }
         let predictions = self.agent.commit_task_actions(&self.run).await?;
         crate::store::record_build_receipt(
             &self.store,

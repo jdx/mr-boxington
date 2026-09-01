@@ -23,7 +23,22 @@ pub(super) fn run(
     settings: &CliSettings,
     arguments: &[String],
 ) -> Result<ExitCode> {
-    cargo_with_settings_and_bypass_log(config, settings, arguments, None)
+    cargo_with_settings_bypass_log_and_roots(config, settings, arguments, None, None)
+}
+
+/// Run Cargo with roots an earlier probe already resolved.
+///
+/// The persistent Cargo shim probes before loading configuration so an
+/// invocation outside a usable workspace can pass through untouched. Reusing
+/// that result here keeps the shim from running the same `cargo metadata`
+/// command twice.
+pub(super) fn run_with_roots(
+    config: &Config,
+    settings: &CliSettings,
+    arguments: &[String],
+    roots: Roots,
+) -> Result<ExitCode> {
+    cargo_with_settings_bypass_log_and_roots(config, settings, arguments, None, Some(roots))
 }
 
 pub(crate) fn cargo_with_bypass_log(
@@ -31,7 +46,13 @@ pub(crate) fn cargo_with_bypass_log(
     arguments: &[String],
     bypass_log: Option<&Path>,
 ) -> Result<ExitCode> {
-    cargo_with_settings_and_bypass_log(config, &CliSettings::default(), arguments, bypass_log)
+    cargo_with_settings_bypass_log_and_roots(
+        config,
+        &CliSettings::default(),
+        arguments,
+        bypass_log,
+        None,
+    )
 }
 
 pub(crate) fn cargo_with_settings_and_bypass_log(
@@ -39,6 +60,16 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
     settings: &CliSettings,
     arguments: &[String],
     bypass_log: Option<&Path>,
+) -> Result<ExitCode> {
+    cargo_with_settings_bypass_log_and_roots(config, settings, arguments, bypass_log, None)
+}
+
+fn cargo_with_settings_bypass_log_and_roots(
+    config: &Config,
+    settings: &CliSettings,
+    arguments: &[String],
+    bypass_log: Option<&Path>,
+    roots: Option<Roots>,
 ) -> Result<ExitCode> {
     let retention = &settings.retention;
     let summary = if cargo_is_quiet(arguments) {
@@ -57,7 +88,7 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
         log::warn!("caching native links is not supported on this platform");
     }
     let working_dir = std::env::current_dir()?;
-    let mut roots = resolve_roots(&cargo, arguments, &working_dir);
+    let mut roots = roots.unwrap_or_else(|| resolve_roots(&cargo, arguments, &working_dir));
     let mut config = config.clone();
     config.apply_workspace_policy(&roots.workspace_root)?;
     let incremental = policy::incremental_allowed(config.incremental);
@@ -573,15 +604,13 @@ pub(super) fn absolute(working_dir: &Path, value: &str) -> PathBuf {
 /// metadata` would report. `-C` moves the whole invocation, and `--config` can
 /// set `build.target-dir` outright, so a probe that drops them describes a
 /// different tree than the one being built.
+#[cfg(test)]
 pub(super) const PROBE_GLOBAL_FLAGS: [&str; 3] = ["-C", "--config", "-Z"];
-/// Options cargo accepts only after the subcommand. The network flags matter
-/// because a probe left to itself may reach the registry the build was told to
-/// stay away from.
-pub(super) const PROBE_MANIFEST_TOGGLES: [&str; 3] = ["--offline", "--frozen", "--locked"];
 
 /// Collect the occurrences of `flags` from `arguments`, preserving order and
 /// repeats. Cargo allows `--flag value`, `--flag=value`, and, for the short
 /// forms, `-Zvalue`.
+#[cfg(test)]
 pub(super) fn forwarded_flags(arguments: &[String], flags: &[&str]) -> Vec<String> {
     let mut forwarded = Vec::new();
     let mut remaining = arguments.iter();
@@ -612,34 +641,21 @@ pub(super) fn cargo_roots(
     arguments: &[String],
     target_dir_env: Option<&std::ffi::OsStr>,
 ) -> Option<Roots> {
-    let mut command = Command::new(cargo);
-    // Say what the probe should see rather than letting it inherit: cargo lets
-    // this variable outrank configuration, so a probe that disagrees with the
-    // caller about it describes a different target directory than the build's.
-    match target_dir_env {
-        Some(dir) => command.env(CARGO_TARGET_DIR_ENV, dir),
-        None => command.env_remove(CARGO_TARGET_DIR_ENV),
-    };
-    // Globals come first; cargo rejects them after the subcommand.
-    command.args(forwarded_flags(arguments, &PROBE_GLOBAL_FLAGS));
-    command.args(["metadata", "--no-deps", "--format-version", "1"]);
-    // Describe the project the build will actually operate on.
-    if let Some(manifest) = flag_value(arguments, "--manifest-path") {
-        command.args(["--manifest-path", manifest]);
-    }
-    for toggle in arguments
-        .iter()
-        .filter(|argument| PROBE_MANIFEST_TOGGLES.contains(&argument.as_str()))
-    {
-        command.arg(toggle);
-    }
-    let output = command.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    parse_cargo_roots(&output.stdout)
+    let working_dir = std::env::current_dir().ok()?;
+    let resolved = mbx_cache_cargo::resolve_reported(
+        cargo,
+        arguments,
+        &working_dir,
+        target_dir_env.map(std::ffi::OsStr::to_os_string),
+    )?;
+    Some(Roots {
+        workspace_root: resolved.workspace_root,
+        target_dir: resolved.target_dir,
+        target_dir_requested: resolved.target_dir_requested,
+    })
 }
 
+#[cfg(test)]
 pub(super) fn parse_cargo_roots(metadata: &[u8]) -> Option<Roots> {
     let metadata: serde_json::Value = serde_json::from_slice(metadata).ok()?;
     Some(Roots {
@@ -651,22 +667,6 @@ pub(super) fn parse_cargo_roots(metadata: &[u8]) -> Option<Roots> {
         target_dir_requested: false,
     })
 }
-
-/// Read `--flag <value>` or `--flag=<value>` out of cargo's arguments.
-pub(super) fn flag_value<'a>(arguments: &'a [String], flag: &str) -> Option<&'a str> {
-    let joined = format!("{flag}=");
-    let mut arguments = arguments.iter();
-    while let Some(argument) = arguments.next() {
-        if let Some(value) = argument.strip_prefix(&joined) {
-            return Some(value);
-        }
-        if argument == flag {
-            return arguments.next().map(String::as_str);
-        }
-    }
-    None
-}
-
 /// Cargo's own compiler-process limit, when it narrows the scheduler pool.
 ///
 /// The CLI wins over `CARGO_BUILD_JOBS`, including `default`, just as it does

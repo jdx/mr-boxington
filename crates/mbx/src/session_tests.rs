@@ -156,6 +156,63 @@ async fn failed_incremental_recording_replaces_an_inherited_root() {
     session.finish().await.unwrap();
 }
 
+/// Cargo caches rustc target and capability probes under the wrapper path. A
+/// temporary path makes an otherwise no-op build repeat all of them, so the
+/// rustc wrapper belongs to the mbx binary rather than the session.
+#[tokio::test]
+async fn rustc_shim_path_survives_and_is_reused_across_sessions() {
+    let cache = tempfile::tempdir().unwrap();
+    let config = test_config(cache.path());
+
+    let first_path = {
+        let session_dir = tempfile::tempdir().unwrap();
+        let session = CacheSession::start(session_dir.path(), &config)
+            .await
+            .unwrap();
+        let path = session.rustc_shim.clone();
+        session.finish().await.unwrap();
+        path
+    };
+
+    assert!(
+        first_path.is_file(),
+        "the wrapper path cached by Cargo must survive its mbx session"
+    );
+
+    let second_dir = tempfile::tempdir().unwrap();
+    let second = CacheSession::start(second_dir.path(), &config)
+        .await
+        .unwrap();
+    assert_eq!(second.rustc_shim, first_path);
+    second.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_session_with_no_shim_connection_does_not_load_a_manifest() {
+    let cache = tempfile::tempdir().unwrap();
+    let session_dir = tempfile::tempdir().unwrap();
+    let session = CacheSession::start(session_dir.path(), &test_config(cache.path()))
+        .await
+        .unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut environment = BTreeMap::new();
+
+    let run = session
+        .begin(
+            workspace.path(),
+            &workspace.path().join("target"),
+            &["build".to_string()],
+            &mut environment,
+        )
+        .await
+        .unwrap();
+
+    assert!(session.task.initialized.get().is_none());
+    run.commit().await.unwrap();
+    assert!(session.task.initialized.get().is_none());
+    assert_eq!(session.finish().await.unwrap().predictions_loaded, 0);
+}
+
 #[test]
 fn nested_sessions_unwrap_the_outer_rustdoc_shim() {
     let values = BTreeMap::from([

@@ -36,6 +36,36 @@ pub fn resolve(
 ) -> CargoInvocation {
     let cargo_args = cargo_arguments(arguments);
     let reported = cargo_roots(cargo, cargo_args, target_dir_env.as_deref());
+    resolve_with_reported(arguments, working_dir, target_dir_env, reported)
+}
+
+/// Resolve one Cargo invocation only when Cargo successfully reports its roots.
+///
+/// Persistent Cargo shims use this form to distinguish a usable build from an
+/// invocation they should pass through, while retaining the successful
+/// metadata result for the session instead of probing twice.
+pub fn resolve_reported(
+    cargo: &OsStr,
+    arguments: &[String],
+    working_dir: &Path,
+    target_dir_env: Option<OsString>,
+) -> Option<CargoInvocation> {
+    let reported = cargo_roots(cargo, cargo_arguments(arguments), target_dir_env.as_deref())?;
+    Some(resolve_with_reported(
+        arguments,
+        working_dir,
+        target_dir_env,
+        Some(reported),
+    ))
+}
+
+fn resolve_with_reported(
+    arguments: &[String],
+    working_dir: &Path,
+    target_dir_env: Option<OsString>,
+    reported: Option<(PathBuf, PathBuf)>,
+) -> CargoInvocation {
+    let cargo_args = cargo_arguments(arguments);
     let invocation_dir = invocation_dir(cargo_args, working_dir);
     let workspace_root = reported
         .as_ref()
@@ -425,9 +455,23 @@ mod tests {
             format!("build.target-dir='{}'", configured.display()),
         ];
 
-        let resolved = resolve(OsStr::new("cargo"), &arguments, root, None);
+        let resolved = resolve_reported(OsStr::new("cargo"), &arguments, root, None).unwrap();
 
         assert_eq!(resolved.target_dir, configured);
         assert!(resolved.target_dir_requested);
+    }
+
+    #[test]
+    fn reported_resolution_requires_a_successful_metadata_probe() {
+        let directory = cargo_fixture();
+        assert!(
+            resolve_reported(
+                OsStr::new("cargo-that-does-not-exist"),
+                &["build".into()],
+                directory.path(),
+                None,
+            )
+            .is_none()
+        );
     }
 }

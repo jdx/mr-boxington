@@ -80,13 +80,11 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
     let Ok(string_arguments) = super::strings(&arguments) else {
         return run_real_cargo(&real_cargo, &arguments);
     };
-    if cargo_roots(
+    let Some(roots) = cargo_roots(
         &real_cargo,
         &string_arguments,
         std::env::var_os(CARGO_TARGET_DIR_ENV).as_deref(),
-    )
-    .is_none()
-    {
+    ) else {
         return run_real_cargo(
             &real_cargo,
             &string_arguments
@@ -94,11 +92,11 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
                 .map(OsString::from)
                 .collect::<Vec<_>>(),
         );
-    }
+    };
     // Every probe and the final child must name Cargo directly.
     unsafe { std::env::set_var("CARGO", &real_cargo) };
     let (config, settings) = Config::load_for_cli()?;
-    super::cargo::run(&config, &settings, &string_arguments)
+    super::cargo::run_with_roots(&config, &settings, &string_arguments, roots)
 }
 
 fn resolve_active_cargo_shim(

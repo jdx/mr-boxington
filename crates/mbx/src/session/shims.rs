@@ -6,6 +6,7 @@ use super::{
 use eyre::{Context, Result};
 use log::debug;
 use mbx_cache_cc::CcLanguage;
+use mbx_cache_core::CacheDigest;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -387,9 +388,15 @@ fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-pub(super) fn install_session_shims(session_dir: &Path) -> Result<(PathBuf, PathBuf)> {
+pub(super) fn install_session_shims(
+    session_dir: &Path,
+    persistent_shims: &Path,
+) -> Result<(PathBuf, PathBuf)> {
     let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
-    let rustc = install_shim(&executable, session_dir, ShimLink::Tracking)?;
+    let binary_shims = binary_shims_dir(persistent_shims, &executable)?;
+    std::fs::create_dir_all(&binary_shims)?;
+    let rustc = binary_shims.join(shim_file_name(RUSTC_SHIM_STEM));
+    link_path_shim(&executable, &rustc)?;
     let rustdoc = install_shim_named(
         &executable,
         session_dir,
@@ -397,6 +404,37 @@ pub(super) fn install_session_shims(session_dir: &Path) -> Result<(PathBuf, Path
         ShimLink::Tracking,
     )?;
     Ok((rustc, rustdoc))
+}
+
+/// A stable shim directory for exactly one installed mbx executable.
+///
+/// Cargo keys its cached rustc probes by the wrapper path. A session-local
+/// wrapper makes every invocation look like a different compiler, while a
+/// single machine-wide name would conceal upgrades. The executable's path and
+/// file identity give repeated runs of one binary the same name and a replaced
+/// binary a new one without reading the whole executable at startup.
+fn binary_shims_dir(shims: &Path, executable: &Path) -> Result<PathBuf> {
+    let executable = std::path::absolute(executable)?;
+    let metadata = std::fs::metadata(&executable)?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+    let mut identity = executable.as_os_str().as_encoded_bytes().to_vec();
+    identity.push(0);
+    identity.extend_from_slice(&metadata.len().to_le_bytes());
+    identity.extend_from_slice(
+        &modified
+            .map_or(0, |duration| duration.as_secs())
+            .to_le_bytes(),
+    );
+    identity.extend_from_slice(
+        &modified
+            .map_or(0, |duration| duration.subsec_nanos())
+            .to_le_bytes(),
+    );
+    let digest = CacheDigest::blake3(&identity);
+    Ok(shims.join("rust").join(digest.hash))
 }
 
 /// How an installed shim refers to the mbx binary behind it.

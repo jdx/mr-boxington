@@ -356,6 +356,34 @@ EOF
   assert_output "1"
 }
 
+@test "the Cargo shim reuses its workspace metadata probe" {
+  local project="$BATS_TEST_TMPDIR/metadata-project"
+  local real_bin="$BATS_TEST_TMPDIR/metadata-real-bin"
+  local cargo_log="$BATS_TEST_TMPDIR/metadata-cargo.log"
+  write_project "$project"
+  mkdir -p "$real_bin"
+  cat >"$real_bin/cargo" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$MBX_TEST_CARGO_LOG"
+case " $* " in
+  *" metadata "*)
+    printf '{"workspace_root":"%s","target_directory":"%s","packages":[]}' \
+      "$MBX_TEST_PROJECT" "$MBX_TEST_PROJECT/target"
+    ;;
+esac
+EOF
+  chmod +x "$real_bin/cargo"
+  "$MBX_BIN" setup >/dev/null
+
+  run env PATH="$MBX_SHIM_DIR:$real_bin:/usr/bin:/bin" \
+    MBX_TEST_CARGO_LOG="$cargo_log" MBX_TEST_PROJECT="$project" \
+    cargo build --manifest-path "$project/Cargo.toml"
+  assert_success
+  run grep -c 'metadata --no-deps --format-version 1' "$cargo_log"
+  assert_success
+  assert_output "1"
+}
+
 @test "explicit mbx Cargo commands do not reenter the installed shim" {
   local project="$BATS_TEST_TMPDIR/explicit-mbx-project"
   write_project "$project"

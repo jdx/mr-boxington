@@ -570,17 +570,33 @@ impl CacheAgent {
 
     /// Load the last committed action manifest for a task into this session.
     pub async fn begin_task(&self, task: &str) -> Result<String> {
-        self.begin_task_with_remote_errors(task, false).await
+        self.begin_task_with_remote_errors(task, false, None).await
+    }
+
+    /// Load a task using its identity as the run key.
+    ///
+    /// A task-scoped process has only one run for an identity, so it can defer
+    /// this work until its first client connects while putting the identity in
+    /// the client's environment ahead of time.
+    pub async fn begin_session_task(&self, task: &str) -> Result<()> {
+        self.begin_task_with_remote_errors(task, false, Some(task.to_string()))
+            .await?;
+        Ok(())
     }
 
     /// Load a task and finish its prefetch, surfacing remote lookup failures.
     pub async fn prefetch_task(&self, task: &str) -> Result<String> {
-        let run = self.begin_task_with_remote_errors(task, true).await?;
+        let run = self.begin_task_with_remote_errors(task, true, None).await?;
         self.wait_for_prefetches().await;
         Ok(run)
     }
 
-    async fn begin_task_with_remote_errors(&self, task: &str, strict: bool) -> Result<String> {
+    async fn begin_task_with_remote_errors(
+        &self,
+        task: &str,
+        strict: bool,
+        run: Option<String>,
+    ) -> Result<String> {
         validate_task_identity(task)?;
         // The local manifest is already enough to start useful work. Do not
         // leave those predictions idle while a high-latency remote answers the
@@ -657,10 +673,11 @@ impl CacheAgent {
                 ..TaskActionState::default()
             }
         };
-        let sequence = self.next_task_run.fetch_add(1, Ordering::Relaxed);
-        let run =
+        let run = run.unwrap_or_else(|| {
+            let sequence = self.next_task_run.fetch_add(1, Ordering::Relaxed);
             CacheDigest::blake3(format!("{task}\0{}\0{sequence}", std::process::id()).as_bytes())
-                .hash;
+                .hash
+        });
         // The largest baseline rather than a sum: beginning the same task again
         // in one session reloads the same manifest, and counting it twice would
         // overstate what there was to match.

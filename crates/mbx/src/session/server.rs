@@ -4,6 +4,7 @@ use eyre::Result;
 use log::debug;
 use mbx_cache_core::CacheAgent;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
@@ -11,6 +12,7 @@ use tokio::task::JoinHandle;
 pub(super) async fn spawn_server(
     session_dir: &Path,
     agent: CacheAgent,
+    task: Arc<super::SessionTask>,
     mut shutdown: oneshot::Receiver<()>,
 ) -> Result<(String, JoinHandle<Result<()>>)> {
     use std::os::unix::fs::PermissionsExt as _;
@@ -30,7 +32,9 @@ pub(super) async fn spawn_server(
                         Err(error) => break Err(eyre::Report::from(error)),
                     };
                     let agent = agent.clone();
+                    let task = Arc::clone(&task);
                     connections.spawn(async move {
+                        initialize_task(&agent, &task).await;
                         if let Err(error) = agent.handle_connection(stream).await {
                             debug!("cache agent connection failed: {error}");
                         }
@@ -64,6 +68,7 @@ impl Drop for SocketCleanup {
 pub(super) async fn spawn_server(
     _session_dir: &Path,
     agent: CacheAgent,
+    task: Arc<super::SessionTask>,
     mut shutdown: oneshot::Receiver<()>,
 ) -> Result<(String, JoinHandle<Result<()>>)> {
     let endpoint = format!(
@@ -90,7 +95,9 @@ pub(super) async fn spawn_server(
                         Err(error) => break Err(error),
                     }
                     let agent = agent.clone();
+                    let task = Arc::clone(&task);
                     connections.spawn(async move {
+                        initialize_task(&agent, &task).await;
                         if let Err(error) = agent.handle_connection(pipe).await {
                             debug!("cache agent connection failed: {error}");
                         }
@@ -108,6 +115,23 @@ pub(super) async fn spawn_server(
         outcome
     });
     Ok((endpoint, server))
+}
+
+async fn initialize_task(agent: &CacheAgent, task: &super::SessionTask) {
+    let Some(identity) = task.identity.get() else {
+        return;
+    };
+    task.initialized
+        .get_or_init(|| async {
+            match agent.begin_session_task(identity).await {
+                Ok(()) => true,
+                Err(error) => {
+                    log::warn!("build action manifest was not loaded: {error}");
+                    false
+                }
+            }
+        })
+        .await;
 }
 
 #[cfg(windows)]
