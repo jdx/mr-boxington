@@ -13,9 +13,9 @@ use mbx_cache_core::{
     RustcMetadata, canonical_json,
 };
 use mbx_cache_rustc::{
-    ActionContext, BypassReason, CompilerIdentity, DiscoveredInputs, LinkerIdentity, ParseOptions,
-    PathMapping, RustcAction, RustcDepInfo, RustcInputPrediction, RustcInvocation, RustcOutputs,
-    normalize_mapped_path,
+    ActionContext, ActionInput, BypassReason, CompilerIdentity, DiscoveredInputs, LinkerIdentity,
+    ParseOptions, PathMapping, RustcAction, RustcDepInfo, RustcInputPrediction, RustcInvocation,
+    RustcOutputs, normalize_mapped_path,
 };
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -1011,14 +1011,48 @@ fn base_action_context(
     working_dir: &Path,
     portable: &Portable,
 ) -> Result<ActionContext> {
-    Ok(ActionContext {
-        compiler: compiler_identity(rustc)?,
+    let compiler = compiler_identity(rustc)?;
+    let mut context = ActionContext {
+        compiler,
         working_dir: working_dir.to_path_buf(),
         path_mappings: portable.mappings.clone(),
         environment: BTreeMap::new(),
         portable_environment: portable.names.clone(),
         inputs: Vec::new(),
-    })
+    };
+    if Path::new(rustc).file_stem() == Some(OsStr::new("clippy-driver"))
+        && let Some(path) = selected_clippy_config(working_dir)
+    {
+        context.inputs.push(ActionInput {
+            digest: CacheDigest::blake3_file(&path)?,
+            path,
+        });
+    }
+    Ok(context)
+}
+
+/// Find the config Clippy would load before consulting stale dep-info.
+///
+/// Clippy records a loaded config in dep-info, but absence cannot be recorded.
+/// Looking it up while constructing the base context makes a newly added or
+/// newly higher-priority config change the action before an old result can be
+/// restored.
+fn selected_clippy_config(working_dir: &Path) -> Option<PathBuf> {
+    let start = std::env::var_os("CLIPPY_CONF_DIR")
+        .or_else(|| std::env::var_os("CARGO_MANIFEST_DIR"))
+        .map_or_else(|| working_dir.to_path_buf(), PathBuf::from);
+    let mut directory = std::fs::canonicalize(start).ok()?;
+    loop {
+        for name in [".clippy.toml", "clippy.toml"] {
+            let path = directory.join(name);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        if !directory.pop() {
+            return None;
+        }
+    }
 }
 
 /// Identify the linker, for the invocations whose key has to describe it.
