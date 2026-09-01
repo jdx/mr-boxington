@@ -18,6 +18,13 @@ mbx places the target directory under its cache root and leaves a symlink at
 target -> <cache root>/targets/v1/<checkout digest>
 ```
 
+Cargo continues to report artifacts through the workspace's `target` path, so
+debugger launch configurations do not capture the private managed path that
+collection may later replace. In a Git checkout, mbx also adds the exact link
+path to `.git/info/exclude` when necessary. A directory-only `target/` pattern
+does not match a symlink; the local exclude keeps `git status` clean without
+changing the project's `.gitignore`.
+
 ## Collection
 
 mbx records the checkout associated with each target view. Collection runs
@@ -120,9 +127,14 @@ Turning placement off does not delete a target directory mbx already manages.
 The existing `target` link continues to work, and collection can still reclaim
 the directory after its checkout disappears.
 
-To remove one workspace's managed target immediately and forget its cache
-claims, run `mbx cache remove /path/to/workspace`. Shared objects stay available
-to other workspaces and are reclaimed by normal garbage collection.
+Run `mbx clean` inside a workspace to remove its managed target and the link
+immediately. An optional workspace path cleans another checkout. Shared cached
+objects and checkout claims remain available, so the next build can restore
+outputs normally.
+
+To remove the target and forget the workspace's cache claims together, run
+`mbx cache remove /path/to/workspace`. Shared objects stay available to other
+workspaces and are reclaimed by normal garbage collection.
 
 ::: warning Windows
 Creating the link requires Developer Mode or a privileged process on Windows.

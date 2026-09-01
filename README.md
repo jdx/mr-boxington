@@ -143,6 +143,7 @@ mbx cache projects
 mbx cache largest --limit 10
 mbx cache verify
 mbx cache remove /path/to/workspace
+mbx clean
 mbx gc
 mbx gc --max-size 3GB
 mbx gc --dry-run

@@ -14,6 +14,7 @@ use std::process::ExitCode;
 
 mod cache;
 mod cargo;
+mod clean;
 mod doctor;
 mod exec;
 mod explain;
@@ -87,6 +88,8 @@ enum Commands {
     Gc(gc::GcArgs),
     /// Inspect the local store.
     Cache(cache::CacheArgs),
+    /// Remove this workspace's managed target directory and link.
+    Clean(clean::CleanArgs),
     /// Watch cache activity across every build on this machine.
     Tui(tui::TuiArgs),
     /// Download predicted remote artifacts without running Cargo.
@@ -125,6 +128,7 @@ fn compiles_nothing(command: &Commands) -> Option<&'static str> {
         Commands::Setup(_) => Some("setup"),
         Commands::Gc(_) => Some("gc"),
         Commands::Cache(_) => Some("cache"),
+        Commands::Clean(_) => Some("clean"),
         Commands::Tui(_) => Some("tui"),
         // Its whole subject is the C and C++ compiles of a build cargo is not
         // running, so a Rust toolchain has nothing to select here.
@@ -179,6 +183,7 @@ pub fn run() -> Result<ExitCode> {
         )
         .map(|()| ExitCode::SUCCESS),
         Commands::Cache(args) => cache::run(&config, args.command),
+        Commands::Clean(args) => clean::run(&config, &args),
         Commands::Tui(args) => tui::run(&config, args),
         Commands::Prefetch(args) => {
             shim::prepare_explicit_cargo()?;

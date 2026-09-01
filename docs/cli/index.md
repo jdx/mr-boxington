@@ -29,6 +29,7 @@
 - [`mbx cache export [--group <GROUP>] <ARCHIVE>`](/cli/cache/export.md)
 - [`mbx cache import <ARCHIVE>`](/cli/cache/import.md)
 - [`mbx cache remove <WORKSPACE>`](/cli/cache/remove.md)
+- [`mbx clean [WORKSPACE]`](/cli/clean.md)
 - [`mbx tui [--once]`](/cli/tui.md)
 - [`mbx prefetch <CARGO_ARGS>…`](/cli/prefetch.md)
 - [`mbx exec [--project-root <DIR>] <COMMAND>…`](/cli/exec.md)
