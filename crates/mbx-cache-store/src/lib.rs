@@ -1037,7 +1037,7 @@ pub fn checkout_is_live_on(store: &Path, workspace_root: &Path) -> bool {
     for ancestor in workspace_root.ancestors().skip(1) {
         match std::fs::metadata(ancestor) {
             Ok(ancestor_metadata) => {
-                return !same_filesystem(&store_metadata, &ancestor_metadata);
+                return !same_filesystem(store, &store_metadata, ancestor, &ancestor_metadata);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return true,
@@ -1059,20 +1059,67 @@ pub fn checkout_is_live(workspace_root: &Path) -> bool {
 }
 
 #[cfg(unix)]
-fn same_filesystem(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+fn same_filesystem(
+    _a_path: &Path,
+    a: &std::fs::Metadata,
+    _b_path: &Path,
+    b: &std::fs::Metadata,
+) -> bool {
     use std::os::unix::fs::MetadataExt as _;
     a.dev() == b.dev()
 }
 
 #[cfg(windows)]
-fn same_filesystem(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt as _;
-    a.volume_serial_number()
-        .is_some_and(|volume| b.volume_serial_number() == Some(volume))
+fn same_filesystem(
+    a_path: &Path,
+    _a: &std::fs::Metadata,
+    b_path: &Path,
+    _b: &std::fs::Metadata,
+) -> bool {
+    windows_volume_name(a_path).is_some_and(|volume| windows_volume_name(b_path) == Some(volume))
+}
+
+#[cfg(windows)]
+fn windows_volume_name(path: &Path) -> Option<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
+    };
+
+    let path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    // Both APIs document MAX_PATH-sized output buffers for volume paths and
+    // names. Failure is uncertainty, which deliberately keeps the checkout
+    // live.
+    let mut mount = vec![0_u16; 261];
+    // SAFETY: `path` is nul-terminated and `mount` is writable for the stated
+    // number of UTF-16 code units.
+    if unsafe { GetVolumePathNameW(path.as_ptr(), mount.as_mut_ptr(), mount.len() as u32) } == 0 {
+        return None;
+    }
+    let mut volume = vec![0_u16; 261];
+    // SAFETY: the successful call above left `mount` nul-terminated, and
+    // `volume` is writable for the stated number of UTF-16 code units.
+    if unsafe {
+        GetVolumeNameForVolumeMountPointW(mount.as_ptr(), volume.as_mut_ptr(), volume.len() as u32)
+    } == 0
+    {
+        return None;
+    }
+    volume.truncate(volume.iter().position(|unit| *unit == 0)?);
+    Some(volume)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn same_filesystem(_a: &std::fs::Metadata, _b: &std::fs::Metadata) -> bool {
+fn same_filesystem(
+    _a_path: &Path,
+    _a: &std::fs::Metadata,
+    _b_path: &Path,
+    _b: &std::fs::Metadata,
+) -> bool {
     false
 }
 
