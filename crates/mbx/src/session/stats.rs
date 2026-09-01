@@ -337,7 +337,12 @@ fn unexpected_bypasses(stats: &AgentStats) -> u64 {
     stats
         .bypasses
         .iter()
-        .filter(|(kind, _)| !matches!(kind.as_str(), "compiler-query" | "standard-input"))
+        .filter(|(kind, _)| {
+            !matches!(
+                kind.as_str(),
+                "compiler-query" | "standard-input" | "cc-compiler-query" | "cc-standard-input"
+            )
+        })
         .map(|(_, count)| count)
         .sum()
 }

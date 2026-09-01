@@ -535,8 +535,12 @@ fn a_session_that_only_failed_its_remote_is_reportable() {
 #[test]
 fn short_summary_omits_routine_compiler_probe_bypasses() {
     let routine = agent_stats(|stats| {
-        stats.bypasses =
-            BTreeMap::from([("compiler-query".into(), 2), ("standard-input".into(), 1)]);
+        stats.bypasses = BTreeMap::from([
+            ("compiler-query".into(), 2),
+            ("standard-input".into(), 1),
+            ("cc-compiler-query".into(), 3),
+            ("cc-standard-input".into(), 4),
+        ]);
     });
     assert!(!should_display_short_stats(&routine));
 
@@ -546,6 +550,8 @@ fn short_summary_omits_routine_compiler_probe_bypasses() {
         stats.bypasses = BTreeMap::from([
             ("compiler-query".into(), 2),
             ("standard-input".into(), 1),
+            ("cc-compiler-query".into(), 3),
+            ("cc-standard-input".into(), 4),
             ("native-library".into(), 5),
         ]);
     });
