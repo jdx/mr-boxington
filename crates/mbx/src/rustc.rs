@@ -1856,6 +1856,7 @@ fn path_mappings(
     })
 }
 
+/// Construct compiler mappings from an injectable environment lookup.
 fn path_mappings_with_env(
     working_dir: &Path,
     target_output: Option<&Path>,

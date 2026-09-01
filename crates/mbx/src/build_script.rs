@@ -696,7 +696,15 @@ fn restore(action: &CacheDigest, action_bytes: &[u8]) -> Result<Option<Restored>
     }))
 }
 
+/// Roots whose machine-specific spellings may appear in build-script state.
 fn build_script_mappings() -> Vec<PathMapping> {
+    build_script_mappings_with_env(|name| std::env::var_os(name).map(PathBuf::from))
+}
+
+/// Construct build-script mappings from an injectable environment lookup.
+fn build_script_mappings_with_env(
+    environment: impl Fn(&str) -> Option<PathBuf>,
+) -> Vec<PathMapping> {
     let mut mappings = Vec::new();
     for (name, placeholder) in [
         ("OUT_DIR", "build_script_out_dir"),
@@ -704,11 +712,16 @@ fn build_script_mappings() -> Vec<PathMapping> {
         (session::WORKSPACE_ROOT_ENV, "workspace"),
         (session::TARGET_DIR_ENV, "target"),
     ] {
-        if let Some(root) = std::env::var_os(name) {
+        if let Some(root) = environment(name) {
             mappings.push(PathMapping::new(root, placeholder));
         }
     }
-    if let Some(cargo_home) = std::env::var_os("CARGO_HOME").map(PathBuf::from) {
+    let cargo_home = environment("CARGO_HOME").or_else(|| {
+        ["HOME", "USERPROFILE"]
+            .into_iter()
+            .find_map(|name| environment(name).map(|home| home.join(".cargo")))
+    });
+    if let Some(cargo_home) = cargo_home {
         mappings.push(PathMapping::new(
             cargo_home.join("registry"),
             "cargo_registry",
@@ -842,6 +855,27 @@ mod tests {
             .unwrap();
         assert!(parsed.default_package);
         assert_eq!(parsed.inputs, ["${build_script_manifest_dir}"]);
+    }
+
+    #[test]
+    fn build_script_mappings_use_the_default_cargo_home() {
+        let home = PathBuf::from("/home/builder");
+        let mappings = build_script_mappings_with_env(|name| match name {
+            "HOME" => Some(home.clone()),
+            _ => None,
+        });
+
+        assert_eq!(
+            normalize_environment_value(
+                "/home/builder/.cargo/registry/src/index/widget-1.0.0/src/lib.rs",
+                &mappings,
+            ),
+            "${cargo_registry}/src/index/widget-1.0.0/src/lib.rs"
+        );
+        assert_eq!(
+            normalize_environment_value("/home/builder/.cargo/bin", &mappings),
+            "${cargo_home}/bin"
+        );
     }
 
     #[test]
