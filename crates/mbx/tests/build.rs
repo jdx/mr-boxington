@@ -174,6 +174,9 @@ fn document(project: &Path, store: &Path, report: &Path) -> serde_json::Value {
         .args(["doc", "--offline", "--no-deps"])
         .env("MBX_CACHE_DIR", store)
         .env("MBX_STATS_REPORT", report)
+        .env_remove("MBX_SOCKET")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .env_remove("CARGO_TARGET_DIR")
         .output()
         .expect("mbx should run");
@@ -249,6 +252,7 @@ fn cargo_with(
         .env_remove("TARGET_CXX")
         .env_remove("MBX_REAL_CC")
         .env_remove("MBX_REAL_CXX")
+        .env_remove("MBX_SOCKET")
         .env_remove("RUSTC_WRAPPER")
         .env_remove("RUSTC_WORKSPACE_WRAPPER");
     for (name, value) in settings {
@@ -2048,7 +2052,10 @@ fn build_into_target(
         .env_remove("CARGO_INCREMENTAL")
         .env_remove("MBX_LEARNED_INCREMENTAL")
         .env_remove("CI")
-        .env_remove("MBX_SHARE_OUT_DIR");
+        .env_remove("MBX_SHARE_OUT_DIR")
+        .env_remove("MBX_SOCKET")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER");
     for (name, value) in settings {
         command.env(name, value);
     }

@@ -71,7 +71,10 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
         resolve_real_cargo(&shim)?
     };
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if mbx_disabled() || cargo_proxy_passthrough(&arguments) {
+    if mbx_disabled()
+        || enclosing_session(std::env::var_os(crate::session::SOCKET_ENV).as_deref())
+        || cargo_proxy_passthrough(&arguments)
+    {
         return run_real_cargo(&real_cargo, &arguments);
     }
     let Ok(string_arguments) = super::strings(&arguments) else {
@@ -146,6 +149,14 @@ fn mbx_disabled_value(value: Option<&OsStr>) -> bool {
         let value = value.to_string_lossy();
         value != "0" && !value.eq_ignore_ascii_case("false")
     })
+}
+
+fn enclosing_session(session_socket: Option<&OsStr>) -> bool {
+    // Cargo subcommands such as watch and nextest can invoke Cargo again. The
+    // outer session's compiler wrapper and agent socket are already inherited,
+    // so starting another session here would pay the setup cost for every
+    // nested invocation and replace the long-lived watch session's context.
+    session_socket.is_some_and(|socket| !socket.is_empty())
 }
 
 fn cargo_proxy_passthrough(arguments: &[OsString]) -> bool {
@@ -481,6 +492,13 @@ mod tests {
                 "{command} should start an mbx session"
             );
         }
+    }
+
+    #[test]
+    fn cargo_shim_reuses_an_enclosing_session() {
+        assert!(enclosing_session(Some(OsStr::new("session-socket"))));
+        assert!(!enclosing_session(Some(OsStr::new(""))));
+        assert!(!enclosing_session(None));
     }
 
     #[test]
