@@ -120,6 +120,51 @@ test_binary() {
   assert_success
 }
 
+@test "a -fuse-ld selection restores a linked test binary" {
+  # Any alternate linker proves the path: the selection must resolve, join
+  # the linker identity, and still restore. Skip where none is installed.
+  local selection
+  if command -v ld.mold >/dev/null; then
+    selection=mold
+  elif command -v ld.lld >/dev/null; then
+    selection=lld
+  else
+    skip "no alternate linker (ld.mold or ld.lld) on PATH"
+  fi
+
+  local first_target="$BATS_TEST_TMPDIR/fuse-ld-first"
+  local second_target="$BATS_TEST_TMPDIR/fuse-ld-second"
+  local warm_report="$BATS_TEST_TMPDIR/fuse-ld-warm.json"
+  local bypasses="$BATS_TEST_TMPDIR/fuse-ld-bypasses.tsv"
+
+  run env \
+    CARGO_TARGET_DIR="$first_target" \
+    RUSTFLAGS="-C link-arg=-fuse-ld=$selection" \
+    "$MBX_BIN" test --offline --no-run --manifest-path "$PROJECT/Cargo.toml"
+  assert_success
+
+  run env \
+    CARGO_TARGET_DIR="$second_target" \
+    RUSTFLAGS="-C link-arg=-fuse-ld=$selection" \
+    MBX_STATS_REPORT="$warm_report" \
+    MBX_BYPASS_LOG="$bypasses" \
+    "$MBX_BIN" test --offline --no-run --manifest-path "$PROJECT/Cargo.toml"
+  assert_success
+  # The library and the linked test binary, as in the default-linker case.
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*[2-9]' "$warm_report"
+  assert_success
+  # The selection is modeled, so nothing may bypass as unmodeled.
+  run grep -E '^unmodeled-link-argument' "$bypasses"
+  assert_failure
+
+  local restored
+  restored="$(test_binary "$second_target")"
+  assert_file_exists "$restored"
+  assert_file_executable "$restored"
+  run "$restored"
+  assert_success
+}
+
 @test "MBX_CACHE_LINKS=0 keeps native links outside the cache" {
   local target="$BATS_TEST_TMPDIR/refused-target"
   local bypasses="$BATS_TEST_TMPDIR/bypasses.tsv"

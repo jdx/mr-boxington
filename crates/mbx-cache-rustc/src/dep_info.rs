@@ -504,6 +504,9 @@ fn render_argument(argument: &Argument) -> Result<OsString, BypassReason> {
                 .ok_or_else(|| BypassReason::NonUtf8Path(path.clone()))?,
             if *trailing_slash { "/" } else { "" }
         ),
+        // Nothing links while emitting dep-info either; replayed verbatim for
+        // the same reason as the prefix above.
+        Argument::FuseLd(selection) => format!("--codegen=link-arg=-fuse-ld={selection}"),
     };
     Ok(rendered.into())
 }

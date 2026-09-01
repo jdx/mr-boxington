@@ -98,7 +98,23 @@ fn file_probes() -> FileProbes {
 /// Memoized through the agent for the life of the build, since the answer is
 /// the same for every link in it and the probes are several processes.
 /// Describe the default linker, or a recognized Windows linker override.
-pub(crate) fn identity_for(override_linker: Option<&Path>) -> Result<LinkerIdentity> {
+///
+/// `fuse_ld` is a `-fuse-ld=<name>` selection the adapter modeled for a
+/// native link: the driver stays `cc`, but the linker it invokes becomes
+/// `ld.<name>`, which is resolved and pinned in place of the default `ld`.
+/// The resolved linker path joins the memoization key, never the raw
+/// selector: which `ld.<name>` a driver invokes depends on its own search
+/// path, COMPILER_PATH, and PATH, so a key holding only `mold` could stand
+/// for two different linkers.
+pub(crate) fn identity_for(
+    override_linker: Option<&Path>,
+    fuse_ld: Option<&str>,
+) -> Result<LinkerIdentity> {
+    if fuse_ld.is_some() && (cfg!(windows) || override_linker.is_some()) {
+        bail!(
+            "a `-fuse-ld` selection with an overridden or Windows linker is not one mbx can identify"
+        );
+    }
     let driver = if let Some(linker) = override_linker {
         if !cfg!(windows)
             || !linker
@@ -120,14 +136,20 @@ pub(crate) fn identity_for(override_linker: Option<&Path>) -> Result<LinkerIdent
     } else {
         which::which("cc").wrap_err("failed to find the linker driver `cc`")?
     };
-    let environment = IDENTITY_ENVIRONMENT
+    let mut environment = IDENTITY_ENVIRONMENT
         .iter()
         .map(|name| ((*name).into(), std::env::var(name).ok()))
         .collect::<BTreeMap<_, _>>();
+    let fuse_ld = fuse_ld
+        .map(|selection| resolve_fuse_ld(&driver, selection))
+        .transpose()?;
+    if let Some(program) = &fuse_ld {
+        environment.insert("MBX_FUSE_LD".into(), Some(program.display().to_string()));
+    }
     if let Some(cached) = find_recorded(&driver, &environment)? {
         return Ok(cached);
     }
-    let identity = probe(&driver)?;
+    let identity = probe(&driver, fuse_ld.as_deref())?;
     record(&driver, &environment, &identity)?;
     Ok(identity)
 }
@@ -165,7 +187,7 @@ fn record(
     }
 }
 
-fn probe(driver: &Path) -> Result<LinkerIdentity> {
+fn probe(driver: &Path, fuse_ld: Option<&Path>) -> Result<LinkerIdentity> {
     if cfg!(windows) {
         return probe_windows(driver);
     }
@@ -175,7 +197,7 @@ fn probe(driver: &Path) -> Result<LinkerIdentity> {
             .ok_or_else(|| eyre::eyre!("the linker driver path is not valid UTF-8"))?
             .to_owned(),
         driver_version: run(driver, &["--version"])?,
-        linker_version: linker_version(driver)?,
+        linker_version: linker_version(driver, fuse_ld)?,
         crt_objects: crt_objects(driver)?,
         sdk: sdk_identity()?,
         deployment_target: std::env::var("MACOSX_DEPLOYMENT_TARGET").ok(),
@@ -437,12 +459,56 @@ fn windows_crt_objects_in(directories: &[PathBuf]) -> Result<BTreeMap<String, Ca
     Ok(resolved)
 }
 
+/// Resolve a `-fuse-ld=<name>` selection to the linker binary the driver
+/// will invoke. The driver answers from its own search path first, which
+/// covers COMPILER_PATH and toolchain-internal linkers; a name it does not
+/// know falls back to PATH. An absolute selection names the linker directly.
+fn resolve_fuse_ld(driver: &Path, selection: &str) -> Result<PathBuf> {
+    if Path::new(selection).is_absolute() {
+        return Ok(PathBuf::from(selection));
+    }
+    let name = format!("ld.{selection}");
+    let argument = format!("-print-prog-name={name}");
+    let printed = run(driver, &[argument.as_str()])
+        .wrap_err_with(|| format!("the linker driver named nothing for `{name}`"))?;
+    let candidate = PathBuf::from(&printed);
+    if candidate.is_absolute() && candidate.exists() {
+        return Ok(candidate);
+    }
+    which::which(&name).wrap_err_with(|| {
+        format!(
+            "`-fuse-ld={selection}` selects `{name}`, which neither the driver nor PATH provides"
+        )
+    })
+}
+
 /// Version of the linker the driver selects, as opposed to the driver itself.
 ///
 /// ld reports through stderr on some platforms and stdout on others, so both
 /// are read; only the first line is kept, since later ones list supported
 /// emulations that say nothing about the version.
-fn linker_version(driver: &Path) -> Result<String> {
+fn linker_version(driver: &Path, fuse_ld: Option<&Path>) -> Result<String> {
+    if let Some(program) = fuse_ld {
+        // Already resolved to the binary the driver invokes; pin both its
+        // path and its version line: on content-addressed toolchains the
+        // path alone identifies the build, and elsewhere the version line
+        // names what a path cannot.
+        let output = Command::new(program)
+            .arg("-v")
+            .output()
+            .wrap_err_with(|| format!("failed to query the linker {}", program.display()))?;
+        let combined = if output.stdout.is_empty() {
+            output.stderr
+        } else {
+            output.stdout
+        };
+        let text = String::from_utf8_lossy(&combined);
+        let version = text.lines().next().unwrap_or_default().trim();
+        if version.is_empty() {
+            bail!("{} reported no version", program.display());
+        }
+        return Ok(format!("{}: {version}", program.display()));
+    }
     // Asked of the driver rather than resolved from PATH: the `ld` a shell
     // would find is not necessarily the one this driver invokes, and a key
     // naming the wrong linker is worse than no key at all.
