@@ -74,6 +74,7 @@ export default defineConfig({
       {
         text: "Cookbook",
         items: [
+          { text: "Local development", link: "/cookbook/local-development" },
           { text: "CI with fork pull requests", link: "/cookbook/fork-prs" },
           {
             text: "Migrate from rust-cache or sccache",
