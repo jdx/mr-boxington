@@ -1856,6 +1856,7 @@ fn path_mappings(
     })
 }
 
+/// Construct compiler mappings from an injectable environment lookup.
 fn path_mappings_with_env(
     working_dir: &Path,
     target_output: Option<&Path>,
@@ -1887,19 +1888,37 @@ fn path_mappings_with_env(
     }) {
         add_mapping(&mut mappings, &mut roots, root, "target");
     }
-    for (name, placeholder) in [
-        (session::WORKSPACE_ROOT_ENV, "workspace"),
-        ("CARGO_HOME", "cargo_home"),
-        ("RUSTUP_HOME", "rustup_home"),
-    ] {
-        if let Some(root) = environment(name).map(PathBuf::from)
-            && root.is_absolute()
-        {
-            add_mapping(&mut mappings, &mut roots, root, placeholder);
-        }
+    if let Some(root) = environment(session::WORKSPACE_ROOT_ENV)
+        .map(PathBuf::from)
+        .filter(|root| root.is_absolute())
+    {
+        add_mapping(&mut mappings, &mut roots, root, "workspace");
+    }
+    let cargo_home = environment("CARGO_HOME")
+        .map(PathBuf::from)
+        .filter(|root| root.is_absolute())
+        .or_else(|| home_roots.first().map(|home| home.join(".cargo")));
+    if let Some(root) = cargo_home {
+        // The registry is its own semantic root because container builds often
+        // mount it elsewhere and leave a symlink below CARGO_HOME. Resolving
+        // this deeper mapping follows that symlink without making arbitrary
+        // paths outside Cargo's registry portable.
+        add_mapping(
+            &mut mappings,
+            &mut roots,
+            root.join("registry"),
+            "cargo_registry",
+        );
+        add_mapping(&mut mappings, &mut roots, root, "cargo_home");
+    }
+    if let Some(root) = environment("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .filter(|root| root.is_absolute())
+    {
+        add_mapping(&mut mappings, &mut roots, root, "rustup_home");
     }
     if let Some(home) = home_roots.first() {
-        for (directory, placeholder) in [(".cargo", "cargo_home"), (".rustup", "rustup_home")] {
+        for (directory, placeholder) in [(".rustup", "rustup_home")] {
             if !mappings
                 .iter()
                 .any(|mapping| mapping.placeholder == placeholder)

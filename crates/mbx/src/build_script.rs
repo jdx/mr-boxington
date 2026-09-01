@@ -696,18 +696,37 @@ fn restore(action: &CacheDigest, action_bytes: &[u8]) -> Result<Option<Restored>
     }))
 }
 
+/// Roots whose machine-specific spellings may appear in build-script state.
 fn build_script_mappings() -> Vec<PathMapping> {
+    build_script_mappings_with_env(|name| std::env::var_os(name).map(PathBuf::from))
+}
+
+/// Construct build-script mappings from an injectable environment lookup.
+fn build_script_mappings_with_env(
+    environment: impl Fn(&str) -> Option<PathBuf>,
+) -> Vec<PathMapping> {
     let mut mappings = Vec::new();
     for (name, placeholder) in [
         ("OUT_DIR", "build_script_out_dir"),
         ("CARGO_MANIFEST_DIR", "build_script_manifest_dir"),
         (session::WORKSPACE_ROOT_ENV, "workspace"),
         (session::TARGET_DIR_ENV, "target"),
-        ("CARGO_HOME", "cargo_home"),
     ] {
-        if let Some(root) = std::env::var_os(name) {
+        if let Some(root) = environment(name) {
             mappings.push(PathMapping::new(root, placeholder));
         }
+    }
+    let cargo_home = environment("CARGO_HOME").or_else(|| {
+        ["HOME", "USERPROFILE"]
+            .into_iter()
+            .find_map(|name| environment(name).map(|home| home.join(".cargo")))
+    });
+    if let Some(cargo_home) = cargo_home {
+        mappings.push(PathMapping::new(
+            cargo_home.join("registry"),
+            "cargo_registry",
+        ));
+        mappings.push(PathMapping::new(cargo_home, "cargo_home"));
     }
     mappings
 }
@@ -836,6 +855,40 @@ mod tests {
             .unwrap();
         assert!(parsed.default_package);
         assert_eq!(parsed.inputs, ["${build_script_manifest_dir}"]);
+    }
+
+    #[test]
+    fn build_script_mappings_use_the_default_cargo_home() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        let mappings = build_script_mappings_with_env(|name| match name {
+            "HOME" => Some(home.clone()),
+            _ => None,
+        });
+        let registry_input = home
+            .join(".cargo")
+            .join("registry")
+            .join("src")
+            .join("index")
+            .join("widget-1.0.0")
+            .join("src")
+            .join("lib.rs");
+        let registry_key = PathBuf::from("${cargo_registry}")
+            .join("src")
+            .join("index")
+            .join("widget-1.0.0")
+            .join("src")
+            .join("lib.rs");
+
+        assert_eq!(
+            normalize_environment_value(&registry_input.to_string_lossy(), &mappings),
+            registry_key.to_string_lossy()
+        );
+        let cargo_bin = home.join(".cargo").join("bin");
+        assert_eq!(
+            normalize_environment_value(&cargo_bin.to_string_lossy(), &mappings),
+            PathBuf::from("${cargo_home}").join("bin").to_string_lossy()
+        );
     }
 
     #[test]

@@ -625,12 +625,14 @@ fn path_mappings(working_dir: &Path) -> Vec<PathMapping> {
     };
     add(session_path(session::TARGET_DIR_ENV), "target");
     add(session_path(session::WORKSPACE_ROOT_ENV), "workspace");
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".cargo")));
     add(
-        std::env::var_os("CARGO_HOME")
-            .map(PathBuf::from)
-            .or_else(|| dirs::home_dir().map(|home| home.join(".cargo"))),
-        "cargo_home",
+        cargo_home.as_ref().map(|home| home.join("registry")),
+        "cargo_registry",
     );
+    add(cargo_home, "cargo_home");
     add(
         std::env::var_os("RUSTUP_HOME")
             .map(PathBuf::from)
