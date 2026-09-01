@@ -488,11 +488,19 @@ fn default_capacity() -> u64 {
 /// An explicit empty directory means "off", stated rather than omitted for the
 /// reason `VERIFY_ENV` always is: an absent key would leave a shim resolving
 /// configuration on its own, which is the standalone path, not a disabled one.
-pub(crate) fn session_environment(config: &Config) -> Vec<(String, String)> {
+/// The environment for a Cargo build whose own jobserver may be narrower.
+pub(crate) fn session_environment_with_jobs(
+    config: &Config,
+    cargo_jobs: Option<u64>,
+) -> Vec<(String, String)> {
     let scheduler = &config.scheduler;
     if !scheduler.enabled {
         return vec![(SCHED_DIR_ENV.into(), String::new())];
     }
+    let permits = cargo_jobs.map_or_else(
+        || scheduler.permits(),
+        |jobs| scheduler.permits().min(jobs.max(1)),
+    );
     vec![
         (
             SCHED_DIR_ENV.into(),
@@ -502,10 +510,10 @@ pub(crate) fn session_environment(config: &Config) -> Vec<(String, String)> {
                 .to_string_lossy()
                 .into_owned(),
         ),
-        (SCHED_SLOTS_ENV.into(), scheduler.cpus.to_string()),
+        (SCHED_SLOTS_ENV.into(), permits.to_string()),
         (
             SCHED_SLOT_BYTES_ENV.into(),
-            bytes_per_permit(scheduler.memory_bytes, scheduler.cpus).to_string(),
+            bytes_per_permit(scheduler.memory_bytes, permits).to_string(),
         ),
         (
             SCHED_PRIORITY_ENV.into(),
@@ -550,11 +558,12 @@ impl Pool {
 
     fn from_config(config: &Config) -> Option<Self> {
         let scheduler = &config.scheduler;
+        let permits = scheduler.permits();
         scheduler.enabled.then(|| {
             Self::new(
                 config.cache_dir.join(SCHEDULER_DIR),
-                scheduler.cpus,
-                bytes_per_permit(scheduler.memory_bytes, scheduler.cpus),
+                permits,
+                bytes_per_permit(scheduler.memory_bytes, permits),
                 scheduler.priority,
             )
         })

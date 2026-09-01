@@ -64,20 +64,26 @@ retries = 3
 [scheduler]
 enabled = true
 cpus = 16                # default: logical CPUs
+reserve_cpus = 2         # default: 0
 memory = "24GiB"         # default: 85% of physical memory
 priority = "normal"      # or "low"
 ```
 
 ## Workspace policy
 
-A repository may check in a `.mbx.toml` containing only the four build-policy
-switches below:
+A repository may check in a `.mbx.toml` containing the build-policy switches
+and scheduler policy below:
 
 ```toml
 incremental = false
 share_out_dir = false
 build_script_execution = true
 cc = true
+
+[scheduler]
+reserve_cpus = 2
+memory = "12GiB"
+priority = "normal"
 ```
 
 Environment variables still win. Machine paths, remote-cache configuration,
@@ -131,12 +137,14 @@ and restores its result instead of burning a core on it. How the pool weighs
 compilations and links — and what happens when a guess is wrong — is described
 in [how it works](/how-it-works#machine-wide-scheduling).
 
-The pool is memory-aware. `scheduler.cpus` permits (default: logical CPUs)
-divide `scheduler.memory` (default: 85% of physical memory, leaving headroom
-for everything that is not a compiler; `"none"` keeps plain CPU permits). In a
-container, "physical memory" means the cgroup's limit rather than the host's
-RAM — a build in a 4 GiB container on a large machine is budgeted by the
-4 GiB, because the rest was never its to spend.
+The pool is memory-aware. `scheduler.cpus` permits (default: logical CPUs),
+less `scheduler.reserve_cpus` (default: 0), divide `scheduler.memory` (default:
+85% of physical memory, leaving headroom for everything that is not a compiler;
+`"none"` keeps plain CPU permits). The pool always keeps at least one permit.
+Cargo's `-j`/`--jobs` or `CARGO_BUILD_JOBS` can narrow the permit count further
+for one build. In a container, "physical memory" means the cgroup's limit rather
+than the host's RAM — a build in a 4 GiB container on a large machine is
+budgeted by the 4 GiB, because the rest was never its to spend.
 
 `priority = "low"` (`MBX_SCHEDULER_PRIORITY`) is for builds nobody is sitting
 at — CI on a shared box, an editor's background check. While a normal-priority

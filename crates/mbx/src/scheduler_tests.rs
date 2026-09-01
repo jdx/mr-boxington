@@ -649,15 +649,16 @@ fn an_oversized_payload_is_not_left_behind() {
 fn session_environment_states_off_explicitly() {
     let config = crate::config::Config::for_test(Path::new("/cache"));
     assert_eq!(
-        session_environment(&config),
+        session_environment_with_jobs(&config, None),
         vec![(SCHED_DIR_ENV.to_string(), String::new())]
     );
 
     let mut config = crate::config::Config::for_test(Path::new("/cache"));
     config.scheduler.enabled = true;
     config.scheduler.cpus = 8;
+    config.scheduler.reserve_cpus = 2;
     config.scheduler.memory_bytes = Some(8000);
-    let environment = session_environment(&config);
+    let environment = session_environment_with_jobs(&config, None);
     let value = |name: &str| {
         environment
             .iter()
@@ -669,7 +670,18 @@ fn session_environment_states_off_explicitly() {
         value(SCHED_DIR_ENV),
         Path::new("/cache").join("scheduler").to_str().unwrap()
     );
-    assert_eq!(value(SCHED_SLOTS_ENV), "8");
-    assert_eq!(value(SCHED_SLOT_BYTES_ENV), "1000");
+    assert_eq!(value(SCHED_SLOTS_ENV), "6");
+    assert_eq!(value(SCHED_SLOT_BYTES_ENV), "1333");
     assert_eq!(value(SCHED_PRIORITY_ENV), "normal");
+
+    let environment = session_environment_with_jobs(&config, Some(3));
+    let value = |name: &str| {
+        environment
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+            .unwrap()
+    };
+    assert_eq!(value(SCHED_SLOTS_ENV), "3");
+    assert_eq!(value(SCHED_SLOT_BYTES_ENV), "2666");
 }

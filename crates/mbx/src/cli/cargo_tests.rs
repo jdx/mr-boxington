@@ -199,6 +199,48 @@ fn forwards_repeated_and_attached_global_flags() {
 }
 
 #[test]
+fn cargo_jobs_follow_cargo_cli_and_environment_precedence() {
+    let args = |values: &[&str]| {
+        values
+            .iter()
+            .map(|value| (*value).into())
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        cargo_job_limit_with(&args(&["build"]), Some("3"), 12),
+        Some(3)
+    );
+    assert_eq!(
+        cargo_job_limit_with(&args(&["build", "-j4"]), Some("3"), 12),
+        Some(4)
+    );
+    assert_eq!(
+        cargo_job_limit_with(&args(&["build", "--jobs=-2"]), None, 12),
+        Some(10)
+    );
+    assert_eq!(
+        cargo_job_limit_with(&args(&["build", "-j", "2"]), Some("7"), 12),
+        Some(2)
+    );
+    assert_eq!(
+        cargo_job_limit_with(&args(&["build", "-j1", "-j", "5"]), None, 12),
+        Some(5),
+        "Cargo's last occurrence wins"
+    );
+    assert_eq!(
+        cargo_job_limit_with(&args(&["build", "--jobs", "default"]), Some("2"), 12),
+        None,
+        "default resets an environment limit"
+    );
+    assert_eq!(
+        cargo_job_limit_with(&args(&["test", "--", "-j1"]), Some("6"), 12),
+        Some(6),
+        "test-harness arguments are not Cargo options"
+    );
+}
+
+#[test]
 fn cargo_help_does_not_trigger_target_migration() {
     assert!(cargo_help_requested(&["build".into(), "--help".into()]));
     assert!(cargo_help_requested(&["help".into(), "build".into()]));

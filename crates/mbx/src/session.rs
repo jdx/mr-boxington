@@ -108,6 +108,15 @@ impl CacheSession {
     /// `session_dir` holds the shim, socket, and staging directory, and is
     /// expected to be a temporary directory owned by the caller.
     pub async fn start(session_dir: &Path, config: &Config) -> Result<Self> {
+        Self::start_with_jobs(session_dir, config, None).await
+    }
+
+    /// Start a session whose Cargo jobserver limits compiler concurrency.
+    pub(crate) async fn start_with_jobs(
+        session_dir: &Path,
+        config: &Config,
+        cargo_jobs: Option<u64>,
+    ) -> Result<Self> {
         let (shim, rustdoc_shim) = install_session_shims(session_dir)?;
         let cc_shims = if config.cc {
             // Build systems such as CMake persist HOST_CC as an absolute
@@ -152,7 +161,7 @@ impl CacheSession {
             build_script_execution: config.build_script_execution,
             agent,
             events,
-            scheduler_env: crate::scheduler::session_environment(config),
+            scheduler_env: crate::scheduler::session_environment_with_jobs(config, cargo_jobs),
             store,
             started: Instant::now(),
             shutdown: Mutex::new(Some(shutdown_tx)),

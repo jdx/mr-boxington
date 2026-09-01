@@ -284,6 +284,14 @@ Permit priority of this build's compilations.
 - `low`
 
 
+### `scheduler.reserve_cpus`
+
+- **Type:** `int`
+- **Default:** `0`
+- **Set with:** `MBX_SCHEDULER_RESERVE_CPUS`
+
+Logical CPUs to leave free for the rest of the machine.
+
 ### `share_out_dir`
 
 - **Type:** `bool`
