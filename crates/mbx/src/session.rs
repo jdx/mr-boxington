@@ -220,6 +220,7 @@ impl CacheSession {
         let _ = self.task.identity.set(identity.clone());
         let action_run = Some(ActionRun {
             run: identity.clone(),
+            receipt: build_receipt_run(&identity),
             identity: identity.clone(),
             workspace_root: workspace_root.to_path_buf(),
             export_group: std::env::var(CACHE_EXPORT_GROUP_ENV).ok(),
@@ -418,6 +419,7 @@ impl CacheSession {
             Ok(run) => (
                 run.clone(),
                 Some(ActionRun {
+                    receipt: run.clone(),
                     run,
                     identity: identity.clone(),
                     workspace_root: project_root.to_path_buf(),
@@ -659,6 +661,7 @@ impl AgentEventObserver for EventStream {
 /// An in-flight build's completed action manifest.
 pub struct ActionRun {
     run: String,
+    receipt: String,
     identity: String,
     workspace_root: PathBuf,
     export_group: Option<String>,
@@ -679,13 +682,26 @@ impl ActionRun {
         let predictions = self.agent.commit_task_actions(&self.run).await?;
         crate::store::record_build_receipt(
             &self.store,
-            &self.run,
+            &self.receipt,
             &self.identity,
             &self.workspace_root,
             self.export_group.as_deref(),
             predictions,
         )
     }
+}
+
+/// A unique receipt name for one invocation of a stable Cargo task.
+fn build_receipt_run(identity: &str) -> String {
+    CacheDigest::blake3(
+        format!(
+            "{identity}\0{}\0{}",
+            std::process::id(),
+            crate::util::random_string(12)
+        )
+        .as_bytes(),
+    )
+    .hash
 }
 
 /// Identity for this build's prefetch manifest.

@@ -617,13 +617,19 @@ fn a_ci_export_group_collects_every_build_in_the_job() {
         first.path(),
         source_store.path(),
         &reports.path().join("first.json"),
-        &[(mbx::session::CACHE_EXPORT_GROUP_ENV, group)],
+        &[
+            (mbx::session::CACHE_EXPORT_GROUP_ENV, group),
+            ("MBX_LEARNED_INCREMENTAL", "0"),
+        ],
     );
     build_with(
         second.path(),
         source_store.path(),
         &reports.path().join("second.json"),
-        &[(mbx::session::CACHE_EXPORT_GROUP_ENV, group)],
+        &[
+            (mbx::session::CACHE_EXPORT_GROUP_ENV, group),
+            ("MBX_LEARNED_INCREMENTAL", "0"),
+        ],
     );
     wipe_target(first.path());
     wipe_target(second.path());
@@ -632,17 +638,35 @@ fn a_ci_export_group_collects_every_build_in_the_job() {
         first.path(),
         source_store.path(),
         &reports.path().join("first-warm.json"),
-        &[(mbx::session::CACHE_EXPORT_GROUP_ENV, warm_group)],
+        &[
+            (mbx::session::CACHE_EXPORT_GROUP_ENV, warm_group),
+            ("MBX_LEARNED_INCREMENTAL", "0"),
+        ],
+    )
+    .0;
+    edit_project(first.path(), 1);
+    let first_changed = build_with(
+        first.path(),
+        source_store.path(),
+        &reports.path().join("first-changed.json"),
+        &[
+            (mbx::session::CACHE_EXPORT_GROUP_ENV, warm_group),
+            ("MBX_LEARNED_INCREMENTAL", "0"),
+        ],
     )
     .0;
     let second_warm = build_with(
         second.path(),
         source_store.path(),
         &reports.path().join("second-warm.json"),
-        &[(mbx::session::CACHE_EXPORT_GROUP_ENV, warm_group)],
+        &[
+            (mbx::session::CACHE_EXPORT_GROUP_ENV, warm_group),
+            ("MBX_LEARNED_INCREMENTAL", "0"),
+        ],
     )
     .0;
     assert!(count(&first_warm, "hits") > 0);
+    assert!(count(&first_changed, "misses") > 0);
     assert!(count(&second_warm, "hits") > 0);
     let archive = reports.path().join("job.tar");
 
@@ -675,8 +699,8 @@ fn a_ci_export_group_collects_every_build_in_the_job() {
     ))
     .unwrap();
     assert!(
-        stats["action_results"].as_u64().unwrap() >= 2,
-        "both builds should seed the destination store: {stats}; export: {}; import: {}",
+        stats["action_results"].as_u64().unwrap() >= 3,
+        "every grouped build should seed the destination store: {stats}; export: {}; import: {}",
         String::from_utf8_lossy(&export.stdout),
         String::from_utf8_lossy(&import.stdout),
     );
