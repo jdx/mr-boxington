@@ -229,22 +229,80 @@ fn same_path(left: &Path, right: &Path) -> bool {
     }
 }
 
-/// Keep explicit `mbx build`-style commands from rediscovering the persistent
-/// Cargo shim after setup has placed it first on PATH.
+/// Keep explicit `mbx build`-style commands from rediscovering a persistent
+/// Cargo shim or mise command wrapper on PATH.
 pub(super) fn prepare_explicit_cargo() -> Result<()> {
-    let Some(shim_dir) = super::setup_install_dir() else {
+    let standalone_shim = super::setup_install_dir()
+        .map(|directory| directory.join(if cfg!(windows) { "cargo.exe" } else { "cargo" }))
+        .filter(|shim| shim.is_file());
+    let Some(path) = std::env::var_os("PATH") else {
         return Ok(());
     };
-    let shim = shim_dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
-    if !shim.is_file() {
+    let (path, proxy) = path_without_cargo_proxies(&path, standalone_shim.as_deref())?;
+    let Some(proxy) = proxy else {
         return Ok(());
-    }
-    exclude_shim_from_path(&shim)?;
-    let cargo = resolve_real_cargo(&shim)?;
+    };
+    let cargo = resolve_explicit_cargo(
+        &proxy,
+        standalone_shim.as_deref(),
+        std::env::var_os("CARGO").as_deref(),
+        &path,
+    )?;
+    PATH_BEFORE_SHIM_EXCLUSION.get_or_init(|| std::env::var_os("PATH").unwrap_or_default());
     // SAFETY: CLI dispatch is single-threaded here, before the cache session
     // or any child process has started.
-    unsafe { std::env::set_var("CARGO", cargo) };
+    unsafe {
+        std::env::set_var("PATH", path);
+        std::env::set_var("CARGO", cargo);
+    }
     Ok(())
+}
+
+fn path_without_cargo_proxies(
+    path: &OsStr,
+    standalone_shim: Option<&Path>,
+) -> Result<(OsString, Option<PathBuf>)> {
+    let name = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+    let mut first_proxy = None;
+    let directories = std::env::split_paths(path).filter(|directory| {
+        let candidate = directory.join(name);
+        let is_standalone = standalone_shim.is_some_and(|shim| same_path(&candidate, shim));
+        let is_proxy =
+            candidate.is_file() && (is_standalone || is_mise_command_wrapper_path(&candidate));
+        if is_proxy {
+            first_proxy.get_or_insert(candidate);
+        }
+        !is_proxy
+    });
+    Ok((std::env::join_paths(directories)?, first_proxy))
+}
+
+/// Resolve Cargo for an explicit command without accepting its standalone shim.
+fn resolve_explicit_cargo(
+    proxy: &Path,
+    standalone_shim: Option<&Path>,
+    configured: Option<&OsStr>,
+    path: &OsStr,
+) -> Result<OsString> {
+    if let Some(configured) = configured.map(Path::new).filter(|candidate| {
+        candidate.is_absolute()
+            && candidate.is_file()
+            && !is_mise_command_wrapper_path(candidate)
+            && standalone_shim.is_none_or(|shim| !same_path(candidate, shim))
+    }) {
+        return Ok(configured.as_os_str().to_owned());
+    }
+    let name = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+    for directory in std::env::split_paths(path) {
+        let candidate = directory.join(name);
+        if candidate.is_file() {
+            return Ok(candidate.into_os_string());
+        }
+    }
+    eyre::bail!(
+        "could not find the real Cargo after excluding {}",
+        proxy.display()
+    )
 }
 
 fn exclude_shim_from_path(shim: &Path) -> Result<()> {
@@ -583,6 +641,50 @@ mod tests {
         assert_eq!(
             std::env::split_paths(&path_without_shim(&shim, &path).unwrap()).collect::<Vec<_>>(),
             vec![real_dir]
+        );
+    }
+
+    #[test]
+    fn explicit_cargo_excludes_mise_wrapper_from_child_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let wrapper_dir = directory.path().join("command-wrappers/bin");
+        let shim_dir = directory.path().join("mbx/bin");
+        let mise_shims_dir = directory.path().join("mise/shims");
+        let tool_dir = directory.path().join("tool/bin");
+        let real_dir = directory.path().join("real");
+        std::fs::create_dir_all(&wrapper_dir).unwrap();
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        std::fs::create_dir_all(&mise_shims_dir).unwrap();
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let name = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+        let wrapper = wrapper_dir.join(name);
+        let shim = shim_dir.join(name);
+        let mise_shim = mise_shims_dir.join(name);
+        let real = real_dir.join(name);
+        std::fs::write(&wrapper, b"mise wrapper").unwrap();
+        std::fs::write(&shim, b"mbx shim").unwrap();
+        std::fs::write(&mise_shim, b"mise shim").unwrap();
+        std::fs::write(&real, b"real").unwrap();
+        let path = std::env::join_paths([
+            &wrapper_dir,
+            &shim_dir,
+            &mise_shims_dir,
+            &tool_dir,
+            &real_dir,
+        ])
+        .unwrap();
+
+        let (path, proxy) = path_without_cargo_proxies(&path, Some(&shim)).unwrap();
+
+        assert_eq!(proxy, Some(wrapper.clone()));
+        assert_eq!(
+            std::env::split_paths(&path).collect::<Vec<_>>(),
+            vec![mise_shims_dir, tool_dir, real_dir]
+        );
+        assert_eq!(
+            resolve_explicit_cargo(&wrapper, Some(&shim), Some(shim.as_os_str()), &path).unwrap(),
+            mise_shim.into_os_string()
         );
     }
 
