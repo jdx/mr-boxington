@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Wire protocol version used between an in-process cache agent and its shims.
-pub const AGENT_PROTOCOL_VERSION: u8 = 7;
+pub const AGENT_PROTOCOL_VERSION: u8 = 6;
 /// Largest single protocol request the agent will read.
 ///
 /// Requests are small JSON objects; the largest legitimate ones carry an output
@@ -63,9 +63,6 @@ pub enum AgentRequest {
         restore: RestoreStats,
         /// Compiler crate name, when the invocation supplied one.
         crate_name: Option<String>,
-        /// Cache-key material retained for local miss diagnosis.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        diagnostic: Option<ActionDiagnostic>,
     },
     /// A compilation the adapter declined to cache, grouped by reason.
     RecordBypass {
@@ -85,9 +82,6 @@ pub enum AgentRequest {
         crate_name: Option<String>,
         /// Wall time spent running the compiler.
         duration_ns: u64,
-        /// Cache-key material retained for local miss diagnosis.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        diagnostic: Option<ActionDiagnostic>,
     },
     /// Account for a cache hit that was rebuilt for correctness verification.
     RecordActionVerification {
@@ -221,8 +215,6 @@ pub enum AgentEvent {
         crate_name: Option<String>,
         /// Restoration work performed by the adapter.
         restore: RestoreStats,
-        /// Cache-key material retained for local miss diagnosis.
-        diagnostic: Option<ActionDiagnostic>,
     },
     /// A compilation the adapter declined to cache.
     Bypass {
@@ -239,8 +231,6 @@ pub enum AgentEvent {
         crate_name: Option<String>,
         /// Wall time spent running the compiler.
         duration_ns: u64,
-        /// Cache-key material retained for local miss diagnosis.
-        diagnostic: Option<ActionDiagnostic>,
     },
     /// A hit was rebuilt to verify it.
     Verification {
@@ -253,6 +243,15 @@ pub enum AgentEvent {
     Warning {
         /// Human-readable single-line diagnostic.
         message: String,
+    },
+    /// Cache-key material for the action event immediately following it.
+    ActionDiagnostic {
+        /// Outcome of the action this describes.
+        outcome: String,
+        /// Compiler crate name, when the invocation supplied one.
+        crate_name: Option<String>,
+        /// Privacy-preserving action-key decomposition.
+        diagnostic: ActionDiagnostic,
     },
 }
 

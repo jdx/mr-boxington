@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v7.jsonl");
+const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v6.jsonl");
 
 fn digest() -> CacheDigest {
     CacheDigest {
@@ -99,7 +99,7 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
         (
             "request.hello",
             AgentRequest::Hello {
-                protocol: 7,
+                protocol: 6,
                 client_version: "0.3.0".into(),
             },
         ),
@@ -142,7 +142,6 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
                 action: digest(),
                 restore: restore(),
                 crate_name: Some("serde".into()),
-                diagnostic: None,
             },
         ),
         (
@@ -167,7 +166,6 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
                 outcome: "miss".into(),
                 crate_name: Some("fixture".into()),
                 duration_ns: 19,
-                diagnostic: None,
             },
         ),
         (
@@ -249,7 +247,7 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
         (
             "response.hello",
             AgentResponse::Hello {
-                protocol: 7,
+                protocol: 6,
                 agent_version: "0.3.0".into(),
             },
         ),
@@ -401,7 +399,7 @@ fn assert_fixture<T: Serialize>(expected: &mut BTreeMap<&str, &str>, name: &str,
 }
 
 #[test]
-fn agent_protocol_v7_shapes_match_the_conformance_fixture() {
+fn agent_protocol_v6_shapes_match_the_conformance_fixture() {
     let mut expected = fixture();
     for line in AGENT_FIXTURE.lines() {
         let (name, json) = line
@@ -479,7 +477,7 @@ fn agent_protocol_v7_shapes_match_the_conformance_fixture() {
 
 #[test]
 fn protocol_constants_match_the_contract() {
-    assert_eq!(AGENT_PROTOCOL_VERSION, 7);
+    assert_eq!(AGENT_PROTOCOL_VERSION, 6);
     assert_eq!(PROTOCOL_VERSION, 1);
     assert_eq!(
         ACTION_RESULT_MEDIA_TYPE,

@@ -58,6 +58,7 @@ const MAX_WARNING_BYTES: usize = 4 * 1024;
 /// message, which deduplication already collapses; the cap only guards
 /// against a message that embeds something unique per compilation.
 const MAX_WARNINGS: usize = 128;
+const ACTION_DIAGNOSTIC_PREFIX: &str = "@mbx-action-diagnostic\t";
 /// Most file identities one digest lookup or record may carry.
 const MAX_FILE_DIGEST_BATCH: usize = 16 * 1024;
 /// Most recorded file digests one session retains across every scope.
@@ -179,6 +180,27 @@ fn validate_crate_name(crate_name: Option<&str>) -> Result<()> {
         bail!("invalid compiler crate name");
     }
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct ActionDiagnosticEnvelope {
+    outcome: String,
+    crate_name: Option<String>,
+    diagnostic: ActionDiagnostic,
+}
+
+fn parse_action_diagnostic(
+    message: &str,
+) -> Option<Result<(String, Option<String>, ActionDiagnostic)>> {
+    let payload = message.strip_prefix(ACTION_DIAGNOSTIC_PREFIX)?;
+    Some((|| {
+        let envelope: ActionDiagnosticEnvelope = serde_json::from_str(payload)?;
+        if !matches!(envelope.outcome.as_str(), "hit" | "miss") {
+            bail!("invalid action diagnostic outcome");
+        }
+        validate_crate_name(envelope.crate_name.as_deref())?;
+        Ok((envelope.outcome, envelope.crate_name, envelope.diagnostic))
+    })())
 }
 
 fn atomic_saturating_add(target: &AtomicU64, value: u64) {
@@ -1073,8 +1095,18 @@ impl CacheAgent {
                 action,
                 restore,
                 crate_name,
-                diagnostic,
-            } => self.record_action_hit(&action, restore, crate_name, diagnostic),
+            } => {
+                if let Some(diagnostic) =
+                    connection.take_action_diagnostic("hit", crate_name.as_deref())
+                {
+                    self.emit(|| AgentEvent::ActionDiagnostic {
+                        outcome: "hit".into(),
+                        crate_name: crate_name.clone(),
+                        diagnostic,
+                    });
+                }
+                self.record_action_hit(&action, restore, crate_name)
+            }
             AgentRequest::RecordBypass { kind } => {
                 *self
                     .stats
@@ -1091,7 +1123,14 @@ impl CacheAgent {
                 self.emit(|| AgentEvent::Unconsulted);
                 Ok(AgentResponse::UnconsultedRecorded)
             }
-            AgentRequest::RecordWarning { message } => self.record_warning(message),
+            AgentRequest::RecordWarning { message } => match parse_action_diagnostic(&message) {
+                Some(Ok((outcome, crate_name, diagnostic))) => {
+                    connection.record_action_diagnostic(outcome, crate_name, diagnostic);
+                    Ok(AgentResponse::WarningRecorded)
+                }
+                Some(Err(error)) => Err(error),
+                None => self.record_warning(message),
+            },
             AgentRequest::FindFileDigests { scope, files } => self.find_file_digests(scope, files),
             AgentRequest::JoinActionPromise {
                 adapter,
@@ -1107,13 +1146,18 @@ impl CacheAgent {
                 outcome,
                 crate_name,
                 duration_ns,
-                diagnostic,
-            } => self.record_compiler_invocation(
-                &outcome,
-                crate_name.as_deref(),
-                duration_ns,
-                diagnostic,
-            ),
+            } => {
+                if let Some(diagnostic) =
+                    connection.take_action_diagnostic(&outcome, crate_name.as_deref())
+                {
+                    self.emit(|| AgentEvent::ActionDiagnostic {
+                        outcome: outcome.clone(),
+                        crate_name: crate_name.clone(),
+                        diagnostic,
+                    });
+                }
+                self.record_compiler_invocation(&outcome, crate_name.as_deref(), duration_ns)
+            }
             AgentRequest::RecordActionVerification { matched, restore } => {
                 self.record_materialization(restore);
                 self.stats.verifications.fetch_add(1, Ordering::Relaxed);
@@ -1462,7 +1506,6 @@ impl CacheAgent {
         action: &CacheDigest,
         restore: RestoreStats,
         crate_name: Option<String>,
-        diagnostic: Option<ActionDiagnostic>,
     ) -> Result<AgentResponse> {
         validate_crate_name(crate_name.as_deref())?;
         if self.actions.find(action)?.is_none() {
@@ -1478,7 +1521,6 @@ impl CacheAgent {
         self.emit(|| AgentEvent::ActionHit {
             crate_name,
             restore,
-            diagnostic,
         });
         Ok(AgentResponse::ActionHitRecorded)
     }
@@ -1510,7 +1552,6 @@ impl CacheAgent {
         outcome: &str,
         crate_name: Option<&str>,
         duration_ns: u64,
-        diagnostic: Option<ActionDiagnostic>,
     ) -> Result<AgentResponse> {
         if !matches!(
             outcome,
@@ -1535,7 +1576,6 @@ impl CacheAgent {
             outcome: outcome.to_string(),
             crate_name: crate_name.map(str::to_string),
             duration_ns,
-            diagnostic,
         });
         Ok(AgentResponse::CompilerInvocationRecorded)
     }

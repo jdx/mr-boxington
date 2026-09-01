@@ -10,12 +10,12 @@ use mbx_cache_cc::CcLanguage;
 #[cfg(test)]
 use mbx_cache_core::AGENT_PROTOCOL_VERSION;
 use mbx_cache_core::{
-    AgentEvent, AgentEventObserver, AgentRemoteCache, AgentRequest, AgentResponse, AgentStats,
-    CacheAgent, CacheDigest, FileDigestCache, FileDigestScope, FileIdentity, NoFileDigestCache,
-    RecordedFileDigest, canonical_json,
+    ActionDiagnostic, AgentEvent, AgentEventObserver, AgentRemoteCache, AgentRequest,
+    AgentResponse, AgentStats, CacheAgent, CacheDigest, FileDigestCache, FileDigestScope,
+    FileIdentity, NoFileDigestCache, RecordedFileDigest, canonical_json,
 };
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -133,7 +133,7 @@ impl CacheSession {
         let events = config
             .events
             .then(|| Arc::new(EventWriter::new(&store)))
-            .map(EventStream);
+            .map(EventStream::new);
         let agent = match &events {
             Some(events) => agent.with_observer(Arc::new(events.clone())),
             None => agent,
@@ -178,7 +178,7 @@ impl CacheSession {
         // Named before the first compilation, so a TUI that attaches mid-build
         // can say whose build it is watching rather than showing bare rows.
         if let Some(events) = &self.events {
-            events.0.started(workspace_root, command);
+            events.writer.started(workspace_root, command);
         }
         // Recorded before the build rather than after it: a build that fails
         // still means this checkout is here and using the store, and the record
@@ -359,7 +359,7 @@ impl CacheSession {
     ) -> Option<ActionRun> {
         let identity = exec_identity(project_root, command);
         if let Some(events) = &self.events {
-            events.0.started(project_root, command);
+            events.writer.started(project_root, command);
         }
         // The project root stands in for the target directory: a standalone
         // build owns its output directory, so there is nothing managed to
@@ -453,7 +453,7 @@ impl CacheSession {
         if let Some(events) = &self.events
             && let Ok(totals) = serde_json::to_value(StatsReport::from(&stats))
         {
-            events.0.finished(totals);
+            events.writer.finished(totals);
         }
         Ok(stats)
     }
@@ -501,7 +501,35 @@ impl Drop for CacheSession {
 /// or a verification row, since that is the distinction a reader wants; a
 /// bypass's own compile is dropped, because the bypass row already said so.
 #[derive(Clone)]
-struct EventStream(Arc<EventWriter>);
+struct EventStream {
+    writer: Arc<EventWriter>,
+    diagnostics: Arc<Mutex<VecDeque<PendingDiagnostic>>>,
+}
+
+struct PendingDiagnostic {
+    outcome: String,
+    crate_name: Option<String>,
+    diagnostic: ActionDiagnostic,
+}
+
+impl EventStream {
+    fn new(writer: Arc<EventWriter>) -> Self {
+        Self {
+            writer,
+            diagnostics: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    fn take_diagnostic(&self, outcome: &str, crate_name: Option<&str>) -> Option<ActionDiagnostic> {
+        let mut diagnostics = self.diagnostics.lock().unwrap();
+        let position = diagnostics.iter().position(|pending| {
+            pending.outcome == outcome && pending.crate_name.as_deref() == crate_name
+        })?;
+        diagnostics
+            .remove(position)
+            .map(|pending| pending.diagnostic)
+    }
+}
 
 impl AgentEventObserver for EventStream {
     fn event(&self, event: AgentEvent) {
@@ -509,21 +537,23 @@ impl AgentEventObserver for EventStream {
             AgentEvent::ActionHit {
                 crate_name,
                 restore,
-                diagnostic,
-            } => self.0.action_with_diagnostic(
-                ActionOutcome::Hit,
-                crate_name,
-                restore.duration_ns,
-                ActionDetail {
-                    avoided_compiler_ns: restore.avoided_compiler_duration_ns,
-                    output_files: restore.output_files,
-                    output_bytes: restore.output_bytes,
-                    reflinked_output_bytes: restore.reflinked_output_bytes,
-                    copied_output_bytes: restore.copied_output_bytes,
-                },
-                diagnostic,
-            ),
-            AgentEvent::Bypass { kind } => self.0.action(
+            } => {
+                let diagnostic = self.take_diagnostic("hit", crate_name.as_deref());
+                self.writer.action_with_diagnostic(
+                    ActionOutcome::Hit,
+                    crate_name,
+                    restore.duration_ns,
+                    ActionDetail {
+                        avoided_compiler_ns: restore.avoided_compiler_duration_ns,
+                        output_files: restore.output_files,
+                        output_bytes: restore.output_bytes,
+                        reflinked_output_bytes: restore.reflinked_output_bytes,
+                        copied_output_bytes: restore.copied_output_bytes,
+                    },
+                    diagnostic,
+                );
+            }
+            AgentEvent::Bypass { kind } => self.writer.action(
                 ActionOutcome::Bypass { reason: kind },
                 None,
                 0,
@@ -537,9 +567,8 @@ impl AgentEventObserver for EventStream {
                 outcome,
                 crate_name,
                 duration_ns,
-                diagnostic,
             } => {
-                let outcome = match outcome.as_str() {
+                let recorded_outcome = match outcome.as_str() {
                     "miss" => ActionOutcome::Miss,
                     "unconsulted" => ActionOutcome::Unconsulted,
                     // A verification's own row comes from the verification
@@ -547,20 +576,34 @@ impl AgentEventObserver for EventStream {
                     // has one.
                     _ => return,
                 };
-                self.0.action_with_diagnostic(
-                    outcome,
+                let diagnostic = self.take_diagnostic(&outcome, crate_name.as_deref());
+                self.writer.action_with_diagnostic(
+                    recorded_outcome,
                     crate_name,
                     duration_ns,
                     ActionDetail::default(),
                     diagnostic,
                 );
             }
-            AgentEvent::Verification { matched, restore } => self.0.action(
+            AgentEvent::Verification { matched, restore } => self.writer.action(
                 ActionOutcome::Verification { matched },
                 None,
                 restore.duration_ns,
                 ActionDetail::default(),
             ),
+            AgentEvent::ActionDiagnostic {
+                outcome,
+                crate_name,
+                diagnostic,
+            } => self
+                .diagnostics
+                .lock()
+                .unwrap()
+                .push_back(PendingDiagnostic {
+                    outcome,
+                    crate_name,
+                    diagnostic,
+                }),
             // A decision this build does not know how to describe is left out
             // rather than guessed at; the totals still count it.
             _ => {}
@@ -1444,12 +1487,46 @@ pub(crate) fn record_compiler_invocation_with_diagnostic(
     duration_ns: u64,
     diagnostic: Option<mbx_cache_core::ActionDiagnostic>,
 ) {
-    let _ = request_agent(&[AgentRequest::RecordCompilerInvocation {
+    let mut requests = Vec::new();
+    if let Some(diagnostic) = diagnostic
+        && let Some(request) = action_diagnostic_request(outcome, crate_name, diagnostic)
+    {
+        requests.push(request);
+    }
+    requests.push(AgentRequest::RecordCompilerInvocation {
         outcome: outcome.into(),
         crate_name: crate_name.map(str::to_string),
         duration_ns,
+    });
+    let _ = request_agent(&requests);
+}
+
+const ACTION_DIAGNOSTIC_PREFIX: &str = "@mbx-action-diagnostic\t";
+
+#[derive(Serialize)]
+struct ActionDiagnosticEnvelope<'a> {
+    outcome: &'a str,
+    crate_name: Option<&'a str>,
+    diagnostic: ActionDiagnostic,
+}
+
+pub(crate) fn action_diagnostic_request(
+    outcome: &str,
+    crate_name: Option<&str>,
+    diagnostic: ActionDiagnostic,
+) -> Option<AgentRequest> {
+    // Keep diagnostics on the v6 wire without adding fields to the public,
+    // exhaustively matchable AgentRequest variants. The agent recognizes this
+    // reserved warning envelope and does not surface it as a user warning.
+    let payload = serde_json::to_string(&ActionDiagnosticEnvelope {
+        outcome,
+        crate_name,
         diagnostic,
-    }]);
+    })
+    .ok()?;
+    Some(AgentRequest::RecordWarning {
+        message: format!("{ACTION_DIAGNOSTIC_PREFIX}{payload}"),
+    })
 }
 
 /// Append the full reason to `MBX_BYPASS_LOG`, when one is configured.

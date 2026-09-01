@@ -1282,6 +1282,7 @@ fn join_flight(compilation: &Compilation<'_>) -> Option<InvocationFlight> {
 /// The payload gets exactly the treatment a manifest prediction does --
 /// canonical-form check, every input rehashed, the store consulted -- so the
 /// worst a stale or foreign record can do is miss.
+#[allow(clippy::too_many_arguments)]
 fn restore_flight_prediction(
     compilation: &Compilation<'_>,
     outputs: &RustcOutputs,

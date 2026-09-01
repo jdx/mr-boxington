@@ -236,13 +236,20 @@ pub(crate) fn record_action_hit_with_diagnostic(
     crate_name: &str,
     diagnostic: Option<ActionDiagnostic>,
 ) {
-    let responses = session::request_agent(&[AgentRequest::RecordActionHit {
+    let mut requests = Vec::new();
+    if let Some(diagnostic) = diagnostic
+        && let Some(request) =
+            session::action_diagnostic_request("hit", Some(crate_name), diagnostic)
+    {
+        requests.push(request);
+    }
+    requests.push(AgentRequest::RecordActionHit {
         action: action.clone(),
         restore,
         crate_name: Some(crate_name.to_string()),
-        diagnostic,
-    }]);
-    match responses.map(|responses| responses.into_iter().next()) {
+    });
+    let responses = session::request_agent(&requests);
+    match responses.map(|mut responses| responses.pop()) {
         Ok(Some(AgentResponse::ActionHitRecorded)) => {}
         Ok(Some(AgentResponse::Error { message })) => {
             session::report_shim_warning(&format!("hit was not recorded: {message}"));

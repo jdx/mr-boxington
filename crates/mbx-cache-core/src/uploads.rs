@@ -20,7 +20,8 @@
 //! waits for them itself.
 
 use crate::{
-    BlobPackLimits, BlobSource, BlobUpload, CacheDigest, RemoteActionResult, RemoteCacheClient,
+    ActionDiagnostic, BlobPackLimits, BlobSource, BlobUpload, CacheDigest, RemoteActionResult,
+    RemoteCacheClient,
 };
 use futures_util::future::{BoxFuture, Shared};
 use futures_util::{FutureExt, StreamExt, stream};
@@ -69,6 +70,8 @@ pub(crate) type UploadTicket = Shared<BoxFuture<'static, UploadOutcome>>;
 #[derive(Default)]
 pub(crate) struct ConnectionUploads {
     tickets: Vec<UploadTicket>,
+    /// Diagnostic sent immediately before its action-accounting request.
+    action_diagnostic: Option<(String, Option<String>, ActionDiagnostic)>,
 }
 
 impl ConnectionUploads {
@@ -78,6 +81,35 @@ impl ConnectionUploads {
 
     fn prerequisites(&self) -> Vec<UploadTicket> {
         self.tickets.clone()
+    }
+
+    pub(crate) fn record_action_diagnostic(
+        &mut self,
+        outcome: String,
+        crate_name: Option<String>,
+        diagnostic: ActionDiagnostic,
+    ) {
+        self.action_diagnostic = Some((outcome, crate_name, diagnostic));
+    }
+
+    pub(crate) fn take_action_diagnostic(
+        &mut self,
+        outcome: &str,
+        crate_name: Option<&str>,
+    ) -> Option<ActionDiagnostic> {
+        let matches =
+            self.action_diagnostic
+                .as_ref()
+                .is_some_and(|(pending_outcome, pending_crate, _)| {
+                    pending_outcome == outcome && pending_crate.as_deref() == crate_name
+                });
+        if matches {
+            self.action_diagnostic
+                .take()
+                .map(|(_, _, diagnostic)| diagnostic)
+        } else {
+            None
+        }
     }
 }
 
