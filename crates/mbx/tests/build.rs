@@ -391,14 +391,13 @@ fn clippy_workspace_compilations_restore_and_track_clippy_toml() {
     )
     .unwrap();
 
-    let cold = cargo_with(
+    let (cold, cold_stderr) = cargo_with(
         first.path(),
         store.path(),
         &reports.path().join("clippy-cold.json"),
         &["clippy", "--offline"],
         &[],
-    )
-    .0;
+    );
     assert_eq!(count(&cold, "hits"), 0, "a cold clippy run cannot hit");
     assert!(
         cold["bypasses"].get("multiple-inputs").is_none(),
@@ -406,7 +405,7 @@ fn clippy_workspace_compilations_restore_and_track_clippy_toml() {
     );
     assert!(
         count(&cold, "stored_bytes") > 0,
-        "the workspace compilation should be stored: {cold}"
+        "the workspace compilation should be stored: {cold}\n{cold_stderr}"
     );
 
     let warm = cargo_with(
