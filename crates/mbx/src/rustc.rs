@@ -126,7 +126,11 @@ struct Compilation<'a> {
     linker: Option<LinkerIdentity>,
 }
 
-pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode> {
+pub(crate) fn compile(
+    rustc: &OsStr,
+    arguments: &[OsString],
+    wrapper_argument: Option<&OsStr>,
+) -> Result<ExitCode> {
     let working_dir = std::env::current_dir()?;
     // The orchestrated session supplies the target root. A persistent wrapper
     // has no parent session, so first parse just enough of the invocation to
@@ -159,6 +163,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     if execution_only_build_script {
         return compile_execution_only_build_script(
             rustc,
+            wrapper_argument,
             &arguments,
             &working_dir,
             &invocation,
@@ -373,7 +378,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
     let compilation_started = SystemTime::now();
     let compiler_timer = Instant::now();
-    let mut command = Command::new(rustc);
+    let mut command = compiler_command(rustc, wrapper_argument);
     command.args(&arguments).current_dir(&working_dir);
     if let Some(directory) = learned.directory.as_deref() {
         // Appended here rather than to the parsed argument vector: the parser
@@ -470,6 +475,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
 /// install the execution-cache launcher keyed by its compilation action.
 fn compile_execution_only_build_script(
     rustc: &OsStr,
+    wrapper_argument: Option<&OsStr>,
     arguments: &[OsString],
     working_dir: &Path,
     invocation: &RustcInvocation,
@@ -479,7 +485,7 @@ fn compile_execution_only_build_script(
     let demand = crate::scheduler::Demand::new(invocation.crate_name(), true);
     let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
     let started = Instant::now();
-    let output = Command::new(rustc)
+    let output = compiler_command(rustc, wrapper_argument)
         .args(arguments)
         .current_dir(working_dir)
         .output()
@@ -548,6 +554,14 @@ fn compile_execution_only_build_script(
         }
     }
     Ok(exit_code(output.status))
+}
+
+fn compiler_command(rustc: &OsStr, wrapper_argument: Option<&OsStr>) -> Command {
+    let mut command = Command::new(rustc);
+    if let Some(argument) = wrapper_argument {
+        command.arg(argument);
+    }
+    command
 }
 
 fn install_build_script_shim(
@@ -1664,6 +1678,7 @@ fn compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
 
 fn query_compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
     let executable = resolve_executable(rustc)?;
+    let clippy = Path::new(rustc).file_stem() == Some(OsStr::new("clippy-driver"));
     let environment = ["RUSTUP_HOME", "RUSTUP_TOOLCHAIN"]
         .into_iter()
         .map(|name| (name.into(), std::env::var(name).ok()))
@@ -1696,10 +1711,34 @@ fn query_compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+        let mut stdout = output.stdout;
+        if clippy {
+            let mut command = Command::new(&executable);
+            command.arg("--version");
+            for (name, value) in &environment {
+                if let Some(value) = value {
+                    command.env(name, value);
+                } else {
+                    command.env_remove(name);
+                }
+            }
+            let output = command
+                .output()
+                .wrap_err("failed to query the clippy-driver identity")?;
+            if !output.status.success() {
+                bail!(
+                    "clippy-driver identity command failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            stdout.extend_from_slice(b"\nmbx-driver: ");
+            stdout.extend_from_slice(output.stdout.trim_ascii());
+            stdout.push(b'\n');
+        }
         let responses = session::request_agent(&[AgentRequest::StoreExecutableIdentity {
             executable,
             environment,
-            stdout: output.stdout,
+            stdout,
         }])?;
         let Some(AgentResponse::ExecutableIdentity {
             stdout: Some(stdout),
@@ -1733,6 +1772,11 @@ fn query_compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
         toolchain,
         rustc_version,
         host: host.to_string(),
+        driver: verbose
+            .lines()
+            .find_map(|line| line.strip_prefix("mbx-driver: "))
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
     })
 }
 

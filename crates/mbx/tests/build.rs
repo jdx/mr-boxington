@@ -295,7 +295,8 @@ fn cargo_with(
         .env_remove("MBX_REAL_CC")
         .env_remove("MBX_REAL_CXX")
         .env_remove("RUSTC_WRAPPER")
-        .env_remove("RUSTC_WORKSPACE_WRAPPER");
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("CLIPPY_CONF_DIR");
     for (name, value) in settings {
         command.env(name, value);
     }
@@ -358,6 +359,78 @@ fn count(stats: &serde_json::Value, field: &str) -> u64 {
     stats[field]
         .as_u64()
         .unwrap_or_else(|| panic!("{field} should be a number"))
+}
+
+#[test]
+fn clippy_workspace_compilations_restore_and_track_clippy_toml() {
+    if !Command::new(cargo())
+        .args(["clippy", "--version"])
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        return;
+    }
+    let store = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let changed = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    for project in [&first, &second, &changed] {
+        write_project(project.path());
+    }
+    for project in [&first, &second] {
+        std::fs::write(
+            project.path().join("clippy.toml"),
+            "too-many-arguments-threshold = 7\n",
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        changed.path().join("clippy.toml"),
+        "too-many-arguments-threshold = 8\n",
+    )
+    .unwrap();
+
+    let cold = cargo_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("clippy-cold.json"),
+        &["clippy", "--offline"],
+        &[],
+    )
+    .0;
+    assert_eq!(count(&cold, "hits"), 0, "a cold clippy run cannot hit");
+    assert!(
+        cold["bypasses"].get("multiple-inputs").is_none(),
+        "the real rustc path must not be parsed as a source: {cold}"
+    );
+    assert!(
+        count(&cold, "stored_bytes") > 0,
+        "the workspace compilation should be stored: {cold}"
+    );
+
+    let warm = cargo_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("clippy-warm.json"),
+        &["clippy", "--offline"],
+        &[],
+    )
+    .0;
+    assert!(count(&warm, "hits") > 0, "clippy should restore: {warm}");
+
+    let changed = cargo_with(
+        changed.path(),
+        store.path(),
+        &reports.path().join("clippy-changed.json"),
+        &["clippy", "--offline"],
+        &[],
+    )
+    .0;
+    assert!(
+        count(&changed, "misses") > 0,
+        "changed clippy.toml must miss: {changed}"
+    );
 }
 
 #[test]

@@ -258,11 +258,14 @@ impl CacheSession {
         if let Some(previous) = environment.get("RUSTC_WORKSPACE_WRAPPER") {
             // Cargo nests this inside RUSTC_WRAPPER, so the shim receives the
             // workspace wrapper where it ordinarily receives rustc. Remember
-            // that path both to recognize the nested invocation and to avoid
-            // silently treating rustc itself as an input file.
-            warn!(
-                "RUSTC_WORKSPACE_WRAPPER is already set to {previous}; deferring to it for workspace crates, so those compilations are not cached"
-            );
+            // that path to recognize the nested invocation. Clippy has a
+            // modeled identity and configuration inputs; other workspace
+            // wrappers remain transparent because mbx cannot key their work.
+            if executable_stem(OsStr::new(previous)) != Some("clippy-driver") {
+                warn!(
+                    "RUSTC_WORKSPACE_WRAPPER is already set to {previous}; deferring to it for workspace crates, so those compilations are not cached"
+                );
+            }
             environment.insert(
                 PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV.into(),
                 previous.clone(),
@@ -1085,8 +1088,17 @@ pub fn run_rustc_shim() -> ExitCode {
     let arguments = arguments.collect::<Vec<_>>();
     let is_workspace_wrapper = std::env::var_os(PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV)
         .is_some_and(|wrapper| wrapper == rustc);
-    if std::env::var_os(PREVIOUS_RUSTC_WRAPPER_ENV).is_none() && !is_workspace_wrapper {
-        match crate::rustc::compile(&rustc, &arguments) {
+    let (wrapper_argument, compiler_arguments) = workspace_wrapper_arguments(&rustc, &arguments);
+    let cacheable_workspace_wrapper = is_workspace_wrapper && wrapper_argument.is_some();
+    if std::env::var_os(PREVIOUS_RUSTC_WRAPPER_ENV).is_none()
+        && (!is_workspace_wrapper || cacheable_workspace_wrapper)
+    {
+        // Cargo composes RUSTC_WRAPPER outside RUSTC_WORKSPACE_WRAPPER. Clippy
+        // occupies the latter, so its wrapper protocol arrives here as
+        // `clippy-driver <real-rustc> <rustc arguments>`. The real rustc path
+        // must still be passed to the driver when it executes, but it is not a
+        // source input and must not be handed to the rustc argument parser.
+        match crate::rustc::compile(&rustc, compiler_arguments, wrapper_argument) {
             Ok(exit_code) => return exit_code,
             Err(error) => {
                 record_bypass(&error);
@@ -1097,6 +1109,24 @@ pub fn run_rustc_shim() -> ExitCode {
     }
 
     run_transparent_rustc(rustc, arguments)
+}
+
+fn workspace_wrapper_arguments<'a>(
+    compiler: &OsStr,
+    arguments: &'a [OsString],
+) -> (Option<&'a OsStr>, &'a [OsString]) {
+    let wrapper_argument = arguments.first().filter(|argument| {
+        executable_stem(compiler) == Some("clippy-driver")
+            && executable_stem(argument) == Some("rustc")
+    });
+    match wrapper_argument {
+        Some(argument) => (Some(argument.as_os_str()), &arguments[1..]),
+        None => (None, arguments),
+    }
+}
+
+fn executable_stem(executable: &OsStr) -> Option<&str> {
+    Path::new(executable).file_stem()?.to_str()
 }
 
 fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode {
