@@ -29,7 +29,7 @@ pub(crate) fn run_with_settings(
 }
 
 /// Replay the newest recorded build for this workspace and explain its misses
-/// against the most recent earlier hit for each crate.
+/// against the most recent earlier hit for each compilation unit.
 pub(crate) fn last(config: &Config) -> Result<ExitCode> {
     let workspace = crate::util::workspace_root(&std::env::current_dir()?);
     let sessions = recorded_sessions(&config.store_dir(), &workspace)?;
@@ -40,7 +40,7 @@ pub(crate) fn last(config: &Config) -> Result<ExitCode> {
         );
     };
 
-    let mut previous_hits: BTreeMap<String, ActionDiagnostic> = BTreeMap::new();
+    let mut previous_hits = PreviousHits::new();
     for session in &sessions[..target_index] {
         for event in &session.events {
             if let SessionEvent::Action {
@@ -49,8 +49,9 @@ pub(crate) fn last(config: &Config) -> Result<ExitCode> {
                 diagnostic: Some(diagnostic),
                 ..
             } = event
+                && let Some(unit) = compilation_unit(diagnostic)
             {
-                previous_hits.insert(crate_name.clone(), diagnostic.clone());
+                previous_hits.insert((crate_name.clone(), unit), diagnostic.clone());
             }
         }
     }
@@ -63,6 +64,8 @@ struct RecordedSession {
     command: Vec<String>,
     events: Vec<SessionEvent>,
 }
+
+type PreviousHits = BTreeMap<(String, String), ActionDiagnostic>;
 
 fn recorded_sessions(store: &Path, workspace: &Path) -> Result<Vec<RecordedSession>> {
     let mut sessions = Vec::new();
@@ -97,7 +100,7 @@ fn recorded_sessions(store: &Path, workspace: &Path) -> Result<Vec<RecordedSessi
     Ok(sessions)
 }
 
-fn display_last(session: &RecordedSession, previous_hits: &BTreeMap<String, ActionDiagnostic>) {
+fn display_last(session: &RecordedSession, previous_hits: &PreviousHits) {
     let command = if session.command.is_empty() {
         "cargo".to_string()
     } else {
@@ -137,7 +140,8 @@ fn display_last(session: &RecordedSession, previous_hits: &BTreeMap<String, Acti
             found = true;
         }
         crate::session::note(&format!("\n{crate_name}"));
-        match (previous_hits.get(crate_name), diagnostic) {
+        let previous = previous_hit(previous_hits, crate_name, diagnostic);
+        match (previous, diagnostic) {
             (Some(previous), Some(current)) => display_diff(previous, current),
             (None, _) => crate::session::note(
                 "  no earlier recorded hit with key details for this crate; the cache may be cold, this action may use another adapter, or its history may have expired",
@@ -150,6 +154,22 @@ fn display_last(session: &RecordedSession, previous_hits: &BTreeMap<String, Acti
     if !found {
         crate::session::note("\nno cache misses were recorded");
     }
+}
+
+fn compilation_unit(diagnostic: &ActionDiagnostic) -> Option<String> {
+    diagnostic
+        .components
+        .get("compilation unit")
+        .map(mbx_cache_core::CacheDigest::key)
+}
+
+fn previous_hit<'a>(
+    hits: &'a PreviousHits,
+    crate_name: &str,
+    diagnostic: Option<&ActionDiagnostic>,
+) -> Option<&'a ActionDiagnostic> {
+    let unit = diagnostic.and_then(compilation_unit)?;
+    hits.get(&(crate_name.to_string(), unit))
 }
 
 fn display_diff(previous: &ActionDiagnostic, current: &ActionDiagnostic) {
@@ -474,6 +494,34 @@ mod tests {
         assert_eq!(
             changed_keys(&previous, &current),
             ["added", "changed", "removed"]
+        );
+    }
+
+    #[test]
+    fn matches_history_by_compilation_unit_not_only_crate_name() {
+        let diagnostic = |unit: &str, action: &str| ActionDiagnostic {
+            action: mbx_cache_core::CacheDigest::blake3(action.as_bytes()),
+            components: BTreeMap::from([(
+                "compilation unit".into(),
+                mbx_cache_core::CacheDigest::blake3(unit.as_bytes()),
+            )]),
+            inputs: BTreeMap::new(),
+        };
+        let lib = diagnostic("lib-unit", "lib-hit");
+        let test = diagnostic("test-unit", "test-hit");
+        let current = diagnostic("lib-unit", "lib-miss");
+        let hits = PreviousHits::from([
+            (("shared_name".into(), compilation_unit(&lib).unwrap()), lib),
+            (
+                ("shared_name".into(), compilation_unit(&test).unwrap()),
+                test,
+            ),
+        ]);
+
+        let matched = previous_hit(&hits, "shared_name", Some(&current)).unwrap();
+        assert_eq!(
+            matched.action,
+            mbx_cache_core::CacheDigest::blake3(b"lib-hit")
         );
     }
 }

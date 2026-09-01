@@ -413,22 +413,23 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             .try_into()
             .unwrap_or(u64::MAX),
     };
-    session::record_compiler_invocation_with_diagnostic(
-        if verification.is_some() {
-            "verification"
-        } else if learned.engaged() {
-            "incremental"
-        } else if action_lookup_attempted {
-            "miss"
-        } else {
-            "unconsulted"
-        },
-        Some(&timing.crate_name),
-        timing.duration_ns,
-        current_diagnostic,
-    );
+    let recorded_outcome = if verification.is_some() {
+        "verification"
+    } else if learned.engaged() {
+        "incremental"
+    } else if action_lookup_attempted {
+        "miss"
+    } else {
+        "unconsulted"
+    };
     let _ = replay_output(&output);
     if let Some(cached) = verification {
+        session::record_compiler_invocation_with_diagnostic(
+            recorded_outcome,
+            Some(&timing.crate_name),
+            timing.duration_ns,
+            current_diagnostic,
+        );
         let divergence = verification_divergence(&cached, &output);
         record_verification(divergence.is_none(), cached.restore);
         if let Some(divergence) = divergence {
@@ -440,7 +441,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     }
     if output.status.success() {
         learned.record_compiled();
-        let publication: Result<()> = (|| {
+        let publication: Result<Option<ActionDiagnostic>> = (|| {
             let (candidates, discovered) = action_from_dep_info(&compilation, &outputs.dep_info)?;
             discovered.verify_not_modified_since(compilation_started)?;
             discovered.verify()?;
@@ -475,12 +476,19 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                     .map(|flight| &flight.flight),
                 remote_claim.as_deref().filter(|_| !learned.engaged()),
             );
-            Ok(())
+            Ok(action_diagnostic(action).ok())
         })();
-        if let Err(error) = publication {
-            eprintln!("mbx[warning]: result was not stored: {error:#}");
+        match publication {
+            Ok(diagnostic) => current_diagnostic = diagnostic,
+            Err(error) => eprintln!("mbx[warning]: result was not stored: {error:#}"),
         }
     }
+    session::record_compiler_invocation_with_diagnostic(
+        recorded_outcome,
+        Some(&timing.crate_name),
+        timing.duration_ns,
+        current_diagnostic,
+    );
     Ok(exit_code(output.status))
 }
 
@@ -983,6 +991,27 @@ fn action_diagnostic(action: &RustcAction) -> Result<ActionDiagnostic> {
         }
     }
     if let Some(serde_json::Value::Array(arguments)) = descriptor.remove("arguments") {
+        let unit_arguments = arguments
+            .iter()
+            .filter(|value| {
+                value.as_str().is_some_and(|argument| {
+                    argument == "--test"
+                        || [
+                            "--crate-name=",
+                            "--crate-type=",
+                            "--target=",
+                            "--codegen=metadata=",
+                            "--codegen=extra-filename=",
+                        ]
+                        .iter()
+                        .any(|prefix| argument.starts_with(prefix))
+                })
+            })
+            .collect::<Vec<_>>();
+        components.insert(
+            "compilation unit".into(),
+            CacheDigest::blake3(&canonical_json(&unit_arguments)?),
+        );
         let mut occurrences = BTreeMap::<String, usize>::new();
         for (index, value) in arguments.into_iter().enumerate() {
             let base = value
