@@ -32,12 +32,17 @@ struct CompileTiming {
     duration_ns: u64,
 }
 
-/// Consecutive misses with changed content before a unit compiles incrementally.
+/// Consecutive misses with changed content before an external unit compiles
+/// incrementally.
 ///
 /// One changed key is an edit; a run of them is a developer working here. The
 /// threshold is what separates the two, and it is small because the cost of
 /// guessing wrong is one uncached compilation the unit was going to pay anyway.
 const HOT_STREAK_THRESHOLD: u32 = 3;
+
+/// A workspace unit is hot on its first edit. Its dependent cone still uses
+/// the ordinary cache because churn is measured from each unit's own sources.
+const WORKSPACE_HOT_STREAK_THRESHOLD: u32 = 1;
 
 /// Schema version of the per-checkout churn record.
 const CHURN_STATE_VERSION: u8 = 1;
@@ -93,7 +98,7 @@ impl LearnedPlan {
 /// What one checkout last compiled for one unit, and how long its sources have
 /// been moving.
 ///
-/// Kept beside the incremental state it decides, in this checkout's target
+/// Kept beside the incremental state it decides, in a checkout-specific cache
 /// directory, rather than in the prediction manifest: a manifest is shared by
 /// every worktree resolving the same lockfile, so a streak recorded there would
 /// let one developer's edit loop mark a crate hot for a sibling worktree that
@@ -205,6 +210,9 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                     Err(error) => {
                         eprintln!("mbx[warning]: compiler timing was not refreshed: {error:#}");
                     }
+                }
+                if source_is_in_workspace(&compilation) {
+                    record_learned_baseline(&compilation, &discovered);
                 }
                 if verify {
                     verification = Some(cached);
@@ -426,6 +434,9 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             let (candidates, discovered) = action_from_dep_info(&compilation, &outputs.dep_info)?;
             discovered.verify_not_modified_since(compilation_started)?;
             discovered.verify()?;
+            if learned.record.is_none() && source_is_in_workspace(&compilation) {
+                record_learned_baseline(&compilation, &discovered);
+            }
             // An incremental artifact carries state from this checkout's edit
             // history, so it is recorded as what the unit currently contains --
             // which is how the next build notices the churn ended -- but never
@@ -583,16 +594,17 @@ fn learned_plan(
     recorded: Option<&ChurnState>,
     sources: &CacheDigest,
     enabled: bool,
+    threshold: u32,
 ) -> LearnedPlan {
     let streak = match recorded {
         Some(recorded) if recorded.sources == sources.key() => 0,
         // Capped at the threshold: the streak is a state, not a tally, and
         // letting it climb would only delay noticing that the churn stopped.
-        Some(recorded) => recorded.streak.saturating_add(1).min(HOT_STREAK_THRESHOLD),
+        Some(recorded) => recorded.streak.saturating_add(1).min(threshold),
         None => 0,
     };
     LearnedPlan {
-        hot: enabled && streak >= HOT_STREAK_THRESHOLD,
+        hot: enabled && streak >= threshold,
         streak,
         directory: None,
         record: None,
@@ -601,17 +613,14 @@ fn learned_plan(
 
 /// Where one unit keeps its incremental state.
 ///
-/// It lives under the target directory the session already manages, so a
-/// managed target reclaims it with everything else it holds, and `cargo clean`
-/// reaches it in a checkout that owns its own. A shim with no session has
-/// nowhere of its own to put it, and compiles normally instead.
+/// A session gives it a persistent per-checkout root outside Cargo's target
+/// directory. A standalone shim falls back to its target directory when one is
+/// available, and compiles normally when it has nowhere to put state.
 fn incremental_directory(invocation: &CacheDigest) -> Option<PathBuf> {
-    let target_dir = std::env::var_os(session::TARGET_DIR_ENV)?;
+    let root = incremental_root()?;
     let key = invocation.key();
     let shard = key.get(..16)?;
-    let directory = PathBuf::from(target_dir)
-        .join("mbx-incremental")
-        .join(shard);
+    let directory = root.join(shard);
     match prepare_incremental_directory(&directory) {
         Ok(()) => Some(directory),
         Err(error) => {
@@ -676,7 +685,17 @@ fn plan_learned_reuse(
         let Some(state_path) = churn_state_path(&unit) else {
             return Result::<LearnedPlan>::Ok(LearnedPlan::default());
         };
-        let plan = learned_plan(read_churn_state(&state_path).as_ref(), &sources, enabled);
+        let threshold = if source_is_in_workspace(compilation) {
+            WORKSPACE_HOT_STREAK_THRESHOLD
+        } else {
+            HOT_STREAK_THRESHOLD
+        };
+        let plan = learned_plan(
+            read_churn_state(&state_path).as_ref(),
+            &sources,
+            enabled,
+            threshold,
+        );
         Ok(LearnedPlan {
             record: Some((state_path, sources)),
             ..plan
@@ -692,19 +711,69 @@ fn plan_learned_reuse(
     }
 }
 
+/// Whether the crate root belongs to the checkout Cargo is building.
+fn source_is_in_workspace(compilation: &Compilation<'_>) -> bool {
+    let Some(root) = std::env::var_os(session::WORKSPACE_ROOT_ENV).map(PathBuf::from) else {
+        return false;
+    };
+    let source = compilation.invocation.source();
+    let source = if source.is_absolute() {
+        source.to_path_buf()
+    } else {
+        compilation.working_dir.join(source)
+    };
+    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    let source = std::fs::canonicalize(&source).unwrap_or(source);
+    source.starts_with(root)
+}
+
+/// Establish the baseline after a first successful compilation, when dep-info
+/// finally supplies the complete set of sources. The next edit can then be
+/// recognized immediately.
+fn record_learned_baseline(compilation: &Compilation<'_>, discovered: &DiscoveredInputs) {
+    let recorded = (|| {
+        let context = base_action_context(
+            compilation.rustc,
+            compilation.working_dir,
+            compilation.portable,
+        )?;
+        let unit = compilation.invocation.invocation_digest(&context)?;
+        let Some(path) = churn_state_path(&unit) else {
+            return Result::<()>::Ok(());
+        };
+        let sources = compilation.invocation.source_fingerprint(discovered);
+        write_churn_state(&path, &sources, 0)
+    })();
+    if let Err(error) = recorded {
+        eprintln!("mbx[warning]: initial churn state was not recorded: {error:#}");
+    }
+}
+
 /// Where this checkout records what it last compiled for one unit.
 ///
-/// A sibling of the unit's incremental directory, so both are reclaimed with
-/// the target directory that holds them.
+/// A sibling of the unit's incremental directory, so the decision and the
+/// state survive or disappear together.
 fn churn_state_path(unit: &CacheDigest) -> Option<PathBuf> {
-    let target_dir = std::env::var_os(session::TARGET_DIR_ENV)?;
+    let root = incremental_root()?;
     let key = unit.key();
     let shard = key.get(..16)?;
-    Some(
-        PathBuf::from(target_dir)
-            .join("mbx-incremental")
-            .join(format!("{shard}.json")),
-    )
+    Some(root.join(format!("{shard}.json")))
+}
+
+/// Persistent per-checkout storage for learned incremental state. Sessions
+/// keep it outside Cargo's target directory so `cargo clean` does not erase the
+/// edit history it is meant to accelerate. Standalone shims retain the older
+/// target-local fallback because they have no configured cache root.
+fn incremental_root() -> Option<PathBuf> {
+    std::env::var_os(session::INCREMENTAL_ROOT_ENV)
+        .or_else(|| {
+            std::env::var_os(session::TARGET_DIR_ENV).map(|target| {
+                PathBuf::from(target)
+                    .join("mbx-incremental")
+                    .into_os_string()
+            })
+        })
+        .map(PathBuf::from)
 }
 
 /// A record this version cannot read is treated as no record: the cost is one
@@ -841,6 +910,9 @@ fn restore_prediction_payload(
     match restored {
         Some((action, mut cached)) => {
             cached.restore.avoided_compiler_duration_ns = input_prediction.compiler_duration_ns;
+            if source_is_in_workspace(compilation) {
+                record_learned_baseline(compilation, &discovered);
+            }
             if restore_outputs {
                 record_action_hit(&action, cached.restore, invocation.crate_name());
             }

@@ -583,16 +583,15 @@ fn edit_project(project: &Path, revision: u32) {
 /// Directories only: the churn records that decide when to create one live
 /// beside them as files, and every compilation writes one of those whether or
 /// not it ever goes hot.
-fn learned_sessions(project: &Path) -> usize {
-    let target = project.join("target");
-    let outputs = std::fs::read_link(&target).unwrap_or(target);
-    match std::fs::read_dir(outputs.join("mbx-incremental")) {
-        Ok(entries) => entries
-            .flatten()
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-            .count(),
-        Err(_) => 0,
-    }
+fn learned_sessions(cache: &Path) -> usize {
+    std::fs::read_dir(cache.join("incremental"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .flat_map(|checkout| std::fs::read_dir(checkout.path()).into_iter().flatten())
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .count()
 }
 
 fn compiled_incrementally(stats: &serde_json::Value) -> u64 {
@@ -601,51 +600,72 @@ fn compiled_incrementally(stats: &serde_json::Value) -> u64 {
         .unwrap_or(0)
 }
 
-/// A crate somebody is editing misses on every build no matter what the cache
-/// does. After enough of those in a row, it gets to keep its own incremental
+/// A workspace crate somebody is editing misses on every build no matter what
+/// the cache does. On its first edit, it gets its own incremental
 /// state -- which never reaches the store, because it describes one checkout's
 /// edit history rather than its source.
 #[test]
-fn a_churning_crate_earns_its_own_incremental_state() {
+fn a_workspace_crate_is_incremental_on_its_first_edit() {
     let store = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();
     write_project(project.path());
 
-    let mut stats = build(
+    let cold = build(
         project.path(),
         store.path(),
         &reports.path().join("cold.json"),
     );
-    for revision in 1..=4 {
-        edit_project(project.path(), revision);
-        stats = build(
-            project.path(),
-            store.path(),
-            &reports.path().join(format!("edit-{revision}.json")),
-        );
-        // The streak has to build up first, so nothing is expected before it.
-        if revision < 3 {
-            assert_eq!(
-                compiled_incrementally(&stats),
-                0,
-                "one or two edits is not a pattern yet: {stats}"
-            );
-        }
-    }
+    assert_eq!(
+        compiled_incrementally(&cold),
+        0,
+        "a cold build should populate the shared cache: {cold}"
+    );
+
+    edit_project(project.path(), 1);
+    let stats = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("edit-1.json"),
+    );
 
     assert!(
         compiled_incrementally(&stats) > 0,
         "the edited crate should have compiled incrementally by now: {stats}"
     );
     assert!(
-        learned_sessions(project.path()) > 0,
+        learned_sessions(store.path()) > 0,
         "it should have left incremental state behind: {stats}"
     );
     assert_eq!(
         stats["stored_bytes"].as_u64(),
         Some(0),
         "an incremental artifact must never be published: {stats}"
+    );
+
+    let cleaned = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        .current_dir(project.path())
+        .arg("clean")
+        .env("MBX_CACHE_DIR", store.path())
+        .env("MBX_GC_AUTO", "0")
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .expect("mbx clean should run");
+    assert!(
+        cleaned.status.success(),
+        "clean failed: {}",
+        String::from_utf8_lossy(&cleaned.stderr)
+    );
+
+    edit_project(project.path(), 2);
+    let after_clean = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("edit-after-clean.json"),
+    );
+    assert!(
+        compiled_incrementally(&after_clean) > 0,
+        "cargo clean should preserve learned incremental state: {after_clean}"
     );
 }
 
@@ -1018,6 +1038,17 @@ fn a_second_checkout_starts_warm() {
     assert!(
         count(&warm, "hits") > 0,
         "a checkout at another path should reuse the first build: {warm}"
+    );
+
+    edit_project(second.path(), 1);
+    let edited = build(
+        second.path(),
+        store.path(),
+        &reports.path().join("second-edit.json"),
+    );
+    assert!(
+        compiled_incrementally(&edited) > 0,
+        "a warm checkout should recognize its first edit immediately: {edited}"
     );
 }
 
