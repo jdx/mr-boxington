@@ -1024,7 +1024,13 @@ async fn error_for_status_with_body(mut response: reqwest::Response) -> Result<r
     };
     let mut body = Vec::new();
     let mut truncated = false;
-    while let Some(chunk) = response.chunk().await? {
+    loop {
+        // This body is only diagnostic. If reading it fails, keep the HTTP
+        // status as the authoritative error and any detail already received.
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) | Err(_) => break,
+        };
         let remaining = MAX_REMOTE_ERROR_BYTES.saturating_sub(body.len());
         if chunk.len() > remaining {
             body.extend_from_slice(&chunk[..remaining]);
