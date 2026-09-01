@@ -85,6 +85,38 @@ async fn session_environment_directs_cargo_at_the_shim() {
     session.finish().await.unwrap();
 }
 
+#[tokio::test]
+async fn failed_incremental_recording_replaces_an_inherited_root() {
+    let cache = tempfile::tempdir().unwrap();
+    // A file where the checkout-state directory belongs makes `touch` fail.
+    std::fs::write(cache.path().join("incremental"), b"not a directory").unwrap();
+    let session_dir = tempfile::tempdir().unwrap();
+    let session = CacheSession::start(session_dir.path(), &test_config(cache.path()))
+        .await
+        .unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let target = workspace.path().join("target");
+    let mut values = BTreeMap::from([(
+        INCREMENTAL_ROOT_ENV.into(),
+        "/another/checkout/incremental".into(),
+    )]);
+
+    session
+        .begin(
+            workspace.path(),
+            &target,
+            &["build".to_string()],
+            &mut values,
+        )
+        .await;
+
+    assert_eq!(
+        values.get(INCREMENTAL_ROOT_ENV).map(PathBuf::from),
+        Some(target.join("mbx-incremental"))
+    );
+    session.finish().await.unwrap();
+}
+
 #[test]
 fn nested_sessions_unwrap_the_outer_rustdoc_shim() {
     let values = BTreeMap::from([

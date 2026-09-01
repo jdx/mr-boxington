@@ -1971,6 +1971,13 @@ mod target_views {
             &[("MBX_TARGET_VIEWS", "1")],
         );
         let directory = managed(gone.path());
+        assert!(
+            std::fs::read_dir(store.path().join("incremental"))
+                .unwrap()
+                .next()
+                .is_some(),
+            "the build should record learned incremental state"
+        );
         std::fs::remove_dir_all(gone.path()).unwrap();
 
         // Make the due store sweep fail after it writes its throttle stamp.
@@ -2021,9 +2028,14 @@ mod target_views {
             !output.status.success(),
             "the broken store should be reported"
         );
+        let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            String::from_utf8_lossy(&output.stdout).contains("freed 1 target directories"),
+            stdout.contains("freed 1 target directories"),
             "successful target collection should still be reported"
+        );
+        assert!(
+            stdout.contains("freed 1 learned incremental directories"),
+            "successful incremental collection should still be reported: {stdout}"
         );
         assert!(
             !directory.exists(),

@@ -218,6 +218,16 @@ impl CacheSession {
             TARGET_DIR_ENV.into(),
             target_dir.to_string_lossy().into_owned(),
         );
+        // Always replace an inherited value. If recording this checkout fails,
+        // the shim must use its target-local fallback rather than another
+        // checkout's persistent state.
+        environment.insert(
+            INCREMENTAL_ROOT_ENV.into(),
+            target_dir
+                .join("mbx-incremental")
+                .to_string_lossy()
+                .into_owned(),
+        );
         match crate::incremental::touch(&self.incremental_root, workspace_root) {
             Ok(root) => {
                 environment.insert(

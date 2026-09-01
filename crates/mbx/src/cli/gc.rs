@@ -37,11 +37,17 @@ pub(super) fn run(
         retention.target_max_age,
         dry_run,
     );
-    let incremental = crate::incremental::prune(
+    let incremental = match crate::incremental::prune(
         &config.cache_dir.join("incremental"),
         retention.target_max_age,
         dry_run,
-    );
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            log::warn!("learned incremental state was not collected: {error}");
+            crate::incremental::PruneOutcome::default()
+        }
+    };
     let projected_target_bytes = match &pruned {
         Ok(outcome) => outcome.remaining_bytes,
         Err(_) if retention.max_total_bytes.is_some() => target::stats(&config.target.root)
@@ -68,11 +74,12 @@ pub(super) fn run(
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
+            let mut freed_bytes = incremental.removed_bytes;
             match pruned {
                 Ok(pruned) => {
                     // Credit what the targets gave back even though the store
                     // sweep failed: those bytes are gone from the disk either way.
-                    record_collection(&store, 0, pruned.removed_bytes, dry_run);
+                    freed_bytes = freed_bytes.saturating_add(pruned.removed_bytes);
                     if !json && pruned.removed_views > 0 {
                         println!("{}", target_removals(&pruned, dry_run));
                     }
@@ -81,10 +88,13 @@ pub(super) fn run(
                     log::warn!("target directories were not collected: {prune_error}");
                 }
             }
+            record_collection(&store, 0, freed_bytes, dry_run);
+            if !json {
+                print_incremental_removals(&incremental, dry_run);
+            }
             return Err(error);
         }
     };
-    let incremental = incremental?;
     record_collection(
         &store,
         outcome.removed_bytes,
@@ -112,20 +122,27 @@ pub(super) fn run(
         })?;
     } else {
         print_gc_store_outcome(&outcome, dry_run);
+        // This collection is independent of the managed-target walk below,
+        // so report it even if that walk failed.
+        print_incremental_removals(&incremental, dry_run);
         let pruned = pruned?;
         if pruned.removed_views > 0 {
             println!("{}", target_removals(&pruned, dry_run));
         }
-        if incremental.removed_directories > 0 {
-            let verb = if dry_run { "would free" } else { "freed" };
-            println!(
-                "{verb} {} learned incremental directories ({})",
-                incremental.removed_directories,
-                ByteSize::b(incremental.removed_bytes).display().iec()
-            );
-        }
     }
     Ok(())
+}
+
+fn print_incremental_removals(outcome: &crate::incremental::PruneOutcome, dry_run: bool) {
+    if outcome.removed_directories == 0 {
+        return;
+    }
+    let verb = if dry_run { "would free" } else { "freed" };
+    println!(
+        "{verb} {} learned incremental directories ({})",
+        outcome.removed_directories,
+        ByteSize::b(outcome.removed_bytes).display().iec()
+    );
 }
 
 /// Add what a collection reclaimed to this machine's lifetime totals.
