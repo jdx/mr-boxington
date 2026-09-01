@@ -76,7 +76,7 @@ struct Cli {
 enum Commands {
     /// Check the local installation, cache, toolchain, and remote connection.
     Doctor(doctor::DoctorArgs),
-    /// Run a Cargo command and explain every compilation mbx cannot cache.
+    /// Explain cache bypasses, or replay the last build and diagnose its misses.
     Explain(explain::ExplainArgs),
     /// Make plain Cargo commands run through mbx.
     Setup(setup::SetupArgs),

@@ -1,4 +1,26 @@
 use super::*;
+
+#[test]
+fn action_diagnostics_name_key_parts_without_retaining_their_values() {
+    let bytes = br#"{"adapter_version":1,"arguments":["--codegen=opt-level=2","--cfg=feature=\"secret-feature\""],"compiler":{"host":"host","rustc_version":"version","toolchain":"toolchain"},"environment":{"SECRET":"do-not-record"},"inputs":[{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"path":"${workspace}/src/lib.rs"}],"kind":"rustc","version":1}"#.to_vec();
+    let diagnostic = action_diagnostic(&RustcAction {
+        digest: CacheDigest::blake3(&bytes),
+        bytes,
+    })
+    .unwrap();
+
+    assert!(diagnostic.components.contains_key("compiler toolchain"));
+    assert!(
+        diagnostic
+            .components
+            .contains_key("argument --codegen opt-level")
+    );
+    assert!(diagnostic.components.contains_key("environment SECRET"));
+    assert!(diagnostic.inputs.contains_key("${workspace}/src/lib.rs"));
+    let recorded = serde_json::to_string(&diagnostic).unwrap();
+    assert!(!recorded.contains("do-not-record"));
+    assert!(!recorded.contains("secret-feature"));
+}
 use crate::materialize::{apply_file_mode, make_owner_writable};
 use std::io::Write as _;
 

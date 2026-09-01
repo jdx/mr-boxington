@@ -509,7 +509,8 @@ impl AgentEventObserver for EventStream {
             AgentEvent::ActionHit {
                 crate_name,
                 restore,
-            } => self.0.action(
+                diagnostic,
+            } => self.0.action_with_diagnostic(
                 ActionOutcome::Hit,
                 crate_name,
                 restore.duration_ns,
@@ -520,6 +521,7 @@ impl AgentEventObserver for EventStream {
                     reflinked_output_bytes: restore.reflinked_output_bytes,
                     copied_output_bytes: restore.copied_output_bytes,
                 },
+                diagnostic,
             ),
             AgentEvent::Bypass { kind } => self.0.action(
                 ActionOutcome::Bypass { reason: kind },
@@ -535,6 +537,7 @@ impl AgentEventObserver for EventStream {
                 outcome,
                 crate_name,
                 duration_ns,
+                diagnostic,
             } => {
                 let outcome = match outcome.as_str() {
                     "miss" => ActionOutcome::Miss,
@@ -544,8 +547,13 @@ impl AgentEventObserver for EventStream {
                     // has one.
                     _ => return,
                 };
-                self.0
-                    .action(outcome, crate_name, duration_ns, ActionDetail::default());
+                self.0.action_with_diagnostic(
+                    outcome,
+                    crate_name,
+                    duration_ns,
+                    ActionDetail::default(),
+                    diagnostic,
+                );
             }
             AgentEvent::Verification { matched, restore } => self.0.action(
                 ActionOutcome::Verification { matched },
@@ -1427,10 +1435,20 @@ pub(crate) fn record_compiler_invocation(
     crate_name: Option<&str>,
     duration_ns: u64,
 ) {
+    record_compiler_invocation_with_diagnostic(outcome, crate_name, duration_ns, None);
+}
+
+pub(crate) fn record_compiler_invocation_with_diagnostic(
+    outcome: &str,
+    crate_name: Option<&str>,
+    duration_ns: u64,
+    diagnostic: Option<mbx_cache_core::ActionDiagnostic>,
+) {
     let _ = request_agent(&[AgentRequest::RecordCompilerInvocation {
         outcome: outcome.into(),
         crate_name: crate_name.map(str::to_string),
         duration_ns,
+        diagnostic,
     }]);
 }
 

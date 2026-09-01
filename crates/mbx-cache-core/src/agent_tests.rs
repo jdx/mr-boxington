@@ -106,6 +106,7 @@ async fn records_compiler_time_by_outcome_and_crate() {
                 outcome: outcome.into(),
                 crate_name: crate_name.map(str::to_string),
                 duration_ns,
+                diagnostic: None,
             })
             .await;
         assert!(matches!(
@@ -239,6 +240,7 @@ async fn compiler_invocations_are_counted_by_known_outcomes() {
                 outcome: outcome.into(),
                 crate_name: Some("demo".into()),
                 duration_ns: 10,
+                diagnostic: None,
             })
             .await;
     }
@@ -247,6 +249,7 @@ async fn compiler_invocations_are_counted_by_known_outcomes() {
             outcome: "invented".into(),
             crate_name: None,
             duration_ns: 0,
+            diagnostic: None,
         })
         .await;
 
@@ -377,6 +380,11 @@ async fn reports_each_accounted_decision_to_an_observer() {
     let observer = Arc::new(RecordingObserver::default());
     let agent = CacheAgent::new(directory.path().join("cache"), "test-version")
         .with_observer(observer.clone());
+    let diagnostic = ActionDiagnostic {
+        action: CacheDigest::blake3(b"action"),
+        components: BTreeMap::new(),
+        inputs: BTreeMap::new(),
+    };
 
     agent
         .respond(AgentRequest::RecordBypass {
@@ -389,6 +397,7 @@ async fn reports_each_accounted_decision_to_an_observer() {
             outcome: "miss".into(),
             crate_name: Some("serde".into()),
             duration_ns: 42,
+            diagnostic: Some(diagnostic.clone()),
         })
         .await;
     agent
@@ -408,9 +417,10 @@ async fn reports_each_accounted_decision_to_an_observer() {
                 outcome,
                 crate_name: Some(crate_name),
                 duration_ns: 42,
+                diagnostic: Some(observed),
             },
             AgentEvent::Verification { matched: false, .. },
-        ] if kind == "incremental" && outcome == "miss" && crate_name == "serde"
+        ] if kind == "incremental" && outcome == "miss" && crate_name == "serde" && observed == &diagnostic
     ));
 }
 
@@ -428,6 +438,7 @@ async fn a_rejected_hit_reports_no_event() {
             action: CacheDigest::blake3(b"absent"),
             restore: RestoreStats::default(),
             crate_name: Some("serde".into()),
+            diagnostic: None,
         })
         .await;
 
@@ -445,6 +456,7 @@ async fn a_hit_carrying_an_unusable_crate_name_is_rejected() {
             action: CacheDigest::blake3(b"action"),
             restore: RestoreStats::default(),
             crate_name: Some("serde\nrustc".into()),
+            diagnostic: None,
         })
         .await;
 
@@ -507,6 +519,7 @@ async fn publishes_a_complete_action_result() {
                     reused_output_bytes: 2,
                 },
                 crate_name: None,
+                diagnostic: None,
             })
             .await,
         AgentResponse::ActionHitRecorded
@@ -552,6 +565,7 @@ async fn missing_action_result_is_a_cache_miss() {
                 action,
                 restore: RestoreStats::default(),
                 crate_name: None,
+                diagnostic: None,
             })
             .await,
         AgentResponse::Error { .. }
@@ -1149,6 +1163,7 @@ async fn round_trips_task_actions_between_fresh_local_caches() {
                 action,
                 restore: RestoreStats::default(),
                 crate_name: None,
+                diagnostic: None,
             })
             .await,
         AgentResponse::ActionHitRecorded

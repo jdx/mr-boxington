@@ -2,15 +2,15 @@ use crate::materialize::{
     CachedCompilation, CachedOutput, Materialization, StagedOutputs, apply_file_mode,
     denormalize_output_text, executable_mode_matches, exit_code, file_mode, find_blobs,
     normalize_output_text, persist_outputs, read_canonical_blob, read_verified_blob,
-    record_action_hit, record_verification, replay_bytes, resolve_executable,
+    record_action_hit_with_diagnostic, record_verification, replay_bytes, resolve_executable,
     stage_verified_cached_output, staging_directory, validate_file_mode,
 };
 use crate::{session, util::workspace_root};
 use eyre::{Context, Result, bail};
 use mbx_cache_core::{
-    ActionPrediction, AgentRequest, AgentResponse, CacheDigest, CacheDirectory, CacheFileNode,
-    FileDigestScope, FileIdentity, RecordedFileDigest, RemoteActionResult, RestoreStats,
-    RustcMetadata, canonical_json,
+    ActionDiagnostic, ActionPrediction, AgentRequest, AgentResponse, CacheDigest, CacheDirectory,
+    CacheFileNode, FileDigestScope, FileIdentity, RecordedFileDigest, RemoteActionResult,
+    RestoreStats, RustcMetadata, canonical_json,
 };
 use mbx_cache_rustc::{
     ActionContext, BypassReason, CompilerIdentity, DiscoveredInputs, LinkerIdentity, ParseOptions,
@@ -173,6 +173,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
     let learned_enabled = session::learned_incremental_requested() && !verify;
     let mut verification = None;
     let mut action_lookup_attempted = false;
+    let mut current_diagnostic = None;
     let mut learned = LearnedPlan::default();
     // Probed once, before anything that would swallow the answer: a host whose
     // linker cannot be described bypasses here, where the reason is recorded,
@@ -189,6 +190,10 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
         && let Ok((candidates, discovered)) =
             action_from_current_dep_info(&compilation, &outputs.dep_info)
     {
+        current_diagnostic = candidates
+            .ordered()
+            .next()
+            .and_then(|action| action_diagnostic(action).ok());
         action_lookup_attempted = true;
         match restore_candidates(
             &candidates,
@@ -209,7 +214,16 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                 if verify {
                     verification = Some(cached);
                 } else {
-                    record_action_hit(&action, cached.restore, invocation.crate_name());
+                    let diagnostic = candidates
+                        .ordered()
+                        .find(|candidate| candidate.digest == action)
+                        .and_then(|candidate| action_diagnostic(candidate).ok());
+                    record_action_hit_with_diagnostic(
+                        &action,
+                        cached.restore,
+                        invocation.crate_name(),
+                        diagnostic,
+                    );
                     install_build_script_shim(&invocation, &outputs, &action);
                     let _ = replay_bytes(&cached.stdout, &cached.stderr);
                     return Ok(ExitCode::SUCCESS);
@@ -232,6 +246,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             &mut action_lookup_attempted,
             learned_enabled,
             &mut learned,
+            Some(&mut current_diagnostic),
         ) {
             Ok(Some(cached)) => {
                 if verify {
@@ -278,6 +293,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             &mut action_lookup_attempted,
             learned_enabled,
             &mut learned,
+            Some(&mut current_diagnostic),
         ) {
             Ok(Some(cached)) => {
                 install_build_script_shim(&invocation, &outputs, &cached.action);
@@ -328,6 +344,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
                             &mut action_lookup_attempted,
                             learned_enabled,
                             &mut learned,
+                            Some(&mut current_diagnostic),
                         )
                     });
                     match restored {
@@ -396,7 +413,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
             .try_into()
             .unwrap_or(u64::MAX),
     };
-    session::record_compiler_invocation(
+    session::record_compiler_invocation_with_diagnostic(
         if verification.is_some() {
             "verification"
         } else if learned.engaged() {
@@ -408,6 +425,7 @@ pub(crate) fn compile(rustc: &OsStr, arguments: &[OsString]) -> Result<ExitCode>
         },
         Some(&timing.crate_name),
         timing.duration_ns,
+        current_diagnostic,
     );
     let _ = replay_output(&output);
     if let Some(cached) = verification {
@@ -737,6 +755,7 @@ fn restore_predicted_result(
     action_lookup_attempted: &mut bool,
     learned_enabled: bool,
     learned: &mut LearnedPlan,
+    diagnostic: Option<&mut Option<ActionDiagnostic>>,
 ) -> Result<Option<CachedCompilation>> {
     let Compilation {
         invocation,
@@ -786,6 +805,7 @@ fn restore_predicted_result(
         action_lookup_attempted,
         learned_enabled,
         learned,
+        diagnostic,
     )
 }
 
@@ -807,6 +827,7 @@ fn restore_prediction_payload(
     action_lookup_attempted: &mut bool,
     learned_enabled: bool,
     learned: &mut LearnedPlan,
+    diagnostic: Option<&mut Option<ActionDiagnostic>>,
 ) -> Result<Option<CachedCompilation>> {
     let Compilation {
         invocation,
@@ -825,6 +846,12 @@ fn restore_prediction_payload(
     )?;
     discovered.clone().apply_to(&mut context)?;
     let candidates = ActionCandidates::build(invocation, context, compilation.linker.clone())?;
+    if let Some(diagnostic) = diagnostic {
+        *diagnostic = candidates
+            .ordered()
+            .next()
+            .and_then(|action| action_diagnostic(action).ok());
+    }
     if expected_action.is_some_and(|expected| !candidates.contains(expected)) {
         bail!("the action prediction no longer matches its predicted inputs");
     }
@@ -842,7 +869,16 @@ fn restore_prediction_payload(
         Some((action, mut cached)) => {
             cached.restore.avoided_compiler_duration_ns = input_prediction.compiler_duration_ns;
             if restore_outputs {
-                record_action_hit(&action, cached.restore, invocation.crate_name());
+                let diagnostic = candidates
+                    .ordered()
+                    .find(|candidate| candidate.digest == action)
+                    .and_then(|candidate| action_diagnostic(candidate).ok());
+                record_action_hit_with_diagnostic(
+                    &action,
+                    cached.restore,
+                    invocation.crate_name(),
+                    diagnostic,
+                );
             }
             // Re-record even an identical manifest prediction: the cumulative
             // manifest already inherits it, but this run's build receipt must
@@ -928,6 +964,96 @@ impl ActionCandidates {
     fn ordered(&self) -> impl Iterator<Item = &RustcAction> {
         self.portable.iter().chain(std::iter::once(&self.literal))
     }
+}
+
+/// Split a canonical rustc action into named hashes suitable for session
+/// history. The hashes preserve comparison fidelity without retaining source
+/// contents or environment values.
+fn action_diagnostic(action: &RustcAction) -> Result<ActionDiagnostic> {
+    let mut descriptor: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&action.bytes)?;
+    let mut components = BTreeMap::new();
+
+    if let Some(serde_json::Value::Object(compiler)) = descriptor.remove("compiler") {
+        for (name, value) in compiler {
+            components.insert(
+                format!("compiler {}", name.replace('_', " ")),
+                CacheDigest::blake3(&canonical_json(&value)?),
+            );
+        }
+    }
+    if let Some(serde_json::Value::Array(arguments)) = descriptor.remove("arguments") {
+        let mut occurrences = BTreeMap::<String, usize>::new();
+        for (index, value) in arguments.into_iter().enumerate() {
+            let base = value
+                .as_str()
+                .filter(|argument| argument.starts_with('-'))
+                .map(|argument| {
+                    let argument = argument.trim_start_matches('-');
+                    let (flag, value) = argument.split_once('=').unwrap_or((argument, ""));
+                    let nested = matches!(flag, "C" | "Z" | "codegen")
+                        .then(|| value.split_once('=').map_or(value, |(name, _)| name))
+                        .filter(|name| !name.is_empty());
+                    nested.map_or_else(
+                        || format!("argument --{flag}"),
+                        |name| format!("argument --{flag} {name}"),
+                    )
+                })
+                .unwrap_or_else(|| format!("argument #{}", index + 1));
+            let occurrence = occurrences.entry(base.clone()).or_default();
+            *occurrence += 1;
+            let name = if *occurrence == 1 {
+                base
+            } else {
+                format!("{base} #{}", *occurrence)
+            };
+            components.insert(name, CacheDigest::blake3(&canonical_json(&value)?));
+        }
+    }
+    if let Some(serde_json::Value::Object(linker)) = descriptor.remove("linker") {
+        for (name, value) in linker {
+            components.insert(
+                format!("linker {}", name.replace('_', " ")),
+                CacheDigest::blake3(&canonical_json(&value)?),
+            );
+        }
+    }
+    if let Some(serde_json::Value::Object(environment)) = descriptor.remove("environment") {
+        for (name, value) in environment {
+            components.insert(
+                format!("environment {name}"),
+                CacheDigest::blake3(&canonical_json(&value)?),
+            );
+        }
+    }
+
+    let mut inputs = BTreeMap::new();
+    if let Some(serde_json::Value::Array(entries)) = descriptor.remove("inputs") {
+        for entry in entries {
+            let Some(entry) = entry.as_object() else {
+                continue;
+            };
+            let Some(path) = entry.get("path").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let Some(digest) = entry.get("digest") else {
+                continue;
+            };
+            inputs.insert(path.to_string(), serde_json::from_value(digest.clone())?);
+        }
+    }
+
+    // Version, kind, and adapter version rarely move, but when they do they
+    // are the reason every otherwise-identical key changed.
+    components.insert(
+        "action model".into(),
+        CacheDigest::blake3(&canonical_json(&descriptor)?),
+    );
+    Ok(ActionDiagnostic {
+        action: action.digest.clone(),
+        components,
+        inputs,
+    })
 }
 
 /// Try each candidate key, returning the digest that hit alongside its result.
@@ -1164,6 +1290,7 @@ fn restore_flight_prediction(
     action_lookup_attempted: &mut bool,
     learned_enabled: bool,
     learned: &mut LearnedPlan,
+    diagnostic: Option<&mut Option<ActionDiagnostic>>,
 ) -> Result<Option<CachedCompilation>> {
     let context = base_action_context(
         compilation.rustc,
@@ -1181,6 +1308,7 @@ fn restore_flight_prediction(
         action_lookup_attempted,
         learned_enabled,
         learned,
+        diagnostic,
     )
 }
 

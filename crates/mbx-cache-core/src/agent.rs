@@ -41,8 +41,8 @@ use manifest::{
 pub use stats::{AgentStats, CompilerStats};
 use wire::MAX_REQUEST_BYTES;
 pub use wire::{
-    AGENT_PROTOCOL_VERSION, AgentEvent, AgentEventObserver, AgentRequest, AgentResponse,
-    RestoreStats,
+    AGENT_PROTOCOL_VERSION, ActionDiagnostic, AgentEvent, AgentEventObserver, AgentRequest,
+    AgentResponse, RestoreStats,
 };
 
 const MAX_EXECUTABLE_IDENTITIES: usize = 64;
@@ -1073,7 +1073,8 @@ impl CacheAgent {
                 action,
                 restore,
                 crate_name,
-            } => self.record_action_hit(&action, restore, crate_name),
+                diagnostic,
+            } => self.record_action_hit(&action, restore, crate_name, diagnostic),
             AgentRequest::RecordBypass { kind } => {
                 *self
                     .stats
@@ -1106,7 +1107,13 @@ impl CacheAgent {
                 outcome,
                 crate_name,
                 duration_ns,
-            } => self.record_compiler_invocation(&outcome, crate_name.as_deref(), duration_ns),
+                diagnostic,
+            } => self.record_compiler_invocation(
+                &outcome,
+                crate_name.as_deref(),
+                duration_ns,
+                diagnostic,
+            ),
             AgentRequest::RecordActionVerification { matched, restore } => {
                 self.record_materialization(restore);
                 self.stats.verifications.fetch_add(1, Ordering::Relaxed);
@@ -1455,6 +1462,7 @@ impl CacheAgent {
         action: &CacheDigest,
         restore: RestoreStats,
         crate_name: Option<String>,
+        diagnostic: Option<ActionDiagnostic>,
     ) -> Result<AgentResponse> {
         validate_crate_name(crate_name.as_deref())?;
         if self.actions.find(action)?.is_none() {
@@ -1470,6 +1478,7 @@ impl CacheAgent {
         self.emit(|| AgentEvent::ActionHit {
             crate_name,
             restore,
+            diagnostic,
         });
         Ok(AgentResponse::ActionHitRecorded)
     }
@@ -1501,6 +1510,7 @@ impl CacheAgent {
         outcome: &str,
         crate_name: Option<&str>,
         duration_ns: u64,
+        diagnostic: Option<ActionDiagnostic>,
     ) -> Result<AgentResponse> {
         if !matches!(
             outcome,
@@ -1525,6 +1535,7 @@ impl CacheAgent {
             outcome: outcome.to_string(),
             crate_name: crate_name.map(str::to_string),
             duration_ns,
+            diagnostic,
         });
         Ok(AgentResponse::CompilerInvocationRecorded)
     }

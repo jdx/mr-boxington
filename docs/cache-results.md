@@ -122,8 +122,10 @@ The usual causes, roughly in the order they show up:
   [limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
 - **The inputs actually differ.** A different toolchain, feature set, profile,
   or `RUSTFLAGS` between two checkouts is a different key, and the summary
-  reports it as an ordinary miss. `cargo tree` and comparing the two commands
-  usually finds it.
+  reports it as an ordinary miss. Run `mbx explain --last` to replay the most
+  recent recorded build and list, per missed crate, the key inputs that changed
+  since its last recorded hit. Session history stores hashes rather than source
+  contents or environment values.
 - **Build-script output paths.** A crate that embeds its `OUT_DIR` produces
   checkout-specific inputs for its dependents. mbx remaps this by default;
   `MBX_SHARE_OUT_DIR=0` disables that sharing. See

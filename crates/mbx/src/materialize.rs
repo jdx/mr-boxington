@@ -9,7 +9,8 @@
 use crate::session::{self, STAGING_ENV};
 use eyre::{Result, WrapErr as _, bail};
 use mbx_cache_core::{
-    AgentRequest, AgentResponse, CacheDigest, CacheFileNode, RestoreStats, canonical_json,
+    ActionDiagnostic, AgentRequest, AgentResponse, CacheDigest, CacheFileNode, RestoreStats,
+    canonical_json,
 };
 use mbx_cache_rustc::PathMapping;
 use serde::Serialize;
@@ -226,10 +227,20 @@ pub(crate) fn resolve_executable(executable: &OsStr) -> Result<PathBuf> {
 
 /// Tell the session a cached result was used.
 pub(crate) fn record_action_hit(action: &CacheDigest, restore: RestoreStats, crate_name: &str) {
+    record_action_hit_with_diagnostic(action, restore, crate_name, None);
+}
+
+pub(crate) fn record_action_hit_with_diagnostic(
+    action: &CacheDigest,
+    restore: RestoreStats,
+    crate_name: &str,
+    diagnostic: Option<ActionDiagnostic>,
+) {
     let responses = session::request_agent(&[AgentRequest::RecordActionHit {
         action: action.clone(),
         restore,
         crate_name: Some(crate_name.to_string()),
+        diagnostic,
     }]);
     match responses.map(|responses| responses.into_iter().next()) {
         Ok(Some(AgentResponse::ActionHitRecorded)) => {}

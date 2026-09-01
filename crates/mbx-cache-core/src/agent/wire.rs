@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Wire protocol version used between an in-process cache agent and its shims.
-pub const AGENT_PROTOCOL_VERSION: u8 = 6;
+pub const AGENT_PROTOCOL_VERSION: u8 = 7;
 /// Largest single protocol request the agent will read.
 ///
 /// Requests are small JSON objects; the largest legitimate ones carry an output
@@ -63,6 +63,9 @@ pub enum AgentRequest {
         restore: RestoreStats,
         /// Compiler crate name, when the invocation supplied one.
         crate_name: Option<String>,
+        /// Cache-key material retained for local miss diagnosis.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<ActionDiagnostic>,
     },
     /// A compilation the adapter declined to cache, grouped by reason.
     RecordBypass {
@@ -82,6 +85,9 @@ pub enum AgentRequest {
         crate_name: Option<String>,
         /// Wall time spent running the compiler.
         duration_ns: u64,
+        /// Cache-key material retained for local miss diagnosis.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<ActionDiagnostic>,
     },
     /// Account for a cache hit that was rebuilt for correctness verification.
     RecordActionVerification {
@@ -215,6 +221,8 @@ pub enum AgentEvent {
         crate_name: Option<String>,
         /// Restoration work performed by the adapter.
         restore: RestoreStats,
+        /// Cache-key material retained for local miss diagnosis.
+        diagnostic: Option<ActionDiagnostic>,
     },
     /// A compilation the adapter declined to cache.
     Bypass {
@@ -231,6 +239,8 @@ pub enum AgentEvent {
         crate_name: Option<String>,
         /// Wall time spent running the compiler.
         duration_ns: u64,
+        /// Cache-key material retained for local miss diagnosis.
+        diagnostic: Option<ActionDiagnostic>,
     },
     /// A hit was rebuilt to verify it.
     Verification {
@@ -244,6 +254,21 @@ pub enum AgentEvent {
         /// Human-readable single-line diagnostic.
         message: String,
     },
+}
+
+/// A privacy-preserving decomposition of an action key.
+///
+/// Values are content digests rather than source or environment contents. The
+/// names are enough to say what changed without copying secrets into session
+/// history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionDiagnostic {
+    /// Complete action-cache key.
+    pub action: CacheDigest,
+    /// Non-file key components, named for display.
+    pub components: BTreeMap<String, CacheDigest>,
+    /// Normalized input path to content digest.
+    pub inputs: BTreeMap<String, CacheDigest>,
 }
 
 /// A sink for [`AgentEvent`]s observed during one session.
