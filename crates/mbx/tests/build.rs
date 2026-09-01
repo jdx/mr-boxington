@@ -2121,7 +2121,12 @@ mod target_views {
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
             .find(|message| message["reason"] == "compiler-artifact")
             .expect("Cargo should report the built artifact");
-        let target = project.path().join("target");
+        // Cargo canonicalizes `/var` to `/private/var` on macOS. Anchor the
+        // expected public path to that same workspace spelling without
+        // canonicalizing `target` itself through the managed symlink.
+        let target = std::fs::canonicalize(project.path())
+            .unwrap()
+            .join("target");
         for filename in artifact["filenames"].as_array().unwrap() {
             let filename = Path::new(filename.as_str().unwrap());
             assert!(
