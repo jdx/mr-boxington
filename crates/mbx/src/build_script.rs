@@ -703,11 +703,17 @@ fn build_script_mappings() -> Vec<PathMapping> {
         ("CARGO_MANIFEST_DIR", "build_script_manifest_dir"),
         (session::WORKSPACE_ROOT_ENV, "workspace"),
         (session::TARGET_DIR_ENV, "target"),
-        ("CARGO_HOME", "cargo_home"),
     ] {
         if let Some(root) = std::env::var_os(name) {
             mappings.push(PathMapping::new(root, placeholder));
         }
+    }
+    if let Some(cargo_home) = std::env::var_os("CARGO_HOME").map(PathBuf::from) {
+        mappings.push(PathMapping::new(
+            cargo_home.join("registry"),
+            "cargo_registry",
+        ));
+        mappings.push(PathMapping::new(cargo_home, "cargo_home"));
     }
     mappings
 }

@@ -74,6 +74,26 @@ start fresh:
 The operating system and architecture are included in generated keys. Advanced
 workflows can provide complete `cache-key` and `restore-keys` inputs.
 
+### Docker builds
+
+Mount the mbx store and Cargo registry into the container at stable locations.
+The registry may either be mounted directly at `$CARGO_HOME/registry` or
+mounted elsewhere and symlinked from there:
+
+```sh
+docker run --rm \
+  --env CARGO_HOME=/tmp/cargo-home \
+  --env HOME=/tmp/build-home \
+  --mount "type=bind,source=$HOME/.cargo/registry,target=/tmp/host-cargo-registry" \
+  --mount "type=bind,source=$HOME/.cache/mbx,target=/tmp/build-home/.cache/mbx" \
+  builder \
+  sh -c 'mkdir -p "$CARGO_HOME" && ln -s /tmp/host-cargo-registry "$CARGO_HOME/registry" && mbx build'
+```
+
+mbx maps the registry separately from the rest of `CARGO_HOME`, so cached
+compiler inputs remain portable when that child symlink resolves outside the
+Cargo home directory.
+
 ### Closure bundles for action transports
 
 An action can transport only the cache entries produced or used by its builds,

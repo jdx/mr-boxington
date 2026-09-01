@@ -301,10 +301,42 @@ fn standalone_registry_mapping_uses_the_default_cargo_home() {
     assert!(mappings.iter().any(|mapping| {
         mapping.placeholder == "cargo_home" && mapping.root == home.join(".cargo")
     }));
+    assert!(mappings.iter().any(|mapping| {
+        mapping.placeholder == "cargo_registry" && mapping.root == home.join(".cargo/registry")
+    }));
     assert!(
         !mappings
             .iter()
             .any(|mapping| mapping.placeholder == "workspace")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cargo_registry_mapping_follows_a_child_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let cargo_home = directory.path().join("cargo-home");
+    let physical_registry = directory.path().join("host-cargo-registry");
+    std::fs::create_dir_all(&cargo_home).unwrap();
+    std::fs::create_dir_all(&physical_registry).unwrap();
+    symlink(&physical_registry, cargo_home.join("registry")).unwrap();
+    let source = physical_registry.join("src/index/widget-1.0.0/src/lib.rs");
+
+    let mappings = PathMapping::ordered(&path_mappings_with_env(
+        directory.path(),
+        None,
+        None,
+        |name| match name {
+            "CARGO_HOME" => Some(cargo_home.as_os_str().to_owned()),
+            _ => None,
+        },
+    ));
+
+    assert_eq!(
+        normalize_mapped_path(&source, directory.path(), &mappings).unwrap(),
+        "${cargo_registry}/src/index/widget-1.0.0/src/lib.rs"
     );
 }
 
