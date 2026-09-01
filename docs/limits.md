@@ -144,9 +144,11 @@ with the wrong compiler. A value that is a command rather than a path, such as
 Only a plain single-source object compile through a gcc-, clang-, or MSVC-style
 driver is admitted. Linking, preprocessing, assembly, Objective-C, precompiled
 headers, coverage instrumentation, compiler plugins, options forwarded to a
-sub-tool with `-Wp,`/`-Wa,`/`-Wl,`/`-Xclang`, and response files all bypass,
-as does any flag the adapter does not model. MSVC compiler PDBs, modules, and
-other extra outputs also bypass. A source or header that
+sub-tool with `-Wp,`/`-Wl,`/`-Xclang`, unmodeled `-Wa,` assembler options, and
+response files all bypass, as does any flag the adapter does not model. Known
+assembler options that add no inputs, such as `-Wa,--noexecstack`, are keyed
+and admitted. MSVC compiler PDBs, modules, and other extra outputs also bypass.
+A source or header that
 expands `__DATE__`, `__TIME__`, or `__TIMESTAMP__` bypasses too: its object is
 not a function of its inputs.
 

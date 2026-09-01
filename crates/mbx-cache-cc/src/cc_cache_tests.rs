@@ -167,6 +167,10 @@ fn actionable_bypasses_carry_remediation() {
         .remediation()
         .unwrap();
     assert!(remediation.contains("Unset"));
+    let remediation = CcBypassReason::ToolPassthrough("-Wa,--reads-input".into())
+        .remediation()
+        .unwrap();
+    assert!(remediation.contains("If you control the build script"));
     assert!(CcBypassReason::CompilerQuery.remediation().is_none());
 }
 
@@ -290,7 +294,11 @@ fn unlisted_f_and_m_flags_bypass_with_the_flag_text() {
 
 #[test]
 fn tool_passthrough_flags_bypass_even_with_admitted_prefixes() {
-    for flag in ["-Wl,-z,now", "-Wa,--noexecstack", "-Wp,-D_FORTIFY_SOURCE=2"] {
+    for flag in [
+        "-Wl,-z,now",
+        "-Wa,--defsym,version=1",
+        "-Wp,-D_FORTIFY_SOURCE=2",
+    ] {
         let arguments = argv(&[flag, "-c", "-o", "a.o", "a.c"]);
         assert_eq!(
             CcInvocation::parse(&arguments).unwrap_err().kind(),
@@ -308,6 +316,14 @@ fn tool_passthrough_flags_bypass_even_with_admitted_prefixes() {
         CcInvocation::parse(&arguments).unwrap_err().kind(),
         "tool-passthrough"
     );
+}
+
+#[test]
+fn no_input_assembler_options_stay_admitted_key_material() {
+    let flag = "-Wa,--noexecstack";
+    let arguments = argv(&[flag, "-c", "-o", "a.o", "a.c"]);
+    let invocation = CcInvocation::parse(&arguments).expect("option should be admitted");
+    assert!(invocation.arguments.contains(&Argument::Plain(flag.into())));
 }
 
 #[test]
