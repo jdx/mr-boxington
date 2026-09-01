@@ -78,12 +78,41 @@ fn setup_puts_rust_analyzer_checks_through_the_stable_cargo_shim() {
         "check",
         "--workspace",
         "--all-targets",
+        "--target-dir",
+        "target/rust-analyzer",
         "--message-format=json",
     ]));
     assert_eq!(
         configure_rust_analyzer(&config, &shim, SetupAction::Status).unwrap(),
         ExitCode::SUCCESS
     );
+}
+
+#[test]
+fn setup_upgrades_its_existing_rust_analyzer_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("rust-analyzer.toml");
+    let shim = directory.path().join("bin/cargo");
+    let mut command = toml_edit::Array::new();
+    command.extend([
+        shim.to_string_lossy().into_owned(),
+        "check".into(),
+        "--workspace".into(),
+        "--all-targets".into(),
+        "--message-format=json".into(),
+    ]);
+    let mut document = toml_edit::DocumentMut::new();
+    document["check"]["overrideCommand"] = toml_edit::value(command);
+    std::fs::write(&config, document.to_string()).unwrap();
+
+    assert_eq!(
+        configure_rust_analyzer(&config, &shim, SetupAction::Status).unwrap(),
+        ExitCode::FAILURE
+    );
+    configure_rust_analyzer(&config, &shim, SetupAction::Install).unwrap();
+
+    let written = std::fs::read_to_string(config).unwrap();
+    assert!(written.contains("target/rust-analyzer"));
 }
 
 #[test]

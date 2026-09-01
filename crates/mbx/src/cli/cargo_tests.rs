@@ -320,6 +320,30 @@ pub(super) fn managed_target_config(root: &Path) -> Config {
 }
 
 #[test]
+fn rust_analyzer_target_is_a_child_of_the_managed_view() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = managed_target_config(directory.path());
+    let workspace = directory.path().join("project");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let roots = Roots {
+        workspace_root: workspace.clone(),
+        target_dir: workspace.join(RUST_ANALYZER_TARGET_DIR),
+        target_dir_requested: true,
+    };
+
+    let placement = place_target_view(&config, &roots);
+
+    let managed = std::fs::read_link(workspace.join("target")).unwrap();
+    assert_eq!(
+        placement.directory.unwrap(),
+        workspace.join(RUST_ANALYZER_TARGET_DIR)
+    );
+    assert!(managed.starts_with(&config.target.root));
+    assert_eq!(placement.touch_path, workspace.join("target"));
+    assert_eq!(crate::target::stats(&config.target.root).unwrap().views, 1);
+}
+
+#[test]
 fn accepting_the_target_prompt_requests_migration_without_removing_outputs() {
     let directory = tempfile::tempdir().unwrap();
     let workspace = directory.path().join("project");
