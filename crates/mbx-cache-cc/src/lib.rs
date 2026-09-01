@@ -189,6 +189,12 @@ const SEPARATE_PATH_FLAGS: &[&str] = &[
 
 const TOOL_PASSTHROUGH_FLAGS: &[&str] = &["-Xassembler", "-Xclang", "-Xlinker", "-Xpreprocessor"];
 
+/// Assembler options whose effects are completely described by their text.
+///
+/// Other assembler options can name files that dependency discovery does not
+/// report, so they remain conservative passthrough bypasses.
+const SUPPORTED_ASSEMBLER_OPTIONS: &[&str] = &["--noexecstack"];
+
 const COMPILER_QUERY_FLAGS: &[&str] = &[
     "--help",
     "--version",
@@ -241,7 +247,7 @@ impl CcBypassReason {
                 "Generate headers before compilation instead of changing an include directory while the compiler is running.",
             ),
             Self::UnknownFlag(_) | Self::ToolPassthrough(_) => Some(
-                "Remove the reported compiler option, or upgrade mbx if the option should be modeled.",
+                "Upgrade mbx or report the unmodeled compiler option. If you control the build script, removing the option can also make the compilation cacheable.",
             ),
             Self::UnmappedAbsolutePath(_) => Some(
                 "Move the input under a mapped project or system root, or keep this compilation uncached.",
@@ -1259,6 +1265,15 @@ impl<'a> Parser<'a> {
         }
         if value == "--coverage" {
             return Err(CcBypassReason::CoverageInstrumentation(value.into()));
+        }
+        if let Some(options) = value.strip_prefix("-Wa,")
+            && !options.is_empty()
+            && options
+                .split(',')
+                .all(|option| SUPPORTED_ASSEMBLER_OPTIONS.contains(&option))
+        {
+            self.parsed.push(Argument::Plain(value.into()));
+            return Ok(());
         }
         if TOOL_PASSTHROUGH_FLAGS.contains(&value)
             || value.starts_with("-Wp,")
