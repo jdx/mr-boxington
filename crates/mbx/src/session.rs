@@ -73,6 +73,7 @@ pub(crate) const WORKSPACE_ROOT_ENV: &str = "MBX_WORKSPACE_ROOT";
 pub(crate) const TARGET_DIR_ENV: &str = "MBX_TARGET_DIR";
 pub(crate) const BUILD_SCRIPT_REAL_SUFFIX: &str = ".mbx-real";
 const PREVIOUS_RUSTC_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WRAPPER";
+const PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WORKSPACE_WRAPPER";
 const REAL_RUSTDOC_ENV: &str = "MBX_REAL_RUSTDOC";
 pub(crate) const BYPASS_LOG_ENV: &str = "MBX_BYPASS_LOG";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -253,6 +254,19 @@ impl CacheSession {
                 "RUSTC_WRAPPER is already set to {previous}; deferring to it, so this build is not cached"
             );
             environment.insert(PREVIOUS_RUSTC_WRAPPER_ENV.into(), previous);
+        }
+        if let Some(previous) = environment.get("RUSTC_WORKSPACE_WRAPPER") {
+            // Cargo nests this inside RUSTC_WRAPPER, so the shim receives the
+            // workspace wrapper where it ordinarily receives rustc. Remember
+            // that path both to recognize the nested invocation and to avoid
+            // silently treating rustc itself as an input file.
+            warn!(
+                "RUSTC_WORKSPACE_WRAPPER is already set to {previous}; deferring to it for workspace crates, so those compilations are not cached"
+            );
+            environment.insert(
+                PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV.into(),
+                previous.clone(),
+            );
         }
         let rustdoc = configured_rustdoc(environment);
         environment.insert(REAL_RUSTDOC_ENV.into(), rustdoc);
@@ -1069,7 +1083,9 @@ pub fn run_rustc_shim() -> ExitCode {
         return ExitCode::from(1);
     };
     let arguments = arguments.collect::<Vec<_>>();
-    if std::env::var_os(PREVIOUS_RUSTC_WRAPPER_ENV).is_none() {
+    let is_workspace_wrapper = std::env::var_os(PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV)
+        .is_some_and(|wrapper| wrapper == rustc);
+    if std::env::var_os(PREVIOUS_RUSTC_WRAPPER_ENV).is_none() && !is_workspace_wrapper {
         match crate::rustc::compile(&rustc, &arguments) {
             Ok(exit_code) => return exit_code,
             Err(error) => {
@@ -1118,6 +1134,7 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
     };
     command.args(&arguments);
     command.env_remove(PREVIOUS_RUSTC_WRAPPER_ENV);
+    command.env_remove(PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV);
 
     #[cfg(unix)]
     {

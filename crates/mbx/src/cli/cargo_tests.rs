@@ -97,16 +97,27 @@ fn resolves_a_relative_directory_against_the_working_directory() {
 }
 
 #[test]
-fn carries_an_inherited_wrapper_into_the_session() {
+fn carries_inherited_wrappers_into_the_session() {
     let cwd = Path::new("/workspace");
     let with = inherited_environment(
-        |name| (name == "RUSTC_WRAPPER").then(|| "/usr/bin/sccache".to_string()),
+        |name| match name {
+            "RUSTC_WRAPPER" => Some("/usr/bin/sccache".to_string()),
+            "RUSTC_WORKSPACE_WRAPPER" => Some("/usr/bin/workspace-rustc".to_string()),
+            _ => None,
+        },
         cwd,
     );
     assert_eq!(with.get("RUSTC_WRAPPER").unwrap(), "/usr/bin/sccache");
+    assert_eq!(
+        with.get("RUSTC_WORKSPACE_WRAPPER").unwrap(),
+        "/usr/bin/workspace-rustc"
+    );
 
     // An empty value is how a shell unsets it in practice.
-    let empty = inherited_environment(|name| (name == "RUSTC_WRAPPER").then(String::new), cwd);
+    let empty = inherited_environment(
+        |name| matches!(name, "RUSTC_WRAPPER" | "RUSTC_WORKSPACE_WRAPPER").then(String::new),
+        cwd,
+    );
     assert!(empty.is_empty());
     assert!(inherited_environment(|_| None, cwd).is_empty());
 }
