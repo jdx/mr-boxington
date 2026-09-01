@@ -154,7 +154,10 @@ pub fn run() -> Result<ExitCode> {
         args.command = original_exec_arguments(&original)?;
     }
     if let Commands::Doctor(args) = &cli.command {
-        shim::prepare_explicit_cargo()?;
+        // Doctor describes the toolchain selected at this invocation site.
+        // In particular, a mise Cargo wrapper is what resolves a project-local
+        // toolchain; excluding it first would make the version check fall
+        // through to an unrelated Cargo later on PATH.
         return doctor::run(args, toolchain);
     }
     let (config, settings) = Config::load_for_cli()?;
