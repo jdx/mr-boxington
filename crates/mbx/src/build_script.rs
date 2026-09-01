@@ -859,22 +859,35 @@ mod tests {
 
     #[test]
     fn build_script_mappings_use_the_default_cargo_home() {
-        let home = PathBuf::from("/home/builder");
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
         let mappings = build_script_mappings_with_env(|name| match name {
             "HOME" => Some(home.clone()),
             _ => None,
         });
+        let registry_input = home
+            .join(".cargo")
+            .join("registry")
+            .join("src")
+            .join("index")
+            .join("widget-1.0.0")
+            .join("src")
+            .join("lib.rs");
+        let registry_key = PathBuf::from("${cargo_registry}")
+            .join("src")
+            .join("index")
+            .join("widget-1.0.0")
+            .join("src")
+            .join("lib.rs");
 
         assert_eq!(
-            normalize_environment_value(
-                "/home/builder/.cargo/registry/src/index/widget-1.0.0/src/lib.rs",
-                &mappings,
-            ),
-            "${cargo_registry}/src/index/widget-1.0.0/src/lib.rs"
+            normalize_environment_value(&registry_input.to_string_lossy(), &mappings),
+            registry_key.to_string_lossy()
         );
+        let cargo_bin = home.join(".cargo").join("bin");
         assert_eq!(
-            normalize_environment_value("/home/builder/.cargo/bin", &mappings),
-            "${cargo_home}/bin"
+            normalize_environment_value(&cargo_bin.to_string_lossy(), &mappings),
+            PathBuf::from("${cargo_home}").join("bin").to_string_lossy()
         );
     }
 
