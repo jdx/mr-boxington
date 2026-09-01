@@ -20,11 +20,11 @@ const DEFAULT_TARGET_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
-/// The largest a budget nobody configured will grow to.
-///
-/// Scaling without a ceiling would hand a 4TB workstation hundreds of
-/// gigabytes it never asked to give up.
-const MAX_SCALED_BUDGET: u64 = 100 * GIB;
+/// The largest the action-store budget nobody configured will grow to.
+const MAX_STORE_BUDGET: u64 = 500 * GIB;
+
+/// The largest the managed-target budget nobody configured will grow to.
+const MAX_TARGET_BUDGET: u64 = 100 * GIB;
 
 /// Scaled budgets are rounded down to a multiple of this.
 ///
@@ -45,6 +45,7 @@ struct ScaledBudget {
     /// Percent of the whole disk.
     percent: u64,
     floor: u64,
+    ceiling: u64,
     /// Used when the disk cannot be measured. Guessing a disk size would be
     /// worse: this is the budget mbx shipped with before it scaled them.
     fallback: u64,
@@ -53,6 +54,7 @@ struct ScaledBudget {
 const STORE_BUDGET: ScaledBudget = ScaledBudget {
     percent: 5,
     floor: 5 * GIB,
+    ceiling: MAX_STORE_BUDGET,
     fallback: 20 * GIB,
 };
 
@@ -61,6 +63,7 @@ const STORE_BUDGET: ScaledBudget = ScaledBudget {
 const TARGET_BUDGET: ScaledBudget = ScaledBudget {
     percent: 10,
     floor: 10 * GIB,
+    ceiling: MAX_TARGET_BUDGET,
     fallback: 30 * GIB,
 };
 
@@ -73,7 +76,7 @@ impl ScaledBudget {
         // Floors and the ceiling are whole increments themselves, so clamping
         // cannot reintroduce a ragged number.
         let whole = share - (share % BUDGET_INCREMENT);
-        whole.clamp(self.floor, MAX_SCALED_BUDGET)
+        whole.clamp(self.floor, self.ceiling)
     }
 }
 
@@ -258,7 +261,7 @@ struct RawGc {
     /// Action-store and per-session remote-download budget.
     #[usage(
         env = "MBX_GC_MAX_SIZE",
-        default_note = "5% of the cache disk, from 5GiB to 100GiB"
+        default_note = "5% of the cache disk, from 5GiB to 500GiB"
     )]
     max_size: Option<String>,
     /// Combined action-store and managed-target budget, or "none".
@@ -1018,10 +1021,13 @@ mod tests {
             (Some(32 * GIB), STORE_BUDGET.floor, TARGET_BUDGET.floor),
             (Some(400 * GIB), 20 * GIB, 40 * GIB),
             // 5% and 10% of 1TiB are 51.2 and 102.4 GiB: the first rounds down
-            // to a whole increment, the second meets the ceiling.
-            (Some(1_024 * GIB), 50 * GIB, MAX_SCALED_BUDGET),
-            // A large disk stops at the ceiling on both counts.
-            (Some(8_000 * GIB), MAX_SCALED_BUDGET, MAX_SCALED_BUDGET),
+            // to a whole increment, the second meets its ceiling.
+            (Some(1_024 * GIB), 50 * GIB, MAX_TARGET_BUDGET),
+            // A large shared disk can give the store more than the old 100GiB
+            // ceiling while managed targets remain capped there.
+            (Some(8_000 * GIB), 400 * GIB, MAX_TARGET_BUDGET),
+            // The store still has a ceiling on exceptionally large disks.
+            (Some(20_000 * GIB), MAX_STORE_BUDGET, MAX_TARGET_BUDGET),
             // An unmeasurable disk uses the fixed fallbacks.
             (None, STORE_BUDGET.fallback, TARGET_BUDGET.fallback),
         ];
@@ -1050,7 +1056,7 @@ mod tests {
                     "{resolved} is not a whole increment for a {disk_gib}GiB disk"
                 );
                 assert!(resolved >= budget.floor);
-                assert!(resolved <= MAX_SCALED_BUDGET);
+                assert!(resolved <= budget.ceiling);
             }
         }
     }
@@ -1105,7 +1111,7 @@ mod tests {
         assert_eq!(config.gc.max_bytes, STORE_BUDGET.floor, "5% of 64GiB");
         assert_eq!(
             settings.retention.target_max_bytes,
-            Some(MAX_SCALED_BUDGET),
+            Some(MAX_TARGET_BUDGET),
             "10% of 4TiB, at the ceiling"
         );
     }

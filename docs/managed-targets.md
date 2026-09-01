@@ -44,7 +44,7 @@ a build server do not need the same configuration:
 
 | Budget | Default | Bounds |
 | --- | --- | --- |
-| `gc.max_size` (action store) | 5% of the disk | 5 GiB to 100 GiB |
+| `gc.max_size` (action store) | 5% of the disk | 5 GiB to 500 GiB |
 | `target.max_size` (managed targets) | 10% of the disk | 10 GiB to 100 GiB |
 
 Scaled budgets are rounded down to a whole 5 GiB. When the disk cannot be

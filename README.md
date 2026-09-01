@@ -122,9 +122,9 @@ startup files.
 Collection runs after a build, at most once an hour, and needs no
 configuration. Both size budgets default to a share of the disk holding the
 cache — 5% for the action store and 10% for managed `target/` directories,
-each from its floor (5 GiB and 10 GiB) up to 100 GiB and rounded down to a
-whole 5 GiB — and a managed directory is also collected once its checkout is
-gone or it has sat unused for 30 days.
+from floors of 5 GiB and 10 GiB up to 500 GiB and 100 GiB respectively, and
+rounded down to a whole 5 GiB — and a managed directory is also collected once
+its checkout is gone or it has sat unused for 30 days.
 
 mbx keeps a running total of what that has been worth and reports one line of
 it after a build:

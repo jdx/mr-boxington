@@ -17,9 +17,9 @@ misspelled setting is an error rather than a silent no-op.
 
 mbx bounds its own disk use without being configured. The two size budgets
 default to a share of the disk holding the cache — 5% for the action store and
-10% for managed target directories — each from its floor (5 GiB and 10 GiB) up
-to 100 GiB, rounded down to a whole 5 GiB. Managed targets are also collected
-after 30 days unused.
+10% for managed target directories — from floors of 5 GiB and 10 GiB up to
+500 GiB and 100 GiB respectively, rounded down to a whole 5 GiB. Managed
+targets are also collected after 30 days unused.
 
 Setting any of them outright overrides the scaling; `"none"` disables
 `target.max_size`, `target.max_age`, and `gc.max_total_size`. See

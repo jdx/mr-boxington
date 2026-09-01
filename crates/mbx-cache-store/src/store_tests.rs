@@ -812,12 +812,16 @@ fn treats_a_store_with_no_checkout_records_as_plain_lru() {
 fn drops_checkout_records_whose_worktree_is_gone() {
     let directory = tempfile::tempdir().unwrap();
     let store = directory.path().join("store");
-    let gone = directory.path().join("gone");
+    let discarded_parent = directory.path().join("temporary");
+    let gone = discarded_parent.join("codex/worktree");
     std::fs::create_dir_all(&gone).unwrap();
     record_checkout(&store, &"e".repeat(64), &gone, &gone.join("target")).unwrap();
 
     assert_eq!(stats(&store).unwrap().live_checkouts, 1);
-    std::fs::remove_dir_all(&gone).unwrap();
+    // Codex and temporary-worktree managers discard the checkout together
+    // with its parent hierarchy. The surviving temp directory is the nearest
+    // ancestor that can corroborate the deletion.
+    std::fs::remove_dir_all(&discarded_parent).unwrap();
     let after = stats(&store).unwrap();
     assert_eq!(after.stale_checkouts, 1);
     assert_eq!(after.live_checkouts, 0);
@@ -917,24 +921,36 @@ fn ignores_what_it_did_not_write_beside_the_checkout_records() {
 }
 
 #[test]
-fn keeps_a_checkout_whose_absence_it_cannot_corroborate() {
+fn corroborates_a_removed_checkout_through_its_nearest_existing_ancestor() {
     let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("store");
+    std::fs::create_dir_all(&store).unwrap();
 
-    // A checkout that is gone from a parent that is still there is the one
-    // case worth believing: that is what deleting a worktree looks like.
+    // A checkout that is gone from a parent on the store's filesystem is worth
+    // believing: that is what deleting a worktree looks like.
     let parent = directory.path().join("worktrees");
     std::fs::create_dir_all(&parent).unwrap();
-    assert!(!checkout_is_live(&parent.join("removed")));
+    assert!(!checkout_is_live_on(&store, &parent.join("removed")));
 
-    // A checkout whose parent went with it looks like an ejected volume or a
-    // mount that is temporarily away, and un-rooting those would throw away
-    // a cache somebody is still using.
-    assert!(checkout_is_live(
+    // Worktree managers remove their empty parent hierarchy too. The nearest
+    // remaining ancestor still corroborates that this checkout was deleted.
+    assert!(!checkout_is_live_on(
+        &store,
         &directory.path().join("gone/deeper/still")
     ));
 
     // And anything still on disk is live whatever its parent says.
-    assert!(checkout_is_live(directory.path()));
+    assert!(checkout_is_live_on(&store, directory.path()));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn keeps_a_missing_checkout_beneath_a_different_filesystem() {
+    let directory = tempfile::tempdir().unwrap();
+    assert!(checkout_is_live_on(
+        directory.path(),
+        Path::new("/proc/mbx-checkout-that-does-not-exist")
+    ));
 }
 
 #[test]
