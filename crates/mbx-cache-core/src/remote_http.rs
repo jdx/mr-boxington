@@ -37,6 +37,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use url::{Host, Url};
 
+const MAX_REMOTE_ERROR_BYTES: usize = 4 * 1024;
+
 struct DownloadedBlobPack {
     directory: tempfile::TempDir,
     blobs: Vec<(CacheDigest, PathBuf)>,
@@ -320,7 +322,8 @@ impl HttpRemoteCache {
         {
             return Ok(NegotiatedCapabilities::default());
         }
-        let bytes = read_bounded_json(response.error_for_status()?, "capabilities").await?;
+        let bytes =
+            read_bounded_json(error_for_status_with_body(response).await?, "capabilities").await?;
         let capabilities: RemoteCacheCapabilities = serde_json::from_slice(&bytes)?;
         if capabilities.protocol.major != PROTOCOL_VERSION {
             bail!(
@@ -408,7 +411,11 @@ impl HttpRemoteCache {
             self.action_promises_disabled.store(true, Ordering::Relaxed);
             return Ok(None);
         }
-        let bytes = read_bounded_json(response.error_for_status()?, "action promise").await?;
+        let bytes = read_bounded_json(
+            error_for_status_with_body(response).await?,
+            "action promise",
+        )
+        .await?;
         let state: ActionPromiseState = serde_json::from_slice(&bytes)?;
         state.validate()?;
         if let ActionPromiseState::Complete { prediction } = &state {
@@ -450,7 +457,7 @@ impl HttpRemoteCache {
             self.action_promises_disabled.store(true, Ordering::Relaxed);
             return Ok(false);
         }
-        response.error_for_status()?;
+        error_for_status_with_body(response).await?;
         Ok(true)
     }
 
@@ -533,7 +540,7 @@ impl HttpRemoteCache {
             ) {
                 return Ok(None);
             }
-            let response = response.error_for_status()?;
+            let response = error_for_status_with_body(response).await?;
             let media_type = response
                 .headers()
                 .get(CONTENT_TYPE)
@@ -573,7 +580,9 @@ impl HttpRemoteCache {
             if response.status() == StatusCode::NOT_FOUND {
                 return Ok(None);
             }
-            let bytes = read_bounded_json(response.error_for_status()?, "action result").await?;
+            let bytes =
+                read_bounded_json(error_for_status_with_body(response).await?, "action result")
+                    .await?;
             Ok(Some(serde_json::from_slice::<RemoteActionResult>(&bytes)?))
         })
         .await?;
@@ -645,9 +654,12 @@ impl HttpRemoteCache {
                 self.action_batches_disabled.store(true, Ordering::Relaxed);
                 return Ok(None);
             }
-            let bytes =
-                read_json_within(response.error_for_status()?, "action result batch", bound)
-                    .await?;
+            let bytes = read_json_within(
+                error_for_status_with_body(response).await?,
+                "action result batch",
+                bound,
+            )
+            .await?;
             Ok(Some(serde_json::from_slice::<ActionResultBatch>(&bytes)?))
         })
         .await?;
@@ -682,7 +694,7 @@ impl HttpRemoteCache {
                 .send()
                 .await?;
             if response.status() != StatusCode::PRECONDITION_FAILED {
-                response.error_for_status()?;
+                error_for_status_with_body(response).await?;
             }
             Ok(())
         })
@@ -707,7 +719,7 @@ impl HttpRemoteCache {
             if response.status() == StatusCode::NOT_FOUND {
                 return Ok(None);
             }
-            let response = response.error_for_status()?;
+            let response = error_for_status_with_body(response).await?;
             let etag = parse_strong_etag(response.headers().get(ETAG))?;
             let bytes = read_bounded_json(response, "action manifest").await?;
             Ok(Some(RemoteActionManifest { bytes, etag }))
@@ -743,7 +755,7 @@ impl HttpRemoteCache {
             if response.status() == StatusCode::PRECONDITION_FAILED {
                 return Ok(ManifestPutOutcome::PreconditionFailed);
             }
-            response.error_for_status()?;
+            error_for_status_with_body(response).await?;
             Ok(ManifestPutOutcome::Stored)
         })
         .await
@@ -764,12 +776,12 @@ impl HttpRemoteCache {
         }
         let url = self.blob_endpoint(digest)?;
         retry_async("GET", &url, self.retries, || async {
-            let mut response = self
+            let response = self
                 .request(reqwest::Method::GET, url.clone(), media_type)
                 .await?
                 .send()
-                .await?
-                .error_for_status()?;
+                .await?;
+            let mut response = error_for_status_with_body(response).await?;
             // Stop reading as soon as the response outgrows the digest it claims
             // to satisfy. A server that streams more than it promised must not be
             // able to exhaust this process before verification rejects it.
@@ -803,12 +815,12 @@ impl HttpRemoteCache {
         }
         let url = self.blob_endpoint(digest)?;
         let download = retry_async("GET", &url, self.retries, || async {
-            let mut response = self
+            let response = self
                 .request(reqwest::Method::GET, url.clone(), BLOB_MEDIA_TYPE)
                 .await?
                 .send()
                 .await?;
-            response.error_for_status_ref()?;
+            let mut response = error_for_status_with_body(response).await?;
             fs::create_dir_all(staging_dir)?;
             let temporary = tempfile::NamedTempFile::new_in(staging_dir)?;
             let mut output = tokio::fs::File::from_std(temporary.reopen()?);
@@ -930,8 +942,11 @@ impl HttpRemoteCache {
                     .store(true, Ordering::Relaxed);
                 return Ok(None);
             }
-            let bytes =
-                read_bounded_json(response.error_for_status()?, "blob pack receipt").await?;
+            let bytes = read_bounded_json(
+                error_for_status_with_body(response).await?,
+                "blob pack receipt",
+            )
+            .await?;
             Ok(Some(serde_json::from_slice::<BlobPackReceipt>(&bytes)?))
         })
         .await
@@ -993,13 +1008,51 @@ impl HttpRemoteCache {
             };
             let response = request.send().await?;
             if response.status() != StatusCode::PRECONDITION_FAILED {
-                response.error_for_status()?;
+                error_for_status_with_body(response).await?;
             }
             Ok(())
         })
         .await
     }
 }
+
+/// Preserve a failed request's status for retry classification while adding a
+/// bounded, log-safe version of the server's explanation to the error.
+async fn error_for_status_with_body(mut response: reqwest::Response) -> Result<reqwest::Response> {
+    let Err(status_error) = response.error_for_status_ref() else {
+        return Ok(response);
+    };
+    let mut body = Vec::new();
+    let mut truncated = false;
+    while let Some(chunk) = response.chunk().await? {
+        let remaining = MAX_REMOTE_ERROR_BYTES.saturating_sub(body.len());
+        if chunk.len() > remaining {
+            body.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let body = String::from_utf8_lossy(&body);
+    let detail = body
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let detail = detail.trim();
+    if detail.is_empty() {
+        return Err(status_error.into());
+    }
+    let suffix = if truncated { " (truncated)" } else { "" };
+    let message = format!("{status_error}: remote cache server response: {detail}{suffix}");
+    Err(eyre::Report::new(status_error).wrap_err(message))
+}
+
 pub(crate) fn blob_pack_chunk(
     digests: &[CacheDigest],
     limits: BlobPackLimits,

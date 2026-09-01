@@ -84,6 +84,40 @@ fn action_result_keys_require_blake3() {
 }
 
 #[tokio::test]
+async fn action_upload_errors_include_a_bounded_server_response() {
+    let mut server = mockito::Server::new_async().await;
+    let action = CacheDigest::blake3(b"rejected action");
+    let endpoint = format!("/v1/action-results/blake3/{}/{}", action.hash, action.size);
+    let mut response = "invalid rustc action: unexpected field `linker`".to_string();
+    response.push_str(&"x".repeat(MAX_REMOTE_ERROR_BYTES));
+    response.push_str("unbounded-tail");
+    let upload = server
+        .mock("PUT", endpoint.as_str())
+        .with_status(422)
+        .with_body(response)
+        .create_async()
+        .await;
+    let result = RemoteActionResult {
+        action,
+        metadata: None,
+        output_root: None,
+        version: 1,
+    };
+
+    let error = test_client(&server)
+        .put_action_result(&result)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("422 Unprocessable Entity"), "{error}");
+    assert!(error.contains("unexpected field `linker`"), "{error}");
+    assert!(error.contains("(truncated)"), "{error}");
+    assert!(!error.contains("unbounded-tail"), "{error}");
+    upload.assert_async().await;
+}
+
+#[tokio::test]
 async fn joins_an_advertised_action_promise() {
     let mut server = mockito::Server::new_async().await;
     mock_capabilities(&mut server, serde_json::json!({ "action_promises": true })).await;
