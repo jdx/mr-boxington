@@ -338,6 +338,10 @@ enum Argument {
         path: PathBuf,
         trailing_slash: bool,
     },
+    /// A `-fuse-ld=<name>` handed to the driver, selecting which linker a
+    /// link invokes. Modeled for native links only, where the linker identity
+    /// probe resolves and pins the linker it names.
+    FuseLd(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -442,6 +446,17 @@ impl RustcInvocation {
                 return None;
             };
             value.strip_prefix("--codegen=linker=").map(Path::new)
+        })
+    }
+
+    /// Linker selected with `-C link-arg=-fuse-ld=<name>`, if the invocation
+    /// passes one the adapter models.
+    pub fn fuse_ld(&self) -> Option<&str> {
+        self.arguments.iter().find_map(|argument| {
+            let Argument::FuseLd(selection) = argument else {
+                return None;
+            };
+            Some(selection.as_str())
         })
     }
 
@@ -1488,6 +1503,28 @@ impl<'a> Parser<'a> {
         {
             return Err(BypassReason::UnknownCodegenOption(name.into()));
         }
+        // `-fuse-ld=<name>` selects the linker the driver invokes. Parsed
+        // rather than keyed as text so the linker identity probe can pin the
+        // selected linker; a repeated selection dedups, and a conflicting
+        // second selection falls through to Plain, which native-link handling
+        // declines to model. The driver honors the last selection, so a
+        // conflict is a link whose linker this adapter cannot name.
+        if name == "link-arg"
+            && let Some((_, option)) = value.split_once('=')
+            && let Some(selection) = option.strip_prefix("-fuse-ld=")
+            && !selection.is_empty()
+            && !selection.contains(',')
+            && !self.parsed.iter().any(
+                |argument| matches!(argument, Argument::FuseLd(existing) if existing != selection),
+            )
+        {
+            if !self.parsed.iter().any(
+                |argument| matches!(argument, Argument::FuseLd(existing) if existing == selection),
+            ) {
+                self.parsed.push(Argument::FuseLd(selection.to_owned()));
+            }
+            return Ok(());
+        }
         // `-oso_prefix` names a checkout-specific path, so it is parsed
         // rather than keyed as text: the path normalizes like every other
         // path in the key, which is what lets two checkouts passing their own
@@ -1607,6 +1644,25 @@ impl<'a> Parser<'a> {
             && let Some(option) = self.first_link_argument()
         {
             return Err(BypassReason::UnmodeledLinkArgument(option.to_owned()));
+        }
+        // `-fuse-ld` is modeled only for native links, where the linker
+        // identity probe resolves and pins the linker it names. A wasm or
+        // other non-native link consuming the selection has no identity that
+        // describes it, so it declines the action like any other link
+        // argument. Where nothing links, the selection is inert and the key
+        // carries its text.
+        if let Some(selection) = self.parsed.iter().find_map(|argument| {
+            let Argument::FuseLd(selection) = argument else {
+                return None;
+            };
+            Some(selection.as_str())
+        }) && !matches!(
+            link_output,
+            LinkOutput::Library | LinkOutput::NativeExecutable | LinkOutput::NativeProcMacro
+        ) {
+            return Err(BypassReason::UnmodeledLinkArgument(format!(
+                "link-arg=-fuse-ld={selection}"
+            )));
         }
         if self.parsed.iter().any(|argument| {
             matches!(argument, Argument::Plain(value) if value.starts_with("--codegen=linker="))
@@ -2010,6 +2066,7 @@ impl<'a> ActionBuilder<'a> {
                 self.normalize_path(path)?,
                 if *trailing_slash { "/" } else { "" }
             )),
+            Argument::FuseLd(selection) => Ok(format!("--codegen=link-arg=-fuse-ld={selection}")),
         }
     }
 

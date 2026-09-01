@@ -73,7 +73,41 @@ fn the_identity_round_trips_through_its_recorded_form() {
 /// Probe this host without the agent round-trip the real path memoizes through.
 fn identity_without_agent() -> Result<LinkerIdentity> {
     let driver = which::which("cc")?;
-    probe(&driver)
+    probe(&driver, None)
+}
+
+/// A `-fuse-ld` selection is resolved through the driver first, and a
+/// selection naming nothing the driver or PATH can find is an error rather
+/// than a key pointing at a linker nobody pinned.
+#[test]
+fn a_fuse_ld_selection_resolves_or_is_refused() {
+    let Ok(driver) = which::which("cc") else {
+        return;
+    };
+
+    let bogus = resolve_fuse_ld(&driver, "definitely-not-a-real-linker");
+    assert!(
+        bogus.is_err(),
+        "a nonexistent linker must not resolve: {bogus:?}"
+    );
+
+    // An absolute selection names the linker directly, no resolution needed.
+    let direct = Path::new(if cfg!(windows) { "C:/ld" } else { "/opt/ld" });
+    assert_eq!(
+        resolve_fuse_ld(&driver, direct.to_str().unwrap()).unwrap(),
+        direct
+    );
+
+    // Whatever the host does provide resolves to an absolute path that
+    // exists: anything less could alias two linkers in one memoization key.
+    for name in ["mold", "lld", "bfd", "gold"] {
+        if let Ok(program) = resolve_fuse_ld(&driver, name) {
+            assert!(
+                program.is_absolute() && program.exists(),
+                "{name} resolved to {program:?}"
+            );
+        }
+    }
 }
 
 /// The probe names are platform knowledge, but the rule about them is not:

@@ -1067,7 +1067,7 @@ fn linker_for(invocation: &RustcInvocation) -> Result<Option<LinkerIdentity>> {
     if !invocation.links_natively() {
         return Ok(None);
     }
-    match crate::linker::identity_for(invocation.linker_override()) {
+    match crate::linker::identity_for(invocation.linker_override(), invocation.fuse_ld()) {
         Ok(identity) => Ok(Some(identity)),
         Err(error) => Err(BypassReason::UnportableNativeLink(format!(
             "the linker could not be identified: {error:#}"

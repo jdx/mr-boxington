@@ -1813,19 +1813,77 @@ fn link_arguments_bypass_whatever_actually_links() {
         );
     }
 
-    for flag in ["-Clink-arg=-fuse-ld=lld", "-Clink-arg=/STACK:8000000"] {
-        let native = args(&["--test", "--emit=dep-info,link", flag, "src/lib.rs"]);
-        assert_eq!(
-            RustcInvocation::parse_with(&native, native_links()),
-            Err(BypassReason::UnmodeledLinkArgument(
-                flag.strip_prefix("-C").unwrap().into()
-            )),
-            "{flag} should not be cacheable on a native link"
-        );
-    }
+    let flag = "-Clink-arg=/STACK:8000000";
+    let native = args(&["--test", "--emit=dep-info,link", flag, "src/lib.rs"]);
+    assert_eq!(
+        RustcInvocation::parse_with(&native, native_links()),
+        Err(BypassReason::UnmodeledLinkArgument(
+            flag.strip_prefix("-C").unwrap().into()
+        )),
+        "{flag} should not be cacheable on a native link"
+    );
 }
 
-/// The one link argument the adapter models: ld64's `-oso_prefix` names a
+/// `-fuse-ld=<name>` is the one link argument beyond `-oso_prefix` the
+/// adapter models: on a native link the linker identity probe resolves and
+/// pins the selected linker, so the link caches. On any other link output the
+/// selection has no identity describing it, so it bypasses like every other
+/// link argument. A conflicting second selection names no single linker and
+/// bypasses too.
+#[test]
+fn fuse_ld_is_modeled_for_native_links_only() {
+    let native = args(&[
+        "--test",
+        "--emit=dep-info,link",
+        "-Clink-arg=-fuse-ld=mold",
+        "src/lib.rs",
+    ]);
+    let invocation = RustcInvocation::parse_with(&native, native_links())
+        .expect("a `-fuse-ld` selection on a native link is cacheable");
+    assert_eq!(invocation.fuse_ld(), Some("mold"));
+
+    let wasm = args(&[
+        "--crate-type=bin",
+        "--emit=dep-info,link",
+        "--target=wasm32-unknown-unknown",
+        "-Clink-arg=-fuse-ld=mold",
+        "src/main.rs",
+    ]);
+    assert_eq!(
+        RustcInvocation::parse(&wasm),
+        Err(BypassReason::UnmodeledLinkArgument(
+            "link-arg=-fuse-ld=mold".into()
+        )),
+        "a `-fuse-ld` selection should not be cacheable on a wasm link"
+    );
+
+    let conflicting = args(&[
+        "--test",
+        "--emit=dep-info,link",
+        "-Clink-arg=-fuse-ld=mold",
+        "-Clink-arg=-fuse-ld=lld",
+        "src/lib.rs",
+    ]);
+    assert_eq!(
+        RustcInvocation::parse_with(&conflicting, native_links()),
+        Err(BypassReason::UnmodeledLinkArgument(
+            "link-arg=-fuse-ld=lld".into()
+        )),
+        "conflicting `-fuse-ld` selections name no single linker"
+    );
+
+    let library = args(&[
+        "--crate-type=rlib",
+        "--emit=dep-info,metadata",
+        "-Clink-arg=-fuse-ld=mold",
+        "src/lib.rs",
+    ]);
+    let invocation = RustcInvocation::parse(&library)
+        .expect("a `-fuse-ld` selection is inert where nothing links");
+    assert_eq!(invocation.fuse_ld(), Some("mold"));
+}
+
+/// The first link argument the adapter modeled: ld64's `-oso_prefix` names a
 /// checkout-specific path, so its value normalizes like every other path in
 /// the key instead of pinning the key to one checkout's spelling.
 #[test]
