@@ -196,10 +196,20 @@ fn build_with(
     report: &Path,
     settings: &[(&str, &str)],
 ) -> (serde_json::Value, String) {
+    cargo_with(project, store, report, &["build", "--offline"], settings)
+}
+
+fn cargo_with(
+    project: &Path,
+    store: &Path,
+    report: &Path,
+    arguments: &[&str],
+    settings: &[(&str, &str)],
+) -> (serde_json::Value, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_mbx"));
     command
         .current_dir(project)
-        .args(["build", "--offline"])
+        .args(arguments)
         .env("MBX_CACHE_DIR", store)
         .env("MBX_STATS_REPORT", report)
         // Cargo's own environment for this test would otherwise redirect the
@@ -918,6 +928,40 @@ fn restores_a_wiped_target_directory_from_the_store() {
     assert!(
         count(&warm, "estimated_compiler_duration_avoided_ns") > 0,
         "a warm build should report the compiler time recorded by its cold build: {warm}"
+    );
+}
+
+#[test]
+fn restores_predictions_across_equivalent_cargo_commands() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+    );
+    wipe_target(project.path());
+
+    let warm = cargo_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("warm.json"),
+        &["build", "--offline", "--workspace"],
+        &[],
+    )
+    .0;
+
+    assert!(
+        count(&warm, "hits") > 0,
+        "adding a Cargo selector should not discard learned predictions: {warm}"
+    );
+    assert_eq!(
+        count(&warm, "unconsulted"),
+        0,
+        "equivalent compilations should all have predictions: {warm}"
     );
 }
 

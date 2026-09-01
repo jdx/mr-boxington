@@ -266,9 +266,10 @@ fn identity_follows_the_dependency_graph_not_the_path() {
         build_identity(first.path(), &command),
         build_identity(second.path(), &command),
     );
-    assert_ne!(
+    assert_eq!(
         build_identity(first.path(), &command),
         build_identity(first.path(), &["test".to_string()]),
+        "Cargo commands in one dependency graph should share predictions",
     );
 }
 
