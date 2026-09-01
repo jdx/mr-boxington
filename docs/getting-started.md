@@ -29,8 +29,11 @@ command = "mbx"
 env = { MBX_CARGO_SHIM_MODE = "1" }
 ```
 
-Then run `mise install`. This avoids changing the global mise configuration,
-and every contributor who activates the project gets the same Cargo wrapper.
+Then run `mise install`. This installs mbx but does not activate the wrapper in
+the parent shell. Run project tasks with `mise run`, or activate mise in the
+shell before invoking plain `cargo` commands. This avoids changing the global
+mise configuration, and every contributor who activates the project gets the
+same Cargo wrapper.
 
 ### Release archive
 
