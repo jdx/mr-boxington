@@ -163,6 +163,51 @@ fn transparent_rustc_replaces_the_shim_process() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn rustc_workspace_wrapper_is_preserved_without_becoming_the_compiler() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_project(project.path());
+
+    let wrapper = project.path().join("workspace-rustc");
+    let log = project.path().join("workspace-rustc.log");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\nprintf 'called\\n' >> \"$MBX_TEST_WORKSPACE_WRAPPER_LOG\"\nexec \"$@\"\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&wrapper).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&wrapper, permissions).unwrap();
+
+    let (stats, stderr) = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("stats.json"),
+        &[
+            ("RUSTC_WORKSPACE_WRAPPER", wrapper.to_str().unwrap()),
+            ("MBX_TEST_WORKSPACE_WRAPPER_LOG", log.to_str().unwrap()),
+        ],
+    );
+
+    assert!(
+        std::fs::read_to_string(log).unwrap().contains("called"),
+        "Cargo should still invoke the configured workspace wrapper"
+    );
+    assert!(
+        stderr.contains("RUSTC_WORKSPACE_WRAPPER is already set"),
+        "the uncached workspace compilation should be disclosed: {stderr}"
+    );
+    assert!(
+        stats["bypasses"].get("multiple-inputs").is_none(),
+        "the workspace wrapper must not be parsed as rustc: {stats}"
+    );
+}
+
 /// Build `project` against `store`, returning the run's statistics.
 fn build(project: &Path, store: &Path, report: &Path) -> serde_json::Value {
     build_with(project, store, report, &[]).0

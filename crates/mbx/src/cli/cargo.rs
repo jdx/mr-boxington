@@ -442,10 +442,11 @@ pub(super) struct Roots {
     pub(super) target_dir_requested: bool,
 }
 
-/// Carry a `RUSTC_WRAPPER` the caller already configured into the session.
+/// Carry rustc wrappers the caller already configured into the session.
 ///
-/// The session records it so the shim can defer to it; without this it would be
-/// dropped silently and whatever it does would stop happening.
+/// The session records them so the shim can defer to them; without this a
+/// workspace wrapper is mistaken for rustc because Cargo nests it inside
+/// `RUSTC_WRAPPER`.
 pub(super) fn inherited_environment(
     get_env: impl Fn(&str) -> Option<String>,
     working_dir: &Path,
@@ -453,6 +454,9 @@ pub(super) fn inherited_environment(
     let mut environment = BTreeMap::new();
     if let Some(wrapper) = get_env("RUSTC_WRAPPER").filter(|value| !value.is_empty()) {
         environment.insert("RUSTC_WRAPPER".into(), wrapper);
+    }
+    if let Some(wrapper) = get_env("RUSTC_WORKSPACE_WRAPPER").filter(|value| !value.is_empty()) {
+        environment.insert("RUSTC_WORKSPACE_WRAPPER".into(), wrapper);
     }
     // Cargo gives every shim its own working directory, so a relative
     // destination would scatter records across crate directories -- or fail

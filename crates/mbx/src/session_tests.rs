@@ -52,6 +52,10 @@ async fn session_environment_directs_cargo_at_the_shim() {
     let workspace = tempfile::tempdir().unwrap();
     let mut values = BTreeMap::from([
         ("RUSTC_WRAPPER".into(), "existing".into()),
+        (
+            "RUSTC_WORKSPACE_WRAPPER".into(),
+            "workspace-existing".into(),
+        ),
         ("RUSTDOC".into(), "custom-rustdoc".into()),
     ]);
     let run = session
@@ -71,6 +75,10 @@ async fn session_environment_directs_cargo_at_the_shim() {
     let wrapper = Path::new(values.get("RUSTC_WRAPPER").unwrap());
     assert_eq!(wrapper.file_stem().unwrap(), RUSTC_SHIM_STEM);
     assert_eq!(values.get(PREVIOUS_RUSTC_WRAPPER_ENV).unwrap(), "existing");
+    assert_eq!(
+        values.get(PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV).unwrap(),
+        "workspace-existing"
+    );
     assert_eq!(values.get(REAL_RUSTDOC_ENV).unwrap(), "custom-rustdoc");
     assert_eq!(
         Path::new(values.get("RUSTDOC").unwrap())
