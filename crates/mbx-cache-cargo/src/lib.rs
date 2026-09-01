@@ -70,18 +70,22 @@ pub fn resolve(
 struct ActionIdentity<'a> {
     version: u8,
     workspace: &'a str,
-    command: &'a [String],
     os: &'static str,
     arch: &'static str,
 }
 
 /// Derive the prediction-manifest identity used by mbx for a Cargo command.
-pub fn build_identity(workspace_root: &Path, command: &[String]) -> String {
+///
+/// The command is accepted for API compatibility but deliberately does not
+/// enter the identity. rustc invocation digests distinguish profiles,
+/// features, targets, and compiler toolchains; keeping the surrounding Cargo
+/// command here would prevent equivalent dependency compilations from sharing
+/// predictions across `build`, `test`, and Clippy.
+pub fn build_identity(workspace_root: &Path, _command: &[String]) -> String {
     let workspace = workspace_marker(workspace_root);
     let bytes = canonical_json(&ActionIdentity {
-        version: 2,
+        version: 3,
         workspace: &workspace,
-        command,
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
     })
@@ -299,6 +303,25 @@ mod tests {
         assert_eq!(
             build_identity(left.path(), &command),
             build_identity(right.path(), &command)
+        );
+    }
+
+    #[test]
+    fn cargo_commands_and_toolchain_selectors_share_predictions() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("Cargo.lock"), "same").unwrap();
+
+        let build = vec!["build".to_string()];
+        let test = vec!["test".to_string(), "--workspace".to_string()];
+        let msrv = vec!["+1.91".to_string(), "check".to_string()];
+
+        assert_eq!(
+            build_identity(project.path(), &build),
+            build_identity(project.path(), &test),
+        );
+        assert_eq!(
+            build_identity(project.path(), &build),
+            build_identity(project.path(), &msrv),
         );
     }
 
