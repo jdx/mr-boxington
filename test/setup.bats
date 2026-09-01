@@ -368,6 +368,32 @@ EOF
   refute_output --partial "RUSTC_WRAPPER is already set"
 }
 
+@test "explicit mbx Cargo commands do not reenter mise's command wrapper" {
+  local project="$BATS_TEST_TMPDIR/explicit-mise-wrapper-project"
+  local wrapper_dir="$BATS_TEST_TMPDIR/mise-data/command-wrappers/bin"
+  local wrapper_log="$BATS_TEST_TMPDIR/mise-wrapper.log"
+  local real_cargo_dir
+  real_cargo_dir="$(dirname "$(command -v cargo)")"
+  write_project "$project"
+  mkdir -p "$wrapper_dir"
+  cat >"$wrapper_dir/cargo" <<'EOF'
+#!/bin/sh
+printf 'reentered\n' >>"$MBX_TEST_MISE_WRAPPER_LOG"
+exit 97
+EOF
+  chmod +x "$wrapper_dir/cargo"
+
+  run env -u CARGO \
+    PATH="$wrapper_dir:$real_cargo_dir:/usr/bin:/bin" \
+    MBX_TEST_MISE_WRAPPER_LOG="$wrapper_log" \
+    CARGO_TARGET_DIR="$BATS_TEST_TMPDIR/explicit-mise-wrapper-target" \
+    "$MBX_BIN" check --offline --manifest-path "$project/Cargo.toml"
+
+  assert_success
+  refute_output --partial "RUSTC_WRAPPER is already set"
+  [ ! -e "$wrapper_log" ]
+}
+
 @test "plain Cargo restores a second checkout through a full mbx session" {
   local first="$BATS_TEST_TMPDIR/first-checkout"
   local second="$BATS_TEST_TMPDIR/second-checkout"
