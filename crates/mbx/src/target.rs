@@ -383,8 +383,8 @@ fn ignore_managed_link(workspace_root: &Path, target_dir: &Path) -> Result<()> {
         .env_remove("GIT_COMMON_DIR")
         .args([
             "rev-parse",
+            "--show-prefix",
             "--path-format=absolute",
-            "--show-toplevel",
             "--git-path",
             "info/exclude",
         ])
@@ -394,21 +394,29 @@ fn ignore_managed_link(workspace_root: &Path, target_dir: &Path) -> Result<()> {
         eyre::bail!("the workspace is not in a Git repository");
     }
     let paths = String::from_utf8(paths.stdout).wrap_err("Git returned non-UTF-8 paths")?;
-    let mut paths = paths.lines();
-    let repository = PathBuf::from(
+    let mut paths = paths
+        .split_terminator('\n')
+        .map(|path| path.trim_end_matches('\r'));
+    let prefix = PathBuf::from(
         paths
             .next()
-            .ok_or_else(|| eyre::eyre!("Git did not report the repository root"))?,
+            .ok_or_else(|| eyre::eyre!("Git did not report the workspace prefix"))?,
     );
     let exclude = PathBuf::from(
         paths
             .next()
             .ok_or_else(|| eyre::eyre!("Git did not report its exclude file"))?,
     );
-    let relative = target_dir
-        .strip_prefix(&repository)
-        .wrap_err("the target link is outside the Git worktree")?;
-    let pattern = format!("/{}", gitignore_path(relative)?);
+    // Git may resolve a symlinked spelling of the worktree (notably `/var` to
+    // `/private/var` on macOS). Its own prefix is stable across that boundary;
+    // combine it with the part we know relative to Cargo's workspace instead
+    // of trying to strip two differently spelled absolute roots.
+    let relative = prefix.join(
+        target_dir
+            .strip_prefix(workspace_root)
+            .wrap_err("the target link is outside the Cargo workspace")?,
+    );
+    let pattern = format!("/{}", gitignore_path(&relative)?);
 
     let existing = std::fs::read(&exclude).unwrap_or_default();
     if existing

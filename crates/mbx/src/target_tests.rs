@@ -52,7 +52,10 @@ fn places_the_default_target_directory_under_the_managed_root() {
 #[test]
 fn a_directory_only_gitignore_still_hides_the_managed_link() {
     let directory = tempfile::tempdir().unwrap();
-    let workspace = checkout(directory.path(), "project");
+    let spelling = tempfile::tempdir().unwrap();
+    let repository = spelling.path().join("repository");
+    symlink_dir(directory.path(), &repository).unwrap();
+    let workspace = checkout(&repository, "project");
     assert!(
         Command::new("git")
             .current_dir(directory.path())
@@ -61,19 +64,19 @@ fn a_directory_only_gitignore_still_hides_the_managed_link() {
             .unwrap()
             .success()
     );
-    std::fs::write(directory.path().join(".gitignore"), "target/\n").unwrap();
+    std::fs::write(repository.join(".gitignore"), "target/\n").unwrap();
     let config = test_config(directory.path(), true);
 
     place(&config, &workspace, &workspace.join("target"), false).unwrap();
 
     assert_eq!(
-        std::fs::read_to_string(directory.path().join(".gitignore")).unwrap(),
+        std::fs::read_to_string(repository.join(".gitignore")).unwrap(),
         "target/\n",
         "mbx should not change a tracked project file"
     );
     assert!(
         Command::new("git")
-            .current_dir(directory.path())
+            .current_dir(&repository)
             .args(["check-ignore", "--quiet", "--no-index", "--"])
             .arg("project/target")
             .status()
