@@ -17,6 +17,24 @@ shim but only prints an upgrade warning instead of editing mise configuration.
 With `--global`, mise activates mbx in its global configuration. Drop
 `--global` to activate it only in the current project's configuration.
 
+To keep the wrapper project-scoped and reviewable, commit it directly in the
+project's `mise.toml` instead:
+
+```toml
+[tools]
+mr-boxington = "1.3.0"
+
+[wrappers.cargo]
+command = "mbx"
+env = { MBX_CARGO_SHIM_MODE = "1" }
+```
+
+Then run `mise install`. This installs mbx but does not activate the wrapper in
+the parent shell. Run project tasks with `mise run`, or activate mise in the
+shell before invoking plain `cargo` commands. This avoids changing the global
+mise configuration, and every contributor who activates the project gets the
+same Cargo wrapper.
+
 ### Release archive
 
 :::tabs
