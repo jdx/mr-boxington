@@ -96,6 +96,32 @@ fn weights_count_against_capacity() {
 }
 
 #[test]
+fn a_build_limit_counts_only_that_builds_leases() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut other = pool_at(directory.path(), 6, 0);
+    other.build = Some(("other".into(), 6));
+    let elsewhere = other.try_admit(2, None).unwrap().expect("other build");
+
+    let mut limited = pool_at(directory.path(), 6, 0);
+    limited.build = Some(("limited".into(), 2));
+    let own = limited
+        .try_admit(2, None)
+        .unwrap()
+        .expect("two permits beside another build");
+    assert!(
+        limited.try_admit(1, None).unwrap().is_none(),
+        "the build cannot exceed its own ceiling even with machine capacity free"
+    );
+
+    drop(own);
+    assert!(
+        limited.try_admit(3, None).unwrap().is_some(),
+        "one demand heavier than the build ceiling still makes progress"
+    );
+    drop(elsewhere);
+}
+
+#[test]
 fn a_dead_holders_lease_is_reclaimed() {
     let directory = tempfile::tempdir().unwrap();
     let pool = pool_at(directory.path(), 1, 0);
@@ -110,6 +136,7 @@ fn a_dead_holders_lease_is_reclaimed() {
             version: LEASE_VERSION,
             weight: 1,
             priority: "normal".into(),
+            build_id: None,
         })
         .unwrap(),
     )
@@ -673,6 +700,8 @@ fn session_environment_states_off_explicitly() {
     assert_eq!(value(SCHED_SLOTS_ENV), "6");
     assert_eq!(value(SCHED_SLOT_BYTES_ENV), "1333");
     assert_eq!(value(SCHED_PRIORITY_ENV), "normal");
+    assert!(!value(SCHED_BUILD_ID_ENV).is_empty());
+    assert_eq!(value(SCHED_BUILD_SLOTS_ENV), "6");
 
     let environment = session_environment_with_jobs(&config, Some(3));
     let value = |name: &str| {
@@ -682,6 +711,7 @@ fn session_environment_states_off_explicitly() {
             .map(|(_, value)| value.as_str())
             .unwrap()
     };
-    assert_eq!(value(SCHED_SLOTS_ENV), "3");
-    assert_eq!(value(SCHED_SLOT_BYTES_ENV), "2666");
+    assert_eq!(value(SCHED_SLOTS_ENV), "6", "the machine pool stays global");
+    assert_eq!(value(SCHED_SLOT_BYTES_ENV), "1333");
+    assert_eq!(value(SCHED_BUILD_SLOTS_ENV), "3");
 }

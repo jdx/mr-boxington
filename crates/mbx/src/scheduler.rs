@@ -80,6 +80,10 @@ pub(crate) const SCHED_SLOTS_ENV: &str = "MBX_SCHED_SLOTS";
 pub(crate) const SCHED_SLOT_BYTES_ENV: &str = "MBX_SCHED_SLOT_BYTES";
 /// Permit priority of this build's compilations.
 pub(crate) const SCHED_PRIORITY_ENV: &str = "MBX_SCHED_PRIORITY";
+/// Identity shared by every compiler shim in one Cargo build.
+const SCHED_BUILD_ID_ENV: &str = "MBX_SCHED_BUILD_ID";
+/// Most weighted permits one Cargo build may hold at once.
+const SCHED_BUILD_SLOTS_ENV: &str = "MBX_SCHED_BUILD_SLOTS";
 
 /// Schema version of one lease record.
 const LEASE_VERSION: u8 = 1;
@@ -214,6 +218,8 @@ struct Lease {
     version: u8,
     weight: u64,
     priority: String,
+    #[serde(default)]
+    build_id: Option<String>,
 }
 
 /// What one finished compilation leaves in its flight file: the prediction
@@ -435,6 +441,8 @@ struct MemoryLedger {
 pub(crate) struct Pool {
     dir: PathBuf,
     capacity: u64,
+    /// A per-Cargo-build ceiling, separate from the machine-wide capacity.
+    build: Option<(String, u64)>,
     /// Memory one permit stands for. Zero turns memory weighting and the
     /// available-memory gate off, leaving plain CPU permits.
     bytes_per_permit: u64,
@@ -456,15 +464,28 @@ pub(crate) fn pool() -> Option<&'static Pool> {
 fn resolve_pool() -> Option<Pool> {
     match std::env::var_os(SCHED_DIR_ENV) {
         Some(dir) if dir.is_empty() => None,
-        Some(dir) => Some(Pool::new(
-            PathBuf::from(dir),
-            env_number(SCHED_SLOTS_ENV).unwrap_or_else(default_capacity),
-            env_number(SCHED_SLOT_BYTES_ENV).unwrap_or(0),
-            std::env::var(SCHED_PRIORITY_ENV)
+        Some(dir) => {
+            let capacity = env_number(SCHED_SLOTS_ENV).unwrap_or_else(default_capacity);
+            let mut pool = Pool::new(
+                PathBuf::from(dir),
+                capacity,
+                env_number(SCHED_SLOT_BYTES_ENV).unwrap_or(0),
+                std::env::var(SCHED_PRIORITY_ENV)
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or_default(),
+            );
+            pool.build = std::env::var(SCHED_BUILD_ID_ENV)
                 .ok()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or_default(),
-        )),
+                .filter(|id| !id.is_empty())
+                .map(|id| {
+                    let slots = env_number(SCHED_BUILD_SLOTS_ENV)
+                        .unwrap_or(capacity)
+                        .clamp(1, capacity.max(1));
+                    (id, slots)
+                });
+            Some(pool)
+        }
         None => match Config::load() {
             Ok(config) => Pool::from_config(&config),
             Err(error) => {
@@ -497,10 +518,8 @@ pub(crate) fn session_environment_with_jobs(
     if !scheduler.enabled {
         return vec![(SCHED_DIR_ENV.into(), String::new())];
     }
-    let permits = cargo_jobs.map_or_else(
-        || scheduler.permits(),
-        |jobs| scheduler.permits().min(jobs.max(1)),
-    );
+    let permits = scheduler.permits();
+    let build_permits = cargo_jobs.map_or(permits, |jobs| permits.min(jobs.max(1)));
     vec![
         (
             SCHED_DIR_ENV.into(),
@@ -519,6 +538,8 @@ pub(crate) fn session_environment_with_jobs(
             SCHED_PRIORITY_ENV.into(),
             scheduler.priority.as_str().into(),
         ),
+        (SCHED_BUILD_ID_ENV.into(), crate::util::random_string(12)),
+        (SCHED_BUILD_SLOTS_ENV.into(), build_permits.to_string()),
     ]
 }
 
@@ -550,6 +571,7 @@ impl Pool {
         Self {
             dir,
             capacity: capacity.max(1),
+            build: None,
             bytes_per_permit,
             priority,
             available_memory: crate::util::memory_available_bytes,
@@ -673,7 +695,19 @@ impl Pool {
         registrar.lock()?;
         let live = scan_leases(&leases)?;
         let capacity = self.capacity - self.reserved();
-        let used: u64 = live.iter().sum();
+        let used: u64 = live.iter().map(|lease| lease.weight).sum();
+        if let Some((build_id, build_capacity)) = &self.build {
+            let build_used = live
+                .iter()
+                .filter(|lease| lease.build_id.as_ref() == Some(build_id))
+                .map(|lease| lease.weight)
+                .sum::<u64>();
+            // Like an oversized machine-wide demand, a single compilation
+            // heavier than this build's ceiling must still be able to run.
+            if build_used > 0 && build_used.saturating_add(weight) > *build_capacity {
+                return Ok(None);
+            }
+        }
         // A demand too heavy for what the pool will lend it can only ever run
         // by itself, so on an idle pool it does, rather than waiting for room
         // that nothing is going to make. Measured against the capacity left
@@ -724,6 +758,7 @@ impl Pool {
             version: LEASE_VERSION,
             weight,
             priority: self.priority.as_str().into(),
+            build_id: self.build.as_ref().map(|(id, _)| id.clone()),
         })?;
         let mut last = None;
         for _ in 0..LEASE_NAME_ATTEMPTS {
@@ -881,7 +916,7 @@ fn read_ledger(path: &Path) -> MemoryLedger {
 }
 
 /// The live lease weights, reclaiming any lease whose holder has died.
-fn scan_leases(leases: &Path) -> Result<Vec<u64>> {
+fn scan_leases(leases: &Path) -> Result<Vec<Lease>> {
     let mut live = Vec::new();
     for entry in std::fs::read_dir(leases)? {
         let path = entry?.path();
@@ -896,11 +931,22 @@ fn scan_leases(leases: &Path) -> Result<Vec<u64>> {
         }
         // A live lease that cannot be read still occupies its holder, so it
         // counts as the smallest thing it could be rather than nothing.
-        let weight = std::fs::read(&path)
+        let lease = std::fs::read(&path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Lease>(&bytes).ok())
-            .map_or(1, |lease| lease.weight.max(1));
-        live.push(weight);
+            .map_or_else(
+                || Lease {
+                    version: LEASE_VERSION,
+                    weight: 1,
+                    priority: SchedulerPriority::Normal.as_str().into(),
+                    build_id: None,
+                },
+                |mut lease| {
+                    lease.weight = lease.weight.max(1);
+                    lease
+                },
+            );
+        live.push(lease);
     }
     Ok(live)
 }

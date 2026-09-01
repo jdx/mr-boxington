@@ -141,10 +141,11 @@ The pool is memory-aware. `scheduler.cpus` permits (default: logical CPUs),
 less `scheduler.reserve_cpus` (default: 0), divide `scheduler.memory` (default:
 85% of physical memory, leaving headroom for everything that is not a compiler;
 `"none"` keeps plain CPU permits). The pool always keeps at least one permit.
-Cargo's `-j`/`--jobs` or `CARGO_BUILD_JOBS` can narrow the permit count further
-for one build. In a container, "physical memory" means the cgroup's limit rather
-than the host's RAM — a build in a 4 GiB container on a large machine is
-budgeted by the 4 GiB, because the rest was never its to spend.
+Cargo's `-j`/`--jobs` or `CARGO_BUILD_JOBS` can cap how many weighted permits
+one build holds without shrinking the machine-wide pool available to other
+builds. In a container, "physical memory" means the cgroup's limit rather than
+the host's RAM — a build in a 4 GiB container on a large machine is budgeted by
+the 4 GiB, because the rest was never its to spend.
 
 `priority = "low"` (`MBX_SCHEDULER_PRIORITY`) is for builds nobody is sitting
 at — CI on a shared box, an editor's background check. While a normal-priority
