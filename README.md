@@ -15,10 +15,10 @@
   <a href="https://github.com/jdx/mr-boxington/releases">Releases</a>
 </p>
 
-`mbx` wraps ordinary Cargo commands with a content-addressed rustc cache. Cargo
-still resolves dependencies, plans builds, and links outputs; mbx restores
-supported compilations it has seen before. Run `mbx setup` once and keep using
-the Cargo commands you already run.
+`mbx` puts a content-addressed rustc cache behind ordinary Cargo commands.
+Cargo still resolves dependencies, plans builds, and links outputs. mbx
+restores the compilations it has seen before. Run `mbx setup` once and keep
+using the Cargo commands you already run.
 
 ```sh
 cargo build                # cached by mbx
@@ -28,29 +28,21 @@ mbx tui                    # watch every build's cache activity live
 mbx gc --dry-run           # preview what cleanup would reclaim
 ```
 
-The first build prints what it set up — where the cache lives, the budget it
-is pruned to, and when a `target/` directory becomes collectable.
-
 ## Why mbx?
 
-- **Warm every worktree.** Cache keys contain no checkout-specific absolute
-  paths, so building one checkout warms its siblings automatically without
-  sharing a Cargo target lock.
-- **Bounded disk, without a chore.** The action store prunes itself to a
-  budget, and managed `target/` directories are deleted when their checkout is
-  gone, unused for 30 days, or over their share of the disk. Both budgets
-  scale with the disk rather than assuming every machine is the same size.
-- **Warm CI safely.** GitHub Actions cache can warm fork pull requests from a
-  cache built on `main`, while a self-hosted remote can serve trusted runners
-  and teammates. Pull requests never publish remote objects.
-- **Run multiple Cargo builds at the same time.** They share one machine-wide
-  CPU and memory budget. Identical cold compilations already running are
-  compiled once and restored into every other build. With a compatible cache
-  server, the same in-flight deduplication extends across CI runners.
-- **See the whole result.** mbx reports hits, misses, actions it could not look
-  up, and actions it deliberately bypassed. A high hit rate cannot hide work
-  that never entered the cache. `mbx tui` shows the same outcomes as they
-  happen, for every build on the machine at once.
+- Cache keys contain no checkout-specific paths, so building one worktree
+  warms its siblings, and no two checkouts wait on the same Cargo target lock.
+- Disk use is bounded without a chore. The cache prunes itself to a share of
+  the disk, and a managed `target/` directory is deleted when its checkout is
+  gone, unused for 30 days, or over budget.
+- Several Cargo builds can run at once. They share one machine-wide CPU and
+  memory budget, and a cold compilation already running in one build is
+  compiled once and restored into the others.
+- CI can be warmed safely. GitHub Actions cache can warm fork pull requests
+  from a cache built on `main`, and pull requests never publish remote objects.
+- The summary counts hits, misses, and the compilations mbx could not look up
+  or bypassed on purpose, so a high hit rate cannot hide work that never
+  entered the cache.
 
 ## Install
 
@@ -61,31 +53,13 @@ mise use --global --postinstall "mbx setup --yes" mr-boxington
 ```
 
 > [!NOTE]
-> Automatic Cargo wrapping requires mise 2026.8.16 or newer. Older versions
-> receive an upgrade warning and are not configured.
+> Automatic Cargo wrapping requires mise 2026.8.16 or newer.
 
-Open a new shell and verify that plain Cargo resolves to mise's command
-wrapper. On Unix:
-
-```sh
-command -v cargo
-# ~/.local/share/mise/command-wrappers/bin/cargo on Linux
-```
-
-On Windows, use PowerShell or `where.exe`:
-
-```powershell
-(Get-Command cargo).Path
-where.exe cargo
-```
-
-`mbx setup` writes a `[wrappers.cargo]` entry and runs `mise reshim`. mise
-activation handles interactive shells. SSH commands, coding agents, and other
-non-interactive tools may not load that activation; prepend
-`~/.local/share/mbx/bin` to `PATH` in a startup file they read (for example,
-`~/.zshenv` for zsh). Afterward, agents and people can use the ordinary `cargo`
-commands they already know; explicitly prefixing a command with `mbx` remains
-supported.
+Open a new shell and check that `command -v cargo` resolves to mise's command
+wrapper. `mbx setup` writes a `[wrappers.cargo]` entry and runs `mise reshim`.
+Tools that skip mise activation, such as SSH commands and coding agents, need
+`~/.local/share/mbx/bin` on `PATH` instead. Prefixing a command with `mbx`
+always works.
 
 With Cargo:
 
@@ -94,113 +68,63 @@ cargo install mbx --locked
 mbx setup
 ```
 
-Or install the latest Linux x86-64 release archive:
-
-```sh
-mkdir -p ~/.local/bin
-archive=mbx-x86_64-unknown-linux-gnu.tar.gz
-release=https://github.com/jdx/mr-boxington/releases/latest/download
-curl -fsSLO "$release/$archive"
-curl -fsSLO "$release/SHA256SUMS"
-grep "  $archive$" SHA256SUMS | sha256sum --check --strict -
-tar -xzf "$archive" -C ~/.local/bin
-```
-
-Use the corresponding `-musl` archive for a static Linux binary. Release
-archives cover both libc variants on x86-64 and ARM64, plus Apple Silicon and
-Windows x86-64 and ARM64.
-Every release includes `SHA256SUMS`.
-
-After installing from an archive, run `$HOME/.local/bin/mbx setup`. Without
-mise it prints the appropriate `PATH` command and does not edit your shell
-startup files.
+Release archives for Linux, macOS, and Windows are on the
+[releases page](https://github.com/jdx/mr-boxington/releases), each with a
+`SHA256SUMS` file.
 
 [See all installation options →](https://mr-boxington.jdx.dev/getting-started)
 
 ## Automatic pruning
 
 Collection runs after a build, at most once an hour, and needs no
-configuration. Both size budgets default to a share of the disk holding the
-cache — 5% for the action store and 10% for managed `target/` directories,
-from floors of 5 GiB and 10 GiB up to 500 GiB and 100 GiB respectively, and
-rounded down to a whole 5 GiB — and a managed directory is also collected once
-its checkout is gone or it has sat unused for 30 days.
-
-mbx keeps a running total of what that has been worth and reports one line of
-it after a build:
+configuration. The first build prints the budgets it chose for this machine.
+mbx keeps a running total of what collection has reclaimed and prints one line
+about it after a build:
 
 ```text
 mbx[savings]: 41.7 GiB of target/ had outlived its checkouts. it has been dealt with.
 ```
 
-The line is drawn from a pool, so it does not repeat itself. `savings =
-"plain"` states the same facts without the joke, and `savings = "off"` keeps
-the totals without printing anything (`MBX_SAVINGS` from the environment). Inspect or collect the store explicitly with:
+`savings = "plain"` drops the joke. Inspect or collect the store by hand with:
 
 ```sh
 mbx cache stats
-mbx cache projects
-mbx cache largest --limit 10
-mbx cache verify
-mbx cache remove /path/to/workspace
-mbx clean
-mbx gc
-mbx gc --max-size 3GB
 mbx gc --dry-run
+mbx gc
+mbx clean        # this workspace's managed target/ only
 ```
 
-For a checkout without an existing `target/`, managed target directories are
-enabled automatically:
-
-```sh
-cargo build
-```
-
-mbx places the target directory under its cache root and leaves `target` as a
-symlink, so familiar paths still work — and the outputs of a checkout that is
-deleted get collected rather than stranded.
-
-For an existing real `target/`, an interactive `mbx` asks before removing the
-old outputs and replacing the directory with a managed link. The safe default
-is to keep it. Non-interactive runs never remove it. Set `MBX_TARGET_VIEWS=0`
-to disable managed placement and the prompt.
+For a checkout without an existing `target/`, the first build places the
+target directory under the cache root and leaves `target` as a symlink, so
+familiar paths still work and a deleted checkout's outputs get collected. An
+existing `target/` is only replaced if you say yes at the prompt.
 
 [Learn about managed targets →](https://mr-boxington.jdx.dev/managed-targets)
 
-## Worktrees and parallel CI
-
-An equivalent rustc action keys the same across checkout paths. One worktree's
-dependency build can therefore warm another while every checkout keeps its own
-target directory.
+## CI
 
 For GitHub-hosted CI, [`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action)
-can install mbx and use GitHub Actions cache, saving only from the default
-branch and restoring in pull requests. Trusted environments can switch the
-same action to a compatible remote such as the self-hostable
+installs mbx and uses GitHub Actions cache. Trusted environments can point the
+same action at a compatible remote such as the self-hostable
 [cache server](https://mr-boxington.jdx.dev/cache-server).
 
-GitHub Actions' parallel steps can start independent Clippy or test
-configurations together. Give each one a separate `CARGO_TARGET_DIR` and run
-it through mbx: the commands share one CPU and memory budget instead of each
-trying to fill the runner on its own. We saw mise's lint job finish up to 45%
-sooner this way.
+Parallel steps that run Clippy and tests together can each get their own
+`CARGO_TARGET_DIR` and share one CPU and memory budget through mbx. mise's
+lint job finished up to 45% sooner this way.
 
 [Copy the parallel workflow →](https://mr-boxington.jdx.dev/github-action#parallel-cargo-steps)
 
 ## How it works
 
-An `mbx` Cargo command starts an in-process cache agent, points Cargo at rustc and
-rustdoc shims, and exits the agent with the build — there is no daemon. The shims
-derive action keys, restore cached outputs when possible, or run the real tool and
-publish a successful result. That includes `cargo doc`: rendered crate pages are
-cached independently, then rustdoc cheaply rebuilds their shared search indexes.
+An `mbx` Cargo command starts an in-process cache agent, points Cargo at rustc
+and rustdoc shims, and stops the agent when the build ends. There is no daemon.
+The shims derive action keys, restore cached outputs when they can, and
+otherwise run the real tool and publish a successful result.
 
-Anything mbx cannot model exactly bypasses the cache. A native link is cached
-only when the linker itself can enter the key: host binaries and tests on Linux
-and macOS, where mbx resolves the linker, startup objects, and libc, and
-self-contained WebAssembly targets everywhere, whose linker and libc ship in
-the Rust toolchain. Incremental compilations bypass the cache. Correctness
-comes before hit rate.
+Anything mbx cannot model exactly bypasses the cache. Native links are cached
+on Linux, macOS, and Windows when mbx can put the linker and its system inputs
+into the key, and the workspace crate you are editing is recompiled
+incrementally with state that never enters the shared cache.
 
 [Read the architecture and limits →](https://mr-boxington.jdx.dev/how-it-works)
 
