@@ -41,7 +41,11 @@ Unlike rustc, a C compile leaves no dependency record behind for a later build
 to read, and publishing one would add a file the uncached build never produced.
 So the shim asks for its own dependency list, keeps it private, and keys the
 compilation on the files that list names. A cold compilation therefore has no
-key to look up yet; it is stored after compiling and warms the next build. The
+key to look up yet; it is stored after compiling and warms the next build.
+A build that asks the compiler for its own list, as OpenSSL's makefiles and
+CMake do with `-MD` or `-MMD`, gets one from the shim instead, written from the
+same files whether the object was compiled or restored; the flags shape that
+list and nothing else, so they are not part of the key. The
 directories the compile searched also contribute a manifest of the names in
 them that could answer an `#include`, so a header appearing where it would
 *shadow* one that was read changes the key even though every file that was read

@@ -257,16 +257,107 @@ fn preprocess_and_assembly_modes_bypass_as_non_object_output() {
     }
 }
 
+/// `-M` and `-MM` stop after preprocessing, `-MG` changes what a missing
+/// header means, and a list modifier with no `-MD` or `-MMD` to modify is not
+/// a shape any build produces: all of those still bypass.
 #[test]
-fn caller_dependency_flags_bypass_before_injection() {
-    for flag in ["-MD", "-MMD", "-MP", "-M", "-MM"] {
-        let arguments = argv(&[flag, "-c", "-o", "a.o", "a.c"]);
+fn dependency_flags_that_are_not_a_compile_with_a_list_bypass() {
+    for arguments in [
+        vec!["-M", "-c", "-o", "a.o", "a.c"],
+        vec!["-MM", "-c", "-o", "a.o", "a.c"],
+        vec!["-MD", "-MG", "-c", "-o", "a.o", "a.c"],
+        vec!["-MP", "-c", "-o", "a.o", "a.c"],
+        vec!["-MF", "a.d", "-c", "-o", "a.o", "a.c"],
+        vec!["-MT", "a.o", "-c", "-o", "a.o", "a.c"],
+    ] {
         assert_eq!(
-            CcInvocation::parse(&arguments).unwrap_err().kind(),
+            CcInvocation::parse(&argv(&arguments)).unwrap_err().kind(),
             "caller-dependency-flags",
-            "{flag} should bypass"
+            "{arguments:?} should bypass"
         );
     }
+}
+
+/// A caller asking for a dependency list beside the object -- OpenSSL's
+/// makefiles, CMake -- gets one from the shim. The flags shape that list and
+/// nothing else, so they are neither key material nor passed to the driver,
+/// which honors only one `-MF` and owes the shim its own.
+#[test]
+fn caller_dependency_lists_are_taken_from_the_flags_and_kept_out_of_the_key() {
+    let plain = CcInvocation::parse(&argv(&["-O2", "-c", "-o", "out/a.o", "a.c"])).unwrap();
+    assert_eq!(plain.caller_depfile(), None);
+
+    let arguments = argv(&[
+        "-O2",
+        "-MMD",
+        "-MF",
+        "out/a.o.d",
+        "-MT",
+        "a.o",
+        "-MQ",
+        "$(OBJ)",
+        "-MP",
+        "-c",
+        "-o",
+        "out/a.o",
+        "a.c",
+    ]);
+    let listed = CcInvocation::parse(&arguments).unwrap();
+    let caller = listed.caller_depfile().expect("a list was asked for");
+    assert_eq!(caller.path, PathBuf::from("out/a.o.d"));
+    assert_eq!(
+        caller.targets,
+        vec![
+            DepfileTarget {
+                name: "a.o".into(),
+                quoted: false
+            },
+            DepfileTarget {
+                name: "$(OBJ)".into(),
+                quoted: true
+            },
+        ]
+    );
+    assert!(caller.user_headers_only);
+    assert!(caller.phony_targets);
+    assert_eq!(
+        listed.arguments, plain.arguments,
+        "the list flags are not key material"
+    );
+    assert_eq!(
+        listed.compiler_arguments(&arguments),
+        argv(&["-O2", "-c", "-o", "out/a.o", "a.c"]),
+        "the driver runs without the list flags"
+    );
+
+    // `-MD` alone: the driver would write `<object>.d` naming the object.
+    let defaulted = CcInvocation::parse(&argv(&["-MD", "-c", "-o", "out/a.o", "a.c"])).unwrap();
+    let caller = defaulted.caller_depfile().unwrap();
+    assert_eq!(caller.path, PathBuf::from("out/a.d"));
+    assert_eq!(
+        caller.targets,
+        vec![DepfileTarget {
+            name: "out/a.o".into(),
+            quoted: true
+        }]
+    );
+    assert!(!caller.user_headers_only);
+    assert!(!caller.phony_targets);
+
+    // Attached spellings, as CMake writes them.
+    let attached = CcInvocation::parse(&argv(&[
+        "-MMD",
+        "-MFout/b.d",
+        "-MTb.o",
+        "-c",
+        "-o",
+        "b.o",
+        "a.c",
+    ]))
+    .unwrap();
+    let caller = attached.caller_depfile().unwrap();
+    assert_eq!(caller.path, PathBuf::from("out/b.d"));
+    assert_eq!(caller.targets[0].name, "b.o");
 }
 
 #[test]
@@ -1014,5 +1105,34 @@ fn isa_and_codegen_switches_are_admitted_key_material() {
             .unwrap_err()
             .kind(),
         "local-cpu-target"
+    );
+}
+
+/// `-o` is often relative to the compiler's working directory -- OpenSSL's
+/// makefiles name every object that way -- and a path handed to the cache
+/// agent has to mean the same file from the agent's own directory.
+#[test]
+fn the_object_is_addressed_absolutely_from_the_working_directory() {
+    let relative = CcInvocation::parse(&argv(&[
+        "-c",
+        "-o",
+        "ssl/./lib/../ssl_lib.o",
+        "ssl/ssl_lib.c",
+    ]))
+    .unwrap();
+    assert_eq!(
+        relative.output_in(Path::new("/build/openssl")),
+        PathBuf::from("/build/openssl/ssl/ssl_lib.o")
+    );
+    assert_eq!(
+        relative.output(),
+        Path::new("ssl/./lib/../ssl_lib.o"),
+        "the spelling the key sees is the caller's"
+    );
+
+    let absolute = CcInvocation::parse(&argv(&["-c", "-o", "/out/a.o", "a.c"])).unwrap();
+    assert_eq!(
+        absolute.output_in(Path::new("/elsewhere")),
+        PathBuf::from("/out/a.o")
     );
 }

@@ -737,9 +737,76 @@ pub struct CcInvocation {
     required_inputs: Vec<PathBuf>,
     language: CcLanguage,
     sysroot: Option<PathBuf>,
+    caller_depfile: Option<CallerDepfile>,
+    /// Positions in the parsed command line of the dependency-list flags the
+    /// caller passed, which the shim leaves out when it runs the driver.
+    dependency_argument_indices: Vec<usize>,
+}
+
+/// A dependency list the caller asked the driver to write beside the object.
+///
+/// Build systems driving the compiler through a build script -- OpenSSL's
+/// makefiles under `openssl-src`, CMake under many `-sys` crates -- ask for one
+/// with `-MD` or `-MMD` so their own rebuild logic has something to read. The
+/// flags do not change the object, so they are not key material, and the file
+/// names paths on this machine, so it is never stored. The shim writes it
+/// itself from the dependency list it already collects, whether the object
+/// was compiled or restored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CallerDepfile {
+    /// Where the list goes: `-MF`, or the object's path with a `.d` extension.
+    pub path: PathBuf,
+    /// The rule's targets, from `-MT` and `-MQ`, or the object as `-o` named it.
+    pub targets: Vec<DepfileTarget>,
+    /// Whether system headers are left out, as `-MMD` does.
+    pub user_headers_only: bool,
+    /// Whether every header also gets an empty rule of its own, as `-MP` does.
+    pub phony_targets: bool,
+}
+
+/// One target of a caller's dependency rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepfileTarget {
+    /// The target text as the caller gave it.
+    pub name: String,
+    /// Whether characters special to make are quoted on output, as `-MQ`
+    /// asks; `-MT` writes the name literally.
+    pub quoted: bool,
 }
 
 impl CcInvocation {
+    /// The object's path made absolute against the compiler's working
+    /// directory, for reading and storing it. `-o` is often relative --
+    /// OpenSSL's makefiles name every object that way -- and a path handed to
+    /// the cache agent has to mean the same file from the agent's own
+    /// directory. Key material still normalizes the spelling as given.
+    pub fn output_in(&self, working_dir: &Path) -> PathBuf {
+        if self.output.is_absolute() {
+            normalize_components(&self.output)
+        } else {
+            normalize_components(&working_dir.join(&self.output))
+        }
+    }
+
+    /// The dependency list the caller asked for, if any.
+    pub fn caller_depfile(&self) -> Option<&CallerDepfile> {
+        self.caller_depfile.as_ref()
+    }
+
+    /// The command line to run the driver with: `arguments` as parsed, less
+    /// the caller's dependency-list flags. The shim asks the driver for its
+    /// own list, the driver honors only one `-MF`, and the caller's list is
+    /// written by the shim afterwards.
+    pub fn compiler_arguments(&self, arguments: &[OsString]) -> Vec<OsString> {
+        arguments
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !self.dependency_argument_indices.contains(index))
+            .map(|(_, argument)| argument.clone())
+            .collect()
+    }
+
     /// Parse a driver command line, admitting only modeled single-object
     /// compiles.
     pub fn parse(arguments: &[OsString]) -> Result<Self, CcBypassReason> {
@@ -1212,6 +1279,21 @@ struct Parser<'a> {
     sysroot: Option<PathBuf>,
     explicit_language: Option<CcLanguage>,
     compiling: bool,
+    dependency: DependencyRequest,
+}
+
+/// What the caller's `-M` flags asked for, gathered while parsing.
+#[derive(Debug, Default)]
+struct DependencyRequest {
+    /// `Some(false)` for `-MD`, `Some(true)` for `-MMD`.
+    user_headers_only: Option<bool>,
+    file: Option<PathBuf>,
+    targets: Vec<DepfileTarget>,
+    phony_targets: bool,
+    /// The last `-MF`, `-MT`, `-MQ`, or `-MP` seen, for the bypass a request
+    /// without `-MD` or `-MMD` reports.
+    modifier: Option<String>,
+    indices: Vec<usize>,
 }
 
 impl<'a> Parser<'a> {
@@ -1227,6 +1309,7 @@ impl<'a> Parser<'a> {
             sysroot: None,
             explicit_language: None,
             compiling: false,
+            dependency: DependencyRequest::default(),
         }
     }
 
@@ -1254,6 +1337,31 @@ impl<'a> Parser<'a> {
         let output = self.output.clone().ok_or(CcBypassReason::MissingOutput)?;
         let language = self.language(&source)?;
         self.required_inputs.push(source.clone());
+        let caller_depfile = match self.dependency.user_headers_only {
+            Some(user_headers_only) => Some(CallerDepfile {
+                path: self
+                    .dependency
+                    .file
+                    .unwrap_or_else(|| output.with_extension("d")),
+                targets: if self.dependency.targets.is_empty() {
+                    vec![DepfileTarget {
+                        name: output.to_string_lossy().into_owned(),
+                        quoted: true,
+                    }]
+                } else {
+                    self.dependency.targets
+                },
+                user_headers_only,
+                phony_targets: self.dependency.phony_targets,
+            }),
+            // `-MF` or `-MT` without `-MD` or `-MMD` writes nothing, but it is
+            // not a shape the cc crate or a makefile produces, so it is not
+            // one to guess at.
+            None => match self.dependency.modifier {
+                Some(modifier) => return Err(CcBypassReason::CallerDependencyFlags(modifier)),
+                None => None,
+            },
+        };
         Ok(CcInvocation {
             arguments: self.parsed,
             source,
@@ -1262,7 +1370,45 @@ impl<'a> Parser<'a> {
             required_inputs: self.required_inputs,
             language,
             sysroot: self.sysroot,
+            caller_depfile,
+            dependency_argument_indices: self.dependency.indices,
         })
+    }
+
+    /// A `-M` flag: the caller wants a dependency list beside the object.
+    ///
+    /// `-MD` and `-MMD` compile as well as listing, so they are taken, with
+    /// the `-MF`, `-MT`, `-MQ`, and `-MP` that shape the list. None of them
+    /// enters the key: the object is the same with or without them. `-M` and
+    /// `-MM` stop after preprocessing, and `-MG` changes what a missing header
+    /// means, so those still bypass.
+    fn parse_dependency_flag(&mut self, value: &str, option: &str) -> Result<(), CcBypassReason> {
+        let start = self.index - 1;
+        match option {
+            "D" => self.dependency.user_headers_only = Some(false),
+            "MD" => self.dependency.user_headers_only = Some(true),
+            "P" => {
+                self.dependency.phony_targets = true;
+                self.dependency.modifier = Some(value.into());
+            }
+            _ if option.starts_with('F') => {
+                let file = self.take_value("-MF", Some(&option[1..]))?;
+                self.dependency.file = Some(PathBuf::from(file));
+                self.dependency.modifier = Some("-MF".into());
+            }
+            _ if option.starts_with('T') || option.starts_with('Q') => {
+                let flag = &value[..3];
+                let name = self.take_value(flag, Some(&option[1..]))?;
+                self.dependency.targets.push(DepfileTarget {
+                    name,
+                    quoted: option.starts_with('Q'),
+                });
+                self.dependency.modifier = Some(flag.into());
+            }
+            _ => return Err(CcBypassReason::CallerDependencyFlags(value.into())),
+        }
+        self.dependency.indices.extend(start..self.index);
+        Ok(())
     }
 
     fn language(&self, source: &Path) -> Result<CcLanguage, CcBypassReason> {
@@ -1331,8 +1477,8 @@ impl<'a> Parser<'a> {
         if matches!(value, "-E" | "-S") {
             return Err(CcBypassReason::NonObjectOutput(value.into()));
         }
-        if value.starts_with("-M") {
-            return Err(CcBypassReason::CallerDependencyFlags(value.into()));
+        if let Some(option) = value.strip_prefix("-M") {
+            return self.parse_dependency_flag(value, option);
         }
         if value.starts_with("-save-temps") {
             return Err(CcBypassReason::SaveTemps(value.into()));
@@ -1624,6 +1770,8 @@ impl<'a> MsvcParser<'a> {
             required_inputs: self.required_inputs,
             language,
             sysroot: None,
+            caller_depfile: None,
+            dependency_argument_indices: Vec::new(),
         })
     }
 

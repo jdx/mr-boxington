@@ -104,6 +104,63 @@ impl CcDepfile {
 
 const RULE_SEPARATOR: &str = ": ";
 
+impl CcDepfile {
+    /// Render the dependency list a caller asked for, the way the driver
+    /// writes one: the rule's targets, then every prerequisite on its own
+    /// continued line, then, for `-MP`, an empty rule per header so make does
+    /// not fail when one is deleted. `source` is the file that was compiled
+    /// and gets no phony rule, exactly as the driver leaves it out.
+    ///
+    /// Escapes are the ones `parse` reads back: a space, a `#`, and a `$` in
+    /// a path. A quoted target gets the same treatment; a literal one is
+    /// written as given, which is what `-MT` promises.
+    pub fn render(
+        targets: &[crate::DepfileTarget],
+        files: &[PathBuf],
+        source: &Path,
+        phony_targets: bool,
+    ) -> String {
+        let mut rendered = String::new();
+        for (index, target) in targets.iter().enumerate() {
+            if index > 0 {
+                rendered.push(' ');
+            }
+            if target.quoted {
+                rendered.push_str(&escape_make_word(&target.name));
+            } else {
+                rendered.push_str(&target.name);
+            }
+        }
+        rendered.push(':');
+        for file in files {
+            rendered.push_str(" \\\n ");
+            rendered.push_str(&escape_make_word(&file.to_string_lossy()));
+        }
+        rendered.push('\n');
+        if phony_targets {
+            for file in files.iter().filter(|file| file.as_path() != source) {
+                rendered.push_str(&escape_make_word(&file.to_string_lossy()));
+                rendered.push_str(":\n");
+            }
+        }
+        rendered
+    }
+}
+
+/// Quote a word for make the way the driver does in a dependency list.
+fn escape_make_word(word: &str) -> String {
+    let mut escaped = String::with_capacity(word.len());
+    for character in word.chars() {
+        match character {
+            ' ' => escaped.push_str("\\ "),
+            '#' => escaped.push_str("\\#"),
+            '$' => escaped.push_str("$$"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
 /// Join physical lines the compiler wrapped with a trailing backslash.
 fn join_continuations(contents: &str) -> Result<String, CcBypassReason> {
     let mut joined = String::with_capacity(contents.len());
