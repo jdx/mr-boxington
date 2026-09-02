@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.13](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.12...mbx-cache-store-v0.1.13) - 2026-09-02
+
+### Fixed
+
+- *(cache)* preserve grouped exports through collection ([#280](https://github.com/jdx/mr-boxington/pull/280))
+
+### Other
+
+- trim the README and correct link caching claims ([#277](https://github.com/jdx/mr-boxington/pull/277))
+
 ## [0.1.12](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.11...mbx-cache-store-v0.1.12) - 2026-09-02
 
 ### Fixed
