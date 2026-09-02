@@ -2005,3 +2005,50 @@ fn a_covering_oso_prefix_makes_a_debug_link_portable() {
         Err(BypassReason::UnportableNativeLink("debuginfo=2".into())),
     );
 }
+
+/// Cargo passes `-C linker-plugin-lto` to every dependency of a build whose
+/// profile turns LTO on, so bypassing it left such builds without a cache for
+/// anything but the workspace. The switch is keyed; a plugin path is a host
+/// file the key does not describe and still bypasses.
+#[test]
+fn linker_plugin_lto_is_keyed_and_a_plugin_path_bypasses() {
+    let plain = RustcInvocation::parse(&args(&[
+        "--crate-type=lib",
+        "--emit=dep-info,metadata,link",
+        "-Cembed-bitcode=yes",
+        "src/lib.rs",
+    ]))
+    .unwrap();
+    for flag in ["-Clinker-plugin-lto", "-Clinker-plugin-lto=yes"] {
+        let with_lto = RustcInvocation::parse(&args(&[
+            "--crate-type=lib",
+            "--emit=dep-info,metadata,link",
+            "-Cembed-bitcode=yes",
+            flag,
+            "src/lib.rs",
+        ]))
+        .unwrap();
+        assert_ne!(
+            with_lto.arguments, plain.arguments,
+            "{flag} is part of the key"
+        );
+        assert!(
+            with_lto
+                .arguments
+                .contains(&Argument::Plain(format!("--codegen={}", &flag[2..]))),
+            "{flag} is keyed as text"
+        );
+    }
+
+    assert_eq!(
+        RustcInvocation::parse(&args(&[
+            "--crate-type=lib",
+            "--emit=dep-info,metadata,link",
+            "-Clinker-plugin-lto=/usr/lib/LLVMgold.so",
+            "src/lib.rs",
+        ])),
+        Err(BypassReason::UnknownCodegenOption(
+            "linker-plugin-lto=/usr/lib/LLVMgold.so".into()
+        ))
+    );
+}

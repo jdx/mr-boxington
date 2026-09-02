@@ -116,6 +116,7 @@ const SUPPORTED_CODEGEN_OPTIONS: &[&str] = &[
     "link-args",
     "link-dead-code",
     "link-self-contained",
+    "linker-plugin-lto",
     "lto",
     "metadata",
     "no-prepopulate-passes",
@@ -1506,6 +1507,22 @@ impl<'a> Parser<'a> {
             && !(cfg!(windows) && name == "linker")
         {
             return Err(BypassReason::UnknownCodegenOption(name.into()));
+        }
+        // Cargo compiles every dependency of an LTO build with this flag, so
+        // the rlibs carry bitcode for the final link to optimize across. The
+        // switch is keyed as text like any other option. A value naming the
+        // linker plugin is a host file the key does not describe, so that
+        // spelling still bypasses.
+        if name == "linker-plugin-lto"
+            && let Some((_, selection)) = value.split_once('=')
+            && !matches!(
+                selection,
+                "" | "y" | "yes" | "on" | "true" | "n" | "no" | "off" | "false"
+            )
+        {
+            return Err(BypassReason::UnknownCodegenOption(format!(
+                "linker-plugin-lto={selection}"
+            )));
         }
         // `-fuse-ld=<name>` selects the linker the driver invokes. Parsed
         // rather than keyed as text so the linker identity probe can pin the
