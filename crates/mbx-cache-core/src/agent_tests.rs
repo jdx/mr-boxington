@@ -3562,6 +3562,42 @@ async fn bounds_active_remote_download_time_for_a_session() {
 }
 
 #[tokio::test]
+async fn exhausted_remote_download_budget_does_not_wait_for_transfer_capacity() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = mockito::Server::new_async().await;
+    let digest = CacheDigest::blake3(b"missing");
+    let agent = remote_agent(
+        &server,
+        directory.path().join("reader"),
+        RemoteCacheMode::ReadOnly,
+    );
+    agent.note_remote_download_budget_exhausted();
+    let _held_transfers = agent
+        .remote_transfers
+        .acquire_many(MAX_REMOTE_TRANSFERS as u32)
+        .await
+        .unwrap();
+    let remote = agent.remote.as_deref().unwrap();
+
+    let batch = tokio::time::timeout(
+        Duration::from_millis(100),
+        agent.fetch_remote_blobs(remote, vec![digest.clone()], None),
+    )
+    .await
+    .expect("an exhausted budget should stop a blob batch immediately");
+    assert!(batch.is_empty());
+
+    let individual = tokio::time::timeout(
+        Duration::from_millis(100),
+        agent.fetch_remote_blob(remote, &digest),
+    )
+    .await
+    .expect("an exhausted budget should fail before waiting for a transfer permit");
+
+    assert!(individual.is_err());
+}
+
+#[tokio::test]
 async fn merges_overlapping_runs_into_one_task_manifest() {
     let directory = tempfile::tempdir().unwrap();
     let cache = directory.path().join("cache");

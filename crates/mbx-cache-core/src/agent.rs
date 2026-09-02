@@ -639,6 +639,20 @@ impl CacheAgent {
         })
     }
 
+    fn ensure_remote_download_budget_available(&self) -> Result<()> {
+        if self.remote_download_budget_exhausted() {
+            bail!("remote cache download budget exhausted");
+        }
+        Ok(())
+    }
+
+    fn remote_download_budget_exhausted(&self) -> bool {
+        self.stats
+            .remote_download_budget_exhausted
+            .load(Ordering::Relaxed)
+            != 0
+    }
+
     fn reserve_remote_download_up_to(&self, requested: u64) -> Result<RemoteDownloadReservation> {
         let mut current = self.remote_download_bytes.load(Ordering::Acquire);
         loop {
@@ -1124,11 +1138,7 @@ impl CacheAgent {
                 .stats
                 .remote_blob_transfer_duration_ns
                 .load(Ordering::Relaxed),
-            remote_download_budget_exhausted: self
-                .stats
-                .remote_download_budget_exhausted
-                .load(Ordering::Relaxed)
-                != 0,
+            remote_download_budget_exhausted: self.remote_download_budget_exhausted(),
             local_cas_write_duration_ns: self
                 .stats
                 .local_cas_write_duration_ns

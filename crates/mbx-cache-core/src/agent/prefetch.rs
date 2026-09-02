@@ -537,9 +537,15 @@ impl CacheAgent {
         if missing.is_empty() {
             return verified;
         }
+        if self.remote_download_budget_exhausted() {
+            return verified;
+        }
 
         let mut pack_candidates = missing.clone();
         while !pack_candidates.is_empty() {
+            if self.remote_download_budget_exhausted() {
+                return verified;
+            }
             let candidates = match blob_pack_chunk(
                 &pack_candidates.keys().cloned().collect::<Vec<_>>(),
                 BlobPackLimits {
@@ -582,6 +588,9 @@ impl CacheAgent {
             if requested.is_empty() {
                 continue;
             }
+            if self.remote_download_budget_exhausted() {
+                return verified;
+            }
             let requested_bytes = requested
                 .iter()
                 .fold(0_u64, |total, digest| total.saturating_add(digest.size));
@@ -615,6 +624,10 @@ impl CacheAgent {
                         break;
                     }
                 };
+                if let Err(error) = self.ensure_remote_download_budget_available() {
+                    warn!("remote cache blob pack skipped: {error}");
+                    break;
+                }
                 let download_time = match self.begin_remote_download() {
                     Ok(timer) => timer,
                     Err(error) => {
@@ -701,6 +714,10 @@ impl CacheAgent {
                     ),
                 }
             }
+        }
+
+        if self.remote_download_budget_exhausted() {
+            return verified;
         }
 
         let mut transfers = stream::iter(missing.into_keys().map(|digest| {
@@ -893,18 +910,25 @@ impl CacheAgent {
         digest: &CacheDigest,
         prefetch_limit: Option<&tokio::sync::Semaphore>,
     ) -> Result<PathBuf> {
+        if let Some(path) = self.find_verified_blob(digest)? {
+            return Ok(path);
+        }
+        self.ensure_remote_download_budget_available()?;
         let lock = self.write_lock(digest);
         let _guard = lock.lock().await;
         if let Some(path) = self.find_verified_blob(digest)? {
             return Ok(path);
         }
+        self.ensure_remote_download_budget_available()?;
         let _prefetch_permit = match prefetch_limit {
             Some(limit) => Some(limit.acquire().await?),
             None => None,
         };
+        self.ensure_remote_download_budget_available()?;
         let _permit = self.remote_transfers.acquire().await?;
-        let reservation = self.reserve_remote_download(digest.size)?;
+        self.ensure_remote_download_budget_available()?;
         let download_time = self.begin_remote_download()?;
+        let reservation = self.reserve_remote_download(digest.size)?;
         self.stats
             .remote_blob_requests
             .fetch_add(1, Ordering::Relaxed);
