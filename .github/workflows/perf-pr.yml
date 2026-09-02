@@ -67,6 +67,7 @@ jobs:
       MBX_REMOTE_URL: ""
     container:
       image: ghcr.io/jdx/perf-runner@sha256:0f4ee40929472883a32cc29bcd4bd22068c4382b72697da299d6769475b263b5
+      # Anonymous by design; perf-runner#10 prunes it after this container stops.
       options: --cpuset-cpus 0-7 --mount type=volume,dst=/var/cache/mbx
     timeout-minutes: 40
     permissions:
