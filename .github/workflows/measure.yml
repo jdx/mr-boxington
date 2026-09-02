@@ -11,8 +11,6 @@ concurrency:
   cancel-in-progress: false
 env:
   CARGO_INCREMENTAL: "0"
-  # Persistent appliance-local store; no remote backend is configured.
-  MBX_CACHE_DIR: /var/cache/mbx
   # Rust 1.97.1 is part of the digest-pinned benchmark image.
   MISE_DISABLE_TOOLS: rust
   RUSTUP_TOOLCHAIN: 1.97.1
@@ -21,6 +19,9 @@ env:
 jobs:
   measure:
     runs-on: [self-hosted, jdx-perf-v1]
+    env:
+      # Persistent appliance-local store; no remote backend is configured.
+      MBX_CACHE_DIR: /var/cache/mbx
     container:
       image: ghcr.io/jdx/perf-runner@sha256:0f4ee40929472883a32cc29bcd4bd22068c4382b72697da299d6769475b263b5
       options: --cpuset-cpus 0-7 --mount type=bind,src=/var/cache/jdx-perf/mbx,dst=/var/cache/mbx
