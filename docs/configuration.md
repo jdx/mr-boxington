@@ -199,6 +199,15 @@ suppress the summary for that invocation.
 
 ## Incremental builds
 
+::: tip Start with the default
+You do not need `MBX_INCREMENTAL=1` to make edited crates compile
+incrementally. mbx already gives a changing crate private incremental state
+while keeping the rest of the build in the shared cache.
+
+Turn it on when one checkout's edit loop matters more than cache reuse across
+branches and worktrees.
+:::
+
 `MBX_INCREMENTAL=1` stops mbx from forcing `CARGO_INCREMENTAL=0` locally. This
 can help an edit/rebuild loop, but an incremental workspace artifact changes
 the inputs of crates above it and reduces reuse across worktrees. CI always
