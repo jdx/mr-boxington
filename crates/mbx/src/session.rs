@@ -149,7 +149,7 @@ impl CacheSession {
                 store.clone(),
                 VERSION,
                 remote,
-                config.gc.max_bytes,
+                config.remote.max_download_bytes,
             )
         } else {
             CacheAgent::new(store.clone(), VERSION)

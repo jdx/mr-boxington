@@ -22,6 +22,22 @@ mode = "read-write"
 The namespace isolates one project's cache from another. It is required when a
 remote URL is set. To host your own server, see [cache server](/cache-server).
 
+## Bound downloads
+
+Each build downloads at most 256 MiB of remote artifact data by default. Once
+that budget is exhausted, remaining actions compile normally. This keeps a
+large debug build or a slow remote from turning nominal cache hits into a build
+time regression while preserving the actions already restored into the local
+store.
+
+Set `remote.max_download_size` or `MBX_REMOTE_MAX_DOWNLOAD_SIZE` to choose a
+different per-build budget:
+
+```toml
+[remote]
+max_download_size = "512MiB"
+```
+
 ## Configure an S3-compatible bucket
 
 ```toml

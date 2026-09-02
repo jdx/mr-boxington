@@ -80,7 +80,7 @@ Minimum interval between automatic sweeps.
 - **Default:** 5% of the cache disk, from 5GiB to 500GiB
 - **Set with:** `MBX_GC_MAX_SIZE`
 
-Action-store and per-session remote-download budget.
+Action-store budget.
 
 ### `gc.max_total_size`
 
@@ -138,6 +138,14 @@ Compile crates that keep missing the cache with changed content incrementally, k
 - **Set with:** `MBX_LOG`
 
 Log filter for mbx's own diagnostics, such as `debug` or `mbx=trace`.
+
+### `remote.max_download_size`
+
+- **Type:** `string`
+- **Default:** `256MiB`
+- **Set with:** `MBX_REMOTE_MAX_DOWNLOAD_SIZE`
+
+Most remote artifact data one build may download. Once exhausted, remaining actions compile normally instead of letting a slow cache dominate the build.
 
 ### `remote.mode`
 

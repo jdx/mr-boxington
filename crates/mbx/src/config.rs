@@ -15,10 +15,12 @@ const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_HTTP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_HTTP_RETRIES: i64 = 3;
 const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const DEFAULT_REMOTE_MAX_DOWNLOAD_BYTES: u64 = 256 * MIB;
 /// How long a managed target directory may sit unused before collection.
 const DEFAULT_TARGET_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
-const GIB: u64 = 1024 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * MIB;
 
 /// The largest the action-store budget nobody configured will grow to.
 const MAX_STORE_BUDGET: u64 = 500 * GIB;
@@ -224,6 +226,10 @@ struct RawRemote {
         choices("read-write", "read-only", "write-only")
     )]
     mode: String,
+    /// Most remote artifact data one build may download. Once exhausted, remaining
+    /// actions compile normally instead of letting a slow cache dominate the build.
+    #[usage(env = "MBX_REMOTE_MAX_DOWNLOAD_SIZE", default = "256MiB")]
+    max_download_size: String,
     /// S3 endpoint for a store that is not AWS, such as MinIO or R2.
     #[usage(env = "MBX_REMOTE_S3_ENDPOINT", ty = "url")]
     s3_endpoint: Option<String>,
@@ -268,7 +274,7 @@ struct RawGc {
     /// Sweep after a build when collection is due.
     #[usage(env = "MBX_GC_AUTO", default = true)]
     auto: bool,
-    /// Action-store and per-session remote-download budget.
+    /// Action-store budget.
     #[usage(
         env = "MBX_GC_MAX_SIZE",
         default_note = "5% of the cache disk, from 5GiB to 500GiB"
@@ -433,7 +439,7 @@ impl std::str::FromStr for SchedulerPriority {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RemoteSettings {
     pub url: Option<String>,
     pub namespace: Option<String>,
@@ -441,10 +447,29 @@ pub struct RemoteSettings {
     pub token_file: Option<PathBuf>,
     pub oidc_audience: Option<String>,
     pub mode: RemoteCacheMode,
+    pub max_download_bytes: u64,
     pub s3_endpoint: Option<String>,
     pub s3_region: Option<String>,
     pub s3_force_path_style: Option<bool>,
     pub s3_conditional_writes: S3ConditionalWrites,
+}
+
+impl Default for RemoteSettings {
+    fn default() -> Self {
+        Self {
+            url: None,
+            namespace: None,
+            token: None,
+            token_file: None,
+            oidc_audience: None,
+            mode: RemoteCacheMode::default(),
+            max_download_bytes: DEFAULT_REMOTE_MAX_DOWNLOAD_BYTES,
+            s3_endpoint: None,
+            s3_region: None,
+            s3_force_path_style: None,
+            s3_conditional_writes: S3ConditionalWrites::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -780,6 +805,8 @@ impl Config {
                 token_file: raw.remote.token_file,
                 oidc_audience: raw.remote.oidc_audience,
                 mode,
+                max_download_bytes: parse_byte_size(&raw.remote.max_download_size)
+                    .wrap_err("invalid remote.max_download_size")?,
                 s3_endpoint: raw.remote.s3_endpoint,
                 s3_region: raw.remote.s3_region,
                 s3_force_path_style: raw.remote.s3_force_path_style,
@@ -1055,6 +1082,7 @@ mod tests {
             url = "https://file.example"
             namespace = "file"
             mode = "read-only"
+            max_download_size = "512MiB"
             s3_conditional_writes = "required"
             [http]
             timeout = "5s"
@@ -1073,6 +1101,7 @@ mod tests {
                 ("MBX_CACHE_DIR", "/from/env"),
                 ("MBX_REMOTE_URL", "https://env.example"),
                 ("MBX_REMOTE_MODE", "write-only"),
+                ("MBX_REMOTE_MAX_DOWNLOAD_SIZE", "128MiB"),
                 ("MBX_HTTP_TIMEOUT", "250ms"),
                 ("MBX_GC_MAX_SIZE", "2GiB"),
                 ("MBX_TARGET_ROOT", "/from/env/targets"),
@@ -1083,6 +1112,7 @@ mod tests {
         assert_eq!(config.cache_dir, PathBuf::from("/from/env"));
         assert_eq!(config.remote.url.unwrap(), "https://env.example");
         assert_eq!(config.remote.mode, RemoteCacheMode::WriteOnly);
+        assert_eq!(config.remote.max_download_bytes, 128 * MIB);
         assert_eq!(config.http.timeout, Duration::from_millis(250));
         assert_eq!(config.gc.max_bytes, 2 * 1024 * 1024 * 1024);
         // Values absent from the environment still come from the file.
@@ -1109,6 +1139,10 @@ mod tests {
         assert_eq!(config.http.download_timeout, DEFAULT_HTTP_DOWNLOAD_TIMEOUT);
         assert_eq!(config.http.retries, DEFAULT_HTTP_RETRIES);
         assert_eq!(config.remote.mode, RemoteCacheMode::ReadWrite);
+        assert_eq!(
+            config.remote.max_download_bytes,
+            DEFAULT_REMOTE_MAX_DOWNLOAD_BYTES
+        );
         assert!(config.remote.url.is_none());
         assert!(!config.verify);
         assert!(!config.incremental);
@@ -1328,6 +1362,7 @@ mod tests {
         assert!(configured(None, &[("MBX_HTTP_RETRIES", "many")]).is_err());
         assert!(configured(None, &[("MBX_GC_MAX_SIZE", "lots")]).is_err());
         assert!(configured(None, &[("MBX_GC_MAX_TOTAL_SIZE", "lots")]).is_err());
+        assert!(configured(None, &[("MBX_REMOTE_MAX_DOWNLOAD_SIZE", "lots")]).is_err());
         assert!(configured(None, &[("MBX_GC_INTERVAL", "later")]).is_err());
         assert!(configured(None, &[("MBX_TARGET_MAX_SIZE", "lots")]).is_err());
         assert!(configured(None, &[("MBX_TARGET_MAX_AGE", "later")]).is_err());
@@ -1361,6 +1396,21 @@ mod tests {
         ] {
             let config = configured(None, &[("MBX_GC_MAX_SIZE", value)]).unwrap();
             assert_eq!(config.gc.max_bytes, expected, "{value} should parse");
+        }
+    }
+
+    #[test]
+    fn reads_a_remote_download_budget_in_either_unit_convention() {
+        for (value, expected) in [
+            ("256MiB", 256 * MIB),
+            ("256MB", 256_000_000),
+            ("1048576", MIB),
+        ] {
+            let config = configured(None, &[("MBX_REMOTE_MAX_DOWNLOAD_SIZE", value)]).unwrap();
+            assert_eq!(
+                config.remote.max_download_bytes, expected,
+                "{value} should parse"
+            );
         }
     }
 
