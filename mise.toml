@@ -117,7 +117,7 @@ run = "lychee --offline --include-fragments --root-dir \"$PWD/docs/.vitepress/di
 
 [tasks."perf:prepare"]
 description = "Build the fixed benchmark subject"
-run = "cargo build --release --locked -p mbx"
+run = "mbx build --release --locked -p mbx"
 
 [tasks."build:pgo"]
 description = "Build a profile-guided mbx release binary"
@@ -160,6 +160,9 @@ depends = ["perf:prepare"]
 run = "tak run --record"
 
 [tools]
+# Perf jobs build the current source with the latest released mbx so the
+# appliance cache is usable without bootstrapping from the branch under test.
+mr-boxington = "1.4.1"
 "github:jdx/tak" = "0.0.9"
 aube = "latest"
 communique = "latest"
