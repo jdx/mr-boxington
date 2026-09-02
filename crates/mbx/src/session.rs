@@ -37,9 +37,10 @@ use client::validate_handshake_response;
 use client::{request_agent_at, request_standalone_agent};
 pub(crate) use diagnostics::{note, report_shim_warning, reserve_stderr_for_compiler};
 use server::spawn_server;
+pub(crate) use shims::CC_CRATE_ENV;
 #[cfg(all(test, windows))]
 use shims::link_path_shim;
-use shims::{CC_CRATE_ENV, CcShims, install_cc_shims, install_session_shims};
+use shims::{CcShims, install_cc_shims, install_session_shims};
 pub use shims::{
     PathShims, ShimLink, install_path_shims, install_shim, install_shim_named, shim_file_name,
 };

@@ -71,8 +71,11 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
         resolve_real_cargo(&shim)?
     };
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if mbx_disabled()
-        || enclosing_session(std::env::var_os(crate::session::SOCKET_ENV).as_deref())
+    if mbx_disabled() {
+        preserve_native_compiler_paths();
+        return run_real_cargo(&real_cargo, &arguments);
+    }
+    if enclosing_session(std::env::var_os(crate::session::SOCKET_ENV).as_deref())
         || cargo_proxy_passthrough(&arguments)
     {
         return run_real_cargo(&real_cargo, &arguments);
@@ -147,6 +150,41 @@ fn mbx_disabled_value(value: Option<&OsStr>) -> bool {
         let value = value.to_string_lossy();
         value != "0" && !value.eq_ignore_ascii_case("false")
     })
+}
+
+/// Keep native build-system configuration reusable while bypassing the cache.
+///
+/// CMake records the absolute compiler path it sees. An mbx build points host
+/// C and C++ compilation at persistent shims, so handing a later disabled
+/// build the platform compiler directly makes CMake invalidate and reconfigure
+/// the same build directory. The persistent shim is already transparent
+/// without a session; preserve its path here without starting an agent or
+/// caching any compilation.
+fn preserve_native_compiler_paths() {
+    if crate::session::CC_CRATE_ENV
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+    {
+        return;
+    }
+    let Ok((config, _)) = Config::load_for_cli() else {
+        return;
+    };
+    if !config.cc {
+        return;
+    }
+    let shims = config.cache_dir.join("shims");
+    for (variable, stem) in [
+        ("HOST_CC", crate::session::CC_SHIM_STEM),
+        ("HOST_CXX", crate::session::CXX_SHIM_STEM),
+    ] {
+        let shim = shims.join(crate::session::shim_file_name(stem));
+        if shim.is_file() {
+            // SAFETY: Cargo shim dispatch is single-threaded before its child
+            // process starts.
+            unsafe { std::env::set_var(variable, shim) };
+        }
+    }
 }
 
 fn enclosing_session(session_socket: Option<&OsStr>) -> bool {
