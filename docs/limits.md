@@ -143,7 +143,10 @@ build the object with the wrong compiler. A value that is a command, such as
 `ccache gcc`, is left alone for the same reason.
 
 Only a plain single-source object compile through a gcc-, clang-, or MSVC-style
-driver is admitted. Linking, preprocessing, assembly, Objective-C, precompiled
+driver is admitted, with preprocessed assembly (`.S`, or `-x
+assembler-with-cpp`) counting as C: its includes are what dependency discovery
+reads, and the assembler is part of a GCC identity. Linking, preprocessing,
+assembly that skips the preprocessor (`.s`), Objective-C, precompiled
 headers, coverage instrumentation, compiler plugins, options forwarded to a
 sub-tool with `-Wp,`/`-Wl,`/`-Xclang`, unmodeled `-Wa,` assembler options, and
 response files all bypass, as does any flag the adapter does not model. Known

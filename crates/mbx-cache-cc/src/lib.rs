@@ -1420,7 +1420,12 @@ impl<'a> Parser<'a> {
             .and_then(|extension| extension.to_str())
             .unwrap_or_default();
         match extension {
-            "c" => Ok(CcLanguage::C),
+            // Preprocessed assembly goes through the C driver: the preprocessor
+            // resolves its includes, which is what dependency discovery reads,
+            // and the assembler that then produces the object is already part
+            // of a GCC identity. Plain `.s` is not preprocessed and reports no
+            // dependencies, so it stays out.
+            "c" | "S" => Ok(CcLanguage::C),
             "cc" | "cpp" | "cxx" | "c++" => Ok(CcLanguage::Cxx),
             _ => Err(CcBypassReason::UnsupportedLanguage(
                 source.display().to_string(),
@@ -1461,7 +1466,7 @@ impl<'a> Parser<'a> {
                 .extension()
                 .and_then(|extension| extension.to_str())
                 .unwrap_or_default();
-            if !matches!(extension, "c" | "cc" | "cpp" | "cxx" | "c++") {
+            if !matches!(extension, "c" | "S" | "cc" | "cpp" | "cxx" | "c++") {
                 return Err(CcBypassReason::UnsupportedLanguage(value.into()));
             }
         }
@@ -1616,7 +1621,7 @@ impl<'a> Parser<'a> {
         if let Some(rest) = value.strip_prefix("-x") {
             let language = self.take_value("-x", Some(rest))?;
             self.explicit_language = Some(match language.as_str() {
-                "c" => CcLanguage::C,
+                "c" | "assembler-with-cpp" => CcLanguage::C,
                 "c++" => CcLanguage::Cxx,
                 other => return Err(CcBypassReason::UnsupportedLanguage(other.into())),
             });
