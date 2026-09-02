@@ -119,7 +119,7 @@ pub(super) fn is_target_triple(suffix: &str) -> bool {
 /// Variables the `cc` crate consults before falling back to the platform
 /// default. A build that sets any of them has chosen its own compiler, and mbx
 /// stands aside rather than redirecting it.
-pub(super) const CC_CRATE_ENV: &[&str] = &["CC", "CXX", "HOST_CC", "HOST_CXX"];
+pub(crate) const CC_CRATE_ENV: &[&str] = &["CC", "CXX", "HOST_CC", "HOST_CXX"];
 
 /// Install the C and C++ shims, resolving the compilers they will run.
 ///
