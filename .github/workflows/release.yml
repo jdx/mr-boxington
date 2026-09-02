@@ -60,28 +60,28 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            runner: namespace-profile-endev-linux-amd64
+            runner: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
             bin: mbx
             cross: true
             pgo: true
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            runner: namespace-profile-endev-linux-amd64
+            runner: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
             bin: mbx
             pgo: true
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            runner: namespace-profile-endev-linux-amd64
+            runner: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
             bin: mbx
             cross: true
           - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
-            runner: namespace-profile-endev-linux-arm64
+            runner: namespace-profile-endev-linux-arm64;overrides.cache-tag=cache
             bin: mbx
             pgo: true
           - target: aarch64-apple-darwin
             os: macos-latest
-            runner: namespace-profile-endev-macos-arm64
+            runner: namespace-profile-endev-macos-arm64;overrides.cache-tag=cache
             bin: mbx
             pgo: true
           - target: x86_64-pc-windows-msvc
@@ -315,7 +315,7 @@ jobs:
     # Needs every target: a release carrying only some of its archives is worse
     # than one that arrives late, and the draft stays unpublished either way.
     needs: build
-    runs-on: namespace-profile-endev-linux-amd64
+    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
     permissions:
       contents: write
     steps:

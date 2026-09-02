@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: namespace-profile-endev-linux-amd64
+    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
     permissions:
       contents: read
       pages: write
@@ -57,7 +57,7 @@ jobs:
       pages: write
       id-token: write
     needs: build
-    runs-on: namespace-profile-endev-linux-amd64
+    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
     steps:
       - name: Deploy to GitHub Pages
         id: deployment

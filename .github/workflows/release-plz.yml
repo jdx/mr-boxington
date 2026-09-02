@@ -33,7 +33,7 @@ concurrency:
 jobs:
   release-plz-release:
     name: Release
-    runs-on: namespace-profile-endev-linux-amd64
+    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
     # Forks should never attempt to publish.
     if: ${{ github.repository_owner == 'jdx' }}
     permissions:
@@ -158,7 +158,7 @@ jobs:
     name: Enhance release notes
     needs: release-plz-release
     if: ${{ needs.release-plz-release.outputs.tag != '' }}
-    runs-on: namespace-profile-endev-linux-amd64
+    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
     continue-on-error: true
     permissions:
       contents: read
@@ -196,7 +196,7 @@ jobs:
     name: Publish release
     needs: [release-plz-release, upload-assets, enhance-release]
     if: ${{ needs.release-plz-release.outputs.tag != '' }}
-    runs-on: namespace-profile-endev-linux-amd64
+    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
     permissions:
       contents: write
     steps:
@@ -208,7 +208,7 @@ jobs:
 
   release-plz-pr:
     name: Release PR
-    runs-on: namespace-profile-endev-linux-amd64
+    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
     if: ${{ github.repository_owner == 'jdx' }}
     permissions:
       contents: write
