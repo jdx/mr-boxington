@@ -366,11 +366,11 @@ EOF
   local cxx_shim="$MBX_CACHE_DIR/shims/mbx-cxx$executable_suffix"
   mkdir -p "$real_bin" "$(dirname "$cc_shim")"
   touch "$cc_shim" "$cxx_shim"
-  cat >"$real_bin/cargo" <<'EOF'
+  cat >"$real_bin/cargo$executable_suffix" <<'EOF'
 #!/bin/sh
 printf 'HOST_CC=%s\nHOST_CXX=%s\n' "$HOST_CC" "$HOST_CXX"
 EOF
-  chmod +x "$real_bin/cargo"
+  chmod +x "$real_bin/cargo$executable_suffix"
   "$MBX_BIN" setup >/dev/null
 
   run env MBX_DISABLE=1 PATH="$MBX_SHIM_DIR:$real_bin:/usr/bin:/bin" cargo build
