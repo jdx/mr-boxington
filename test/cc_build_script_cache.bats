@@ -189,3 +189,65 @@ EOF
   run grep -E '"hits"[[:space:]]*:[[:space:]]*2' "$warm_report"
   assert_success
 }
+
+@test "a build script's own dependency list is written on a compile and on a restore" {
+  # OpenSSL's makefiles and CMake ask the driver for a dependency list with
+  # `-MMD -MF`, which used to bypass every such object. The list is not key
+  # material and names this machine's paths, so the shim writes it itself,
+  # from the files the compilation read, whether the object was compiled or
+  # restored into a fresh target.
+  cat >"$PROJECT/build.rs" <<'RS'
+use std::{env, path::PathBuf, process::Command};
+
+fn main() {
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let compiler = env::var("HOST_CC")
+        .or_else(|_| env::var("CC"))
+        .unwrap_or_else(|_| "cc".into());
+    let status = Command::new(&compiler)
+        .arg("-O2")
+        .arg("-Iinclude")
+        .arg("-MMD")
+        .arg("-MF")
+        .arg(out.join("hello.d"))
+        .arg("-MT")
+        .arg("hello.o")
+        .arg("-c")
+        .arg("-o")
+        .arg(out.join("hello.o"))
+        .arg("src/hello.c")
+        .status()
+        .expect("the C compiler should run");
+    assert!(status.success());
+    let list = std::fs::read_to_string(out.join("hello.d")).expect("the dependency list");
+    assert!(list.starts_with("hello.o:"), "unexpected list: {list}");
+    assert!(list.contains("include/hello.h"), "unexpected list: {list}");
+}
+RS
+  local first_target="$BATS_TEST_TMPDIR/first-target"
+  local second_target="$BATS_TEST_TMPDIR/second-target"
+  local warm_report="$BATS_TEST_TMPDIR/warm.json"
+
+  run env CARGO_TARGET_DIR="$first_target" \
+    "$MBX_BIN" build --offline --manifest-path "$PROJECT/Cargo.toml"
+  assert_success
+  local compiled
+  compiled="$(object_in "$first_target")"
+  [ -n "$compiled" ]
+
+  run env CARGO_TARGET_DIR="$second_target" MBX_STATS_REPORT="$warm_report" \
+    "$MBX_BIN" build --offline --manifest-path "$PROJECT/Cargo.toml"
+  assert_success
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*3' "$warm_report"
+  assert_success
+  local restored
+  restored="$(object_in "$second_target")"
+  [ -n "$restored" ]
+  run cmp "$compiled" "$restored"
+  assert_success
+  # The build script's own assertions ran against a restored object, so the
+  # list was written on the restore too; this makes that explicit.
+  run find "$second_target" -name hello.d -type f
+  assert_success
+  assert_output --partial hello.d
+}

@@ -522,3 +522,37 @@ fn verification_trusts_an_unchanged_identity_and_rereads_a_changed_one() {
     std::fs::write(&header, "int b(void);\n").expect("rewrite");
     assert_eq!(discovered.verify().unwrap_err().kind(), "input-changed");
 }
+
+/// The list the shim writes for a caller reads back through the same parser,
+/// escapes exactly what the parser unescapes, quotes only the targets that
+/// asked for it, and gives every header but the source a phony rule when `-MP`
+/// asked.
+#[test]
+fn a_rendered_caller_depfile_reads_back_and_quotes_like_the_driver() {
+    let files = vec![
+        PathBuf::from("/src/a.c"),
+        PathBuf::from("/src/my dir/a.h"),
+        PathBuf::from("/src/#odd$/b.h"),
+    ];
+    let targets = [
+        crate::DepfileTarget {
+            name: "$(OBJ)".into(),
+            quoted: false,
+        },
+        crate::DepfileTarget {
+            name: "out/a b.o".into(),
+            quoted: true,
+        },
+    ];
+
+    let rendered = CcDepfile::render(&targets, &files, Path::new("/src/a.c"), true);
+
+    assert_eq!(
+        rendered,
+        "$(OBJ) out/a\\ b.o: \\\n /src/a.c \\\n /src/my\\ dir/a.h \\\n /src/\\#odd$$/b.h\n/src/my\\ dir/a.h:\n/src/\\#odd$$/b.h:\n"
+    );
+    assert_eq!(CcDepfile::parse(&rendered).unwrap().files, files);
+
+    let plain = CcDepfile::render(&targets[1..], &files[..1], Path::new("/src/a.c"), false);
+    assert_eq!(plain, "out/a\\ b.o: \\\n /src/a.c\n");
+}

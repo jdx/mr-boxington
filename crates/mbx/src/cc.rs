@@ -52,6 +52,10 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     let arguments = portable.applied_to(arguments);
     let arguments = arguments.as_ref();
     let invocation = CcInvocation::parse_for(arguments, identity.family)?;
+    // The driver honors one `-MF`, and the shim's own dependency list is the
+    // one it needs; the caller's is written by the shim once the files this
+    // compilation read are known.
+    let compiler_arguments = invocation.compiler_arguments(arguments);
     let environment = environment_inputs_for(
         |name| std::env::var(name).ok(),
         invocation.sysroot(),
@@ -104,6 +108,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
             &discovered,
             !verify,
             &context.path_mappings,
+            &context.working_dir,
         ) {
             Ok(restored) => restored,
             Err(error) => {
@@ -113,6 +118,10 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         };
         if let Some(cached) = restored {
             if !verify {
+                write_caller_depfile(
+                    &invocation,
+                    discovered.files().map(|input| input.path.as_path()),
+                );
                 record_prediction(
                     &task,
                     &invocation_digest,
@@ -161,7 +170,11 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
             &mut looked_up,
             None,
         ) {
-            Ok(Some((action, cached))) => {
+            Ok(Some((action, cached, discovered))) => {
+                write_caller_depfile(
+                    &invocation,
+                    discovered.files().map(|input| input.path.as_path()),
+                );
                 replay_bytes(&cached.stdout, &cached.stderr)?;
                 record_action_hit(&action, cached.restore, &compilation_name(&invocation));
                 return Ok(ExitCode::SUCCESS);
@@ -200,13 +213,17 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
                         &mut looked_up,
                         Some(&prediction.action),
                     ) {
-                        Ok(Some((action, cached))) => {
+                        Ok(Some((action, cached, discovered))) => {
                             // Mirror the successful fleet handoff locally:
                             // the remote promise is ephemeral, while this
                             // record survives for the next local flight.
                             if let Some(flight) = &flight {
                                 flight.leave(&prediction.payload);
                             }
+                            write_caller_depfile(
+                                &invocation,
+                                discovered.files().map(|input| input.path.as_path()),
+                            );
                             replay_bytes(&cached.stdout, &cached.stderr)?;
                             record_action_hit(
                                 &action,
@@ -253,7 +270,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     let started = Instant::now();
     let compilation_started = SystemTime::now();
     let mut command = Command::new(compiler);
-    command.args(arguments);
+    command.args(&compiler_arguments);
     command.args(invocation.dependency_arguments_for(&depfile, context.compiler.family));
     let output = command
         .output()
@@ -287,7 +304,6 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     if !output.status.success() {
         return Ok(exit_code(output.status));
     }
-
     // A failure to publish must not fail a compilation that already succeeded.
     if let Err(error) = publish(
         &invocation,
@@ -308,6 +324,21 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         session::report_shim_warning(&format!("cc result was not published: {error:#}"));
         #[cfg(not(debug_assertions))]
         let _ = error;
+    }
+    // Owed whether or not the object was published: the build that asked for
+    // the list reads it next. Written after publication, because the list
+    // may land in a directory the compilation searched for headers, and a
+    // file appearing there between the two manifest snapshots would read as
+    // a header that appeared mid-compile.
+    if invocation.caller_depfile().is_some() {
+        match mbx_cache_cc::CcDepfile::read_for(&depfile, context.compiler.family) {
+            Ok(listed) => {
+                write_caller_depfile(&invocation, listed.files.iter().map(PathBuf::as_path))
+            }
+            Err(error) => session::report_shim_warning(&format!(
+                "the caller's dependency list was not written: {error}"
+            )),
+        }
     }
     Ok(exit_code(output.status))
 }
@@ -339,11 +370,15 @@ fn publish(
     // its headers. Publishing one that names the directory anyway would make
     // that claim false for every checkout that restored it, so a compilation
     // whose output kept the value is left uncached rather than shared wrong.
-    if !portable.outputs_are_clean(invocation.output()) {
-        return Err(CcBypassReason::UnportableOutput(invocation.output().to_path_buf()).into());
+    // Addressed absolutely from here on: `-o` may be relative to the compiler's
+    // working directory, and the cache agent that stores the object does not
+    // share it. OpenSSL's makefiles compile every object that way.
+    let object = invocation.output_in(&context.working_dir);
+    if !portable.outputs_are_clean(&object) {
+        return Err(CcBypassReason::UnportableOutput(object).into());
     }
     let action = invocation.action(context.clone())?;
-    publish_result(&action, invocation, output, &context.path_mappings)?;
+    publish_result(&action, &object, output, &context.path_mappings)?;
     let prediction = invocation.prediction(context, duration_ns)?;
     record_prediction(
         task,
@@ -371,7 +406,7 @@ fn restore_flight_prediction(
     invocation_digest: &CacheDigest,
     looked_up: &mut bool,
     recorded_action: Option<&CacheDigest>,
-) -> Result<Option<(CacheDigest, CachedCompilation)>> {
+) -> Result<Option<(CacheDigest, CachedCompilation, CcDiscoveredInputs)>> {
     let prediction: CcInputPrediction = serde_json::from_str(payload)?;
     let discovered = prediction.discover(
         &context.working_dir,
@@ -391,6 +426,7 @@ fn restore_flight_prediction(
         &discovered,
         true,
         &context.path_mappings,
+        &context.working_dir,
     )?;
     let Some(cached) = restored else {
         return Ok(None);
@@ -403,7 +439,46 @@ fn restore_flight_prediction(
         None,
         None,
     );
-    Ok(Some((action.digest, cached)))
+    Ok(Some((action.digest, cached, discovered)))
+}
+
+/// Write the dependency list the caller asked the driver for, from the files
+/// this compilation is known to have read.
+///
+/// Best-effort: the object is already in place, and a build whose list is
+/// missing rebuilds that object at worst. For `-MMD` the system headers are
+/// left out the way the driver would leave them out; a header the shim cannot
+/// tell is a system one stays in, which only makes the list more cautious.
+fn write_caller_depfile<'a>(invocation: &CcInvocation, files: impl Iterator<Item = &'a Path>) {
+    let Some(caller) = invocation.caller_depfile() else {
+        return;
+    };
+    let files = files
+        .filter(|path| !caller.user_headers_only || !mbx_cache_cc::is_system_path(path))
+        .map(Path::to_path_buf)
+        .collect::<Vec<_>>();
+    let rendered = mbx_cache_cc::CcDepfile::render(
+        &caller.targets,
+        &files,
+        invocation.source(),
+        caller.phony_targets,
+    );
+    let written = (|| {
+        if let Some(parent) = caller
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&caller.path, rendered)
+    })();
+    if let Err(error) = written {
+        session::report_shim_warning(&format!(
+            "the caller's dependency list {} was not written: {error}",
+            caller.path.display()
+        ));
+    }
 }
 
 /// The environment values whose absolute paths a compilation is made
@@ -880,10 +955,25 @@ fn record_prediction(
         adapter: ADAPTER.into(),
         payload,
     };
-    let _ = session::request_agent(&[AgentRequest::RecordActionPrediction {
+    // Best-effort like the rest of publication, but not silent in a debug
+    // build: a prediction that is never recorded is a compilation that is
+    // never looked up again, with nothing in the summary to say why.
+    let recorded = session::request_agent(&[AgentRequest::RecordActionPrediction {
         task: task.to_string(),
         prediction: wire_prediction.clone(),
     }]);
+    #[cfg(debug_assertions)]
+    match recorded.map(|responses| responses.into_iter().next()) {
+        Ok(Some(AgentResponse::ActionPredictionRecorded)) => {}
+        Ok(other) => session::report_shim_warning(&format!(
+            "cc prediction was not recorded: unexpected agent response {other:?}"
+        )),
+        Err(error) => {
+            session::report_shim_warning(&format!("cc prediction was not recorded: {error:#}"))
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = recorded;
     if let Some(claim) = remote_claim {
         let _ = session::request_agent(&[AgentRequest::CompleteActionPromise {
             claim: claim.to_string(),
@@ -917,6 +1007,7 @@ fn restore_result(
     discovered: &CcDiscoveredInputs,
     restore_outputs: bool,
     mappings: &[PathMapping],
+    working_dir: &Path,
 ) -> Result<Option<CachedCompilation>> {
     let text_mappings = rustc_path_mappings(mappings);
     let responses = session::request_agent(&[AgentRequest::FindActionResult {
@@ -958,7 +1049,7 @@ fn restore_result(
     let directory: CacheDirectory =
         read_canonical_blob(&roots[2], &output_root_digest, "output directory")?;
     let node = validated_object(directory, invocation)?;
-    let destination = invocation.output().to_path_buf();
+    let destination = invocation.output_in(working_dir);
 
     let blobs = find_blobs(&[
         metadata.stdout.clone(),
@@ -1076,12 +1167,11 @@ fn validated_object(directory: CacheDirectory, invocation: &CcInvocation) -> Res
 
 fn publish_result(
     action: &CcAction,
-    invocation: &CcInvocation,
+    object: &Path,
     output: &Output,
     mappings: &[PathMapping],
 ) -> Result<()> {
     let text_mappings = rustc_path_mappings(mappings);
-    let object = invocation.output();
     let metadata = std::fs::metadata(object)
         .wrap_err_with(|| format!("failed to inspect cc output {}", object.display()))?;
     if !metadata.is_file() {
