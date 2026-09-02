@@ -84,6 +84,10 @@ fn bypass_kinds_are_stable_and_field_independent() {
             "embedded-timestamp-macro",
         ),
         (
+            CcBypassReason::AssemblerInputDirective("/w/a.S".into()),
+            "assembler-input-directive",
+        ),
+        (
             CcBypassReason::MalformedDepfile("no rule".into()),
             "malformed-depfile",
         ),
@@ -429,8 +433,8 @@ fn plain_warning_flags_stay_admitted_key_material() {
 }
 
 #[test]
-fn assembly_and_objective_c_sources_bypass_as_unsupported_languages() {
-    for source in ["a.S", "a.s", "a.m", "a.mm", "a.C", "a.rs"] {
+fn plain_assembly_and_objective_c_sources_bypass_as_unsupported_languages() {
+    for source in ["a.s", "a.m", "a.mm", "a.C", "a.rs"] {
         let arguments = argv(&["-c", "-o", "a.o", source]);
         assert_eq!(
             CcInvocation::parse(&arguments).unwrap_err().kind(),
@@ -1135,4 +1139,62 @@ fn the_object_is_addressed_absolutely_from_the_working_directory() {
         absolute.output_in(Path::new("/elsewhere")),
         PathBuf::from("/out/a.o")
     );
+}
+
+/// Preprocessed assembly compiles like C: the preprocessor reports the
+/// includes it read, and the assembler is already part of the identity. Plain
+/// assembly is not preprocessed, reports nothing, and stays out.
+#[test]
+fn preprocessed_assembly_is_admitted_and_plain_assembly_is_not() {
+    let by_extension = CcInvocation::parse(&argv(&["-c", "-o", "a.o", "curve25519.S"])).unwrap();
+    assert_eq!(by_extension.language(), CcLanguage::C);
+
+    let explicit = CcInvocation::parse(&argv(&[
+        "-x",
+        "assembler-with-cpp",
+        "-c",
+        "-o",
+        "a.o",
+        "a.S",
+    ]))
+    .unwrap();
+    assert_eq!(explicit.language(), CcLanguage::C);
+    assert!(
+        explicit
+            .arguments
+            .contains(&Argument::Plain("-xassembler-with-cpp".into())),
+        "the explicit language enters the key"
+    );
+
+    for arguments in [
+        vec!["-c", "-o", "a.o", "a.s"],
+        vec!["-x", "assembler", "-c", "-o", "a.o", "a.S"],
+    ] {
+        assert_eq!(
+            CcInvocation::parse(&argv(&arguments)).unwrap_err().kind(),
+            "unsupported-language"
+        );
+    }
+}
+
+#[test]
+fn assembler_input_directives_bypass_only_preprocessed_assembly() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("a.S");
+    let assembly = CcInvocation::parse(&argv(&["-c", "-o", "a.o", "a.S"])).unwrap();
+    for directive in [".include", ".INCBIN", ".SInclude"] {
+        std::fs::write(&source, format!("{directive} \"constants.inc\"\n")).unwrap();
+        assert_eq!(
+            assembly
+                .validate_discovered_inputs([source.as_path()])
+                .unwrap_err()
+                .kind(),
+            "assembler-input-directive",
+            "{directive} must bypass"
+        );
+    }
+
+    let c = CcInvocation::parse(&argv(&["-c", "-o", "a.o", "a.c"])).unwrap();
+    c.validate_discovered_inputs([source.as_path()])
+        .expect("assembler syntax in C text is irrelevant");
 }

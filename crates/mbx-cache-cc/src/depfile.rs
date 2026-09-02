@@ -18,6 +18,10 @@ pub const INCLUDE_MANIFEST_PREFIX: &str = "@include-manifest:";
 /// Macros whose expansion is not a function of the compilation's inputs.
 const TIMESTAMP_MACROS: &[&[u8]] = &[b"__DATE__", b"__TIME__", b"__TIMESTAMP__"];
 
+/// Directives whose operands are consumed by the assembler, after the
+/// compiler has finished producing its dependency list.
+const ASSEMBLER_INPUT_DIRECTIVES: &[&[u8]] = &[b".include", b".incbin", b".sinclude"];
+
 const SCAN_CHUNK_BYTES: usize = 64 * 1024;
 
 /// A parsed GNU-style dependency list.
@@ -540,7 +544,7 @@ pub fn manifest_snapshot(
 /// adapter's explicit precompiled-header bypass cannot see.
 const INCLUDABLE_EXTENSIONS: &[&str] = &[
     "c", "c++", "cc", "cpp", "cxx", "def", "gch", "h", "h++", "hh", "hpp", "hxx", "inc", "inl",
-    "ipp", "pch", "tcc",
+    "ipp", "pch", "s", "tcc",
 ];
 
 /// Whether a file name could be what an `#include` directive names.
@@ -659,6 +663,63 @@ fn contains_timestamp_macro(path: &Path) -> Result<bool, CcBypassReason> {
         let keep = window.len().saturating_sub(longest.saturating_sub(1));
         window.drain(..keep);
     }
+}
+
+/// Whether a preprocessor input can make the assembler read another file.
+///
+/// Searching for the directive text, including in comments and inactive
+/// conditional branches, deliberately accepts false positives. Missing a real
+/// directive would publish an object whose complete inputs are absent from the
+/// key; bypassing an otherwise cacheable object is the safe outcome instead.
+pub(crate) fn contains_assembler_input_directive(path: &Path) -> Result<bool, CcBypassReason> {
+    contains_any(path, ASSEMBLER_INPUT_DIRECTIVES)
+}
+
+fn contains_any(path: &Path, needles: &[&[u8]]) -> Result<bool, CcBypassReason> {
+    let file = std::fs::File::open(path).map_err(|error| CcBypassReason::InputRead {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    let longest = needles
+        .iter()
+        .map(|needle| needle.len())
+        .max()
+        .unwrap_or_default();
+    let mut reader = std::io::BufReader::new(file);
+    let mut window = Vec::with_capacity(SCAN_CHUNK_BYTES + longest);
+    let mut chunk = vec![0_u8; SCAN_CHUNK_BYTES];
+    loop {
+        let read = reader
+            .read(&mut chunk)
+            .map_err(|error| CcBypassReason::InputRead {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+        if read == 0 {
+            return Ok(false);
+        }
+        window.extend_from_slice(&chunk[..read]);
+        if needles
+            .iter()
+            .any(|needle| contains_subslice_ascii_case_insensitive(&window, needle))
+        {
+            return Ok(true);
+        }
+        let keep = window.len().saturating_sub(longest.saturating_sub(1));
+        window.drain(..keep);
+    }
+}
+
+fn contains_subslice_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .zip(needle)
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+    })
 }
 
 fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {

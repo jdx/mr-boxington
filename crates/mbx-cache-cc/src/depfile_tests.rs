@@ -211,6 +211,19 @@ fn include_directory_manifests_change_the_key_when_a_shadowing_header_appears() 
 }
 
 #[test]
+fn assembly_names_contribute_to_include_manifests() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let include = directory.path().join("include");
+    std::fs::create_dir_all(&include).expect("create include dir");
+    let directories = BTreeSet::from([include.clone()]);
+    let before = manifest_snapshot(&directories).expect("initial manifest");
+
+    write(&include, "constants.S", ".equ constant, 1\n");
+    let after = manifest_snapshot(&directories).expect("updated manifest");
+    assert_ne!(before, after);
+}
+
+#[test]
 fn a_missing_include_directory_has_an_empty_manifest_rather_than_an_error() {
     let directory = tempfile::tempdir().expect("tempdir");
     let root = directory.path();
