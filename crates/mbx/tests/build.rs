@@ -1407,7 +1407,41 @@ fn build_script_shim_does_not_redirty_its_compilation() {
                 .then_some(path)
         })
         .expect("the build dependency should have an rlib");
-    filetime::set_file_mtime(&helper, filetime::FileTime::now()).unwrap();
+    let build_script = project
+        .path()
+        .join("target/debug/build")
+        .read_dir()
+        .unwrap()
+        .find_map(|entry| {
+            let directory = entry.ok()?.path();
+            directory.read_dir().ok()?.find_map(|entry| {
+                let path = entry.ok()?.path();
+                let name = path.file_name()?.to_str()?;
+                (path.is_file()
+                    && name.starts_with("build_script_build-")
+                    && !name.ends_with(".d")
+                    && !name.ends_with(".pdb"))
+                .then_some(path)
+            })
+        })
+        .expect("the compiled build script should exist");
+
+    let build_script_mtime = build_script.metadata().unwrap().modified().unwrap();
+    filetime::set_file_mtime(
+        &helper,
+        filetime::FileTime::from_system_time(
+            build_script_mtime + std::time::Duration::from_secs(4),
+        ),
+    )
+    .unwrap();
+    assert!(
+        helper.metadata().unwrap().modified().unwrap() > build_script_mtime,
+        "the fixture dependency must be newer than the compiled build script"
+    );
+    let helper_mtime = helper.metadata().unwrap().modified().unwrap();
+    while std::time::SystemTime::now() <= helper_mtime {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     let repaired = build(
         project.path(),
         store.path(),
