@@ -1,5 +1,5 @@
 use super::gc::sweep_store;
-use crate::config::{CliSettings, Config, RetentionSettings};
+use crate::config::{CliSettings, Config, RetentionSettings, SummaryStyle};
 use crate::session::{self, CacheSession};
 use crate::{policy, target};
 use bytesize::ByteSize;
@@ -41,6 +41,11 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
     bypass_log: Option<&Path>,
 ) -> Result<ExitCode> {
     let retention = &settings.retention;
+    let summary = if cargo_is_quiet(arguments) {
+        SummaryStyle::Off
+    } else {
+        settings.summary
+    };
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     // Only where mbx can identify the linker precisely enough to key what it
     // produced. Said out loud only to somebody who asked for it: this is on
@@ -185,7 +190,7 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
 
         let stats = match session.finish().await {
             Ok(stats) => {
-                crate::session::display_stats(&stats, config);
+                crate::session::display_stats(&stats, config, summary);
                 Some(stats)
             }
             Err(error) => {
@@ -437,6 +442,15 @@ pub(super) fn run_cargo(
         .status()
         .wrap_err_with(|| format!("failed to run {}", cargo.to_string_lossy()))?;
     Ok(exit_code(status))
+}
+
+/// Cargo's quiet flag applies to mbx's build summary as well as Cargo's own
+/// progress. Arguments after `--` belong to rustc or the program being run.
+pub(super) fn cargo_is_quiet(arguments: &[String]) -> bool {
+    arguments
+        .iter()
+        .take_while(|argument| argument.as_str() != "--")
+        .any(|argument| matches!(argument.as_str(), "-q" | "--quiet"))
 }
 
 #[cfg(unix)]

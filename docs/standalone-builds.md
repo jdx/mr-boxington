@@ -64,8 +64,8 @@ real compiler without using the cache.
 mbx caches ordinary gcc-, clang-, and MSVC-style compile commands that compile
 one C or C++ source file into an object. It does not cache links,
 multi-source compiler calls, or commands whose behavior it cannot model
-safely. Those commands still run normally; the session summary reports why
-they bypassed the cache.
+safely. Those commands still run normally; the session summary counts their
+bypasses, and `MBX_SUMMARY=full` reports the grouped reasons.
 
 `mbx exec` only intercepts the unversioned compiler names listed above. It
 leaves commands such as `gcc-13`, absolute compiler paths, and explicitly

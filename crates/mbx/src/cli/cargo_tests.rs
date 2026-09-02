@@ -1,6 +1,17 @@
 use super::*;
 
 #[test]
+fn cargo_quiet_only_applies_before_the_argument_separator() {
+    assert!(cargo_is_quiet(&["build".into(), "-q".into()]));
+    assert!(cargo_is_quiet(&["test".into(), "--quiet".into()]));
+    assert!(!cargo_is_quiet(&[
+        "run".into(),
+        "--".into(),
+        "--quiet".into()
+    ]));
+}
+
+#[test]
 fn prefers_the_outermost_lockfile_as_the_workspace_root() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
