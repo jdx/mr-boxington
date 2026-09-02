@@ -83,24 +83,22 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
     // Placed before the session starts, because the target directory is what
     // the shim maps out of its cache keys and it has to be the one cargo will
     // actually write to.
-    let (placed, removed_target_bytes) = if migrate_existing {
+    let (placement, removed_target_bytes) = if migrate_existing {
         let outcome = target::migrate_existing(
             config,
             &roots.workspace_root,
             &roots.target_dir,
             roots.target_dir_requested,
         )?;
-        (outcome.managed, outcome.removed_bytes)
-    } else {
         (
-            target::place(
-                config,
-                &roots.workspace_root,
-                &roots.target_dir,
-                roots.target_dir_requested,
-            ),
-            None,
+            TargetViewPlacement {
+                directory: outcome.managed,
+                touch_path: roots.target_dir.clone(),
+            },
+            outcome.removed_bytes,
         )
+    } else {
+        (place_target_view(config, &roots), None)
     };
     if let Some(bytes) = removed_target_bytes {
         crate::session::note(&format!(
@@ -108,13 +106,13 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
             ByteSize::b(bytes).display().iec()
         ));
     }
-    if let Some(directory) = &placed {
+    if let Some(directory) = &placement.directory {
         roots.target_dir = directory.clone();
     } else {
         // Placement declined, but an earlier one may have left a link this
         // build is about to write through. Keep that directory's record fresh
         // so collection does not treat it as idle.
-        target::touch_managed(config, &roots.workspace_root, &roots.target_dir);
+        target::touch_managed(config, &roots.workspace_root, &placement.touch_path);
     }
 
     // Probed rather than assumed, and only on the one run that will say
@@ -146,7 +144,7 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
                 path.display().to_string(),
             );
         }
-        if let Some(directory) = &placed {
+        if let Some(directory) = &placement.directory {
             environment.insert(
                 CARGO_TARGET_DIR_ENV.into(),
                 directory.to_string_lossy().into_owned(),
@@ -197,6 +195,41 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
         Ok((status, stats))
     });
     account_session(config, settings, session_outcome, removed_target_bytes)
+}
+
+pub(super) struct TargetViewPlacement {
+    pub(super) directory: Option<PathBuf>,
+    pub(super) touch_path: PathBuf,
+}
+
+/// Place the editor's explicit target inside the checkout's managed view.
+///
+/// Cargo's `--target-dir` normally opts out of placement. The exact path that
+/// `mbx setup` writes is different: placing its `target` parent first prevents
+/// an editor-first checkout from creating a real directory that would block
+/// managed targets later. Cargo still writes into the requested child, so its
+/// directory lock remains independent from terminal builds.
+pub(super) fn place_target_view(config: &Config, roots: &Roots) -> TargetViewPlacement {
+    let default = roots.workspace_root.join("target");
+    if roots.target_dir_requested
+        && roots.target_dir == roots.workspace_root.join(super::RUST_ANALYZER_TARGET_DIR)
+    {
+        let directory = target::place(config, &roots.workspace_root, &default, false)
+            .map(|_| roots.target_dir.clone());
+        return TargetViewPlacement {
+            directory,
+            touch_path: default,
+        };
+    }
+    TargetViewPlacement {
+        directory: target::place(
+            config,
+            &roots.workspace_root,
+            &roots.target_dir,
+            roots.target_dir_requested,
+        ),
+        touch_path: roots.target_dir.clone(),
+    }
 }
 
 /// Sweep the store and record the session's savings after a build session.

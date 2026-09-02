@@ -26,7 +26,15 @@ const RUST_ANALYZER_CONFIG_FILE: &str = "rust-analyzer.toml";
 const MISE_WRAPPERS_MINIMUM_VERSION: (u64, u64, u64) = (2026, 8, 16);
 const MISE_WRAPPERS_MINIMUM_VERSION_DISPLAY: &str = "2026.8.16";
 const CARGO_WRAPPER_MODE_ENV: &str = "MBX_CARGO_SHIM_MODE";
-const RUST_ANALYZER_CHECK_ARGUMENTS: [&str; 4] = [
+const RUST_ANALYZER_CHECK_ARGUMENTS: [&str; 6] = [
+    "check",
+    "--workspace",
+    "--all-targets",
+    "--target-dir",
+    super::RUST_ANALYZER_TARGET_DIR,
+    "--message-format=json",
+];
+const LEGACY_RUST_ANALYZER_CHECK_ARGUMENTS: [&str; 4] = [
     "check",
     "--workspace",
     "--all-targets",
@@ -304,10 +312,25 @@ pub(super) fn rust_analyzer_config_path_from(scope: &MiseScope, cwd: &Path) -> R
     }
 }
 
-fn rust_analyzer_command(shim: &Path) -> Vec<String> {
+fn rust_analyzer_command<const N: usize>(shim: &Path, arguments: [&str; N]) -> Vec<String> {
     std::iter::once(shim.to_string_lossy().into_owned())
-        .chain(RUST_ANALYZER_CHECK_ARGUMENTS.map(str::to_owned))
+        .chain(arguments.map(str::to_owned))
         .collect()
+}
+
+fn rust_analyzer_command_matches(
+    configured: Option<&toml_edit::Item>,
+    expected: &[String],
+) -> bool {
+    configured
+        .and_then(toml_edit::Item::as_array)
+        .is_some_and(|command| {
+            command.len() == expected.len()
+                && command
+                    .iter()
+                    .zip(expected)
+                    .all(|(actual, expected)| actual.as_str() == Some(expected))
+        })
 }
 
 pub(super) fn configure_rust_analyzer(
@@ -323,27 +346,27 @@ pub(super) fn configure_rust_analyzer(
     let mut document = contents
         .parse::<toml_edit::DocumentMut>()
         .wrap_err_with(|| format!("failed to parse {}", path.display()))?;
-    let expected = rust_analyzer_command(shim);
+    let expected = rust_analyzer_command(shim, RUST_ANALYZER_CHECK_ARGUMENTS);
+    let legacy = rust_analyzer_command(shim, LEGACY_RUST_ANALYZER_CHECK_ARGUMENTS);
     let check = document
         .get("check")
         .and_then(toml_edit::Item::as_table_like);
     let configured = check.and_then(|check| check.get("overrideCommand"));
     let has_check_settings = check.is_some_and(|check| !check.is_empty());
-    let owns_configuration =
-        configured
-            .and_then(toml_edit::Item::as_array)
-            .is_some_and(|command| {
-                command.len() == expected.len()
-                    && command
-                        .iter()
-                        .zip(&expected)
-                        .all(|(actual, expected)| actual.as_str() == Some(expected))
-            });
+    let owns_configuration = rust_analyzer_command_matches(configured, &expected);
+    let owns_legacy_configuration = rust_analyzer_command_matches(configured, &legacy);
 
     match action {
         SetupAction::Status if owns_configuration => {
             println!("rust-analyzer checks run through mbx: {}", path.display());
             Ok(ExitCode::SUCCESS)
+        }
+        SetupAction::Status if owns_legacy_configuration => {
+            println!(
+                "rust-analyzer checks share Cargo's target directory; run `mbx setup` to update {}",
+                path.display()
+            );
+            Ok(ExitCode::FAILURE)
         }
         SetupAction::Status if has_check_settings => {
             println!(
@@ -360,7 +383,7 @@ pub(super) fn configure_rust_analyzer(
             Ok(ExitCode::FAILURE)
         }
         SetupAction::Uninstall => {
-            if owns_configuration {
+            if owns_configuration || owns_legacy_configuration {
                 let check = document
                     .get_mut("check")
                     .and_then(toml_edit::Item::as_table_like_mut)
@@ -378,6 +401,17 @@ pub(super) fn configure_rust_analyzer(
             Ok(ExitCode::SUCCESS)
         }
         SetupAction::Install if owns_configuration => Ok(ExitCode::SUCCESS),
+        SetupAction::Install if owns_legacy_configuration => {
+            let mut command = toml_edit::Array::new();
+            command.extend(expected);
+            document["check"]["overrideCommand"] = toml_edit::value(command);
+            crate::util::write_atomic(path, document.to_string().as_bytes())?;
+            println!(
+                "rust-analyzer background checks now use a separate target directory: {}",
+                path.display()
+            );
+            Ok(ExitCode::SUCCESS)
+        }
         SetupAction::Install if has_check_settings => {
             println!(
                 "left {} unchanged: rust-analyzer check settings are already configured",
