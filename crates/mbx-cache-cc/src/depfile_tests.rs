@@ -466,3 +466,57 @@ fn parses_msvc_source_dependencies() {
         ]
     );
 }
+
+/// A ledger that answers one known identity with a fixed digest.
+struct SentinelLedger {
+    known: FileIdentity,
+    digest: CacheDigest,
+}
+
+impl FileDigestCache for SentinelLedger {
+    fn find(&self, _scope: FileDigestScope, files: &[FileIdentity]) -> Vec<Option<CacheDigest>> {
+        files
+            .iter()
+            .map(|file| (*file == self.known).then(|| self.digest.clone()))
+            .collect()
+    }
+
+    fn record(&self, _scope: FileDigestScope, _entries: Vec<RecordedFileDigest>) {}
+}
+
+/// Verification confirms an input by the identity `collect` recorded rather
+/// than by reading it again, and reads it again once that identity has moved.
+#[test]
+fn verification_trusts_an_unchanged_identity_and_rereads_a_changed_one() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let root = directory.path();
+    let header = write(root, "a.h", "int a(void);\n");
+    let metadata = std::fs::metadata(&header).expect("metadata");
+    // Hashing could never produce the sentinel, so a verify that passes can
+    // only have trusted the identity.
+    let sentinel = CacheDigest {
+        algorithm: "blake3".into(),
+        hash: "c".repeat(64),
+        size: metadata.len(),
+    };
+    let ledger = SentinelLedger {
+        known: FileIdentity::describe(&header, &metadata).expect("identity"),
+        digest: sentinel.clone(),
+    };
+    let discovered = CcDiscoveredInputs::collect(
+        root,
+        BTreeSet::from([header.clone()]),
+        BTreeSet::from([root.to_path_buf()]),
+        &ledger,
+    )
+    .expect("discovery");
+    assert_eq!(discovered.files().next().expect("input").digest, sentinel);
+
+    discovered.verify().expect("an unchanged identity verifies");
+
+    // Same length, new bytes: the write moves the identity, so the file is
+    // read again and the sentinel no longer describes it.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&header, "int b(void);\n").expect("rewrite");
+    assert_eq!(discovered.verify().unwrap_err().kind(), "input-changed");
+}
