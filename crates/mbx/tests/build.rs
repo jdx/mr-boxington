@@ -1047,6 +1047,11 @@ fn editing_one_crate_leaves_its_dependents_publishing() {
         stats["stored_bytes"].as_u64().unwrap_or(0) > 0,
         "the crate above it never changed, so it should still publish: {stats}"
     );
+    assert_eq!(
+        stats["lookups"].as_u64(),
+        Some(1),
+        "the hot edited crate should skip lookup while its dependent still publishes: {stats}"
+    );
 }
 
 #[test]
