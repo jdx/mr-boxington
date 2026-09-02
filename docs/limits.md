@@ -149,8 +149,8 @@ reads, and the assembler is part of a GCC identity. Linking, preprocessing,
 assembly that skips the preprocessor (`.s`), Objective-C, precompiled
 headers, coverage instrumentation, compiler plugins, options forwarded to a
 sub-tool with `-Wp,`/`-Wl,`/`-Xclang`, unmodeled `-Wa,` assembler options, and
-assembler-time `.include`/`.incbin` inputs, and response files all bypass, as
-does any flag the adapter does not model. Known
+assembler-time `.include`/`.sinclude`/`.incbin` inputs, and response files all
+bypass, as does any flag the adapter does not model. Known
 assembler options that add no inputs, such as `-Wa,--noexecstack`, are keyed
 and admitted. MSVC compiler PDBs, modules, and other extra outputs also bypass.
 A source or header that expands `__DATE__`, `__TIME__`, or `__TIMESTAMP__`

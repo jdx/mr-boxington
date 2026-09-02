@@ -1181,15 +1181,18 @@ fn preprocessed_assembly_is_admitted_and_plain_assembly_is_not() {
 fn assembler_input_directives_bypass_only_preprocessed_assembly() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("a.S");
-    std::fs::write(&source, ".include \"constants.inc\"\n").unwrap();
     let assembly = CcInvocation::parse(&argv(&["-c", "-o", "a.o", "a.S"])).unwrap();
-    assert_eq!(
-        assembly
-            .validate_discovered_inputs([source.as_path()])
-            .unwrap_err()
-            .kind(),
-        "assembler-input-directive"
-    );
+    for directive in [".include", ".INCBIN", ".SInclude"] {
+        std::fs::write(&source, format!("{directive} \"constants.inc\"\n")).unwrap();
+        assert_eq!(
+            assembly
+                .validate_discovered_inputs([source.as_path()])
+                .unwrap_err()
+                .kind(),
+            "assembler-input-directive",
+            "{directive} must bypass"
+        );
+    }
 
     let c = CcInvocation::parse(&argv(&["-c", "-o", "a.o", "a.c"])).unwrap();
     c.validate_discovered_inputs([source.as_path()])

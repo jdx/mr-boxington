@@ -20,7 +20,7 @@ const TIMESTAMP_MACROS: &[&[u8]] = &[b"__DATE__", b"__TIME__", b"__TIMESTAMP__"]
 
 /// Directives whose operands are consumed by the assembler, after the
 /// compiler has finished producing its dependency list.
-const ASSEMBLER_INPUT_DIRECTIVES: &[&[u8]] = &[b".include", b".incbin"];
+const ASSEMBLER_INPUT_DIRECTIVES: &[&[u8]] = &[b".include", b".incbin", b".sinclude"];
 
 const SCAN_CHUNK_BYTES: usize = 64 * 1024;
 
@@ -701,13 +701,25 @@ fn contains_any(path: &Path, needles: &[&[u8]]) -> Result<bool, CcBypassReason> 
         window.extend_from_slice(&chunk[..read]);
         if needles
             .iter()
-            .any(|needle| contains_subslice(&window, needle))
+            .any(|needle| contains_subslice_ascii_case_insensitive(&window, needle))
         {
             return Ok(true);
         }
         let keep = window.len().saturating_sub(longest.saturating_sub(1));
         window.drain(..keep);
     }
+}
+
+fn contains_subslice_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .zip(needle)
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+    })
 }
 
 fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
