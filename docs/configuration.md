@@ -199,6 +199,16 @@ suppress the summary for that invocation.
 
 ## Incremental builds
 
+::: tip Smart incremental is already on
+mbx speeds up repeated edits without relying on `CARGO_INCREMENTAL`. It keeps
+incremental state for crates you are actively changing while leaving everything
+else reusable across branches and worktrees.
+
+Most users should leave `MBX_INCREMENTAL` unset. Turning it on makes the whole
+workspace incremental, producing checkout-specific artifacts that are less
+useful to the shared cache.
+:::
+
 `MBX_INCREMENTAL=1` stops mbx from forcing `CARGO_INCREMENTAL=0` locally. This
 can help an edit/rebuild loop, but an incremental workspace artifact changes
 the inputs of crates above it and reduces reuse across worktrees. CI always
