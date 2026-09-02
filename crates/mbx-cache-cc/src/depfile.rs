@@ -188,6 +188,10 @@ pub struct CcDiscoveredInputs {
     working_dir: PathBuf,
     /// Content-addressed inputs, including include-directory manifests.
     pub inputs: Vec<CcActionInput>,
+    /// What each file input looked like on disk when its digest was
+    /// established, index-aligned with `inputs`; `None` for manifests and
+    /// where the filesystem gave nothing to compare against later.
+    identities: Vec<Option<FileIdentity>>,
 }
 
 impl CcDiscoveredInputs {
@@ -245,8 +249,10 @@ impl CcDiscoveredInputs {
             .filter_map(|(_, identity)| identity.clone())
             .collect::<Vec<_>>();
         let mut recorded = digests.find(FileDigestScope::CcInput, &queries).into_iter();
+        let mut identities = Vec::with_capacity(inputs.capacity());
         let mut fresh = Vec::new();
         for (path, identity) in identified {
+            identities.push(identity.clone());
             let remembered = identity
                 .as_ref()
                 .and_then(|_| recorded.next().flatten())
@@ -290,10 +296,12 @@ impl CcDiscoveredInputs {
                 path: PathBuf::from(format!("{INCLUDE_MANIFEST_PREFIX}{}", directory.display())),
                 digest,
             });
+            identities.push(None);
         }
         Ok(Self {
             working_dir,
             inputs,
+            identities,
         })
     }
 
@@ -327,10 +335,29 @@ impl CcDiscoveredInputs {
         Ok(())
     }
 
-    /// Rehash every discovered file before publication, degrading a changed
+    /// Confirm every discovered file before publication, degrading a changed
     /// input to a miss rather than storing an object under a stale key.
+    ///
+    /// A file still wearing the identity `collect` recorded is confirmed by
+    /// that stat alone where the identity carries a change time, which cannot
+    /// be set from user space and so shows a rewrite that restored the old
+    /// modification time. One whose identity moved, that had none, or that a
+    /// platform without change times described, is read and hashed again.
     pub fn verify(&self) -> Result<(), CcBypassReason> {
-        for input in self.files() {
+        for (index, input) in self.inputs.iter().enumerate() {
+            if is_manifest_input(&input.path) {
+                continue;
+            }
+            let read_error = |error: std::io::Error| CcBypassReason::InputRead {
+                path: input.path.clone(),
+                message: error.to_string(),
+            };
+            if let Some(Some(identity)) = self.identities.get(index)
+                && identity.changed.is_some()
+                && identity.still_describes().map_err(read_error)?
+            {
+                continue;
+            }
             let matches = input.digest.matches_file(&input.path).map_err(|error| {
                 CcBypassReason::InputRead {
                     path: input.path.clone(),

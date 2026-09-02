@@ -136,6 +136,11 @@ pub struct DiscoveredInputs {
     pub inputs: Vec<ActionInput>,
     /// Environment inputs captured from dep-info.
     pub environment: BTreeMap<String, Option<String>>,
+    /// What each input looked like on disk when its digest was established,
+    /// index-aligned with `inputs`; `None` where the filesystem gave nothing to
+    /// compare against later. Lets `verify` confirm an input by stat instead of
+    /// by reading it again.
+    identities: Vec<Option<FileIdentity>>,
 }
 
 impl DiscoveredInputs {
@@ -177,8 +182,10 @@ impl DiscoveredInputs {
             .collect::<Vec<_>>();
         let mut recorded = digests.find(FileDigestScope::Content, &queries).into_iter();
         let mut inputs = Vec::with_capacity(identified.len());
+        let mut identities = Vec::with_capacity(identified.len());
         let mut fresh = Vec::new();
         for (path, identity) in identified {
+            identities.push(identity.clone());
             let remembered = identity
                 .as_ref()
                 .and_then(|_| recorded.next().flatten())
@@ -216,6 +223,7 @@ impl DiscoveredInputs {
             working_dir,
             inputs,
             environment,
+            identities,
         })
     }
 
@@ -246,7 +254,27 @@ impl DiscoveredInputs {
     /// This closes the discovery/compile race by degrading changed inputs to a
     /// cache miss rather than storing outputs beneath a stale action key.
     pub fn verify(&self) -> Result<(), BypassReason> {
-        for input in &self.inputs {
+        for (index, input) in self.inputs.iter().enumerate() {
+            let read_error = |error: std::io::Error| BypassReason::InputRead {
+                path: input.path.clone(),
+                message: error.to_string(),
+            };
+            // An input still wearing the identity discovery recorded -- length,
+            // modification time, and change time -- is confirmed by that stat
+            // alone. The change time is what makes this as good as reading: it
+            // cannot be set from user space, so a rewrite that puts the old
+            // modification time back still shows, where a platform that reports
+            // none would let a same-length rewrite inside one timestamp tick
+            // through. Such an identity is not trusted here, and neither is an
+            // input that had none. Reading everything again cost as much as
+            // keying the compilation did: a large binary's dependency rlibs, a
+            // gigabyte of them, read twice for every edit.
+            if let Some(Some(identity)) = self.identities.get(index)
+                && identity.changed.is_some()
+                && identity.still_describes().map_err(read_error)?
+            {
+                continue;
+            }
             let matches = input.digest.matches_file(&input.path).map_err(|error| {
                 BypassReason::InputRead {
                     path: input.path.clone(),
@@ -996,6 +1024,56 @@ mod tests {
         assert_eq!(recorded.len(), 1, "only the fresh hash is recorded");
         assert_eq!(recorded[0].file.path, fresh_path);
         assert_eq!(recorded[0].digest, by_path(&fresh_path));
+    }
+
+    /// Verification after the compiler runs confirms an input by its recorded
+    /// identity rather than by reading it again; a file that has moved on is
+    /// still read and still fails. Only where the identity carries a change
+    /// time, which is what makes the stat as good as the read.
+    #[cfg(unix)]
+    #[test]
+    fn verification_trusts_an_unchanged_identity_and_rereads_a_changed_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let known_path = root.join("libdep.rlib");
+        std::fs::write(&known_path, b"rlib bytes").unwrap();
+        let metadata = std::fs::metadata(&known_path).unwrap();
+        // The sentinel could never come from hashing the file, so a verify
+        // that passes can only have trusted the identity.
+        let sentinel = CacheDigest {
+            algorithm: "blake3".into(),
+            hash: "c".repeat(64),
+            size: metadata.len(),
+        };
+        let ledger = SentinelLedger {
+            known: FileIdentity::describe(&known_path, &metadata).unwrap(),
+            digest: sentinel,
+            recorded: std::sync::Mutex::new(Vec::new()),
+        };
+        let discovered = DiscoveredInputs::from_paths(
+            root,
+            BTreeSet::from([known_path.clone()]),
+            BTreeMap::new(),
+            &ledger,
+        )
+        .unwrap();
+
+        discovered.verify().unwrap();
+
+        // Rewritten with the same length: the identity moves with the write,
+        // so the file is read again and the sentinel no longer matches it.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&known_path, b"RLIB BYTES").unwrap();
+        assert_eq!(
+            discovered.verify(),
+            Err(BypassReason::InputChanged(known_path.clone()))
+        );
+
+        std::fs::remove_file(&known_path).unwrap();
+        assert!(matches!(
+            discovered.verify(),
+            Err(BypassReason::InputRead { path, .. }) if path == known_path
+        ));
     }
 
     /// A rewrite that restores length and modification time must still be

@@ -37,6 +37,21 @@ impl FileIdentity {
             changed: change_token(metadata),
         })
     }
+
+    /// Whether the file at this identity's path still has exactly this
+    /// identity, so the digest recorded against it still describes the bytes on
+    /// disk without reading them again.
+    ///
+    /// Length alone would miss an overwrite that keeps the size, and the
+    /// modification time can be put back by whoever rewrote the file. The
+    /// change time cannot be set from user space, so where the platform reports
+    /// one a rewrite that restores the old modification time still shows. A
+    /// file that has vanished is an error rather than a change, so the caller
+    /// can tell the two apart.
+    pub fn still_describes(&self) -> std::io::Result<bool> {
+        let metadata = std::fs::metadata(&self.path)?;
+        Ok(Self::describe(&self.path, &metadata).as_ref() == Some(self))
+    }
 }
 
 /// The metadata-change time as an opaque token, where the platform has one.
@@ -101,4 +116,25 @@ impl FileDigestCache for NoFileDigestCache {
     }
 
     fn record(&self, _scope: FileDigestScope, _entries: Vec<RecordedFileDigest>) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_identity_describes_the_file_until_it_is_written_or_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("input.rs");
+        std::fs::write(&path, b"fn main() {}").unwrap();
+        let identity = FileIdentity::describe(&path, &std::fs::metadata(&path).unwrap()).unwrap();
+        assert!(identity.still_describes().unwrap());
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, b"fn main() { }").unwrap();
+        assert!(!identity.still_describes().unwrap());
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(identity.still_describes().is_err());
+    }
 }
