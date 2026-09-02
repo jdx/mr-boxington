@@ -84,6 +84,10 @@ fn bypass_kinds_are_stable_and_field_independent() {
             "embedded-timestamp-macro",
         ),
         (
+            CcBypassReason::AssemblerInputDirective("/w/a.S".into()),
+            "assembler-input-directive",
+        ),
+        (
             CcBypassReason::MalformedDepfile("no rule".into()),
             "malformed-depfile",
         ),
@@ -1171,4 +1175,23 @@ fn preprocessed_assembly_is_admitted_and_plain_assembly_is_not() {
             "unsupported-language"
         );
     }
+}
+
+#[test]
+fn assembler_input_directives_bypass_only_preprocessed_assembly() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("a.S");
+    std::fs::write(&source, ".include \"constants.inc\"\n").unwrap();
+    let assembly = CcInvocation::parse(&argv(&["-c", "-o", "a.o", "a.S"])).unwrap();
+    assert_eq!(
+        assembly
+            .validate_discovered_inputs([source.as_path()])
+            .unwrap_err()
+            .kind(),
+        "assembler-input-directive"
+    );
+
+    let c = CcInvocation::parse(&argv(&["-c", "-o", "a.o", "a.c"])).unwrap();
+    c.validate_discovered_inputs([source.as_path()])
+        .expect("assembler syntax in C text is irrelevant");
 }

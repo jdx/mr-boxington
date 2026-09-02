@@ -596,6 +596,7 @@ fn discover(
     {
         files.insert(absolute(&path, &context.working_dir));
     }
+    invocation.validate_discovered_inputs(files.iter().map(PathBuf::as_path))?;
     Ok(CcDiscoveredInputs::collect(
         &context.working_dir,
         files.clone(),

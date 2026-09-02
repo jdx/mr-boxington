@@ -431,6 +431,10 @@ pub enum CcBypassReason {
     /// of its inputs.
     #[error("input expands a timestamp macro: {0}")]
     EmbeddedTimestampMacro(PathBuf),
+    /// Preprocessed assembly names an input that compiler dependency output
+    /// does not report.
+    #[error("preprocessed assembly uses an assembler input directive in {0}")]
+    AssemblerInputDirective(PathBuf),
     /// The injected depfile could not be parsed exactly.
     #[error("could not model the compiler depfile: {0}")]
     MalformedDepfile(String),
@@ -670,6 +674,8 @@ struct CcActionDescriptor {
     version: u8,
     kind: &'static str,
     adapter_version: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assembly_input_model: Option<u8>,
     compiler: CcCompilerDescriptor,
     arguments: Vec<String>,
     environment: BTreeMap<String, Option<String>>,
@@ -681,6 +687,8 @@ struct CcInvocationDescriptor {
     version: u8,
     kind: &'static str,
     adapter_version: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assembly_input_model: Option<u8>,
     compiler: CcCompilerDescriptor,
     arguments: Vec<String>,
     required_inputs: Vec<String>,
@@ -736,6 +744,7 @@ pub struct CcInvocation {
     include_dirs: Vec<PathBuf>,
     required_inputs: Vec<PathBuf>,
     language: CcLanguage,
+    preprocessed_assembly: bool,
     sysroot: Option<PathBuf>,
     caller_depfile: Option<CallerDepfile>,
     /// Positions in the parsed command line of the dependency-list flags the
@@ -853,6 +862,27 @@ impl CcInvocation {
     /// Language the driver compiles.
     pub fn language(&self) -> CcLanguage {
         self.language
+    }
+
+    /// Reject assembler-time file directives that the preprocessor's
+    /// dependency list cannot name.
+    ///
+    /// This is a no-op for C and C++ inputs. For preprocessed assembly, every
+    /// file reported by dependency discovery is scanned conservatively before
+    /// an object can be published.
+    pub fn validate_discovered_inputs<'a>(
+        &self,
+        paths: impl IntoIterator<Item = &'a Path>,
+    ) -> Result<(), CcBypassReason> {
+        if !self.preprocessed_assembly {
+            return Ok(());
+        }
+        for path in paths {
+            if depfile::contains_assembler_input_directive(path)? {
+                return Err(CcBypassReason::AssemblerInputDirective(path.to_path_buf()));
+            }
+        }
+        Ok(())
     }
 
     /// Sysroot named on the command line, if any.
@@ -1139,6 +1169,7 @@ impl<'a> ActionBuilder<'a> {
             version: ACTION_SCHEMA_VERSION,
             kind: "cc",
             adapter_version: ADAPTER_VERSION,
+            assembly_input_model: invocation.assembly_input_model,
             compiler: invocation.compiler,
             arguments: invocation.arguments,
             environment: self.context.environment.clone(),
@@ -1170,6 +1201,9 @@ impl<'a> ActionBuilder<'a> {
             version: ACTION_SCHEMA_VERSION,
             kind: "cc",
             adapter_version: ADAPTER_VERSION,
+            // Version the assembly-only safety model independently so adding
+            // support does not invalidate every existing C and C++ entry.
+            assembly_input_model: self.invocation.preprocessed_assembly.then_some(1),
             compiler: self.compiler_descriptor(),
             arguments,
             required_inputs,
@@ -1278,6 +1312,7 @@ struct Parser<'a> {
     required_inputs: Vec<PathBuf>,
     sysroot: Option<PathBuf>,
     explicit_language: Option<CcLanguage>,
+    preprocessed_assembly: bool,
     compiling: bool,
     dependency: DependencyRequest,
 }
@@ -1308,6 +1343,7 @@ impl<'a> Parser<'a> {
             required_inputs: Vec::new(),
             sysroot: None,
             explicit_language: None,
+            preprocessed_assembly: false,
             compiling: false,
             dependency: DependencyRequest::default(),
         }
@@ -1336,6 +1372,9 @@ impl<'a> Parser<'a> {
         let source = self.source.clone().ok_or(CcBypassReason::MissingInput)?;
         let output = self.output.clone().ok_or(CcBypassReason::MissingOutput)?;
         let language = self.language(&source)?;
+        let preprocessed_assembly = self.preprocessed_assembly
+            || (self.explicit_language.is_none()
+                && source.extension().and_then(|value| value.to_str()) == Some("S"));
         self.required_inputs.push(source.clone());
         let caller_depfile = match self.dependency.user_headers_only {
             Some(user_headers_only) => Some(CallerDepfile {
@@ -1369,6 +1408,7 @@ impl<'a> Parser<'a> {
             include_dirs: self.include_dirs,
             required_inputs: self.required_inputs,
             language,
+            preprocessed_assembly,
             sysroot: self.sysroot,
             caller_depfile,
             dependency_argument_indices: self.dependency.indices,
@@ -1621,7 +1661,11 @@ impl<'a> Parser<'a> {
         if let Some(rest) = value.strip_prefix("-x") {
             let language = self.take_value("-x", Some(rest))?;
             self.explicit_language = Some(match language.as_str() {
-                "c" | "assembler-with-cpp" => CcLanguage::C,
+                "c" => CcLanguage::C,
+                "assembler-with-cpp" => {
+                    self.preprocessed_assembly = true;
+                    CcLanguage::C
+                }
                 "c++" => CcLanguage::Cxx,
                 other => return Err(CcBypassReason::UnsupportedLanguage(other.into())),
             });
@@ -1774,6 +1818,7 @@ impl<'a> MsvcParser<'a> {
             include_dirs: self.include_dirs,
             required_inputs: self.required_inputs,
             language,
+            preprocessed_assembly: false,
             sysroot: None,
             caller_depfile: None,
             dependency_argument_indices: Vec::new(),
