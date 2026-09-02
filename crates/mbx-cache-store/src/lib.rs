@@ -254,13 +254,29 @@ pub fn export_group(store: &Path, group: &str, archive: &Path) -> Result<Transfe
         .join(group_key(group));
     let receipts = walk_files(&root)?
         .into_iter()
-        .filter_map(|entry| read_build_receipt(&entry.path))
-        .filter(|receipt| receipt.group.as_deref() == Some(group))
+        .filter_map(|entry| read_build_receipt(&entry.path).map(|receipt| (entry.path, receipt)))
+        .filter(|(_, receipt)| receipt.group.as_deref() == Some(group))
         .collect::<Vec<_>>();
     if receipts.is_empty() {
         eyre::bail!("no completed mbx builds are recorded for export group {group:?}");
     }
-    export_receipts(store, receipts, archive)
+    let outcome = export_receipts(
+        store,
+        receipts
+            .iter()
+            .map(|(_, receipt)| receipt.clone())
+            .collect(),
+        archive,
+    )?;
+    // A receipt is a pending-export root. Retire only the files this export
+    // consumed, and only after its complete archive has been published. A
+    // concurrent build can add another uniquely named receipt to the group
+    // without this cleanup deleting work the archive did not include.
+    for (path, _) in receipts {
+        std::fs::remove_file(path)?;
+    }
+    let _ = std::fs::remove_dir(root);
+    Ok(outcome)
 }
 
 fn export_receipts(
@@ -1009,6 +1025,7 @@ fn read_checkout_record(path: &Path) -> Option<CheckoutRecord> {
     (record.version == CHECKOUT_RECORD_VERSION).then_some(record)
 }
 
+/// Actions whose successful grouped export has not retired its receipts yet.
 fn grouped_receipt_actions(store: &Path) -> Result<BTreeSet<CacheDigest>> {
     let root = store.join(BUILD_RECEIPTS_DIR).join("groups");
     Ok(walk_files(&root)?
@@ -1167,6 +1184,7 @@ fn rooted_objects(store: &Path, identities: &BTreeSet<String>) -> Result<HashSet
     Ok(rooted_action_objects(store, actions))
 }
 
+/// Return every local CAS path needed to restore the supplied actions.
 fn rooted_action_objects(
     store: &Path,
     actions: impl IntoIterator<Item = CacheDigest>,

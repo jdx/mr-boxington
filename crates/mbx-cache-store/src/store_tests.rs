@@ -588,6 +588,51 @@ fn collection_preserves_grouped_receipts_replaced_in_the_task_manifest() {
     let imported = import_archive(destination.path(), &archive).unwrap();
     assert_eq!(exported.actions, 2);
     assert_eq!(imported.actions, 2);
+    assert!(
+        grouped_receipt_actions(source.path()).unwrap().is_empty(),
+        "a successful export should retire the receipts it consumed"
+    );
+
+    gc(
+        source.path(),
+        stats(source.path()).unwrap().total_bytes() - 1,
+    )
+    .unwrap();
+    assert!(
+        LocalActionCache::new(source.path())
+            .find(&first_action)
+            .unwrap()
+            .is_none(),
+        "retired receipts must stop rooting replaced actions"
+    );
+}
+
+#[test]
+fn failed_group_export_keeps_its_receipts_pending() {
+    let source = tempfile::tempdir().unwrap();
+    let workspace = source.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let group = "github-run-42/retry";
+    let action = store_result(source.path(), "missing action", &[]);
+    record_build_in_group(
+        source.path(),
+        &"3".repeat(64),
+        &workspace,
+        std::slice::from_ref(&action),
+        Some(group),
+    );
+    let action_path = LocalActionCache::new(source.path())
+        .path_for(&action)
+        .unwrap();
+    std::fs::remove_file(action_path).unwrap();
+
+    let _ = export_group(source.path(), group, &source.path().join("job.tar")).unwrap_err();
+
+    assert_eq!(
+        grouped_receipt_actions(source.path()).unwrap(),
+        BTreeSet::from([action]),
+        "a failed export must leave its receipts available for retry"
+    );
 }
 
 #[test]
