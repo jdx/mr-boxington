@@ -22,6 +22,17 @@ are temporary and are not retained. CI uploads the correctness measurements
 and a `tak history` snapshot as artifacts; trusted main-branch runs publish the
 shared performance series to `refs/notes/tak`.
 
+`edit_loop.py` measures the other important build shape: repeated source edits
+in a pinned mise checkout while keeping the Cargo target and incremental state.
+It seeds an unedited build, discards the first edited build that teaches mbx to
+enable rustc incremental compilation for the workspace crate, and reports 30
+subsequent edits. Raw Cargo runs with its normal incremental compilation; mbx
+starts with `CARGO_INCREMENTAL=0`, so its results specifically exercise the
+learned per-checkout policy. The report separates wall, mbx session, and summed
+compiler-process time so Cargo orchestration is not mistaken for rustc work.
+The subject and latest stable Rust release are pinned in the driver so results
+do not silently change with the machine running it.
+
 `real_world.py` measures somebody else's project instead of this one. It
 clones a pinned checkout of [jdx/hk](https://github.com/jdx/hk) and runs the
 same `cargo build --locked` under raw cargo, mbx, and kache across the

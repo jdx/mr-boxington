@@ -141,6 +141,15 @@ python3 benchmarks/real_world.py \
   --output target/benchmarks
 """
 
+[tasks."bench:edit-loop"]
+description = "Measure repeated source edits in a pinned mise checkout"
+depends = ["perf:prepare"]
+run = """
+python3 benchmarks/edit_loop.py \
+  --mbx target/release/mbx \
+  --output target/benchmarks/edit-loop
+"""
+
 # What CI runs. Adds the scenarios that need a second checkout or a second
 # toolchain, and rewrites the results file the documentation site reads.
 [tasks."bench:refresh"]
