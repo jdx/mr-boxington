@@ -91,6 +91,9 @@ pub struct AgentStats {
     pub remote_blob_pack_blobs: u64,
     /// Cumulative time spent downloading and verifying remote blobs.
     pub remote_blob_transfer_duration_ns: u64,
+    /// Whether the configured remote download size or active-time budget stopped
+    /// further restores during this session.
+    pub remote_download_budget_exhausted: bool,
     /// Cumulative time spent ingesting downloaded blobs into the local CAS.
     pub local_cas_write_duration_ns: u64,
     /// Number of speculative prefetch runs started for task manifests.

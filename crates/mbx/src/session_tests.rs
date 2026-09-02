@@ -716,6 +716,10 @@ fn short_summary_omits_routine_compiler_probe_bypasses() {
     );
     assert!(!summary.contains("compiler-query"), "{summary}");
     assert!(!summary.contains("standard-input"), "{summary}");
+
+    let exhausted = agent_stats(|stats| stats.remote_download_budget_exhausted = true);
+    let summary = short_summary(&exhausted);
+    assert!(summary.contains("download budget exhausted"), "{summary}");
 }
 
 #[test]
@@ -742,6 +746,7 @@ fn an_off_summary_still_writes_the_versioned_stats_report() {
         stats.remote_blob_requests = 4;
         stats.remote_blob_pack_requests = 2;
         stats.remote_blob_pack_blobs = 100;
+        stats.remote_download_budget_exhausted = true;
         stats.materialization_duration_ns = 9;
         stats.predictions_loaded = 11;
     });
@@ -753,7 +758,7 @@ fn an_off_summary_still_writes_the_versioned_stats_report() {
 
     // Bumped whenever the report grows a field, so a reader can tell from the
     // version alone which ones it may expect.
-    assert_eq!(report["version"], 4);
+    assert_eq!(report["version"], 5);
     assert_eq!(report["predictions_loaded"], 11);
     assert_eq!(report["session_duration_ns"], 42);
     assert_eq!(report["hits"], 2);
@@ -775,6 +780,7 @@ fn an_off_summary_still_writes_the_versioned_stats_report() {
     assert_eq!(report["remote_blob_requests"], 4);
     assert_eq!(report["remote_blob_pack_requests"], 2);
     assert_eq!(report["remote_blob_pack_blobs"], 100);
+    assert_eq!(report["remote_download_budget_exhausted"], true);
     assert_eq!(report["materialization_duration_ns"], 9);
 }
 

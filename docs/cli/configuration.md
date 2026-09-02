@@ -142,10 +142,18 @@ Log filter for mbx's own diagnostics, such as `debug` or `mbx=trace`.
 ### `remote.max_download_size`
 
 - **Type:** `string`
-- **Default:** `256MiB`
+- **Default:** `1GiB`
 - **Set with:** `MBX_REMOTE_MAX_DOWNLOAD_SIZE`
 
-Most remote artifact data one build may download. Once exhausted, remaining actions compile normally instead of letting a slow cache dominate the build.
+Most remote artifact data one build may download.
+
+### `remote.max_download_time`
+
+- **Type:** `duration`
+- **Default:** `1m`
+- **Set with:** `MBX_REMOTE_MAX_DOWNLOAD_TIME`
+
+Most active wall time one build may spend downloading remote artifacts.
 
 ### `remote.mode`
 

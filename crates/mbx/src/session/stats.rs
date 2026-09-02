@@ -52,6 +52,7 @@ pub(super) struct StatsReport {
     remote_manifest_lookup_duration_ns: u64,
     remote_action_lookup_duration_ns: u64,
     remote_blob_transfer_duration_ns: u64,
+    remote_download_budget_exhausted: bool,
     local_cas_write_duration_ns: u64,
     prefetch_duration_ns: u64,
     materialization_duration_ns: u64,
@@ -72,7 +73,7 @@ struct SlowCompilationReport {
 impl From<&AgentStats> for StatsReport {
     fn from(stats: &AgentStats) -> Self {
         Self {
-            version: 4,
+            version: 5,
             session_duration_ns: stats.session_duration_ns,
             lookups: stats.lookups,
             hits: stats.hits,
@@ -131,6 +132,7 @@ impl From<&AgentStats> for StatsReport {
             remote_manifest_lookup_duration_ns: stats.remote_manifest_lookup_duration_ns,
             remote_action_lookup_duration_ns: stats.remote_action_lookup_duration_ns,
             remote_blob_transfer_duration_ns: stats.remote_blob_transfer_duration_ns,
+            remote_download_budget_exhausted: stats.remote_download_budget_exhausted,
             local_cas_write_duration_ns: stats.local_cas_write_duration_ns,
             prefetch_duration_ns: stats.prefetch_duration_ns,
             materialization_duration_ns: stats.materialization_duration_ns,
@@ -180,6 +182,11 @@ pub(crate) fn display_stats(stats: &AgentStats, config: &Config, style: SummaryS
             "mbx[cache]: the remote cache failed {} of its requests; this build ran without what it could not reach, and the warnings above say why",
             stats.remote_failures,
         ));
+    }
+    if stats.remote_download_budget_exhausted {
+        note(
+            "mbx[cache]: the remote download budget was exhausted; remaining actions compiled normally",
+        );
     }
     if stats.unconsulted > 0 {
         // A cold target directory hits this for everything it compiles, and
@@ -324,6 +331,9 @@ pub(super) fn short_summary(stats: &AgentStats) -> String {
     if stats.remote_failures > 0 {
         outcomes.push(format!("{} remote failures", stats.remote_failures));
     }
+    if stats.remote_download_budget_exhausted {
+        outcomes.push("download budget exhausted".to_string());
+    }
     format!(
         "mbx[cache]: {}; {} downloaded, {} uploaded, {} stored locally",
         outcomes.join(", "),
@@ -359,6 +369,7 @@ pub(super) fn should_display_short_stats(stats: &AgentStats) -> bool {
         || unexpected_bypasses(stats) > 0
         || stats.avoided_compiler_duration_ns > 0
         || stats.remote_failures > 0
+        || stats.remote_download_budget_exhausted
 }
 
 /// Explain a session that loaded a full manifest and matched none of it.
@@ -402,6 +413,7 @@ pub(super) fn should_display_stats(stats: &AgentStats) -> bool {
         // A session that reached a remote cache and got nothing but failures has
         // nothing else to report, and is the session most worth reporting.
         || stats.remote_failures > 0
+        || stats.remote_download_budget_exhausted
 }
 
 pub(super) fn write_stats_report(path: &Path, stats: &AgentStats) -> Result<()> {

@@ -3242,6 +3242,38 @@ fn remote_agent_url_with_limit(
     )
 }
 
+fn remote_agent_url_with_limits(
+    base_url: url::Url,
+    cache_dir: PathBuf,
+    mode: RemoteCacheMode,
+    max_remote_download_bytes: u64,
+    max_remote_download_time: Duration,
+) -> CacheAgent {
+    let client = RemoteCacheClient::new(crate::RemoteCacheConfig {
+        base_url,
+        namespace: "test".into(),
+        token: None,
+        token_file: None,
+        oidc_audience: None,
+        connect_timeout: Duration::from_secs(1),
+        read_timeout: Duration::from_secs(1),
+        download_timeout: Duration::from_secs(1),
+        retries: 0,
+    })
+    .unwrap();
+    CacheAgent::new_remote_with_download_limits(
+        &cache_dir,
+        "test-version",
+        AgentRemoteCache {
+            client,
+            mode,
+            staging_dir: cache_dir.join("remote"),
+        },
+        max_remote_download_bytes,
+        max_remote_download_time,
+    )
+}
+
 #[tokio::test]
 async fn a_read_write_agent_claims_an_advertised_action_promise() {
     let directory = tempfile::tempdir().unwrap();
@@ -3501,8 +3533,32 @@ async fn bounds_cumulative_remote_downloads_for_a_session() {
         agent.remote_download_bytes.load(Ordering::Relaxed),
         first.size
     );
+    assert!(agent.stats().remote_download_budget_exhausted);
     first_download.assert_async().await;
     second_download.assert_async().await;
+}
+
+#[tokio::test]
+async fn bounds_active_remote_download_time_for_a_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let digest = CacheDigest::blake3(b"slow");
+    let responses = BTreeMap::from([(blob_path(&digest), b"slow".to_vec())]);
+    let (base_url, _, server) = delayed_blob_server(responses, Duration::from_millis(100)).await;
+    let agent = remote_agent_url_with_limits(
+        base_url,
+        directory.path().join("reader"),
+        RemoteCacheMode::ReadOnly,
+        u64::MAX,
+        Duration::from_millis(10),
+    );
+
+    assert!(matches!(
+        agent.respond(AgentRequest::FindBlob { digest }).await,
+        AgentResponse::Blob { path: None }
+    ));
+    assert!(agent.stats().remote_download_budget_exhausted);
+    assert_eq!(agent.stats().downloaded_bytes, 0);
+    server.abort();
 }
 
 #[tokio::test]

@@ -131,6 +131,7 @@ struct AtomicAgentStats {
     remote_blob_pack_requests: AtomicU64,
     remote_blob_pack_blobs: AtomicU64,
     remote_blob_transfer_duration_ns: AtomicU64,
+    remote_download_budget_exhausted: AtomicU64,
     local_cas_write_duration_ns: AtomicU64,
     prefetch_runs: AtomicU64,
     prefetch_duration_ns: AtomicU64,
@@ -262,6 +263,7 @@ pub struct CacheAgent {
     remote_staging_dir: Arc<PathBuf>,
     remote_download_limit: u64,
     remote_download_bytes: Arc<AtomicU64>,
+    remote_download_time_budget: Option<Arc<RemoteDownloadTimeBudget>>,
     pending_remote_actions: Arc<Mutex<BTreeMap<CacheDigest, RemoteActionResult>>>,
     remote_transfers: Arc<tokio::sync::Semaphore>,
     prefetch_transfers: Arc<tokio::sync::Semaphore>,
@@ -367,6 +369,60 @@ struct RemoteDownloadReservation {
     committed: bool,
 }
 
+#[derive(Debug, Default)]
+struct RemoteDownloadTimeState {
+    active: u64,
+    active_since: Option<Instant>,
+    elapsed: Duration,
+}
+
+#[derive(Debug)]
+struct RemoteDownloadTimeBudget {
+    limit: Duration,
+    state: Mutex<RemoteDownloadTimeState>,
+}
+
+struct RemoteDownloadTimePermit {
+    budget: Arc<RemoteDownloadTimeBudget>,
+    remaining: Duration,
+}
+
+impl RemoteDownloadTimeBudget {
+    fn start(self: &Arc<Self>) -> Option<RemoteDownloadTimePermit> {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        let elapsed = state.elapsed.saturating_add(
+            state
+                .active_since
+                .map_or(Duration::ZERO, |started| now.duration_since(started)),
+        );
+        let remaining = self.limit.checked_sub(elapsed)?;
+        if remaining.is_zero() {
+            return None;
+        }
+        if state.active == 0 {
+            state.active_since = Some(now);
+        }
+        state.active += 1;
+        Some(RemoteDownloadTimePermit {
+            budget: self.clone(),
+            remaining,
+        })
+    }
+}
+
+impl Drop for RemoteDownloadTimePermit {
+    fn drop(&mut self) {
+        let now = Instant::now();
+        let mut state = self.budget.state.lock().unwrap();
+        if let Some(started) = state.active_since {
+            state.elapsed = state.elapsed.saturating_add(now.duration_since(started));
+        }
+        state.active = state.active.saturating_sub(1);
+        state.active_since = (state.active > 0).then_some(now);
+    }
+}
+
 impl RemoteDownloadReservation {
     fn bytes(&self) -> u64 {
         self.reserved
@@ -397,7 +453,7 @@ struct ExecutableIdentityKey {
 impl CacheAgent {
     /// Create an agent backed by the cache rooted at `cache_dir`.
     pub fn new(cache_dir: impl Into<PathBuf>, version: impl Into<Arc<str>>) -> Self {
-        Self::build(cache_dir.into(), version.into(), None, 0)
+        Self::build(cache_dir.into(), version.into(), None, 0, None)
     }
 
     /// Create an agent with local-first access to a remote action cache.
@@ -411,6 +467,7 @@ impl CacheAgent {
             version.into(),
             Some(remote),
             DEFAULT_MAX_REMOTE_DOWNLOAD_BYTES,
+            None,
         )
     }
 
@@ -426,6 +483,25 @@ impl CacheAgent {
             version.into(),
             Some(remote),
             max_remote_download_bytes,
+            None,
+        )
+    }
+
+    /// Create a remote agent with cumulative data and active-transfer-time
+    /// budgets for the session.
+    pub fn new_remote_with_download_limits(
+        cache_dir: impl Into<PathBuf>,
+        version: impl Into<Arc<str>>,
+        remote: AgentRemoteCache,
+        max_remote_download_bytes: u64,
+        max_remote_download_time: Duration,
+    ) -> Self {
+        Self::build(
+            cache_dir.into(),
+            version.into(),
+            Some(remote),
+            max_remote_download_bytes,
+            Some(max_remote_download_time),
         )
     }
 
@@ -434,6 +510,7 @@ impl CacheAgent {
         version: Arc<str>,
         remote: Option<AgentRemoteCache>,
         remote_download_limit: u64,
+        remote_download_time_limit: Option<Duration>,
     ) -> Self {
         let remote_mode = remote
             .as_ref()
@@ -479,6 +556,12 @@ impl CacheAgent {
             remote_staging_dir: Arc::new(remote_staging_dir),
             remote_download_limit,
             remote_download_bytes: Arc::new(AtomicU64::new(0)),
+            remote_download_time_budget: remote_download_time_limit.map(|limit| {
+                Arc::new(RemoteDownloadTimeBudget {
+                    limit,
+                    state: Mutex::new(RemoteDownloadTimeState::default()),
+                })
+            }),
             pending_remote_actions: Arc::new(Mutex::new(BTreeMap::new())),
             remote_transfers,
             prefetch_transfers: Arc::new(tokio::sync::Semaphore::new(MAX_PREFETCH_TRANSFERS)),
@@ -520,6 +603,7 @@ impl CacheAgent {
                 .checked_add(bytes)
                 .ok_or_else(|| eyre::eyre!("remote cache download budget overflowed"))?;
             if next > self.remote_download_limit {
+                self.note_remote_download_budget_exhausted();
                 bail!(
                     "remote cache download budget exceeded: {} bytes requested with {} of {} bytes already used",
                     bytes,
@@ -545,6 +629,16 @@ impl CacheAgent {
         }
     }
 
+    fn begin_remote_download(&self) -> Result<Option<RemoteDownloadTimePermit>> {
+        let Some(budget) = &self.remote_download_time_budget else {
+            return Ok(None);
+        };
+        budget.start().map(Some).ok_or_else(|| {
+            self.note_remote_download_budget_exhausted();
+            eyre::eyre!("remote cache download time budget exhausted")
+        })
+    }
+
     fn reserve_remote_download_up_to(&self, requested: u64) -> Result<RemoteDownloadReservation> {
         let mut current = self.remote_download_bytes.load(Ordering::Acquire);
         loop {
@@ -557,6 +651,9 @@ impl CacheAgent {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
+                    if requested > 0 && reserved == 0 {
+                        self.note_remote_download_budget_exhausted();
+                    }
                     return Ok(RemoteDownloadReservation {
                         counter: self.remote_download_bytes.clone(),
                         reserved,
@@ -1027,6 +1124,11 @@ impl CacheAgent {
                 .stats
                 .remote_blob_transfer_duration_ns
                 .load(Ordering::Relaxed),
+            remote_download_budget_exhausted: self
+                .stats
+                .remote_download_budget_exhausted
+                .load(Ordering::Relaxed)
+                != 0,
             local_cas_write_duration_ns: self
                 .stats
                 .local_cas_write_duration_ns
@@ -1518,6 +1620,12 @@ impl CacheAgent {
     /// Record that a remote operation failed and the build carried on without it.
     fn note_remote_failure(&self) {
         self.stats.remote_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn note_remote_download_budget_exhausted(&self) {
+        self.stats
+            .remote_download_budget_exhausted
+            .store(1, Ordering::Relaxed);
     }
 
     async fn get_remote_action_result(

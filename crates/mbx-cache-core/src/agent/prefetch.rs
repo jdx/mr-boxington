@@ -615,14 +615,31 @@ impl CacheAgent {
                         break;
                     }
                 };
+                let download_time = match self.begin_remote_download() {
+                    Ok(timer) => timer,
+                    Err(error) => {
+                        warn!("remote cache blob pack skipped: {error}");
+                        break;
+                    }
+                };
                 let transfer_started = Instant::now();
-                let pack = remote
+                let download = remote
                     .get_blob_pack_with_limit(
                         &requested,
                         self.remote_staging_dir.as_path(),
                         pack_reservation.bytes(),
                     )
-                    .await;
+                    .boxed();
+                let pack = match &download_time {
+                    Some(timer) => tokio::time::timeout(timer.remaining, download)
+                        .await
+                        .map_err(|_| {
+                            self.note_remote_download_budget_exhausted();
+                            eyre::eyre!("remote cache download time budget exhausted")
+                        })
+                        .and_then(std::convert::identity),
+                    None => download.await,
+                };
                 (pack, duration_ns(transfer_started))
             };
             let pack = match pack {
@@ -887,15 +904,26 @@ impl CacheAgent {
         };
         let _permit = self.remote_transfers.acquire().await?;
         let reservation = self.reserve_remote_download(digest.size)?;
+        let download_time = self.begin_remote_download()?;
         self.stats
             .remote_blob_requests
             .fetch_add(1, Ordering::Relaxed);
         let transfer_timer =
             AtomicDurationTimer::start(&self.stats.remote_blob_transfer_duration_ns);
-        let temporary = remote
+        let download = remote
             .get_blob_file(digest, self.remote_staging_dir.as_path())
-            .await?;
+            .boxed();
+        let temporary = match &download_time {
+            Some(timer) => tokio::time::timeout(timer.remaining, download)
+                .await
+                .map_err(|_| {
+                    self.note_remote_download_budget_exhausted();
+                    eyre::eyre!("remote cache download time budget exhausted")
+                })??,
+            None => download.await?,
+        };
         drop(transfer_timer);
+        drop(download_time);
         let _cas_timer = AtomicDurationTimer::start(&self.stats.local_cas_write_duration_ns);
         let path = self.cas.store_verified_file(digest, temporary.path())?;
         reservation.commit(digest.size);

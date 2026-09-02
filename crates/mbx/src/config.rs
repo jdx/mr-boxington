@@ -15,7 +15,8 @@ const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_HTTP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_HTTP_RETRIES: i64 = 3;
 const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
-const DEFAULT_REMOTE_MAX_DOWNLOAD_BYTES: u64 = 256 * MIB;
+const DEFAULT_REMOTE_MAX_DOWNLOAD_BYTES: u64 = GIB;
+const DEFAULT_REMOTE_MAX_DOWNLOAD_TIME: Duration = Duration::from_secs(60);
 /// How long a managed target directory may sit unused before collection.
 const DEFAULT_TARGET_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
@@ -226,10 +227,12 @@ struct RawRemote {
         choices("read-write", "read-only", "write-only")
     )]
     mode: String,
-    /// Most remote artifact data one build may download. Once exhausted, remaining
-    /// actions compile normally instead of letting a slow cache dominate the build.
-    #[usage(env = "MBX_REMOTE_MAX_DOWNLOAD_SIZE", default = "256MiB")]
+    /// Most remote artifact data one build may download.
+    #[usage(env = "MBX_REMOTE_MAX_DOWNLOAD_SIZE", default = "1GiB")]
     max_download_size: String,
+    /// Most active wall time one build may spend downloading remote artifacts.
+    #[usage(env = "MBX_REMOTE_MAX_DOWNLOAD_TIME", default = "1m", ty = "duration")]
+    max_download_time: String,
     /// S3 endpoint for a store that is not AWS, such as MinIO or R2.
     #[usage(env = "MBX_REMOTE_S3_ENDPOINT", ty = "url")]
     s3_endpoint: Option<String>,
@@ -448,6 +451,7 @@ pub struct RemoteSettings {
     pub oidc_audience: Option<String>,
     pub mode: RemoteCacheMode,
     pub max_download_bytes: u64,
+    pub max_download_time: Duration,
     pub s3_endpoint: Option<String>,
     pub s3_region: Option<String>,
     pub s3_force_path_style: Option<bool>,
@@ -464,6 +468,7 @@ impl Default for RemoteSettings {
             oidc_audience: None,
             mode: RemoteCacheMode::default(),
             max_download_bytes: DEFAULT_REMOTE_MAX_DOWNLOAD_BYTES,
+            max_download_time: DEFAULT_REMOTE_MAX_DOWNLOAD_TIME,
             s3_endpoint: None,
             s3_region: None,
             s3_force_path_style: None,
@@ -807,6 +812,8 @@ impl Config {
                 mode,
                 max_download_bytes: parse_byte_size(&raw.remote.max_download_size)
                     .wrap_err("invalid remote.max_download_size")?,
+                max_download_time: parse_duration(&raw.remote.max_download_time)
+                    .wrap_err("invalid remote.max_download_time")?,
                 s3_endpoint: raw.remote.s3_endpoint,
                 s3_region: raw.remote.s3_region,
                 s3_force_path_style: raw.remote.s3_force_path_style,
@@ -1083,6 +1090,7 @@ mod tests {
             namespace = "file"
             mode = "read-only"
             max_download_size = "512MiB"
+            max_download_time = "45s"
             s3_conditional_writes = "required"
             [http]
             timeout = "5s"
@@ -1102,6 +1110,7 @@ mod tests {
                 ("MBX_REMOTE_URL", "https://env.example"),
                 ("MBX_REMOTE_MODE", "write-only"),
                 ("MBX_REMOTE_MAX_DOWNLOAD_SIZE", "128MiB"),
+                ("MBX_REMOTE_MAX_DOWNLOAD_TIME", "15s"),
                 ("MBX_HTTP_TIMEOUT", "250ms"),
                 ("MBX_GC_MAX_SIZE", "2GiB"),
                 ("MBX_TARGET_ROOT", "/from/env/targets"),
@@ -1113,6 +1122,7 @@ mod tests {
         assert_eq!(config.remote.url.unwrap(), "https://env.example");
         assert_eq!(config.remote.mode, RemoteCacheMode::WriteOnly);
         assert_eq!(config.remote.max_download_bytes, 128 * MIB);
+        assert_eq!(config.remote.max_download_time, Duration::from_secs(15));
         assert_eq!(config.http.timeout, Duration::from_millis(250));
         assert_eq!(config.gc.max_bytes, 2 * 1024 * 1024 * 1024);
         // Values absent from the environment still come from the file.
@@ -1142,6 +1152,10 @@ mod tests {
         assert_eq!(
             config.remote.max_download_bytes,
             DEFAULT_REMOTE_MAX_DOWNLOAD_BYTES
+        );
+        assert_eq!(
+            config.remote.max_download_time,
+            DEFAULT_REMOTE_MAX_DOWNLOAD_TIME
         );
         assert!(config.remote.url.is_none());
         assert!(!config.verify);
@@ -1363,6 +1377,7 @@ mod tests {
         assert!(configured(None, &[("MBX_GC_MAX_SIZE", "lots")]).is_err());
         assert!(configured(None, &[("MBX_GC_MAX_TOTAL_SIZE", "lots")]).is_err());
         assert!(configured(None, &[("MBX_REMOTE_MAX_DOWNLOAD_SIZE", "lots")]).is_err());
+        assert!(configured(None, &[("MBX_REMOTE_MAX_DOWNLOAD_TIME", "later")]).is_err());
         assert!(configured(None, &[("MBX_GC_INTERVAL", "later")]).is_err());
         assert!(configured(None, &[("MBX_TARGET_MAX_SIZE", "lots")]).is_err());
         assert!(configured(None, &[("MBX_TARGET_MAX_AGE", "later")]).is_err());

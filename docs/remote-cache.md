@@ -24,18 +24,22 @@ remote URL is set. To host your own server, see [cache server](/cache-server).
 
 ## Bound downloads
 
-Each build downloads at most 256 MiB of remote artifact data by default. Once
-that budget is exhausted, remaining actions compile normally. This keeps a
-large debug build or a slow remote from turning nominal cache hits into a build
-time regression while preserving the actions already restored into the local
-store.
+Each build downloads at most 1 GiB of remote artifact data and spends at most
+one minute of active wall time transferring it by default. Concurrent transfers
+share the time budget rather than each charging it independently. Once either
+budget is exhausted, remaining actions compile normally. The size ceiling
+bounds runaway volume while the time ceiling keeps a slow remote from turning
+nominal cache hits into a build-time regression. Actions already restored stay
+in the local store.
 
-Set `remote.max_download_size` or `MBX_REMOTE_MAX_DOWNLOAD_SIZE` to choose a
-different per-build budget:
+Set `remote.max_download_size` / `MBX_REMOTE_MAX_DOWNLOAD_SIZE` and
+`remote.max_download_time` / `MBX_REMOTE_MAX_DOWNLOAD_TIME` to choose different
+per-build budgets:
 
 ```toml
 [remote]
-max_download_size = "512MiB"
+max_download_size = "2GiB"
+max_download_time = "2m"
 ```
 
 ## Configure an S3-compatible bucket

@@ -145,11 +145,12 @@ impl CacheSession {
         std::fs::create_dir(&staging)?;
         let store = config.store_dir();
         let agent = if let Some(remote) = action_remote_cache(config, &store)? {
-            CacheAgent::new_remote_with_download_limit(
+            CacheAgent::new_remote_with_download_limits(
                 store.clone(),
                 VERSION,
                 remote,
                 config.remote.max_download_bytes,
+                config.remote.max_download_time,
             )
         } else {
             CacheAgent::new(store.clone(), VERSION)
