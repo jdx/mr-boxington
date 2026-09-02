@@ -151,6 +151,15 @@ pub(crate) fn stage_verified_cached_output(
         );
     }
     apply_file_mode(&temporary, node.mode, node.executable)?;
+    // A cache hit stands in for work Cargo decided was stale. Reflinks and
+    // some copy implementations preserve the CAS blob's older mtime, which
+    // can leave this output older than the dependency that triggered the
+    // invocation and make Cargo repeat it forever. A real compiler would have
+    // produced the file now, so give the restored output the same ordering.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&temporary)?
+        .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()))?;
     Ok((temporary, materialization))
 }
 

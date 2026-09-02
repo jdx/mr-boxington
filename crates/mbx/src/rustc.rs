@@ -1730,6 +1730,7 @@ fn restore_result(
             if restore_outputs
                 && std::fs::read(&destination).is_ok_and(|existing| existing == bytes)
             {
+                mark_output_restored(&destination)?;
                 restore.reused_output_files = restore.reused_output_files.saturating_add(1);
                 restore.reused_output_bytes = restore
                     .reused_output_bytes
@@ -1753,15 +1754,16 @@ fn restore_result(
             executable: node.executable,
             mode: node.mode,
         });
-        // An output that already holds these bytes is kept, not rewritten.
-        // What the rewrite would change is only the modification time, and
-        // that change is what makes cargo's next freshness pass re-dirty
-        // every dependent of this unit -- a rebuild loop that never settles.
-        // Keeping the file settles it: once nothing rewrites, nothing is
-        // newer than what depends on it, and the next build is a no-op.
+        // Avoid copying bytes that are already here, but still make the output
+        // look freshly produced. Cargo only invoked rustc because this unit
+        // was stale; leaving its old mtime behind lets a newer dependency keep
+        // the same unit stale forever, even though this cache hit rebuilt it
+        // logically. Cargo writes the unit fingerprint after rustc returns, so
+        // touching it here preserves the same ordering as a real compilation.
         if restore_outputs
             && output_already_in_place(&node, &destination, session::file_digest_cache())
         {
+            mark_output_restored(&destination)?;
             restore.reused_output_files = restore.reused_output_files.saturating_add(1);
             restore.reused_output_bytes =
                 restore.reused_output_bytes.saturating_add(node.digest.size);
@@ -1815,14 +1817,21 @@ fn restore_result(
     }))
 }
 
+fn mark_output_restored(path: &Path) -> Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()))?;
+    Ok(())
+}
+
 /// Whether the destination already holds exactly the bytes this hit would
 /// place there.
 ///
 /// The session ledger answers without a read when it can; otherwise the file
 /// is read once and hashed, which costs what the copy it replaces would have
-/// cost and buys an unchanged modification time. A ledger entry whose digest
-/// disagrees is a content difference already proven, so it refuses without
-/// reading either.
+/// cost. A ledger entry whose digest disagrees is a content difference already
+/// proven, so it refuses without reading either.
 pub(crate) fn output_already_in_place(
     node: &CacheFileNode,
     destination: &Path,
