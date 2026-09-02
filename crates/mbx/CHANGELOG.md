@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1](https://github.com/jdx/mr-boxington/compare/v1.4.0...v1.4.1) - 2026-09-02
+
+### Other
+
+- trim the README and correct link caching claims ([#277](https://github.com/jdx/mr-boxington/pull/277))
+
 ## [1.4.0](https://github.com/jdx/mr-boxington/compare/v1.3.2...v1.4.0) - 2026-09-02
 
 ### Added
