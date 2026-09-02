@@ -18,6 +18,7 @@ env:
 
 jobs:
   measure:
+    if: github.ref == 'refs/heads/main'
     runs-on: [self-hosted, jdx-perf-v1]
     env:
       # Persistent appliance-local store; no remote backend is configured.
