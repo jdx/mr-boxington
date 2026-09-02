@@ -71,6 +71,7 @@ pub(crate) const VERIFY_ENV: &str = "MBX_VERIFY";
 pub(crate) const SHARE_OUT_DIR_ENV: &str = "MBX_SHARE_OUT_DIR";
 pub(crate) const BUILD_SCRIPT_EXECUTION_ENV: &str = "MBX_BUILD_SCRIPT_EXECUTION";
 pub(crate) const LEARNED_INCREMENTAL_ENV: &str = "MBX_LEARNED_INCREMENTAL";
+pub(crate) const LEARNED_INCREMENTAL_MAX_SIZE_ENV: &str = "MBX_LEARNED_INCREMENTAL_MAX_SIZE";
 pub(crate) const INCREMENTAL_ROOT_ENV: &str = "MBX_INCREMENTAL_ROOT";
 pub const CACHE_LINKS_ENV: &str = "MBX_CACHE_LINKS";
 /// Group completed builds for one later cache export, used by CI actions.
@@ -1527,6 +1528,21 @@ pub(crate) fn share_out_dir_requested() -> bool {
 /// state instead of publishing it. Read the same way as verify mode.
 pub(crate) fn learned_incremental_requested() -> bool {
     std::env::var_os(LEARNED_INCREMENTAL_ENV).is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+/// How much incremental state one crate may keep before the shim discards it;
+/// `None` is no limit. The session writes the resolved setting, but a shim
+/// running without one may inherit the user's own spelling, so both a byte
+/// count and a size with a unit are accepted. Anything unreadable falls back
+/// to the declared default rather than to no limit or to zero.
+pub(crate) fn learned_incremental_max_size() -> Option<u64> {
+    let default = Some(crate::config::DEFAULT_LEARNED_INCREMENTAL_MAX_SIZE);
+    match std::env::var(LEARNED_INCREMENTAL_MAX_SIZE_ENV) {
+        Ok(value) if !value.trim().is_empty() => {
+            crate::config::parse_optional_byte_size(&value).unwrap_or(default)
+        }
+        _ => default,
+    }
 }
 
 /// Tell the session that this compilation was not cacheable.

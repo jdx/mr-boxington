@@ -126,6 +126,14 @@ pub(crate) struct RawConfig {
         default = true
     )]
     _learned_incremental: bool,
+    /// How much learned incremental state one crate may keep, or "none". State
+    /// past this is discarded before the crate compiles again.
+    #[usage(
+        key = "learned_incremental_max_size",
+        env = "MBX_LEARNED_INCREMENTAL_MAX_SIZE",
+        default = "8GiB"
+    )]
+    learned_incremental_max_size: String,
     /// Share eligible compilations that read `OUT_DIR`.
     #[usage(env = "MBX_SHARE_OUT_DIR", default = true)]
     share_out_dir: bool,
@@ -482,6 +490,15 @@ pub(crate) struct RetentionSettings {
 /// callers can construct, so a knob the binary alone reads does not belong on
 /// it: adding a field there is a breaking change to an API this crate does not
 /// mean to offer.
+/// The declared default of `learned_incremental_max_size`.
+///
+/// A crate's incremental state is roughly proportional to the crate, not to
+/// how often it is edited, because rustc discards superseded sessions itself.
+/// A large workspace binary with line tables keeps a few GiB, so the budget is
+/// generous enough that ordinary crates never hit it; discarding state on
+/// every edit would silently turn the edit loop back into full recompilation.
+pub(crate) const DEFAULT_LEARNED_INCREMENTAL_MAX_SIZE: u64 = 8 * 1024 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub(crate) struct CliSettings {
     pub retention: RetentionSettings,
@@ -489,6 +506,8 @@ pub(crate) struct CliSettings {
     pub summary: SummaryStyle,
     /// Whether a churning crate may compile with its own incremental state.
     pub learned_incremental: bool,
+    /// How much of that state one crate may keep, in bytes; `None` is no limit.
+    pub learned_incremental_max_size: Option<u64>,
     /// Whether natively linked programs may be cached.
     pub cache_links: bool,
 }
@@ -502,6 +521,7 @@ impl Default for CliSettings {
             savings: SavingsStyle::default(),
             summary: SummaryStyle::default(),
             learned_incremental: true,
+            learned_incremental_max_size: Some(DEFAULT_LEARNED_INCREMENTAL_MAX_SIZE),
             cache_links: true,
         }
     }
@@ -794,6 +814,10 @@ impl Config {
                 savings: raw.savings.parse().wrap_err("invalid savings")?,
                 summary: raw.summary.parse().wrap_err("invalid summary")?,
                 learned_incremental: raw._learned_incremental,
+                learned_incremental_max_size: parse_optional_byte_size(
+                    &raw.learned_incremental_max_size,
+                )
+                .wrap_err("invalid learned_incremental_max_size")?,
                 cache_links: raw.cache_links,
             },
         ))
@@ -970,7 +994,7 @@ fn parse_store_budget(value: &str) -> Result<u64> {
     parse_byte_size(value)
 }
 
-fn parse_optional_byte_size(value: &str) -> Result<Option<u64>> {
+pub(crate) fn parse_optional_byte_size(value: &str) -> Result<Option<u64>> {
     if is_no_limit(value) {
         return Ok(None);
     }
@@ -1382,6 +1406,32 @@ mod tests {
 
         let (_, settings) = configured_for_cli(None, &[("MBX_LEARNED_INCREMENTAL", "0")]).unwrap();
         assert!(!settings.learned_incremental);
+    }
+
+    /// The budget has to hold a real crate's state: rustc keeps one session's
+    /// worth per crate, and a large binary's session is a few GiB.
+    #[test]
+    fn learned_incremental_state_budget_is_generous_and_can_be_lifted() {
+        let (_, settings) = configured_for_cli(None, &[]).unwrap();
+        assert_eq!(
+            settings.learned_incremental_max_size,
+            Some(DEFAULT_LEARNED_INCREMENTAL_MAX_SIZE)
+        );
+
+        let (_, settings) =
+            configured_for_cli(None, &[("MBX_LEARNED_INCREMENTAL_MAX_SIZE", "2GiB")]).unwrap();
+        assert_eq!(
+            settings.learned_incremental_max_size,
+            Some(2 * 1024 * 1024 * 1024)
+        );
+
+        let (_, settings) =
+            configured_for_cli(None, &[("MBX_LEARNED_INCREMENTAL_MAX_SIZE", "none")]).unwrap();
+        assert_eq!(settings.learned_incremental_max_size, None);
+
+        let error =
+            configured_for_cli(None, &[("MBX_LEARNED_INCREMENTAL_MAX_SIZE", "lots")]).unwrap_err();
+        assert!(error.to_string().contains("learned_incremental_max_size"));
     }
 
     #[test]

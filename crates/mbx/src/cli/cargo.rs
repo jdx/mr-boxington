@@ -206,6 +206,12 @@ fn cargo_with_settings_bypass_log_and_roots(
             if learned_incremental { "1" } else { "0" }.into(),
         );
         environment.insert(
+            session::LEARNED_INCREMENTAL_MAX_SIZE_ENV.into(),
+            settings
+                .learned_incremental_max_size
+                .map_or_else(|| "none".to_string(), |bytes| bytes.to_string()),
+        );
+        environment.insert(
             session::CACHE_LINKS_ENV.into(),
             if cache_links { "1" } else { "0" }.into(),
         );

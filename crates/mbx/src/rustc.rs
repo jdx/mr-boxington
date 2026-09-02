@@ -47,9 +47,6 @@ const WORKSPACE_HOT_STREAK_THRESHOLD: u32 = 1;
 /// Schema version of the per-checkout churn record.
 const CHURN_STATE_VERSION: u8 = 1;
 
-/// How large one unit's incremental state may grow before it is discarded.
-const INCREMENTAL_DIR_MAX_BYTES: u64 = 1024 * 1024 * 1024;
-
 /// What a churning unit gets: its own incremental state, and no publication.
 #[derive(Clone, Debug, Default)]
 struct LearnedPlan {
@@ -65,9 +62,9 @@ struct LearnedPlan {
 
 impl LearnedPlan {
     /// Find somewhere to keep the state, for a unit that earned it.
-    fn resolved(mut self, invocation: &CacheDigest) -> Self {
+    fn resolved(mut self, invocation: &CacheDigest, crate_name: &str) -> Self {
         if self.hot {
-            self.directory = incremental_directory(invocation);
+            self.directory = incremental_directory(invocation, crate_name);
         }
         self
     }
@@ -658,13 +655,25 @@ fn learned_plan(
 /// A session gives it a persistent per-checkout root outside Cargo's target
 /// directory. A standalone shim falls back to its target directory when one is
 /// available, and compiles normally when it has nowhere to put state.
-fn incremental_directory(invocation: &CacheDigest) -> Option<PathBuf> {
+fn incremental_directory(invocation: &CacheDigest, crate_name: &str) -> Option<PathBuf> {
     let root = incremental_root()?;
     let key = invocation.key();
     let shard = key.get(..16)?;
     let directory = root.join(shard);
-    match prepare_incremental_directory(&directory) {
-        Ok(()) => Some(directory),
+    match prepare_incremental_directory(&directory, session::learned_incremental_max_size()) {
+        Ok(discarded) => {
+            if let Some(bytes) = discarded {
+                // Said out loud: the build goes on to report this compilation
+                // as incremental, and a crate whose state is discarded on
+                // every edit is indistinguishable from the outside from
+                // incremental compilation that simply does not help.
+                eprintln!(
+                    "mbx[warning]: discarded {} of incremental state for {crate_name}: it passed learned_incremental_max_size, which can be raised to keep it",
+                    bytesize::ByteSize::b(bytes).display().iec()
+                );
+            }
+            Some(directory)
+        }
         Err(error) => {
             eprintln!("mbx[warning]: incremental state was not prepared: {error:#}");
             None
@@ -672,17 +681,26 @@ fn incremental_directory(invocation: &CacheDigest) -> Option<PathBuf> {
     }
 }
 
-/// Make sure the unit's state directory exists and is not unbounded.
+/// Make sure the unit's state directory exists and is inside its budget.
 ///
-/// Incremental state grows with the edit history rather than the source, so it
-/// is discarded wholesale once it is large. Losing it costs one full
-/// recompilation, which is what this unit would have paid without it.
-fn prepare_incremental_directory(directory: &Path) -> Result<()> {
-    if directory_bytes(directory) > INCREMENTAL_DIR_MAX_BYTES {
+/// rustc keeps about one session's worth of state per crate and removes the
+/// sessions it has superseded, so the state is proportional to the crate rather
+/// than to how long it has been edited. The budget is a backstop against state
+/// rustc could not clean up, not a ceiling ordinary crates should reach: state
+/// discarded before every compile is a full recompilation reported as
+/// incremental, the opposite of what it is for. Returns how many bytes were
+/// discarded, if any.
+fn prepare_incremental_directory(directory: &Path, budget: Option<u64>) -> Result<Option<u64>> {
+    let discarded = budget.and_then(|budget| {
+        let bytes = directory_bytes(directory);
+        (bytes > budget).then_some(bytes)
+    });
+    if discarded.is_some() {
         std::fs::remove_dir_all(directory)
             .wrap_err("failed to discard oversized incremental state")?;
     }
-    std::fs::create_dir_all(directory).wrap_err("failed to create the incremental directory")
+    std::fs::create_dir_all(directory).wrap_err("failed to create the incremental directory")?;
+    Ok(discarded)
 }
 
 fn directory_bytes(directory: &Path) -> u64 {
@@ -742,7 +760,7 @@ fn plan_learned_reuse(
             record: Some((state_path, sources)),
             ..plan
         }
-        .resolved(&unit))
+        .resolved(&unit, compilation.invocation.crate_name()))
     })();
     match planned {
         Ok(plan) => plan,

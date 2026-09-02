@@ -130,6 +130,14 @@ Let local workspace members compile incrementally.
 
 Compile crates that keep missing the cache with changed content incrementally, keeping their outputs out of the shared cache.
 
+### `learned_incremental_max_size`
+
+- **Type:** `string`
+- **Default:** `8GiB`
+- **Set with:** `MBX_LEARNED_INCREMENTAL_MAX_SIZE`
+
+How much learned incremental state one crate may keep, or "none". State past this is discarded before the crate compiles again.
+
 ### `log`
 
 - **Type:** `string`

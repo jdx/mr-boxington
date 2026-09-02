@@ -33,6 +33,7 @@ Every value below is optional; these are shown set explicitly.
 # <config directory>/mbx/config.toml
 cache_dir = "/var/cache/mbx"
 incremental = false
+learned_incremental_max_size = "8GiB"  # or "none"
 share_out_dir = true
 build_script_execution = true
 cc = true
@@ -218,9 +219,18 @@ changes the keys of everything above it, and those crates keep compiling and
 publishing normally. So does a miss on unchanged sources, such as a wiped
 `target/` or a first build in a new checkout. The record and state are private
 to each checkout and live under `incremental/` in mbx's cache directory, so
-`cargo clean` does not discard the next edit's speedup. Each crate's
-incremental state is discarded once it passes 1 GiB, and normal garbage
+`cargo clean` does not discard the next edit's speedup. Normal garbage
 collection removes state for deleted or expired checkouts.
+
+Each crate's state is discarded, with a warning naming the crate, once it
+passes `learned_incremental_max_size` (`MBX_LEARNED_INCREMENTAL_MAX_SIZE`,
+default 8 GiB; `"none"` lifts the limit). rustc keeps about one session's worth
+of state per crate and removes the sessions it has superseded, so the state is
+proportional to the crate rather than to how long it has been edited, and the
+budget is a backstop rather than a size ordinary crates reach. A large binary
+built with debug info keeps a few GiB. Set the budget below that and every edit
+compiles from scratch while still being reported as incremental, so raise it
+rather than lower it when the warning appears.
 
 CI never does this, because a fresh runner has no earlier state to build on.
 `MBX_LEARNED_INCREMENTAL=0` turns it off. `MBX_INCREMENTAL=1` supersedes it by
