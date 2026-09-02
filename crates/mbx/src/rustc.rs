@@ -181,7 +181,6 @@ pub(crate) fn compile(
     let mut verification = None;
     let mut action_lookup_attempted = false;
     let mut current_diagnostic = None;
-    let mut learned = LearnedPlan::default();
     // Probed once, before anything that would swallow the answer: a host whose
     // linker cannot be described bypasses here, where the reason is recorded,
     // rather than deep inside key construction where it becomes a warning
@@ -193,7 +192,9 @@ pub(crate) fn compile(
         portable: &portable,
         linker: linker_for(&invocation)?,
     };
-    if outputs.dep_info.is_file()
+    let mut learned = reuse_hot_workspace_plan(&compilation, &outputs, learned_enabled);
+    if !learned.engaged()
+        && outputs.dep_info.is_file()
         && let Ok((candidates, discovered)) =
             action_from_current_dep_info(&compilation, &outputs.dep_info)
     {
@@ -250,7 +251,7 @@ pub(crate) fn compile(
         }
     }
     let mut prediction_missing = false;
-    if !action_lookup_attempted {
+    if !learned.engaged() && !action_lookup_attempted {
         match restore_predicted_result(
             &compilation,
             &outputs,
@@ -285,7 +286,7 @@ pub(crate) fn compile(
     // waking from that wait, or finding the prediction a finished flight left
     // behind, is one more chance to restore instead of compile. Never in
     // verify mode, whose whole point is running the compiler.
-    let flight = if verify {
+    let flight = if verify || learned.engaged() {
         None
     } else {
         join_flight(&compilation)
@@ -766,6 +767,65 @@ fn plan_learned_reuse(
         Ok(plan) => plan,
         Err(error) => {
             eprintln!("mbx[warning]: churn was not tracked for this crate: {error:#}");
+            LearnedPlan::default()
+        }
+    }
+}
+
+/// Re-enter a workspace unit's established private state without rebuilding a
+/// shared action key first.
+///
+/// An intact dep-info file supplies the source fingerprint without constructing
+/// a shared action. A missing target, settled source, or changed environment
+/// deliberately takes the slower path so it can restore or republish.
+fn reuse_hot_workspace_plan(
+    compilation: &Compilation<'_>,
+    outputs: &RustcOutputs,
+    enabled: bool,
+) -> LearnedPlan {
+    if !enabled || !outputs.dep_info.is_file() || !source_is_in_workspace(compilation) {
+        return LearnedPlan::default();
+    }
+    let planned = (|| {
+        let context = base_action_context(
+            compilation.rustc,
+            compilation.working_dir,
+            compilation.portable,
+        )?;
+        let unit = compilation.invocation.invocation_digest(&context)?;
+        let Some(state_path) = churn_state_path(&unit) else {
+            return Result::<LearnedPlan>::Ok(LearnedPlan::default());
+        };
+        let Some(recorded) = read_churn_state(&state_path) else {
+            return Ok(LearnedPlan::default());
+        };
+        let dep_info = RustcDepInfo::read(&outputs.dep_info)?;
+        verify_environment(&dep_info.environment)?;
+        let discovered = compilation.invocation.discover_inputs_with_mappings(
+            &dep_info,
+            compilation.working_dir,
+            &compilation.portable.mappings,
+            session::file_digest_cache(),
+        )?;
+        let sources = compilation.invocation.source_fingerprint(&discovered);
+        if recorded.streak < WORKSPACE_HOT_STREAK_THRESHOLD || recorded.sources == sources.key() {
+            return Ok(LearnedPlan::default());
+        }
+        Ok(LearnedPlan {
+            hot: true,
+            streak: recorded
+                .streak
+                .saturating_add(1)
+                .min(WORKSPACE_HOT_STREAK_THRESHOLD),
+            directory: None,
+            record: Some((state_path, sources)),
+        }
+        .resolved(&unit, compilation.invocation.crate_name()))
+    })();
+    match planned {
+        Ok(plan) => plan,
+        Err(error) => {
+            eprintln!("mbx[warning]: incremental state was not reused: {error:#}");
             LearnedPlan::default()
         }
     }
