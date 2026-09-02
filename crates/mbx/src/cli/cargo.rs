@@ -126,12 +126,13 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
     }
 
     let session_dir = tempfile::Builder::new().prefix("mbx-session-").tempdir()?;
+    let cargo_jobs = cargo_job_limit(arguments);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
 
     let session_outcome = runtime.block_on(async {
-        let session = CacheSession::start(session_dir.path(), config).await?;
+        let session = CacheSession::start_with_jobs(session_dir.path(), config, cargo_jobs).await?;
         let mut environment = inherited_environment(|name| std::env::var(name).ok(), &working_dir);
         if let Some(path) = bypass_log {
             let path = if path.is_absolute() {
@@ -648,6 +649,74 @@ pub(super) fn flag_value<'a>(arguments: &'a [String], flag: &str) -> Option<&'a 
         if argument == flag {
             return arguments.next().map(String::as_str);
         }
+    }
+    None
+}
+
+/// Cargo's own compiler-process limit, when it narrows the scheduler pool.
+///
+/// The CLI wins over `CARGO_BUILD_JOBS`, including `default`, just as it does
+/// in Cargo. Invalid values are left for Cargo to diagnose and do not make mbx
+/// invent a second interpretation.
+fn cargo_job_limit(arguments: &[String]) -> Option<u64> {
+    cargo_job_limit_with(
+        arguments,
+        std::env::var("CARGO_BUILD_JOBS").ok().as_deref(),
+        std::thread::available_parallelism().map_or(1, |cpus| cpus.get() as u64),
+    )
+}
+
+pub(super) fn cargo_job_limit_with(
+    arguments: &[String],
+    environment: Option<&str>,
+    logical_cpus: u64,
+) -> Option<u64> {
+    let mut cli_value = None;
+    let mut cli_seen = false;
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        if argument == "--" {
+            break;
+        }
+        let value = if argument == "-j" || argument == "--jobs" {
+            index += 1;
+            arguments.get(index).map(String::as_str)
+        } else if let Some(value) = argument.strip_prefix("--jobs=") {
+            Some(value)
+        } else if let Some(value) = argument.strip_prefix("-j=") {
+            Some(value)
+        } else {
+            argument
+                .strip_prefix("-j")
+                .filter(|value| !value.is_empty())
+        };
+        if let Some(value) = value {
+            cli_seen = true;
+            cli_value = resolve_cargo_jobs(value, logical_cpus);
+        }
+        index += 1;
+    }
+    if cli_seen {
+        cli_value
+    } else {
+        environment.and_then(|value| resolve_cargo_jobs(value, logical_cpus))
+    }
+}
+
+fn resolve_cargo_jobs(value: &str, logical_cpus: u64) -> Option<u64> {
+    if value == "default" {
+        return None;
+    }
+    let jobs = value.parse::<i64>().ok()?;
+    if jobs > 0 {
+        return Some(jobs as u64);
+    }
+    if jobs < 0 {
+        return i128::from(logical_cpus)
+            .checked_add(i128::from(jobs))
+            .filter(|jobs| *jobs > 0)
+            .and_then(|jobs| u64::try_from(jobs).ok());
     }
     None
 }

@@ -174,6 +174,9 @@ struct RawScheduler {
     /// Machine-wide concurrent compile permits.
     #[usage(env = "MBX_SCHEDULER_CPUS", default_note = "logical CPUs")]
     cpus: Option<i64>,
+    /// Logical CPUs to leave free for the rest of the machine.
+    #[usage(env = "MBX_SCHEDULER_RESERVE_CPUS", default = 0)]
+    reserve_cpus: i64,
     /// Memory budget the permits divide, or "none" for plain CPU permits.
     #[usage(env = "MBX_SCHEDULER_MEMORY", default_note = "85% of physical memory")]
     memory: Option<String>,
@@ -352,10 +355,19 @@ pub struct SchedulerSettings {
     pub enabled: bool,
     /// Machine-wide concurrent compile permits.
     pub cpus: u64,
+    /// Permits withheld from the configured CPU count.
+    pub reserve_cpus: u64,
     /// Memory the permits divide; `None` leaves plain CPU permits.
     pub memory_bytes: Option<u64>,
     /// Priority of this build's compilations against other builds.
     pub priority: SchedulerPriority,
+}
+
+impl SchedulerSettings {
+    /// Compile permits left after preserving capacity for interactive work.
+    pub(crate) fn permits(&self) -> u64 {
+        self.cpus.saturating_sub(self.reserve_cpus).max(1)
+    }
 }
 
 /// The scheduling a hand-built `Config` gets: none.
@@ -370,6 +382,7 @@ impl Default for SchedulerSettings {
         Self {
             enabled: false,
             cpus: 1,
+            reserve_cpus: 0,
             memory_bytes: None,
             priority: SchedulerPriority::Normal,
         }
@@ -684,6 +697,9 @@ impl Config {
                 .ok_or_else(|| eyre::eyre!("invalid scheduler.cpus: must be a positive count"))?,
             None => std::thread::available_parallelism().map_or(1, |cpus| cpus.get() as u64),
         };
+        let scheduler_reserve_cpus = u64::try_from(raw.scheduler.reserve_cpus).map_err(|_| {
+            eyre::eyre!("invalid scheduler.reserve_cpus: must be a non-negative count")
+        })?;
         let scheduler_memory = match raw.scheduler.memory.as_deref() {
             Some(value) => parse_optional_byte_size(value).wrap_err("invalid scheduler.memory")?,
             // Measured only when the scheduler would use the answer, like the
@@ -701,6 +717,7 @@ impl Config {
         let scheduler = SchedulerSettings {
             enabled: raw.scheduler.enabled,
             cpus: scheduler_cpus,
+            reserve_cpus: scheduler_reserve_cpus,
             memory_bytes: scheduler_memory,
             priority: raw
                 .scheduler
@@ -769,12 +786,55 @@ impl Config {
             .wrap_err_with(|| format!("failed to parse {}", path.display()))?;
 
         for (key, value) in document.iter() {
+            if key == "scheduler" {
+                let table = value
+                    .as_table()
+                    .ok_or_else(|| eyre::eyre!("{}.scheduler must be a table", path.display()))?;
+                for (scheduler_key, value) in table.iter() {
+                    let setting = format!("scheduler.{scheduler_key}");
+                    match scheduler_key {
+                        "enabled" if !environment_contains("MBX_SCHEDULER") => {
+                            self.scheduler.enabled = workspace_bool(&path, &setting, value)?;
+                        }
+                        "cpus" if !environment_contains("MBX_SCHEDULER_CPUS") => {
+                            self.scheduler.cpus = workspace_count(&path, &setting, value, false)?;
+                        }
+                        "reserve_cpus" if !environment_contains("MBX_SCHEDULER_RESERVE_CPUS") => {
+                            self.scheduler.reserve_cpus =
+                                workspace_count(&path, &setting, value, true)?;
+                        }
+                        "memory" if !environment_contains("MBX_SCHEDULER_MEMORY") => {
+                            let memory = value.as_str().ok_or_else(|| {
+                                eyre::eyre!("{}.{} must be a string", path.display(), setting)
+                            })?;
+                            self.scheduler.memory_bytes = parse_optional_byte_size(memory)
+                                .wrap_err_with(|| {
+                                    format!("invalid {}.{setting}", path.display())
+                                })?;
+                        }
+                        "priority" if !environment_contains("MBX_SCHEDULER_PRIORITY") => {
+                            let priority = value.as_str().ok_or_else(|| {
+                                eyre::eyre!("{}.{} must be a string", path.display(), setting)
+                            })?;
+                            self.scheduler.priority = priority.parse().wrap_err_with(|| {
+                                format!("invalid {}.{setting}", path.display())
+                            })?;
+                        }
+                        "enabled" | "cpus" | "reserve_cpus" | "memory" | "priority" => {}
+                        _ => bail!(
+                            "{} contains unsupported workspace setting {setting:?}; only scheduler.enabled, scheduler.cpus, scheduler.reserve_cpus, scheduler.memory, and scheduler.priority are allowed",
+                            path.display()
+                        ),
+                    }
+                }
+                continue;
+            }
             if !matches!(
                 key,
                 "incremental" | "share_out_dir" | "build_script_execution" | "cc"
             ) {
                 bail!(
-                    "{} contains unsupported workspace setting {key:?}; only incremental, share_out_dir, build_script_execution, and cc are allowed",
+                    "{} contains unsupported workspace setting {key:?}; only incremental, share_out_dir, build_script_execution, cc, and scheduler are allowed",
                     path.display()
                 );
             }
@@ -805,6 +865,36 @@ impl Config {
     pub fn store_dir(&self) -> PathBuf {
         self.cache_dir.join("actions")
     }
+}
+
+fn workspace_bool(path: &Path, setting: &str, value: &toml_edit::Item) -> Result<bool> {
+    value
+        .as_bool()
+        .ok_or_else(|| eyre::eyre!("{}.{} must be a boolean", path.display(), setting))
+}
+
+fn workspace_count(
+    path: &Path,
+    setting: &str,
+    value: &toml_edit::Item,
+    zero_allowed: bool,
+) -> Result<u64> {
+    let count = value
+        .as_integer()
+        .and_then(|count| u64::try_from(count).ok())
+        .filter(|count| zero_allowed || *count > 0);
+    count.ok_or_else(|| {
+        let requirement = if zero_allowed {
+            "non-negative"
+        } else {
+            "positive"
+        };
+        eyre::eyre!(
+            "{}.{} must be a {requirement} count",
+            path.display(),
+            setting
+        )
+    })
 }
 
 /// Resolve a byte size, written either plainly or with a unit.
@@ -1278,6 +1368,77 @@ mod tests {
     }
 
     #[test]
+    fn workspace_policy_accepts_scheduler_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join(".mbx.toml"),
+            "[scheduler]\nenabled = true\ncpus = 8\nreserve_cpus = 2\nmemory = \"6GiB\"\npriority = \"low\"\n",
+        )
+        .unwrap();
+        let mut config = configured(None, &[("MBX_SCHEDULER", "false")]).unwrap();
+
+        config
+            .apply_workspace_policy_with(directory.path(), |name| name == "MBX_SCHEDULER")
+            .unwrap();
+
+        assert!(!config.scheduler.enabled, "the environment still wins");
+        assert_eq!(config.scheduler.cpus, 8);
+        assert_eq!(config.scheduler.reserve_cpus, 2);
+        assert_eq!(config.scheduler.permits(), 6);
+        assert_eq!(config.scheduler.memory_bytes, Some(6 * GIB));
+        assert_eq!(config.scheduler.priority, SchedulerPriority::Low);
+    }
+
+    #[test]
+    fn environment_overrides_workspace_scheduler_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join(".mbx.toml"),
+            "[scheduler]\ncpus = 8\nreserve_cpus = 2\nmemory = \"6GiB\"\npriority = \"low\"\n",
+        )
+        .unwrap();
+        let environment = [
+            ("MBX_SCHEDULER_CPUS", "5"),
+            ("MBX_SCHEDULER_RESERVE_CPUS", "1"),
+            ("MBX_SCHEDULER_MEMORY", "4GiB"),
+            ("MBX_SCHEDULER_PRIORITY", "normal"),
+        ];
+        let mut config = configured(None, &environment).unwrap();
+
+        config
+            .apply_workspace_policy_with(directory.path(), |name| {
+                environment.iter().any(|(key, _)| *key == name)
+            })
+            .unwrap();
+
+        assert_eq!(config.scheduler.cpus, 5);
+        assert_eq!(config.scheduler.reserve_cpus, 1);
+        assert_eq!(config.scheduler.memory_bytes, Some(4 * GIB));
+        assert_eq!(config.scheduler.priority, SchedulerPriority::Normal);
+    }
+
+    #[test]
+    fn workspace_policy_validates_scheduler_settings() {
+        for setting in [
+            "[scheduler]\ncpus = 0",
+            "[scheduler]\nreserve_cpus = -1",
+            "[scheduler]\nmemory = \"plenty\"",
+            "[scheduler]\npriority = \"urgent\"",
+            "[scheduler]\nunknown = true",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::write(directory.path().join(".mbx.toml"), setting).unwrap();
+            let mut config = configured(None, &[]).unwrap();
+            assert!(
+                config
+                    .apply_workspace_policy_with(directory.path(), |_| false)
+                    .is_err(),
+                "{setting:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn environment_overrides_workspace_policy() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -1387,6 +1548,7 @@ mod tests {
             "the budget leaves headroom for what it cannot see"
         );
         assert_eq!(config.scheduler.priority, SchedulerPriority::Normal);
+        assert_eq!(config.scheduler.reserve_cpus, 0);
     }
 
     #[test]
@@ -1395,12 +1557,15 @@ mod tests {
             None,
             &[
                 ("MBX_SCHEDULER_CPUS", "3"),
+                ("MBX_SCHEDULER_RESERVE_CPUS", "1"),
                 ("MBX_SCHEDULER_MEMORY", "4GiB"),
                 ("MBX_SCHEDULER_PRIORITY", "low"),
             ],
         )
         .unwrap();
         assert_eq!(config.scheduler.cpus, 3);
+        assert_eq!(config.scheduler.reserve_cpus, 1);
+        assert_eq!(config.scheduler.permits(), 2);
         assert_eq!(config.scheduler.memory_bytes, Some(4 * GIB));
         assert_eq!(config.scheduler.priority, SchedulerPriority::Low);
 
@@ -1413,8 +1578,23 @@ mod tests {
             "\"none\" keeps plain CPU permits"
         );
 
+        let config = configured(
+            None,
+            &[
+                ("MBX_SCHEDULER_CPUS", "3"),
+                ("MBX_SCHEDULER_RESERVE_CPUS", "9"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(config.scheduler.permits(), 1, "one permit always remains");
+
         let error = configured(None, &[("MBX_SCHEDULER_CPUS", "0")]).unwrap_err();
         assert!(error.to_string().contains("scheduler.cpus"), "{error}");
+        let error = configured(None, &[("MBX_SCHEDULER_RESERVE_CPUS", "-1")]).unwrap_err();
+        assert!(
+            error.to_string().contains("scheduler.reserve_cpus"),
+            "{error}"
+        );
         let error = configured(None, &[("MBX_SCHEDULER_PRIORITY", "loud")]).unwrap_err();
         assert!(error.to_string().contains("scheduler.priority"), "{error}");
     }
