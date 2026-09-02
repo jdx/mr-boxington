@@ -19,6 +19,7 @@ impl Worker {
     /// Start the configured worker, or leave jdxld disabled when no path was set.
     pub(crate) async fn start(
         session_dir: &Path,
+        state_root: &Path,
         configured: Option<&Path>,
     ) -> Result<Option<Self>> {
         let Some(configured) = configured else {
@@ -41,6 +42,7 @@ impl Worker {
             .arg("--mbx-worker")
             .arg(&socket_path)
             .arg(std::process::id().to_string())
+            .arg(state_root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .spawn()

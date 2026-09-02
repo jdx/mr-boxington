@@ -177,7 +177,12 @@ impl CacheSession {
         });
         let (socket, server) =
             spawn_server(session_dir, agent.clone(), Arc::clone(&task), shutdown_rx).await?;
-        let jdxld = crate::jdxld::Worker::start(session_dir, config.jdxld.as_deref()).await?;
+        let jdxld = crate::jdxld::Worker::start(
+            session_dir,
+            &config.cache_dir.join("incremental/jdxld"),
+            config.jdxld.as_deref(),
+        )
+        .await?;
         Ok(Self {
             socket,
             rustc_shim: shim,

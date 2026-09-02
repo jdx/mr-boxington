@@ -212,12 +212,14 @@ into jdxld's experimental mr-boxington worker protocol. mbx starts one worker
 for the Cargo command, routes native links to its Unix socket, and stops it as
 soon as the command finishes. The worker does not linger on a timeout.
 
-The current prototype reuses unchanged input mappings while still performing
-resolution, layout, relocation, and output on every link. In the captured mbx
-benchmark this reduced link-only time by about 13%; it is infrastructure for
-deeper incremental linking, not yet a persistent cross-command link cache.
-These links currently bypass mbx's native-link output cache because that cache
-does not yet model an overridden Clang linker.
+The current prototype reuses unchanged input mappings within a command and
+writes advisory link manifests under `incremental/jdxld` in mbx's cache
+directory. A later Cargo command can load the prior manifest and identify
+changed inputs, but jdxld still performs resolution, layout, relocation, and
+output in full. The captured warm-worker benchmark reduced link-only time by
+about 12%; the on-disk manifest does not save time yet. These links currently
+bypass mbx's native-link output cache because that cache does not yet model an
+overridden Clang linker.
 
 ## Learned incremental reuse
 
