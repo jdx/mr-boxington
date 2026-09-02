@@ -187,6 +187,33 @@ async fn rustc_shim_path_survives_and_is_reused_across_sessions() {
     second.finish().await.unwrap();
 }
 
+#[cfg(windows)]
+#[test]
+fn concurrent_persistent_shim_installation_keeps_the_binary_intact() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = directory.path().join("mbx.exe");
+    let destination = directory.path().join("mbx-rustc.exe");
+    let contents = vec![0x5a; 1024 * 1024];
+    std::fs::write(&executable, &contents).unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(32));
+    let mut installers = Vec::new();
+    for _ in 0..32 {
+        let executable = executable.clone();
+        let destination = destination.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        installers.push(std::thread::spawn(move || {
+            barrier.wait();
+            link_path_shim(&executable, &destination)
+        }));
+    }
+    for installer in installers {
+        installer.join().unwrap().unwrap();
+    }
+
+    assert_eq!(std::fs::read(&executable).unwrap(), contents);
+    assert_eq!(std::fs::read(&destination).unwrap(), contents);
+}
+
 #[tokio::test]
 async fn a_session_with_no_shim_connection_does_not_load_a_manifest() {
     let cache = tempfile::tempdir().unwrap();
