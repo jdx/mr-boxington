@@ -1818,7 +1818,9 @@ fn restore_result(
 }
 
 fn mark_output_restored(path: &Path) -> Result<()> {
-    std::fs::File::open(path)?
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
         .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()))?;
     Ok(())
 }

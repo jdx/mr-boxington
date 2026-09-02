@@ -156,7 +156,9 @@ pub(crate) fn stage_verified_cached_output(
     // can leave this output older than the dependency that triggered the
     // invocation and make Cargo repeat it forever. A real compiler would have
     // produced the file now, so give the restored output the same ordering.
-    std::fs::File::open(&temporary)?
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&temporary)?
         .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()))?;
     Ok((temporary, materialization))
 }

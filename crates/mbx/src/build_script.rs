@@ -94,7 +94,10 @@ pub(crate) fn install(executable: &Path, binary_action: &CacheDigest) -> Result<
     let temporary = real.with_extension("mbx-real-new");
     let _ = std::fs::remove_file(&temporary);
     std::fs::copy(executable, &temporary).wrap_err("failed to preserve the build script")?;
-    std::fs::File::open(&temporary)?.set_times(std::fs::FileTimes::new().set_modified(modified))?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&temporary)?
+        .set_times(std::fs::FileTimes::new().set_modified(modified))?;
     let _ = std::fs::remove_file(&real);
     std::fs::rename(&temporary, &real)?;
     std::fs::write(
@@ -105,7 +108,10 @@ pub(crate) fn install(executable: &Path, binary_action: &CacheDigest) -> Result<
     let mbx = std::env::current_exe().wrap_err("failed to locate the mbx shim")?;
     let _ = std::fs::remove_file(executable);
     let installed = std::fs::copy(&mbx, executable).and_then(|_| {
-        std::fs::File::open(executable)?.set_times(std::fs::FileTimes::new().set_modified(modified))
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(executable)?
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
     });
     if let Err(error) = installed {
         let _ = std::fs::rename(&real, executable);
