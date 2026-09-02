@@ -1343,6 +1343,98 @@ fn write_execution_cached_project(directory: &Path, declares_inputs: bool) {
     assert!(status.success());
 }
 
+/// Write a build script with a Rust build-dependency. Cargo compares the
+/// build-script executable's mtime with that dependency when checking whether
+/// the compilation is fresh.
+fn write_build_dependent_script_project(directory: &Path) {
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::create_dir_all(directory.join("helper/src")).unwrap();
+    std::fs::write(
+        directory.join("Cargo.toml"),
+        "[package]\nname = \"build-dependent-script\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[build-dependencies]\nhelper = { path = \"helper\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("helper/Cargo.toml"),
+        "[package]\nname = \"helper\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("helper/src/lib.rs"),
+        "pub fn emit() { println!(\"cargo:rerun-if-changed=build.rs\"); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("build.rs"),
+        "fn main() { helper::emit(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("src/lib.rs"),
+        "pub fn value() -> u32 { 1 }\n",
+    )
+    .unwrap();
+    let status = Command::new(cargo())
+        .current_dir(directory)
+        .args(["generate-lockfile", "--offline"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[test]
+fn build_script_shim_does_not_redirty_its_compilation() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_build_dependent_script_project(project.path());
+
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+    );
+    let helper = project
+        .path()
+        .join("target/debug/deps")
+        .read_dir()
+        .unwrap()
+        .find_map(|entry| {
+            let path = entry.ok()?.path();
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("libhelper-") && name.ends_with(".rlib"))
+                .then_some(path)
+        })
+        .expect("the build dependency should have an rlib");
+    filetime::set_file_mtime(&helper, filetime::FileTime::now()).unwrap();
+    let repaired = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("repaired.json"),
+    );
+    assert!(
+        count(&repaired, "hits") > 0,
+        "the newer dependency should make Cargo invoke cached work: {repaired}"
+    );
+
+    let noop = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("noop.json"),
+    );
+    assert_eq!(
+        count(&noop, "hits"),
+        0,
+        "Cargo should not invoke the compiler or build script again: {noop}"
+    );
+    assert_eq!(
+        count(&noop, "misses"),
+        0,
+        "Cargo should consider every target fresh: {noop}"
+    );
+}
+
 /// Write a fixture that relies on Cargo's implicit package-wide build-script
 /// input. Its execution log lives outside the package so observing a run does
 /// not itself invalidate that input.

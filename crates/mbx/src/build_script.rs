@@ -82,10 +82,19 @@ struct Restored {
 
 /// Preserve the real program beside Cargo's expected path and replace it with mbx.
 pub(crate) fn install(executable: &Path, binary_action: &CacheDigest) -> Result<()> {
+    // Cargo decides whether a build-script compilation is fresh partly by
+    // comparing this path's mtime with its dependencies. The path becomes a
+    // shim below, but it still has to look as new as the binary it represents:
+    // copying the mbx executable can otherwise give it mbx's older mtime and
+    // make Cargo compile the build script again on every invocation.
+    let modified = std::fs::metadata(executable)?
+        .modified()
+        .wrap_err("failed to inspect the build-script modification time")?;
     let real = session::build_script_real_path(executable);
     let temporary = real.with_extension("mbx-real-new");
     let _ = std::fs::remove_file(&temporary);
     std::fs::copy(executable, &temporary).wrap_err("failed to preserve the build script")?;
+    std::fs::File::open(&temporary)?.set_times(std::fs::FileTimes::new().set_modified(modified))?;
     let _ = std::fs::remove_file(&real);
     std::fs::rename(&temporary, &real)?;
     std::fs::write(
@@ -95,7 +104,9 @@ pub(crate) fn install(executable: &Path, binary_action: &CacheDigest) -> Result<
 
     let mbx = std::env::current_exe().wrap_err("failed to locate the mbx shim")?;
     let _ = std::fs::remove_file(executable);
-    let installed = std::fs::copy(&mbx, executable).map(|_| ());
+    let installed = std::fs::copy(&mbx, executable).and_then(|_| {
+        std::fs::File::open(executable)?.set_times(std::fs::FileTimes::new().set_modified(modified))
+    });
     if let Err(error) = installed {
         let _ = std::fs::rename(&real, executable);
         return Err(error).wrap_err("failed to install the build-script shim");
@@ -856,6 +867,31 @@ fn restore_symlink(_: &str, _: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn build_script_shim_keeps_the_compiled_binary_mtime() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("build-script-build");
+        std::fs::write(&executable, b"compiled build script").unwrap();
+        let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        filetime::set_file_mtime(&executable, filetime::FileTime::from_system_time(modified))
+            .unwrap();
+
+        install(&executable, &CacheDigest::blake3(b"action")).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&executable).unwrap().modified().unwrap(),
+            modified
+        );
+        assert_eq!(
+            std::fs::metadata(session::build_script_real_path(&executable))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            modified
+        );
+    }
 
     #[test]
     fn directives_are_deduplicated_and_both_cargo_spellings_are_accepted() {
