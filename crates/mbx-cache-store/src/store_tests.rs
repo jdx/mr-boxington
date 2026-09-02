@@ -593,9 +593,17 @@ fn collection_preserves_grouped_receipts_replaced_in_the_task_manifest() {
         "a successful export should retire the receipts it consumed"
     );
 
+    let first_closure_bytes =
+        rooted_action_objects(source.path(), std::iter::once(first_action.clone()))
+            .into_iter()
+            .map(|path| std::fs::metadata(path).unwrap().len())
+            .sum::<u64>();
     gc(
         source.path(),
-        stats(source.path()).unwrap().total_bytes() - 1,
+        stats(source.path())
+            .unwrap()
+            .total_bytes()
+            .saturating_sub(first_closure_bytes),
     )
     .unwrap();
     assert!(
