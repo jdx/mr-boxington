@@ -49,6 +49,24 @@ fn jdxld_is_added_only_to_native_links() {
     ];
     use_jdxld_for_native_link(&mut check, OsStr::new("/opt/jdxld"));
     assert_eq!(check.len(), 3);
+
+    let mut cross = vec![
+        "--crate-type=bin".into(),
+        "--emit=link".into(),
+        "--target=wasm32-unknown-unknown".into(),
+        "src/main.rs".into(),
+    ];
+    use_jdxld_for_native_link(&mut cross, OsStr::new("/opt/jdxld"));
+    assert_eq!(cross.len(), 4);
+
+    let mut build_script = vec![
+        "--crate-name=build_script_build".into(),
+        "--crate-type=bin".into(),
+        "--emit=link".into(),
+        "build.rs".into(),
+    ];
+    use_jdxld_for_native_link(&mut build_script, OsStr::new("/opt/jdxld"));
+    assert_eq!(build_script.len(), 4);
 }
 
 #[test]
@@ -109,6 +127,8 @@ async fn session_environment_directs_cargo_at_the_shim() {
             "workspace-existing".into(),
         ),
         ("RUSTDOC".into(), "custom-rustdoc".into()),
+        (JDXLD_BIN_ENV.into(), "/stale/jdxld".into()),
+        (JDXLD_SOCKET_ENV.into(), "/stale/jdxld.sock".into()),
     ]);
     let run = session
         .begin(
@@ -121,6 +141,8 @@ async fn session_environment_directs_cargo_at_the_shim() {
 
     assert!(run.is_some());
     assert!(values.contains_key(SOCKET_ENV));
+    assert!(!values.contains_key(JDXLD_BIN_ENV));
+    assert!(!values.contains_key(JDXLD_SOCKET_ENV));
     assert!(values.contains_key(STAGING_ENV));
     assert_eq!(values.get(BUILD_ENV).unwrap().len(), 64);
     // The shim carries an .exe suffix on Windows, so compare stems.

@@ -37,7 +37,7 @@ impl Worker {
         let socket_path = session_dir.join("jdxld.sock");
         let socket = socket_path.to_string_lossy().into_owned();
         let executable_string = executable.to_string_lossy().into_owned();
-        let mut child = Command::new(&executable)
+        let child = Command::new(&executable)
             .arg("--mbx-worker")
             .arg(&socket_path)
             .arg(std::process::id().to_string())
@@ -45,25 +45,27 @@ impl Worker {
             .stdout(Stdio::null())
             .spawn()
             .wrap_err_with(|| format!("failed to start jdxld `{}`", executable.display()))?;
+        // Own the child before the first await so cancellation runs Drop and
+        // cannot strand a worker whose socket has not appeared yet.
+        let mut worker = Self {
+            child,
+            executable: executable_string,
+            socket,
+        };
 
         let started = Instant::now();
         loop {
             if socket_path.exists() {
-                return Ok(Some(Self {
-                    child,
-                    executable: executable_string,
-                    socket,
-                }));
+                return Ok(Some(worker));
             }
-            if let Some(status) = child
+            if let Some(status) = worker
+                .child
                 .try_wait()
                 .wrap_err("failed to inspect the jdxld worker")?
             {
                 bail!("jdxld worker exited before accepting links: {status}");
             }
             if started.elapsed() >= START_TIMEOUT {
-                let _ = child.kill();
-                let _ = child.wait();
                 bail!(
                     "jdxld worker did not create `{}` within {} seconds",
                     socket_path.display(),

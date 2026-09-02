@@ -280,6 +280,8 @@ impl CacheSession {
             Err(error) => warn!("incremental state was not recorded: {error:#}"),
         }
         environment.insert(SOCKET_ENV.into(), self.socket.clone());
+        environment.remove(JDXLD_BIN_ENV);
+        environment.remove(JDXLD_SOCKET_ENV);
         if let Some(jdxld) = self.jdxld.lock().unwrap().as_ref() {
             environment.insert(JDXLD_BIN_ENV.into(), jdxld.executable().into());
             environment.insert(JDXLD_SOCKET_ENV.into(), jdxld.socket().into());
@@ -1270,10 +1272,22 @@ pub fn run_rustc_shim() -> ExitCode {
 
 /// Pin native links to the worker's executable without changing metadata-only calls.
 fn use_jdxld_for_native_link(arguments: &mut Vec<OsString>, jdxld: &OsStr) {
-    if links_natively(arguments) {
+    if links_natively(arguments)
+        && !has_explicit_target(arguments)
+        && crate_name_argument(arguments).as_deref() != Some("build_script_build")
+    {
         arguments.push("-Clinker=clang".into());
         arguments.push(format!("-Clink-arg=--ld-path={}", Path::new(jdxld).display()).into());
     }
+}
+
+fn has_explicit_target(arguments: &[OsString]) -> bool {
+    arguments.iter().any(|argument| {
+        argument == "--target"
+            || argument
+                .to_str()
+                .is_some_and(|argument| argument.starts_with("--target="))
+    })
 }
 
 fn workspace_wrapper_arguments<'a>(
