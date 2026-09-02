@@ -88,7 +88,7 @@ fn cargo_with_settings_bypass_log_and_roots(
         log::warn!("caching native links is not supported on this platform");
     }
     let working_dir = std::env::current_dir()?;
-    let mut roots = roots.unwrap_or_else(|| resolve_roots(&cargo, arguments, &working_dir));
+    let roots = roots.unwrap_or_else(|| resolve_roots(&cargo, arguments, &working_dir));
     let mut config = config.clone();
     config.apply_workspace_policy(&roots.workspace_root)?;
     let incremental = policy::incremental_allowed(config.incremental);
@@ -142,9 +142,7 @@ fn cargo_with_settings_bypass_log_and_roots(
             ByteSize::b(bytes).display().iec()
         ));
     }
-    if let Some(directory) = &placement.directory {
-        roots.target_dir = directory.clone();
-    } else {
+    if placement.directory.is_none() {
         // Placement declined, but an earlier one may have left a link this
         // build is about to write through. Keep that directory's record fresh
         // so collection does not treat it as idle.
@@ -156,7 +154,8 @@ fn cargo_with_settings_bypass_log_and_roots(
     // finished and probe the directory cargo will actually use rather than
     // predicting that a managed target will win.
     if !cargo_help_requested(arguments) && !was_explained(&config.store_dir()) {
-        let reflinks = crate::util::reflinks_work(&config.cache_dir, &roots.target_dir);
+        let target_dir = placement.directory.as_deref().unwrap_or(&roots.target_dir);
+        let reflinks = crate::util::reflinks_work(&config.cache_dir, target_dir);
         crate::session::note(&first_run_notice(config, retention, reflinks));
         mark_explained(&config.store_dir());
     }
@@ -181,10 +180,14 @@ fn cargo_with_settings_bypass_log_and_roots(
                 path.display().to_string(),
             );
         }
-        if let Some(directory) = &placement.directory {
+        if placement.directory.is_some() {
+            // Keep Cargo's public artifact paths anchored in the checkout.
+            // The target link still puts the bytes in the managed view, while
+            // debugger launch configurations survive collection and rebuilds
+            // instead of remembering mbx's private, disposable path.
             environment.insert(
                 CARGO_TARGET_DIR_ENV.into(),
-                directory.to_string_lossy().into_owned(),
+                roots.target_dir.to_string_lossy().into_owned(),
             );
         }
         let run = session

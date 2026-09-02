@@ -26,7 +26,9 @@ use eyre::{Context, Result};
 use mbx_cache_core::CacheDigest;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const VIEWS_DIR: &str = "v1";
@@ -73,6 +75,18 @@ pub struct MigrationOutcome {
 pub fn remove_workspace(root: &Path, workspace_root: &Path) -> Result<Option<u64>> {
     let record_path = view_record_path(root, workspace_root);
     let Some(record) = read_view_record(&record_path) else {
+        // Collection removes the record and directory but cannot remove a
+        // link inside a live checkout. Let an explicit clean finish that job
+        // once the destination is gone, without deleting an unrecorded view
+        // that may still contain outputs.
+        let directory = view_dir(root, workspace_root);
+        let link = workspace_root.join("target");
+        if !directory.exists()
+            && std::fs::read_link(&link).is_ok_and(|destination| destination == directory)
+        {
+            remove_link(&link)?;
+            return Ok(Some(0));
+        }
         return Ok(None);
     };
     if record.workspace_root != workspace_root {
@@ -332,7 +346,114 @@ pub fn place(
             return None;
         }
     }
+    if let Err(error) = ignore_managed_link(workspace_root, target_dir) {
+        // Git integration is a courtesy, not a condition of placing build
+        // outputs. A checkout with unusual metadata must still be buildable.
+        log::debug!("the managed target link was not excluded from Git: {error:#}");
+    }
     Some(managed)
+}
+
+/// Keep the managed link out of `git status` without changing tracked files.
+///
+/// Git gives directory-only patterns such as `target/` different semantics
+/// for a symlink, so the pattern that ignored Cargo's directory stops matching
+/// after placement. The repository-local exclude file is the right place for
+/// mbx's implementation detail: it applies to this checkout while leaving the
+/// project's `.gitignore` untouched.
+fn ignore_managed_link(workspace_root: &Path, target_dir: &Path) -> Result<()> {
+    let ignored = Command::new("git")
+        .current_dir(workspace_root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .args(["check-ignore", "--quiet", "--no-index", "--"])
+        .arg(target_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    if ignored.is_ok_and(|status| status.success()) {
+        return Ok(());
+    }
+
+    let paths = Command::new("git")
+        .current_dir(workspace_root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .args([
+            "rev-parse",
+            "--show-prefix",
+            "--path-format=absolute",
+            "--git-path",
+            "info/exclude",
+        ])
+        .output()
+        .wrap_err("could not locate the Git repository")?;
+    if !paths.status.success() {
+        eyre::bail!("the workspace is not in a Git repository");
+    }
+    let paths = String::from_utf8(paths.stdout).wrap_err("Git returned non-UTF-8 paths")?;
+    let mut paths = paths
+        .split_terminator('\n')
+        .map(|path| path.trim_end_matches('\r'));
+    let prefix = PathBuf::from(
+        paths
+            .next()
+            .ok_or_else(|| eyre::eyre!("Git did not report the workspace prefix"))?,
+    );
+    let exclude = PathBuf::from(
+        paths
+            .next()
+            .ok_or_else(|| eyre::eyre!("Git did not report its exclude file"))?,
+    );
+    // Git may resolve a symlinked spelling of the worktree (notably `/var` to
+    // `/private/var` on macOS). Its own prefix is stable across that boundary;
+    // combine it with the part we know relative to Cargo's workspace instead
+    // of trying to strip two differently spelled absolute roots.
+    let relative = prefix.join(
+        target_dir
+            .strip_prefix(workspace_root)
+            .wrap_err("the target link is outside the Cargo workspace")?,
+    );
+    let pattern = format!("/{}", gitignore_path(&relative)?);
+
+    let existing = std::fs::read(&exclude).unwrap_or_default();
+    if existing
+        .split(|byte| *byte == b'\n')
+        .any(|line| line.strip_suffix(b"\r").unwrap_or(line) == pattern.as_bytes())
+    {
+        return Ok(());
+    }
+    if let Some(parent) = exclude.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&exclude)?;
+    let mut addition = Vec::with_capacity(pattern.len() + 2);
+    if !existing.is_empty() && !existing.ends_with(b"\n") {
+        addition.push(b'\n');
+    }
+    writeln!(addition, "{pattern}")?;
+    file.write_all(&addition)?;
+    Ok(())
+}
+
+fn gitignore_path(path: &Path) -> Result<String> {
+    let path = path.to_string_lossy().replace('\\', "/");
+    if path.contains(['\n', '\r']) {
+        eyre::bail!("the target path contains a newline");
+    }
+    let mut escaped = String::with_capacity(path.len());
+    for character in path.chars() {
+        if matches!(character, '\\' | '*' | '?' | '[' | ']' | '#' | '!') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    Ok(escaped)
 }
 
 /// Whether a link had to be made, or was already pointing the right way.

@@ -48,6 +48,46 @@ fn places_the_default_target_directory_under_the_managed_root() {
     assert_eq!(stats(&config.target.root).unwrap().views, 1);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_directory_only_gitignore_still_hides_the_managed_link() {
+    let directory = tempfile::tempdir().unwrap();
+    let spelling = tempfile::tempdir().unwrap();
+    let repository = spelling.path().join("repository");
+    symlink_dir(directory.path(), &repository).unwrap();
+    let workspace = checkout(&repository, "project");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["init", "--quiet"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::write(repository.join(".gitignore"), "target/\n").unwrap();
+    let config = test_config(directory.path(), true);
+
+    place(&config, &workspace, &workspace.join("target"), false).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(repository.join(".gitignore")).unwrap(),
+        "target/\n",
+        "mbx should not change a tracked project file"
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&repository)
+            .args(["check-ignore", "--quiet", "--no-index", "--"])
+            .arg("project/target")
+            .status()
+            .unwrap()
+            .success(),
+        "the repository-local exclude should match the symlink"
+    );
+    let exclude = std::fs::read_to_string(directory.path().join(".git/info/exclude")).unwrap();
+    assert!(exclude.lines().any(|line| line == "/project/target"));
+}
+
 #[test]
 fn placing_a_target_directory_twice_reaches_the_same_one() {
     let directory = tempfile::tempdir().unwrap();
@@ -346,6 +386,21 @@ fn explicitly_removes_one_workspaces_managed_target() {
     assert!(!managed.exists());
     assert!(!workspace.join("target").exists());
     assert_eq!(stats(&config.target.root).unwrap(), ViewStats::default());
+}
+
+#[test]
+fn explicit_removal_drops_a_link_left_dangling_by_collection() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    let managed = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    std::fs::remove_dir_all(&managed).unwrap();
+    std::fs::remove_file(view_record_path(&config.target.root, &workspace)).unwrap();
+
+    let bytes = remove_workspace(&config.target.root, &workspace).unwrap();
+
+    assert_eq!(bytes, Some(0));
+    assert!(std::fs::symlink_metadata(workspace.join("target")).is_err());
 }
 
 #[test]

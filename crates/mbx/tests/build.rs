@@ -220,6 +220,8 @@ fn document(project: &Path, store: &Path, report: &Path) -> serde_json::Value {
         .env("MBX_CACHE_DIR", store)
         .env("MBX_STATS_REPORT", report)
         .env_remove("MBX_SOCKET")
+        // This suite may itself be run through mbx. The fixture needs a fresh
+        // session rather than chaining the outer test build's compiler shim.
         .env_remove("RUSTC_WRAPPER")
         .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .env_remove("CARGO_TARGET_DIR")
@@ -2092,6 +2094,75 @@ mod target_views {
             project.path().join("target/debug/libfixture.rlib").exists(),
             "the workspace should still reach its own build outputs"
         );
+    }
+
+    #[test]
+    fn cargo_reports_workspace_paths_for_managed_artifacts() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_project(project.path());
+
+        let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+            .current_dir(project.path())
+            .args(["build", "--offline", "--message-format=json"])
+            .env("MBX_CACHE_DIR", store.path())
+            .env_remove("CARGO_TARGET_DIR")
+            .output()
+            .expect("mbx should run");
+        assert!(
+            output.status.success(),
+            "build failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let artifact = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|message| message["reason"] == "compiler-artifact")
+            .expect("Cargo should report the built artifact");
+        // Cargo canonicalizes `/var` to `/private/var` on macOS. Anchor the
+        // expected public path to that same workspace spelling without
+        // canonicalizing `target` itself through the managed symlink.
+        let target = std::fs::canonicalize(project.path())
+            .unwrap()
+            .join("target");
+        for filename in artifact["filenames"].as_array().unwrap() {
+            let filename = Path::new(filename.as_str().unwrap());
+            assert!(
+                filename.starts_with(&target),
+                "debugger-facing artifact path escaped the workspace: {}",
+                filename.display()
+            );
+        }
+    }
+
+    #[test]
+    fn mbx_clean_removes_the_managed_view_and_link() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(project.path());
+        build(
+            project.path(),
+            store.path(),
+            &reports.path().join("cold.json"),
+        );
+        let managed = managed(project.path());
+
+        let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+            .current_dir(project.path().join("src"))
+            .arg("clean")
+            .env("MBX_CACHE_DIR", store.path())
+            .env_remove("CARGO_TARGET_DIR")
+            .output()
+            .expect("mbx clean should run");
+
+        assert!(
+            output.status.success(),
+            "clean failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!managed.exists());
+        assert!(std::fs::symlink_metadata(project.path().join("target")).is_err());
     }
 
     #[test]
