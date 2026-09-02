@@ -91,7 +91,7 @@ fn record_build_in_group(
         .join("v1")
         .join(format!("{identity}.json"));
     write_atomic(&path, &serde_json::to_vec(&manifest).unwrap()).unwrap();
-    let run = CacheDigest::blake3(format!("run-{identity}-{group:?}").as_bytes()).hash;
+    let run = CacheDigest::blake3(format!("run-{identity}-{group:?}-{actions:?}").as_bytes()).hash;
     record_build_receipt(store, &run, identity, workspace_root, group, predictions).unwrap();
 }
 
@@ -514,6 +514,133 @@ fn grouped_export_unions_parallel_build_receipts() {
     assert!(cache.find(&first_action).unwrap().is_some());
     assert!(cache.find(&second_action).unwrap().is_some());
     assert!(cache.find(&unrelated_action).unwrap().is_none());
+}
+
+#[test]
+fn collection_preserves_grouped_receipts_replaced_in_the_task_manifest() {
+    let source = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let workspace = source.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let group = "github-run-42/repeated-task";
+    let identity = "2".repeat(64);
+
+    let first_output = store_object(source.path(), b"first compiled artifact");
+    let first_action = store_result(
+        source.path(),
+        "first command action",
+        std::slice::from_ref(&first_output),
+    );
+    record_build_in_group(
+        source.path(),
+        &identity,
+        &workspace,
+        std::slice::from_ref(&first_action),
+        Some(group),
+    );
+
+    // A later Cargo command shares this task identity and replaces the current
+    // manifest. Its earlier receipt still belongs to the grouped CI export.
+    let second_output = store_object(source.path(), b"second compiled artifact");
+    let second_action = store_result(
+        source.path(),
+        "second command action",
+        std::slice::from_ref(&second_output),
+    );
+    record_build_in_group(
+        source.path(),
+        &identity,
+        &workspace,
+        std::slice::from_ref(&second_action),
+        Some(group),
+    );
+
+    // Make the replaced action older than an unrelated object. Without the
+    // receipt root, collection evicts its closure first and export fails with
+    // "action result is missing".
+    age(source.path(), &first_action, Duration::from_secs(60 * 60));
+    age(source.path(), &first_output, Duration::from_secs(60 * 60));
+    let spare = store_object(source.path(), b"unrelated spare");
+    let before = stats(source.path()).unwrap().total_bytes();
+
+    gc(source.path(), before - 1).unwrap();
+
+    assert!(
+        LocalActionCache::new(source.path())
+            .find(&first_action)
+            .unwrap()
+            .is_some(),
+        "a grouped receipt must keep a replaced action exportable"
+    );
+    assert!(
+        LocalCas::new(source.path())
+            .find(&first_output)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        LocalCas::new(source.path()).find(&spare).unwrap().is_none(),
+        "collection should still reclaim objects no receipt needs"
+    );
+
+    let archive = source.path().join("job.tar");
+    let exported = export_group(source.path(), group, &archive).unwrap();
+    let imported = import_archive(destination.path(), &archive).unwrap();
+    assert_eq!(exported.actions, 2);
+    assert_eq!(imported.actions, 2);
+    assert!(
+        grouped_receipt_actions(source.path()).unwrap().is_empty(),
+        "a successful export should retire the receipts it consumed"
+    );
+
+    let first_closure_bytes =
+        rooted_action_objects(source.path(), std::iter::once(first_action.clone()))
+            .into_iter()
+            .map(|path| std::fs::metadata(path).unwrap().len())
+            .sum::<u64>();
+    gc(
+        source.path(),
+        stats(source.path())
+            .unwrap()
+            .total_bytes()
+            .saturating_sub(first_closure_bytes),
+    )
+    .unwrap();
+    assert!(
+        LocalActionCache::new(source.path())
+            .find(&first_action)
+            .unwrap()
+            .is_none(),
+        "retired receipts must stop rooting replaced actions"
+    );
+}
+
+#[test]
+fn failed_group_export_keeps_its_receipts_pending() {
+    let source = tempfile::tempdir().unwrap();
+    let workspace = source.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let group = "github-run-42/retry";
+    let action = store_result(source.path(), "missing action", &[]);
+    record_build_in_group(
+        source.path(),
+        &"3".repeat(64),
+        &workspace,
+        std::slice::from_ref(&action),
+        Some(group),
+    );
+    let action_path = LocalActionCache::new(source.path())
+        .path_for(&action)
+        .unwrap();
+    std::fs::remove_file(action_path).unwrap();
+
+    let _ = export_group(source.path(), group, &source.path().join("job.tar")).unwrap_err();
+
+    assert_eq!(
+        grouped_receipt_actions(source.path()).unwrap(),
+        BTreeSet::from([action]),
+        "a failed export must leave its receipts available for retry"
+    );
 }
 
 #[test]

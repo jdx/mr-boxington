@@ -254,13 +254,29 @@ pub fn export_group(store: &Path, group: &str, archive: &Path) -> Result<Transfe
         .join(group_key(group));
     let receipts = walk_files(&root)?
         .into_iter()
-        .filter_map(|entry| read_build_receipt(&entry.path))
-        .filter(|receipt| receipt.group.as_deref() == Some(group))
+        .filter_map(|entry| read_build_receipt(&entry.path).map(|receipt| (entry.path, receipt)))
+        .filter(|(_, receipt)| receipt.group.as_deref() == Some(group))
         .collect::<Vec<_>>();
     if receipts.is_empty() {
         eyre::bail!("no completed mbx builds are recorded for export group {group:?}");
     }
-    export_receipts(store, receipts, archive)
+    let outcome = export_receipts(
+        store,
+        receipts
+            .iter()
+            .map(|(_, receipt)| receipt.clone())
+            .collect(),
+        archive,
+    )?;
+    // A receipt is a pending-export root. Retire only the files this export
+    // consumed, and only after its complete archive has been published. A
+    // concurrent build can add another uniquely named receipt to the group
+    // without this cleanup deleting work the archive did not include.
+    for (path, _) in receipts {
+        std::fs::remove_file(path)?;
+    }
+    let _ = std::fs::remove_dir(root);
+    Ok(outcome)
 }
 
 fn export_receipts(
@@ -819,7 +835,17 @@ fn gc_with_mode(store: &Path, max_bytes: u64, dry_run: bool) -> Result<GcOutcome
         // Reachability costs a read per action result and per output tree, so
         // it is computed only when something is actually about to be evicted.
         // Under budget a sweep stays a directory walk and nothing more.
-        let rooted = rooted_objects(store, &checkouts.live_identities)?;
+        let mut rooted = rooted_objects(store, &checkouts.live_identities)?;
+        // A grouped CI export deliberately retains the exact actions from
+        // every command in the job. Later commands can replace the current
+        // task-manifest prediction for the same invocation, but the earlier
+        // receipt still has to remain exportable until the post-job step runs.
+        // Receipt bookkeeping is not part of the cache budget, so consult it
+        // only when a sweep is already necessary and root its object closure.
+        rooted.extend(rooted_action_objects(
+            store,
+            grouped_receipt_actions(store)?,
+        ));
         // `false` sorts first, so unrooted objects go before rooted ones and
         // each class goes oldest-first. A store with no records at all roots
         // nothing and this is exactly the LRU it was before.
@@ -999,6 +1025,17 @@ fn read_checkout_record(path: &Path) -> Option<CheckoutRecord> {
     (record.version == CHECKOUT_RECORD_VERSION).then_some(record)
 }
 
+/// Actions whose successful grouped export has not retired its receipts yet.
+fn grouped_receipt_actions(store: &Path) -> Result<BTreeSet<CacheDigest>> {
+    let root = store.join(BUILD_RECEIPTS_DIR).join("groups");
+    Ok(walk_files(&root)?
+        .into_iter()
+        .filter_map(|entry| read_build_receipt(&entry.path))
+        .flat_map(|receipt| receipt.predictions.into_iter())
+        .map(|prediction| prediction.action)
+        .collect())
+}
+
 /// Whether a recorded claim still speaks for a checkout that is using this
 /// store.
 fn claim_is_live(store: &Path, record: &CheckoutRecord) -> bool {
@@ -1131,44 +1168,54 @@ fn same_filesystem(
 /// tolerant -- a blob that has already been evicted, or that no longer parses,
 /// simply roots less, and rooting less can only mean collecting sooner.
 fn rooted_objects(store: &Path, identities: &BTreeSet<String>) -> Result<HashSet<PathBuf>> {
-    let cas = LocalCas::new(store);
-    let mut rooted = HashSet::new();
-    let mut visited = BTreeSet::new();
+    let mut actions = BTreeSet::new();
     for identity in identities {
         // One manifest this build cannot read is not worth abandoning a sweep
         // over. It roots nothing, which can only mean collecting sooner.
-        let actions = match task_manifest_actions(store, identity) {
+        let manifest_actions = match task_manifest_actions(store, identity) {
             Ok(actions) => actions,
             Err(error) => {
                 log::debug!("could not read the manifest for {identity}: {error}");
                 continue;
             }
         };
-        for action in actions {
-            let Some(result) = read_action_result(store, &action) else {
-                continue;
-            };
-            root_digest(&cas, &mut rooted, &result.action);
-            if let Some(metadata) = &result.metadata {
-                root_digest(&cas, &mut rooted, metadata);
-                // The metadata blob is a descriptor too: it names the captured
-                // stdout and stderr, and a restore reads both. Stopping at the
-                // descriptor would leave the diagnostics of every action
-                // unrooted -- including the one empty blob that every silent
-                // compilation shares, which is enough on its own to turn a
-                // rooted hit back into a miss.
-                if let Some(rustc) = read_rustc_metadata(&cas, metadata) {
-                    root_digest(&cas, &mut rooted, &rustc.stdout);
-                    root_digest(&cas, &mut rooted, &rustc.stderr);
-                }
-            }
-            if let Some(output_root) = &result.output_root {
-                root_digest(&cas, &mut rooted, output_root);
-                root_tree(&cas, output_root, &mut rooted, &mut visited);
+        actions.extend(manifest_actions);
+    }
+    Ok(rooted_action_objects(store, actions))
+}
+
+/// Return every local CAS path needed to restore the supplied actions.
+fn rooted_action_objects(
+    store: &Path,
+    actions: impl IntoIterator<Item = CacheDigest>,
+) -> HashSet<PathBuf> {
+    let cas = LocalCas::new(store);
+    let mut rooted = HashSet::new();
+    let mut visited = BTreeSet::new();
+    for action in actions {
+        let Some(result) = read_action_result(store, &action) else {
+            continue;
+        };
+        root_digest(&cas, &mut rooted, &result.action);
+        if let Some(metadata) = &result.metadata {
+            root_digest(&cas, &mut rooted, metadata);
+            // The metadata blob is a descriptor too: it names the captured
+            // stdout and stderr, and a restore reads both. Stopping at the
+            // descriptor would leave the diagnostics of every action
+            // unrooted -- including the one empty blob that every silent
+            // compilation shares, which is enough on its own to turn a
+            // rooted hit back into a miss.
+            if let Some(rustc) = read_rustc_metadata(&cas, metadata) {
+                root_digest(&cas, &mut rooted, &rustc.stdout);
+                root_digest(&cas, &mut rooted, &rustc.stderr);
             }
         }
+        if let Some(output_root) = &result.output_root {
+            root_digest(&cas, &mut rooted, output_root);
+            root_tree(&cas, output_root, &mut rooted, &mut visited);
+        }
     }
-    Ok(rooted)
+    rooted
 }
 
 fn read_action_result(store: &Path, action: &CacheDigest) -> Option<RemoteActionResult> {
