@@ -261,13 +261,16 @@ impl DiscoveredInputs {
             };
             // An input still wearing the identity discovery recorded -- length,
             // modification time, and change time -- is confirmed by that stat
-            // alone. It is the same evidence the session ledger already accepts
-            // in place of hashing, and the change time cannot be set from user
-            // space, so a rewrite that puts the old modification time back still
-            // shows. Reading everything again here cost as much as keying the
-            // compilation did: a large binary's dependency rlibs, a gigabyte of
-            // them, read twice for every edit.
+            // alone. The change time is what makes this as good as reading: it
+            // cannot be set from user space, so a rewrite that puts the old
+            // modification time back still shows, where a platform that reports
+            // none would let a same-length rewrite inside one timestamp tick
+            // through. Such an identity is not trusted here, and neither is an
+            // input that had none. Reading everything again cost as much as
+            // keying the compilation did: a large binary's dependency rlibs, a
+            // gigabyte of them, read twice for every edit.
             if let Some(Some(identity)) = self.identities.get(index)
+                && identity.changed.is_some()
                 && identity.still_describes().map_err(read_error)?
             {
                 continue;
@@ -1025,7 +1028,9 @@ mod tests {
 
     /// Verification after the compiler runs confirms an input by its recorded
     /// identity rather than by reading it again; a file that has moved on is
-    /// still read and still fails.
+    /// still read and still fails. Only where the identity carries a change
+    /// time, which is what makes the stat as good as the read.
+    #[cfg(unix)]
     #[test]
     fn verification_trusts_an_unchanged_identity_and_rereads_a_changed_one() {
         let directory = tempfile::tempdir().unwrap();

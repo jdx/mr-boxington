@@ -486,6 +486,8 @@ impl FileDigestCache for SentinelLedger {
 
 /// Verification confirms an input by the identity `collect` recorded rather
 /// than by reading it again, and reads it again once that identity has moved.
+/// Only where the identity carries a change time.
+#[cfg(unix)]
 #[test]
 fn verification_trusts_an_unchanged_identity_and_rereads_a_changed_one() {
     let directory = tempfile::tempdir().expect("tempdir");

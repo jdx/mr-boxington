@@ -339,9 +339,10 @@ impl CcDiscoveredInputs {
     /// input to a miss rather than storing an object under a stale key.
     ///
     /// A file still wearing the identity `collect` recorded is confirmed by
-    /// that stat alone, for the same reason the ledger lookup in `collect`
-    /// skips hashing it; one whose identity moved, or that had none, is read
-    /// and hashed again.
+    /// that stat alone where the identity carries a change time, which cannot
+    /// be set from user space and so shows a rewrite that restored the old
+    /// modification time. One whose identity moved, that had none, or that a
+    /// platform without change times described, is read and hashed again.
     pub fn verify(&self) -> Result<(), CcBypassReason> {
         for (index, input) in self.inputs.iter().enumerate() {
             if is_manifest_input(&input.path) {
@@ -352,6 +353,7 @@ impl CcDiscoveredInputs {
                 message: error.to_string(),
             };
             if let Some(Some(identity)) = self.identities.get(index)
+                && identity.changed.is_some()
                 && identity.still_describes().map_err(read_error)?
             {
                 continue;
