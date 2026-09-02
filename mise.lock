@@ -162,6 +162,48 @@ checksum = "sha256:32975d1493ee1a975d6bb41e4fb56fe419cb442ded628bb772ba2e614acfa
 url = "https://github.com/lycheeverse/lychee/releases/download/lychee-v0.24.2/lychee-x86_64-pc-windows-msvc.zip"
 url_api = "https://api.github.com/repos/lycheeverse/lychee/releases/assets/409959491"
 
+[[tools.mr-boxington]]
+version = "1.4.1"
+backend = "github:jdx/mr-boxington"
+specifiers = ["1.4.1"]
+
+[tools.mr-boxington."platforms.linux-arm64"]
+checksum = "sha256:7ca1deeb64ad22bd5ddc9f45c749c78d3eb32608562c363727de3f0c595df0f0"
+url = "https://github.com/jdx/mr-boxington/releases/download/v1.4.1/mbx-aarch64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/jdx/mr-boxington/releases/assets/540505948"
+provenance = "github-attestations"
+
+[tools.mr-boxington."platforms.linux-arm64-musl"]
+checksum = "sha256:3113dfce87c8ee6d3485f7eb99f87ae130b9b9f2c73224720edf2cef7279b5d1"
+url = "https://github.com/jdx/mr-boxington/releases/download/v1.4.1/mbx-aarch64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/jdx/mr-boxington/releases/assets/540505946"
+provenance = "github-attestations"
+
+[tools.mr-boxington."platforms.linux-x64"]
+checksum = "sha256:5bc7434333a941f664bbe73ae229edf6111c9fb5f771f959ca411a11358baf8a"
+url = "https://github.com/jdx/mr-boxington/releases/download/v1.4.1/mbx-x86_64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/jdx/mr-boxington/releases/assets/540505965"
+provenance = "github-attestations"
+
+[tools.mr-boxington."platforms.linux-x64-musl"]
+checksum = "sha256:7277ceabefae1b444b39200c2cb944018a87da628ff77aa94291a8cc338546e6"
+url = "https://github.com/jdx/mr-boxington/releases/download/v1.4.1/mbx-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/jdx/mr-boxington/releases/assets/540505964"
+provenance = "github-attestations"
+
+[tools.mr-boxington."platforms.macos-arm64"]
+checksum = "sha256:57f1cac111d9972ad675aa80cbedf4c86b3423dfb11091383175db0f6341847e"
+url = "https://github.com/jdx/mr-boxington/releases/download/v1.4.1/mbx-aarch64-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/jdx/mr-boxington/releases/assets/540505945"
+provenance = "github-attestations"
+provenance_verified = true
+
+[tools.mr-boxington."platforms.windows-x64"]
+checksum = "sha256:346cb0405129bbca4f7a24fc916b036cfd806d497d52ba47fc8bb0a0531b4382"
+url = "https://github.com/jdx/mr-boxington/releases/download/v1.4.1/mbx-x86_64-pc-windows-msvc.zip"
+url_api = "https://api.github.com/repos/jdx/mr-boxington/releases/assets/540505963"
+provenance = "github-attestations"
+
 [[tools.node]]
 version = "24.19.0"
 backend = "core:node"
