@@ -130,6 +130,14 @@ Connect and request timeout.
 
 Let local workspace members compile incrementally.
 
+### `jdxld`
+
+- **Type:** `option<path>`
+- **Optional:** true
+- **Set with:** `MBX_JDXLD`
+
+Use this jdxld binary for native Rust links and keep its worker alive for the build session.
+
 ### `learned_incremental`
 
 - **Type:** `bool`
