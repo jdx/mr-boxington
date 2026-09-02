@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.11](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.5.10...mbx-cache-protocol-v0.5.11) - 2026-09-02
+
+### Fixed
+
+- fix managed target lifecycle edges ([#269](https://github.com/jdx/mr-boxington/pull/269))
+- release cache pinned by phantom checkouts ([#270](https://github.com/jdx/mr-boxington/pull/270))
+
 ## [0.5.10](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.5.9...mbx-cache-protocol-v0.5.10) - 2026-08-31
 
 ### Added

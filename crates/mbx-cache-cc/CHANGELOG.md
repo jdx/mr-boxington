@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.10.3...mbx-cache-cc-v0.11.0) - 2026-09-02
+
+### Fixed
+
+- fix managed target lifecycle edges ([#269](https://github.com/jdx/mr-boxington/pull/269))
+- release cache pinned by phantom checkouts ([#270](https://github.com/jdx/mr-boxington/pull/270))
+- *(cache)* model no-input assembler options ([#266](https://github.com/jdx/mr-boxington/pull/266))
+
 ## [0.10.2](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.10.1...mbx-cache-cc-v0.10.2) - 2026-08-31
 
 ### Added
