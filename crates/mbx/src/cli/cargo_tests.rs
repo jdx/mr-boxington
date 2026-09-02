@@ -357,6 +357,7 @@ pub(super) fn managed_target_config(root: &Path) -> Config {
         stats_report: None,
         verify: false,
         incremental: false,
+        jdxld: None,
         share_out_dir: false,
         build_script_execution: false,
         events: false,

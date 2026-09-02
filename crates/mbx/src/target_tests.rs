@@ -7,6 +7,7 @@ fn test_config(root: &Path, views: bool) -> Config {
         stats_report: None,
         verify: false,
         incremental: false,
+        jdxld: None,
         share_out_dir: false,
         build_script_execution: false,
         events: false,

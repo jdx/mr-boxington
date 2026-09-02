@@ -32,6 +32,26 @@ fn an_unrecognized_workspace_wrapper_argument_is_left_for_transparent_execution(
 }
 
 #[test]
+fn jdxld_is_added_only_to_native_links() {
+    let mut link = vec![
+        "--crate-type=bin".into(),
+        "--emit=link".into(),
+        "src/main.rs".into(),
+    ];
+    use_jdxld_for_native_link(&mut link, OsStr::new("/opt/jdxld"));
+    assert_eq!(&link[3], "-Clinker=clang");
+    assert_eq!(link.last().unwrap(), "-Clink-arg=--ld-path=/opt/jdxld");
+
+    let mut check = vec![
+        "--crate-type=bin".into(),
+        "--emit=metadata".into(),
+        "src/main.rs".into(),
+    ];
+    use_jdxld_for_native_link(&mut check, OsStr::new("/opt/jdxld"));
+    assert_eq!(check.len(), 3);
+}
+
+#[test]
 fn ambiguous_build_script_sidecars_are_refused() {
     let directory = tempfile::tempdir().unwrap();
     let invoked = directory.path().join(format!(
@@ -57,6 +77,7 @@ fn test_config(cache_dir: &Path) -> Config {
         stats_report: None,
         verify: false,
         incremental: false,
+        jdxld: None,
         share_out_dir: false,
         build_script_execution: false,
         events: false,

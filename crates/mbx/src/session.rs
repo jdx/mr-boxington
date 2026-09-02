@@ -74,6 +74,8 @@ pub(crate) const BUILD_SCRIPT_EXECUTION_ENV: &str = "MBX_BUILD_SCRIPT_EXECUTION"
 pub(crate) const LEARNED_INCREMENTAL_ENV: &str = "MBX_LEARNED_INCREMENTAL";
 pub(crate) const LEARNED_INCREMENTAL_MAX_SIZE_ENV: &str = "MBX_LEARNED_INCREMENTAL_MAX_SIZE";
 pub(crate) const INCREMENTAL_ROOT_ENV: &str = "MBX_INCREMENTAL_ROOT";
+pub(crate) const JDXLD_BIN_ENV: &str = "MBX_JDXLD_BIN";
+pub(crate) const JDXLD_SOCKET_ENV: &str = "MBX_JDXLD_SOCKET";
 pub const CACHE_LINKS_ENV: &str = "MBX_CACHE_LINKS";
 /// Group completed builds for one later cache export, used by CI actions.
 pub const CACHE_EXPORT_GROUP_ENV: &str = "MBX_CACHE_EXPORT_GROUP";
@@ -106,6 +108,7 @@ pub struct CacheSession {
     scheduler_env: Vec<(String, String)>,
     store: PathBuf,
     incremental_root: PathBuf,
+    jdxld: Mutex<Option<crate::jdxld::Worker>>,
     /// The checkout's private state directory once `begin` has claimed it,
     /// where the file-digest ledger is saved when the session finishes.
     ledger_dir: Mutex<Option<PathBuf>>,
@@ -174,6 +177,7 @@ impl CacheSession {
         });
         let (socket, server) =
             spawn_server(session_dir, agent.clone(), Arc::clone(&task), shutdown_rx).await?;
+        let jdxld = crate::jdxld::Worker::start(session_dir, config.jdxld.as_deref()).await?;
         Ok(Self {
             socket,
             rustc_shim: shim,
@@ -189,6 +193,7 @@ impl CacheSession {
             scheduler_env: crate::scheduler::session_environment_with_jobs(config, cargo_jobs),
             store,
             incremental_root: config.cache_dir.join("incremental"),
+            jdxld: Mutex::new(jdxld),
             ledger_dir: Mutex::new(None),
             started: Instant::now(),
             shutdown: Mutex::new(Some(shutdown_tx)),
@@ -275,6 +280,10 @@ impl CacheSession {
             Err(error) => warn!("incremental state was not recorded: {error:#}"),
         }
         environment.insert(SOCKET_ENV.into(), self.socket.clone());
+        if let Some(jdxld) = self.jdxld.lock().unwrap().as_ref() {
+            environment.insert(JDXLD_BIN_ENV.into(), jdxld.executable().into());
+            environment.insert(JDXLD_SOCKET_ENV.into(), jdxld.socket().into());
+        }
         environment.insert(
             STAGING_ENV.into(),
             self.staging.to_string_lossy().into_owned(),
@@ -489,6 +498,9 @@ impl CacheSession {
 
     /// Stop the agent and collect this session's statistics.
     pub async fn finish(&self) -> Result<AgentStats> {
+        if let Some(jdxld) = self.jdxld.lock().unwrap().take() {
+            jdxld.finish()?;
+        }
         if let Some(shutdown) = self.shutdown.lock().unwrap().take() {
             let _ = shutdown.send(());
         }
@@ -1227,7 +1239,10 @@ pub fn run_rustc_shim() -> ExitCode {
         eprintln!("mbx[error]: the rustc shim expected the rustc executable as its first argument");
         return ExitCode::from(1);
     };
-    let arguments = arguments.collect::<Vec<_>>();
+    let mut arguments = arguments.collect::<Vec<_>>();
+    if let Some(jdxld) = std::env::var_os(JDXLD_BIN_ENV).filter(|path| !path.is_empty()) {
+        use_jdxld_for_native_link(&mut arguments, &jdxld);
+    }
     let is_workspace_wrapper = std::env::var_os(PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV)
         .is_some_and(|wrapper| wrapper == rustc);
     let (wrapper_argument, compiler_arguments) = workspace_wrapper_arguments(&rustc, &arguments);
@@ -1251,6 +1266,14 @@ pub fn run_rustc_shim() -> ExitCode {
     }
 
     run_transparent_rustc(rustc, arguments)
+}
+
+/// Pin native links to the worker's executable without changing metadata-only calls.
+fn use_jdxld_for_native_link(arguments: &mut Vec<OsString>, jdxld: &OsStr) {
+    if links_natively(arguments) {
+        arguments.push("-Clinker=clang".into());
+        arguments.push(format!("-Clink-arg=--ld-path={}", Path::new(jdxld).display()).into());
+    }
 }
 
 fn workspace_wrapper_arguments<'a>(

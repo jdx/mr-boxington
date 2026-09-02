@@ -119,6 +119,9 @@ pub(crate) struct RawConfig {
     /// Let local workspace members compile incrementally.
     #[usage(env = "MBX_INCREMENTAL", default = false)]
     incremental: bool,
+    /// Use this jdxld binary for native Rust links and keep its worker alive for the build session.
+    #[usage(env = "MBX_JDXLD")]
+    jdxld: Option<PathBuf>,
     /// Compile crates that keep missing the cache with changed content
     /// incrementally, keeping their outputs out of the shared cache.
     #[usage(
@@ -317,6 +320,8 @@ pub struct Config {
     /// Let cargo compile workspace members incrementally, rather than forcing
     /// `CARGO_INCREMENTAL=0` for the whole build.
     pub incremental: bool,
+    /// jdxld binary used for native Rust links in this build session.
+    pub jdxld: Option<PathBuf>,
     /// Let a compilation that reads `OUT_DIR` be shared between checkouts.
     ///
     /// On by default: the compilation remaps generated sources to a stable
@@ -353,6 +358,7 @@ impl Config {
             stats_report: None,
             verify: false,
             incremental: false,
+            jdxld: None,
             share_out_dir: false,
             build_script_execution: false,
             events: false,
@@ -798,6 +804,7 @@ impl Config {
             stats_report: raw.stats_report,
             verify: raw.verify,
             incremental: raw.incremental,
+            jdxld: raw.jdxld,
             share_out_dir: raw.share_out_dir,
             build_script_execution: raw.build_script_execution,
             events: raw.events,

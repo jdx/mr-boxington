@@ -33,6 +33,7 @@ Every value below is optional; these are shown set explicitly.
 # <config directory>/mbx/config.toml
 cache_dir = "/var/cache/mbx"
 incremental = false
+jdxld = "/path/to/jdxld" # optional, Linux only
 learned_incremental_max_size = "8GiB"  # or "none"
 share_out_dir = true
 build_script_execution = true
@@ -203,6 +204,20 @@ suppress the summary for that invocation.
 can help an edit/rebuild loop, but an incremental workspace artifact changes
 the inputs of crates above it and reduces reuse across worktrees. CI always
 disables it because a fresh runner has no incremental state to reuse.
+
+## jdxld session linking
+
+On Linux, `jdxld = "/path/to/jdxld"` (or `MBX_JDXLD`) opts native Rust links
+into jdxld's experimental mr-boxington worker protocol. mbx starts one worker
+for the Cargo command, routes native links to its Unix socket, and stops it as
+soon as the command finishes. The worker does not linger on a timeout.
+
+The current prototype reuses unchanged input mappings while still performing
+resolution, layout, relocation, and output on every link. In the captured mbx
+benchmark this reduced link-only time by about 13%; it is infrastructure for
+deeper incremental linking, not yet a persistent cross-command link cache.
+These links currently bypass mbx's native-link output cache because that cache
+does not yet model an overridden Clang linker.
 
 ## Learned incremental reuse
 

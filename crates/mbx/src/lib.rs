@@ -50,6 +50,7 @@ mod build_script;
 mod cc;
 mod digest_ledger;
 mod incremental;
+mod jdxld;
 mod linker;
 mod materialize;
 mod rustc;
