@@ -453,6 +453,80 @@ async fn disables_blob_packs_when_the_advertised_endpoint_is_unavailable() {
 }
 
 #[tokio::test]
+async fn stops_reading_once_failed_reads_exhaust_the_stall_budget() {
+    let mut server = mockito::Server::new_async().await;
+    let digest = CacheDigest::blake3(b"unreachable blob");
+    // `expect(1)` is the assertion: the second read must not reach the server.
+    // Without a stall budget every object pays the download deadline again, so
+    // an unhealthy remote can outlast the build it is meant to accelerate.
+    let request = server
+        .mock(
+            "GET",
+            format!("/v1/blobs/blake3/{}/{}", digest.hash, digest.size).as_str(),
+        )
+        .with_status(503)
+        .expect(1)
+        .create_async()
+        .await;
+    let client = test_client_with_stall_budget(
+        &server,
+        Duration::from_millis(50),
+        0,
+        Duration::from_nanos(1),
+    );
+    let staging = tempfile::tempdir().unwrap();
+
+    let _ = client
+        .get_blob_file(&digest, staging.path())
+        .await
+        .expect_err("the first read fails against a 503");
+
+    let error = client
+        .get_blob_file(&digest, staging.path())
+        .await
+        .expect_err("the second read is abandoned rather than attempted");
+    assert!(
+        error.to_string().contains("reads were abandoned"),
+        "{error}"
+    );
+    // Packs degrade to "unsupported", which callers already treat as a miss.
+    assert!(
+        client
+            .get_blob_pack(&[digest], staging.path())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    request.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_zero_stall_budget_keeps_reading() {
+    let mut server = mockito::Server::new_async().await;
+    let digest = CacheDigest::blake3(b"still tried");
+    let request = server
+        .mock(
+            "GET",
+            format!("/v1/blobs/blake3/{}/{}", digest.hash, digest.size).as_str(),
+        )
+        .with_status(503)
+        .expect(2)
+        .create_async()
+        .await;
+    let client = test_client_with(&server, Duration::from_millis(50), 0);
+    let staging = tempfile::tempdir().unwrap();
+
+    for _ in 0..2 {
+        let _ = client
+            .get_blob_file(&digest, staging.path())
+            .await
+            .expect_err("every read fails against a 503");
+    }
+
+    request.assert_async().await;
+}
+
+#[tokio::test]
 async fn rejects_truncated_blob_pack_frames() {
     let mut server = mockito::Server::new_async().await;
     let contents = b"complete blob";
@@ -882,7 +956,18 @@ fn test_client_with(
     download_timeout: Duration,
     retries: i64,
 ) -> HttpRemoteCache {
-    HttpRemoteCache::new(RemoteCacheConfig {
+    // Zero leaves the stall budget out of the way: these tests provoke read
+    // failures deliberately and must keep reading afterwards.
+    test_client_with_stall_budget(server, download_timeout, retries, Duration::ZERO)
+}
+
+fn test_client_with_stall_budget(
+    server: &mockito::ServerGuard,
+    download_timeout: Duration,
+    retries: i64,
+    read_stall_budget: Duration,
+) -> HttpRemoteCache {
+    let mut client = HttpRemoteCache::new(RemoteCacheConfig {
         base_url: server.url().parse().unwrap(),
         namespace: "test".into(),
         token: Some("test-token".into()),
@@ -893,7 +978,9 @@ fn test_client_with(
         download_timeout,
         retries,
     })
-    .unwrap()
+    .unwrap();
+    client.set_read_stall_budget(read_stall_budget);
+    client
 }
 
 async fn mock_blob_pack_capabilities(server: &mut mockito::ServerGuard) {

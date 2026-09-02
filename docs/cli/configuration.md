@@ -98,6 +98,14 @@ Combined action-store and managed-target budget, or "none".
 
 Deadline for one blob download, retries and backoff included.
 
+### `http.read_stall_budget`
+
+- **Type:** `duration`
+- **Default:** `90s`
+- **Set with:** `MBX_HTTP_READ_STALL_BUDGET`
+
+Wall clock a build may lose to failed remote reads before it stops reading and just compiles. "0" keeps reading however long it takes.
+
 ### `http.retries`
 
 - **Type:** `int`

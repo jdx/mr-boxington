@@ -13,6 +13,7 @@ use usage_config::{EnvLayer, FileLayer, FileScope, Layers};
 
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_HTTP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
+const DEFAULT_HTTP_READ_STALL_BUDGET: Duration = Duration::from_secs(90);
 const DEFAULT_HTTP_RETRIES: i64 = 3;
 const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// How long a managed target directory may sit unused before collection.
@@ -299,6 +300,10 @@ struct RawHttp {
     /// Deadline for one blob download, retries and backoff included.
     #[usage(env = "MBX_HTTP_DOWNLOAD_TIMEOUT", default = "10m", ty = "duration")]
     download_timeout: String,
+    /// Wall clock a build may lose to failed remote reads before it stops
+    /// reading and just compiles. "0" keeps reading however long it takes.
+    #[usage(env = "MBX_HTTP_READ_STALL_BUDGET", default = "90s", ty = "duration")]
+    read_stall_budget: String,
     /// Request retries.
     #[usage(env = "MBX_HTTP_RETRIES", default = 3)]
     retries: i64,
@@ -459,6 +464,7 @@ pub struct RemoteSettings {
 pub struct HttpSettings {
     pub timeout: Duration,
     pub download_timeout: Duration,
+    pub read_stall_budget: Duration,
     pub retries: i64,
 }
 
@@ -611,6 +617,7 @@ impl Default for HttpSettings {
         Self {
             timeout: DEFAULT_HTTP_TIMEOUT,
             download_timeout: DEFAULT_HTTP_DOWNLOAD_TIMEOUT,
+            read_stall_budget: DEFAULT_HTTP_READ_STALL_BUDGET,
             retries: DEFAULT_HTTP_RETRIES,
         }
     }
@@ -735,6 +742,8 @@ impl Config {
             timeout: parse_duration(&raw.http.timeout).wrap_err("invalid http.timeout")?,
             download_timeout: parse_duration(&raw.http.download_timeout)
                 .wrap_err("invalid http.download_timeout")?,
+            read_stall_budget: parse_duration(&raw.http.read_stall_budget)
+                .wrap_err("invalid http.read_stall_budget")?,
             retries: raw.http.retries,
         };
         let gc = GcSettings {

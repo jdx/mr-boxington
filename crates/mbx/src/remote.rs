@@ -68,17 +68,20 @@ pub(crate) fn remote_client_with(
     {
         bail!("remote.s3_* settings apply to an s3:// remote cache URL, but remote.url is {url}");
     }
-    Ok(Some(RemoteCacheClient::new(RemoteCacheConfig {
-        base_url: url,
-        namespace,
-        token: config.remote.token.clone(),
-        token_file: config.remote.token_file.clone(),
-        oidc_audience: config.remote.oidc_audience.clone(),
-        connect_timeout: config.http.timeout,
-        read_timeout: config.http.timeout,
-        download_timeout: config.http.download_timeout,
-        retries: config.http.retries,
-    })?))
+    Ok(Some(
+        RemoteCacheClient::new(RemoteCacheConfig {
+            base_url: url,
+            namespace,
+            token: config.remote.token.clone(),
+            token_file: config.remote.token_file.clone(),
+            oidc_audience: config.remote.oidc_audience.clone(),
+            connect_timeout: config.http.timeout,
+            read_timeout: config.http.timeout,
+            download_timeout: config.http.download_timeout,
+            retries: config.http.retries,
+        })?
+        .with_read_stall_budget(config.http.read_stall_budget),
+    ))
 }
 
 /// The namespace, which isolates one project's cache and is always required.

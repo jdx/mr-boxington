@@ -249,3 +249,11 @@ can hold a build open. A packed request scales the deadline up with the bytes
 and object count it asks for, since the configured value describes a single
 blob. Raise it if a slow link makes large artifacts run out of time before
 their retries are spent.
+
+That deadline bounds one download, not a build. An unhealthy server charges it
+again for every object, so `MBX_HTTP_READ_STALL_BUDGET` bounds the sum: once a
+session has lost that much wall clock to reads that failed, it stops reading and
+compiles instead. Reads are best effort — a miss costs a local compile, while a
+stall costs the whole job — so this trades a cold build for a bounded one. Only
+failed reads count against it; a slow read that returned an object paid for
+itself. Set it to `0` to keep reading however long the remote takes to fail.

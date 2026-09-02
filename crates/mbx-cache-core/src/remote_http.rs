@@ -32,8 +32,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use url::{Host, Url};
 
@@ -170,6 +170,17 @@ pub(crate) struct HttpRemoteCache {
     blob_pack_uploads_disabled: AtomicBool,
     action_batches_disabled: AtomicBool,
     action_promises_disabled: AtomicBool,
+    /// Wall clock this session may lose to reads that fail before it stops
+    /// asking, and the total lost so far.
+    ///
+    /// `download_timeout` bounds one logical download. It cannot bound what a
+    /// session pays for an unhealthy server, because every object is charged
+    /// that deadline again. Reads are best effort — a miss costs a local
+    /// compile — so once the losses add up past the budget the session stops
+    /// reading and builds instead.
+    read_stall_budget: Duration,
+    read_stall_nanos: AtomicU64,
+    reads_abandoned: AtomicBool,
 }
 
 impl HttpRemoteCache {
@@ -202,7 +213,48 @@ impl HttpRemoteCache {
             blob_pack_uploads_disabled: AtomicBool::new(false),
             action_batches_disabled: AtomicBool::new(false),
             action_promises_disabled: AtomicBool::new(false),
+            read_stall_budget: Duration::ZERO,
+            read_stall_nanos: AtomicU64::new(0),
+            reads_abandoned: AtomicBool::new(false),
         })
+    }
+
+    /// Set the budget from [`RemoteCacheClient::with_read_stall_budget`].
+    pub(crate) fn set_read_stall_budget(&mut self, budget: Duration) {
+        self.read_stall_budget = budget;
+    }
+
+    /// Whether this session has given up on reading from the remote.
+    fn reads_abandoned(&self) -> bool {
+        self.reads_abandoned.load(Ordering::Relaxed)
+    }
+
+    /// Charge a failed read against the session's stall budget.
+    ///
+    /// Only failures are charged: a slow read that returns an object paid for
+    /// itself, while a slow read that returns nothing is pure loss. Crossing
+    /// the budget abandons reads for the rest of the session and says so once.
+    fn charge_read_stall(&self, elapsed: Duration) {
+        // A zero budget means the operator asked to keep reading no matter how
+        // long the remote takes to fail.
+        if self.read_stall_budget.is_zero() {
+            return;
+        }
+        let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+        let total = self
+            .read_stall_nanos
+            .fetch_add(nanos, Ordering::Relaxed)
+            .saturating_add(nanos);
+        if Duration::from_nanos(total) < self.read_stall_budget {
+            return;
+        }
+        if !self.reads_abandoned.swap(true, Ordering::Relaxed) {
+            warn!(
+                "remote cache reads gave up after losing {:?} to failed reads, over the {:?} budget; building locally for the rest of this session",
+                Duration::from_nanos(total),
+                self.read_stall_budget
+            );
+        }
     }
 
     pub(crate) async fn check_connection(&self) -> Result<()> {
@@ -476,7 +528,10 @@ impl HttpRemoteCache {
         staging_dir: &Path,
         max_bytes: u64,
     ) -> Result<Option<RemoteBlobPack>> {
-        if digests.is_empty() || self.blob_packs_disabled.load(Ordering::Relaxed) {
+        if digests.is_empty()
+            || self.blob_packs_disabled.load(Ordering::Relaxed)
+            || self.reads_abandoned()
+        {
             return Ok(None);
         }
         let Some(mut limits) = self.blob_pack_limits().await? else {
@@ -557,13 +612,19 @@ impl HttpRemoteCache {
         // Deliberately outside `retry_async`: `download_timeout` is a deadline
         // for the whole download, not a per-attempt bound. A stalled attempt is
         // already caught by the client's connect and read timeouts.
-        tokio::time::timeout(download_timeout, download)
+        let started_at = Instant::now();
+        let result = tokio::time::timeout(download_timeout, download)
             .await
             .map_err(|_| {
                 eyre!(
                     "remote cache blob pack download for {url} exceeded its {download_timeout:?} budget across all attempts"
                 )
-            })?
+            })
+            .and_then(|result| result);
+        if result.is_err() {
+            self.charge_read_stall(started_at.elapsed());
+        }
+        result
     }
 
     pub(crate) async fn get_action_result(
@@ -806,6 +867,9 @@ impl HttpRemoteCache {
         staging_dir: &Path,
     ) -> Result<tempfile::NamedTempFile> {
         digest.validate()?;
+        if self.reads_abandoned() {
+            bail!("remote cache reads were abandoned for this session");
+        }
         if digest.size > MAX_REMOTE_BLOB_BYTES {
             bail!(
                 "remote cache blob declared {} bytes, over the {} byte limit",
@@ -845,13 +909,19 @@ impl HttpRemoteCache {
         // Deliberately outside `retry_async`: `download_timeout` is a deadline
         // for the whole download, not a per-attempt bound. A stalled attempt is
         // already caught by the client's connect and read timeouts.
-        tokio::time::timeout(download_timeout, download)
+        let started_at = Instant::now();
+        let result = tokio::time::timeout(download_timeout, download)
             .await
             .map_err(|_| {
                 eyre!(
                     "remote cache blob download for {url} exceeded its {download_timeout:?} budget across all attempts"
                 )
-            })?
+            })
+            .and_then(|result| result);
+        if result.is_err() {
+            self.charge_read_stall(started_at.elapsed());
+        }
+        result
     }
 
     pub(crate) async fn blob_pack_upload_limits(&self) -> Result<Option<BlobPackLimits>> {
