@@ -466,7 +466,10 @@ fn replaceable_managed_link(existing: &Path, managed: &Path, workspace_root: &Pa
         && view_key(&record.workspace_root) == name
     {
         return record.workspace_root == workspace_root
-            || !crate::store::checkout_is_live(&record.workspace_root);
+            || !crate::store::checkout_is_live_on(
+                managed.parent().unwrap_or(managed),
+                &record.workspace_root,
+            );
     }
     // A collector removes the record and directory together. With neither
     // left, a digest-shaped dangling link under this root is safe to recover;
@@ -588,7 +591,7 @@ pub(crate) fn collect(
             directory,
             record.updated_secs,
             bytes,
-            crate::store::checkout_is_live(&record.workspace_root),
+            crate::store::checkout_is_live_on(root, &record.workspace_root),
         ));
     }
     let mut remaining = entries

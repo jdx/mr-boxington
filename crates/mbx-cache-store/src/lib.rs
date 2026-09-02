@@ -601,7 +601,7 @@ pub fn projects(store: &Path) -> Result<Vec<ProjectUsage>> {
                 continue;
             };
             let project = projects.entry(record.workspace_root.clone()).or_default();
-            if claim_is_live(&record) {
+            if claim_is_live(store, &record) {
                 project.0.insert(identity.clone());
                 project.1 = true;
             }
@@ -979,7 +979,7 @@ fn scan_checkouts(store: &Path) -> Result<CheckoutScan> {
         }
         for record in walk_files(&entry.path())? {
             match read_checkout_record(&record.path) {
-                Some(checkout) if claim_is_live(&checkout) => {
+                Some(checkout) if claim_is_live(store, &checkout) => {
                     scan.live_identities.insert(name.clone());
                     scan.live_records += 1;
                 }
@@ -1001,8 +1001,8 @@ fn read_checkout_record(path: &Path) -> Option<CheckoutRecord> {
 
 /// Whether a recorded claim still speaks for a checkout that is using this
 /// store.
-fn claim_is_live(record: &CheckoutRecord) -> bool {
-    checkout_is_live(&record.workspace_root) && !claim_has_expired(record)
+fn claim_is_live(store: &Path, record: &CheckoutRecord) -> bool {
+    checkout_is_live_on(store, &record.workspace_root) && !claim_has_expired(record)
 }
 
 fn claim_has_expired(record: &CheckoutRecord) -> bool {
@@ -1016,26 +1016,111 @@ fn claim_has_expired(record: &CheckoutRecord) -> bool {
 
 /// Whether the checkout a record names is still on disk.
 ///
-/// Absence is believed only when the checkout is definitely absent *and* its
-/// parent directory is definitely still there. Deleting a worktree, or a whole
-/// project directory, leaves the parent behind; a volume being ejected or a
-/// network mount going away takes several levels with it, and that is the case
-/// worth being careful about -- a temporarily absent mount must not un-root a
-/// checkout that is really there.
+/// Absence is believed only when the checkout is definitely absent and its
+/// nearest existing ancestor is on the same filesystem as the store. Walking
+/// all the way to that ancestor matters for worktree managers and temporary
+/// directories, which commonly remove a checkout together with one or more of
+/// its otherwise-empty parents.
 ///
-/// So both questions are asked the same way: only a definite answer counts, and
-/// an error at either step means live. Being wrong in that direction only
-/// delays collection; the other way round throws away a warm cache someone is
-/// still using.
-pub fn checkout_is_live(workspace_root: &Path) -> bool {
+/// A different filesystem can be a mount whose contents are temporarily
+/// unavailable, so uncertainty there remains live. Errors are treated the same
+/// way: being wrong in that direction only delays collection; the other way
+/// round throws away a warm cache someone is still using.
+pub fn checkout_is_live_on(store: &Path, workspace_root: &Path) -> bool {
     if !matches!(workspace_root.try_exists(), Ok(false)) {
         return true;
     }
-    match workspace_root.parent() {
-        Some(parent) => !matches!(parent.try_exists(), Ok(true)),
-        // A root directory has no parent to corroborate anything with.
-        None => true,
+
+    let Ok(store_metadata) = std::fs::metadata(store) else {
+        return true;
+    };
+    for ancestor in workspace_root.ancestors().skip(1) {
+        match std::fs::metadata(ancestor) {
+            Ok(ancestor_metadata) => {
+                return !same_filesystem(store, &store_metadata, ancestor, &ancestor_metadata);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return true,
+        }
     }
+    true
+}
+
+/// Whether a checkout is still on disk, corroborating absence through its
+/// immediate parent.
+///
+/// Prefer [`checkout_is_live_on`] when an existing store or managed-target
+/// root is available to distinguish deletion from an unavailable filesystem.
+pub fn checkout_is_live(workspace_root: &Path) -> bool {
+    let Some(parent) = workspace_root.parent() else {
+        return true;
+    };
+    checkout_is_live_on(parent, workspace_root)
+}
+
+#[cfg(unix)]
+fn same_filesystem(
+    _a_path: &Path,
+    a: &std::fs::Metadata,
+    _b_path: &Path,
+    b: &std::fs::Metadata,
+) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    a.dev() == b.dev()
+}
+
+#[cfg(windows)]
+fn same_filesystem(
+    a_path: &Path,
+    _a: &std::fs::Metadata,
+    b_path: &Path,
+    _b: &std::fs::Metadata,
+) -> bool {
+    windows_volume_name(a_path).is_some_and(|volume| windows_volume_name(b_path) == Some(volume))
+}
+
+#[cfg(windows)]
+fn windows_volume_name(path: &Path) -> Option<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
+    };
+
+    let path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    // Both APIs document MAX_PATH-sized output buffers for volume paths and
+    // names. Failure is uncertainty, which deliberately keeps the checkout
+    // live.
+    let mut mount = vec![0_u16; 261];
+    // SAFETY: `path` is nul-terminated and `mount` is writable for the stated
+    // number of UTF-16 code units.
+    if unsafe { GetVolumePathNameW(path.as_ptr(), mount.as_mut_ptr(), mount.len() as u32) } == 0 {
+        return None;
+    }
+    let mut volume = vec![0_u16; 261];
+    // SAFETY: the successful call above left `mount` nul-terminated, and
+    // `volume` is writable for the stated number of UTF-16 code units.
+    if unsafe {
+        GetVolumeNameForVolumeMountPointW(mount.as_ptr(), volume.as_mut_ptr(), volume.len() as u32)
+    } == 0
+    {
+        return None;
+    }
+    volume.truncate(volume.iter().position(|unit| *unit == 0)?);
+    Some(volume)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_filesystem(
+    _a_path: &Path,
+    _a: &std::fs::Metadata,
+    _b_path: &Path,
+    _b: &std::fs::Metadata,
+) -> bool {
+    false
 }
 
 /// CAS paths reachable from the builds that live checkouts still depend on.
