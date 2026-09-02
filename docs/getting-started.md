@@ -150,8 +150,7 @@ where.exe cargo
 mise activation supplies the command-wrapper path to shells where mise is active.
 The wrapper invokes `mbx` with Cargo shim mode enabled, then mise removes its
 dispatch directories before mbx delegates to the configured or system Cargo.
-SSH
-commands, coding agents, editors, and other non-interactive tools may use a
+SSH commands, coding agents, editors, and other non-interactive tools may use a
 startup path that does not activate mise. In that case, prepend the directory
 printed by `mbx setup` in a startup file those processes read. For zsh,
 `~/.zshenv` applies to interactive and non-interactive shells:
@@ -162,8 +161,8 @@ export PATH="$HOME/.local/share/mbx/bin:$PATH"
 
 Start a new process and run `command -v cargo` again. Once it resolves to the
 shim, ordinary `cargo build`, `cargo test`, and `cargo check` commands use mbx
-automatically. Explicit `mbx cargo …` commands remain supported, but users and
-tools do not need to remember a special prefix.
+automatically. Prefixing a Cargo command with `mbx`, as in `mbx build`, still
+works.
 
 Outside mise activation, the stable `cargo` launcher uses the setup-time mbx
 while it exists, then resolves the active `mbx` from `PATH` after an upgrade
@@ -178,8 +177,8 @@ editor did not inherit mise's `PATH`. Its outputs go to
 `target/rust-analyzer`, separate from terminal builds so the two Cargo processes
 do not contend on the target-directory lock. When `target` is managed, the
 editor directory lives inside that view and is collected with it, while the
-shared store warms both builds. Existing rust-analyzer check settings are always
-left unchanged rather than silently changing commands or features.
+shared store warms both builds. Existing rust-analyzer check settings are left
+unchanged.
 
 After installing from a release archive, run `$HOME/.local/bin/mbx setup` on
 Unix. On Windows, run
@@ -195,18 +194,16 @@ Release binaries cover:
 
 Other platforms with a Rust toolchain can build from source with
 `cargo install mbx --locked`. mbx wraps whichever Cargo and rustc are active,
-including rustup-managed toolchains — `mbx doctor` reports the pair it found.
+including rustup-managed toolchains. `mbx doctor` reports the pair it found.
 
 Reflinked output restoration needs a filesystem with copy-on-write file
 cloning: APFS on macOS, btrfs or XFS on Linux, ReFS (Dev Drive) on Windows.
-mbx probes the actual cache and target locations rather than assuming from
-the platform, and copies bytes where cloning is unavailable — caching still
-works on ext4 or NTFS, it just spends the disk twice.
+mbx probes the cache and target locations and copies bytes where cloning is
+unavailable. Caching still works on ext4 or NTFS but spends the disk twice.
 
 ### Windows
 
-Windows is a supported release platform with a narrower caching tier. The
-differences, which the pages they belong to also note in place:
+Windows is a supported release platform. The differences from Linux and macOS:
 
 - Reflinks need ReFS, which usually means a Dev Drive; on NTFS mbx copies
   bytes instead.
@@ -272,7 +269,7 @@ mise run lint:default ::: lint:all
 
 Separate target directories keep Cargo's directory lock from serializing the
 commands. mbx shares one machine-wide compiler pool and deduplicates identical
-work in flight without further configuration — see
+work in flight without further configuration. See
 [how it works](/how-it-works#machine-wide-scheduling) for the mechanism and
 the same shape [inside GitHub Actions](/github-action#parallel-cargo-steps).
 
@@ -327,9 +324,9 @@ After a build that used the cache, mbx prints a one-line summary to stderr:
 mbx[cache]: 139 hits, 8 misses, 4 not looked up, 147 prefetched, 7 bypassed; 312.4 MiB downloaded, 0 B uploaded, 280.1 MiB stored locally
 ```
 
-These are three different outcomes: a miss means mbx looked up an action and
-found nothing, “could not look up” means it had no key yet, and a bypass means
-mbx deliberately declined to cache the action. See [Cache results](/cache-results).
+A miss means mbx looked up an action and found nothing. “Not looked up” means
+it had no key yet. A bypass means mbx declined to cache the action. See
+[Cache results](/cache-results).
 Set `MBX_SUMMARY=full` for the detailed breakdown, `MBX_SUMMARY=off` for none,
 or use Cargo's `-q`/`--quiet` for a quiet invocation.
 
@@ -361,8 +358,7 @@ mbx gc --json
 
 ## Reporting a problem
 
-Three things describe almost any mbx problem, and a bug report that carries
-them rarely needs a follow-up question:
+Three things describe almost any mbx problem:
 
 ```sh
 mbx doctor --json           # environment, store, and setup state
@@ -372,8 +368,8 @@ MBX_BYPASS_LOG=bypass.log cargo build   # why each compilation was not cached
 
 All three describe your machine: `mbx doctor --json` reports absolute cache
 paths and the URL and namespace of any configured remote, and the logs name
-the crates you build. Credentials themselves are never printed, but remove
-whatever else you would rather not publish before posting.
+the crates you build. Credentials are never printed. Remove anything else you
+would rather not publish before posting.
 
 `MBX_LOG` takes an [env_logger](https://docs.rs/env_logger) filter, so
 `debug`, `trace`, or a per-module filter such as `mbx=trace` all work; it
@@ -387,9 +383,8 @@ Report a problem in
 and propose a change in
 [Ideas](https://github.com/jdx/mr-boxington/discussions/categories/ideas).
 A suspected vulnerability goes through
-[private advisory reporting](https://github.com/jdx/mr-boxington/security/advisories/new)
-rather than a public thread; see
-[SECURITY.md](https://github.com/jdx/mr-boxington/blob/main/SECURITY.md).
+[private advisory reporting](https://github.com/jdx/mr-boxington/security/advisories/new);
+see [SECURITY.md](https://github.com/jdx/mr-boxington/blob/main/SECURITY.md).
 
 ## Next steps
 

@@ -17,8 +17,8 @@ the `target` symlink in each checkout keeps working across upgrades.
 `mbx doctor --json`, `mbx cache stats --json`, `mbx gc --json`, and
 `MBX_STATS_REPORT` emit versioned documents; fields are added compatibly and a
 shape change bumps the version. Scripts should read the version field and
-parse JSON rather than the human-readable `mbx[...]` stderr lines, which are
-written for people and may be reworded at any time.
+parse the JSON. The `mbx[...]` stderr lines are written for people and may be
+reworded at any time.
 
 ### Session event streams are not
 
@@ -30,7 +30,7 @@ parses them but mbx itself. Scripts should read `MBX_STATS_REPORT`.
 ## Configuration
 
 Unknown TOML keys and invalid values are errors, so an upgrade that renames or
-retires a setting fails loudly instead of silently ignoring what you wrote.
+retires a setting fails instead of ignoring what you wrote.
 
 ## Wire protocols and crates
 
@@ -43,6 +43,6 @@ follow semantic versioning enforced by `cargo-semver-checks` in CI. See
 
 `mbx-cache-cargo`, `mbx-cache-store`, `mbx-cache-core`, `mbx-cache-rustc`, and
 `mbx-cache-cc` are supported building blocks for coordinated embedding.
-They intentionally stay on `0.x`: their public APIs can change in a new minor
+They stay on `0.x`: their public APIs can change in a new minor
 release, and embedders should pin a compatible minor. Store and wire formats
 remain independently versioned and treat unfamiliar records as cache misses.

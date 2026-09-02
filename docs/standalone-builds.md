@@ -98,7 +98,7 @@ Set `MBX_CC=0` to run the command without C or C++ caching:
 MBX_CC=0 mbx exec make
 ```
 
-Because C and C++ compilation is the only work cached by `mbx exec`, this makes
-the command equivalent to running it directly. Production release builds may
-use the local cache, but should not use a remote cache; this prevents remote
-cache poisoning from affecting published artifacts.
+C and C++ compilation is the only work `mbx exec` caches, so this runs the
+command as if it were invoked directly. Production release builds may use the
+local cache but should not use a remote cache, which keeps remote cache
+poisoning away from published artifacts.

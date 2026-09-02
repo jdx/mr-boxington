@@ -31,16 +31,14 @@ mbx records the checkout associated with each target view. Collection runs
 after a build, at most once an hour, and needs no configuration. A target
 directory is removed when any of these is true:
 
-- **Its checkout is gone.** Nothing can ask for those outputs again, so this
-  happens regardless of the limits below.
-- **It has gone unused for `target.max_age`** — 30 days by default. The next
-  build in that checkout starts warm from the shared store rather than from
-  scratch, so this costs a re-link rather than a rebuild.
-- **The managed directories together exceed `target.max_size`**, in which case
-  the least recently used go first. The most recently used directory is never
-  collected for being over budget — it is the checkout you are working in, and
-  deleting it would only make the next build recreate it. If the budget cannot
-  be met without it, mbx says so and keeps it.
+- Its checkout is gone. This happens regardless of the limits below.
+- It has gone unused for `target.max_age`, 30 days by default. The next build
+  in that checkout restores from the shared store, so this costs a re-link
+  rather than a rebuild.
+- The managed directories together exceed `target.max_size`. The least
+  recently used go first. The most recently used directory is never collected
+  for being over budget; if the budget cannot be met without it, mbx says so
+  and keeps it.
 
 Cached compilations shared with a live checkout remain protected throughout.
 
@@ -72,17 +70,16 @@ max_total_size = "50GiB"
 ```
 
 `"none"` turns off `target.max_size`, `target.max_age`, or
-`gc.max_total_size`. A value that is neither a size nor `"none"` is an error
-rather than a silently ignored setting, so a typo cannot disable collection.
-`gc.max_size` has no `"none"`: an unbounded action store is the problem
-collection exists to prevent. `MBX_TARGET_VIEWS=0` opts out of managed target
-directories altogether, and a directory that is still reached through an
-existing `target` symlink keeps counting as in use, so turning placement off
-does not schedule existing outputs for deletion.
+`gc.max_total_size`. A value that is neither a size nor `"none"` is an error,
+so a typo cannot disable collection. `gc.max_size` has no `"none"`; the action
+store is always bounded. `MBX_TARGET_VIEWS=0` opts out of managed target
+directories altogether. A directory that is still reached through an existing
+`target` symlink keeps counting as in use, so turning placement off does not
+schedule existing outputs for deletion.
 
-Each budget is measured against the disk that actually holds it, so putting
+Each budget is measured against the disk that holds it, so putting
 [`target.root`](/configuration#target-root) on a large scratch volume sizes
-the target budget from that volume rather than from the cache disk.
+the target budget from that volume.
 
 ## When mbx leaves a target alone
 

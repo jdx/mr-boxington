@@ -3,7 +3,7 @@
 mbx reads configuration from three places; the first value found wins:
 
 1. Environment variables (`MBX_*`).
-2. `.mbx.toml` at the resolved Cargo workspace root — the
+2. `.mbx.toml` at the resolved Cargo workspace root, for the
    [build-policy switches](#workspace-policy) only.
 3. `mbx/config.toml` in the platform configuration directory:
    - Linux: `~/.config/mbx/config.toml`, honoring `$XDG_CONFIG_HOME`
@@ -11,19 +11,19 @@ mbx reads configuration from three places; the first value found wins:
    - Windows: `%APPDATA%\mbx\config.toml`
 
 Anything still unset takes its default. Unknown TOML keys are rejected, so a
-misspelled setting is an error rather than a silent no-op.
+misspelled setting is an error.
 
 ## Disk-scaled defaults
 
-mbx bounds its own disk use without being configured. The two size budgets
-default to a share of the disk holding the cache — 5% for the action store and
-10% for managed target directories — from floors of 5 GiB and 10 GiB up to
-500 GiB and 100 GiB respectively, rounded down to a whole 5 GiB. Managed
-targets are also collected after 30 days unused.
+The two size budgets default to a share of the disk holding the cache: 5% for
+the action store (`gc.max_size`) and 10% for managed target directories
+(`target.max_size`), each bounded at both ends. Managed targets are also
+collected after 30 days unused. The table in
+[managed target directories](/managed-targets#budgets-scale-with-the-disk)
+lists the bounds and what collection removes.
 
 Setting any of them outright overrides the scaling; `"none"` disables
-`target.max_size`, `target.max_age`, and `gc.max_total_size`. See
-[managed target directories](/managed-targets) for what collection removes.
+`target.max_size`, `target.max_age`, and `gc.max_total_size`.
 
 ## Example
 
@@ -89,13 +89,13 @@ priority = "normal"
 
 Environment variables still win. Machine paths, remote-cache configuration,
 credentials, diagnostics, target placement, and garbage collection are not
-accepted from a repository-owned file. mbx reports an error instead of applying
-an unsafe or misspelled workspace setting.
+accepted from a repository-owned file. mbx reports an error for an unsupported
+or misspelled workspace setting.
 
 `share_out_dir = true` is the global default. A workspace may set it to false
-when generated source paths must remain literal in debug information — for
-C and C++ objects as well as Rust artifacts, since a build script's generated
-headers reach both.
+when generated source paths must remain literal in debug information. This
+applies to C and C++ objects as well as Rust artifacts, because a build
+script's generated headers reach both.
 
 `build_script_execution = true` (`MBX_BUILD_SCRIPT_EXECUTION`) caches eligible
 `build.rs` executions. Set it to false to keep compilation caching while every
@@ -134,9 +134,9 @@ by the kernel if a process dies, so a crashed build cannot wedge its siblings.
 
 Builds running at the same time also stop repeating each other: a compilation
 identical to one already running anywhere on the machine waits for that one
-and restores its result instead of burning a core on it. How the pool weighs
-compilations and links — and what happens when a guess is wrong — is described
-in [how it works](/how-it-works#machine-wide-scheduling).
+and restores its result. How the pool weighs compilations and links, and what
+happens when a guess is wrong, is described in
+[how it works](/how-it-works#machine-wide-scheduling).
 
 The pool is memory-aware. `scheduler.cpus` permits (default: logical CPUs),
 less `scheduler.reserve_cpus` (default: 0), divide `scheduler.memory` (default:
@@ -144,24 +144,23 @@ less `scheduler.reserve_cpus` (default: 0), divide `scheduler.memory` (default:
 `"none"` keeps plain CPU permits). The pool always keeps at least one permit.
 Cargo's `-j`/`--jobs` or `CARGO_BUILD_JOBS` can cap how many weighted permits
 one build holds without shrinking the machine-wide pool available to other
-builds. In a container, "physical memory" means the cgroup's limit rather than
-the host's RAM — a build in a 4 GiB container on a large machine is budgeted by
-the 4 GiB, because the rest was never its to spend.
+builds. In a container, physical memory means the cgroup's limit, so a build in
+a 4 GiB container on a large machine is budgeted by the 4 GiB.
 
 `priority = "low"` (`MBX_SCHEDULER_PRIORITY`) is for builds nobody is sitting
-at — CI on a shared box, an editor's background check. While a normal-priority
-build is waiting for permits, low-priority builds leave a quarter of the pool
-free for it.
+at, such as CI on a shared box or an editor's background check. While a
+normal-priority build is waiting for permits, low-priority builds leave a
+quarter of the pool free for it.
 
-Two limits are worth knowing: a single compilation larger than the machine is
-still too large when it runs alone, and crates that have never been measured
-start at one permit until the pool has seen them once.
+Two limits apply: a single compilation larger than the machine is still too
+large when it runs alone, and crates that have never been measured start at one
+permit until the pool has seen them once.
 
 ## Verify mode
 
 `MBX_VERIFY=1` compiles and consults the cache side by side and compares the
-results. It is deliberately expensive — use it to qualify correctness, not for
-everyday builds.
+results. It is expensive; use it to qualify correctness, not for everyday
+builds.
 
 The build reports what it found:
 
@@ -169,10 +168,10 @@ The build reports what it found:
 mbx[cache]: qualification: 24 verified, 0 diverged
 ```
 
-Run it in the checkout that filled the cache, so that what is being measured
-is whether a compilation reproduces itself rather than whether two checkouts
-embed the same paths. Anything above zero divergences is a modeling bug worth
-reporting; `MBX_BYPASS_LOG` and `mbx explain` show what was left out.
+Run it in the checkout that filled the cache. Artifacts restored from another
+checkout embed that checkout's paths and would be reported as divergences. Any
+divergence in the same checkout is a modeling bug; please report it.
+`MBX_BYPASS_LOG` and `mbx explain` show what was left out.
 
 This is how to qualify a setting whose tier you want to check against your
 own workload, such as
@@ -182,20 +181,20 @@ before relying on it.
 ## The savings line
 
 `savings` controls the one-line report of accumulated savings after a build
-(`MBX_SAVINGS` from the environment). `quips` — the default — draws the line
-from a pool of dry one-liners, `plain` states the same facts in the register
-of the other `mbx[...]` lines, and `off` keeps the totals without printing
+(`MBX_SAVINGS` from the environment). `quips`, the default, draws the line
+from a pool of dry one-liners. `plain` states the same facts in the register
+of the other `mbx[...]` lines. `off` keeps the totals without printing
 anything.
 
 ## Build summaries
 
 `summary` controls the cache report printed to stderr after a build
-(`MBX_SUMMARY` from the environment). `short` — the default — prints one line,
-leaving routine `compiler-query` and `standard-input` probes out of its bypass
-count. `full` prints the detailed timing, compiler, bypass, transfer, and
-materialization breakdown. `off` prints no cache summary, while still writing
-`MBX_STATS_REPORT` when configured. Cargo's `-q` and `--quiet` also suppress
-the summary for that invocation.
+(`MBX_SUMMARY` from the environment). `short`, the default, prints one line
+and leaves routine `compiler-query` and `standard-input` probes out of its
+bypass count. `full` prints the detailed timing, compiler, bypass, transfer,
+and materialization breakdown. `off` prints no cache summary, while still
+writing `MBX_STATS_REPORT` when configured. Cargo's `-q` and `--quiet` also
+suppress the summary for that invocation.
 
 ## Incremental builds
 
@@ -208,25 +207,25 @@ disables it because a fresh runner has no incremental state to reuse.
 
 The crate you are editing misses the cache on every build, because its content
 is new every time. On the first source edit to a crate inside the workspace,
-mbx compiles that crate with its own incremental state rather than from scratch,
-and keeps the result out of the shared cache — an incremental artifact describes
-one checkout's edit history, not its source. Crates outside the workspace retain
-the conservative three-change threshold. The build reports those compilations
-as `incremental` and says how many were held back.
+mbx compiles that crate with its own incremental state and keeps the result out
+of the shared cache, since an incremental artifact describes one checkout's
+edit history. A crate outside the workspace switches after three consecutive
+misses with changed sources. The build reports those compilations as
+`incremental` and says how many were held back.
 
-The trigger is the crate's own sources, not its cache key, so a rebuilt
-dependency — which changes the keys of everything above it — keeps compiling
-and publishing normally, and so does a miss on unchanged sources (a wiped
-`target/`, a first build in a new checkout). The record and state are private
-to each checkout, living under `incremental/` in mbx's cache directory so
+The trigger is the crate's own sources, not its cache key. A rebuilt dependency
+changes the keys of everything above it, and those crates keep compiling and
+publishing normally. So does a miss on unchanged sources, such as a wiped
+`target/` or a first build in a new checkout. The record and state are private
+to each checkout and live under `incremental/` in mbx's cache directory, so
 `cargo clean` does not discard the next edit's speedup. Each crate's
 incremental state is discarded once it passes 1 GiB, and normal garbage
 collection removes state for deleted or expired checkouts.
 
-CI never does this, for the same reason it never compiles incrementally: there
-is no earlier state to build on. `MBX_LEARNED_INCREMENTAL=0` turns it off, and
-`MBX_INCREMENTAL=1` supersedes it by handing the whole decision back to
-cargo.
+CI never does this, because a fresh runner has no earlier state to build on.
+`MBX_LEARNED_INCREMENTAL=0` turns it off. `MBX_INCREMENTAL=1` supersedes it by
+handing incremental compilation back to cargo, and `MBX_VERIFY=1` disables it
+for the build being verified.
 
 ## Sizes and durations
 

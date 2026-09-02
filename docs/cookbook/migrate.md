@@ -2,9 +2,9 @@
 
 ## From rust-cache or `actions/cache` over `target/`
 
-A tarball cache and mbx solve the same problem, so replace the step rather
-than stacking them — an archived `target/` restored over a managed one is
-exactly the stale, ever-growing entry mbx exists to replace (see
+A tarball cache and mbx solve the same problem, so replace the step instead of
+stacking them. An archived `target/` restored over a managed one is the stale,
+ever-growing entry mbx replaces (see
 [tarball CI caches](/compared#tarball-ci-caches)).
 
 Before:
@@ -31,16 +31,16 @@ registry. To keep those cached too, use the
 [manual GitHub cache setup](/github-action#manual-github-cache-setup), which
 shares one entry between Cargo's download caches and the mbx store.
 
-Leave release jobs out of the migration entirely: a production release should
-not restore any compiler cache, mbx's or the one being removed. See the
+Leave release jobs out of the migration: a production release should not
+restore any compiler cache, mbx's or the one being removed. See the
 [release warning](/github-action#s3-compatible-bucket).
 
 ## From sccache
 
 Both tools wrap rustc through `RUSTC_WRAPPER`, so they cannot be combined for
-the same build. mbx does not fight for the seat: with `RUSTC_WRAPPER` already
-set it defers to the existing wrapper and warns that the build is not cached.
-Migration is therefore removal — take sccache out of:
+the same build. With `RUSTC_WRAPPER` already set, mbx defers to the existing
+wrapper and warns that the build is not cached. Migration is removal: take
+sccache out of
 
 - `RUSTC_WRAPPER` in CI environments and shell profiles,
 - `build.rustc-wrapper` in `~/.cargo/config.toml`,
@@ -57,6 +57,6 @@ mbx doctor
 
 However you arrive, the first mbx build has an empty store: it restores
 nothing, stores everything, and the summary's
-[could not look up](/cache-results#could-not-look-up) line dominates. Compare
+[could not look up](/cache-results#could-not-look-up) count dominates. Compare
 the second build, and
 [`mbx explain`](/cache-results#bypass) says what any remaining gap is made of.

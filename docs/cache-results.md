@@ -16,15 +16,18 @@ and its successful result was stored.
 ## Could not look up
 
 mbx did not yet have usable dep-info or a prediction from which to derive the
-key. This is common on a genuinely cold build. The action is still stored after
+key. This is common on a cold build. The action is still stored after
 compilation, so calling it a miss would overstate the number of failed lookups.
+The short summary counts these as `not looked up`; the full summary prints a
+`could not look up` line with the reason.
 
 ## Bypass
 
 mbx recognized that it could not model the action exactly and ran the real
-compiler without caching it. Reasons are grouped in the full summary
-(`MBX_SUMMARY=full`); set `MBX_BYPASS_LOG` to a file path for the full
-per-action record.
+compiler without caching it. The short summary's `bypassed` count leaves out
+routine compiler probes (`compiler-query`, `standard-input`, and their `cc-`
+counterparts). Reasons are grouped in the full summary (`MBX_SUMMARY=full`);
+set `MBX_BYPASS_LOG` to a file path for the per-action record.
 
 Run a Cargo command through `mbx explain` to collect those records temporarily,
 group identical causes, and print guidance for every bypass category:
@@ -68,10 +71,10 @@ not bypass counts, because mbx never observed the compiler invocations.
 
 A remote cache request failed and the build carried on without it: unreachable
 host, refused credentials, or a response this client would not accept. mbx never
-fails a build over a remote cache, so these only ever cost hit rate — but a
-remote that is failing every request reports the same hits, misses, and bytes as
-one that was merely empty, which is why the summary counts them. The short
-summary includes the count inline; the full summary explains it:
+fails a build over a remote cache, so these only cost hit rate. The summary
+counts them because a remote that is failing every request reports the same
+hits, misses, and bytes as one that was empty. The short summary includes the
+count inline; the full summary explains it:
 
 ```text
 mbx[cache]: the remote cache failed 4 of its requests; this build ran without what it could not reach, and the warnings above say why
@@ -84,26 +87,26 @@ on a cache that has quietly stopped serving.
 ## Watching a build instead
 
 Everything above describes results reported after a build. To see the same
-outcomes as they are decided — one row per compilation, with the crate it
-belongs to — run [`mbx tui`](/tui) in another terminal. It reads every build
+outcomes as they are decided, one row per compilation with the crate it
+belongs to, run [`mbx tui`](/tui) in another terminal. It reads every build
 on the machine, including ones already running.
 
 ## Reading the hit rate
 
 A build can report a high hit rate among attempted lookups while spending most
-of its time on actions that were not looked up or were bypassed. Read all three
+of its time on actions that were not looked up or were bypassed. Read all the
 summary counts together, and compare wall-clock time when evaluating the
 cache. Set `MBX_SUMMARY=full` when the one-line counts need a breakdown.
 
 A link mbx cannot describe always runs, so its downstream crates may have work
 to do on an otherwise warm build. Native executables, tests, and proc macros on
-Linux, macOS, and Windows, plus binaries, tests, and `cdylib`s for supported self-contained
-WebAssembly targets, may be restored as hits; see
+Linux, macOS, and Windows, plus binaries, tests, and `cdylib`s for supported
+self-contained WebAssembly targets, may be restored as hits; see
 [limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
 
 ## Troubleshooting a low hit rate
 
-Run the build through `mbx explain` first — it collects the per-action
+Run the build through `mbx explain` first. It collects the per-action
 records, groups identical causes, and prints guidance for each category:
 
 ```sh
@@ -112,42 +115,43 @@ mbx explain build --workspace
 
 The usual causes, roughly in the order they show up:
 
-- **The store is cold.** A first build has no dep-info to derive keys from, so
-  "could not look up" dominates and everything is stored rather than restored.
-  Read the hit rate off the second build.
-- **Incremental builds are enabled.** With `MBX_INCREMENTAL=1`, workspace
+- The store is cold. A first build has no dep-info to derive keys from, so
+  "could not look up" dominates and everything is stored. Read the hit rate
+  off the second build.
+- Incremental builds are enabled. With `MBX_INCREMENTAL=1`, workspace
   members compile incrementally, those compilations bypass the cache, and the
   changed artifacts make crates above them miss too. See
   [limits](/limits#incremental-compilations-are-not-cached).
-- **A link could not be described.** Native executables, tests, and proc macros
-  are cached on Linux, macOS, and Windows, and self-contained WebAssembly targets
-  everywhere, but native links with custom or unmodeled inputs still run. A rebuilt dylib can also change the keys of its
-  downstream crates. `mbx explain` reports why the link bypassed; see
+- A link could not be described. Native executables, tests, and proc macros
+  are cached on Linux, macOS, and Windows, and self-contained WebAssembly
+  targets everywhere, but native links with custom or unmodeled inputs still
+  run. A rebuilt dylib can also change the keys of its downstream crates.
+  `mbx explain` reports why the link bypassed; see
   [limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
-- **The inputs actually differ.** A different toolchain, feature set, profile,
-  or `RUSTFLAGS` between two checkouts is a different key, and the summary
+- The inputs differ. A different toolchain, feature set, profile, or
+  `RUSTFLAGS` between two checkouts is a different key, and the summary
   reports it as an ordinary miss. Run `mbx explain --last` to replay the most
-  recent recorded build and list, per missed crate, the key inputs that changed
-  since its last recorded hit. Session history stores hashes rather than source
-  contents or environment values.
-- **Build-script output paths.** A crate that embeds its `OUT_DIR` produces
+  recent recorded build and list, per missed crate, the key inputs that
+  changed since its last recorded hit. Session history stores hashes, not
+  source contents or environment values.
+- Build-script output paths. A crate that embeds its `OUT_DIR` produces
   checkout-specific inputs for its dependents. mbx remaps this by default;
   `MBX_SHARE_OUT_DIR=0` disables that sharing. See
   [limits](/limits#out-dir-sharing-remaps-generated-source-paths).
-- **A build chose its own C compiler, or is cross-compiling.** Setting `CC`,
+- A build chose its own C compiler, or is cross-compiling. Setting `CC`,
   `HOST_CC`, or a target-specific variant leaves that build's C and C++
   compilations uncached, and so does `--target`. Bypass kinds beginning `cc-`
   report anything the C adapter declined to model. See
   [limits](/limits#c-and-c-caching-covers-the-host-compiles-mbx-drives).
-- **CI restored nothing.** On GitHub Actions, check that the cache step
-  actually restored an entry — a changed `cache-generation` or a fresh
-  repository starts empty by design. With a remote cache configured, check the
-  [remote failure](#remote-failure) count too: a remote that is failing every
-  request reports the same zeros as one that is merely empty.
+- CI restored nothing. On GitHub Actions, check that the cache step restored
+  an entry; a changed `cache-generation` or a fresh repository starts empty.
+  With a remote cache configured, check the [remote failure](#remote-failure)
+  count too: a remote that is failing every request reports the same zeros as
+  one that is empty.
 
 ## Compiler time
 
-The session summary reports real compiler time by outcome and an estimate of
+The full summary reports real compiler time by outcome and an estimate of
 the compiler time avoided by cache hits:
 
 ```text
@@ -157,10 +161,10 @@ mbx[cache]: slowest uncached crates: syn 8.90s, regex-syntax 4.90s, serde_derive
 
 The estimate comes from the duration recorded with the successful compilation
 that populated the action prediction; older predictions without a timing hint
-contribute zero rather than being guessed. The five crates with the largest
-cumulative uncached compiler time are listed so optimization work can target
-wall-clock cost instead of action count.
+contribute zero. The five crates with the largest cumulative uncached compiler
+time are listed so optimization work can target wall-clock cost instead of
+action count.
 
-The version 2 JSON statistics report exposes the same data in
+The JSON statistics report exposes the same data in
 `estimated_compiler_duration_avoided_ns`, `compiler`, and
 `slow_compilations`.

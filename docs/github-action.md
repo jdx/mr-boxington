@@ -51,9 +51,9 @@ steps:
 ```
 
 Each command needs a separate `CARGO_TARGET_DIR`; otherwise Cargo's target
-directory lock serializes the supposedly parallel steps. The mbx store and
-scheduler stay shared, so the steps run side by side on one CPU and memory
-budget rather than each Cargo process trying to fill the runner on its own.
+directory lock serializes the parallel steps. The mbx store and scheduler stay
+shared, so the steps run side by side on one CPU and memory budget instead of
+each Cargo process filling the runner on its own.
 
 We saw mise's own lint job finish up to 45% sooner this way. Tuning and
 failure behavior are covered under
@@ -209,15 +209,15 @@ steps:
   - run: mbx build --workspace --all-features
 ```
 
-mbx is installed rather than set up through
-[`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action) here,
+This example installs mbx with `jdx/mise-action` instead of
+[`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action),
 because the action's GitHub Actions cache backend would store the same actions
 a second time. Use one or the other.
 
-mbx still refuses to publish from a pull request. Because a bucket has no
-server to authorize anything, make IAM agree: scope the role's trust policy to
-the branches allowed to assume it, and give pull request jobs a role that can
-only read. See [remote cache](/remote-cache#who-may-publish).
+mbx still refuses to publish from a pull request. A bucket has no server to
+authorize anything, so make IAM agree: scope the role's trust policy to the
+branches allowed to assume it, and give pull request jobs a role that can only
+read. See [remote cache](/remote-cache#who-may-publish).
 
 ::: warning Do not use remote caches for production releases
 A production release may still use `mbx` and its local cache, but should not use
@@ -226,6 +226,6 @@ Release jobs should also avoid restoring or saving the mbx store through
 `actions/cache`.
 :::
 
-For a repository that combines both backends — the server for trusted runs, the
-GitHub cache for fork pull requests — see
+For a repository that combines both backends, the server for trusted runs and
+the GitHub cache for fork pull requests, see
 [CI with fork pull requests](/cookbook/fork-prs).

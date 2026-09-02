@@ -2,8 +2,8 @@
 
 [`jdx/mr-boxington-cache`](https://github.com/jdx/mr-boxington-cache) is the
 self-hostable remote cache server. It implements version 1 of the mbx
-action-cache protocol — immutable blobs, atomic action-result commits,
-namespace isolation, and streaming blob packs — and also serves
+action-cache protocol: immutable blobs, atomic action-result commits,
+namespace isolation, and streaming blob packs. It also serves
 [mise](https://mise.jdx.dev)'s task cache. Any server implementing the
 [protocol](/protocol-compatibility) works with mbx; this page documents the
 reference implementation.
@@ -45,13 +45,13 @@ Every option has a matching environment variable and CLI flag; run
 | `MBX_CACHE_STORAGE` | `filesystem` | `filesystem` or `s3` |
 | `MBX_CACHE_DATA_DIR` | `/var/lib/mbx-cache` | Filesystem blob root |
 | `MBX_CACHE_DATABASE_URL` | `memory://` | PostgreSQL URL or development memory store |
-| `MBX_CACHE_S3_BUCKET` | — | Required for S3 storage |
+| `MBX_CACHE_S3_BUCKET` | none | Required for S3 storage |
 | `MBX_CACHE_S3_PREFIX` | `v1` | Object-key prefix |
 | `MBX_CACHE_S3_ENDPOINT` | AWS default | S3-compatible endpoint |
 | `MBX_CACHE_S3_REGION` | `us-east-1` | S3 region |
 | `MBX_CACHE_S3_PATH_STYLE` | `false` | Enable for MinIO and similar services |
-| `MBX_CACHE_TOKENS_JSON` | — | Static token grants |
-| `MBX_CACHE_OIDC_PROVIDERS_JSON` | — | Trusted OIDC providers and claim grants |
+| `MBX_CACHE_TOKENS_JSON` | none | Static token grants |
+| `MBX_CACHE_OIDC_PROVIDERS_JSON` | none | Trusted OIDC providers and claim grants |
 | `MBX_CACHE_ALLOW_ANONYMOUS` | `false` | Allow access without configured grants |
 | `MBX_CACHE_MAX_BLOB_BYTES` | `5368709120` | Maximum upload size |
 
@@ -78,8 +78,8 @@ Authorization is deny-by-default. Namespace patterns may be an exact name,
 ```
 
 Rotate tokens by deploying the old and new grants together, moving clients to
-the new token, then removing the old grant. Inject the JSON through a secret
-rather than writing it into deployment configuration.
+the new token, then removing the old grant. Inject the JSON through a secret,
+not through deployment configuration.
 
 ### OIDC
 
@@ -109,9 +109,10 @@ The server discovers the issuer's JWKS endpoint and verifies the signature,
 issuer, audience, expiry, not-before time, and subject before applying the
 first matching rule. Rules are alternatives; every claim within a rule must
 match exactly. Pin stable identity claims such as GitHub's numeric
-`repository_owner_id` alongside the repository name — names can be reclaimed,
-the ID cannot — and add `ref` or `environment` claims when only a narrower
-workflow identity should write. Symmetric JWT algorithms are never accepted.
+`repository_owner_id` alongside the repository name, since names can be
+reclaimed and the ID cannot. Add `ref` or `environment` claims when only a
+narrower workflow identity should write. Symmetric JWT algorithms are never
+accepted.
 
 On the client side, mbx acquires the GitHub Actions job token itself: set
 `MBX_REMOTE_OIDC_AUDIENCE`, or use
@@ -128,28 +129,28 @@ mbx-cache --sweep-metadata-older-than-days 35
 ```
 
 Keep the sweep age longer than the storage lifecycle so objects expire first.
-A dangling reference is never fatal — a client that cannot fetch a blob treats
+A dangling reference is never fatal: a client that cannot fetch a blob treats
 the action as a miss and recompiles.
 
 Multiple stateless replicas can run against the same PostgreSQL database and
 S3 bucket. Readiness and liveness probes use `/v1/status`, and `/metrics`
 exposes Prometheus counters for actions, blobs, and blob-pack transfers with
-fixed, low-cardinality labels — namespaces, tokens, and digests never appear
-as labels. The server has no deletion endpoint; retention and disaster
-recovery are administrative concerns (back up PostgreSQL, use bucket
-versioning or replication as required).
+fixed, low-cardinality labels. Namespaces, tokens, and digests never appear as
+labels. The server has no deletion endpoint. Retention and disaster recovery
+are administrative concerns: back up PostgreSQL, and use bucket versioning or
+replication as required.
 
 A server advertising action promises can coordinate identical cold
 compilations across replicas. Claims are short-lived database leases scoped by
 namespace and invocation digest; completion is accepted only after the named
-action result is durable. This state is coordination rather than cache content:
-abandoned claims expire, completed promises are immutable for their retention
-window, and no promise endpoint bypasses the namespace's write authorization.
+action result is durable. Abandoned claims expire, completed promises are
+immutable for their retention window, and no promise endpoint bypasses the
+namespace's write authorization.
 
 ## Protocol
 
-The wire protocol — endpoints, media types, canonical hashing, and the
-evolution rules — is documented in
+The wire protocol (endpoints, media types, canonical hashing, and the
+evolution rules) is documented in
 [protocol compatibility](/protocol-compatibility). The
 [repository README](https://github.com/jdx/mr-boxington-cache) covers
 implementation details beyond it, including blob-pack framing and validation

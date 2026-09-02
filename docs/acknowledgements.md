@@ -6,8 +6,8 @@ kache.
 ## Cargo
 
 [Cargo](https://github.com/rust-lang/cargo) resolves dependencies, plans
-builds, and orchestrates rustc. Its `RUSTC_WRAPPER` integration is what allows
-mbx and other Rust compiler caches to wrap compiler invocations.
+builds, and orchestrates rustc. Its `RUSTC_WRAPPER` integration lets mbx and
+other Rust compiler caches wrap compiler invocations.
 
 ## sccache
 
