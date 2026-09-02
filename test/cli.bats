@@ -84,6 +84,29 @@ setup() {
   assert_output --partial "compiler-query"
 }
 
+@test "explain --last diagnoses a miss from recorded inputs" {
+  cargo init --lib --vcs none missed-project
+  cd missed-project
+
+  run "$MBX_BIN" check
+  assert_success
+
+  touch src/lib.rs
+  run "$MBX_BIN" check
+  assert_success
+
+  printf 'pub fn changed() {}\n' >src/lib.rs
+  run "$MBX_BIN" check
+  assert_success
+
+  run "$MBX_BIN" explain --last
+  assert_success
+  assert_output --partial "last recorded build"
+  assert_output --partial "missed crates"
+  assert_output --partial "inputs changed since the last hit"
+  assert_output --partial "src/lib.rs"
+}
+
 @test "inspection commands offer versioned JSON" {
   run "$MBX_BIN" cache dir --json
   assert_success

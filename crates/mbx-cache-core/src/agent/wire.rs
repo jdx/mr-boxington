@@ -244,6 +244,30 @@ pub enum AgentEvent {
         /// Human-readable single-line diagnostic.
         message: String,
     },
+    /// Cache-key material for the action event immediately following it.
+    ActionDiagnostic {
+        /// Outcome of the action this describes.
+        outcome: String,
+        /// Compiler crate name, when the invocation supplied one.
+        crate_name: Option<String>,
+        /// Privacy-preserving action-key decomposition.
+        diagnostic: ActionDiagnostic,
+    },
+}
+
+/// A privacy-preserving decomposition of an action key.
+///
+/// Values are content digests rather than source or environment contents. The
+/// names are enough to say what changed without copying secrets into session
+/// history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionDiagnostic {
+    /// Complete action-cache key.
+    pub action: CacheDigest,
+    /// Non-file key components, named for display.
+    pub components: BTreeMap<String, CacheDigest>,
+    /// Normalized input path to content digest.
+    pub inputs: BTreeMap<String, CacheDigest>,
 }
 
 /// A sink for [`AgentEvent`]s observed during one session.

@@ -9,7 +9,8 @@
 use crate::session::{self, STAGING_ENV};
 use eyre::{Result, WrapErr as _, bail};
 use mbx_cache_core::{
-    AgentRequest, AgentResponse, CacheDigest, CacheFileNode, RestoreStats, canonical_json,
+    ActionDiagnostic, AgentRequest, AgentResponse, CacheDigest, CacheFileNode, RestoreStats,
+    canonical_json,
 };
 use mbx_cache_rustc::PathMapping;
 use serde::Serialize;
@@ -226,12 +227,29 @@ pub(crate) fn resolve_executable(executable: &OsStr) -> Result<PathBuf> {
 
 /// Tell the session a cached result was used.
 pub(crate) fn record_action_hit(action: &CacheDigest, restore: RestoreStats, crate_name: &str) {
-    let responses = session::request_agent(&[AgentRequest::RecordActionHit {
+    record_action_hit_with_diagnostic(action, restore, crate_name, None);
+}
+
+pub(crate) fn record_action_hit_with_diagnostic(
+    action: &CacheDigest,
+    restore: RestoreStats,
+    crate_name: &str,
+    diagnostic: Option<ActionDiagnostic>,
+) {
+    let mut requests = Vec::new();
+    if let Some(diagnostic) = diagnostic
+        && let Some(request) =
+            session::action_diagnostic_request("hit", Some(crate_name), diagnostic)
+    {
+        requests.push(request);
+    }
+    requests.push(AgentRequest::RecordActionHit {
         action: action.clone(),
         restore,
         crate_name: Some(crate_name.to_string()),
-    }]);
-    match responses.map(|responses| responses.into_iter().next()) {
+    });
+    let responses = session::request_agent(&requests);
+    match responses.map(|mut responses| responses.pop()) {
         Ok(Some(AgentResponse::ActionHitRecorded)) => {}
         Ok(Some(AgentResponse::Error { message })) => {
             session::report_shim_warning(&format!("hit was not recorded: {message}"));

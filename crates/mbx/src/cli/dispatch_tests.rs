@@ -95,7 +95,7 @@ fn a_toolchain_selects_one_for_every_command_that_reaches_a_compiler() {
         panic!("explain should be reserved by mbx");
     };
     assert_eq!(
-        with_toolchain(Some("nightly"), args.arguments()),
+        with_toolchain(Some("nightly"), args.arguments().unwrap()),
         ["+nightly", "clippy"]
     );
 }
@@ -170,9 +170,20 @@ fn explain_forwards_cargo_flags_and_the_rustc_separator() {
         panic!("explain should be reserved by mbx");
     };
     assert_eq!(
-        arguments.arguments(),
+        arguments.arguments().unwrap(),
         ["clippy", "--workspace", "--", "-D", "warnings"]
     );
+}
+
+#[test]
+fn explain_last_needs_no_cargo_command() {
+    let argv = ["mbx", "explain", "--last"].map(std::ffi::OsStr::new);
+    let cli = Cli::try_parse_from(&argv).unwrap();
+    let Commands::Explain(arguments) = cli.command else {
+        panic!("explain should be reserved by mbx");
+    };
+
+    assert!(arguments.is_last());
 }
 
 #[test]

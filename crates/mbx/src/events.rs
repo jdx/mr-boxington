@@ -21,6 +21,7 @@
 
 use crate::util::random_string;
 use eyre::{Context, Result};
+use mbx_cache_core::ActionDiagnostic;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Write;
@@ -68,6 +69,8 @@ pub(crate) enum SessionEvent {
         duration_ns: u64,
         #[serde(default, skip_serializing_if = "ActionDetail::is_empty")]
         detail: ActionDetail,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<ActionDiagnostic>,
     },
     /// The stream hit its size cap. Counters continue; rows stop.
     Truncated { v: u8, ts_ms: u64 },
@@ -334,6 +337,18 @@ impl EventWriter {
         duration_ns: u64,
         detail: ActionDetail,
     ) {
+        self.action_with_diagnostic(outcome, crate_name, duration_ns, detail, None);
+    }
+
+    /// Record one accounted compilation with cache-key diagnostics.
+    pub(crate) fn action_with_diagnostic(
+        &self,
+        outcome: ActionOutcome,
+        crate_name: Option<String>,
+        duration_ns: u64,
+        detail: ActionDetail,
+        diagnostic: Option<ActionDiagnostic>,
+    ) {
         self.write(&SessionEvent::Action {
             v: EVENT_VERSION,
             ts_ms: now_ms(),
@@ -341,6 +356,7 @@ impl EventWriter {
             crate_name,
             duration_ns,
             detail,
+            diagnostic,
         });
     }
 

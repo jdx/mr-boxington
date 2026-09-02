@@ -371,12 +371,74 @@ impl AgentEventObserver for RecordingObserver {
     }
 }
 
+#[test]
+fn diagnostic_and_action_events_are_emitted_as_one_pair() {
+    let directory = tempfile::tempdir().unwrap();
+    let observer = Arc::new(RecordingObserver::default());
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version")
+        .with_observer(observer.clone());
+    let barrier = Arc::new(std::sync::Barrier::new(9));
+    let threads = (0..8)
+        .map(|index| {
+            let agent = agent.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let crate_name = format!("unit-{index}");
+                barrier.wait();
+                agent.emit_action(
+                    Some(AgentEvent::ActionDiagnostic {
+                        outcome: "miss".into(),
+                        crate_name: Some(crate_name.clone()),
+                        diagnostic: ActionDiagnostic {
+                            action: CacheDigest::blake3(crate_name.as_bytes()),
+                            components: BTreeMap::new(),
+                            inputs: BTreeMap::new(),
+                        },
+                    }),
+                    AgentEvent::CompilerInvocation {
+                        outcome: "miss".into(),
+                        crate_name: Some(crate_name),
+                        duration_ns: 1,
+                    },
+                );
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    let events = observer.events.lock().unwrap();
+    assert_eq!(events.len(), 16);
+    for pair in events.chunks_exact(2) {
+        assert!(matches!(
+            pair,
+            [
+                AgentEvent::ActionDiagnostic {
+                    crate_name: Some(diagnostic_crate),
+                    ..
+                },
+                AgentEvent::CompilerInvocation {
+                    crate_name: Some(action_crate),
+                    ..
+                }
+            ] if diagnostic_crate == action_crate
+        ));
+    }
+}
+
 #[tokio::test]
 async fn reports_each_accounted_decision_to_an_observer() {
     let directory = tempfile::tempdir().unwrap();
     let observer = Arc::new(RecordingObserver::default());
     let agent = CacheAgent::new(directory.path().join("cache"), "test-version")
         .with_observer(observer.clone());
+    let diagnostic = ActionDiagnostic {
+        action: CacheDigest::blake3(b"action"),
+        components: BTreeMap::new(),
+        inputs: BTreeMap::new(),
+    };
 
     agent
         .respond(AgentRequest::RecordBypass {
@@ -385,11 +447,23 @@ async fn reports_each_accounted_decision_to_an_observer() {
         .await;
     agent.respond(AgentRequest::RecordUnconsulted).await;
     agent
-        .respond(AgentRequest::RecordCompilerInvocation {
-            outcome: "miss".into(),
-            crate_name: Some("serde".into()),
-            duration_ns: 42,
-        })
+        .handle_requests([
+            AgentRequest::RecordWarning {
+                message: format!(
+                    "{ACTION_DIAGNOSTIC_PREFIX}{}",
+                    serde_json::json!({
+                        "outcome": "miss",
+                        "crate_name": "serde",
+                        "diagnostic": diagnostic,
+                    })
+                ),
+            },
+            AgentRequest::RecordCompilerInvocation {
+                outcome: "miss".into(),
+                crate_name: Some("serde".into()),
+                duration_ns: 42,
+            },
+        ])
         .await;
     agent
         .respond(AgentRequest::RecordActionVerification {
@@ -404,13 +478,23 @@ async fn reports_each_accounted_decision_to_an_observer() {
         [
             AgentEvent::Bypass { kind },
             AgentEvent::Unconsulted,
+            AgentEvent::ActionDiagnostic {
+                outcome: diagnostic_outcome,
+                crate_name: Some(diagnostic_crate),
+                diagnostic: observed,
+            },
             AgentEvent::CompilerInvocation {
                 outcome,
                 crate_name: Some(crate_name),
                 duration_ns: 42,
             },
             AgentEvent::Verification { matched: false, .. },
-        ] if kind == "incremental" && outcome == "miss" && crate_name == "serde"
+        ] if kind == "incremental"
+            && diagnostic_outcome == "miss"
+            && diagnostic_crate == "serde"
+            && observed == &diagnostic
+            && outcome == "miss"
+            && crate_name == "serde"
     ));
 }
 
@@ -423,15 +507,32 @@ async fn a_rejected_hit_reports_no_event() {
 
     // A hit for an action the store never had is an error, and an error is not
     // an outcome an observer should see.
-    let response = agent
-        .respond(AgentRequest::RecordActionHit {
-            action: CacheDigest::blake3(b"absent"),
-            restore: RestoreStats::default(),
-            crate_name: Some("serde".into()),
-        })
+    let diagnostic = ActionDiagnostic {
+        action: CacheDigest::blake3(b"absent"),
+        components: BTreeMap::new(),
+        inputs: BTreeMap::new(),
+    };
+    let responses = agent
+        .handle_requests([
+            AgentRequest::RecordWarning {
+                message: format!(
+                    "{ACTION_DIAGNOSTIC_PREFIX}{}",
+                    serde_json::json!({
+                        "outcome": "hit",
+                        "crate_name": "serde",
+                        "diagnostic": diagnostic,
+                    })
+                ),
+            },
+            AgentRequest::RecordActionHit {
+                action: CacheDigest::blake3(b"absent"),
+                restore: RestoreStats::default(),
+                crate_name: Some("serde".into()),
+            },
+        ])
         .await;
 
-    assert!(matches!(response, AgentResponse::Error { .. }));
+    assert!(matches!(responses[1], AgentResponse::Error { .. }));
     assert!(observer.events.lock().unwrap().is_empty());
 }
 
