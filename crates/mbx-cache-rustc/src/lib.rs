@@ -843,6 +843,8 @@ pub struct CompilerIdentity {
     pub rustc_version: String,
     /// Compiler host target triple.
     pub host: String,
+    /// Identity of a compiler driver layered over rustc, when one is in use.
+    pub driver: Option<String>,
 }
 
 /// One file input paired with the digest used in the action key.
@@ -1125,6 +1127,8 @@ struct CompilerDescriptor {
     toolchain: String,
     rustc_version: String,
     host: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    driver: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -1976,6 +1980,7 @@ impl<'a> ActionBuilder<'a> {
                 toolchain: self.context.compiler.toolchain.clone(),
                 rustc_version: self.context.compiler.rustc_version.clone(),
                 host: self.context.compiler.host.clone(),
+                driver: self.context.compiler.driver.clone(),
             },
             arguments,
             required_inputs,

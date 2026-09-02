@@ -1,6 +1,36 @@
 use super::*;
 
 #[test]
+fn clippy_workspace_wrapper_is_peeled_before_rustc_parsing() {
+    let arguments = vec![
+        Path::new("toolchain")
+            .join(format!("rustc{}", std::env::consts::EXE_SUFFIX))
+            .into_os_string(),
+        "--crate-name".into(),
+        "fixture".into(),
+        "src/lib.rs".into(),
+    ];
+    let driver =
+        Path::new("toolchain").join(format!("clippy-driver{}", std::env::consts::EXE_SUFFIX));
+
+    let (wrapper_argument, compiler_arguments) =
+        workspace_wrapper_arguments(driver.as_os_str(), &arguments);
+
+    assert_eq!(wrapper_argument, Some(arguments[0].as_os_str()));
+    assert_eq!(compiler_arguments, &arguments[1..]);
+}
+
+#[test]
+fn an_unrecognized_workspace_wrapper_argument_is_left_for_transparent_execution() {
+    let arguments = vec!["custom-compiler".into(), "src/lib.rs".into()];
+    let (wrapper_argument, compiler_arguments) =
+        workspace_wrapper_arguments(OsStr::new("custom-driver"), &arguments);
+
+    assert_eq!(wrapper_argument, None);
+    assert_eq!(compiler_arguments, arguments);
+}
+
+#[test]
 fn ambiguous_build_script_sidecars_are_refused() {
     let directory = tempfile::tempdir().unwrap();
     let invoked = directory.path().join(format!(

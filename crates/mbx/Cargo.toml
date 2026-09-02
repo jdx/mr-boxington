@@ -27,7 +27,7 @@ memchr = "2"
 mbx-cache-core = { path = "../mbx-cache-core", version = "0.10.3", default-features = false }
 mbx-cache-cargo = { path = "../mbx-cache-cargo", version = "0.1.12", default-features = false }
 mbx-cache-cc = { path = "../mbx-cache-cc", version = "0.10.3", default-features = false }
-mbx-cache-rustc = { path = "../mbx-cache-rustc", version = "0.10.3", default-features = false }
+mbx-cache-rustc = { path = "../mbx-cache-rustc", version = "0.11.0", default-features = false }
 mbx-cache-store = { path = "../mbx-cache-store", version = "0.1.11", default-features = false }
 rand = "0.10"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }

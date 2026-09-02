@@ -299,7 +299,8 @@ fn cargo_with(
         .env_remove("MBX_REAL_CXX")
         .env_remove("MBX_SOCKET")
         .env_remove("RUSTC_WRAPPER")
-        .env_remove("RUSTC_WORKSPACE_WRAPPER");
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("CLIPPY_CONF_DIR");
     for (name, value) in settings {
         command.env(name, value);
     }
@@ -362,6 +363,131 @@ fn count(stats: &serde_json::Value, field: &str) -> u64 {
     stats[field]
         .as_u64()
         .unwrap_or_else(|| panic!("{field} should be a number"))
+}
+
+#[test]
+fn clippy_workspace_compilations_restore_and_track_clippy_toml() {
+    if !Command::new(cargo())
+        .args(["clippy", "--version"])
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        return;
+    }
+    let store = tempfile::tempdir().unwrap();
+    let appearance_store = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let changed = tempfile::tempdir().unwrap();
+    let changed_flags = tempfile::tempdir().unwrap();
+    let without_config = tempfile::tempdir().unwrap();
+    let added_config = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    for project in [
+        &first,
+        &second,
+        &changed,
+        &changed_flags,
+        &without_config,
+        &added_config,
+    ] {
+        write_project(project.path());
+    }
+    for project in [&first, &second, &changed_flags] {
+        std::fs::write(
+            project.path().join("clippy.toml"),
+            "too-many-arguments-threshold = 7\n",
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        changed.path().join("clippy.toml"),
+        "too-many-arguments-threshold = 8\n",
+    )
+    .unwrap();
+    std::fs::write(
+        added_config.path().join("clippy.toml"),
+        "too-many-arguments-threshold = 7\n",
+    )
+    .unwrap();
+
+    let (cold, cold_stderr) = cargo_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("clippy-cold.json"),
+        &["clippy", "--offline"],
+        &[],
+    );
+    assert_eq!(count(&cold, "hits"), 0, "a cold clippy run cannot hit");
+    assert!(
+        cold["bypasses"].get("multiple-inputs").is_none(),
+        "the real rustc path must not be parsed as a source: {cold}"
+    );
+    assert!(
+        count(&cold, "stored_bytes") > 0,
+        "the workspace compilation should be stored: {cold}\n{cold_stderr}"
+    );
+
+    let warm = cargo_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("clippy-warm.json"),
+        &["clippy", "--offline"],
+        &[],
+    )
+    .0;
+    assert!(count(&warm, "hits") > 0, "clippy should restore: {warm}");
+
+    let changed = cargo_with(
+        changed.path(),
+        store.path(),
+        &reports.path().join("clippy-changed.json"),
+        &["clippy", "--offline"],
+        &[],
+    )
+    .0;
+    assert!(
+        count(&changed, "misses") > 0,
+        "changed clippy.toml must miss: {changed}"
+    );
+
+    let changed_flags = cargo_with(
+        changed_flags.path(),
+        store.path(),
+        &reports.path().join("clippy-changed-flags.json"),
+        &["clippy", "--offline", "--", "-D", "warnings"],
+        &[],
+    )
+    .0;
+    assert!(
+        count(&changed_flags, "misses") > 0,
+        "changed CLIPPY_ARGS must miss: {changed_flags}"
+    );
+
+    let without_config = cargo_with(
+        without_config.path(),
+        appearance_store.path(),
+        &reports.path().join("clippy-without-config.json"),
+        &["clippy", "--offline"],
+        &[],
+    )
+    .0;
+    assert!(
+        count(&without_config, "stored_bytes") > 0,
+        "the no-config action should be stored: {without_config}"
+    );
+    let added_config = cargo_with(
+        added_config.path(),
+        appearance_store.path(),
+        &reports.path().join("clippy-added-config.json"),
+        &["clippy", "--offline"],
+        &[],
+    )
+    .0;
+    assert!(
+        count(&added_config, "misses") > 0,
+        "adding clippy.toml must miss: {added_config}"
+    );
 }
 
 #[test]

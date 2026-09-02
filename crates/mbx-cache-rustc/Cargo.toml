@@ -1,6 +1,6 @@
 [package]
 name = "mbx-cache-rustc"
-version = "0.10.3"
+version = "0.11.0"
 description = "mbx internals: conservative rustc action analysis and key construction. No API stability -- use the mbx CLI or mbx-cache-protocol."
 edition.workspace = true
 rust-version.workspace = true

@@ -105,6 +105,7 @@ fn context(inputs: &[(&str, &str)]) -> ActionContext {
             toolchain: "core:rust@1.97.1".into(),
             rustc_version: "1.97.1 (8bab26f4f 2026-07-14)".into(),
             host: "x86_64-unknown-linux-gnu".into(),
+            driver: None,
         },
         working_dir: workspace(),
         path_mappings: vec![
@@ -165,6 +166,31 @@ fn parses_a_cargo_library_invocation() {
     assert!(json.contains(r#""--out-dir=${target}/debug/deps""#));
     assert!(json.contains(r#""--extern=serde=${target}/debug/deps/libserde.rlib""#));
     assert_eq!(action.digest.algorithm, "blake3");
+}
+
+#[test]
+fn compiler_driver_identity_distinguishes_clippy_actions() {
+    let invocation = common_invocation();
+    let inputs = [
+        ("src/lib.rs", "source"),
+        ("target/debug/deps/libserde.rlib", "serde"),
+    ];
+    let rustc = invocation.action(context(&inputs)).unwrap();
+    let mut clippy_context = context(&inputs);
+    clippy_context.compiler.driver = Some("clippy 0.1.97 (8bab26f4f6 2026-07-14)".into());
+    let clippy = invocation.action(clippy_context).unwrap();
+
+    assert_ne!(clippy.digest, rustc.digest);
+    assert!(
+        String::from_utf8(clippy.bytes)
+            .unwrap()
+            .contains(r#""driver":"clippy 0.1.97 (8bab26f4f6 2026-07-14)""#)
+    );
+    assert!(
+        !String::from_utf8(rustc.bytes)
+            .unwrap()
+            .contains(r#""driver""#)
+    );
 }
 
 #[test]
@@ -634,6 +660,7 @@ fn predicts_inputs_without_reusing_stale_contents() {
         toolchain: "stable".into(),
         rustc_version: "rustc test".into(),
         host: "test-host".into(),
+        driver: None,
     };
     let context = ActionContext {
         compiler,
