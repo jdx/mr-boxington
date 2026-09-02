@@ -325,20 +325,26 @@ fn link_path_shim(executable: &Path, destination: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn link_path_shim(executable: &Path, destination: &Path) -> Result<()> {
+pub(super) fn link_path_shim(executable: &Path, destination: &Path) -> Result<()> {
     // Windows cannot replace an executable while another process has it open,
     // so a stable existing shim is preferable to a racy in-place upgrade. A
     // missing shim is pinned to this binary by hard link, with copy fallback.
     if destination.is_file() {
         return Ok(());
     }
-    if let Err(link_error) = std::fs::hard_link(executable, destination) {
-        std::fs::copy(executable, destination).wrap_err_with(|| {
-            format!(
-                "failed to install the shim {} by hard link ({link_error}) or copy",
-                destination.display()
-            )
-        })?;
+    match std::fs::hard_link(executable, destination) {
+        Ok(()) => {}
+        // Another session won the installation race. Copying onto that hard
+        // link would copy the executable onto itself and can truncate it.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(link_error) => {
+            std::fs::copy(executable, destination).wrap_err_with(|| {
+                format!(
+                    "failed to install the shim {} by hard link ({link_error}) or copy",
+                    destination.display()
+                )
+            })?;
+        }
     }
     Ok(())
 }
