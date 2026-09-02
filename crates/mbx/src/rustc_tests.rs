@@ -1005,3 +1005,45 @@ fn a_ledger_answer_decides_in_place_without_reading() {
         &FixedLedger(other),
     ));
 }
+
+/// The budget is a backstop, so it removes state only once the state has
+/// actually passed it. A budget lower than what one compilation leaves behind
+/// would discard the state before every compile, and the edit loop would be a
+/// full recompilation labelled incremental.
+#[test]
+fn incremental_state_is_discarded_only_past_its_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("unit");
+    let session = directory.join("s-session");
+    std::fs::create_dir_all(&session).unwrap();
+    std::fs::write(session.join("dep-graph.bin"), vec![0_u8; 4096]).unwrap();
+
+    // Inside the budget, and without one, the state stays where it is.
+    assert_eq!(
+        prepare_incremental_directory(&directory, Some(1 << 20)).unwrap(),
+        None
+    );
+    assert!(session.join("dep-graph.bin").is_file());
+    assert_eq!(
+        prepare_incremental_directory(&directory, None).unwrap(),
+        None
+    );
+    assert!(session.join("dep-graph.bin").is_file());
+
+    // Past it, the state goes and the caller is told how much went, with the
+    // directory left ready for the compilation that follows.
+    assert_eq!(
+        prepare_incremental_directory(&directory, Some(1024)).unwrap(),
+        Some(4096)
+    );
+    assert!(directory.is_dir());
+    assert!(!session.exists());
+
+    // A directory that does not exist yet is simply created.
+    let fresh = root.path().join("fresh");
+    assert_eq!(
+        prepare_incremental_directory(&fresh, Some(1)).unwrap(),
+        None
+    );
+    assert!(fresh.is_dir());
+}
