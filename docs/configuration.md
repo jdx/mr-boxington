@@ -207,19 +207,21 @@ disables it because a fresh runner has no incremental state to reuse.
 ## Learned incremental reuse
 
 The crate you are editing misses the cache on every build, because its content
-is new every time. After three consecutive compilations whose sources changed,
-mbx compiles that crate with its own incremental state rather than from
-scratch, and keeps the result out of the shared cache — an incremental artifact
-describes one checkout's edit history, not its source. The build reports those
-compilations as `incremental` and says how many were held back.
+is new every time. On the first source edit to a crate inside the workspace,
+mbx compiles that crate with its own incremental state rather than from scratch,
+and keeps the result out of the shared cache — an incremental artifact describes
+one checkout's edit history, not its source. Crates outside the workspace retain
+the conservative three-change threshold. The build reports those compilations
+as `incremental` and says how many were held back.
 
 The trigger is the crate's own sources, not its cache key, so a rebuilt
 dependency — which changes the keys of everything above it — keeps compiling
 and publishing normally, and so does a miss on unchanged sources (a wiped
-`target/`, a first build in a new checkout). The record is private to each
-checkout, living in `mbx-incremental/` inside that build's target directory
-beside the incremental state itself; a managed target reclaims both, and each
-crate's incremental state is discarded once it passes 1 GiB.
+`target/`, a first build in a new checkout). The record and state are private
+to each checkout, living under `incremental/` in mbx's cache directory so
+`cargo clean` does not discard the next edit's speedup. Each crate's
+incremental state is discarded once it passes 1 GiB, and normal garbage
+collection removes state for deleted or expired checkouts.
 
 CI never does this, for the same reason it never compiles incrementally: there
 is no earlier state to build on. `MBX_LEARNED_INCREMENTAL=0` turns it off, and

@@ -69,6 +69,7 @@ pub(crate) const VERIFY_ENV: &str = "MBX_VERIFY";
 pub(crate) const SHARE_OUT_DIR_ENV: &str = "MBX_SHARE_OUT_DIR";
 pub(crate) const BUILD_SCRIPT_EXECUTION_ENV: &str = "MBX_BUILD_SCRIPT_EXECUTION";
 pub(crate) const LEARNED_INCREMENTAL_ENV: &str = "MBX_LEARNED_INCREMENTAL";
+pub(crate) const INCREMENTAL_ROOT_ENV: &str = "MBX_INCREMENTAL_ROOT";
 pub const CACHE_LINKS_ENV: &str = "MBX_CACHE_LINKS";
 /// Group completed builds for one later cache export, used by CI actions.
 pub const CACHE_EXPORT_GROUP_ENV: &str = "MBX_CACHE_EXPORT_GROUP";
@@ -100,6 +101,7 @@ pub struct CacheSession {
     /// What the shims need to draw compile permits from the machine-wide pool.
     scheduler_env: Vec<(String, String)>,
     store: PathBuf,
+    incremental_root: PathBuf,
     started: Instant,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
     server: Mutex<Option<JoinHandle<Result<()>>>>,
@@ -166,6 +168,7 @@ impl CacheSession {
             events,
             scheduler_env: crate::scheduler::session_environment_with_jobs(config, cargo_jobs),
             store,
+            incremental_root: config.cache_dir.join("incremental"),
             started: Instant::now(),
             shutdown: Mutex::new(Some(shutdown_tx)),
             server: Mutex::new(Some(server)),
@@ -228,6 +231,25 @@ impl CacheSession {
             TARGET_DIR_ENV.into(),
             target_dir.to_string_lossy().into_owned(),
         );
+        // Always replace an inherited value. If recording this checkout fails,
+        // the shim must use its target-local fallback rather than another
+        // checkout's persistent state.
+        environment.insert(
+            INCREMENTAL_ROOT_ENV.into(),
+            target_dir
+                .join("mbx-incremental")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        match crate::incremental::touch(&self.incremental_root, workspace_root) {
+            Ok(root) => {
+                environment.insert(
+                    INCREMENTAL_ROOT_ENV.into(),
+                    root.to_string_lossy().into_owned(),
+                );
+            }
+            Err(error) => warn!("incremental state was not recorded: {error:#}"),
+        }
         environment.insert(SOCKET_ENV.into(), self.socket.clone());
         environment.insert(
             STAGING_ENV.into(),

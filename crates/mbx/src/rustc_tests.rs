@@ -27,37 +27,51 @@ fn only_a_run_of_changed_sources_earns_incremental_state() {
 
     // Nothing recorded here yet: a first compilation in a checkout is not
     // evidence of anything, and neither is a wiped target directory.
-    assert_eq!(learned_plan(None, &now, true).streak, 0);
+    assert_eq!(
+        learned_plan(None, &now, true, HOT_STREAK_THRESHOLD).streak,
+        0
+    );
 
     // Recorded against the sources this compilation already has, so nobody
     // edited it -- something else lost the result, and recompiling normally
     // restores it for everyone.
     let unchanged = churn("current sources", HOT_STREAK_THRESHOLD);
-    let plan = learned_plan(Some(&unchanged), &now, true);
+    let plan = learned_plan(Some(&unchanged), &now, true, HOT_STREAK_THRESHOLD);
     assert_eq!(plan.streak, 0);
     assert!(!plan.hot);
 
     // Changed sources climb the streak, and only its last step is hot.
     for previous in 0..HOT_STREAK_THRESHOLD - 1 {
         let recorded = churn("older sources", previous);
-        let plan = learned_plan(Some(&recorded), &now, true);
+        let plan = learned_plan(Some(&recorded), &now, true, HOT_STREAK_THRESHOLD);
         assert_eq!(plan.streak, previous + 1);
         assert!(!plan.hot);
     }
     let recorded = churn("older sources", HOT_STREAK_THRESHOLD - 1);
-    assert!(learned_plan(Some(&recorded), &now, true).hot);
+    assert!(learned_plan(Some(&recorded), &now, true, HOT_STREAK_THRESHOLD).hot);
 
     // The streak is a state rather than a tally, so it stops at the threshold.
     let saturated = churn("older sources", HOT_STREAK_THRESHOLD);
     assert_eq!(
-        learned_plan(Some(&saturated), &now, true).streak,
+        learned_plan(Some(&saturated), &now, true, HOT_STREAK_THRESHOLD).streak,
         HOT_STREAK_THRESHOLD
     );
 
     // Disabled, the streak is still tracked so that enabling it later works.
-    let plan = learned_plan(Some(&saturated), &now, false);
+    let plan = learned_plan(Some(&saturated), &now, false, HOT_STREAK_THRESHOLD);
     assert_eq!(plan.streak, HOT_STREAK_THRESHOLD);
     assert!(!plan.hot);
+}
+
+#[test]
+fn one_changed_workspace_source_is_hot() {
+    let now = CacheDigest::blake3(b"current sources");
+    let recorded = churn("older sources", 0);
+
+    let plan = learned_plan(Some(&recorded), &now, true, WORKSPACE_HOT_STREAK_THRESHOLD);
+
+    assert_eq!(plan.streak, 1);
+    assert!(plan.hot);
 }
 
 /// The record belongs to one checkout, so a sibling worktree that cannot read

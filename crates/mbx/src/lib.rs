@@ -48,6 +48,7 @@ pub mod util;
 
 mod build_script;
 mod cc;
+mod incremental;
 mod linker;
 mod materialize;
 mod rustc;
