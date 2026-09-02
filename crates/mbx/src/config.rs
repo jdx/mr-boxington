@@ -119,7 +119,8 @@ pub(crate) struct RawConfig {
     /// Let local workspace members compile incrementally.
     #[usage(env = "MBX_INCREMENTAL", default = false)]
     incremental: bool,
-    /// Use this jdxld binary for native Rust links and keep its worker alive for the build session.
+    /// On Linux, use this jdxld binary for native Rust links and keep its worker alive for the
+    /// build session.
     #[usage(env = "MBX_JDXLD")]
     jdxld: Option<PathBuf>,
     /// Compile crates that keep missing the cache with changed content
