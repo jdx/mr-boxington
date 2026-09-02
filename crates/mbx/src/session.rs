@@ -104,6 +104,9 @@ pub struct CacheSession {
     scheduler_env: Vec<(String, String)>,
     store: PathBuf,
     incremental_root: PathBuf,
+    /// The checkout's private state directory once `begin` has claimed it,
+    /// where the file-digest ledger is saved when the session finishes.
+    ledger_dir: Mutex<Option<PathBuf>>,
     started: Instant,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
     server: Mutex<Option<JoinHandle<Result<()>>>>,
@@ -184,6 +187,7 @@ impl CacheSession {
             scheduler_env: crate::scheduler::session_environment_with_jobs(config, cargo_jobs),
             store,
             incremental_root: config.cache_dir.join("incremental"),
+            ledger_dir: Mutex::new(None),
             started: Instant::now(),
             shutdown: Mutex::new(Some(shutdown_tx)),
             server: Mutex::new(Some(server)),
@@ -257,6 +261,14 @@ impl CacheSession {
                     INCREMENTAL_ROOT_ENV.into(),
                     root.to_string_lossy().into_owned(),
                 );
+                // Seeded before any shim can ask: the first compilation of the
+                // crate being edited is the one that would otherwise read every
+                // unchanged dependency again.
+                let seeded = self
+                    .agent
+                    .seed_file_digests(crate::digest_ledger::load(&root));
+                debug!("file-digest ledger seeded with {seeded} entries");
+                *self.ledger_dir.lock().unwrap() = Some(root);
             }
             Err(error) => warn!("incremental state was not recorded: {error:#}"),
         }
@@ -494,6 +506,15 @@ impl CacheSession {
         // downloads were holding.
         self.agent.wait_for_uploads().await;
         served?;
+        // Saved after the shims are done and before the summary, so the next
+        // session in this checkout starts from everything this one hashed.
+        // Best-effort like the ledger itself.
+        if let Some(ledger_dir) = self.ledger_dir.lock().unwrap().take() {
+            match crate::digest_ledger::save(&ledger_dir, self.agent.file_digests()) {
+                Ok(count) => debug!("file-digest ledger saved with {count} entries"),
+                Err(error) => warn!("the file-digest ledger was not saved: {error:#}"),
+            }
+        }
         let mut stats = self.agent.stats();
         stats.session_duration_ns = duration_ns(self.started.elapsed());
         // The same totals the summary reports, so a reader of a finished stream

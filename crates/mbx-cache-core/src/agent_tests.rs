@@ -3966,3 +3966,94 @@ async fn file_digest_records_are_validated() {
         "a length that disagrees with the digest must be refused"
     );
 }
+
+/// A seeded ledger answers like one this session filled, drops what it cannot
+/// vouch for, and never overrides what this session recorded itself.
+#[test]
+fn seeded_file_digests_answer_lookups_and_yield_to_this_sessions_records() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    let file = directory.path().join("libdep.rlib");
+    std::fs::write(&file, b"rlib bytes").unwrap();
+    let identity = FileIdentity::describe(&file, &std::fs::metadata(&file).unwrap()).unwrap();
+    let digest = CacheDigest::blake3(b"rlib bytes");
+    // A digest hashing could never produce, sized like the file so the ledger
+    // accepts it: whichever entry answers is then unambiguous.
+    let own = RecordedFileDigest {
+        file: identity.clone(),
+        digest: CacheDigest {
+            algorithm: "blake3".into(),
+            hash: "a".repeat(64),
+            size: identity.len,
+        },
+    };
+    let wrong_length = RecordedFileDigest {
+        file: FileIdentity {
+            len: identity.len + 1,
+            ..identity.clone()
+        },
+        digest: digest.clone(),
+    };
+    let relative = RecordedFileDigest {
+        file: FileIdentity {
+            path: "relative/libdep.rlib".into(),
+            ..identity.clone()
+        },
+        digest: digest.clone(),
+    };
+
+    // Recorded by a shim first: the seed must not replace it.
+    agent
+        .record_file_digests(FileDigestScope::Content, vec![own.clone()])
+        .unwrap();
+    let seeded = agent.seed_file_digests(vec![
+        (
+            FileDigestScope::Content,
+            RecordedFileDigest {
+                file: identity.clone(),
+                digest: digest.clone(),
+            },
+        ),
+        (
+            FileDigestScope::CcInput,
+            RecordedFileDigest {
+                file: identity.clone(),
+                digest: digest.clone(),
+            },
+        ),
+        (FileDigestScope::Content, wrong_length),
+        (FileDigestScope::Content, relative),
+    ]);
+    assert_eq!(seeded, 1, "only the cc entry was new and valid");
+
+    let AgentResponse::FileDigests { digests } = agent
+        .find_file_digests(FileDigestScope::Content, vec![identity.clone()])
+        .unwrap()
+    else {
+        panic!("expected digests");
+    };
+    assert_eq!(digests, vec![Some(own.digest.clone())]);
+    let AgentResponse::FileDigests { digests } = agent
+        .find_file_digests(FileDigestScope::CcInput, vec![identity.clone()])
+        .unwrap()
+    else {
+        panic!("expected digests");
+    };
+    assert_eq!(digests, vec![Some(digest.clone())]);
+
+    let mut exported = agent.file_digests();
+    exported.sort_by_key(|(scope, _)| *scope);
+    assert_eq!(
+        exported,
+        vec![
+            (FileDigestScope::Content, own),
+            (
+                FileDigestScope::CcInput,
+                RecordedFileDigest {
+                    file: identity,
+                    digest
+                }
+            ),
+        ]
+    );
+}
