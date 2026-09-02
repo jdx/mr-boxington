@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.2](https://github.com/jdx/mr-boxington/compare/v1.4.1...v1.4.2) - 2026-09-02
+
+### Fixed
+
+- *(remote)* bound what a build loses to failed cache reads ([#292](https://github.com/jdx/mr-boxington/pull/292))
+- keep learned incremental state for large crates ([#282](https://github.com/jdx/mr-boxington/pull/282))
+- *(setup)* preserve native compiler path when disabled ([#281](https://github.com/jdx/mr-boxington/pull/281))
+
+### Other
+
+- carry the file-digest ledger across sessions ([#285](https://github.com/jdx/mr-boxington/pull/285))
+
 ## [1.4.1](https://github.com/jdx/mr-boxington/compare/v1.4.0...v1.4.1) - 2026-09-02
 
 ### Other

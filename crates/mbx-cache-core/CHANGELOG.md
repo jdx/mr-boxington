@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.2](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.11.1...mbx-cache-core-v0.11.2) - 2026-09-02
+
+### Fixed
+
+- *(remote)* bound what a build loses to failed cache reads ([#292](https://github.com/jdx/mr-boxington/pull/292))
+
+### Other
+
+- verify compiler inputs by identity after compiling ([#284](https://github.com/jdx/mr-boxington/pull/284))
+- carry the file-digest ledger across sessions ([#285](https://github.com/jdx/mr-boxington/pull/285))
+
 ## [0.11.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.11.0...mbx-cache-core-v0.11.1) - 2026-09-02
 
 ### Other
