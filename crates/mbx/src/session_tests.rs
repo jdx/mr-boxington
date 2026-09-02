@@ -664,6 +664,15 @@ fn a_loaded_manifest_that_matched_nothing_is_called_out() {
         stats.predictions_loaded = 257;
     });
     assert_eq!(stale_manifest_note(&live), None);
+
+    // The first `cargo test --no-run` after `cargo build`: the shared manifest
+    // predicts the whole build, and the two test harnesses it has never seen
+    // are all that compiles. Nothing about the toolchain changed.
+    let new_shape = agent_stats(|stats| {
+        stats.unconsulted = 2;
+        stats.predictions_loaded = 816;
+    });
+    assert_eq!(stale_manifest_note(&new_shape), None);
 }
 
 #[test]
