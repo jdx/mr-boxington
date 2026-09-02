@@ -276,6 +276,19 @@ pub struct CacheAgent {
     uploads: Option<UploadQueue>,
 }
 
+/// What every file-digest record must satisfy before the ledger will answer
+/// with it, whether a shim sent it or an earlier session left it behind.
+fn validate_file_digest_record(entry: &RecordedFileDigest) -> Result<()> {
+    if !entry.file.path.is_absolute() {
+        bail!("file-digest records need absolute paths");
+    }
+    entry.digest.validate()?;
+    if entry.file.len != entry.digest.size {
+        bail!("file-digest record length does not match its digest");
+    }
+    Ok(())
+}
+
 /// Records background upload activity against a session's statistics.
 struct AgentUploadSink {
     stats: Arc<AtomicAgentStats>,
@@ -1688,13 +1701,7 @@ impl CacheAgent {
             bail!("too many file-digest records in one request");
         }
         for entry in &entries {
-            if !entry.file.path.is_absolute() {
-                bail!("file-digest records need absolute paths");
-            }
-            entry.digest.validate()?;
-            if entry.file.len != entry.digest.size {
-                bail!("file-digest record length does not match its digest");
-            }
+            validate_file_digest_record(entry)?;
         }
         let mut ledger = self.file_digests.lock().unwrap();
         for entry in entries {
@@ -1706,6 +1713,45 @@ impl CacheAgent {
             ledger.insert((scope, entry.file.path.clone()), entry);
         }
         Ok(AgentResponse::FileDigestsRecorded)
+    }
+
+    /// Start the file-digest ledger from entries an earlier session left
+    /// behind, so a file nothing has touched since is not read again by the
+    /// first compilation of this session that names it.
+    ///
+    /// Each entry stands only while its recorded identity still matches the
+    /// disk, the same rule a lookup applies to what this session recorded, so
+    /// a stale seed costs a hash and nothing else. Entries this session has
+    /// already recorded are kept over seeded ones. Returns how many were taken.
+    pub fn seed_file_digests(&self, entries: Vec<(FileDigestScope, RecordedFileDigest)>) -> usize {
+        let mut ledger = self.file_digests.lock().unwrap();
+        let mut seeded = 0;
+        for (scope, entry) in entries {
+            if ledger.len() >= MAX_FILE_DIGEST_ENTRIES {
+                break;
+            }
+            if validate_file_digest_record(&entry).is_err() {
+                continue;
+            }
+            if let std::collections::btree_map::Entry::Vacant(slot) =
+                ledger.entry((scope, entry.file.path.clone()))
+            {
+                slot.insert(entry);
+                seeded += 1;
+            }
+        }
+        seeded
+    }
+
+    /// Everything the file-digest ledger holds, for a later session to start
+    /// from.
+    pub fn file_digests(&self) -> Vec<(FileDigestScope, RecordedFileDigest)> {
+        self.file_digests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|((scope, _), entry)| (*scope, entry.clone()))
+            .collect()
     }
 
     fn find_action_prediction(

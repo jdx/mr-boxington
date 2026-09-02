@@ -65,6 +65,15 @@ prediction for later invocations. A cold compilation may therefore have no key
 to look up yet. It still gets stored after compiling and can warm the next
 build.
 
+Hashing those files is shared too. The agent keeps a ledger of every file a
+shim has hashed, keyed by the file's length, modification time, and change
+time, so a dependency's rlib is read once however many crates link it. The
+ledger is saved with the checkout's private state when the build finishes and
+loaded by its next build, so the crate being edited does not read its unchanged
+dependencies again before it can look anything up. An entry answers only while
+the file on disk still has the identity it was recorded with; anything else is
+hashed as if never seen.
+
 ## Rustdoc actions
 
 Cargo invokes rustdoc through a separate shim. Each documentation action keys
