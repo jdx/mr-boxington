@@ -220,13 +220,11 @@ fn document(project: &Path, store: &Path, report: &Path) -> serde_json::Value {
         .env("MBX_CACHE_DIR", store)
         .env("MBX_STATS_REPORT", report)
         .env_remove("MBX_SOCKET")
-        .env_remove("RUSTC_WRAPPER")
-        .env_remove("RUSTC_WORKSPACE_WRAPPER")
-        .env_remove("CARGO_TARGET_DIR")
         // This suite may itself be run through mbx. The fixture needs a fresh
         // session rather than chaining the outer test build's compiler shim.
         .env_remove("RUSTC_WRAPPER")
         .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("CARGO_TARGET_DIR")
         .output()
         .expect("mbx should run");
     assert!(
@@ -2359,8 +2357,6 @@ fn build_into_target(
         .args(["build", "--offline"])
         .env("MBX_CACHE_DIR", store)
         .env("CARGO_TARGET_DIR", target)
-        .env_remove("RUSTC_WRAPPER")
-        .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .env_remove("MBX_INCREMENTAL")
         .env_remove("CARGO_INCREMENTAL")
         .env_remove("MBX_LEARNED_INCREMENTAL")
