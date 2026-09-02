@@ -981,3 +981,38 @@ fn forced_includes_still_enter_the_key() {
     };
     assert_ne!(build("one.h"), build("two.h"));
 }
+
+/// Instruction-set selections and code-generation switches change the object
+/// as a pure function of their text, so they are key material: a `-sys` crate
+/// that compiles its SIMD kernels with `-mavx512f`, or turns off LTO for one
+/// file, still caches. Selections that resolve against this machine's CPU are
+/// a different case and keep bypassing.
+#[test]
+fn isa_and_codegen_switches_are_admitted_key_material() {
+    for flag in [
+        "-mavx512f",
+        "-mavx512vl",
+        "-mbmi2",
+        "-mssse3",
+        "-mpclmul",
+        "-mvpclmulqdq",
+        "-mxsave",
+        "-fno-lto",
+        "-fno-semantic-interposition",
+        "-ftls-model=initial-exec",
+        "-fsanitize-undefined-strip-path-components=-1",
+    ] {
+        let invocation = CcInvocation::parse(&argv(&[flag, "-c", "-o", "a.o", "a.c"]))
+            .unwrap_or_else(|reason| panic!("{flag} should be admitted: {reason}"));
+        assert!(
+            invocation.arguments.contains(&Argument::Plain(flag.into())),
+            "{flag} must enter the key"
+        );
+    }
+    assert_eq!(
+        CcInvocation::parse(&argv(&["-march=native", "-c", "-o", "a.o", "a.c"]))
+            .unwrap_err()
+            .kind(),
+        "local-cpu-target"
+    );
+}
