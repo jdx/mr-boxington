@@ -109,23 +109,6 @@ jobs:
             valgrind --version
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-      # Pinned: the comparison is only fair while both caches are the versions
-      # the published numbers name.
-      - name: Install released kache
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          archive=kache-x86_64-unknown-linux-musl.tar.gz
-          install_dir="$RUNNER_TEMP/kache-release"
-          mkdir -p "$install_dir"
-          gh release download v0.16.0 \
-            --repo kunobi-ninja/kache \
-            --pattern "$archive" \
-            --pattern "$archive.sha256" \
-            --dir "$install_dir"
-          (cd "$install_dir" && sha256sum --check --strict "$archive.sha256")
-          tar -xzf "$install_dir/$archive" -C "$install_dir"
-          echo "$install_dir" >> "$GITHUB_PATH"
       - name: Install released mbx
         env:
           GH_TOKEN: ${{ github.token }}
@@ -147,8 +130,9 @@ jobs:
       - name: Refresh benchmarks
         env:
           MBX_BENCH_ALTERNATE_TOOLCHAIN: 1.96.0
+          MISE_LOCKED: "1"
         run: |
-          python3 benchmarks/real_world.py \
+          mise x -- python3 benchmarks/real_world.py \
             --mbx "$MBX_BENCH_BINARY" \
             --scenarios cold,warm,commit,worktree,toolchain,contention \
             --output target/benchmarks \
