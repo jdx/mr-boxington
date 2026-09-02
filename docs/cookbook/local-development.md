@@ -60,8 +60,8 @@ the identical action, mbx waits for it and restores that result instead of
 running a duplicate compiler. The TUI makes both decisions visible by crate.
 
 An editor background check and a watcher may request much of the same work.
-That is safe, but Cargo still plans both builds; keep both only when the watcher
-runs a meaningfully different command such as tests, Clippy, or another feature
+That is safe, but Cargo still plans both builds; keep both only when the
+watcher runs a different command such as tests, Clippy, or another feature
 set.
 
 Do not add `cargo clean` to a watch loop. Cargo already rebuilds changed inputs,
@@ -88,7 +88,7 @@ cpus = 4
 memory = "8GiB"
 ```
 
-Choose values for the machine rather than copying those numbers blindly. The
+Choose values for the machine; those numbers are an example. The
 CPU setting limits concurrent real compiler work across every terminal and
 worktree; cache hits do not consume permits. The memory setting prevents known
 large compilations from filling all CPU permits at once.
@@ -134,8 +134,7 @@ CARGO_TARGET_DIR=target/debugger-uncached MBX_DISABLE=1 \
   cargo build --bin my-program
 ```
 
-This is deliberately cold and is best reserved for path-sensitive debugger or
+This build is cold and is best reserved for path-sensitive debugger or
 artifact investigations. Remove the extra target directory when finished; the
-shared action cache remains intact. To investigate whether restored bytes
-diverge rather than merely obtain a local debug build, use
-[`MBX_VERIFY=1`](/configuration#verify-mode).
+shared action cache remains intact. To check whether restored bytes diverge,
+use [`MBX_VERIFY=1`](/configuration#verify-mode).

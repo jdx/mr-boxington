@@ -9,7 +9,7 @@ build, never a wrong one. See [stability](/stability#the-store-is-disposable).
 
 ## Why wasn't my first build faster?
 
-A first build has an empty store — there is nothing to hit, so it can only
+A first build has an empty store. There is nothing to hit, so it can only
 cost time, and the summary's "could not look up" line dominates. Time the
 second build instead. See
 [cache results](/cache-results#troubleshooting-a-low-hit-rate) and the cold
@@ -17,19 +17,19 @@ scenario in [benchmarks](/benchmarks#cold).
 
 ## Why does a fully warm build still take time?
 
-Links mbx cannot describe always run — a large binary re-links even when every
-compilation hit. Host binaries and tests are restored on Linux, macOS, and Windows, and
-self-contained WebAssembly targets everywhere; the rest is
+Links mbx cannot describe always run, so a large binary re-links even when
+every compilation hit. Host binaries and tests are restored on Linux, macOS,
+and Windows, and self-contained WebAssembly targets everywhere. The rest is
 [limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
 
 ## The cache stopped hitting after a Rust update. Is it broken?
 
-No — the compiler is part of every key, so a toolchain roll invalidates every
+No. The compiler is part of every key, so a toolchain roll invalidates every
 rustc action at once, and the build says so:
 `a manifest predicting N compilations was loaded, but none matched this build`.
 The benchmarks cover this in the [toolchain scenario](/benchmarks#toolchain).
 Actions that do not depend on rustc, such as a build script's C objects,
-legitimately survive.
+survive.
 
 ## Can I use mbx together with sccache?
 

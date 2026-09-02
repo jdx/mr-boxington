@@ -1,6 +1,7 @@
 # Limits
 
-mr boxington favors correct uncached work over risky cache reuse.
+When mbx cannot model a compilation exactly, it runs the compiler and does not
+cache the result. This page lists those cases.
 
 ## Build-script execution follows Cargo's freshness inputs
 
@@ -32,9 +33,14 @@ when the build later runs under plain Cargo, outside an mbx session.
 
 ## Incremental compilations are not cached
 
-Cargo's normal incremental workspace compilations bypass the action cache.
-Dependencies, which Cargo builds non-incrementally, remain cacheable — and they
-are the bulk of a cold build. See [incremental
+Incremental compilations bypass the action cache. Dependencies, which Cargo
+builds non-incrementally, remain cacheable, and they are the bulk of a cold
+build.
+
+By default mbx forces `CARGO_INCREMENTAL=0` and instead gives a crate whose
+sources keep changing its own private incremental state; see [learned
+incremental reuse](/configuration#learned-incremental-reuse). Those
+compilations are never published to the shared cache. See [incremental
 builds](/configuration#incremental-builds) for the trade `MBX_INCREMENTAL=1`
 makes.
 
@@ -45,9 +51,9 @@ objects, and system libraries that rustc dep-info does not enumerate. mbx
 caches such a link only when it can put all of that into the key, and bypasses
 it otherwise.
 
-WebAssembly is the case that needs nothing extra: a binary, test, or `cdylib`
-for one of these built-in targets uses its compiler-bundled self-contained
-linker, so it is cached on every platform:
+WebAssembly needs nothing extra: a binary, test, or `cdylib` for one of these
+built-in targets uses its compiler-bundled self-contained linker, so it is
+cached on every platform:
 
 - `wasm32-unknown-unknown`
 - `wasm32-wasip1` and `wasm32-wasip1-threads`
@@ -61,37 +67,35 @@ identity. Custom target specifications, external WebAssembly toolchains,
 native libraries, unrecognized custom linkers, disabled WASI CRT bundling, and
 non-affirmative `link-self-contained` modes remain uncached.
 
-Host test binaries and executables are cached on Linux, macOS, and Windows, by putting
-the rest of the link into the key: the resolved `cc` driver and its version,
-the linker it selects, the startup objects and libc it resolves (hashed), and
-on macOS the SDK. On Windows the key identifies `link.exe` or `lld-link`, the
-MSVC toolset and Windows SDK versions, and the selected VC and Universal CRT
-libraries. Two hosts that differ in any of those produce different keys
-and miss, rather than sharing a binary neither of them built. `cache_links`
-(`MBX_CACHE_LINKS=0`) turns it off.
+Host test binaries, executables, and proc macros are cached on Linux, macOS,
+and Windows by putting the rest of the link into the key: the resolved `cc`
+driver and its version, the linker it selects, the startup objects and libc it
+resolves (hashed), and on macOS the SDK. On Windows the key identifies
+`link.exe` or `lld-link`, the MSVC toolset and Windows SDK versions, and the
+selected VC and Universal CRT libraries. Two hosts that differ in any of those
+produce different keys and miss. `cache_links` (`MBX_CACHE_LINKS=0`) turns it
+off.
 
-Some hosts cannot be described at all. mbx asks the driver to place a startup
-object and a libc, and a host where neither resolves gets no linker identity
-and therefore no cached links — refusing is the only safe answer, because two
-hosts failing the same probe would otherwise agree on a key without either of
-them having pinned what it stood for. The same goes for a driver that names no
-linker or reports no version. Those links appear in `mbx explain` like any
-other bypass.
+Some hosts cannot be described. mbx asks the driver to place a startup object
+and a libc; a host where neither resolves gets no linker identity and no cached
+links, because two hosts failing the same probe would otherwise agree on a key
+without either having pinned what it stood for. The same goes for a driver that
+names no linker or reports no version. Those links appear in `mbx explain` like
+any other bypass.
 
 Even then, a link bypasses if it names a native library, overrides the linker,
 or carries a flag that would embed this checkout's paths (`-Crpath`,
 `-Cprefer-dynamic`) or leave a file beside the binary that mbx does not store
 (`-Csplit-debuginfo`). On macOS a debug-info link records absolute object
 paths and their timestamps in the binary's debug map, so the shim passes ld64
-`-oso_prefix` for its own output directory, which is what lets those links
-cache rather than bypass. An explicit
-`--target` bypasses too, even when it spells the host triple: rustc without one
-links for the host by construction, and that is the only linker mbx identifies.
+`-oso_prefix` for its own output directory, which lets those links cache. An
+explicit `--target` bypasses too, even when it spells the host triple: rustc
+without one links for the host, and that is the only linker mbx identifies.
 
 ## Restored artifacts are equivalent, not always identical
 
 A restore writes this checkout's spelling of the outputs that describe where a
-compilation ran — its dep-info and its diagnostics — so the files cargo reads
+compilation ran, its dep-info and its diagnostics, so the files cargo reads
 name the directory it is building into.
 
 The compiled artifacts are reused as they were produced, and a few things can
@@ -104,41 +108,38 @@ the compiler ran in.
 A C or C++ object also records the absolute include directories it was given,
 which is how a `-sys` crate whose build script generates headers into
 `OUT_DIR` used to produce a different object in every target directory. With
-[`OUT_DIR` sharing](/configuration#share-out-dir) on — the default — mbx
-passes the compiler `-fdebug-prefix-map` for that directory, so the object
-records the same placeholder the key does and two target directories produce
-the same bytes. An object that keeps the path anyway, in a string the source
-holds rather than in debug information, is not published at all rather than
-shared under a key that says the path does not matter. The object path alone
-never did this on Linux or macOS; on Windows it does, because the debug
-information records where the object was written as well.
+[`OUT_DIR` sharing](/configuration#share-out-dir) on (the default), mbx passes
+the compiler `-fdebug-prefix-map` for that directory, so the object records the
+same placeholder the key does and two target directories produce the same
+bytes. An object that keeps the path anyway, in a string the source holds, is
+not published. The object path alone never did this on Linux or macOS; on
+Windows it does, because the debug information also records where the object
+was written.
 
 None of these changes what the artifact does. All of them are visible to
 `MBX_VERIFY=1`, which compares bytes: a divergence it reports for a
 compilation restored from another checkout, or from another target directory
-whose paths the object records, is that difference rather than a fault. The
+whose paths the object records, is that difference and not a fault. The
 divergence names the file and what differed about it, so a run's divergences
-can be told apart from one another rather than counted together.
+can be told apart.
 
 ## C and C++ caching covers the host compiles mbx drives
 
 mbx caches the C and C++ a cargo build script compiles for the host through
 the `cc` crate, and the C and C++ of a command run under
 [`mbx exec`](/standalone-builds), which puts shims for the plain driver names
-on `PATH` for that command alone. A compile mbx never stood in for — one
-outside both paths — is not
-reached. Neither are cross compilations: a cargo build installs the shims as
-`HOST_CC` and `HOST_CXX`, which the `cc` crate consults only when host and
-target agree, and `mbx exec` shims only `cc`, `c++`, `gcc`, `g++`, `clang`,
-and `clang++` on Unix, plus `cl.exe` on Windows, leaving a versioned toolchain
-to the build that chose it.
+on `PATH` for that command alone. A compile outside both paths is not reached.
+Neither are cross compilations the build did not name a compiler for: a cargo
+build installs the shims as `HOST_CC` and `HOST_CXX`, which the `cc` crate
+consults only when host and target agree, and `mbx exec` shims only `cc`,
+`c++`, `gcc`, `g++`, `clang`, and `clang++` on Unix, plus `cl.exe` on Windows,
+leaving a versioned toolchain to the build that chose it.
 
-A cross compile is cached when the build names its own compiler, through
-`CC_<target>`, `CXX_<target>`, `TARGET_CC`, or `TARGET_CXX`: mbx wraps what
-was named rather than replacing it. A cross build that names nothing is left
-alone, because which compiler a target implies lives in the `cc` crate's own
-tables — guessing wrong would not cost a cache hit, it would build the object
-with the wrong compiler. A value that is a command rather than a path, such as
+A cross compile is cached when the build names its own compiler through
+`CC_<target>`, `CXX_<target>`, `TARGET_CC`, or `TARGET_CXX`: mbx wraps what was
+named. A cross build that names nothing is left alone, because which compiler a
+target implies lives in the `cc` crate's own tables, and a wrong guess would
+build the object with the wrong compiler. A value that is a command, such as
 `ccache gcc`, is left alone for the same reason.
 
 Only a plain single-source object compile through a gcc-, clang-, or MSVC-style
@@ -148,39 +149,38 @@ sub-tool with `-Wp,`/`-Wl,`/`-Xclang`, unmodeled `-Wa,` assembler options, and
 response files all bypass, as does any flag the adapter does not model. Known
 assembler options that add no inputs, such as `-Wa,--noexecstack`, are keyed
 and admitted. MSVC compiler PDBs, modules, and other extra outputs also bypass.
-A source or header that
-expands `__DATE__`, `__TIME__`, or `__TIMESTAMP__` bypasses too: its object is
-not a function of its inputs.
+A source or header that expands `__DATE__`, `__TIME__`, or `__TIMESTAMP__`
+bypasses too: its object is not a function of its inputs.
 
-A flag that tunes for the machine's own processor — `-march=native` and its
-relatives — bypasses as well, since the object it produces is not a function
-of anything the key names.
+A flag that tunes for the machine's own processor, such as `-march=native` and
+its relatives, bypasses as well, because the object depends on the host CPU and
+the key does not name it.
 
 ## Shadowing is modeled by name, not by content
 
 An include directory contributes the names in it that could answer an
-`#include`: headers, sources — `#include "generated.c"` is unusual but legal —
+`#include`: headers, sources (`#include "generated.c"` is unusual but legal),
 names without an extension, and precompiled headers, which GCC prefers over
 the header they were built from without anything on the command line saying so.
 
-What is left out is what cannot answer an `#include` at all: an object, a
-dependency file, an archive. That distinction is what keeps the key stable,
-because a build writes those into the very directory a generated header lives
-in, and counting them would make the key depend on how many sibling
-compilations had finished rather than on anything about this one.
+Objects, dependency files, and archives are left out, because they cannot
+answer an `#include`. A build writes those into the directory a generated
+header lives in, and counting them would make the key depend on how many
+sibling compilations had finished.
 
 Manifests are taken once before the compiler runs and again before publishing.
-A header that appeared while the compilation was in flight is one the compiler
-never saw, so recording it would claim a state that did not produce this
-object.
+If a search directory changed in between, the compilation bypasses: a header
+that appeared while the compiler ran is one it never saw, and the key would
+otherwise claim a state that did not produce this object.
 
-System roots are exempt from manifests entirely: enumerating an SDK on every
-compile costs more than the risk, and anything actually read from one is
-digested like any other input.
+System roots are exempt from manifests. Enumerating an SDK on every compile
+costs more than the risk, and anything read from one is digested like any other
+input.
 
-The shims are only installed when the build has not chosen its own compiler.
-Setting `CC`, `CXX`, `HOST_CC`, `HOST_CXX`, `TARGET_CC`, or `TARGET_CXX` leaves
-that build's C compilations uncached, and `MBX_CC=0` disables the feature.
+The host shims are only installed when the build has not chosen its own host
+compiler. Setting `CC`, `CXX`, `HOST_CC`, or `HOST_CXX` leaves that build's
+host C compilations uncached; `TARGET_CC`, `TARGET_CXX`, `CC_<target>`, and
+`CXX_<target>` are wrapped as described above. `MBX_CC=0` disables the feature.
 
 ## `OUT_DIR` sharing remaps generated source paths
 
@@ -193,10 +193,10 @@ cross-checkout cache sharing for their dependent crates.
 
 This covers C and C++ as well as Rust. A build script that generates headers
 into `OUT_DIR` passes that directory to its own compilations, which record it
-in debug information, so the same remapping applies — rustc is told
-`--remap-path-prefix` and the C compiler `-fdebug-prefix-map`, and in both
-cases an output that kept the literal path is left uncached rather than
-shared. `MBX_SHARE_OUT_DIR=0` turns both off together.
+in debug information, so the same remapping applies: rustc is told
+`--remap-path-prefix` and the C compiler `-fdebug-prefix-map`. In both cases an
+output that kept the literal path is left uncached. `MBX_SHARE_OUT_DIR=0` turns
+both off together.
 
 ## Incremental output reduces sharing
 
