@@ -368,8 +368,19 @@ pub(super) fn should_display_short_stats(stats: &AgentStats) -> bool {
 /// CI runner image updating its preinstalled toolchain is the common way --
 /// that reading sends people hunting for restore failures. The distinction is
 /// observable: predictions were loaded, and not one lookup was ever made.
+///
+/// Only when what compiled is a real share of what was predicted, though. The
+/// manifest is shared by every Cargo command in a workspace, so the first
+/// `cargo test --no-run` after `cargo build` compiles a couple of test
+/// harnesses the manifest has never seen and looks nothing up, while a
+/// toolchain change recompiles everything the manifest predicted. A handful
+/// of new units against hundreds of predictions is the former.
 pub(super) fn stale_manifest_note(stats: &AgentStats) -> Option<String> {
-    (stats.unconsulted > 0 && stats.lookups == 0 && stats.predictions_loaded > 0).then(|| {
+    (stats.unconsulted > 0
+        && stats.lookups == 0
+        && stats.predictions_loaded > 0
+        && stats.unconsulted.saturating_mul(2) >= stats.predictions_loaded)
+        .then(|| {
         format!(
             "mbx[cache]: a manifest predicting {} compilations was loaded, but none matched this build; the compiler or its flags changed since they were recorded (a toolchain update does this)",
             stats.predictions_loaded,
