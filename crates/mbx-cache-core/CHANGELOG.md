@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.10.3...mbx-cache-core-v0.11.0) - 2026-09-02
+
+### Added
+
+- explain cache misses from session history ([#274](https://github.com/jdx/mr-boxington/pull/274))
+
+### Fixed
+
+- fix managed target lifecycle edges ([#269](https://github.com/jdx/mr-boxington/pull/269))
+- release cache pinned by phantom checkouts ([#270](https://github.com/jdx/mr-boxington/pull/270))
+- cache clippy workspace compilations ([#273](https://github.com/jdx/mr-boxington/pull/273))
+- *(cache)* include remote error response details ([#275](https://github.com/jdx/mr-boxington/pull/275))
+
+### Other
+
+- preserve Cargo rustc probe cache ([#268](https://github.com/jdx/mr-boxington/pull/268))
+
 ## [0.10.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.10.2...mbx-cache-core-v0.10.3) - 2026-09-01
 
 ### Added

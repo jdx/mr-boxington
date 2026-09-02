@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0](https://github.com/jdx/mr-boxington/compare/v1.3.2...v1.4.0) - 2026-09-02
+
+### Added
+
+- explain cache misses from session history ([#274](https://github.com/jdx/mr-boxington/pull/274))
+- add quiet build summaries ([#264](https://github.com/jdx/mr-boxington/pull/264))
+- *(scheduler)* respect build CPU limits ([#267](https://github.com/jdx/mr-boxington/pull/267))
+
+### Fixed
+
+- avoid racing persistent Windows shims ([#276](https://github.com/jdx/mr-boxington/pull/276))
+- fix managed target lifecycle edges ([#269](https://github.com/jdx/mr-boxington/pull/269))
+- release cache pinned by phantom checkouts ([#270](https://github.com/jdx/mr-boxington/pull/270))
+- fix build-script caching and doctor toolchain ([#272](https://github.com/jdx/mr-boxington/pull/272))
+- *(setup)* isolate rust-analyzer target directory ([#261](https://github.com/jdx/mr-boxington/pull/261))
+- cache clippy workspace compilations ([#273](https://github.com/jdx/mr-boxington/pull/273))
+- reuse enclosing sessions for nested cargo ([#265](https://github.com/jdx/mr-boxington/pull/265))
+- handle rustc workspace wrappers ([#263](https://github.com/jdx/mr-boxington/pull/263))
+- *(cache)* map symlinked Cargo registries ([#259](https://github.com/jdx/mr-boxington/pull/259))
+
+### Other
+
+- preserve Cargo rustc probe cache ([#268](https://github.com/jdx/mr-boxington/pull/268))
+- make workspace edit loops incremental ([#271](https://github.com/jdx/mr-boxington/pull/271))
+
 ## [1.3.2](https://github.com/jdx/mr-boxington/compare/v1.3.1...v1.3.2) - 2026-09-01
 
 ### Fixed
