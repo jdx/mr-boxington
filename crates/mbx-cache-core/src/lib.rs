@@ -276,6 +276,23 @@ impl RemoteCacheClient {
         })
     }
 
+    /// Bound the wall clock this session may lose to reads that fail.
+    ///
+    /// `download_timeout` bounds one logical download; this bounds their sum.
+    /// Without it an unhealthy server charges every object that deadline again,
+    /// so a build can spend longer failing to read the cache than it would have
+    /// spent compiling. Reads are best effort, so exhausting this budget stops
+    /// them for the rest of the session rather than failing the build.
+    ///
+    /// `Duration::ZERO` keeps reading however long the remote takes to fail.
+    /// Has no effect on an S3 backend, which has no such deadline to repeat.
+    pub fn with_read_stall_budget(mut self, budget: Duration) -> Self {
+        if let Backend::Http(client) = &mut self.backend {
+            client.set_read_stall_budget(budget);
+        }
+        self
+    }
+
     /// Construct a client backed directly by an S3-compatible object store.
     ///
     /// The store answers the same lookups a cache server does, without the
