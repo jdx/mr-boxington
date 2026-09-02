@@ -204,9 +204,9 @@ mbx speeds up repeated edits without relying on `CARGO_INCREMENTAL`. It keeps
 incremental state for crates you are actively changing while leaving everything
 else reusable across branches and worktrees.
 
-Most users should leave `MBX_INCREMENTAL` unset. Turning it on makes the whole
-workspace incremental, producing checkout-specific artifacts that are less
-useful to the shared cache.
+You probably do not want to turn it on. When policy allows, it makes local
+workspace crates use Cargo's incremental mode. Those checkout-specific builds
+bypass the shared cache and can make crates above them miss it too.
 :::
 
 `MBX_INCREMENTAL=1` stops mbx from forcing `CARGO_INCREMENTAL=0` locally. This
