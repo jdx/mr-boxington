@@ -109,10 +109,6 @@ jobs:
             valgrind --version
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-      # Pinned: the comparison is only fair while both caches are the versions
-      # the published numbers name.
-      - name: Install kache
-        run: cargo install kache --locked --version 0.16.0
       - name: Install released mbx
         env:
           GH_TOKEN: ${{ github.token }}
@@ -134,8 +130,9 @@ jobs:
       - name: Refresh benchmarks
         env:
           MBX_BENCH_ALTERNATE_TOOLCHAIN: 1.96.0
+          MISE_LOCKED: "1"
         run: |
-          python3 benchmarks/real_world.py \
+          mise x -- python3 benchmarks/real_world.py \
             --mbx "$MBX_BENCH_BINARY" \
             --scenarios cold,warm,commit,worktree,toolchain,contention \
             --output target/benchmarks \
