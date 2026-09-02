@@ -180,6 +180,7 @@ impl CacheSession {
         let jdxld = crate::jdxld::Worker::start(
             session_dir,
             &config.cache_dir.join("incremental/jdxld"),
+            &socket,
             config.jdxld.as_deref(),
         )
         .await?;

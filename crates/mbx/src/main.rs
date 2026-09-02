@@ -1,6 +1,12 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    #[cfg(unix)]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(mbx::jdxld_digest_helper::ARG))
+    {
+        return mbx::jdxld_digest_helper::run();
+    }
     if mbx::session::is_build_script_shim() {
         return mbx::session::run_build_script_shim();
     }

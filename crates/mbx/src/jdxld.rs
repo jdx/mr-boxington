@@ -20,6 +20,7 @@ impl Worker {
     pub(crate) async fn start(
         session_dir: &Path,
         state_root: &Path,
+        agent_socket: &str,
         configured: Option<&Path>,
     ) -> Result<Option<Self>> {
         let Some(configured) = configured else {
@@ -38,11 +39,14 @@ impl Worker {
         let socket_path = session_dir.join("jdxld.sock");
         let socket = socket_path.to_string_lossy().into_owned();
         let executable_string = executable.to_string_lossy().into_owned();
+        let helper = std::env::current_exe().wrap_err("failed to locate the mbx executable")?;
         let child = Command::new(&executable)
             .arg("--mbx-worker")
             .arg(&socket_path)
             .arg(std::process::id().to_string())
             .arg(state_root)
+            .env("MBX_JDXLD_DIGEST_HELPER", helper)
+            .env(crate::session::SOCKET_ENV, agent_socket)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .spawn()

@@ -51,6 +51,9 @@ mod cc;
 mod digest_ledger;
 mod incremental;
 mod jdxld;
+#[cfg(unix)]
+#[doc(hidden)]
+pub mod jdxld_digest_helper;
 mod linker;
 mod materialize;
 mod rustc;

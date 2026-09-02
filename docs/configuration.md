@@ -214,11 +214,13 @@ soon as the command finishes. The worker does not linger on a timeout.
 
 The current prototype reuses unchanged input mappings within a command and
 writes advisory link manifests under `incremental/jdxld` in mbx's cache
-directory. A later Cargo command can load the prior manifest and identify
-changed inputs, but jdxld still performs resolution, layout, relocation, and
-output in full. The captured warm-worker benchmark reduced link-only time by
-about 12%; the on-disk manifest does not save time yet. These links currently
-bypass mbx's native-link output cache because that cache does not yet model an
+directory. Linker inputs are content-addressed through mbx's persistent
+file-digest ledger, so later commands can reuse known digests without rereading
+unchanged files and can recognize rustc temporary inputs after their paths
+change. jdxld still performs resolution, layout, relocation, and output in
+full. The captured warm-worker benchmark reduced link-only time by about 12%;
+the on-disk manifest does not save time yet. These links currently bypass
+mbx's native-link output cache because that cache does not yet model an
 overridden Clang linker.
 
 ## Learned incremental reuse
