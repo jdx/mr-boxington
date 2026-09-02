@@ -31,6 +31,22 @@ setup() {
   assert_output --partial "0 failures"
 }
 
+@test "doctor reports the Cargo selected by the active project wrapper" {
+  local wrapper_dir="$BATS_TEST_TMPDIR/command-wrappers/bin"
+  local fallback_dir="$BATS_TEST_TMPDIR/fallback-bin"
+  mkdir -p "$wrapper_dir" "$fallback_dir"
+  printf '#!/bin/sh\nprintf "cargo 1.98.0 (active)\\n"\n' >"$wrapper_dir/cargo"
+  printf '#!/bin/sh\nprintf "cargo 1.97.1 (fallback)\\n"\n' >"$fallback_dir/cargo"
+  printf '#!/bin/sh\nprintf "rustc 1.98.0 (active)\\n"\n' >"$wrapper_dir/rustc"
+  chmod +x "$wrapper_dir/cargo" "$fallback_dir/cargo" "$wrapper_dir/rustc"
+
+  run env -u CARGO PATH="$wrapper_dir:$fallback_dir:/usr/bin:/bin" "$MBX_BIN" doctor
+
+  assert_success
+  assert_output --partial "cargo 1.98.0 (active)"
+  refute_output --partial "cargo 1.97.1 (fallback)"
+}
+
 @test "a toolchain in front of a Cargo command still selects one" {
   cargo init --lib --vcs none toolchain-project
   cd toolchain-project

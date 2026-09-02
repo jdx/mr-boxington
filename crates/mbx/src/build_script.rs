@@ -266,6 +266,13 @@ fn record_prediction(
 fn parse_prediction(stdout: &[u8]) -> Result<Option<Prediction>> {
     let text = std::str::from_utf8(stdout).wrap_err("build-script stdout is not UTF-8")?;
     let mappings = build_script_mappings();
+    parse_prediction_with_mappings(text, &mappings)
+}
+
+fn parse_prediction_with_mappings(
+    text: &str,
+    mappings: &[PathMapping],
+) -> Result<Option<Prediction>> {
     let mut inputs = BTreeSet::new();
     let mut environment = BTreeSet::new();
     for line in text.lines() {
@@ -279,7 +286,19 @@ fn parse_prediction(stdout: &[u8]) -> Result<Option<Prediction>> {
             if path.is_empty() {
                 return Ok(None);
             }
-            inputs.insert(normalize_environment_value(path, &mappings));
+            let path = normalize_environment_value(path, mappings);
+            // A generated file cannot also be an input to the execution that
+            // generated it. Build scripts use this shape to make Cargo run
+            // them every time (shadow-rs does so in release builds), and
+            // publishing it under a key derived after execution makes two
+            // different results contend for one local action. Preserve the
+            // script's always-rerun contract instead of trying to cache it.
+            if path.starts_with("${build_script_out_dir}")
+                || path.starts_with("${build_script_out_dir:")
+            {
+                return Ok(None);
+            }
+            inputs.insert(path);
         } else if let Some(name) = directive.strip_prefix("rerun-if-env-changed=")
             && !name.is_empty()
         {
@@ -935,6 +954,20 @@ mod tests {
             )
             .unwrap()
             .is_none()
+        );
+    }
+
+    #[test]
+    fn an_out_dir_changed_path_bypasses_execution_caching() {
+        let directory = tempfile::tempdir().unwrap();
+        let out_dir = directory.path().join("target/build/package/out");
+        let directive = format!("cargo:rerun-if-changed={}/shadow.rs\n", out_dir.display());
+        let mappings = [PathMapping::new(&out_dir, "build_script_out_dir")];
+
+        assert!(
+            parse_prediction_with_mappings(&directive, &mappings)
+                .unwrap()
+                .is_none()
         );
     }
 
