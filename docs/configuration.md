@@ -44,8 +44,8 @@ savings = "quips"        # or "plain", "off"
 default = "system"
 
 [linker.profiles.dev]
-aarch64-apple-darwin = "jdxld@0.10.0"
 x86_64-unknown-linux-gnu = "mold@2.42.0"
+aarch64-unknown-linux-gnu = "wild@0.10.0"
 default = "rust-lld"
 
 [linker.profiles.release]
@@ -91,7 +91,7 @@ it. The built-in selectors are:
 - `system`, which leaves Cargo's linker selection alone;
 - `rust-lld` or `lld`, which uses the LLD shipped with the active Rust
   toolchain;
-- `jdxld@<version>`, `mold@<version>`, or `wild@<version>`, which downloads the
+- `mold@<version>` or `wild@<version>`, which downloads the
   matching release asset and verifies GitHub's SHA-256 digest; and
 - `path:<executable>`, which selects a linker mbx does not install.
 
@@ -109,7 +109,6 @@ ordinary profile is `dev`, `--release` selects `release`, `cargo bench` selects
 default = "system"
 
 [linker.profiles.dev]
-aarch64-apple-darwin = "jdxld@0.10.0"
 x86_64-unknown-linux-gnu = "mold@2.42.0"
 aarch64-unknown-linux-gnu = "wild@0.10.0"
 
@@ -124,10 +123,9 @@ MBX_LINKER=mold@2.42.0 cargo build
 MBX_LINKER=system cargo build --release
 ```
 
-mold and Wild currently provide managed releases for Linux. jdxld provides a
-managed Apple Silicon macOS release. Unsupported host platforms fail before
-Cargo starts rather than silently changing the linker. The selected executable
-remains part of mbx's native-link cache identity.
+mold and Wild currently provide managed releases for Linux. Unsupported host
+platforms fail before Cargo starts rather than silently changing the linker.
+The selected executable remains part of mbx's native-link cache identity.
 
 ## Workspace policy
 

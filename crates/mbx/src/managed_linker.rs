@@ -7,7 +7,6 @@ use reqwest::blocking::Client;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
-use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -19,7 +18,6 @@ const LINKER_ENV: &str = "MBX_LINKER";
 #[derive(Debug, Clone)]
 pub(crate) struct Selection {
     pub(crate) executable: PathBuf,
-    pub(crate) starts_worker: bool,
 }
 
 /// Resolve and, where necessary, install the linker selected for this build.
@@ -47,17 +45,14 @@ pub(crate) fn resolve(
         Spec::Path(path) => Ok(Some(Selection {
             executable: which::which(&path)
                 .wrap_err_with(|| format!("failed to find selected linker `{}`", path.display()))?,
-            starts_worker: executable_name(&path) == "jdxld",
         })),
         Spec::RustLld => Ok(Some(Selection {
             executable: rust_lld(target.as_deref(), cache_dir, cargo_arguments)?,
-            starts_worker: false,
         })),
         Spec::Managed { provider, version } => {
             let installed = install(provider, &version, cache_dir, http)?;
             Ok(Some(Selection {
                 executable: installed,
-                starts_worker: provider == Provider::Jdxld,
             }))
         }
     }
@@ -73,7 +68,6 @@ pub(crate) fn validate_workspace_selector(value: &str) -> Result<()> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Provider {
-    Jdxld,
     Mold,
     Wild,
 }
@@ -81,7 +75,6 @@ enum Provider {
 impl Provider {
     fn parse(name: &str) -> Option<Self> {
         match name {
-            "jdxld" => Some(Self::Jdxld),
             "mold" => Some(Self::Mold),
             "wild" => Some(Self::Wild),
             _ => None,
@@ -90,7 +83,6 @@ impl Provider {
 
     fn name(self) -> &'static str {
         match self {
-            Self::Jdxld => "jdxld",
             Self::Mold => "mold",
             Self::Wild => "wild",
         }
@@ -98,7 +90,6 @@ impl Provider {
 
     fn repository(self) -> &'static str {
         match self {
-            Self::Jdxld => "jdx/jdxld",
             Self::Mold => "rui314/mold",
             Self::Wild => "wild-linker/wild",
         }
@@ -107,7 +98,7 @@ impl Provider {
     fn tag(self, version: &str) -> String {
         match self {
             Self::Wild => version.to_owned(),
-            Self::Jdxld | Self::Mold => format!("v{version}"),
+            Self::Mold => format!("v{version}"),
         }
     }
 
@@ -137,9 +128,6 @@ impl Provider {
                     "wild-linker-{version}-{arch}-unknown-linux-{environment}.tar.gz"
                 ))
             }
-            Self::Jdxld if cfg!(target_os = "macos") && arch == "aarch64" => {
-                Ok("jdxld-aarch64-apple-darwin.tar.gz".into())
-            }
             _ => bail!(
                 "{} does not publish a managed binary for {}-{}",
                 self.name(),
@@ -151,7 +139,6 @@ impl Provider {
 
     fn executable_suffix(self) -> String {
         match self {
-            Self::Jdxld => "/jdxld".into(),
             Self::Mold => "/bin/mold".into(),
             Self::Wild => "/wild".into(),
         }
@@ -182,11 +169,11 @@ impl Spec {
         }
         let Some((name, version)) = value.split_once('@') else {
             bail!(
-                "unknown linker selector `{value}`; use system, rust-lld, path:<executable>, or jdxld|mold|wild@<version>"
+                "unknown linker selector `{value}`; use system, rust-lld, path:<executable>, or mold|wild@<version>"
             );
         };
         let Some(provider) = Provider::parse(name) else {
-            bail!("unknown managed linker `{name}`; supported linkers are jdxld, mold, and wild");
+            bail!("unknown managed linker `{name}`; supported linkers are mold and wild");
         };
         let version = version.trim_start_matches('v');
         if version.is_empty() || matches!(version, "." | ".." | "latest") {
@@ -477,10 +464,6 @@ fn executable_filename(name: &str) -> String {
     } else {
         name.into()
     }
-}
-
-fn executable_name(path: &Path) -> &str {
-    path.file_stem().and_then(OsStr::to_str).unwrap_or_default()
 }
 
 #[cfg(test)]

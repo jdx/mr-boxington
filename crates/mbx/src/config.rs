@@ -1594,7 +1594,7 @@ default = "system"
 
 [linker.profiles.dev]
 default = "wild@0.10.0"
-aarch64-apple-darwin = "jdxld@0.10.0"
+aarch64-apple-darwin = "rust-lld"
 
 [linker.profiles.release]
 default = "rust-lld"
@@ -1603,7 +1603,7 @@ default = "rust-lld"
 
         assert_eq!(
             config.linker.for_build("dev", Some("aarch64-apple-darwin")),
-            Some("jdxld@0.10.0".into())
+            Some("rust-lld".into())
         );
         assert_eq!(
             config
@@ -1628,7 +1628,7 @@ default = "rust-lld"
         .unwrap();
         let mut config = configured(
             Some(
-                "[linker.profiles.dev]\ndefault = \"system\"\naarch64-apple-darwin = \"jdxld@0.10.0\"",
+                "[linker.profiles.dev]\ndefault = \"system\"\naarch64-apple-darwin = \"rust-lld\"",
             ),
             &[],
         )
@@ -1646,7 +1646,7 @@ default = "rust-lld"
         );
         assert_eq!(
             config.linker.for_build("dev", Some("aarch64-apple-darwin")),
-            Some("jdxld@0.10.0".into())
+            Some("rust-lld".into())
         );
     }
 

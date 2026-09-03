@@ -172,12 +172,6 @@ fn cargo_with_settings_bypass_log_and_roots(
         .build()?;
 
     let session_outcome = runtime.block_on(async {
-        let linker_worker = match &managed_linker {
-            Some(selection) => {
-                crate::linker_worker::Worker::start(session_dir.path(), selection).await?
-            }
-            None => None,
-        };
         let session = CacheSession::start_with_jobs(session_dir.path(), config, cargo_jobs).await?;
         let mut environment = inherited_environment(|name| std::env::var(name).ok(), &working_dir);
         if let Some(path) = bypass_log {
@@ -215,9 +209,6 @@ fn cargo_with_settings_bypass_log_and_roots(
                 selection.executable.to_string_lossy().into_owned(),
             );
         }
-        if let Some(worker) = &linker_worker {
-            environment.insert(session::JDXLD_SOCKET_ENV.into(), worker.socket().into());
-        }
         // Stated explicitly for the same reason as the session's own keys: an
         // unset value would let the shim inherit one from the parent, with no
         // way to turn it off here.
@@ -237,8 +228,6 @@ fn cargo_with_settings_bypass_log_and_roots(
         );
 
         let status = run_cargo(&cargo, arguments, environment);
-        drop(linker_worker);
-
         // The shim records a prediction only after a compilation has either
         // been restored or published successfully. Preserve that completed
         // portion even when a later compilation makes cargo fail: it is still

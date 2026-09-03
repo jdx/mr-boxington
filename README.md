@@ -104,14 +104,14 @@ existing `target/` is only replaced if you say yes at the prompt.
 ## Managed linkers
 
 Choose a different linker for each Cargo profile and target. mbx can use the
-Rust toolchain's bundled LLD or automatically download pinned jdxld, mold, and
-Wild releases, verify their GitHub SHA-256 digest, and reuse the installation
+Rust toolchain's bundled LLD or automatically download pinned mold and Wild
+releases, verify their GitHub SHA-256 digest, and reuse the installation
 across builds:
 
 ```toml
 [linker.profiles.dev]
-aarch64-apple-darwin = "jdxld@0.10.0"
 x86_64-unknown-linux-gnu = "mold@2.42.0"
+aarch64-unknown-linux-gnu = "wild@0.10.0"
 
 [linker.profiles.release]
 default = "rust-lld"
