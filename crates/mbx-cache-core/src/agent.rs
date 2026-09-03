@@ -73,7 +73,7 @@ const MAX_PREFETCH_TRANSFERS: usize = 48;
 /// Packs are individually bounded to keep their staging footprint predictable.
 /// Allowing a few independent streams prevents one large Azure object stream
 /// from serializing an entire workspace restore.
-const MAX_CONCURRENT_BLOB_PACKS: usize = 4;
+const MAX_CONCURRENT_BLOB_PACKS: usize = 8;
 /// Most predicted actions whose complete output closures are downloaded
 /// speculatively for one task.
 ///
