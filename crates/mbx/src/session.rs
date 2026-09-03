@@ -435,25 +435,26 @@ impl CacheSession {
         {
             warn!("this checkout was not recorded as a cache root: {error}");
         }
-        let (protocol_build, action_run) = match self.agent.begin_task(&identity).await {
-            Ok(run) => (
-                run.clone(),
-                Some(ActionRun {
-                    receipt: run.clone(),
-                    run,
-                    identity: identity.clone(),
-                    workspace_root: project_root.to_path_buf(),
-                    export_group: std::env::var(CACHE_EXPORT_GROUP_ENV).ok(),
-                    store: self.store.clone(),
-                    agent: self.agent.clone(),
-                    initialized: None,
-                }),
-            ),
-            Err(error) => {
-                warn!("build action manifest was not loaded: {error}");
-                (identity, None)
-            }
-        };
+        let (protocol_build, action_run) =
+            match self.agent.begin_task_on_prediction(&identity).await {
+                Ok(run) => (
+                    run.clone(),
+                    Some(ActionRun {
+                        receipt: run.clone(),
+                        run,
+                        identity: identity.clone(),
+                        workspace_root: project_root.to_path_buf(),
+                        export_group: std::env::var(CACHE_EXPORT_GROUP_ENV).ok(),
+                        store: self.store.clone(),
+                        agent: self.agent.clone(),
+                        initialized: None,
+                    }),
+                ),
+                Err(error) => {
+                    warn!("build action manifest was not loaded: {error}");
+                    (identity, None)
+                }
+            };
         environment.insert(
             WORKSPACE_ROOT_ENV.into(),
             project_root.to_string_lossy().into_owned(),

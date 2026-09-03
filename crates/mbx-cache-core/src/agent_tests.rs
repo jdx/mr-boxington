@@ -760,6 +760,58 @@ async fn begin_task_reports_how_many_predictions_were_loaded() {
     assert_eq!(reader.stats().predictions_loaded, 2);
 }
 
+#[test]
+fn a_matching_prediction_activates_only_its_adapter_once() {
+    let rustc_first = ActionPrediction {
+        invocation: CacheDigest::blake3(b"first rustc invocation"),
+        action: CacheDigest::blake3(b"first rustc action"),
+        adapter: "rustc".into(),
+        payload: "{}".into(),
+    };
+    let rustc_second = ActionPrediction {
+        invocation: CacheDigest::blake3(b"second rustc invocation"),
+        action: CacheDigest::blake3(b"second rustc action"),
+        adapter: "rustc".into(),
+        payload: "{}".into(),
+    };
+    let cc = ActionPrediction {
+        invocation: CacheDigest::blake3(b"cc invocation"),
+        action: CacheDigest::blake3(b"cc action"),
+        adapter: "cc".into(),
+        payload: "{}".into(),
+    };
+    let mut state = TaskActionState::default();
+    for prediction in [&rustc_first, &rustc_second, &cc] {
+        state
+            .predictions
+            .insert(prediction.invocation.clone(), prediction.clone());
+    }
+
+    let (prediction, prefetch) =
+        activate_prediction_adapter(&mut state, &CacheDigest::blake3(b"stale invocation"));
+    assert_eq!(prediction, None);
+    assert_eq!(prefetch, None);
+    assert!(state.prefetched_adapters.is_empty());
+
+    let (prediction, prefetch) = activate_prediction_adapter(&mut state, &rustc_first.invocation);
+    assert_eq!(prediction, Some(rustc_first.clone()));
+    let prefetch = prefetch.unwrap();
+    assert_eq!(prefetch.len(), 2);
+    assert!(
+        prefetch
+            .iter()
+            .all(|prediction| prediction.adapter == "rustc")
+    );
+
+    let (prediction, prefetch) = activate_prediction_adapter(&mut state, &rustc_second.invocation);
+    assert_eq!(prediction, Some(rustc_second));
+    assert_eq!(prefetch, None, "one adapter starts only one prefetch wave");
+
+    let (prediction, prefetch) = activate_prediction_adapter(&mut state, &cc.invocation);
+    assert_eq!(prediction, Some(cc.clone()));
+    assert_eq!(prefetch, Some(vec![cc]));
+}
+
 #[tokio::test]
 async fn commit_receipt_contains_this_runs_predictions_not_its_baseline() {
     let directory = tempfile::tempdir().unwrap();
@@ -2702,6 +2754,106 @@ async fn prefetch_skips_remote_negotiation_when_every_action_is_local() {
 
     assert!(agent.prefetch_action_batches(&actions).await.unwrap());
     assert_eq!(agent.stats().remote_action_lookups, 0);
+}
+
+#[tokio::test]
+async fn deferred_prefetch_waits_for_a_matching_adapter() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let task = "5".repeat(64);
+    let rustc = ActionPrediction {
+        invocation: CacheDigest::blake3(b"matching rustc invocation"),
+        action: CacheDigest::blake3(b"matching rustc action"),
+        adapter: "rustc".into(),
+        payload: "{}".into(),
+    };
+    let cc = ActionPrediction {
+        invocation: CacheDigest::blake3(b"unmatched cc invocation"),
+        action: CacheDigest::blake3(b"unmatched cc action"),
+        adapter: "cc".into(),
+        payload: "{}".into(),
+    };
+    let manifest_bytes = canonical_json(&TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: vec![rustc.clone(), cc],
+    })
+    .unwrap();
+    let manifest_etag = blake3::hash(&manifest_bytes).to_hex().to_string();
+    let (_, selector) = CacheAgent::task_manifest_selector(&task).unwrap();
+    let manifest = server
+        .mock("GET", action_manifest_path(&selector).as_str())
+        .with_status(200)
+        .with_header("etag", &format!("\"{manifest_etag}\""))
+        .with_body(manifest_bytes)
+        .expect(1)
+        .create_async()
+        .await;
+    let capabilities = server
+        .mock("GET", "/v1/capabilities")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            serde_json::json!({
+                "protocol":{"major":1},
+                "features":{"action_batch":true},
+                "limits":{"max_batch_items":100,"max_pack_bytes":1048576}
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let batch = server
+        .mock("POST", "/v1/action-results:batch")
+        .match_body(mockito::Matcher::Json(serde_json::json!({
+            "digests": [rustc.action.clone()]
+        })))
+        .with_status(200)
+        .with_header("content-type", ACTION_RESULT_BATCH_MEDIA_TYPE)
+        .with_body(serde_json::json!({ "results": [] }).to_string())
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(
+        &server,
+        directory.path().join("reader"),
+        RemoteCacheMode::ReadOnly,
+    );
+
+    let run = agent.begin_task_on_prediction(&task).await.unwrap();
+    agent.wait_for_prefetches().await;
+    assert_eq!(agent.stats().prefetch_runs, 0);
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::FindActionPrediction {
+                task: run.clone(),
+                invocation: CacheDigest::blake3(b"stale invocation"),
+            })
+            .await,
+        AgentResponse::ActionPrediction { prediction: None }
+    ));
+    agent.wait_for_prefetches().await;
+    assert_eq!(agent.stats().prefetch_runs, 0);
+
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::FindActionPrediction {
+                task: run,
+                invocation: rustc.invocation.clone(),
+            })
+            .await,
+        AgentResponse::ActionPrediction {
+            prediction: Some(found)
+        } if found == rustc
+    ));
+    agent.wait_for_prefetches().await;
+
+    manifest.assert_async().await;
+    capabilities.assert_async().await;
+    batch.assert_async().await;
+    assert_eq!(agent.stats().prefetch_runs, 1);
+    assert_eq!(agent.stats().remote_action_lookups, 1);
 }
 
 #[tokio::test]
