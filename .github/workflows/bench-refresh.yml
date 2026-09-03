@@ -71,7 +71,7 @@ jobs:
   refresh:
     name: Refresh benchmarks
     needs: check
-    if: needs.check.outputs.drift == 'true'
+    if: needs.check.outputs.drift == 'true' && github.ref != 'refs/heads/codex/benchmark-small-edit'
     # Keep the runner class fixed: the six-job contention scenario needs enough
     # CPU to reproduce the large parallel CI job it models, and timings cannot
     # be compared across machine classes. The host-wide lease serializes this
@@ -258,3 +258,170 @@ jobs:
             gh pr create --base main --head bench-refresh \
               --title "$TITLE" --body-file "$RUNNER_TEMP/body.md"
           fi
+
+  edit-rust-cache-seed:
+    name: Seed rust-cache at the parent
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/benchmark-small-edit'
+    runs-on: [self-hosted, jdx-perf-v1]
+    container:
+      image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68
+      options: --cpuset-cpus 0-7
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jdx/hk
+          ref: 27bb615768b85c9ac88e2abf8895219b44462871
+          path: subject
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
+        with:
+          shared-key: hk-small-edit-${{ github.run_id }}
+          add-job-id-key: "false"
+          workspaces: subject -> target
+      - working-directory: subject
+        run: cargo build --locked
+
+  edit-rust-cache-measure:
+    name: Measure rust-cache after the edit
+    needs: edit-rust-cache-seed
+    runs-on: [self-hosted, jdx-perf-v1]
+    container:
+      image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68
+      options: --cpuset-cpus 0-7
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jdx/hk
+          ref: fc29ead1456ba7c1f62826c284126410a4014b00
+          path: subject
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
+        with:
+          shared-key: hk-small-edit-${{ github.run_id }}
+          add-job-id-key: "false"
+          workspaces: subject -> target
+          save-if: "false"
+      - id: measure
+        working-directory: subject
+        run: |
+          started=$(date +%s%N)
+          cargo build --locked
+          finished=$(date +%s%N)
+          echo "duration_ns=$((finished - started))" >> "$GITHUB_OUTPUT"
+      - name: Record result
+        env:
+          DURATION_NS: ${{ steps.measure.outputs.duration_ns }}
+        run: |
+          mkdir -p target/small-edit
+          jq -n --arg tool rust-cache --argjson wall_duration_ns "$DURATION_NS" \
+            '{tool:$tool, wall_duration_ns:$wall_duration_ns}' \
+            > target/small-edit/rust-cache.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: small-edit-rust-cache-${{ github.run_id }}
+          path: target/small-edit/rust-cache.json
+
+  edit-mbx-seed:
+    name: Seed mbx at the parent
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/benchmark-small-edit'
+    runs-on: [self-hosted, jdx-perf-v1]
+    container:
+      image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68
+      options: --cpuset-cpus 0-7
+    timeout-minutes: 45
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jdx/hk
+          ref: 27bb615768b85c9ac88e2abf8895219b44462871
+          path: subject
+          persist-credentials: false
+      - uses: jdx/mr-boxington-action@adc5c234c02592f7edd008bf81d5bc0e9584dc03 # v1
+        with:
+          version: 1.6.0
+          cache-key: hk-small-edit-mbx-${{ github.run_id }}-parent
+          save-on-workflow-dispatch: "true"
+          toolchain: 1.97.1
+      - working-directory: subject
+        run: mbx build --locked
+
+  edit-mbx-measure:
+    name: Measure mbx after the edit
+    needs: edit-mbx-seed
+    runs-on: [self-hosted, jdx-perf-v1]
+    container:
+      image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68
+      options: --cpuset-cpus 0-7
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jdx/hk
+          ref: fc29ead1456ba7c1f62826c284126410a4014b00
+          path: subject
+          persist-credentials: false
+      - uses: jdx/mr-boxington-action@adc5c234c02592f7edd008bf81d5bc0e9584dc03 # v1
+        with:
+          version: 1.6.0
+          cache-key: hk-small-edit-mbx-${{ github.run_id }}-child
+          restore-keys: hk-small-edit-mbx-${{ github.run_id }}-parent
+          toolchain: 1.97.1
+      - id: measure
+        working-directory: subject
+        run: |
+          started=$(date +%s%N)
+          mbx build --locked
+          finished=$(date +%s%N)
+          echo "duration_ns=$((finished - started))" >> "$GITHUB_OUTPUT"
+      - name: Record result
+        env:
+          DURATION_NS: ${{ steps.measure.outputs.duration_ns }}
+        run: |
+          mkdir -p target/small-edit
+          jq -n --arg tool mbx --argjson wall_duration_ns "$DURATION_NS" \
+            '{tool:$tool, wall_duration_ns:$wall_duration_ns}' \
+            > target/small-edit/mbx.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: small-edit-mbx-${{ github.run_id }}
+          path: target/small-edit/mbx.json
+
+  edit-report:
+    name: Report small-edit comparison
+    needs: [edit-rust-cache-measure, edit-mbx-measure]
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: small-edit-*-${{ github.run_id }}
+          path: ${{ runner.temp }}/small-edit
+          merge-multiple: true
+      - name: Compare results
+        run: |
+          rust_cache=$(jq -r .wall_duration_ns "$RUNNER_TEMP/small-edit/rust-cache.json")
+          mbx=$(jq -r .wall_duration_ns "$RUNNER_TEMP/small-edit/mbx.json")
+          jq -n --argjson rust_cache "$rust_cache" --argjson mbx "$mbx" \
+            '{rust_cache_seconds:($rust_cache / 1e9), mbx_seconds:($mbx / 1e9), mbx_speedup:($rust_cache / $mbx)}' \
+            | tee "$RUNNER_TEMP/small-edit/comparison.json"
+          {
+            echo '## hk small-edit comparison'
+            echo
+            echo '| Tool | Build after restore |'
+            echo '| :--- | ---: |'
+            printf '| rust-cache | %.2f s |\n' "$(awk "BEGIN {print $rust_cache / 1000000000}")"
+            printf '| mbx | %.2f s |\n' "$(awk "BEGIN {print $mbx / 1000000000}")"
+          } >> "$GITHUB_STEP_SUMMARY"

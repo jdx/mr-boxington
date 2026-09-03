@@ -4,7 +4,7 @@
 `measure_builds.py` measures this workspace against itself, which answers
 "did mbx regress" but not "what does mbx do to somebody else's build". This
 driver clones a pinned third-party subject and runs the same Cargo invocation
-under raw cargo, mbx, and kache across scenarios drawn from the live hk and
+under raw cargo, a restored Cargo target, mbx, and kache across scenarios drawn from the live hk and
 mise cache workflows: a cold store, a warm store with a fresh target, the
 next commit on the branch, and a second checkout at a different path.
 
@@ -45,7 +45,7 @@ SUBJECTS: dict[str, dict[str, object]] = {
     },
 }
 
-TOOLS = ("cargo", "mbx-sequential", "mbx-unscheduled", "mbx", "kache")
+TOOLS = ("cargo", "rust-cache", "mbx-sequential", "mbx-unscheduled", "mbx", "kache")
 
 # All three run the same binary. The contention scenario separates the current
 # sequential lint shape, the proposed parallel shape, and a parallel control
@@ -92,6 +92,13 @@ SCENARIOS: dict[str, dict[str, object]] = {
         "description": (
             "cache tools warmed at the parent commit, build the child -- "
             "Cargo is the uncached push-to-push baseline"
+        ),
+    },
+    "edit": {
+        "tools": ("rust-cache", "mbx"),
+        "description": (
+            "parent state restored, then one Rust source file gains 30 lines -- "
+            "Swatinem/rust-cache target reuse against mbx action reuse"
         ),
     },
     "worktree": {
@@ -308,7 +315,7 @@ class Runner:
             environment["RUSTUP_TOOLCHAIN"] = toolchain
         args = list(subject["args"]) if args is None else args  # type: ignore[arg-type]
 
-        if tool == "cargo":
+        if tool in ("cargo", "rust-cache"):
             return ["cargo", *args], environment
         if tool in MBX_TOOLS:
             if self.mbx is None:
@@ -352,9 +359,11 @@ class Runner:
         target: Path,
         store: Path,
         toolchain: str | None = None,
+        fresh_target: bool = True,
     ) -> dict[str, object]:
         """Run one build and return its timing plus whatever the tool reported."""
-        shutil.rmtree(target, ignore_errors=True)
+        if fresh_target:
+            shutil.rmtree(target, ignore_errors=True)
         extra: dict[str, object] = {}
         command, environment = self.invocation(
             tool=tool,
@@ -685,6 +694,31 @@ def run_scenario(
                         checkout=checkout,
                         target=target,
                         store=store,
+                    )
+                )
+            elif scenario == "edit":
+                checkout = work / f"checkout-{cell}"
+                clone(subject, str(subject["parent"]), checkout)
+                runner.run(
+                    tool=tool,
+                    cell=f"{cell}-seed",
+                    subject=subject,
+                    checkout=checkout,
+                    target=target,
+                    store=store,
+                )
+                git("checkout", "--detach", str(subject["child"]), cwd=checkout)
+                results.append(
+                    runner.run(
+                        tool=tool,
+                        cell=cell,
+                        subject=subject,
+                        checkout=checkout,
+                        target=target,
+                        store=store,
+                        # Swatinem/rust-cache restores Cargo's target from the
+                        # parent build. mbx restores actions into a fresh target.
+                        fresh_target=tool != "rust-cache",
                     )
                 )
             elif scenario == "worktree":
