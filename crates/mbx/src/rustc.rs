@@ -482,6 +482,21 @@ pub(crate) fn compile(
             timing.duration_ns,
             current_diagnostic,
         );
+        if output.status.success()
+            && let Err(error) = validate_compiler_inputs(
+                &invocation,
+                &outputs,
+                &working_dir,
+                &portable,
+                compilation_started,
+                &input_identities,
+            )
+        {
+            if discard_modified_compiler_result(&outputs, &error) {
+                return Ok(ExitCode::FAILURE);
+            }
+            eprintln!("mbx[warning]: verification inputs were not validated: {error:#}");
+        }
         let divergence = verification_divergence(&cached, &output);
         record_verification(divergence.is_none(), cached.restore);
         if let Some(divergence) = divergence {
@@ -540,13 +555,7 @@ pub(crate) fn compile(
         })();
         match publication {
             Ok(diagnostic) => current_diagnostic = diagnostic,
-            Err(error) if compiler_input_was_modified(&error) => {
-                if let Err(discard_error) = discard_compiler_outputs(&outputs) {
-                    eprintln!(
-                        "mbx[warning]: some invalid compiler outputs could not be removed: {discard_error:#}"
-                    );
-                }
-                eprintln!("mbx[error]: compilation result was discarded: {error:#}");
+            Err(error) if discard_modified_compiler_result(&outputs, &error) => {
                 compiler_input_invalid = true;
             }
             Err(error) => eprintln!("mbx[warning]: result was not stored: {error:#}"),
@@ -575,6 +584,43 @@ fn compiler_input_was_modified(error: &eyre::Report) -> bool {
         error.downcast_ref::<BypassReason>(),
         Some(BypassReason::InputModifiedDuringCompilation(_) | BypassReason::InputChanged(_))
     )
+}
+
+/// Reject and remove a successful compiler result whose inputs changed while it ran.
+fn discard_modified_compiler_result(outputs: &RustcOutputs, error: &eyre::Report) -> bool {
+    if !compiler_input_was_modified(error) {
+        return false;
+    }
+    if let Err(discard_error) = discard_compiler_outputs(outputs) {
+        eprintln!(
+            "mbx[warning]: some invalid compiler outputs could not be removed: {discard_error:#}"
+        );
+    }
+    eprintln!("mbx[error]: compilation result was discarded: {error:#}");
+    true
+}
+
+fn validate_compiler_inputs(
+    invocation: &RustcInvocation,
+    outputs: &RustcOutputs,
+    working_dir: &Path,
+    portable: &Portable,
+    compilation_started: SystemTime,
+    input_identities: &std::io::Result<BTreeMap<PathBuf, FileIdentity>>,
+) -> Result<()> {
+    let input_identities = input_identities
+        .as_ref()
+        .map_err(|error| eyre::eyre!(error.to_string()))?;
+    let dep_info = RustcDepInfo::read(&outputs.dep_info)?;
+    let discovered = invocation.discover_inputs_with_mappings(
+        &dep_info,
+        working_dir,
+        &portable.mappings,
+        session::file_digest_cache(),
+    )?;
+    discovered.verify_not_modified_since_with_identities(compilation_started, input_identities)?;
+    discovered.verify()?;
+    Ok(())
 }
 
 /// Remove an invalid compiler result before Cargo can consume or fingerprint it.
@@ -610,6 +656,10 @@ fn compile_execution_only_build_script(
 ) -> Result<ExitCode> {
     let demand = crate::scheduler::Demand::new(invocation.crate_name(), true);
     let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
+    let required_inputs = invocation.required_inputs_in(working_dir);
+    let input_identities =
+        crate::util::snapshot_file_identities(required_inputs.iter().map(PathBuf::as_path));
+    let compilation_started = SystemTime::now();
     let started = Instant::now();
     let output = compiler_command(rustc, wrapper_argument)
         .args(arguments)
@@ -624,6 +674,21 @@ fn compile_execution_only_build_script(
         started.elapsed().as_nanos().try_into().unwrap_or(u64::MAX),
     );
     let _ = replay_output(&output);
+    if output.status.success()
+        && let Err(error) = validate_compiler_inputs(
+            invocation,
+            outputs,
+            working_dir,
+            portable,
+            compilation_started,
+            &input_identities,
+        )
+    {
+        if discard_modified_compiler_result(outputs, &error) {
+            return Ok(ExitCode::FAILURE);
+        }
+        eprintln!("mbx[warning]: build-script inputs were not validated: {error:#}");
+    }
     if output.status.success()
         && let Some(executable) = outputs.build_script_executable(invocation.crate_name())
     {

@@ -310,6 +310,78 @@ fn a_mid_compilation_input_edit_discards_the_result() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_mid_compilation_build_script_edit_discards_the_execution_only_result() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_execution_cached_project(project.path(), true);
+
+    let wrapper = project.path().join("delayed-rustc");
+    let compiled = project.path().join("compiler-finished");
+    let release = project.path().join("release-compiler");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\n\"$TEST_REAL_RUSTC\" \"$@\"\nstatus=$?\ncase \" $* \" in\n  *\" --crate-name build_script_build \"*)\n    if [ \"$status\" -eq 0 ]; then\n      : > \"$TEST_COMPILER_FINISHED\"\n      while [ ! -e \"$TEST_RELEASE_COMPILER\" ]; do sleep 0.02; done\n    fi\n    ;;\nesac\nexit \"$status\"\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&wrapper).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&wrapper, permissions).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mbx"));
+    child
+        .current_dir(project.path())
+        .args(["build", "--offline", "--verbose"])
+        .env("MBX_CACHE_DIR", store.path())
+        .env("MBX_CACHE_LINKS", "0")
+        .env("MBX_BUILD_SCRIPT_EXECUTION", "1")
+        .env("MBX_TARGET_VIEWS", "0")
+        .env("RUSTC", &wrapper)
+        .env("TEST_REAL_RUSTC", which::which("rustc").unwrap())
+        .env("TEST_COMPILER_FINISHED", &compiled)
+        .env("TEST_RELEASE_COMPILER", &release)
+        .env_remove("MBX_SOCKET")
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = child.spawn().expect("mbx should run");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !compiled.exists() && std::time::Instant::now() < deadline {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the build exited before the build-script compiler could be released"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        compiled.exists(),
+        "the build-script compiler did not reach the test barrier"
+    );
+
+    let build_script = project.path().join("build.rs");
+    let mut source = std::fs::read_to_string(&build_script).unwrap();
+    source.push_str("\n// edited while rustc was running\n");
+    std::fs::write(build_script, source).unwrap();
+    std::fs::write(&release, b"").unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "the invalid build-script compilation must fail"
+    );
+    assert!(
+        stderr.contains("compilation result was discarded: compiler input was modified"),
+        "the build-script mutation should be diagnosed: {stderr}"
+    );
+}
+
 /// Build `project` against `store`, returning the run's statistics.
 fn build(project: &Path, store: &Path, report: &Path) -> serde_json::Value {
     build_with(project, store, report, &[]).0
