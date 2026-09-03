@@ -398,10 +398,9 @@ pub(crate) fn compile(
     // The machine-wide permit is taken after every chance to hit the cache,
     // and before anything expensive starts. The timer starts afterwards: time
     // spent waiting for the machine is not time this compilation cost.
-    let input_identities = crate::util::snapshot_file_identities(
-        &working_dir,
-        invocation.required_inputs().iter().map(PathBuf::as_path),
-    );
+    let required_inputs = invocation.required_inputs_in(&working_dir);
+    let input_identities =
+        crate::util::snapshot_file_identities(required_inputs.iter().map(PathBuf::as_path));
     let demand =
         crate::scheduler::Demand::new(invocation.crate_name(), invocation.links_natively());
     let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));

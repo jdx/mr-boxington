@@ -265,10 +265,13 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     // The machine-wide permit is taken after every chance to hit the cache,
     // and the timer starts afterwards: time spent waiting for the machine is
     // not time this compilation cost.
-    let input_identities = crate::util::snapshot_file_identities(
-        &working_dir,
-        invocation.required_inputs().iter().map(PathBuf::as_path),
-    );
+    let required_inputs = invocation
+        .required_inputs()
+        .iter()
+        .map(|path| absolute(path, &working_dir))
+        .collect::<Vec<_>>();
+    let input_identities =
+        crate::util::snapshot_file_identities(required_inputs.iter().map(PathBuf::as_path));
     let demand = crate::scheduler::Demand::new(&compilation_name(&invocation), false);
     let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
     let started = Instant::now();

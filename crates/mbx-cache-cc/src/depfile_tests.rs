@@ -276,7 +276,9 @@ fn discovery_rejects_inputs_modified_during_compilation() {
 fn precompile_identity_does_not_depend_on_the_host_clock() {
     let directory = tempfile::tempdir().expect("tempdir");
     let root = directory.path();
-    let source = write(root, "a.c", "int a(void) { return 0; }\n");
+    write(root, "a.c", "int a(void) { return 0; }\n");
+    std::fs::create_dir(root.join("nested")).expect("nested directory");
+    let source = root.join("nested/../a.c");
     let discovered = CcDiscoveredInputs::collect(
         root,
         BTreeSet::from([source.clone()]),
