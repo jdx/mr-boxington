@@ -229,6 +229,7 @@ impl CacheSession {
         {
             warn!("this checkout was not recorded as a cache root: {error}");
         }
+        self.offer_earlier_lockfiles(&identity, workspace_root);
         let _ = self.task.identity.set(identity.clone());
         let action_run = Some(ActionRun {
             run: identity.clone(),
@@ -488,8 +489,20 @@ impl CacheSession {
     /// Warm the recorded actions for a Cargo command without running Cargo.
     pub async fn prefetch(&self, workspace_root: &Path, command: &[String]) -> Result<()> {
         let identity = build_identity(workspace_root, command);
+        self.offer_earlier_lockfiles(&identity, workspace_root);
         self.agent.prefetch_task(&identity).await?;
         Ok(())
+    }
+
+    /// Let a lockfile nobody has built yet inherit the predictions recorded
+    /// for the lockfiles before it, found through the file's Git history.
+    fn offer_earlier_lockfiles(&self, identity: &str, workspace_root: &Path) {
+        let workspace_root = workspace_root.to_path_buf();
+        if let Err(error) = self.agent.register_task_fallbacks(identity, move || {
+            mbx_cache_cargo::previous_build_identities(&workspace_root)
+        }) {
+            debug!("earlier lockfile states were not offered: {error}");
+        }
     }
 
     /// Stop the agent and collect this session's statistics.

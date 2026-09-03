@@ -69,6 +69,19 @@ prediction for later invocations. A cold compilation may therefore have no key
 to look up yet. It still gets stored after compiling and can warm the next
 build.
 
+Predictions are filed under the digest of `Cargo.lock`, so a dependency bump
+starts a new record. A build whose lockfile has no record yet borrows the one
+made for the lockfile before it, found through Git's history of the file, up to
+eight states back, and failing that the newest records in the store, which on a
+runner that restored a cache bundle are the builds that produced it. A bump
+leaves most of the graph unchanged, and those predictions still hash to results
+the cache holds; the crates the bump touched miss and are recorded afresh.
+The borrowed record is kept under the new lockfile, so the commands that
+follow, tests and lints included, start from it as well, and a trusted build
+publishes it there. A shallow clone offers only the history it fetched: a pull request checkout with
+`fetch-depth: 2` reaches its base branch's lockfile, and a `fetch-depth: 1`
+checkout relies on the store.
+
 Hashing those files is shared too. The agent keeps a ledger of every file a
 shim has hashed, keyed by the file's length, modification time, and change
 time, so a dependency's rlib is read once however many crates link it. The
