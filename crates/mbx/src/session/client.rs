@@ -5,7 +5,7 @@ use mbx_cache_core::{AGENT_PROTOCOL_VERSION, AgentRequest, AgentResponse, CacheA
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
@@ -333,46 +333,20 @@ pub(super) fn request_agent_at(
 
 #[cfg(windows)]
 struct WindowsConnection {
-    runtime: tokio::runtime::Runtime,
-    stream: tokio::net::windows::named_pipe::NamedPipeClient,
+    stream: std::fs::File,
 }
 
 #[cfg(windows)]
 impl WindowsConnection {
     fn connect(socket: &OsString) -> Result<Self> {
         let endpoint = socket.to_string_lossy().into_owned();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        let stream = runtime.block_on(connect_pipe(&endpoint))?;
-        let mut connection = Self { runtime, stream };
-        let response = connection.exchange(&AgentRequest::Hello {
-            protocol: AGENT_PROTOCOL_VERSION,
-            client_version: VERSION.into(),
-        })?;
-        validate_handshake_response(&response)?;
-        Ok(connection)
+        let mut stream = connect_pipe(&endpoint)?;
+        sync_handshake(&mut stream)?;
+        Ok(Self { stream })
     }
 
     fn request(&mut self, request: &AgentRequest) -> Result<AgentResponse> {
-        Ok(serde_json::from_str(&self.exchange(request)?)?)
-    }
-
-    fn exchange(&mut self, request: &AgentRequest) -> Result<String> {
-        let mut encoded = serde_json::to_vec(request)?;
-        encoded.push(b'\n');
-        let stream = &mut self.stream;
-        self.runtime.block_on(async move {
-            use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
-
-            stream.write_all(&encoded).await?;
-            stream.flush().await?;
-            let mut response = String::new();
-            tokio::io::BufReader::new(stream)
-                .read_line(&mut response)
-                .await?;
-            Ok(response)
-        })
+        sync_request(&mut self.stream, request)
     }
 }
 
@@ -382,7 +356,7 @@ impl WindowsConnection {
 /// so the rustc processes cargo runs in parallel routinely arrive to a busy
 /// pipe. Without this they would fall back to uncached compiles.
 #[cfg(windows)]
-async fn connect_pipe(endpoint: &str) -> Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+fn connect_pipe(endpoint: &str) -> Result<std::fs::File> {
     use std::time::Instant;
     use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
 
@@ -391,7 +365,11 @@ async fn connect_pipe(endpoint: &str) -> Result<tokio::net::windows::named_pipe:
 
     let deadline = Instant::now() + RETRY_DEADLINE;
     loop {
-        match tokio::net::windows::named_pipe::ClientOptions::new().open(endpoint) {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(endpoint)
+        {
             Ok(client) => return Ok(client),
             Err(error)
                 if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32)
@@ -400,11 +378,11 @@ async fn connect_pipe(endpoint: &str) -> Result<tokio::net::windows::named_pipe:
                 return Err(error).wrap_err("failed to connect to the cache session");
             }
         }
-        tokio::time::sleep(RETRY_DELAY).await;
+        std::thread::sleep(RETRY_DELAY);
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn sync_handshake(stream: &mut (impl std::io::Read + Write)) -> Result<()> {
     let request = AgentRequest::Hello {
         protocol: AGENT_PROTOCOL_VERSION,
@@ -416,7 +394,7 @@ fn sync_handshake(stream: &mut (impl std::io::Read + Write)) -> Result<()> {
     validate_handshake_response(&response)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn sync_request(
     stream: &mut (impl std::io::Read + Write),
     request: &AgentRequest,
@@ -432,7 +410,7 @@ fn sync_request(
 /// Serializing straight onto the socket emits a syscall per JSON fragment,
 /// and a prediction payload has thousands of them, each waking the agent's
 /// reader. The encoded line is assembled first so the kernel sees it once.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn write_request_line(stream: &mut impl Write, request: &AgentRequest) -> Result<()> {
     let mut encoded = serde_json::to_vec(request)?;
     encoded.push(b'\n');
