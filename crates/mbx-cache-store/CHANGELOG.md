@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.15](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.14...mbx-cache-store-v0.1.15) - 2026-09-03
+
+### Added
+
+- manage profile-specific linkers ([#319](https://github.com/jdx/mr-boxington/pull/319))
+
 ## [0.1.14](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.13...mbx-cache-store-v0.1.14) - 2026-09-02
 
 ### Other
