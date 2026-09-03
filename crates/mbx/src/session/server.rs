@@ -147,7 +147,7 @@ pub(super) async fn spawn_server(
                     let agent = agent.clone();
                     let task = Arc::clone(&task);
                     connections.spawn(async move {
-                        initialize_task(&agent, &task).await;
+                        task.connected.store(true, std::sync::atomic::Ordering::Relaxed);
                         if let Err(error) = agent.handle_connection(stream).await {
                             debug!("cache agent connection failed: {error}");
                         }
@@ -213,7 +213,7 @@ fn spawn_fifo_server(
                                 let result = (|| {
                                     let (reader, writer) = accept_fifo_client(&connection_path)?;
                                     runtime.block_on(async {
-                                        initialize_task(&agent, &task).await;
+                                        task.connected.store(true, std::sync::atomic::Ordering::Relaxed);
                                         let stream = tokio::io::join(
                                             BlockingFifoReader(reader),
                                             BlockingFifoWriter(writer),
@@ -468,6 +468,7 @@ mod tests {
         let task = Arc::new(super::super::SessionTask {
             identity: std::sync::OnceLock::new(),
             initialized: tokio::sync::OnceCell::new(),
+            connected: std::sync::atomic::AtomicBool::new(false),
         });
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (endpoint, server) =
@@ -508,6 +509,7 @@ mod tests {
         let task = Arc::new(super::super::SessionTask {
             identity: std::sync::OnceLock::new(),
             initialized: tokio::sync::OnceCell::new(),
+            connected: std::sync::atomic::AtomicBool::new(false),
         });
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (endpoint, server) =
@@ -579,7 +581,7 @@ pub(super) async fn spawn_server(
                     let agent = agent.clone();
                     let task = Arc::clone(&task);
                     connections.spawn(async move {
-                        initialize_task(&agent, &task).await;
+                        task.connected.store(true, std::sync::atomic::Ordering::Relaxed);
                         if let Err(error) = agent.handle_connection(pipe).await {
                             debug!("cache agent connection failed: {error}");
                         }
@@ -599,7 +601,7 @@ pub(super) async fn spawn_server(
     Ok((endpoint, server))
 }
 
-async fn initialize_task(agent: &CacheAgent, task: &super::SessionTask) {
+pub(super) async fn initialize_task(agent: &CacheAgent, task: &super::SessionTask) {
     let Some(identity) = task.identity.get() else {
         return;
     };

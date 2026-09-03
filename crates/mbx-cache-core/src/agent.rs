@@ -7,7 +7,7 @@ use crate::{
 };
 use eyre::{Context, Result, bail};
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream};
-use log::warn;
+use log::{info, warn};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -100,6 +100,23 @@ const PREFETCH_ACTION_BATCH_DELAY: Duration = Duration::from_millis(5);
 const MAX_PREFETCH_DIRECTORY_OBJECTS: usize = 100_000;
 const MAX_PREFETCH_OBJECTS_PER_WAVE: usize = 100_000;
 const DEFAULT_MAX_REMOTE_DOWNLOAD_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+
+/// Names the identities a task may inherit predictions from, consulted only
+/// once nothing has been recorded under its own.
+pub type TaskFallbacks = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+
+/// How many of the store's most recently written manifests a task with
+/// fallbacks tries after the named identities yield nothing.
+///
+/// A runner that restored a cache bundle holds the manifests of the builds
+/// that produced it and no version-control history to name them by, so what
+/// was written last is the best remaining guess at the lockfile before this
+/// one. Each candidate costs one parse, and a manifest from an unrelated
+/// workspace only fails to match. One is skipped when it fills more than half
+/// the prediction limit: an inherited manifest is kept under the new identity,
+/// and a foreign one that large would leave this workspace's own recordings
+/// no room.
+const NEWEST_MANIFEST_CANDIDATES: usize = 8;
 
 /// Remote action-cache access owned by one task session.
 pub struct AgentRemoteCache {
@@ -243,6 +260,9 @@ fn queue_prefetch_directory(
     true
 }
 
+/// See [`CacheAgent::with_task_loader`].
+pub type TaskLoader = dyn for<'a> Fn(&'a CacheAgent, &'a str) -> BoxFuture<'a, ()> + Send + Sync;
+
 /// Shared state for an agent hosted by the process that owns a build session.
 ///
 /// Transport listeners deliberately live in the embedder so the session
@@ -259,9 +279,14 @@ pub struct CacheAgent {
     stats: Arc<AtomicAgentStats>,
     observer: Option<Arc<dyn AgentEventObserver>>,
     observer_emission: Arc<Mutex<()>>,
+    /// Loads a task the first time a request names it, so a connection that
+    /// only reports a bypass never waits for a manifest it will not read.
+    task_loader: Option<Arc<TaskLoader>>,
     executable_identities: Arc<Mutex<BTreeMap<ExecutableIdentityKey, Vec<u8>>>>,
     manifest_dir: Arc<PathBuf>,
     task_actions: Arc<Mutex<BTreeMap<String, TaskActionState>>>,
+    /// Where a task may inherit predictions from, by task identity.
+    task_fallbacks: Arc<Mutex<BTreeMap<String, TaskFallbacks>>>,
     next_task_run: Arc<AtomicU64>,
     manifest_write_lock: Arc<Mutex<()>>,
     remote: Option<Arc<RemoteCacheClient>>,
@@ -512,9 +537,11 @@ impl CacheAgent {
             stats,
             observer: None,
             observer_emission: Arc::new(Mutex::new(())),
+            task_loader: None,
             executable_identities: Arc::new(Mutex::new(BTreeMap::new())),
             manifest_dir: Arc::new(task_manifest_dir(&cache_dir)),
             task_actions: Arc::new(Mutex::new(BTreeMap::new())),
+            task_fallbacks: Arc::new(Mutex::new(BTreeMap::new())),
             next_task_run: Arc::new(AtomicU64::new(0)),
             manifest_write_lock: Arc::new(Mutex::new(())),
             remote,
@@ -537,6 +564,29 @@ impl CacheAgent {
     pub fn with_observer(mut self, observer: Arc<dyn AgentEventObserver>) -> Self {
         self.observer = Some(observer);
         self
+    }
+
+    /// Load tasks on demand.
+    ///
+    /// The loader is called with the agent and the task's identity before the
+    /// first request that names a task this agent has not begun, and is
+    /// expected to begin it; a second call for the same task must be a no-op.
+    /// Requests that name no task never wait on it.
+    pub fn with_task_loader(mut self, loader: Arc<TaskLoader>) -> Self {
+        self.task_loader = Some(loader);
+        self
+    }
+
+    /// Make sure `task` has been begun before a request reads or records
+    /// under it.
+    async fn ensure_task_loaded(&self, task: &str) {
+        let Some(loader) = &self.task_loader else {
+            return;
+        };
+        if self.task_actions.lock().unwrap().contains_key(task) {
+            return;
+        }
+        loader(self, task).await;
     }
 
     fn emit(&self, event: impl FnOnce() -> AgentEvent) {
@@ -635,6 +685,29 @@ impl CacheAgent {
         Ok(())
     }
 
+    /// Name where a task's predictions may come from when nothing has been
+    /// recorded under its own identity.
+    ///
+    /// The identities are produced on demand rather than taken up front,
+    /// because finding them can cost a few version-control commands and most
+    /// builds never need them. The first manifest found, locally and then on
+    /// the remote, is adopted under the task's own identity, so the commands
+    /// that follow, tests and lints included, start from it too, and a trusted
+    /// build publishes it there. When none of the named identities has one,
+    /// the store's newest manifests are tried.
+    pub fn register_task_fallbacks(
+        &self,
+        task: &str,
+        fallbacks: impl Fn() -> Vec<String> + Send + Sync + 'static,
+    ) -> Result<()> {
+        validate_task_identity(task)?;
+        self.task_fallbacks
+            .lock()
+            .unwrap()
+            .insert(task.to_string(), Arc::new(fallbacks));
+        Ok(())
+    }
+
     /// Load a task and finish its prefetch, surfacing remote lookup failures.
     pub async fn prefetch_task(&self, task: &str) -> Result<String> {
         let run = self
@@ -657,19 +730,23 @@ impl CacheAgent {
         // manifest lookup; the authoritative snapshot is loaded again below
         // before it is merged, so another process can still update it while
         // this request is in flight.
-        let early_predictions = {
+        let early_manifest = {
             let _write_guard = self.manifest_write_lock.lock().unwrap();
             let _file_guard = self.lock_task_manifest(task)?;
             self.load_task_manifest(task)?
-                .map(|manifest| manifest.predictions)
-                .unwrap_or_default()
         };
-        let early_actions: BTreeSet<_> = early_predictions
+        let early_actions: BTreeSet<_> = early_manifest
             .iter()
+            .flat_map(|manifest| manifest.predictions.iter())
             .map(|prediction| prediction.action.clone())
             .collect();
         if eager_prefetch {
-            self.spawn_prefetch_predictions(early_predictions);
+            self.spawn_prefetch_predictions(
+                early_manifest
+                    .as_ref()
+                    .map(|manifest| manifest.predictions.clone())
+                    .unwrap_or_default(),
+            );
         }
         let (remote_manifest, mut remote_etag) = if self.remote_mode.reads() {
             match self.get_remote_task_manifest(task).await {
@@ -689,7 +766,10 @@ impl CacheAgent {
         } else {
             (None, None)
         };
-        let manifest = {
+        // Without a remote there is nothing to reconcile: the manifest just
+        // read is the whole truth, and writing it back byte for byte would
+        // serialize every prediction for nothing.
+        let manifest = if self.remote.is_some() && self.remote_mode.reads() {
             let _write_guard = self.manifest_write_lock.lock().unwrap();
             let _file_guard = self.lock_task_manifest(task)?;
             let local_manifest = self.load_task_manifest(task)?;
@@ -708,6 +788,14 @@ impl CacheAgent {
                 self.persist_task_manifest(manifest)?;
             }
             manifest
+        } else {
+            early_manifest
+        };
+        let (manifest, remote_etag) = match manifest {
+            Some(manifest) => (Some(manifest), remote_etag),
+            // Inherited from another identity, so the remote's copy of that
+            // one is no precondition for publishing under this one.
+            None => (self.inherit_task_manifest(task, strict).await?, None),
         };
         let mut state = if let Some(manifest) = manifest {
             TaskActionState {
@@ -766,6 +854,100 @@ impl CacheAgent {
         Ok(run)
     }
 
+    /// Adopt the manifest of a fallback identity for a task that has none.
+    ///
+    /// The named identities are tried in the order given, each in the local
+    /// store and then on the remote, and then the store's newest manifests,
+    /// locally only. The first one found is persisted under `task` so the
+    /// next command sees a complete baseline rather than only what this one
+    /// recorded, and a later session finds it without asking again.
+    async fn inherit_task_manifest(
+        &self,
+        task: &str,
+        strict: bool,
+    ) -> Result<Option<TaskActionManifest>> {
+        let fallbacks = self.task_fallbacks.lock().unwrap().get(task).cloned();
+        let Some(fallbacks) = fallbacks else {
+            return Ok(None);
+        };
+        let named = tokio::task::spawn_blocking(move || fallbacks()).await?;
+        let mut tried = BTreeSet::from([task.to_string()]);
+        let candidates = named.into_iter().map(|identity| (identity, true)).chain(
+            self.newest_task_identities()
+                .into_iter()
+                .map(|identity| (identity, false)),
+        );
+        for (identity, named) in candidates {
+            if !tried.insert(identity.clone()) || validate_task_identity(&identity).is_err() {
+                continue;
+            }
+            let mut found = self.load_task_manifest(&identity)?;
+            if found.is_none() && named && self.remote_mode.reads() {
+                found = match self.get_remote_task_manifest(&identity).await {
+                    Ok(manifest) => manifest.map(|(manifest, _)| manifest),
+                    Err(error) => {
+                        if strict {
+                            return Err(error).wrap_err_with(|| {
+                                format!("remote task action manifest lookup failed for {identity}")
+                            });
+                        }
+                        self.note_remote_failure();
+                        warn!("remote task action manifest lookup failed for {identity}: {error}");
+                        None
+                    }
+                };
+            }
+            let Some(mut manifest) = found else {
+                continue;
+            };
+            if manifest.predictions.is_empty()
+                || (!named && manifest.predictions.len() > MAX_TASK_ACTION_PREDICTIONS / 2)
+            {
+                continue;
+            }
+            info!(
+                "no predictions were recorded for {task}; inheriting {} from {identity}",
+                manifest.predictions.len()
+            );
+            manifest.task = task.to_string();
+            validate_task_manifest(&manifest, task)?;
+            let _write_guard = self.manifest_write_lock.lock().unwrap();
+            let _file_guard = self.lock_task_manifest(task)?;
+            // Another process may have recorded this identity while the
+            // fallbacks were being found. What it wrote describes this
+            // lockfile and wins over an inheritance.
+            if let Some(recorded) = self.load_task_manifest(task)? {
+                return Ok(Some(recorded));
+            }
+            self.persist_task_manifest(&manifest)?;
+            return Ok(Some(manifest));
+        }
+        Ok(None)
+    }
+
+    /// The identities of the store's most recently written manifests.
+    fn newest_task_identities(&self) -> Vec<String> {
+        let Ok(entries) = fs::read_dir(self.manifest_dir.as_path()) else {
+            return Vec::new();
+        };
+        let mut manifests: Vec<(std::time::SystemTime, String)> = entries
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let name = entry.file_name();
+                let identity = name.to_str()?.strip_suffix(".json")?.to_string();
+                validate_task_identity(&identity).ok()?;
+                let modified = entry.metadata().ok()?.modified().ok()?;
+                Some((modified, identity))
+            })
+            .collect();
+        manifests.sort_by(|left, right| right.cmp(left));
+        manifests
+            .into_iter()
+            .take(NEWEST_MANIFEST_CANDIDATES)
+            .map(|(_, identity)| identity)
+            .collect()
+    }
+
     /// Cancel speculative downloads before the owning session exits.
     pub async fn cancel_prefetches(&self) {
         let tasks = std::mem::take(&mut *self.prefetch_tasks.lock().unwrap());
@@ -816,16 +998,27 @@ impl CacheAgent {
     /// mistake that cumulative manifest for the work the run completed.
     pub async fn commit_task_actions(&self, run: &str) -> Result<Vec<ActionPrediction>> {
         validate_task_identity(run)?;
-        let state = self
-            .task_actions
-            .lock()
-            .unwrap()
-            .get(run)
-            .cloned()
-            .ok_or_else(|| eyre::eyre!("task action manifest baseline was not loaded"))?;
-        if !state.baseline_loaded {
-            bail!("task action manifest baseline was not loaded");
-        }
+        let state = {
+            let mut runs = self.task_actions.lock().unwrap();
+            let state = runs
+                .get(run)
+                .ok_or_else(|| eyre::eyre!("task action manifest baseline was not loaded"))?;
+            if !state.baseline_loaded {
+                bail!("task action manifest baseline was not loaded");
+            }
+            // A run that predicted nothing new leaves the manifest as it found
+            // it. Rewriting it would serialize every inherited prediction to
+            // say so, and a remote that is only read has nothing to learn
+            // either. Decided before the baseline is cloned: the baseline is
+            // every prediction the manifest holds.
+            if state.pending_predictions.is_empty()
+                && (self.remote.is_none() || !self.remote_mode.writes())
+            {
+                runs.remove(run);
+                return Ok(Vec::new());
+            }
+            state.clone()
+        };
         let task = state.manifest;
         validate_task_identity(&task)?;
         let completed = state
@@ -1170,6 +1363,13 @@ impl CacheAgent {
         request: AgentRequest,
         connection: &mut ConnectionUploads,
     ) -> AgentResponse {
+        match &request {
+            AgentRequest::FindActionPrediction { task, .. }
+            | AgentRequest::RecordActionPrediction { task, .. } => {
+                self.ensure_task_loaded(task).await;
+            }
+            _ => {}
+        }
         let result = match request {
             AgentRequest::BeginTask { task } => self
                 .begin_task(&task)
@@ -1778,7 +1978,20 @@ impl CacheAgent {
     /// a stale seed costs a hash and nothing else. Entries this session has
     /// already recorded are kept over seeded ones. Returns how many were taken.
     pub fn seed_file_digests(&self, entries: Vec<(FileDigestScope, RecordedFileDigest)>) -> usize {
+        self.seed_file_digests_with(|| entries)
+    }
+
+    /// Seed the ledger from entries produced under its lock.
+    ///
+    /// A lookup that arrives while `load` is still reading waits for it rather
+    /// than missing, so a caller can start the read in the background and let
+    /// whatever else the build is doing overlap it.
+    pub fn seed_file_digests_with(
+        &self,
+        load: impl FnOnce() -> Vec<(FileDigestScope, RecordedFileDigest)>,
+    ) -> usize {
         let mut ledger = self.file_digests.lock().unwrap();
+        let entries = load();
         let mut seeded = 0;
         for (scope, entry) in entries {
             if ledger.len() >= MAX_FILE_DIGEST_ENTRIES {

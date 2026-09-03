@@ -94,6 +94,18 @@ jobs:
           cache: false
         env:
           MISE_LOCKED: "1"
+      # The comparison should track kache itself, not the version that happened
+      # to be current when mise.lock was last updated. Install the newest stable
+      # release explicitly, then keep its real path for builds that run outside
+      # this repository (where a mise shim cannot resolve this configuration).
+      - name: Install latest benchmark comparator
+        env:
+          MISE_GITHUB_TOKEN: ${{ github.token }}
+          MISE_LOCKED: "0"
+        run: |
+          mise install github:kunobi-ninja/kache@latest
+          echo "KACHE_INSTALL_DIR=$(mise where github:kunobi-ninja/kache@latest)" \
+            >> "$GITHUB_ENV"
       - name: Runner metadata
         run: |
           {
@@ -132,7 +144,8 @@ jobs:
           MBX_BENCH_ALTERNATE_TOOLCHAIN: 1.96.0
           MISE_LOCKED: "1"
         run: |
-          mise x -- python3 benchmarks/real_world.py \
+          PATH="$KACHE_INSTALL_DIR:$PATH" \
+            python3 benchmarks/real_world.py \
             --mbx "$MBX_BENCH_BINARY" \
             --scenarios cold,warm,commit,worktree,toolchain,contention \
             --output target/benchmarks \

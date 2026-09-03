@@ -112,6 +112,32 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Replace `path` atomically without waiting for the bytes to reach disk.
+///
+/// For records a build rewrites every time it runs and reads back only as a
+/// shortcut: a checkout's last-used stamp, a crate's churn record, the
+/// file-digest ledger. Losing the newest one to a power cut costs the next
+/// build a rehash or a record one build older, and every reader here treats
+/// a torn file as no file. `sync_all` is what makes [`write_atomic`] cost a
+/// disk round trip per call, and a build pays for several of these.
+pub fn write_advisory(path: &Path, contents: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| eyre::eyre!("path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".mbx-")
+        .tempfile_in(parent)?;
+    temporary.write_all(contents)?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .wrap_err_with(|| format!("failed atomic write: {}", path.display()))?;
+    Ok(())
+}
+
 /// Format a duration for humans, widening precision as the duration grows.
 pub fn format_duration(duration: Duration) -> String {
     if duration < Duration::from_millis(1) {
