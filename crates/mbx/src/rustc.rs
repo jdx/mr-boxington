@@ -491,7 +491,7 @@ pub(crate) fn compile(
         }
         return Ok(exit_code(output.status));
     }
-    let mut final_status = exit_code(output.status);
+    let mut compiler_input_invalid = false;
     if output.status.success() {
         let publication: Result<Option<ActionDiagnostic>> = (|| {
             let input_identities = input_identities
@@ -547,7 +547,7 @@ pub(crate) fn compile(
                     );
                 }
                 eprintln!("mbx[error]: compilation result was discarded: {error:#}");
-                final_status = ExitCode::FAILURE;
+                compiler_input_invalid = true;
             }
             Err(error) => eprintln!("mbx[warning]: result was not stored: {error:#}"),
         }
@@ -558,7 +558,11 @@ pub(crate) fn compile(
         timing.duration_ns,
         current_diagnostic,
     );
-    Ok(final_status)
+    if compiler_input_invalid {
+        Ok(ExitCode::FAILURE)
+    } else {
+        Ok(exit_code(output.status))
+    }
 }
 
 /// Whether publication failed because the compiler's inputs moved underneath it.
