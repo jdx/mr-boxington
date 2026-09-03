@@ -432,6 +432,8 @@ jobs:
       CARGO_TARGET_DIR: /github/home/mbx-direct/target
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: driver
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: jdx/hk
@@ -446,7 +448,7 @@ jobs:
       - working-directory: subject
         run: mbx build --locked
       - name: Snapshot Cargo scheduling state
-        run: python3 benchmarks/analyze_hydration.py snapshot "$MBX_DIRECT_ROOT" "$(command -v mbx)"
+        run: python3 driver/benchmarks/analyze_hydration.py snapshot "$MBX_DIRECT_ROOT" "$(command -v mbx)"
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           key: hk-small-edit-mbx-direct-${{ github.run_id }}-parent
@@ -473,6 +475,8 @@ jobs:
       CARGO_TARGET_DIR: /github/home/mbx-direct/target
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: driver
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: jdx/hk
@@ -494,7 +498,7 @@ jobs:
             /github/home/mbx-direct/snapshot
             /github/home/mbx-direct/cargo-home/registry
       - name: Hydrate Cargo target
-        run: python3 benchmarks/analyze_hydration.py hydrate "$MBX_DIRECT_ROOT" "$(command -v mbx)"
+        run: python3 driver/benchmarks/analyze_hydration.py hydrate "$MBX_DIRECT_ROOT" "$(command -v mbx)"
       - id: measure
         working-directory: subject
         run: |
