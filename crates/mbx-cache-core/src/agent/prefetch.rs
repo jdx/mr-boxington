@@ -538,151 +538,43 @@ impl CacheAgent {
             return verified;
         }
 
+        let pack_limits = match remote.blob_pack_limits().await {
+            Ok(Some(limits)) => Some(limits),
+            Ok(None) => None,
+            Err(error) => {
+                warn!("remote cache blob pack negotiation failed: {error}");
+                None
+            }
+        };
         let mut pack_candidates = missing.clone();
-        while !pack_candidates.is_empty() {
-            let candidates = match blob_pack_chunk(
-                &pack_candidates.keys().cloned().collect::<Vec<_>>(),
-                BlobPackLimits {
-                    max_items: MAX_STAGED_BLOB_PACK_ITEMS,
-                    max_bytes: MAX_STAGED_BLOB_PACK_BYTES,
-                },
-            ) {
-                Ok(candidates) if !candidates.is_empty() => candidates,
-                Ok(_) => break,
-                Err(error) => {
-                    warn!("remote cache blob pack skipped: {error}");
-                    break;
-                }
-            };
-            // A pack and an individual fetch share these per-digest locks. Hold
-            // them through ingestion so overlapping prefetch and foreground
-            // requests cannot download or charge the same object twice.
-            let mut pack_guards = BTreeMap::new();
-            for digest in candidates {
-                let guard = self.write_lock(&digest).lock_owned().await;
-                match self.find_verified_blob(&digest) {
-                    Ok(Some(path)) => {
-                        pack_candidates.remove(&digest);
-                        missing.remove(&digest);
-                        verified.insert(digest, path);
-                    }
-                    Ok(None) => {
-                        pack_guards.insert(digest, guard);
-                    }
+        let mut pack_requests = Vec::new();
+        while let Some(limits) = pack_limits.filter(|_| !pack_candidates.is_empty()) {
+            let candidates =
+                match blob_pack_chunk(&pack_candidates.keys().cloned().collect::<Vec<_>>(), limits)
+                {
+                    Ok(candidates) if !candidates.is_empty() => candidates,
+                    Ok(_) => break,
                     Err(error) => {
-                        warn!(
-                            "local cache blob lookup failed for {}: {error}",
-                            digest.hash
-                        );
-                        pack_guards.insert(digest, guard);
-                    }
-                }
-            }
-            let requested = pack_guards.keys().cloned().collect::<Vec<_>>();
-            if requested.is_empty() {
-                continue;
-            }
-            let requested_bytes = requested
-                .iter()
-                .fold(0_u64, |total, digest| total.saturating_add(digest.size));
-            let pack_reservation = match self
-                .reserve_remote_download_up_to(requested_bytes.min(MAX_STAGED_BLOB_PACK_BYTES))
-            {
-                Ok(reservation) if reservation.bytes() > 0 => reservation,
-                Ok(_) => break,
-                Err(error) => {
-                    warn!("remote cache blob pack skipped: {error}");
-                    break;
-                }
-            };
-            let (pack, transfer_duration_ns) = {
-                let _prefetch_permit = match prefetch_limit {
-                    Some(limit) => match limit.acquire().await {
-                        Ok(permit) => Some(permit),
-                        Err(error) => {
-                            warn!(
-                                "remote cache blob pack could not acquire prefetch limit: {error}"
-                            );
-                            break;
-                        }
-                    },
-                    None => None,
-                };
-                let _transfer_permit = match self.remote_transfers.acquire().await {
-                    Ok(permit) => permit,
-                    Err(error) => {
-                        warn!("remote cache blob pack could not acquire transfer limit: {error}");
+                        warn!("remote cache blob pack skipped: {error}");
                         break;
                     }
                 };
-                let transfer_started = Instant::now();
-                let pack = remote
-                    .get_blob_pack_with_limit(
-                        &requested,
-                        self.remote_staging_dir.as_path(),
-                        pack_reservation.bytes(),
-                    )
-                    .await;
-                (pack, duration_ns(transfer_started))
-            };
-            let pack = match pack {
-                Ok(Some(pack)) => pack,
-                Ok(None) => break,
-                Err(error) => {
-                    atomic_saturating_add(
-                        &self.stats.remote_blob_transfer_duration_ns,
-                        transfer_duration_ns,
-                    );
-                    warn!(
-                        "remote cache blob pack failed; falling back to individual blobs: {error}"
-                    );
-                    break;
-                }
-            };
-            pack_reservation.commit(pack.payload_bytes);
-            atomic_saturating_add(
-                &self.stats.remote_blob_transfer_duration_ns,
-                transfer_duration_ns,
-            );
-            atomic_saturating_add(&self.stats.remote_blob_pack_requests, pack.requests);
-            atomic_saturating_add(&self.stats.remote_blob_pack_blobs, pack.blob_count);
-            atomic_saturating_add(&self.stats.downloaded_bytes, pack.payload_bytes);
-            if pack.requested.is_empty() {
-                // The server's negotiated cap can be smaller than the local
-                // staging cap used to select this locked slice. Fall back for
-                // this slice, but keep packing later candidates that may fit.
-                for digest in &requested {
-                    pack_candidates.remove(digest);
-                }
-                continue;
-            }
-            for digest in &pack.requested {
+            for digest in &candidates {
                 pack_candidates.remove(digest);
             }
-            let mut ingests = stream::iter(pack.blobs.into_iter().map(|(digest, source)| {
-                let digest_for_result = digest.clone();
-                let guard = pack_guards
-                    .remove(&digest)
-                    .expect("requested packed blob has a write lock");
-                async move {
-                    (
-                        digest_for_result,
-                        self.ingest_packed_blob(digest, source, guard).await,
-                    )
-                }
-            }))
-            .buffer_unordered(MAX_PREFETCH_TRANSFERS);
-            while let Some((digest, result)) = ingests.next().await {
-                match result {
-                    Ok(path) => {
-                        missing.remove(&digest);
-                        verified.insert(digest, path);
-                    }
-                    Err(error) => warn!(
-                        "remote cache packed blob ingest failed for {}: {error}",
-                        digest.hash
-                    ),
-                }
+            pack_requests.push(candidates);
+        }
+
+        let mut packs = stream::iter(pack_requests)
+            .map(|requested| async move {
+                self.fetch_remote_blob_pack(remote, requested, prefetch_limit)
+                    .await
+            })
+            .buffer_unordered(MAX_CONCURRENT_BLOB_PACKS);
+        while let Some(blobs) = packs.next().await {
+            for (digest, path) in blobs {
+                missing.remove(&digest);
+                verified.insert(digest, path);
             }
         }
 
@@ -704,6 +596,119 @@ impl CacheAgent {
                 }
                 Err(error) => warn!(
                     "remote cache blob prefetch failed for {}: {error}",
+                    digest.hash
+                ),
+            }
+        }
+        verified
+    }
+
+    async fn fetch_remote_blob_pack(
+        &self,
+        remote: &RemoteCacheClient,
+        candidates: Vec<CacheDigest>,
+        prefetch_limit: Option<&tokio::sync::Semaphore>,
+    ) -> Vec<(CacheDigest, PathBuf)> {
+        // A pack and an individual fetch share these per-digest locks. Acquire
+        // them only after this pack enters the bounded active set, then hold
+        // them through ingestion so a foreground request may win against a
+        // queued pack but cannot duplicate an active download.
+        let mut guards = BTreeMap::new();
+        for digest in candidates {
+            let guard = self.write_lock(&digest).lock_owned().await;
+            match self.find_verified_blob(&digest) {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    guards.insert(digest, guard);
+                }
+                Err(error) => {
+                    warn!(
+                        "local cache blob lookup failed for {}: {error}",
+                        digest.hash
+                    );
+                    guards.insert(digest, guard);
+                }
+            }
+        }
+        let requested = guards.keys().cloned().collect::<Vec<_>>();
+        if requested.is_empty() {
+            return Vec::new();
+        }
+        let requested_bytes = requested
+            .iter()
+            .fold(0_u64, |total, digest| total.saturating_add(digest.size));
+        let reservation = match self
+            .reserve_remote_download_up_to(requested_bytes.min(MAX_STAGED_BLOB_PACK_BYTES))
+        {
+            Ok(reservation) if reservation.bytes() > 0 => reservation,
+            Ok(_) => return Vec::new(),
+            Err(error) => {
+                warn!("remote cache blob pack skipped: {error}");
+                return Vec::new();
+            }
+        };
+        let _prefetch_permit = match prefetch_limit {
+            Some(limit) => match limit.acquire().await {
+                Ok(permit) => Some(permit),
+                Err(error) => {
+                    warn!("remote cache blob pack could not acquire prefetch limit: {error}");
+                    return Vec::new();
+                }
+            },
+            None => None,
+        };
+        let _transfer_permit = match self.remote_transfers.acquire().await {
+            Ok(permit) => permit,
+            Err(error) => {
+                warn!("remote cache blob pack could not acquire transfer limit: {error}");
+                return Vec::new();
+            }
+        };
+        let transfer_started = Instant::now();
+        let pack = remote
+            .get_blob_pack_with_limit(
+                &requested,
+                self.remote_staging_dir.as_path(),
+                reservation.bytes(),
+            )
+            .await;
+        let transfer_duration_ns = duration_ns(transfer_started);
+        atomic_saturating_add(
+            &self.stats.remote_blob_transfer_duration_ns,
+            transfer_duration_ns,
+        );
+        let pack = match pack {
+            Ok(Some(pack)) => pack,
+            Ok(None) => return Vec::new(),
+            Err(error) => {
+                warn!("remote cache blob pack failed; falling back to individual blobs: {error}");
+                return Vec::new();
+            }
+        };
+        reservation.commit(pack.payload_bytes);
+        atomic_saturating_add(&self.stats.remote_blob_pack_requests, pack.requests);
+        atomic_saturating_add(&self.stats.remote_blob_pack_blobs, pack.blob_count);
+        atomic_saturating_add(&self.stats.downloaded_bytes, pack.payload_bytes);
+
+        let mut ingests = stream::iter(pack.blobs.into_iter().map(|(digest, source)| {
+            let digest_for_result = digest.clone();
+            let guard = guards
+                .remove(&digest)
+                .expect("requested packed blob has a write lock");
+            async move {
+                (
+                    digest_for_result,
+                    self.ingest_packed_blob(digest, source, guard).await,
+                )
+            }
+        }))
+        .buffer_unordered(MAX_PREFETCH_TRANSFERS);
+        let mut verified = Vec::new();
+        while let Some((digest, result)) = ingests.next().await {
+            match result {
+                Ok(path) => verified.push((digest, path)),
+                Err(error) => warn!(
+                    "remote cache packed blob ingest failed for {}: {error}",
                     digest.hash
                 ),
             }

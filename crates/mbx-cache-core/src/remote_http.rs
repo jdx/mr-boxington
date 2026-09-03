@@ -356,7 +356,7 @@ impl HttpRemoteCache {
         }
     }
 
-    async fn blob_pack_limits(&self) -> Result<Option<BlobPackLimits>> {
+    pub(crate) async fn blob_pack_limits(&self) -> Result<Option<BlobPackLimits>> {
         Ok(self.negotiated_capabilities().await?.blob_packs)
     }
 

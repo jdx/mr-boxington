@@ -1,9 +1,9 @@
 use crate::uploads::{ConnectionUploads, UploadQueue, UploadSink};
 use crate::{
-    ActionPrediction, ActionPromiseCompletion, ActionPromiseState, BlobPackLimits, CacheDigest,
-    CacheDirectory, LocalActionCache, LocalCas, MAX_STAGED_BLOB_PACK_BYTES,
-    MAX_STAGED_BLOB_PACK_ITEMS, ManifestPutOutcome, RemoteActionResult, RemoteCacheClient,
-    RemoteCacheMode, RustcMetadata, TaskActionManifest, blob_pack_chunk, canonical_json,
+    ActionPrediction, ActionPromiseCompletion, ActionPromiseState, CacheDigest, CacheDirectory,
+    LocalActionCache, LocalCas, MAX_STAGED_BLOB_PACK_BYTES, ManifestPutOutcome, RemoteActionResult,
+    RemoteCacheClient, RemoteCacheMode, RustcMetadata, TaskActionManifest, blob_pack_chunk,
+    canonical_json,
 };
 use eyre::{Context, Result, bail};
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream};
@@ -68,6 +68,12 @@ const MAX_FILE_DIGEST_BATCH: usize = 16 * 1024;
 const MAX_FILE_DIGEST_ENTRIES: usize = 1024 * 1024;
 const MAX_REMOTE_TRANSFERS: usize = 64;
 const MAX_PREFETCH_TRANSFERS: usize = 48;
+/// Most blob packs downloaded at once.
+///
+/// Packs are individually bounded to keep their staging footprint predictable.
+/// Allowing a few independent streams prevents one large Azure object stream
+/// from serializing an entire workspace restore.
+const MAX_CONCURRENT_BLOB_PACKS: usize = 8;
 /// Most predicted actions whose complete output closures are downloaded
 /// speculatively for one task.
 ///
