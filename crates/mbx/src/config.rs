@@ -914,18 +914,23 @@ impl Config {
                 for (linker_key, value) in table.iter() {
                     match linker_key {
                         "default" => {
-                            self.linker.default = value
-                                .as_str()
-                                .ok_or_else(|| {
-                                    eyre::eyre!(
-                                        "{}.linker.default must be a string",
-                                        path.display()
-                                    )
-                                })?
-                                .to_owned();
+                            let selection = value.as_str().ok_or_else(|| {
+                                eyre::eyre!("{}.linker.default must be a string", path.display())
+                            })?;
+                            crate::managed_linker::validate_workspace_selector(selection)
+                                .wrap_err_with(|| {
+                                    format!("invalid {}.linker.default", path.display())
+                                })?;
+                            self.linker.default = selection.to_owned();
                         }
                         "profiles" => {
-                            self.linker.profiles = workspace_linker_profiles(&path, value)?;
+                            for (profile, selections) in workspace_linker_profiles(&path, value)? {
+                                self.linker
+                                    .profiles
+                                    .entry(profile)
+                                    .or_default()
+                                    .extend(selections);
+                            }
                         }
                         _ => bail!(
                             "{} contains unsupported workspace setting \"linker.{linker_key}\"; only linker.default and linker.profiles are allowed",
@@ -1042,6 +1047,12 @@ fn workspace_linker_profiles(
             let selection = selection.as_str().ok_or_else(|| {
                 eyre::eyre!(
                     "{}.linker.profiles.{profile}.{target} must be a string",
+                    path.display()
+                )
+            })?;
+            crate::managed_linker::validate_workspace_selector(selection).wrap_err_with(|| {
+                format!(
+                    "invalid {}.linker.profiles.{profile}.{target}",
                     path.display()
                 )
             })?;
@@ -1615,8 +1626,13 @@ default = "rust-lld"
             "[linker.profiles.dev]\ndefault = \"mold@2.42.0\"\n",
         )
         .unwrap();
-        let mut config =
-            configured(Some("[linker.profiles.dev]\ndefault = \"system\""), &[]).unwrap();
+        let mut config = configured(
+            Some(
+                "[linker.profiles.dev]\ndefault = \"system\"\naarch64-apple-darwin = \"jdxld@0.10.0\"",
+            ),
+            &[],
+        )
+        .unwrap();
 
         config
             .apply_workspace_policy_with(directory.path(), |_| false)
@@ -1627,6 +1643,58 @@ default = "rust-lld"
                 .linker
                 .for_build("dev", Some("x86_64-unknown-linux-gnu")),
             Some("mold@2.42.0".into())
+        );
+        assert_eq!(
+            config.linker.for_build("dev", Some("aarch64-apple-darwin")),
+            Some("jdxld@0.10.0".into())
+        );
+    }
+
+    #[test]
+    fn workspace_linker_policy_preserves_unrelated_global_profiles() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join(".mbx.toml"),
+            "[linker.profiles.dev]\ndefault = \"mold@2.42.0\"\n",
+        )
+        .unwrap();
+        let mut config = configured(
+            Some("[linker.profiles.release]\ndefault = \"rust-lld\""),
+            &[],
+        )
+        .unwrap();
+
+        config
+            .apply_workspace_policy_with(directory.path(), |_| false)
+            .unwrap();
+
+        assert_eq!(
+            config.linker.for_build("release", None),
+            Some("rust-lld".into())
+        );
+        assert_eq!(
+            config.linker.for_build("dev", None),
+            Some("mold@2.42.0".into())
+        );
+    }
+
+    #[test]
+    fn workspace_linker_policy_rejects_executable_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join(".mbx.toml"),
+            "[linker.profiles.dev]\ndefault = \"path:./linker\"\n",
+        )
+        .unwrap();
+        let mut config = configured(None, &[]).unwrap();
+
+        let error = config
+            .apply_workspace_policy_with(directory.path(), |_| false)
+            .unwrap_err();
+
+        assert!(
+            format!("{error:?}")
+                .contains("workspace linker policy may not select an executable path")
         );
     }
 

@@ -63,6 +63,14 @@ pub(crate) fn resolve(
     }
 }
 
+/// Validate a selector supplied by repository-owned workspace policy.
+pub(crate) fn validate_workspace_selector(value: &str) -> Result<()> {
+    match Spec::parse(value)? {
+        Spec::Path(_) => bail!("workspace linker policy may not select an executable path"),
+        _ => Ok(()),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Provider {
     Jdxld,
@@ -181,7 +189,7 @@ impl Spec {
             bail!("unknown managed linker `{name}`; supported linkers are jdxld, mold, and wild");
         };
         let version = version.trim_start_matches('v');
-        if version.is_empty() || version == "latest" {
+        if version.is_empty() || matches!(version, "." | ".." | "latest") {
             bail!("managed linker `{name}` must name an exact version");
         }
         if !version
@@ -368,12 +376,24 @@ fn rust_lld(target: Option<&str>, cache_dir: &Path, cargo_arguments: &[String]) 
     } else {
         "ld.lld"
     };
-    let shim_dir = cache_dir.join("tools/rust-lld").join(host);
+    let sysroot_key = hex::encode(Sha256::digest(sysroot.trim().as_bytes()));
+    let shim_dir = cache_dir
+        .join("tools/rust-lld")
+        .join(host)
+        .join(sysroot_key);
     fs::create_dir_all(&shim_dir)?;
     let shim = shim_dir.join(flavor);
-    if !shim.exists() {
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&path, &shim)?;
+    #[cfg(unix)]
+    {
+        let mut lock = fslock::LockFile::open(&shim_dir.join("install.lock"))?;
+        lock.lock()?;
+        if fs::read_link(&shim).is_ok_and(|target| target == path) {
+            return Ok(shim);
+        }
+        let temporary = shim_dir.join(format!(".{flavor}.new"));
+        let _ = fs::remove_file(&temporary);
+        std::os::unix::fs::symlink(&path, &temporary)?;
+        fs::rename(&temporary, &shim)?;
     }
     Ok(shim)
 }
@@ -391,6 +411,8 @@ fn cargo_profile(arguments: &[String]) -> String {
             profile = arguments.next().cloned();
         } else if let Some(value) = argument.strip_prefix("--profile=") {
             profile = Some(value.to_owned());
+        } else if matches!(argument.as_str(), "--config" | "--color" | "-Z") {
+            let _ = arguments.next();
         } else if !argument.starts_with('-') && !argument.starts_with('+') && subcommand.is_none() {
             subcommand = Some(argument.as_str());
         }
@@ -474,6 +496,10 @@ mod tests {
         );
         assert_eq!(cargo_profile(&["bench".into()]), "bench");
         assert_eq!(
+            cargo_profile(&["--config".into(), "build.jobs=1".into(), "bench".into(),]),
+            "bench"
+        );
+        assert_eq!(
             cargo_profile(&["build".into(), "--profile=fast".into()]),
             "fast"
         );
@@ -497,6 +523,7 @@ mod tests {
         ));
         assert!(Spec::parse("wild@latest").is_err());
         assert!(Spec::parse("mold@../../escape").is_err());
+        assert!(Spec::parse("mold@..").is_err());
         assert!(Spec::parse("unknown@1").is_err());
     }
 
@@ -516,5 +543,17 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_lld_repairs_a_dangling_cached_shim() {
+        let cache = tempfile::tempdir().unwrap();
+        let shim = rust_lld(None, cache.path(), &[]).unwrap();
+        fs::remove_file(&shim).unwrap();
+        std::os::unix::fs::symlink("/missing/rust-lld", &shim).unwrap();
+
+        assert_eq!(rust_lld(None, cache.path(), &[]).unwrap(), shim);
+        assert!(fs::read_link(shim).unwrap().is_file());
     }
 }
