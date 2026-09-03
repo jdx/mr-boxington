@@ -613,6 +613,44 @@ fn materialized_outputs_are_independent_from_the_cas() {
 }
 
 #[test]
+fn only_compiler_input_mutations_invalidate_local_outputs() {
+    let changed = eyre::Report::new(BypassReason::InputChanged("src/lib.rs".into()))
+        .wrap_err("publication failed");
+    let overlapping = eyre::Report::new(BypassReason::InputModifiedDuringCompilation(
+        "src/lib.rs".into(),
+    ));
+
+    assert!(compiler_input_was_modified(&changed));
+    assert!(compiler_input_was_modified(&overlapping));
+    assert!(!compiler_input_was_modified(&eyre::eyre!(
+        "the cache is unavailable"
+    )));
+}
+
+#[test]
+fn discards_every_modeled_compiler_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let metadata = directory.path().join("libfixture.rmeta");
+    let library = directory.path().join("libfixture.rlib");
+    let dep_info = directory.path().join("fixture.d");
+    for path in [&metadata, &library, &dep_info] {
+        std::fs::write(path, b"output").unwrap();
+    }
+    let outputs = RustcOutputs {
+        directory: directory.path().to_path_buf(),
+        files: vec![metadata.clone(), library.clone()],
+        dep_info: dep_info.clone(),
+    };
+
+    discard_compiler_outputs(&outputs).unwrap();
+
+    assert!(!metadata.exists());
+    assert!(!library.exists());
+    assert!(!dep_info.exists());
+    discard_compiler_outputs(&outputs).unwrap();
+}
+
+#[test]
 fn rejects_cached_outputs_with_the_wrong_size() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("cas-blob");

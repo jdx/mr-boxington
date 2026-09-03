@@ -488,8 +488,8 @@ pub(crate) fn compile(
         }
         return Ok(exit_code(output.status));
     }
+    let mut final_status = exit_code(output.status);
     if output.status.success() {
-        learned.record_compiled();
         let publication: Result<Option<ActionDiagnostic>> = (|| {
             let input_identities = input_identities
                 .as_ref()
@@ -498,6 +498,7 @@ pub(crate) fn compile(
             discovered
                 .verify_not_modified_since_with_identities(compilation_started, input_identities)?;
             discovered.verify()?;
+            learned.record_compiled();
             if learned_enabled && learned.record.is_none() && source_is_in_workspace(&compilation) {
                 record_learned_baseline(&compilation, &discovered);
             }
@@ -536,6 +537,15 @@ pub(crate) fn compile(
         })();
         match publication {
             Ok(diagnostic) => current_diagnostic = diagnostic,
+            Err(error) if compiler_input_was_modified(&error) => {
+                if let Err(discard_error) = discard_compiler_outputs(&outputs) {
+                    eprintln!(
+                        "mbx[warning]: some invalid compiler outputs could not be removed: {discard_error:#}"
+                    );
+                }
+                eprintln!("mbx[error]: compilation result was discarded: {error:#}");
+                final_status = ExitCode::FAILURE;
+            }
             Err(error) => eprintln!("mbx[warning]: result was not stored: {error:#}"),
         }
     }
@@ -545,7 +555,39 @@ pub(crate) fn compile(
         timing.duration_ns,
         current_diagnostic,
     );
-    Ok(exit_code(output.status))
+    Ok(final_status)
+}
+
+/// Whether publication failed because the compiler's inputs moved underneath it.
+///
+/// Other publication failures only prevent caching: rustc's local result is
+/// still valid and Cargo can use it. These two failures instead mean the
+/// artifact cannot be trusted, regardless of whether it was ever published.
+fn compiler_input_was_modified(error: &eyre::Report) -> bool {
+    matches!(
+        error.downcast_ref::<BypassReason>(),
+        Some(BypassReason::InputModifiedDuringCompilation(_) | BypassReason::InputChanged(_))
+    )
+}
+
+/// Remove an invalid compiler result before Cargo can consume or fingerprint it.
+fn discard_compiler_outputs(outputs: &RustcOutputs) -> Result<()> {
+    let mut failures = Vec::new();
+    for path in outputs
+        .files
+        .iter()
+        .chain(std::iter::once(&outputs.dep_info))
+    {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => failures.push(format!("{}: {error}", path.display())),
+        }
+    }
+    if !failures.is_empty() {
+        bail!("{}", failures.join("; "));
+    }
+    Ok(())
 }
 
 /// Compile a build script whose native link cannot be action-cached, then
