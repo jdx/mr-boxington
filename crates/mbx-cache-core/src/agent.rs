@@ -74,10 +74,11 @@ const MAX_PREFETCH_TRANSFERS: usize = 48;
 /// Manifests deliberately retain predictions across compatible builds, so a
 /// large workspace can describe far more actions than the next invocation
 /// will request. Keep the most expensive recorded actions warm and let
-/// foreground lookups fetch the long tail on demand. A 256-action ceiling also
-/// bounds speculative output transfer: real Cargo manifests commonly contain
-/// predictions for build-script work made unnecessary by an earlier cache hit.
-const MAX_PREFETCH_ACTIONS: usize = 256;
+/// foreground lookups fetch only unusually large tails on demand. The remote
+/// download-byte budget remains the primary bound on speculative transfer. A
+/// 1,024-action ceiling covers the measured large-workspace manifests while
+/// retaining a guard against pathological manifests and stale prediction sets.
+const MAX_PREFETCH_ACTIONS: usize = 1024;
 // Resolve speculative actions progressively so the most valuable predictions
 // become usable first and cancellation at the end of a build abandons a small
 // tail instead of one workspace-sized transfer wave. Action-result lookup is

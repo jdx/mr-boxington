@@ -125,6 +125,16 @@ pub(crate) struct BlobPackLimits {
     pub(crate) max_bytes: u64,
 }
 
+/// Largest blob pack sent in one streaming upload.
+///
+/// Downloads can make progress while the response body arrives, but an upload
+/// receives no response progress until the server has consumed its request.
+/// Keep one pack comfortably inside the ordinary HTTP inactivity timeout even
+/// when a server advertises a multi-gigabyte protocol limit. The upload queue
+/// sends independent packs concurrently, so smaller packs also avoid making a
+/// single timeout replay hundreds of megabytes.
+const MAX_UPLOAD_BLOB_PACK_BYTES: u64 = 64 * 1024 * 1024;
+
 /// What one capabilities exchange settled, cached for the session.
 ///
 /// `Default` is also the answer for a server with no capabilities endpoint:
@@ -412,7 +422,11 @@ impl HttpRemoteCache {
             }))
         };
         let blob_packs = pack_limits(capabilities.features.blob_packs)?;
-        let blob_pack_uploads = pack_limits(capabilities.features.blob_pack_uploads)?;
+        let blob_pack_uploads =
+            pack_limits(capabilities.features.blob_pack_uploads)?.map(|limits| BlobPackLimits {
+                max_bytes: limits.max_bytes.min(MAX_UPLOAD_BLOB_PACK_BYTES),
+                ..limits
+            });
         let action_batches = if capabilities.features.action_batch {
             let max_items = usize::try_from(capabilities.limits.max_batch_items)
                 .ok()
@@ -754,7 +768,10 @@ impl HttpRemoteCache {
                 .body(body.clone())
                 .send()
                 .await?;
-            if response.status() != StatusCode::PRECONDITION_FAILED {
+            if !matches!(
+                response.status(),
+                StatusCode::PRECONDITION_FAILED | StatusCode::CONFLICT
+            ) {
                 error_for_status_with_body(response).await?;
             }
             Ok(())

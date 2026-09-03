@@ -84,6 +84,34 @@ fn action_result_keys_require_blake3() {
 }
 
 #[tokio::test]
+async fn action_upload_is_idempotent_when_result_already_exists() {
+    let mut server = mockito::Server::new_async().await;
+    let action = CacheDigest::blake3(b"existing action");
+    let endpoint = format!("/v1/action-results/blake3/{}/{}", action.hash, action.size);
+    let upload = server
+        .mock("PUT", endpoint.as_str())
+        .match_header("if-none-match", "*")
+        .with_status(409)
+        .with_body(r#"{"error":"an immutable action result already exists"}"#)
+        .expect(1)
+        .create_async()
+        .await;
+    let result = RemoteActionResult {
+        action,
+        metadata: None,
+        output_root: None,
+        version: 1,
+    };
+
+    test_client(&server)
+        .put_action_result(&result)
+        .await
+        .unwrap();
+
+    upload.assert_async().await;
+}
+
+#[tokio::test]
 async fn action_upload_errors_include_a_bounded_server_response() {
     let mut server = mockito::Server::new_async().await;
     let action = CacheDigest::blake3(b"rejected action");
@@ -737,6 +765,34 @@ async fn rejects_oversized_capabilities() {
         error.contains("over the") || error.contains("exceeded the"),
         "unexpected error: {error}"
     );
+}
+
+#[tokio::test]
+async fn caps_streaming_upload_packs_below_the_download_limit() {
+    let mut server = mockito::Server::new_async().await;
+    server
+        .mock("GET", format!("/v{PROTOCOL_VERSION}/capabilities").as_str())
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            serde_json::json!({
+                "protocol":{"major":1},
+                "features":{"blob_packs":true,"blob_pack_uploads":true},
+                "limits":{"max_batch_items":10000,"max_pack_bytes":5368709120_u64}
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let client = test_client(&server);
+
+    let downloads = client.blob_pack_limits().await.unwrap().unwrap();
+    let uploads = client.blob_pack_upload_limits().await.unwrap().unwrap();
+
+    assert_eq!(downloads.max_bytes, MAX_STAGED_BLOB_PACK_BYTES);
+    assert_eq!(uploads.max_bytes, MAX_UPLOAD_BLOB_PACK_BYTES);
+    assert_eq!(uploads.max_items, MAX_STAGED_BLOB_PACK_ITEMS);
 }
 
 #[tokio::test]
