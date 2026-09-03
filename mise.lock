@@ -7,9 +7,6 @@ version = "2.2.4"
 backend = "aqua:jdx/aube"
 specifiers = ["latest"]
 
-[tools.aube.options]
-"vars.lazy" = "true"
-
 [tools.aube."platforms.linux-arm64"]
 checksum = "sha256:ded66b083215124d196d918ce44506791c2153552f8f307786e07d9bb3f9221e"
 url = "https://github.com/jdx/aube/releases/download/v2.2.4/aube-v2.2.4-aarch64-unknown-linux-gnu.tar.gz"
@@ -123,48 +120,6 @@ provenance_verified = true
 checksum = "sha256:a15f62ea6fa0051f8ae01fca58da26c550ae95fd9d7eccaa167ca53d6f2262b3"
 url = "https://github.com/jdx/tak/releases/download/v0.0.9/tak-x86_64-pc-windows-msvc.zip"
 url_api = "https://api.github.com/repos/jdx/tak/releases/assets/537992910"
-provenance = "github-attestations"
-
-[[tools."github:kunobi-ninja/kache"]]
-version = "0.16.0"
-backend = "github:kunobi-ninja/kache"
-specifiers = ["0.16.0"]
-
-[tools."github:kunobi-ninja/kache"."platforms.linux-arm64"]
-checksum = "sha256:6eabb67867022eecdbfffe43c16e75b5c5b561983742bda3c900a4cb4c50e4a7"
-url = "https://github.com/kunobi-ninja/kache/releases/download/v0.16.0/kache-aarch64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/kunobi-ninja/kache/releases/assets/529655675"
-provenance = "github-attestations"
-
-[tools."github:kunobi-ninja/kache"."platforms.linux-arm64-musl"]
-checksum = "sha256:6eabb67867022eecdbfffe43c16e75b5c5b561983742bda3c900a4cb4c50e4a7"
-url = "https://github.com/kunobi-ninja/kache/releases/download/v0.16.0/kache-aarch64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/kunobi-ninja/kache/releases/assets/529655675"
-provenance = "github-attestations"
-
-[tools."github:kunobi-ninja/kache"."platforms.linux-x64"]
-checksum = "sha256:caee657c662379475af2a0a7611ad32a6d053822036c1ec191bb8fd1c826d54b"
-url = "https://github.com/kunobi-ninja/kache/releases/download/v0.16.0/kache-x86_64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/kunobi-ninja/kache/releases/assets/529655714"
-provenance = "github-attestations"
-
-[tools."github:kunobi-ninja/kache"."platforms.linux-x64-musl"]
-checksum = "sha256:caee657c662379475af2a0a7611ad32a6d053822036c1ec191bb8fd1c826d54b"
-url = "https://github.com/kunobi-ninja/kache/releases/download/v0.16.0/kache-x86_64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/kunobi-ninja/kache/releases/assets/529655714"
-provenance = "github-attestations"
-
-[tools."github:kunobi-ninja/kache"."platforms.macos-arm64"]
-checksum = "sha256:6ad80d3bbb33d7db1715d5a919edbdf755dc19ca22fa83797c659147f1f9e229"
-url = "https://github.com/kunobi-ninja/kache/releases/download/v0.16.0/kache-aarch64-apple-darwin.tar.gz"
-url_api = "https://api.github.com/repos/kunobi-ninja/kache/releases/assets/529655624"
-provenance = "github-attestations"
-provenance_verified = true
-
-[tools."github:kunobi-ninja/kache"."platforms.windows-x64"]
-checksum = "sha256:b4b53a54926e5cdc8c084562fdf215780306c9d5dc7eeaff9e4eb70c0b47fe2a"
-url = "https://github.com/kunobi-ninja/kache/releases/download/v0.16.0/kache-x86_64-pc-windows-msvc.zip"
-url_api = "https://api.github.com/repos/kunobi-ninja/kache/releases/assets/529655706"
 provenance = "github-attestations"
 
 [[tools.lychee]]
