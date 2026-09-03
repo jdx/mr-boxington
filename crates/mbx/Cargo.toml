@@ -22,6 +22,8 @@ env_logger = "0.11"
 dirs = "6"
 eyre = "0.6"
 fslock = "0.2"
+flate2 = "1"
+hex = "0.4"
 log = "0.4"
 memchr = "2"
 mbx-cache-core = { path = "../mbx-cache-core", version = "0.11.2", default-features = false }
@@ -32,8 +34,11 @@ mbx-cache-store = { path = "../mbx-cache-store", version = "0.1.14", default-fea
 rand = "0.10"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 reflink-copy = "0.1"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11"
+tar = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 toml = "1.1"
@@ -63,12 +68,13 @@ windows-sys = { version = "0.61", features = [
 
 [features]
 default = ["rustls"]
-native-tls = ["mbx-cache-cargo/native-tls", "mbx-cache-cc/native-tls", "mbx-cache-core/native-tls", "mbx-cache-rustc/native-tls", "mbx-cache-store/native-tls"]
-rustls = ["mbx-cache-cargo/rustls", "mbx-cache-cc/rustls", "mbx-cache-core/rustls", "mbx-cache-rustc/rustls", "mbx-cache-store/rustls"]
+native-tls = ["mbx-cache-cargo/native-tls", "mbx-cache-cc/native-tls", "mbx-cache-core/native-tls", "mbx-cache-rustc/native-tls", "mbx-cache-store/native-tls", "reqwest/native-tls"]
+rustls = ["mbx-cache-cargo/rustls", "mbx-cache-cc/rustls", "mbx-cache-core/rustls", "mbx-cache-rustc/rustls", "mbx-cache-store/rustls", "reqwest/rustls"]
 rustls-native-roots = [
   "mbx-cache-cargo/rustls-native-roots",
   "mbx-cache-cc/rustls-native-roots",
   "mbx-cache-core/rustls-native-roots",
   "mbx-cache-rustc/rustls-native-roots",
   "mbx-cache-store/rustls-native-roots",
+  "reqwest/rustls",
 ]

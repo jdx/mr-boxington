@@ -74,6 +74,8 @@ pub(crate) const BUILD_SCRIPT_EXECUTION_ENV: &str = "MBX_BUILD_SCRIPT_EXECUTION"
 pub(crate) const LEARNED_INCREMENTAL_ENV: &str = "MBX_LEARNED_INCREMENTAL";
 pub(crate) const LEARNED_INCREMENTAL_MAX_SIZE_ENV: &str = "MBX_LEARNED_INCREMENTAL_MAX_SIZE";
 pub(crate) const INCREMENTAL_ROOT_ENV: &str = "MBX_INCREMENTAL_ROOT";
+pub(crate) const MANAGED_LINKER_ENV: &str = "MBX_MANAGED_LINKER";
+pub(crate) const JDXLD_SOCKET_ENV: &str = "MBX_JDXLD_SOCKET";
 pub const CACHE_LINKS_ENV: &str = "MBX_CACHE_LINKS";
 /// Group completed builds for one later cache export, used by CI actions.
 pub const CACHE_EXPORT_GROUP_ENV: &str = "MBX_CACHE_EXPORT_GROUP";
@@ -1227,7 +1229,10 @@ pub fn run_rustc_shim() -> ExitCode {
         eprintln!("mbx[error]: the rustc shim expected the rustc executable as its first argument");
         return ExitCode::from(1);
     };
-    let arguments = arguments.collect::<Vec<_>>();
+    let mut arguments = arguments.collect::<Vec<_>>();
+    if let Some(linker) = std::env::var_os(MANAGED_LINKER_ENV).filter(|path| !path.is_empty()) {
+        use_managed_linker(&mut arguments, &linker);
+    }
     let is_workspace_wrapper = std::env::var_os(PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV)
         .is_some_and(|wrapper| wrapper == rustc);
     let (wrapper_argument, compiler_arguments) = workspace_wrapper_arguments(&rustc, &arguments);
@@ -1251,6 +1256,15 @@ pub fn run_rustc_shim() -> ExitCode {
     }
 
     run_transparent_rustc(rustc, arguments)
+}
+
+/// Route native links through the selected executable while leaving metadata
+/// queries and `cargo check` byte-for-byte unchanged.
+fn use_managed_linker(arguments: &mut Vec<OsString>, linker: &OsStr) {
+    if links_natively(arguments) {
+        arguments.push("-Clinker=clang".into());
+        arguments.push(format!("-Clink-arg=-fuse-ld={}", Path::new(linker).display()).into());
+    }
 }
 
 fn workspace_wrapper_arguments<'a>(

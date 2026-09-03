@@ -65,6 +65,7 @@ fn test_config(cache_dir: &Path) -> Config {
         http: Default::default(),
         gc: Default::default(),
         scheduler: Default::default(),
+        linker: Default::default(),
         target: crate::config::TargetSettings {
             views: false,
             root: cache_dir.join("targets"),
@@ -837,6 +838,18 @@ fn recognizes_the_bypassed_invocations_that_run_a_linker() {
         let arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
         assert!(!links_natively(&arguments), "{arguments:?} does not link");
     }
+}
+
+#[test]
+fn managed_linkers_are_added_only_to_native_links() {
+    let mut link = vec!["--crate-type=bin".into(), "--emit=link".into()];
+    use_managed_linker(&mut link, OsStr::new("/tools/mold"));
+    assert!(link.contains(&OsString::from("-Clinker=clang")));
+    assert!(link.contains(&OsString::from("-Clink-arg=-fuse-ld=/tools/mold")));
+
+    let mut check = vec!["--crate-type=bin".into(), "--emit=metadata".into()];
+    use_managed_linker(&mut check, OsStr::new("/tools/mold"));
+    assert_eq!(check.len(), 2);
 }
 
 /// The session shim must be a symlink, not a hard link.

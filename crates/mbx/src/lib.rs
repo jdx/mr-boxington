@@ -51,6 +51,8 @@ mod cc;
 mod digest_ledger;
 mod incremental;
 mod linker;
+mod linker_worker;
+mod managed_linker;
 mod materialize;
 mod rustc;
 mod rustdoc;

@@ -580,6 +580,7 @@ mod tests {
             http: Default::default(),
             gc: Default::default(),
             scheduler: Default::default(),
+            linker: Default::default(),
             target: crate::config::TargetSettings {
                 views: true,
                 root: directory.path().join("targets"),
@@ -618,6 +619,7 @@ mod tests {
             http: Default::default(),
             gc: Default::default(),
             scheduler: Default::default(),
+            linker: Default::default(),
             target: crate::config::TargetSettings {
                 views: true,
                 root: directory.path().join("targets"),

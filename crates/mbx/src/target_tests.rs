@@ -15,6 +15,7 @@ fn test_config(root: &Path, views: bool) -> Config {
         http: Default::default(),
         gc: Default::default(),
         scheduler: Default::default(),
+        linker: Default::default(),
         target: TargetSettings {
             views,
             root: root.join("targets"),

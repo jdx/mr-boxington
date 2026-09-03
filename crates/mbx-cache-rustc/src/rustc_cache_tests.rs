@@ -1367,14 +1367,7 @@ fn unportable_native_links_still_bypass() {
         "-Clinker=/usr/bin/false",
         "src/lib.rs",
     ]);
-    if cfg!(windows) {
-        assert!(RustcInvocation::parse_with(&linker, native_links()).is_ok());
-    } else {
-        assert_eq!(
-            RustcInvocation::parse_with(&linker, native_links()),
-            Err(BypassReason::UnknownCodegenOption("linker".into()))
-        );
-    }
+    assert!(RustcInvocation::parse_with(&linker, native_links()).is_ok());
 
     // Absent or affirmatively off is the default the compiler identity pins.
     for flag in ["-Csplit-debuginfo=off", "-Crpath=no", "-Cprefer-dynamic=no"] {

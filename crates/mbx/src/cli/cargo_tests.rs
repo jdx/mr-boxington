@@ -365,6 +365,7 @@ pub(super) fn managed_target_config(root: &Path) -> Config {
         http: Default::default(),
         gc: Default::default(),
         scheduler: Default::default(),
+        linker: Default::default(),
         target: crate::config::TargetSettings {
             views: true,
             root: root.join("targets"),

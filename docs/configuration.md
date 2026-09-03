@@ -40,6 +40,17 @@ cc = true
 summary = "short"        # or "off", "full"
 savings = "quips"        # or "plain", "off"
 
+[linker]
+default = "system"
+
+[linker.profiles.dev]
+aarch64-apple-darwin = "jdxld@0.10.0"
+x86_64-unknown-linux-gnu = "mold@2.42.0"
+default = "rust-lld"
+
+[linker.profiles.release]
+default = "system"
+
 [gc]
 auto = true
 max_size = "20GiB"       # default: 5% of the cache disk
@@ -71,6 +82,53 @@ memory = "24GiB"         # default: 85% of physical memory
 priority = "normal"      # or "low"
 ```
 
+## Managed linkers
+
+mbx can select a linker by Cargo profile and target triple, install an exact
+version from its official GitHub releases, and route native Rust links through
+it. The built-in selectors are:
+
+- `system`, which leaves Cargo's linker selection alone;
+- `rust-lld` or `lld`, which uses the LLD shipped with the active Rust
+  toolchain;
+- `jdxld@<version>`, `mold@<version>`, or `wild@<version>`, which downloads the
+  matching release asset and verifies GitHub's SHA-256 digest; and
+- `path:<executable>`, which selects a linker mbx does not install.
+
+Managed GitHub linkers require an exact version. Downloads are installed once
+beneath `<cache_dir>/tools`; concurrent builds share the same installation
+lock. `GITHUB_TOKEN` may authenticate GitHub API and download requests.
+
+Within a profile table, an exact target triple wins over `default`. The
+top-level `linker.default` applies when the active profile has no entry. Cargo's
+ordinary profile is `dev`, `--release` selects `release`, `cargo bench` selects
+`bench`, and `--profile <name>` selects that custom profile.
+
+```toml
+[linker]
+default = "system"
+
+[linker.profiles.dev]
+aarch64-apple-darwin = "jdxld@0.10.0"
+x86_64-unknown-linux-gnu = "mold@2.42.0"
+aarch64-unknown-linux-gnu = "wild@0.10.0"
+
+[linker.profiles.release]
+default = "rust-lld"
+```
+
+`MBX_LINKER` overrides every file for one invocation:
+
+```sh
+MBX_LINKER=mold@2.42.0 cargo build
+MBX_LINKER=system cargo build --release
+```
+
+mold and Wild currently provide managed releases for Linux. jdxld provides a
+managed Apple Silicon macOS release. Unsupported host platforms fail before
+Cargo starts rather than silently changing the linker. The selected executable
+remains part of mbx's native-link cache identity.
+
 ## Workspace policy
 
 A repository may check in a `.mbx.toml` containing the build-policy switches
@@ -81,6 +139,9 @@ incremental = false
 share_out_dir = false
 build_script_execution = true
 cc = true
+
+[linker.profiles.dev]
+default = "rust-lld"
 
 [scheduler]
 reserve_cpus = 2

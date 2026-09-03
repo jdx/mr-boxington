@@ -146,6 +146,29 @@ Compile crates that keep missing the cache with changed content incrementally, k
 
 How much learned incremental state one crate may keep, or "none". State past this is discarded before the crate compiles again.
 
+### `linker.default`
+
+- **Type:** `string`
+- **Default:** `system`
+
+Linker used when the active Cargo profile has no matching selection.
+
+### `linker.profiles`
+
+- **Type:** `option<map<string, map<string, string>>>`
+- **Optional:** true
+
+Linkers selected by Cargo profile and target triple.
+
+### `linker.selection`
+
+- **Type:** `option<string>`
+- **Optional:** true
+- **Scope:** only from the environment or the command line
+- **Set with:** `MBX_LINKER`
+
+Override the configured linker for this invocation.
+
 ### `log`
 
 - **Type:** `string`
