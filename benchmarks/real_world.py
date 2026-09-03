@@ -45,13 +45,21 @@ SUBJECTS: dict[str, dict[str, object]] = {
     },
 }
 
-TOOLS = ("cargo", "rust-cache", "mbx-sequential", "mbx-unscheduled", "mbx", "kache")
+TOOLS = (
+    "cargo",
+    "rust-cache",
+    "mbx-hydrated",
+    "mbx-sequential",
+    "mbx-unscheduled",
+    "mbx",
+    "kache",
+)
 
 # All three run the same binary. The contention scenario separates the current
 # sequential lint shape, the proposed parallel shape, and a parallel control
 # with the machine-wide scheduler off. Everywhere else they would just measure
 # mbx repeatedly.
-MBX_TOOLS = ("mbx", "mbx-sequential", "mbx-unscheduled")
+MBX_TOOLS = ("mbx", "mbx-hydrated", "mbx-sequential", "mbx-unscheduled")
 
 # Overlapping compilation jobs from the check, lint, and test stages a Rust CI
 # pipeline commonly stacks on one large runner. Two Cargo processes barely
@@ -95,10 +103,11 @@ SCENARIOS: dict[str, dict[str, object]] = {
         ),
     },
     "edit": {
-        "tools": ("rust-cache", "mbx"),
+        "tools": ("rust-cache", "mbx-hydrated", "mbx"),
         "description": (
             "parent state restored, then one Rust source file gains 30 lines -- "
-            "Swatinem/rust-cache target reuse against mbx action reuse"
+            "Swatinem/rust-cache target reuse against mbx action reuse, with a hydrated "
+            "mbx target retained as an implementation ceiling"
         ),
     },
     "worktree": {
@@ -718,7 +727,7 @@ def run_scenario(
                         store=store,
                         # Swatinem/rust-cache restores Cargo's target from the
                         # parent build. mbx restores actions into a fresh target.
-                        fresh_target=tool != "rust-cache",
+                        fresh_target=tool not in ("rust-cache", "mbx-hydrated"),
                     )
                 )
             elif scenario == "worktree":
@@ -1041,8 +1050,13 @@ def main() -> int:
         prefix="mbx-real-world-", ignore_cleanup_errors=True
     ) as temporary:
         work = Path(temporary)
-        cargo_home = work / "cargo-home"
-        cargo_home.mkdir()
+        configured_cargo_home = os.environ.get("MBX_BENCH_CARGO_HOME")
+        cargo_home = (
+            Path(configured_cargo_home).resolve()
+            if configured_cargo_home
+            else work / "cargo-home"
+        )
+        cargo_home.mkdir(parents=True, exist_ok=True)
 
         mirror = work / "mirror.git"
         git("clone", "--bare", str(subject["url"]), mirror)

@@ -414,9 +414,114 @@ jobs:
           name: small-edit-mbx-${{ github.run_id }}
           path: target/small-edit/mbx.json
 
+  edit-mbx-direct-seed:
+    name: Seed direct hydrated mbx at the parent
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/benchmark-small-edit'
+    runs-on: [self-hosted, jdx-perf-v1]
+    container:
+      image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68
+      options: --cpuset-cpus 0-7
+    timeout-minutes: 45
+    permissions:
+      actions: write
+      contents: read
+    env:
+      MBX_DIRECT_ROOT: /github/home/mbx-direct
+      MBX_CACHE_DIR: /github/home/mbx-direct/store
+      CARGO_HOME: /github/home/mbx-direct/cargo-home
+      CARGO_TARGET_DIR: /github/home/mbx-direct/target
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jdx/hk
+          ref: 27bb615768b85c9ac88e2abf8895219b44462871
+          path: subject
+          persist-credentials: false
+      - uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa
+        with:
+          backend: local
+          version: 1.6.0
+          toolchain: 1.97.1
+      - working-directory: subject
+        run: mbx build --locked
+      - name: Snapshot Cargo scheduling state
+        run: python3 benchmarks/analyze_hydration.py snapshot "$MBX_DIRECT_ROOT" "$(command -v mbx)"
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          key: hk-small-edit-mbx-direct-${{ github.run_id }}-parent
+          path: |
+            /github/home/mbx-direct/store
+            /github/home/mbx-direct/snapshot
+            /github/home/mbx-direct/cargo-home/registry
+
+  edit-mbx-direct-measure:
+    name: Measure direct hydrated mbx after the edit
+    needs: edit-mbx-direct-seed
+    runs-on: [self-hosted, jdx-perf-v1]
+    container:
+      image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68
+      options: --cpuset-cpus 0-7
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    env:
+      MBX_DIRECT_ROOT: /github/home/mbx-direct
+      MBX_CACHE_DIR: /github/home/mbx-direct/store
+      CARGO_HOME: /github/home/mbx-direct/cargo-home
+      CARGO_TARGET_DIR: /github/home/mbx-direct/target
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jdx/hk
+          ref: fc29ead1456ba7c1f62826c284126410a4014b00
+          path: subject
+          persist-credentials: false
+      - name: Start end-to-end timer
+        run: echo "EDIT_STARTED_NS=$(date +%s%N)" >> "$GITHUB_ENV"
+      - uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa
+        with:
+          backend: local
+          version: 1.6.0
+          toolchain: 1.97.1
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          key: hk-small-edit-mbx-direct-${{ github.run_id }}-parent
+          path: |
+            /github/home/mbx-direct/store
+            /github/home/mbx-direct/snapshot
+            /github/home/mbx-direct/cargo-home/registry
+      - name: Hydrate Cargo target
+        run: python3 benchmarks/analyze_hydration.py hydrate "$MBX_DIRECT_ROOT" "$(command -v mbx)"
+      - id: measure
+        working-directory: subject
+        run: |
+          started=$(date +%s%N)
+          mbx build --locked
+          finished=$(date +%s%N)
+          echo "build_duration_ns=$((finished - started))" >> "$GITHUB_OUTPUT"
+          echo "total_duration_ns=$((finished - EDIT_STARTED_NS))" >> "$GITHUB_OUTPUT"
+      - name: Record result
+        env:
+          BUILD_DURATION_NS: ${{ steps.measure.outputs.build_duration_ns }}
+          TOTAL_DURATION_NS: ${{ steps.measure.outputs.total_duration_ns }}
+        run: |
+          mkdir -p target/small-edit
+          jq -n --arg tool mbx-direct-hydrated \
+            --argjson build_duration_ns "$BUILD_DURATION_NS" \
+            --argjson restore_and_build_duration_ns "$TOTAL_DURATION_NS" \
+            '{tool:$tool, build_duration_ns:$build_duration_ns, restore_and_build_duration_ns:$restore_and_build_duration_ns}' \
+            > target/small-edit/mbx-direct-hydrated.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: small-edit-mbx-direct-hydrated-${{ github.run_id }}
+          path: target/small-edit/mbx-direct-hydrated.json
+
   edit-report:
     name: Report small-edit comparison
-    needs: [edit-rust-cache-measure, edit-mbx-measure]
+    needs: [edit-rust-cache-measure, edit-mbx-measure, edit-mbx-direct-measure]
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -432,10 +537,13 @@ jobs:
           rust_cache_total=$(jq -r .restore_and_build_duration_ns "$RUNNER_TEMP/small-edit/rust-cache.json")
           mbx_build=$(jq -r .build_duration_ns "$RUNNER_TEMP/small-edit/mbx.json")
           mbx_total=$(jq -r .restore_and_build_duration_ns "$RUNNER_TEMP/small-edit/mbx.json")
+          direct_build=$(jq -r .build_duration_ns "$RUNNER_TEMP/small-edit/mbx-direct-hydrated.json")
+          direct_total=$(jq -r .restore_and_build_duration_ns "$RUNNER_TEMP/small-edit/mbx-direct-hydrated.json")
           jq -n --argjson rust_cache_build "$rust_cache_build" \
             --argjson rust_cache_total "$rust_cache_total" \
             --argjson mbx_build "$mbx_build" --argjson mbx_total "$mbx_total" \
-            '{rust_cache:{build_seconds:($rust_cache_build / 1e9),restore_and_build_seconds:($rust_cache_total / 1e9)},mbx:{build_seconds:($mbx_build / 1e9),restore_and_build_seconds:($mbx_total / 1e9)},mbx_end_to_end_speedup:($rust_cache_total / $mbx_total)}' \
+            --argjson direct_build "$direct_build" --argjson direct_total "$direct_total" \
+            '{rust_cache:{build_seconds:($rust_cache_build / 1e9),restore_and_build_seconds:($rust_cache_total / 1e9)},mbx:{build_seconds:($mbx_build / 1e9),restore_and_build_seconds:($mbx_total / 1e9)},mbx_direct_hydrated:{build_seconds:($direct_build / 1e9),restore_and_build_seconds:($direct_total / 1e9)},mbx_end_to_end_speedup:($rust_cache_total / $mbx_total),mbx_direct_hydrated_end_to_end_speedup:($rust_cache_total / $direct_total)}' \
             | tee "$RUNNER_TEMP/small-edit/comparison.json"
           {
             echo '## hk small-edit comparison'
@@ -448,4 +556,7 @@ jobs:
             printf '| mbx | %.2f s | %.2f s |\n' \
               "$(awk "BEGIN {print $mbx_total / 1000000000}")" \
               "$(awk "BEGIN {print $mbx_build / 1000000000}")"
+            printf '| mbx direct + hydrated | %.2f s | %.2f s |\n' \
+              "$(awk "BEGIN {print $direct_total / 1000000000}")" \
+              "$(awk "BEGIN {print $direct_build / 1000000000}")"
           } >> "$GITHUB_STEP_SUMMARY"
