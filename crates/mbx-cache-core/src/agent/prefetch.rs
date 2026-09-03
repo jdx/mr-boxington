@@ -729,7 +729,7 @@ impl CacheAgent {
                 return Ok::<_, eyre::Report>((path, false, 0));
             }
             let cas_started = Instant::now();
-            let path = agent.cas.store_verified_file(&digest, &source)?;
+            let path = agent.cas.adopt_verified_file(&digest, &source)?;
             let cas_duration_ns = duration_ns(cas_started);
             agent.remember_verified_blob(&digest, &path);
             Ok((path, true, cas_duration_ns))
