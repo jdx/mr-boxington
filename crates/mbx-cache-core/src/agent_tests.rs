@@ -812,6 +812,150 @@ fn a_matching_prediction_activates_only_its_adapter_once() {
     assert_eq!(prefetch, Some(vec![cc]));
 }
 
+fn seeded_predictions(names: &[&str]) -> Vec<ActionPrediction> {
+    names
+        .iter()
+        .map(|name| ActionPrediction {
+            invocation: CacheDigest::blake3(name.as_bytes()),
+            action: CacheDigest::blake3(name.as_bytes()),
+            adapter: "rustc".into(),
+            payload: "{}".into(),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_task_without_a_manifest_inherits_the_first_fallback_that_has_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let previous = "a".repeat(64);
+    let current = "b".repeat(64);
+    let unbuilt = "c".repeat(64);
+    let seed = CacheAgent::new(&cache, "test-version");
+    seed.persist_task_manifest(&TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: previous.clone(),
+        predictions: seeded_predictions(&["first", "second"]),
+    })
+    .unwrap();
+
+    let agent = CacheAgent::new(&cache, "test-version");
+    let consulted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fallbacks = {
+        let consulted = consulted.clone();
+        let identities = vec![unbuilt.clone(), previous.clone()];
+        move || {
+            consulted.store(true, Ordering::Relaxed);
+            identities.clone()
+        }
+    };
+    agent.register_task_fallbacks(&current, fallbacks).unwrap();
+    let run = agent.begin_task(&current).await.unwrap();
+    assert!(consulted.load(Ordering::Relaxed));
+    assert_eq!(agent.stats().predictions_loaded, 2);
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::FindActionPrediction {
+                task: run.clone(),
+                invocation: CacheDigest::blake3(b"first"),
+            })
+            .await,
+        AgentResponse::ActionPrediction {
+            prediction: Some(_)
+        }
+    ));
+
+    // Adopted under the current identity, so a later session finds it
+    // without consulting anything, and the source is left as it was.
+    let adopted = agent.load_task_manifest(&current).unwrap().unwrap();
+    assert_eq!(adopted.task, current);
+    assert_eq!(adopted.predictions.len(), 2);
+    assert!(agent.load_task_manifest(&unbuilt).unwrap().is_none());
+    assert_eq!(
+        agent.load_task_manifest(&previous).unwrap().unwrap().task,
+        previous
+    );
+    let later = CacheAgent::new(&cache, "test-version");
+    later.begin_task(&current).await.unwrap();
+    assert_eq!(later.stats().predictions_loaded, 2);
+}
+
+#[tokio::test]
+async fn fallbacks_are_not_consulted_for_a_task_that_has_a_manifest() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let task = "d".repeat(64);
+    let agent = CacheAgent::new(&cache, "test-version");
+    agent
+        .persist_task_manifest(&TaskActionManifest {
+            version: TASK_ACTION_MANIFEST_VERSION,
+            task: task.clone(),
+            predictions: seeded_predictions(&["own"]),
+        })
+        .unwrap();
+    let consulted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fallbacks = {
+        let consulted = consulted.clone();
+        move || {
+            consulted.store(true, Ordering::Relaxed);
+            vec!["e".repeat(64)]
+        }
+    };
+    agent.register_task_fallbacks(&task, fallbacks).unwrap();
+    agent.begin_task(&task).await.unwrap();
+    assert!(!consulted.load(Ordering::Relaxed));
+    assert_eq!(agent.stats().predictions_loaded, 1);
+}
+
+#[tokio::test]
+async fn a_fallback_manifest_is_fetched_from_the_remote_when_absent_locally() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let previous = "1".repeat(64);
+    let current = "2".repeat(64);
+    let remote_manifest = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: previous.clone(),
+        predictions: seeded_predictions(&["remote"]),
+    };
+    let remote_bytes = canonical_json(&remote_manifest).unwrap();
+    let remote_etag = blake3::hash(&remote_bytes).to_hex().to_string();
+    let (_, current_selector) = CacheAgent::task_manifest_selector(&current).unwrap();
+    let (_, previous_selector) = CacheAgent::task_manifest_selector(&previous).unwrap();
+    let missing = server
+        .mock("GET", action_manifest_path(&current_selector).as_str())
+        .with_status(404)
+        .expect(1)
+        .create_async()
+        .await;
+    let found = server
+        .mock("GET", action_manifest_path(&previous_selector).as_str())
+        .with_status(200)
+        .with_header("etag", &format!("\"{remote_etag}\""))
+        .with_body(remote_bytes)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let agent = remote_agent(
+        &server,
+        directory.path().join("reader"),
+        RemoteCacheMode::ReadOnly,
+    );
+    let fallbacks = {
+        let previous = previous.clone();
+        move || vec![previous.clone()]
+    };
+    agent.register_task_fallbacks(&current, fallbacks).unwrap();
+    agent.begin_task(&current).await.unwrap();
+    assert_eq!(agent.stats().predictions_loaded, 1);
+    let adopted = agent.load_task_manifest(&current).unwrap().unwrap();
+    assert_eq!(adopted.task, current);
+    assert_eq!(adopted.predictions, remote_manifest.predictions);
+    missing.assert_async().await;
+    found.assert_async().await;
+}
+
 #[tokio::test]
 async fn commit_receipt_contains_this_runs_predictions_not_its_baseline() {
     let directory = tempfile::tempdir().unwrap();

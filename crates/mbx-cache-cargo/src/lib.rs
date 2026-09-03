@@ -6,6 +6,7 @@
 
 use mbx_cache_core::{CacheDigest, canonical_json};
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -112,10 +113,85 @@ struct ActionIdentity<'a> {
 /// command here would prevent equivalent dependency compilations from sharing
 /// predictions across `build`, `test`, and Clippy.
 pub fn build_identity(workspace_root: &Path, _command: &[String]) -> String {
-    let workspace = workspace_marker(workspace_root);
+    identity_for_workspace(&workspace_marker(workspace_root))
+}
+
+/// The identities recorded for earlier states of this workspace's
+/// `Cargo.lock`, newest first.
+///
+/// The identity is the lockfile's digest, so a dependency bump starts a
+/// manifest with nothing in it although most of the graph is unchanged and
+/// its results are already cached. Version control remembers what the lockfile
+/// was before: the committed copy first, for an edit that has not been
+/// committed yet, then the copy each commit that touched the file replaced. A
+/// checkout that is not under Git, or a lockfile it does not track, yields
+/// nothing. Every prediction a manifest holds is rehashed before it is
+/// trusted, so an inherited one can only fail to match, never restore the
+/// wrong result.
+pub fn previous_build_identities(workspace_root: &Path) -> Vec<String> {
+    let Ok(lock) = std::fs::read(workspace_root.join("Cargo.lock")) else {
+        return Vec::new();
+    };
+    let limit = PREVIOUS_LOCKFILE_STATES.to_string();
+    let Some(revisions) = git_output(
+        workspace_root,
+        &["rev-list", "-n", &limit, "HEAD", "--", "Cargo.lock"],
+    ) else {
+        return Vec::new();
+    };
+    // A commit's own copy of the lockfile is what its successor replaced, so
+    // the parent of each commit that touched the file is one state further
+    // back; a root commit has no parent and is skipped.
+    let revisions = String::from_utf8_lossy(&revisions);
+    let candidates = std::iter::once("HEAD".to_string()).chain(
+        revisions
+            .lines()
+            .map(|revision| format!("{}^", revision.trim())),
+    );
+    let mut seen = BTreeSet::from([CacheDigest::blake3(&lock).hash]);
+    let mut identities = Vec::new();
+    for revision in candidates {
+        let Some(lock) = git_output(
+            workspace_root,
+            &["show", &format!("{revision}:./Cargo.lock")],
+        ) else {
+            continue;
+        };
+        let marker = CacheDigest::blake3(&lock).hash;
+        if seen.insert(marker.clone()) {
+            identities.push(identity_for_workspace(&marker));
+        }
+        if identities.len() == PREVIOUS_LOCKFILE_STATES {
+            break;
+        }
+    }
+    identities
+}
+
+/// How many earlier lockfile states are offered as prediction sources.
+///
+/// Each one costs a manifest lookup when it is consulted, which only happens
+/// once nothing was recorded under the current identity, and a run of
+/// dependency bumps rarely goes deeper than this before a build of the trunk
+/// records the newest state.
+const PREVIOUS_LOCKFILE_STATES: usize = 8;
+
+fn git_output(workspace_root: &Path, arguments: &[&str]) -> Option<Vec<u8>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace_root)
+        .args(arguments)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
+fn identity_for_workspace(workspace: &str) -> String {
     let bytes = canonical_json(&ActionIdentity {
         version: 3,
-        workspace: &workspace,
+        workspace,
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
     })
@@ -473,5 +549,52 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    fn git(directory: &Path, arguments: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(directory)
+            .args(["-c", "commit.gpgsign=false", "-c", "user.name=t"])
+            .args(["-c", "user.email=t@example.com"])
+            .args(arguments)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {arguments:?} failed");
+    }
+
+    #[test]
+    fn earlier_lockfile_states_are_offered_newest_first() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let command = Vec::new();
+        git(root, &["init", "-q"]);
+        let mut committed = Vec::new();
+        for state in ["one", "two", "three"] {
+            std::fs::write(root.join("Cargo.lock"), state).unwrap();
+            committed.push(build_identity(root, &command));
+            git(root, &["add", "Cargo.lock"]);
+            git(root, &["commit", "-q", "-m", state]);
+        }
+        committed.reverse();
+
+        // An uncommitted edit: the committed copy is the nearest earlier state.
+        std::fs::write(root.join("Cargo.lock"), "four").unwrap();
+        assert!(!committed.contains(&build_identity(root, &command)));
+        assert_eq!(previous_build_identities(root), committed);
+
+        // Once committed, the working copy matches HEAD and is not offered as
+        // its own fallback.
+        git(root, &["commit", "-q", "-am", "four"]);
+        assert_eq!(previous_build_identities(root), committed);
+    }
+
+    #[test]
+    fn a_workspace_outside_version_control_has_no_earlier_states() {
+        let directory = cargo_fixture();
+        std::fs::write(directory.path().join("Cargo.lock"), "one").unwrap();
+        assert!(previous_build_identities(directory.path()).is_empty());
     }
 }

@@ -69,6 +69,15 @@ prediction for later invocations. A cold compilation may therefore have no key
 to look up yet. It still gets stored after compiling and can warm the next
 build.
 
+Predictions are filed under the digest of `Cargo.lock`, so a dependency bump
+starts a new record. A build whose lockfile has no record yet inherits the one
+made for the lockfile before it, found through Git's history of the file, up to
+eight states back. A bump leaves most of the graph unchanged, and those
+predictions still hash to results the cache holds; the crates the bump touched
+miss and are recorded afresh. The inherited record is kept under the new
+lockfile from then on, and a trusted build publishes it there. A checkout that
+is not under Git, or whose lockfile Git does not track, starts empty as before.
+
 Hashing those files is shared too. The agent keeps a ledger of every file a
 shim has hashed, keyed by the file's length, modification time, and change
 time, so a dependency's rlib is read once however many crates link it. The

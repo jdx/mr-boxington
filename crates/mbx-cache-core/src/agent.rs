@@ -7,7 +7,7 @@ use crate::{
 };
 use eyre::{Context, Result, bail};
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream};
-use log::warn;
+use log::{info, warn};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -100,6 +100,10 @@ const PREFETCH_ACTION_BATCH_DELAY: Duration = Duration::from_millis(5);
 const MAX_PREFETCH_DIRECTORY_OBJECTS: usize = 100_000;
 const MAX_PREFETCH_OBJECTS_PER_WAVE: usize = 100_000;
 const DEFAULT_MAX_REMOTE_DOWNLOAD_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+
+/// Names the identities a task may inherit predictions from, consulted only
+/// once nothing has been recorded under its own.
+pub type TaskFallbacks = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 
 /// Remote action-cache access owned by one task session.
 pub struct AgentRemoteCache {
@@ -262,6 +266,8 @@ pub struct CacheAgent {
     executable_identities: Arc<Mutex<BTreeMap<ExecutableIdentityKey, Vec<u8>>>>,
     manifest_dir: Arc<PathBuf>,
     task_actions: Arc<Mutex<BTreeMap<String, TaskActionState>>>,
+    /// Where a task may inherit predictions from, by task identity.
+    task_fallbacks: Arc<Mutex<BTreeMap<String, TaskFallbacks>>>,
     next_task_run: Arc<AtomicU64>,
     manifest_write_lock: Arc<Mutex<()>>,
     remote: Option<Arc<RemoteCacheClient>>,
@@ -515,6 +521,7 @@ impl CacheAgent {
             executable_identities: Arc::new(Mutex::new(BTreeMap::new())),
             manifest_dir: Arc::new(task_manifest_dir(&cache_dir)),
             task_actions: Arc::new(Mutex::new(BTreeMap::new())),
+            task_fallbacks: Arc::new(Mutex::new(BTreeMap::new())),
             next_task_run: Arc::new(AtomicU64::new(0)),
             manifest_write_lock: Arc::new(Mutex::new(())),
             remote,
@@ -635,6 +642,27 @@ impl CacheAgent {
         Ok(())
     }
 
+    /// Name where a task's predictions may come from when nothing has been
+    /// recorded under its own identity.
+    ///
+    /// The identities are produced on demand rather than taken up front,
+    /// because finding them can cost a few version-control commands and most
+    /// builds never need them. The first manifest found, locally and then on
+    /// the remote, is adopted under the task's own identity, so this build
+    /// records into it and a trusted build publishes it there.
+    pub fn register_task_fallbacks(
+        &self,
+        task: &str,
+        fallbacks: impl Fn() -> Vec<String> + Send + Sync + 'static,
+    ) -> Result<()> {
+        validate_task_identity(task)?;
+        self.task_fallbacks
+            .lock()
+            .unwrap()
+            .insert(task.to_string(), Arc::new(fallbacks));
+        Ok(())
+    }
+
     /// Load a task and finish its prefetch, surfacing remote lookup failures.
     pub async fn prefetch_task(&self, task: &str) -> Result<String> {
         let run = self
@@ -709,6 +737,12 @@ impl CacheAgent {
             }
             manifest
         };
+        let (manifest, remote_etag) = match manifest {
+            Some(manifest) => (Some(manifest), remote_etag),
+            // Inherited from another identity, so the remote's copy of that
+            // one is no precondition for publishing under this one.
+            None => (self.inherit_task_manifest(task, strict).await?, None),
+        };
         let mut state = if let Some(manifest) = manifest {
             TaskActionState {
                 manifest: task.to_string(),
@@ -764,6 +798,64 @@ impl CacheAgent {
             self.spawn_prefetch_predictions(predictions);
         }
         Ok(run)
+    }
+
+    /// Adopt the manifest of a fallback identity for a task that has none.
+    ///
+    /// The identities are tried in the order given, each in the local store
+    /// and then on the remote, and the first manifest found is persisted under
+    /// `task` so the next session finds it there without asking again.
+    async fn inherit_task_manifest(
+        &self,
+        task: &str,
+        strict: bool,
+    ) -> Result<Option<TaskActionManifest>> {
+        let fallbacks = self.task_fallbacks.lock().unwrap().get(task).cloned();
+        let Some(fallbacks) = fallbacks else {
+            return Ok(None);
+        };
+        let identities = tokio::task::spawn_blocking(move || fallbacks()).await?;
+        for identity in identities {
+            if identity == task || validate_task_identity(&identity).is_err() {
+                continue;
+            }
+            let mut found = self.load_task_manifest(&identity)?;
+            if found.is_none() && self.remote_mode.reads() {
+                found = match self.get_remote_task_manifest(&identity).await {
+                    Ok(manifest) => manifest.map(|(manifest, _)| manifest),
+                    Err(error) => {
+                        if strict {
+                            return Err(error).wrap_err_with(|| {
+                                format!("remote task action manifest lookup failed for {identity}")
+                            });
+                        }
+                        self.note_remote_failure();
+                        warn!("remote task action manifest lookup failed for {identity}: {error}");
+                        None
+                    }
+                };
+            }
+            let Some(mut manifest) = found else {
+                continue;
+            };
+            info!(
+                "no predictions were recorded for {task}; inheriting {} from {identity}",
+                manifest.predictions.len()
+            );
+            manifest.task = task.to_string();
+            validate_task_manifest(&manifest, task)?;
+            let _write_guard = self.manifest_write_lock.lock().unwrap();
+            let _file_guard = self.lock_task_manifest(task)?;
+            // Another process may have recorded this identity while the
+            // fallbacks were being found. What it wrote describes this
+            // lockfile and wins over an inheritance.
+            if let Some(recorded) = self.load_task_manifest(task)? {
+                return Ok(Some(recorded));
+            }
+            self.persist_task_manifest(&manifest)?;
+            return Ok(Some(manifest));
+        }
+        Ok(None)
     }
 
     /// Cancel speculative downloads before the owning session exits.
