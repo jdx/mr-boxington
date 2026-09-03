@@ -1760,6 +1760,34 @@ async fn foreground_blob_batches_use_blob_packs() {
 }
 
 #[tokio::test]
+async fn downloads_independent_blob_packs_concurrently() {
+    let directory = tempfile::tempdir().unwrap();
+    let entries = BTreeMap::from([
+        (CacheDigest::blake3(b"first pack"), b"first pack".to_vec()),
+        (CacheDigest::blake3(b"second pack"), b"second pack".to_vec()),
+    ]);
+    let (base_url, maximum_in_flight, server) =
+        delayed_pack_server(entries.clone(), Duration::from_millis(50)).await;
+    let agent = remote_agent_url(
+        base_url,
+        directory.path().join("reader"),
+        RemoteCacheMode::ReadOnly,
+    );
+    let remote = agent.remote.as_deref().unwrap();
+
+    let verified = agent
+        .fetch_remote_blobs(remote, entries.keys().cloned().collect(), None)
+        .await;
+    server.await.unwrap();
+
+    assert_eq!(verified.len(), entries.len());
+    for (digest, bytes) in entries {
+        assert_eq!(fs::read(&verified[&digest]).unwrap(), bytes);
+    }
+    assert!(maximum_in_flight.load(Ordering::Relaxed) > 1);
+}
+
+#[tokio::test]
 async fn pack_and_individual_fetches_share_a_digest_lock() {
     let directory = tempfile::tempdir().unwrap();
     let mut server = mockito::Server::new_async().await;
@@ -3347,6 +3375,120 @@ async fn delayed_blob_server(
     });
     (
         format!("http://{address}").parse().unwrap(),
+        observed_maximum,
+        server,
+    )
+}
+
+async fn delayed_pack_server(
+    entries: BTreeMap<CacheDigest, Vec<u8>>,
+    latency: Duration,
+) -> (
+    url::Url,
+    Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use std::sync::atomic::AtomicUsize;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let entries = Arc::new(entries);
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let maximum_in_flight = Arc::new(AtomicUsize::new(0));
+    let observed_maximum = maximum_in_flight.clone();
+    let server = tokio::spawn(async move {
+        let mut requests = tokio::task::JoinSet::new();
+        for _ in 0..3 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let entries = entries.clone();
+            let in_flight = in_flight.clone();
+            let maximum_in_flight = maximum_in_flight.clone();
+            requests.spawn(async move {
+                let mut request = Vec::new();
+                let (header_end, content_length) = loop {
+                    let mut chunk = [0; 1024];
+                    let size = socket.read(&mut chunk).await.unwrap();
+                    assert!(size > 0, "client closed before sending request headers");
+                    request.extend_from_slice(&chunk[..size]);
+                    let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let header_end = header_end + 4;
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    break (header_end, content_length);
+                };
+                while request.len() < header_end + content_length {
+                    let mut chunk = [0; 1024];
+                    let size = socket.read(&mut chunk).await.unwrap();
+                    assert!(size > 0, "client closed before sending request body");
+                    request.extend_from_slice(&chunk[..size]);
+                }
+                let first_line = String::from_utf8_lossy(&request[..header_end])
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .to_owned();
+                let path = first_line.split_whitespace().nth(1).unwrap();
+                if path == "/v1/capabilities" {
+                    let body = serde_json::json!({
+                        "protocol":{"major":1},
+                        "features":{"blob_packs":true},
+                        "limits":{"max_batch_items":1,"max_pack_bytes":1048576}
+                    })
+                    .to_string();
+                    socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    return;
+                }
+                assert_eq!(path, "/v1/blobs:pack");
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request[header_end..header_end + content_length])
+                        .unwrap();
+                let digest: CacheDigest =
+                    serde_json::from_value(body["digests"][0].clone()).unwrap();
+                let bytes = entries.get(&digest).unwrap();
+                let body = blob_pack_body(&[(digest, bytes.as_slice())]);
+                let active = in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+                maximum_in_flight.fetch_max(active, Ordering::Relaxed);
+                tokio::time::sleep(latency).await;
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            crate::BLOB_PACK_MEDIA_TYPE,
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                socket.write_all(&body).await.unwrap();
+                in_flight.fetch_sub(1, Ordering::Relaxed);
+            });
+        }
+        while let Some(result) = requests.join_next().await {
+            result.unwrap();
+        }
+    });
+    (
+        url::Url::parse(&format!("http://{address}/")).unwrap(),
         observed_maximum,
         server,
     )

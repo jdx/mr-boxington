@@ -351,6 +351,14 @@ impl RemoteCacheClient {
         }
     }
 
+    /// How many blobs, and how many payload bytes, one downloaded pack may carry.
+    pub(crate) async fn blob_pack_limits(&self) -> Result<Option<BlobPackLimits>> {
+        match &self.backend {
+            Backend::Http(client) => client.blob_pack_limits().await,
+            Backend::S3(_) => Ok(None),
+        }
+    }
+
     /// Fetch and validate an action-result record, returning `None` on a miss.
     pub async fn get_action_result(
         &self,
