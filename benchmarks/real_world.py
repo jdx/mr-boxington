@@ -40,7 +40,7 @@ SUBJECTS: dict[str, dict[str, object]] = {
         "child": "fc29ead1456ba7c1f62826c284126410a4014b00",
         # hk does not pin a toolchain of its own, so the benchmark pins one.
         # Without this the numbers stop being comparable across runner images.
-        "toolchain": "1.97.1",
+        "toolchain": "1.98.0",
         "args": ["build", "--locked"],
     },
 }

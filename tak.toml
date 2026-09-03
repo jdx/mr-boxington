@@ -10,7 +10,7 @@
 pct = 1.0
 
 [runner]
-class = "gha-ubuntu24.04-x64-valgrind3.22-rust1.97.1"
+class = "gha-ubuntu24.04-x64-valgrind3.22-rust1.98.0"
 
 [bench.startup_control]
 cmd = ["/usr/bin/true", "-vV"]
