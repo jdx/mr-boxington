@@ -247,6 +247,31 @@ Run `mbx +1.91 check` directly for zero-config use. Only commands prefixed with
 mbx's own `tui`, `cache`, `gc`, `doctor`, and diagnostic commands stay under
 `mbx`.
 
+## Choose a linker
+
+On Linux, pinned mold is the recommended performance-oriented starting point.
+Try the current supported release for one build first:
+
+```sh
+MBX_LINKER=mold@2.42.0 cargo build
+```
+
+To keep it enabled, add this to your platform
+[configuration file](/configuration):
+
+```toml
+[linker]
+default = "mold@2.42.0"
+```
+
+Managed linker selection currently requires `clang` on `PATH`. macOS and
+Windows should keep the default `system` selection for now. On Linux or macOS,
+`rust-lld` is the no-download alternative: it ships with the active Rust
+toolchain, and a `cargo +toolchain` command automatically selects that
+toolchain's LLD. Wild is also available on Linux. See
+[managed linkers](/configuration#managed-linkers) for selectors and
+profile- and target-specific examples.
+
 ## Run multiple Cargo builds at the same time
 
 Any task runner can start multiple mbx commands at the same time. For example,

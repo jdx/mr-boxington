@@ -1515,9 +1515,7 @@ impl<'a> Parser<'a> {
         if name == "incremental" {
             return Err(BypassReason::Incremental);
         }
-        if SUPPORTED_CODEGEN_OPTIONS.binary_search(&name).is_err()
-            && !(cfg!(windows) && name == "linker")
-        {
+        if SUPPORTED_CODEGEN_OPTIONS.binary_search(&name).is_err() && name != "linker" {
             return Err(BypassReason::UnknownCodegenOption(name.into()));
         }
         // Cargo compiles every dependency of an LTO build with this flag, so

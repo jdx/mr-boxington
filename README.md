@@ -101,6 +101,26 @@ existing `target/` is only replaced if you say yes at the prompt.
 
 [Learn about managed targets →](https://mr-boxington.jdx.dev/managed-targets)
 
+## Managed linkers
+
+Choose a different linker for each Cargo profile and target. mbx can use the
+Rust toolchain's bundled LLD or automatically download pinned mold and Wild
+releases, verify their GitHub SHA-256 digest, and reuse the installation
+across builds:
+
+```toml
+[linker.profiles.dev]
+x86_64-unknown-linux-gnu = "mold@2.42.0"
+aarch64-unknown-linux-gnu = "wild@0.10.0"
+
+[linker.profiles.release]
+default = "rust-lld"
+```
+
+Set `MBX_LINKER=system` or another selector for a one-command override.
+
+[Configure managed linkers →](https://mr-boxington.jdx.dev/configuration#managed-linkers)
+
 ## CI
 
 For GitHub-hosted CI, [`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action)

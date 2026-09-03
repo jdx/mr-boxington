@@ -97,7 +97,8 @@ fn file_probes() -> FileProbes {
 ///
 /// Memoized through the agent for the life of the build, since the answer is
 /// the same for every link in it and the probes are several processes.
-/// Describe the default linker, or a recognized Windows linker override.
+/// Describe the default linker, a Clang driver selecting a named Unix linker,
+/// or a recognized Windows linker override.
 ///
 /// `fuse_ld` is a `-fuse-ld=<name>` selection the adapter modeled for a
 /// native link: the driver stays `cc`, but the linker it invokes becomes
@@ -110,23 +111,24 @@ pub(crate) fn identity_for(
     override_linker: Option<&Path>,
     fuse_ld: Option<&str>,
 ) -> Result<LinkerIdentity> {
-    if fuse_ld.is_some() && (cfg!(windows) || override_linker.is_some()) {
-        bail!(
-            "a `-fuse-ld` selection with an overridden or Windows linker is not one mbx can identify"
-        );
+    if fuse_ld.is_some() && cfg!(windows) {
+        bail!("a `-fuse-ld` selection with a Windows linker is not one mbx can identify");
     }
     let driver = if let Some(linker) = override_linker {
-        if !cfg!(windows)
-            || !linker
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    matches!(
-                        name.to_ascii_lowercase().as_str(),
-                        "link" | "link.exe" | "lld-link" | "lld-link.exe"
-                    )
-                })
-        {
+        let name = linker
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let recognized = if cfg!(windows) {
+            matches!(
+                name.as_str(),
+                "link" | "link.exe" | "lld-link" | "lld-link.exe"
+            )
+        } else {
+            matches!(name.as_str(), "clang" | "clang++")
+        };
+        if !recognized {
             bail!("the selected linker is not one mbx can identify");
         }
         which::which(linker)

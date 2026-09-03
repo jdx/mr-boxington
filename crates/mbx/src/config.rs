@@ -7,6 +7,7 @@ use crate::util::parse_duration;
 use bytesize::ByteSize;
 use eyre::{Context, Result, bail};
 use mbx_cache_core::{RemoteCacheMode, S3ConditionalWrites};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use usage_config::{EnvLayer, FileLayer, FileScope, Layers};
@@ -182,6 +183,21 @@ pub(crate) struct RawConfig {
     target: RawTarget,
     #[usage(flatten)]
     scheduler: RawScheduler,
+    #[usage(flatten)]
+    linker: RawLinker,
+}
+
+#[derive(Debug, usage::Config)]
+#[usage(prefix = "linker")]
+struct RawLinker {
+    /// Linker used when the active Cargo profile has no matching selection.
+    #[usage(default = "system")]
+    default: String,
+    /// Linkers selected by Cargo profile and target triple.
+    profiles: Option<BTreeMap<String, BTreeMap<String, String>>>,
+    /// Override the configured linker for this invocation.
+    #[usage(key = "selection", env = "MBX_LINKER", scope = "env")]
+    _selection: Option<String>,
 }
 
 #[derive(Debug, usage::Config)]
@@ -341,6 +357,33 @@ pub struct Config {
     pub gc: GcSettings,
     pub target: TargetSettings,
     pub scheduler: SchedulerSettings,
+    pub linker: LinkerSettings,
+}
+
+/// Linker selectors keyed first by Cargo profile, then by target triple.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkerSettings {
+    pub default: String,
+    pub profiles: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+impl Default for LinkerSettings {
+    fn default() -> Self {
+        Self {
+            default: "system".into(),
+            profiles: BTreeMap::new(),
+        }
+    }
+}
+
+impl LinkerSettings {
+    pub(crate) fn for_build(&self, profile: &str, target: Option<&str>) -> Option<String> {
+        let selections = self.profiles.get(profile)?;
+        target
+            .and_then(|target| selections.get(target))
+            .or_else(|| selections.get("default"))
+            .cloned()
+    }
 }
 
 impl Config {
@@ -367,6 +410,7 @@ impl Config {
                 root: cache_dir.join("targets"),
             },
             scheduler: Default::default(),
+            linker: Default::default(),
         }
     }
 }
@@ -795,6 +839,10 @@ impl Config {
             gc,
             target,
             scheduler,
+            linker: LinkerSettings {
+                default: raw.linker.default,
+                profiles: raw.linker.profiles.unwrap_or_default(),
+            },
             stats_report: raw.stats_report,
             verify: raw.verify,
             incremental: raw.incremental,
@@ -856,6 +904,42 @@ impl Config {
             .wrap_err_with(|| format!("failed to parse {}", path.display()))?;
 
         for (key, value) in document.iter() {
+            if key == "linker" {
+                if environment_contains("MBX_LINKER") {
+                    continue;
+                }
+                let table = value
+                    .as_table()
+                    .ok_or_else(|| eyre::eyre!("{}.linker must be a table", path.display()))?;
+                for (linker_key, value) in table.iter() {
+                    match linker_key {
+                        "default" => {
+                            let selection = value.as_str().ok_or_else(|| {
+                                eyre::eyre!("{}.linker.default must be a string", path.display())
+                            })?;
+                            crate::managed_linker::validate_workspace_selector(selection)
+                                .wrap_err_with(|| {
+                                    format!("invalid {}.linker.default", path.display())
+                                })?;
+                            self.linker.default = selection.to_owned();
+                        }
+                        "profiles" => {
+                            for (profile, selections) in workspace_linker_profiles(&path, value)? {
+                                self.linker
+                                    .profiles
+                                    .entry(profile)
+                                    .or_default()
+                                    .extend(selections);
+                            }
+                        }
+                        _ => bail!(
+                            "{} contains unsupported workspace setting \"linker.{linker_key}\"; only linker.default and linker.profiles are allowed",
+                            path.display()
+                        ),
+                    }
+                }
+                continue;
+            }
             if key == "scheduler" {
                 let table = value
                     .as_table()
@@ -904,7 +988,7 @@ impl Config {
                 "incremental" | "share_out_dir" | "build_script_execution" | "cc"
             ) {
                 bail!(
-                    "{} contains unsupported workspace setting {key:?}; only incremental, share_out_dir, build_script_execution, cc, and scheduler are allowed",
+                    "{} contains unsupported workspace setting {key:?}; only incremental, share_out_dir, build_script_execution, cc, linker, and scheduler are allowed",
                     path.display()
                 );
             }
@@ -941,6 +1025,42 @@ fn workspace_bool(path: &Path, setting: &str, value: &toml_edit::Item) -> Result
     value
         .as_bool()
         .ok_or_else(|| eyre::eyre!("{}.{} must be a boolean", path.display(), setting))
+}
+
+fn workspace_linker_profiles(
+    path: &Path,
+    value: &toml_edit::Item,
+) -> Result<BTreeMap<String, BTreeMap<String, String>>> {
+    let profiles = value
+        .as_table()
+        .ok_or_else(|| eyre::eyre!("{}.linker.profiles must be a table", path.display()))?;
+    let mut resolved = BTreeMap::new();
+    for (profile, targets) in profiles {
+        let targets = targets.as_table().ok_or_else(|| {
+            eyre::eyre!(
+                "{}.linker.profiles.{profile} must be a table of target selectors",
+                path.display()
+            )
+        })?;
+        let mut selections = BTreeMap::new();
+        for (target, selection) in targets {
+            let selection = selection.as_str().ok_or_else(|| {
+                eyre::eyre!(
+                    "{}.linker.profiles.{profile}.{target} must be a string",
+                    path.display()
+                )
+            })?;
+            crate::managed_linker::validate_workspace_selector(selection).wrap_err_with(|| {
+                format!(
+                    "invalid {}.linker.profiles.{profile}.{target}",
+                    path.display()
+                )
+            })?;
+            selections.insert(target.to_owned(), selection.to_owned());
+        }
+        resolved.insert(profile.to_owned(), selections);
+    }
+    Ok(resolved)
 }
 
 fn workspace_count(
@@ -1464,6 +1584,118 @@ mod tests {
         assert!(config.incremental);
         assert!(config.share_out_dir);
         assert!(config.build_script_execution);
+    }
+
+    #[test]
+    fn linkers_are_selected_by_profile_and_target() {
+        let file = r#"
+[linker]
+default = "system"
+
+[linker.profiles.dev]
+default = "wild@0.10.0"
+aarch64-apple-darwin = "rust-lld"
+
+[linker.profiles.release]
+default = "rust-lld"
+"#;
+        let config = configured(Some(file), &[]).unwrap();
+
+        assert_eq!(
+            config.linker.for_build("dev", Some("aarch64-apple-darwin")),
+            Some("rust-lld".into())
+        );
+        assert_eq!(
+            config
+                .linker
+                .for_build("dev", Some("x86_64-unknown-linux-gnu")),
+            Some("wild@0.10.0".into())
+        );
+        assert_eq!(
+            config.linker.for_build("release", None),
+            Some("rust-lld".into())
+        );
+        assert_eq!(config.linker.for_build("bench", None), None);
+    }
+
+    #[test]
+    fn workspace_linker_policy_overrides_the_global_selection() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join(".mbx.toml"),
+            "[linker.profiles.dev]\ndefault = \"mold@2.42.0\"\n",
+        )
+        .unwrap();
+        let mut config = configured(
+            Some(
+                "[linker.profiles.dev]\ndefault = \"system\"\naarch64-apple-darwin = \"rust-lld\"",
+            ),
+            &[],
+        )
+        .unwrap();
+
+        config
+            .apply_workspace_policy_with(directory.path(), |_| false)
+            .unwrap();
+
+        assert_eq!(
+            config
+                .linker
+                .for_build("dev", Some("x86_64-unknown-linux-gnu")),
+            Some("mold@2.42.0".into())
+        );
+        assert_eq!(
+            config.linker.for_build("dev", Some("aarch64-apple-darwin")),
+            Some("rust-lld".into())
+        );
+    }
+
+    #[test]
+    fn workspace_linker_policy_preserves_unrelated_global_profiles() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join(".mbx.toml"),
+            "[linker.profiles.dev]\ndefault = \"mold@2.42.0\"\n",
+        )
+        .unwrap();
+        let mut config = configured(
+            Some("[linker.profiles.release]\ndefault = \"rust-lld\""),
+            &[],
+        )
+        .unwrap();
+
+        config
+            .apply_workspace_policy_with(directory.path(), |_| false)
+            .unwrap();
+
+        assert_eq!(
+            config.linker.for_build("release", None),
+            Some("rust-lld".into())
+        );
+        assert_eq!(
+            config.linker.for_build("dev", None),
+            Some("mold@2.42.0".into())
+        );
+    }
+
+    #[test]
+    fn workspace_linker_policy_rejects_executable_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join(".mbx.toml"),
+            "[linker.profiles.dev]\ndefault = \"path:./linker\"\n",
+        )
+        .unwrap();
+        let mut config = configured(None, &[]).unwrap();
+
+        let error = config
+            .apply_workspace_policy_with(directory.path(), |_| false)
+            .unwrap_err();
+
+        assert!(
+            format!("{error:?}")
+                .contains("workspace linker policy may not select an executable path")
+        );
     }
 
     #[test]

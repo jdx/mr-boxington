@@ -91,6 +91,11 @@ fn cargo_with_settings_bypass_log_and_roots(
     let roots = roots.unwrap_or_else(|| resolve_roots(&cargo, arguments, &working_dir));
     let mut config = config.clone();
     config.apply_workspace_policy(&roots.workspace_root)?;
+    let managed_linker = if cargo_help_requested(arguments) {
+        None
+    } else {
+        crate::managed_linker::resolve(&config.linker, &config.cache_dir, &config.http, arguments)?
+    };
     let incremental = policy::incremental_allowed(config.incremental);
     if config.incremental && !incremental {
         log::warn!(
@@ -217,6 +222,12 @@ fn cargo_with_settings_bypass_log_and_roots(
                 &mut environment,
             )
             .await;
+        if let Some(selection) = &managed_linker {
+            environment.insert(
+                session::MANAGED_LINKER_ENV.into(),
+                selection.executable.to_string_lossy().into_owned(),
+            );
+        }
         // Stated explicitly for the same reason as the session's own keys: an
         // unset value would let the shim inherit one from the parent, with no
         // way to turn it off here.
@@ -236,7 +247,6 @@ fn cargo_with_settings_bypass_log_and_roots(
         );
 
         let status = run_cargo(&cargo, arguments, environment);
-
         // The shim records a prediction only after a compilation has either
         // been restored or published successfully. Preserve that completed
         // portion even when a later compilation makes cargo fail: it is still
