@@ -1,7 +1,47 @@
 use eyre::{Context, Result};
+use mbx_cache_core::FileIdentity;
+use std::collections::BTreeMap;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// Capture clock-independent identities for compiler inputs known up front.
+#[cfg(unix)]
+pub(crate) fn snapshot_file_identities<'a>(
+    paths: impl IntoIterator<Item = &'a Path>,
+) -> std::io::Result<BTreeMap<PathBuf, FileIdentity>> {
+    paths
+        .into_iter()
+        .map(|path| {
+            let metadata = std::fs::metadata(path).map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "failed to capture compiler input identity for {}: {error}",
+                        path.display()
+                    ),
+                )
+            })?;
+            let identity = FileIdentity::describe(path, &metadata).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    format!(
+                        "filesystem supplied no identity for compiler input {}",
+                        path.display()
+                    ),
+                )
+            })?;
+            Ok((path.to_path_buf(), identity))
+        })
+        .collect()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn snapshot_file_identities<'a>(
+    _paths: impl IntoIterator<Item = &'a Path>,
+) -> std::io::Result<BTreeMap<PathBuf, FileIdentity>> {
+    Ok(BTreeMap::new())
+}
 
 /// Find the workspace root above `start`.
 ///
@@ -499,6 +539,19 @@ pub fn random_string(length: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn compiler_input_snapshot_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing-input");
+        let error = snapshot_file_identities([missing.as_path()]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failed to capture compiler input identity")
+        );
+    }
 
     #[test]
     fn cgroup_usage_discounts_the_page_cache() {

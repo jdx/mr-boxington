@@ -398,6 +398,9 @@ pub(crate) fn compile(
     // The machine-wide permit is taken after every chance to hit the cache,
     // and before anything expensive starts. The timer starts afterwards: time
     // spent waiting for the machine is not time this compilation cost.
+    let required_inputs = invocation.required_inputs_in(&working_dir);
+    let input_identities =
+        crate::util::snapshot_file_identities(required_inputs.iter().map(PathBuf::as_path));
     let demand =
         crate::scheduler::Demand::new(invocation.crate_name(), invocation.links_natively());
     let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
@@ -455,8 +458,12 @@ pub(crate) fn compile(
     if output.status.success() {
         learned.record_compiled();
         let publication: Result<Option<ActionDiagnostic>> = (|| {
+            let input_identities = input_identities
+                .as_ref()
+                .map_err(|error| eyre::eyre!(error.to_string()))?;
             let (candidates, discovered) = action_from_dep_info(&compilation, &outputs.dep_info)?;
-            discovered.verify_not_modified_since(compilation_started)?;
+            discovered
+                .verify_not_modified_since_with_identities(compilation_started, input_identities)?;
             discovered.verify()?;
             if learned_enabled && learned.record.is_none() && source_is_in_workspace(&compilation) {
                 record_learned_baseline(&compilation, &discovered);

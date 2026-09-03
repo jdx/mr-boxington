@@ -234,9 +234,40 @@ impl DiscoveredInputs {
     /// the contents that produced the artifact. `verify` closes the remaining
     /// race after hashing.
     pub fn verify_not_modified_since(&self, started_at: SystemTime) -> Result<(), BypassReason> {
+        self.verify_not_modified_since_with_identities(started_at, &BTreeMap::new())
+    }
+
+    /// Reject inputs that changed from identities captured before rustc ran,
+    /// falling back to the wall-clock barrier for inputs only dep-info named.
+    ///
+    /// Exact identity comparison does not order a client timestamp against a
+    /// filesystem timestamp, so it remains valid when an NFS server and the
+    /// compiler host use different clocks. Only identities carrying a change
+    /// token qualify: without one a same-length rewrite can restore its mtime.
+    pub fn verify_not_modified_since_with_identities(
+        &self,
+        started_at: SystemTime,
+        before: &BTreeMap<PathBuf, FileIdentity>,
+    ) -> Result<(), BypassReason> {
         for input in &self.inputs {
-            let modified = std::fs::metadata(&input.path)
-                .and_then(|metadata| metadata.modified())
+            let metadata =
+                std::fs::metadata(&input.path).map_err(|error| BypassReason::InputRead {
+                    path: input.path.clone(),
+                    message: error.to_string(),
+                })?;
+            let identity = FileIdentity::describe(&input.path, &metadata);
+            if let Some(previous) = before.get(&input.path)
+                && previous.changed.is_some()
+            {
+                if identity.as_ref() == Some(previous) {
+                    continue;
+                }
+                return Err(BypassReason::InputModifiedDuringCompilation(
+                    input.path.clone(),
+                ));
+            }
+            let modified = metadata
+                .modified()
                 .map_err(|error| BypassReason::InputRead {
                     path: input.path.clone(),
                     message: error.to_string(),
@@ -714,6 +745,44 @@ mod tests {
 
         assert_eq!(
             discovered.verify_not_modified_since(modified),
+            Err(BypassReason::InputModifiedDuringCompilation(source))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn precompile_identity_does_not_depend_on_the_host_clock() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("lib.rs");
+        std::fs::write(&source, "pub fn library() {0}\n").unwrap();
+        let invocation = RustcInvocation::parse(&[
+            "--crate-name=widget".into(),
+            "--crate-type=lib".into(),
+            "--emit=dep-info,metadata".into(),
+            source.clone().into_os_string(),
+        ])
+        .unwrap();
+        let dep_info = RustcDepInfo::parse(&format!("output: {}\n", source.display())).unwrap();
+        let discovered = invocation
+            .discover_inputs(&dep_info, directory.path())
+            .unwrap();
+        let identity =
+            FileIdentity::describe(&source, &std::fs::metadata(&source).unwrap()).unwrap();
+        let before = BTreeMap::from([(source.clone(), identity)]);
+
+        // Every ordinary mtime is after the epoch. The unchanged identity is
+        // nevertheless enough proof when the filesystem clock is far ahead.
+        discovered
+            .verify_not_modified_since_with_identities(SystemTime::UNIX_EPOCH, &before)
+            .unwrap();
+
+        // Conversely, a filesystem clock far behind must not conceal a write.
+        std::fs::write(&source, "pub fn library() {1}\n").unwrap();
+        assert_eq!(
+            discovered.verify_not_modified_since_with_identities(
+                SystemTime::now() + std::time::Duration::from_secs(60),
+                &before,
+            ),
             Err(BypassReason::InputModifiedDuringCompilation(source))
         );
     }

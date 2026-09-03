@@ -271,6 +271,41 @@ fn discovery_rejects_inputs_modified_during_compilation() {
     assert_eq!(discovered.verify().unwrap_err().kind(), "input-changed");
 }
 
+#[cfg(unix)]
+#[test]
+fn precompile_identity_does_not_depend_on_the_host_clock() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let root = directory.path();
+    write(root, "a.c", "int a(void) { return 0; }\n");
+    std::fs::create_dir(root.join("nested")).expect("nested directory");
+    let source = root.join("nested/../a.c");
+    let discovered = CcDiscoveredInputs::collect(
+        root,
+        BTreeSet::from([source.clone()]),
+        BTreeSet::new(),
+        &NoFileDigestCache,
+    )
+    .expect("discovery");
+    let identity = FileIdentity::describe(&source, &std::fs::metadata(&source).unwrap()).unwrap();
+    let before = BTreeMap::from([(source.clone(), identity)]);
+
+    discovered
+        .verify_not_modified_since_with_identities(SystemTime::UNIX_EPOCH, &before)
+        .expect("an unchanged identity is independent of clock offset");
+
+    std::fs::write(&source, "int a(void) { return 1; }\n").expect("rewrite");
+    assert_eq!(
+        discovered
+            .verify_not_modified_since_with_identities(
+                SystemTime::now() + std::time::Duration::from_secs(60),
+                &before,
+            )
+            .unwrap_err()
+            .kind(),
+        "input-modified-during-compilation"
+    );
+}
+
 #[test]
 fn discovery_requires_an_absolute_working_directory() {
     assert_eq!(

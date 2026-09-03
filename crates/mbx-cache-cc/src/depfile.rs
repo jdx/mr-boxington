@@ -380,9 +380,35 @@ impl CcDiscoveredInputs {
     /// being mistaken for the contents that produced the object; `verify`
     /// closes the remaining race after hashing.
     pub fn verify_not_modified_since(&self, started_at: SystemTime) -> Result<(), CcBypassReason> {
+        self.verify_not_modified_since_with_identities(started_at, &BTreeMap::new())
+    }
+
+    /// Reject inputs that changed from identities captured before the driver
+    /// ran, falling back to the wall-clock barrier for discovered headers.
+    pub fn verify_not_modified_since_with_identities(
+        &self,
+        started_at: SystemTime,
+        before: &BTreeMap<PathBuf, FileIdentity>,
+    ) -> Result<(), CcBypassReason> {
         for input in self.files() {
-            let modified = std::fs::metadata(&input.path)
-                .and_then(|metadata| metadata.modified())
+            let metadata =
+                std::fs::metadata(&input.path).map_err(|error| CcBypassReason::InputRead {
+                    path: input.path.clone(),
+                    message: error.to_string(),
+                })?;
+            let identity = FileIdentity::describe(&input.path, &metadata);
+            if let Some(previous) = before.get(&input.path)
+                && previous.changed.is_some()
+            {
+                if identity.as_ref() == Some(previous) {
+                    continue;
+                }
+                return Err(CcBypassReason::InputModifiedDuringCompilation(
+                    input.path.clone(),
+                ));
+            }
+            let modified = metadata
+                .modified()
                 .map_err(|error| CcBypassReason::InputRead {
                     path: input.path.clone(),
                     message: error.to_string(),
