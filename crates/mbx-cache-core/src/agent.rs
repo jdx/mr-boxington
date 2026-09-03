@@ -260,6 +260,9 @@ fn queue_prefetch_directory(
     true
 }
 
+/// See [`CacheAgent::with_task_loader`].
+pub type TaskLoader = dyn for<'a> Fn(&'a CacheAgent, &'a str) -> BoxFuture<'a, ()> + Send + Sync;
+
 /// Shared state for an agent hosted by the process that owns a build session.
 ///
 /// Transport listeners deliberately live in the embedder so the session
@@ -276,6 +279,9 @@ pub struct CacheAgent {
     stats: Arc<AtomicAgentStats>,
     observer: Option<Arc<dyn AgentEventObserver>>,
     observer_emission: Arc<Mutex<()>>,
+    /// Loads a task the first time a request names it, so a connection that
+    /// only reports a bypass never waits for a manifest it will not read.
+    task_loader: Option<Arc<TaskLoader>>,
     executable_identities: Arc<Mutex<BTreeMap<ExecutableIdentityKey, Vec<u8>>>>,
     manifest_dir: Arc<PathBuf>,
     task_actions: Arc<Mutex<BTreeMap<String, TaskActionState>>>,
@@ -531,6 +537,7 @@ impl CacheAgent {
             stats,
             observer: None,
             observer_emission: Arc::new(Mutex::new(())),
+            task_loader: None,
             executable_identities: Arc::new(Mutex::new(BTreeMap::new())),
             manifest_dir: Arc::new(task_manifest_dir(&cache_dir)),
             task_actions: Arc::new(Mutex::new(BTreeMap::new())),
@@ -557,6 +564,29 @@ impl CacheAgent {
     pub fn with_observer(mut self, observer: Arc<dyn AgentEventObserver>) -> Self {
         self.observer = Some(observer);
         self
+    }
+
+    /// Load tasks on demand.
+    ///
+    /// The loader is called with the agent and the task's identity before the
+    /// first request that names a task this agent has not begun, and is
+    /// expected to begin it; a second call for the same task must be a no-op.
+    /// Requests that name no task never wait on it.
+    pub fn with_task_loader(mut self, loader: Arc<TaskLoader>) -> Self {
+        self.task_loader = Some(loader);
+        self
+    }
+
+    /// Make sure `task` has been begun before a request reads or records
+    /// under it.
+    async fn ensure_task_loaded(&self, task: &str) {
+        let Some(loader) = &self.task_loader else {
+            return;
+        };
+        if self.task_actions.lock().unwrap().contains_key(task) {
+            return;
+        }
+        loader(self, task).await;
     }
 
     fn emit(&self, event: impl FnOnce() -> AgentEvent) {
@@ -700,19 +730,23 @@ impl CacheAgent {
         // manifest lookup; the authoritative snapshot is loaded again below
         // before it is merged, so another process can still update it while
         // this request is in flight.
-        let early_predictions = {
+        let early_manifest = {
             let _write_guard = self.manifest_write_lock.lock().unwrap();
             let _file_guard = self.lock_task_manifest(task)?;
             self.load_task_manifest(task)?
-                .map(|manifest| manifest.predictions)
-                .unwrap_or_default()
         };
-        let early_actions: BTreeSet<_> = early_predictions
+        let early_actions: BTreeSet<_> = early_manifest
             .iter()
+            .flat_map(|manifest| manifest.predictions.iter())
             .map(|prediction| prediction.action.clone())
             .collect();
         if eager_prefetch {
-            self.spawn_prefetch_predictions(early_predictions);
+            self.spawn_prefetch_predictions(
+                early_manifest
+                    .as_ref()
+                    .map(|manifest| manifest.predictions.clone())
+                    .unwrap_or_default(),
+            );
         }
         let (remote_manifest, mut remote_etag) = if self.remote_mode.reads() {
             match self.get_remote_task_manifest(task).await {
@@ -732,7 +766,10 @@ impl CacheAgent {
         } else {
             (None, None)
         };
-        let manifest = {
+        // Without a remote there is nothing to reconcile: the manifest just
+        // read is the whole truth, and writing it back byte for byte would
+        // serialize every prediction for nothing.
+        let manifest = if self.remote.is_some() && self.remote_mode.reads() {
             let _write_guard = self.manifest_write_lock.lock().unwrap();
             let _file_guard = self.lock_task_manifest(task)?;
             let local_manifest = self.load_task_manifest(task)?;
@@ -751,6 +788,8 @@ impl CacheAgent {
                 self.persist_task_manifest(manifest)?;
             }
             manifest
+        } else {
+            early_manifest
         };
         let (manifest, remote_etag) = match manifest {
             Some(manifest) => (Some(manifest), remote_etag),
@@ -959,16 +998,27 @@ impl CacheAgent {
     /// mistake that cumulative manifest for the work the run completed.
     pub async fn commit_task_actions(&self, run: &str) -> Result<Vec<ActionPrediction>> {
         validate_task_identity(run)?;
-        let state = self
-            .task_actions
-            .lock()
-            .unwrap()
-            .get(run)
-            .cloned()
-            .ok_or_else(|| eyre::eyre!("task action manifest baseline was not loaded"))?;
-        if !state.baseline_loaded {
-            bail!("task action manifest baseline was not loaded");
-        }
+        let state = {
+            let mut runs = self.task_actions.lock().unwrap();
+            let state = runs
+                .get(run)
+                .ok_or_else(|| eyre::eyre!("task action manifest baseline was not loaded"))?;
+            if !state.baseline_loaded {
+                bail!("task action manifest baseline was not loaded");
+            }
+            // A run that predicted nothing new leaves the manifest as it found
+            // it. Rewriting it would serialize every inherited prediction to
+            // say so, and a remote that is only read has nothing to learn
+            // either. Decided before the baseline is cloned: the baseline is
+            // every prediction the manifest holds.
+            if state.pending_predictions.is_empty()
+                && (self.remote.is_none() || !self.remote_mode.writes())
+            {
+                runs.remove(run);
+                return Ok(Vec::new());
+            }
+            state.clone()
+        };
         let task = state.manifest;
         validate_task_identity(&task)?;
         let completed = state
@@ -1313,6 +1363,13 @@ impl CacheAgent {
         request: AgentRequest,
         connection: &mut ConnectionUploads,
     ) -> AgentResponse {
+        match &request {
+            AgentRequest::FindActionPrediction { task, .. }
+            | AgentRequest::RecordActionPrediction { task, .. } => {
+                self.ensure_task_loaded(task).await;
+            }
+            _ => {}
+        }
         let result = match request {
             AgentRequest::BeginTask { task } => self
                 .begin_task(&task)
@@ -1921,7 +1978,20 @@ impl CacheAgent {
     /// a stale seed costs a hash and nothing else. Entries this session has
     /// already recorded are kept over seeded ones. Returns how many were taken.
     pub fn seed_file_digests(&self, entries: Vec<(FileDigestScope, RecordedFileDigest)>) -> usize {
+        self.seed_file_digests_with(|| entries)
+    }
+
+    /// Seed the ledger from entries produced under its lock.
+    ///
+    /// A lookup that arrives while `load` is still reading waits for it rather
+    /// than missing, so a caller can start the read in the background and let
+    /// whatever else the build is doing overlap it.
+    pub fn seed_file_digests_with(
+        &self,
+        load: impl FnOnce() -> Vec<(FileDigestScope, RecordedFileDigest)>,
+    ) -> usize {
         let mut ledger = self.file_digests.lock().unwrap();
+        let entries = load();
         let mut seeded = 0;
         for (scope, entry) in entries {
             if ledger.len() >= MAX_FILE_DIGEST_ENTRIES {

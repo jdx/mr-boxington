@@ -113,6 +113,9 @@ pub struct CacheSession {
     /// The checkout's private state directory once `begin` has claimed it,
     /// where the file-digest ledger is saved when the session finishes.
     ledger_dir: Mutex<Option<PathBuf>>,
+    /// What the ledger file looked like when this session read it, so a
+    /// session that was alone in the checkout can write without merging.
+    ledger_stamp: Arc<Mutex<Option<crate::digest_ledger::Stamp>>>,
     started: Instant,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
     server: Mutex<Option<JoinHandle<Result<()>>>>,
@@ -123,6 +126,8 @@ pub struct CacheSession {
 pub(super) struct SessionTask {
     identity: std::sync::OnceLock<String>,
     initialized: tokio::sync::OnceCell<bool>,
+    /// Whether any shim connected, which is what makes a run worth committing.
+    connected: std::sync::atomic::AtomicBool,
 }
 
 impl CacheSession {
@@ -153,6 +158,11 @@ impl CacheSession {
         let staging = session_dir.join("staging");
         std::fs::create_dir(&staging)?;
         let store = config.store_dir();
+        let task = Arc::new(SessionTask {
+            identity: std::sync::OnceLock::new(),
+            initialized: tokio::sync::OnceCell::new(),
+            connected: std::sync::atomic::AtomicBool::new(false),
+        });
         let agent = if let Some(remote) = action_remote_cache(config, &store)? {
             CacheAgent::new_remote_with_download_limit(
                 store.clone(),
@@ -171,11 +181,22 @@ impl CacheSession {
             Some(events) => agent.with_observer(Arc::new(events.clone())),
             None => agent,
         };
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let task = Arc::new(SessionTask {
-            identity: std::sync::OnceLock::new(),
-            initialized: tokio::sync::OnceCell::new(),
+        // A shim that needs the build's predictions is the one that waits for
+        // the manifest; the probes cargo runs first only report bypasses.
+        let agent = agent.with_task_loader({
+            let task = Arc::clone(&task);
+            Arc::new(move |agent: &CacheAgent, identity: &str| {
+                let task = Arc::clone(&task);
+                let identity = identity.to_string();
+                Box::pin(async move {
+                    if task.identity.get().is_some_and(|known| *known == identity) {
+                        server::initialize_task(agent, &task).await;
+                    }
+                })
+                    as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>
+            })
         });
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (socket, server) =
             spawn_server(session_dir, agent.clone(), Arc::clone(&task), shutdown_rx).await?;
         Ok(Self {
@@ -194,6 +215,7 @@ impl CacheSession {
             store,
             incremental_root: config.cache_dir.join("incremental"),
             ledger_dir: Mutex::new(None),
+            ledger_stamp: Arc::new(Mutex::new(None)),
             started: Instant::now(),
             shutdown: Mutex::new(Some(shutdown_tx)),
             server: Mutex::new(Some(server)),
@@ -231,6 +253,17 @@ impl CacheSession {
         }
         self.offer_earlier_lockfiles(&identity, workspace_root);
         let _ = self.task.identity.set(identity.clone());
+        // Read now, in the background, rather than when the first shim
+        // connects: cargo spends its own startup planning the build, and that
+        // is time the manifest can be parsed in instead of stalling the first
+        // compilation on it.
+        {
+            let agent = self.agent.clone();
+            let task = Arc::clone(&self.task);
+            tokio::spawn(async move {
+                server::initialize_task(&agent, &task).await;
+            });
+        }
         let action_run = Some(ActionRun {
             run: identity.clone(),
             receipt: build_receipt_run(&identity),
@@ -268,13 +301,20 @@ impl CacheSession {
                     INCREMENTAL_ROOT_ENV.into(),
                     root.to_string_lossy().into_owned(),
                 );
-                // Seeded before any shim can ask: the first compilation of the
-                // crate being edited is the one that would otherwise read every
-                // unchanged dependency again.
-                let seeded = self
-                    .agent
-                    .seed_file_digests(crate::digest_ledger::load(&root));
-                debug!("file-digest ledger seeded with {seeded} entries");
+                // Seeded under the ledger's own lock on a blocking thread, so
+                // cargo's startup overlaps the read, and a shim that asks
+                // before it is done waits for the answer instead of hashing
+                // every unchanged dependency again.
+                let agent = self.agent.clone();
+                let ledger_root = root.clone();
+                let stamp = Arc::clone(&self.ledger_stamp);
+                tokio::task::spawn_blocking(move || {
+                    let seeded = agent.seed_file_digests_with(|| {
+                        *stamp.lock().unwrap() = crate::digest_ledger::stamp(&ledger_root);
+                        crate::digest_ledger::load(&ledger_root)
+                    });
+                    debug!("file-digest ledger seeded with {seeded} entries");
+                });
                 *self.ledger_dir.lock().unwrap() = Some(root);
             }
             Err(error) => warn!("incremental state was not recorded: {error:#}"),
@@ -530,7 +570,8 @@ impl CacheSession {
         // session in this checkout starts from everything this one hashed.
         // Best-effort like the ledger itself.
         if let Some(ledger_dir) = self.ledger_dir.lock().unwrap().take() {
-            match crate::digest_ledger::save(&ledger_dir, self.agent.file_digests()) {
+            let stamp = self.ledger_stamp.lock().unwrap().take();
+            match crate::digest_ledger::save(&ledger_dir, self.agent.file_digests(), stamp) {
                 Ok(count) => debug!("file-digest ledger saved with {count} entries"),
                 Err(error) => warn!("the file-digest ledger was not saved: {error:#}"),
             }
@@ -715,14 +756,20 @@ pub struct ActionRun {
 
 impl ActionRun {
     pub async fn commit(self) -> Result<()> {
-        if self
-            .initialized
-            .as_ref()
-            .is_some_and(|task| task.initialized.get() != Some(&true))
-        {
+        if self.initialized.as_ref().is_some_and(|task| {
+            !task.connected.load(std::sync::atomic::Ordering::Relaxed)
+                || task.initialized.get() != Some(&true)
+        }) {
             return Ok(());
         }
         let predictions = self.agent.commit_task_actions(&self.run).await?;
+        // A build that predicted nothing new has nothing to export that the
+        // receipt before it did not already name, so that receipt stands. A
+        // grouped export still gets its receipt: the group is the record of
+        // which runs took part.
+        if predictions.is_empty() && self.export_group.is_none() {
+            return Ok(());
+        }
         crate::store::record_build_receipt(
             &self.store,
             &self.receipt,

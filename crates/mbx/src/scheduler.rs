@@ -889,7 +889,8 @@ impl Pool {
         }
         let mut contents = serde_json::to_vec(&ledger)?;
         contents.push(b'\n');
-        crate::util::write_atomic(&path, &contents)
+        // A heuristic every link refreshes: a lost write costs one sample.
+        crate::util::write_advisory(&path, &contents)
     }
 }
 
