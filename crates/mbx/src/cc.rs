@@ -265,6 +265,10 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     // The machine-wide permit is taken after every chance to hit the cache,
     // and the timer starts afterwards: time spent waiting for the machine is
     // not time this compilation cost.
+    let input_identities = crate::util::snapshot_file_identities(
+        &working_dir,
+        invocation.required_inputs().iter().map(PathBuf::as_path),
+    );
     let demand = crate::scheduler::Demand::new(&compilation_name(&invocation), false);
     let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
     let started = Instant::now();
@@ -311,6 +315,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         &depfile,
         &output,
         compilation_started,
+        &input_identities,
         &task,
         &invocation_digest,
         duration_ns,
@@ -352,6 +357,7 @@ fn publish(
     depfile: &Path,
     output: &Output,
     compilation_started: SystemTime,
+    input_identities: &BTreeMap<PathBuf, FileIdentity>,
     task: &str,
     invocation_digest: &CacheDigest,
     duration_ns: u64,
@@ -362,7 +368,7 @@ fn publish(
     portable: &Portable,
 ) -> Result<()> {
     let discovered = discover(invocation, context, depfile)?;
-    discovered.verify_not_modified_since(compilation_started)?;
+    discovered.verify_not_modified_since_with_identities(compilation_started, input_identities)?;
     verify_search_path_unchanged(searchable, before)?;
     discovered.verify()?;
     discovered.apply_to(context)?;

@@ -500,6 +500,15 @@ impl RustcInvocation {
         &self.source
     }
 
+    /// Files named directly by the invocation that rustc must read.
+    ///
+    /// This includes the source, explicit extern artifacts, and custom target
+    /// specifications. Callers can snapshot these before rustc starts even
+    /// though the complete input set is only known from dep-info afterwards.
+    pub fn required_inputs(&self) -> &[PathBuf] {
+        &self.required_inputs
+    }
+
     /// Return the explicitly selected compilation target, if any.
     pub fn target(&self) -> Option<&str> {
         self.target.as_deref()

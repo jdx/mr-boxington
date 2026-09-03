@@ -1,7 +1,52 @@
 use eyre::{Context, Result};
+use mbx_cache_core::FileIdentity;
+use std::collections::BTreeMap;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
+
+/// Capture clock-independent identities for compiler inputs known up front.
+#[cfg(unix)]
+pub(crate) fn snapshot_file_identities<'a>(
+    working_dir: &Path,
+    paths: impl IntoIterator<Item = &'a Path>,
+) -> BTreeMap<PathBuf, FileIdentity> {
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let path = if path.is_absolute() {
+                normalize_components(path)
+            } else {
+                normalize_components(&working_dir.join(path))
+            };
+            let metadata = std::fs::metadata(&path).ok()?;
+            let identity = FileIdentity::describe(&path, &metadata)?;
+            Some((path, identity))
+        })
+        .collect()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn snapshot_file_identities<'a>(
+    _working_dir: &Path,
+    _paths: impl IntoIterator<Item = &'a Path>,
+) -> BTreeMap<PathBuf, FileIdentity> {
+    BTreeMap::new()
+}
+
+fn normalize_components(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
 
 /// Find the workspace root above `start`.
 ///
