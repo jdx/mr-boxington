@@ -36,6 +36,8 @@ mod stats;
 use client::validate_handshake_response;
 use client::{request_agent_at, request_standalone_agent};
 pub(crate) use diagnostics::{note, report_shim_warning, reserve_stderr_for_compiler};
+#[cfg(unix)]
+pub(crate) use server::create_fifo;
 pub(crate) use server::listener_unavailable;
 use server::spawn_server;
 pub(crate) use shims::CC_CRATE_ENV;

@@ -318,6 +318,12 @@ protocol connectivity. Warnings describe setup problems, optional features, or
 fallbacks; failures make the command exit
 unsuccessfully.
 
+Build sessions normally communicate over a Unix-domain socket. When a sandbox
+blocks Unix socket listeners but permits filesystem FIFOs, mbx automatically
+uses FIFO transport and keeps caching enabled. If neither transport is
+available, mbx warns and runs Cargo without caching instead of preventing the
+build from starting.
+
 ## Read the result
 
 After a build that used the cache, mbx prints a one-line summary to stderr:

@@ -171,12 +171,23 @@ fn session_check() -> Check {
     let socket = directory.path().join("cache-agent.sock");
     match std::os::unix::net::UnixListener::bind(&socket) {
         Ok(_) => Check::pass("session", "Unix-domain listeners are available"),
-        Err(error) => Check::warn(
-            "session",
-            format!(
-                "Unix-domain listener unavailable ({error}); builds will run without mbx caching"
-            ),
-        ),
+        Err(socket_error) => {
+            let fifo = directory.path().join("cache-agent.fifo");
+            match crate::session::create_fifo(&fifo) {
+                Ok(()) => Check::warn(
+                    "session",
+                    format!(
+                        "Unix-domain listener unavailable ({socket_error}); builds will use FIFO transport"
+                    ),
+                ),
+                Err(fifo_error) => Check::warn(
+                    "session",
+                    format!(
+                        "Unix-domain listener unavailable ({socket_error}) and FIFO unavailable ({fifo_error}); builds will run without mbx caching"
+                    ),
+                ),
+            }
+        }
     }
 }
 
@@ -491,7 +502,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_build_session_transport_is_probed() {
-        assert_eq!(session_check().severity, Severity::Pass);
+        let check = session_check();
+        assert_eq!(check.name, "session");
+        match check.severity {
+            Severity::Pass => assert!(check.detail.contains("Unix-domain")),
+            Severity::Warn => assert!(
+                check.detail.contains("FIFO transport")
+                    || check.detail.contains("without mbx caching")
+            ),
+            Severity::Fail => panic!("session transport probes are advisory"),
+        }
     }
 
     #[test]
