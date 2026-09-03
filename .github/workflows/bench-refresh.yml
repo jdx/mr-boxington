@@ -281,6 +281,8 @@ jobs:
           shared-key: hk-small-edit-${{ github.run_id }}
           add-job-id-key: "false"
           workspaces: subject -> target
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
       - working-directory: subject
         run: cargo build --locked
 
@@ -301,26 +303,34 @@ jobs:
           ref: fc29ead1456ba7c1f62826c284126410a4014b00
           path: subject
           persist-credentials: false
+      - name: Start end-to-end timer
+        run: echo "EDIT_STARTED_NS=$(date +%s%N)" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
         with:
           shared-key: hk-small-edit-${{ github.run_id }}
           add-job-id-key: "false"
           workspaces: subject -> target
           save-if: "false"
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
       - id: measure
         working-directory: subject
         run: |
           started=$(date +%s%N)
           cargo build --locked
           finished=$(date +%s%N)
-          echo "duration_ns=$((finished - started))" >> "$GITHUB_OUTPUT"
+          echo "build_duration_ns=$((finished - started))" >> "$GITHUB_OUTPUT"
+          echo "total_duration_ns=$((finished - EDIT_STARTED_NS))" >> "$GITHUB_OUTPUT"
       - name: Record result
         env:
-          DURATION_NS: ${{ steps.measure.outputs.duration_ns }}
+          BUILD_DURATION_NS: ${{ steps.measure.outputs.build_duration_ns }}
+          TOTAL_DURATION_NS: ${{ steps.measure.outputs.total_duration_ns }}
         run: |
           mkdir -p target/small-edit
-          jq -n --arg tool rust-cache --argjson wall_duration_ns "$DURATION_NS" \
-            '{tool:$tool, wall_duration_ns:$wall_duration_ns}' \
+          jq -n --arg tool rust-cache \
+            --argjson build_duration_ns "$BUILD_DURATION_NS" \
+            --argjson restore_and_build_duration_ns "$TOTAL_DURATION_NS" \
+            '{tool:$tool, build_duration_ns:$build_duration_ns, restore_and_build_duration_ns:$restore_and_build_duration_ns}' \
             > target/small-edit/rust-cache.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -372,6 +382,8 @@ jobs:
           ref: fc29ead1456ba7c1f62826c284126410a4014b00
           path: subject
           persist-credentials: false
+      - name: Start end-to-end timer
+        run: echo "EDIT_STARTED_NS=$(date +%s%N)" >> "$GITHUB_ENV"
       - uses: jdx/mr-boxington-action@adc5c234c02592f7edd008bf81d5bc0e9584dc03 # v1
         with:
           version: 1.6.0
@@ -384,14 +396,18 @@ jobs:
           started=$(date +%s%N)
           mbx build --locked
           finished=$(date +%s%N)
-          echo "duration_ns=$((finished - started))" >> "$GITHUB_OUTPUT"
+          echo "build_duration_ns=$((finished - started))" >> "$GITHUB_OUTPUT"
+          echo "total_duration_ns=$((finished - EDIT_STARTED_NS))" >> "$GITHUB_OUTPUT"
       - name: Record result
         env:
-          DURATION_NS: ${{ steps.measure.outputs.duration_ns }}
+          BUILD_DURATION_NS: ${{ steps.measure.outputs.build_duration_ns }}
+          TOTAL_DURATION_NS: ${{ steps.measure.outputs.total_duration_ns }}
         run: |
           mkdir -p target/small-edit
-          jq -n --arg tool mbx --argjson wall_duration_ns "$DURATION_NS" \
-            '{tool:$tool, wall_duration_ns:$wall_duration_ns}' \
+          jq -n --arg tool mbx \
+            --argjson build_duration_ns "$BUILD_DURATION_NS" \
+            --argjson restore_and_build_duration_ns "$TOTAL_DURATION_NS" \
+            '{tool:$tool, build_duration_ns:$build_duration_ns, restore_and_build_duration_ns:$restore_and_build_duration_ns}' \
             > target/small-edit/mbx.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -412,16 +428,24 @@ jobs:
           merge-multiple: true
       - name: Compare results
         run: |
-          rust_cache=$(jq -r .wall_duration_ns "$RUNNER_TEMP/small-edit/rust-cache.json")
-          mbx=$(jq -r .wall_duration_ns "$RUNNER_TEMP/small-edit/mbx.json")
-          jq -n --argjson rust_cache "$rust_cache" --argjson mbx "$mbx" \
-            '{rust_cache_seconds:($rust_cache / 1e9), mbx_seconds:($mbx / 1e9), mbx_speedup:($rust_cache / $mbx)}' \
+          rust_cache_build=$(jq -r .build_duration_ns "$RUNNER_TEMP/small-edit/rust-cache.json")
+          rust_cache_total=$(jq -r .restore_and_build_duration_ns "$RUNNER_TEMP/small-edit/rust-cache.json")
+          mbx_build=$(jq -r .build_duration_ns "$RUNNER_TEMP/small-edit/mbx.json")
+          mbx_total=$(jq -r .restore_and_build_duration_ns "$RUNNER_TEMP/small-edit/mbx.json")
+          jq -n --argjson rust_cache_build "$rust_cache_build" \
+            --argjson rust_cache_total "$rust_cache_total" \
+            --argjson mbx_build "$mbx_build" --argjson mbx_total "$mbx_total" \
+            '{rust_cache:{build_seconds:($rust_cache_build / 1e9),restore_and_build_seconds:($rust_cache_total / 1e9)},mbx:{build_seconds:($mbx_build / 1e9),restore_and_build_seconds:($mbx_total / 1e9)},mbx_end_to_end_speedup:($rust_cache_total / $mbx_total)}' \
             | tee "$RUNNER_TEMP/small-edit/comparison.json"
           {
             echo '## hk small-edit comparison'
             echo
-            echo '| Tool | Build after restore |'
-            echo '| :--- | ---: |'
-            printf '| rust-cache | %.2f s |\n' "$(awk "BEGIN {print $rust_cache / 1000000000}")"
-            printf '| mbx | %.2f s |\n' "$(awk "BEGIN {print $mbx / 1000000000}")"
+            echo '| Tool | Restore + build | Build only |'
+            echo '| :--- | ---: | ---: |'
+            printf '| rust-cache | %.2f s | %.2f s |\n' \
+              "$(awk "BEGIN {print $rust_cache_total / 1000000000}")" \
+              "$(awk "BEGIN {print $rust_cache_build / 1000000000}")"
+            printf '| mbx | %.2f s | %.2f s |\n' \
+              "$(awk "BEGIN {print $mbx_total / 1000000000}")" \
+              "$(awk "BEGIN {print $mbx_build / 1000000000}")"
           } >> "$GITHUB_STEP_SUMMARY"
