@@ -3,7 +3,7 @@
 
 **Usage:** `mbx [+TOOLCHAIN] <SUBCOMMAND>`
 
-**Version:** 1.5.0
+**Version:** 1.6.0
 
 - **Usage:** `mbx [+TOOLCHAIN] <SUBCOMMAND>`
 

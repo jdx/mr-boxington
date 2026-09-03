@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.11.2...mbx-cache-core-v0.11.3) - 2026-09-03
+
+### Added
+
+- manage profile-specific linkers ([#319](https://github.com/jdx/mr-boxington/pull/319))
+
+### Other
+
+- *(cache)* complete large remote transfers reliably ([#320](https://github.com/jdx/mr-boxington/pull/320))
+
 ## [0.11.2](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.11.1...mbx-cache-core-v0.11.2) - 2026-09-02
 
 ### Fixed
