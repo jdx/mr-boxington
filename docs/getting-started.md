@@ -301,6 +301,7 @@ mbx doctor
   ok  cargo        cargo 1.98.0 (797e8a9bc 2026-08-05)
   ok  rustc        rustc 1.98.0 (88d9e12ae 2026-08-18)
   ok  cache        /home/you/.cache/mbx is writable
+  ok  session      Unix-domain listeners are available
   ok  config       50.0 GiB budget, automatic gc enabled, managed targets enabled at /home/you/.cache/mbx/targets
   ok  reflink      supported by the cache filesystem
   ok  setup        mise Cargo wrapper is active and the fallback shim is current at /home/you/.local/share/mbx/bin/cargo
@@ -311,10 +312,17 @@ mbx doctor
 
 Doctor checks that mise's Cargo wrapper is active, or that the installed fallback
 shim matches the running mbx and is the first `cargo` on `PATH`. It also checks
-the Cargo and rustc executables, cache write access, filesystem reflink support,
-effective remote policy, and remote protocol connectivity. Warnings describe
-setup problems, optional features, or fallbacks; failures make the command exit
+the Cargo and rustc executables, cache write access, the local build-session
+listener, filesystem reflink support, effective remote policy, and remote
+protocol connectivity. Warnings describe setup problems, optional features, or
+fallbacks; failures make the command exit
 unsuccessfully.
+
+Build sessions normally communicate over a Unix-domain socket. When a sandbox
+blocks Unix socket listeners but permits filesystem FIFOs, mbx automatically
+uses FIFO transport and keeps caching enabled. If neither transport is
+available, mbx warns and runs Cargo without caching instead of preventing the
+build from starting.
 
 ## Read the result
 

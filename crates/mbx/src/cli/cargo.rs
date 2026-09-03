@@ -167,7 +167,26 @@ fn cargo_with_settings_bypass_log_and_roots(
         .build()?;
 
     let session_outcome = runtime.block_on(async {
-        let session = CacheSession::start_with_jobs(session_dir.path(), config, cargo_jobs).await?;
+        let session = match CacheSession::start_with_jobs(session_dir.path(), config, cargo_jobs)
+            .await
+        {
+            Ok(session) => session,
+            Err(error) if session::listener_unavailable(&error) => {
+                crate::session::note(&format!(
+                    "mbx[warning]: cache session unavailable; running Cargo without mbx caching: {error:#}"
+                ));
+                // Protect nested Cargo calls from re-entering mbx, and ensure
+                // compiler wrappers cannot inherit an enclosing session that
+                // this build did not start. An empty socket is deliberately
+                // equivalent to an absent one to every mbx shim.
+                let environment = BTreeMap::from([
+                    ("MBX_DISABLE".into(), "1".into()),
+                    (session::SOCKET_ENV.into(), String::new()),
+                ]);
+                return Ok((run_cargo(&cargo, arguments, environment), None));
+            }
+            Err(error) => return Err(error),
+        };
         let mut environment = inherited_environment(|name| std::env::var(name).ok(), &working_dir);
         if let Some(path) = bypass_log {
             let path = if path.is_absolute() {

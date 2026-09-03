@@ -129,6 +129,8 @@ async fn check(config: &Config, toolchain: Option<&str>) -> Vec<Check> {
         command_check("rustc", &rustc, toolchain),
     ];
     checks.push(cache_check(&config.cache_dir));
+    #[cfg(unix)]
+    checks.push(session_check());
     checks.push(Check::pass(
         "config",
         format!(
@@ -143,6 +145,59 @@ async fn check(config: &Config, toolchain: Option<&str>) -> Vec<Check> {
     checks.push(setup_check());
     checks.extend(remote_checks(config).await);
     checks
+}
+
+/// Probe the transport every orchestrated build needs in this environment.
+///
+/// This uses a fresh temporary directory just like a real session. Sandboxes
+/// can permit both creating the directory and opening an AF_UNIX socket while
+/// still rejecting `bind`, so no filesystem-only check can answer this.
+#[cfg(unix)]
+fn session_check() -> Check {
+    let directory = match tempfile::Builder::new()
+        .prefix("mbx-session-probe-")
+        .tempdir()
+    {
+        Ok(directory) => directory,
+        Err(error) => {
+            return Check::warn(
+                "session",
+                format!(
+                    "listener was not tested because a temporary directory could not be created: {error}"
+                ),
+            );
+        }
+    };
+    let socket = directory.path().join("cache-agent.sock");
+    let socket_probe = std::os::unix::net::UnixListener::bind(&socket).map(drop);
+    session_check_from(socket_probe, || {
+        crate::session::create_fifo(&directory.path().join("cache-agent.fifo"))
+    })
+}
+
+/// Turn transport probe results into the diagnostic shown by `mbx doctor`.
+#[cfg(unix)]
+fn session_check_from(
+    socket_probe: std::io::Result<()>,
+    fifo_probe: impl FnOnce() -> std::io::Result<()>,
+) -> Check {
+    match socket_probe {
+        Ok(()) => Check::pass("session", "Unix-domain listeners are available"),
+        Err(socket_error) => match fifo_probe() {
+            Ok(()) => Check::warn(
+                "session",
+                format!(
+                    "Unix-domain listener unavailable ({socket_error}); builds will use FIFO transport"
+                ),
+            ),
+            Err(fifo_error) => Check::warn(
+                "session",
+                format!(
+                    "Unix-domain listener unavailable ({socket_error}) and FIFO unavailable ({fifo_error}); builds will run without mbx caching"
+                ),
+            ),
+        },
+    }
 }
 
 fn enabled(value: bool) -> &'static str {
@@ -451,6 +506,43 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         assert_eq!(cache_check(directory.path()).severity, Severity::Pass);
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_build_session_transport_is_probed() {
+        let check = session_check();
+        assert_eq!(check.name, "session");
+        match check.severity {
+            Severity::Pass => assert!(check.detail.contains("Unix-domain")),
+            Severity::Warn => assert!(
+                check.detail.contains("FIFO transport")
+                    || check.detail.contains("without mbx caching")
+            ),
+            Severity::Fail => panic!("session transport probes are advisory"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_blocked_listener_reports_the_fifo_fallback() {
+        let check = session_check_from(
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            || Ok(()),
+        );
+        assert_eq!(check.severity, Severity::Warn);
+        assert!(check.detail.contains("builds will use FIFO transport"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blocked_socket_and_fifo_report_the_uncached_fallback() {
+        let check = session_check_from(
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            || Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        );
+        assert_eq!(check.severity, Severity::Warn);
+        assert!(check.detail.contains("builds will run without mbx caching"));
     }
 
     #[test]

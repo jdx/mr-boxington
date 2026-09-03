@@ -9,6 +9,99 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 #[cfg(unix)]
+pub(super) const FIFO_ENDPOINT_PREFIX: &str = "fifo:";
+#[cfg(unix)]
+pub(super) const FIFO_CLIENT_PREFIX: &str = "client-";
+#[cfg(unix)]
+pub(super) const FIFO_READY: &str = "ready";
+#[cfg(unix)]
+pub(super) const FIFO_ACCEPTED: &str = "accepted";
+#[cfg(unix)]
+pub(super) const FIFO_REQUESTS: &str = "requests";
+#[cfg(unix)]
+pub(super) const FIFO_RESPONSES: &str = "responses";
+#[cfg(unix)]
+pub(super) const FIFO_CONNECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct ListenerBindError {
+    path: PathBuf,
+    source: std::io::Error,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct TransportUnavailable {
+    socket: ListenerBindError,
+    fifo: eyre::Report,
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for TransportUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}; FIFO fallback also failed: {:#}",
+            self.socket, self.fifo
+        )
+    }
+}
+
+#[cfg(unix)]
+impl std::error::Error for TransportUnavailable {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.socket)
+    }
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for ListenerBindError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "failed to bind cache session listener at {}: {}",
+            self.path.display(),
+            self.source
+        )
+    }
+}
+
+#[cfg(unix)]
+impl std::error::Error for ListenerBindError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+#[cfg(unix)]
+impl ListenerBindError {
+    fn unavailable(&self) -> bool {
+        matches!(
+            self.source.kind(),
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
+        )
+    }
+}
+
+/// Whether session startup failed because this environment cannot bind the
+/// local listener the compiler shims need.
+#[cfg(unix)]
+pub(crate) fn listener_unavailable(error: &eyre::Report) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<ListenerBindError>()
+            .is_some_and(ListenerBindError::unavailable)
+            || cause.downcast_ref::<TransportUnavailable>().is_some()
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn listener_unavailable(_error: &eyre::Report) -> bool {
+    false
+}
+
+#[cfg(unix)]
 pub(super) async fn spawn_server(
     session_dir: &Path,
     agent: CacheAgent,
@@ -18,7 +111,27 @@ pub(super) async fn spawn_server(
     use std::os::unix::fs::PermissionsExt as _;
 
     let socket = session_dir.join("cache-agent.sock");
-    let listener = tokio::net::UnixListener::bind(&socket)?;
+    let listener = match tokio::net::UnixListener::bind(&socket) {
+        Ok(listener) => listener,
+        Err(source) => {
+            let socket_error = ListenerBindError {
+                path: socket,
+                source,
+            };
+            if !socket_error.unavailable() {
+                return Err(socket_error.into());
+            }
+            super::note(&format!(
+                "mbx[warning]: Unix-domain cache session listener unavailable; using FIFO transport: {socket_error}"
+            ));
+            return spawn_fifo_server(session_dir, agent, task, shutdown)
+                .map_err(|fifo| TransportUnavailable {
+                    socket: socket_error,
+                    fifo,
+                })
+                .map_err(Into::into);
+        }
+    };
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     let endpoint = socket.to_string_lossy().into_owned();
     let server = tokio::spawn(async move {
@@ -52,6 +165,375 @@ pub(super) async fn spawn_server(
         outcome
     });
     Ok((endpoint, server))
+}
+
+/// Serve compiler processes through filesystem FIFOs when socket syscalls are
+/// prohibited. Each client owns a private request/response pair, so large
+/// protocol messages and concurrent compilations never share framing.
+#[cfg(unix)]
+fn spawn_fifo_server(
+    session_dir: &Path,
+    agent: CacheAgent,
+    task: Arc<super::SessionTask>,
+    mut shutdown: oneshot::Receiver<()>,
+) -> Result<(String, JoinHandle<Result<()>>)> {
+    use std::collections::HashSet;
+
+    let directory = prepare_fifo_directory(session_dir)?;
+    let endpoint = format!("{FIFO_ENDPOINT_PREFIX}{}", directory.to_string_lossy());
+    let server = tokio::spawn(async move {
+        let _cleanup = FifoCleanup(directory.clone());
+        let mut claimed = HashSet::new();
+        let mut connections = tokio::task::JoinSet::new();
+        let mut poll = tokio::time::interval(std::time::Duration::from_millis(2));
+        let outcome = loop {
+            tokio::select! {
+                _ = poll.tick() => {
+                    let entries = match std::fs::read_dir(&directory) {
+                        Ok(entries) => entries,
+                        Err(error) => break Err(eyre::Report::from(error)),
+                    };
+                    for entry in entries.filter_map(std::result::Result::ok) {
+                        let path = entry.path();
+                        if !entry.file_type().is_ok_and(|kind| kind.is_dir())
+                            || !entry.file_name().to_string_lossy().starts_with(FIFO_CLIENT_PREFIX)
+                            || !claimed.insert(path.clone())
+                        {
+                            continue;
+                        }
+                        let agent = agent.clone();
+                        let task = Arc::clone(&task);
+                        let runtime = tokio::runtime::Handle::current();
+                        let connection_path = path.clone();
+                        let (finished_tx, finished_rx) = oneshot::channel();
+                        let thread = std::thread::Builder::new()
+                            .name("mbx-fifo-session".into())
+                            .spawn(move || {
+                                let _cleanup = FifoCleanup(connection_path.clone());
+                                let result = (|| {
+                                    let (reader, writer) = accept_fifo_client(&connection_path)?;
+                                    runtime.block_on(async {
+                                        initialize_task(&agent, &task).await;
+                                        let stream = tokio::io::join(
+                                            BlockingFifoReader(reader),
+                                            BlockingFifoWriter(writer),
+                                        );
+                                        if let Err(error) = agent.handle_connection(stream).await {
+                                            debug!("cache agent FIFO connection failed: {error}");
+                                        }
+                                        Ok::<(), eyre::Report>(())
+                                    })
+                                })();
+                                let _ = finished_tx.send(result);
+                            });
+                        let thread = match thread {
+                            Ok(thread) => thread,
+                            Err(error) => {
+                                let _cleanup = FifoCleanup(path.clone());
+                                debug!(
+                                    "failed to start cache agent FIFO connection thread: {error}"
+                                );
+                                continue;
+                            }
+                        };
+                        connections.spawn(async move {
+                            let result = finished_rx.await.map_err(eyre::Report::from)?;
+                            thread
+                                .join()
+                                .map_err(|_| eyre::eyre!("cache agent FIFO thread panicked"))?;
+                            result
+                        });
+                    }
+                    while connections.try_join_next().is_some() {}
+                }
+                _ = &mut shutdown => break Ok(()),
+            }
+        };
+        while let Some(connection) = connections.join_next().await {
+            if let Ok(Err(error)) = connection {
+                debug!("cache agent FIFO connection failed: {error}");
+            }
+        }
+        outcome
+    });
+    Ok((endpoint, server))
+}
+
+/// Create and probe the private directory advertised as the FIFO endpoint.
+#[cfg(unix)]
+fn prepare_fifo_directory(session_dir: &Path) -> Result<PathBuf> {
+    prepare_fifo_directory_with(session_dir, create_fifo)
+}
+
+/// Prepare a FIFO endpoint using an injectable creator for deterministic tests.
+#[cfg(unix)]
+fn prepare_fifo_directory_with(
+    session_dir: &Path,
+    make_fifo: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = session_dir.join("cache-agent-fifo");
+    std::fs::create_dir(&directory)?;
+    let probe = directory.join(".probe");
+    let result = (|| {
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        make_fifo(&probe)?;
+        std::fs::remove_file(&probe)?;
+        Ok::<(), std::io::Error>(())
+    })();
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&probe);
+        let _ = std::fs::remove_dir(&directory);
+        return Err(error.into());
+    }
+    Ok(directory)
+}
+
+/// Open one client's FIFO pair after its rendezvous handshake.
+#[cfg(unix)]
+fn accept_fifo_client(directory: &Path) -> Result<(std::fs::File, std::fs::File)> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let requests = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(directory.join(FIFO_REQUESTS))?;
+    let deadline = std::time::Instant::now() + FIFO_CONNECT_DEADLINE;
+    while !directory.join(FIFO_READY).exists() {
+        if std::time::Instant::now() >= deadline {
+            eyre::bail!("timed out waiting for a FIFO cache client");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let responses = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(directory.join(FIFO_RESPONSES))?;
+    std::fs::write(directory.join(FIFO_ACCEPTED), b"")?;
+    set_blocking(&requests)?;
+    set_blocking(&responses)?;
+    Ok((requests, responses))
+}
+
+/// A blocking FIFO request stream polled only from its dedicated OS thread.
+#[cfg(unix)]
+struct BlockingFifoReader(std::fs::File);
+
+#[cfg(unix)]
+impl tokio::io::AsyncRead for BlockingFifoReader {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _context: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use std::io::Read as _;
+
+        let read = self.get_mut().0.read(buffer.initialize_unfilled());
+        match read {
+            Ok(read) => {
+                buffer.advance(read);
+                std::task::Poll::Ready(Ok(()))
+            }
+            Err(error) => std::task::Poll::Ready(Err(error)),
+        }
+    }
+}
+
+/// A blocking FIFO response stream polled only from its dedicated OS thread.
+#[cfg(unix)]
+struct BlockingFifoWriter(std::fs::File);
+
+#[cfg(unix)]
+impl tokio::io::AsyncWrite for BlockingFifoWriter {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _context: &mut std::task::Context<'_>,
+        buffer: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        use std::io::Write as _;
+
+        std::task::Poll::Ready(self.get_mut().0.write(buffer))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn create_fifo(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "FIFO path contains a null byte",
+        )
+    })?;
+    // SAFETY: `path` is a live, null-terminated C string and mode contains
+    // only ordinary permission bits.
+    if unsafe { libc::mkfifo(path.as_ptr(), 0o600) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(unix)]
+pub(super) fn set_blocking(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    // SAFETY: F_GETFL and F_SETFL do not retain the valid file descriptor.
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    if flags == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+struct FifoCleanup(PathBuf);
+
+#[cfg(unix)]
+impl Drop for FifoCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0.join(FIFO_READY));
+        let _ = std::fs::remove_file(self.0.join(FIFO_ACCEPTED));
+        let _ = std::fs::remove_file(self.0.join(FIFO_REQUESTS));
+        let _ = std::fs::remove_file(self.0.join(FIFO_RESPONSES));
+        let _ = std::fs::remove_dir(&self.0);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use mbx_cache_core::{AgentRequest, AgentResponse};
+
+    #[test]
+    fn permission_and_platform_rejections_mean_the_listener_is_unavailable() {
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Unsupported,
+        ] {
+            let error = eyre::Report::from(ListenerBindError {
+                path: "/tmp/cache-agent.sock".into(),
+                source: std::io::Error::from(kind),
+            });
+            assert!(listener_unavailable(&error));
+        }
+    }
+
+    #[test]
+    fn an_address_collision_remains_a_startup_error() {
+        let error = eyre::Report::from(ListenerBindError {
+            path: "/tmp/cache-agent.sock".into(),
+            source: std::io::Error::from(std::io::ErrorKind::AddrInUse),
+        });
+        assert!(!listener_unavailable(&error));
+    }
+
+    #[test]
+    fn a_blocked_mkfifo_prevents_publishing_the_fifo_endpoint() {
+        let session = tempfile::tempdir().unwrap();
+        let error = prepare_fifo_directory_with(session.path(), |_| {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(!session.path().join("cache-agent-fifo").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fifo_transport_serves_the_agent_protocol() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent = CacheAgent::new(directory.path().join("store"), super::super::VERSION);
+        let task = Arc::new(super::super::SessionTask {
+            identity: std::sync::OnceLock::new(),
+            initialized: tokio::sync::OnceCell::new(),
+        });
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (endpoint, server) =
+            spawn_fifo_server(directory.path(), agent, task, shutdown_rx).unwrap();
+        let responses = std::thread::spawn(move || {
+            super::super::client::request_agent_at(
+                &endpoint.into(),
+                &[
+                    AgentRequest::RecordWarning {
+                        message: "x".repeat(128 * 1024),
+                    },
+                    AgentRequest::RecordUnconsulted,
+                ],
+            )
+        })
+        .join()
+        .unwrap()
+        .unwrap();
+        assert!(
+            matches!(
+                responses.as_slice(),
+                [
+                    AgentResponse::Error { message },
+                    AgentResponse::UnconsultedRecorded
+                ] if message == "invalid shim warning"
+            ),
+            "unexpected FIFO responses: {responses:?}"
+        );
+        shutdown_tx.send(()).unwrap();
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fifo_transport_keeps_concurrent_clients_separate() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent = CacheAgent::new(directory.path().join("store"), super::super::VERSION);
+        let observed = agent.clone();
+        let task = Arc::new(super::super::SessionTask {
+            identity: std::sync::OnceLock::new(),
+            initialized: tokio::sync::OnceCell::new(),
+        });
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (endpoint, server) =
+            spawn_fifo_server(directory.path(), agent, task, shutdown_rx).unwrap();
+        let clients = (0..8)
+            .map(|_| {
+                let endpoint = endpoint.clone();
+                std::thread::spawn(move || {
+                    super::super::client::request_agent_at(
+                        &endpoint.into(),
+                        &[AgentRequest::RecordUnconsulted],
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        for client in clients {
+            let responses = client.join().unwrap().unwrap();
+            assert!(matches!(
+                responses.as_slice(),
+                [AgentResponse::UnconsultedRecorded]
+            ));
+        }
+        shutdown_tx.send(()).unwrap();
+        server.await.unwrap().unwrap();
+        assert_eq!(observed.stats().unconsulted, 8);
+    }
 }
 
 #[cfg(unix)]
