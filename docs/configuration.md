@@ -283,12 +283,16 @@ edit history. A crate outside the workspace switches after three consecutive
 misses with changed sources. The build reports those compilations as
 `incremental` and says how many were held back.
 
-The trigger is the crate's own sources, not its cache key. A rebuilt dependency
-changes the keys of everything above it, and those crates keep compiling and
-publishing normally. So does a miss on unchanged sources, such as a wiped
-`target/` or a first build in a new checkout. Once a crate is known to be hot,
-later edits go straight to its private incremental state instead of rebuilding
-and looking up a shared action the edit cannot hit. The record and state are
+The trigger is the crate's own sources, not its cache key. A miss on unchanged
+sources, such as a wiped `target/` or a first build in a new checkout, compiles
+and publishes normally, and so do the crates above a dependency that was
+rebuilt and published. The crates above a dependency that took private state
+are the exception. Their results would be keyed on an artifact no other
+checkout can hold, so they keep private state too instead of paying for a full
+compilation and a publication nothing can restore. The whole cone publishes
+again once the edited crate settles. Once a crate is known to be hot, later
+edits go straight to its private incremental state instead of rebuilding and
+looking up a shared action the edit cannot hit. The record and state are
 private to each checkout and live under `incremental/` in mbx's cache directory,
 so `cargo clean` does not discard the next edit's speedup. Normal garbage
 collection removes state for deleted or expired checkouts.
