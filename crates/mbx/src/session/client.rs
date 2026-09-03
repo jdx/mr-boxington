@@ -303,40 +303,77 @@ pub(super) fn request_agent_at(
     socket: &OsString,
     requests: &[AgentRequest],
 ) -> Result<Vec<AgentResponse>> {
-    let endpoint = socket.to_string_lossy().into_owned();
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?
-        .block_on(async move {
-            use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-            let mut stream = connect_pipe(&endpoint).await?;
-            let request = AgentRequest::Hello {
-                protocol: AGENT_PROTOCOL_VERSION,
-                client_version: VERSION.into(),
-            };
-            let mut encoded = serde_json::to_vec(&request)?;
-            encoded.push(b'\n');
+    // Match Unix: one compiler invocation asks several separate questions,
+    // and reconnecting to the named pipe plus rebuilding a Tokio runtime and
+    // repeating the handshake for every one is particularly expensive on
+    // Windows. A thread-local connection lives for this short-lived shim
+    // process and is discarded after any failed exchange.
+    thread_local! {
+        static CONNECTION: RefCell<Option<(OsString, WindowsConnection)>> =
+            const { RefCell::new(None) };
+    }
+    CONNECTION.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_none_or(|(known, _)| known != socket) {
+            *slot = Some((socket.clone(), WindowsConnection::connect(socket)?));
+        }
+        let (_, connection) = slot.as_mut().expect("the connection was just established");
+        let responses = requests
+            .iter()
+            .map(|request| connection.request(request))
+            .collect::<Result<Vec<_>>>();
+        if responses.is_err() {
+            // A failed exchange leaves the stream in an unknown protocol
+            // state, so the next request starts over on a fresh connection.
+            *slot = None;
+        }
+        responses
+    })
+}
+
+#[cfg(windows)]
+struct WindowsConnection {
+    runtime: tokio::runtime::Runtime,
+    stream: tokio::net::windows::named_pipe::NamedPipeClient,
+}
+
+#[cfg(windows)]
+impl WindowsConnection {
+    fn connect(socket: &OsString) -> Result<Self> {
+        let endpoint = socket.to_string_lossy().into_owned();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let stream = runtime.block_on(connect_pipe(&endpoint))?;
+        let mut connection = Self { runtime, stream };
+        let response = connection.exchange(&AgentRequest::Hello {
+            protocol: AGENT_PROTOCOL_VERSION,
+            client_version: VERSION.into(),
+        })?;
+        validate_handshake_response(&response)?;
+        Ok(connection)
+    }
+
+    fn request(&mut self, request: &AgentRequest) -> Result<AgentResponse> {
+        Ok(serde_json::from_str(&self.exchange(request)?)?)
+    }
+
+    fn exchange(&mut self, request: &AgentRequest) -> Result<String> {
+        let mut encoded = serde_json::to_vec(request)?;
+        encoded.push(b'\n');
+        let stream = &mut self.stream;
+        self.runtime.block_on(async move {
+            use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
             stream.write_all(&encoded).await?;
             stream.flush().await?;
             let mut response = String::new();
-            tokio::io::BufReader::new(&mut stream)
+            tokio::io::BufReader::new(stream)
                 .read_line(&mut response)
                 .await?;
-            validate_handshake_response(&response)?;
-            let mut responses = Vec::with_capacity(requests.len());
-            for request in requests {
-                let mut encoded = serde_json::to_vec(request)?;
-                encoded.push(b'\n');
-                stream.write_all(&encoded).await?;
-                stream.flush().await?;
-                let mut response = String::new();
-                tokio::io::BufReader::new(&mut stream)
-                    .read_line(&mut response)
-                    .await?;
-                responses.push(serde_json::from_str(&response)?);
-            }
-            Ok(responses)
+            Ok(response)
         })
+    }
 }
 
 /// Open the agent's pipe, waiting out the instances that are already busy.
