@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.16](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.15...mbx-cache-store-v0.1.16) - 2026-09-03
+
+### Other
+
+- keep hot-edit bookkeeping off the build's critical path ([#331](https://github.com/jdx/mr-boxington/pull/331))
+
 ## [0.1.15](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.14...mbx-cache-store-v0.1.15) - 2026-09-03
 
 ### Added

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.4](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.11.3...mbx-cache-core-v0.11.4) - 2026-09-03
+
+### Added
+
+- *(cache)* inherit predictions from earlier lockfiles ([#327](https://github.com/jdx/mr-boxington/pull/327))
+
+### Other
+
+- keep hot-edit bookkeeping off the build's critical path ([#331](https://github.com/jdx/mr-boxington/pull/331))
+- *(cache)* adopt prefetched blobs into CAS ([#324](https://github.com/jdx/mr-boxington/pull/324))
+- *(cache)* download blob packs concurrently ([#323](https://github.com/jdx/mr-boxington/pull/323))
+- *(cache)* gate prefetch on matching adapters ([#321](https://github.com/jdx/mr-boxington/pull/321))
+
 ## [0.11.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.11.2...mbx-cache-core-v0.11.3) - 2026-09-03
 
 ### Added
