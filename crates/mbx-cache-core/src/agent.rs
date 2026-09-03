@@ -367,7 +367,30 @@ struct TaskActionState {
     baseline_loaded: bool,
     predictions: BTreeMap<CacheDigest, ActionPrediction>,
     pending_predictions: BTreeMap<CacheDigest, ActionPrediction>,
+    prefetched_adapters: BTreeSet<String>,
     remote_etag: Option<String>,
+}
+
+/// Match an invocation and, on an adapter's first match, select its prefetch wave.
+fn activate_prediction_adapter(
+    state: &mut TaskActionState,
+    invocation: &CacheDigest,
+) -> (Option<ActionPrediction>, Option<Vec<ActionPrediction>>) {
+    let prediction = state.predictions.get(invocation).cloned();
+    let prefetch = prediction.as_ref().and_then(|prediction| {
+        if !state.prefetched_adapters.insert(prediction.adapter.clone()) {
+            return None;
+        }
+        Some(
+            state
+                .predictions
+                .values()
+                .filter(|candidate| candidate.adapter == prediction.adapter)
+                .cloned()
+                .collect(),
+        )
+    });
+    (prediction, prefetch)
 }
 
 struct PrefetchedAction {
@@ -584,7 +607,15 @@ impl CacheAgent {
 
     /// Load the last committed action manifest for a task into this session.
     pub async fn begin_task(&self, task: &str) -> Result<String> {
-        self.begin_task_with_remote_errors(task, false, None).await
+        self.begin_task_with_remote_errors(task, false, None, true)
+            .await
+    }
+
+    /// Load a task but defer each adapter's speculative downloads until its
+    /// first prediction matches the current build.
+    pub async fn begin_task_on_prediction(&self, task: &str) -> Result<String> {
+        self.begin_task_with_remote_errors(task, false, None, false)
+            .await
     }
 
     /// Load a task using its identity as the run key.
@@ -593,14 +624,16 @@ impl CacheAgent {
     /// this work until its first client connects while putting the identity in
     /// the client's environment ahead of time.
     pub async fn begin_session_task(&self, task: &str) -> Result<()> {
-        self.begin_task_with_remote_errors(task, false, Some(task.to_string()))
+        self.begin_task_with_remote_errors(task, false, Some(task.to_string()), false)
             .await?;
         Ok(())
     }
 
     /// Load a task and finish its prefetch, surfacing remote lookup failures.
     pub async fn prefetch_task(&self, task: &str) -> Result<String> {
-        let run = self.begin_task_with_remote_errors(task, true, None).await?;
+        let run = self
+            .begin_task_with_remote_errors(task, true, None, true)
+            .await?;
         self.wait_for_prefetches().await;
         Ok(run)
     }
@@ -610,6 +643,7 @@ impl CacheAgent {
         task: &str,
         strict: bool,
         run: Option<String>,
+        eager_prefetch: bool,
     ) -> Result<String> {
         validate_task_identity(task)?;
         // The local manifest is already enough to start useful work. Do not
@@ -628,7 +662,9 @@ impl CacheAgent {
             .iter()
             .map(|prediction| prediction.action.clone())
             .collect();
-        self.spawn_prefetch_predictions(early_predictions);
+        if eager_prefetch {
+            self.spawn_prefetch_predictions(early_predictions);
+        }
         let (remote_manifest, mut remote_etag) = if self.remote_mode.reads() {
             match self.get_remote_task_manifest(task).await {
                 Ok(Some((manifest, etag))) => (Some(manifest), Some(etag)),
@@ -667,7 +703,7 @@ impl CacheAgent {
             }
             manifest
         };
-        let state = if let Some(manifest) = manifest {
+        let mut state = if let Some(manifest) = manifest {
             TaskActionState {
                 manifest: task.to_string(),
                 baseline_loaded: true,
@@ -677,6 +713,7 @@ impl CacheAgent {
                     .map(|prediction| (prediction.invocation.clone(), prediction))
                     .collect(),
                 pending_predictions: BTreeMap::new(),
+                prefetched_adapters: BTreeSet::new(),
                 remote_etag,
             }
         } else {
@@ -699,6 +736,14 @@ impl CacheAgent {
             state.predictions.len().try_into().unwrap_or(u64::MAX),
             Ordering::Relaxed,
         );
+        if eager_prefetch {
+            state.prefetched_adapters.extend(
+                state
+                    .predictions
+                    .values()
+                    .map(|prediction| prediction.adapter.clone()),
+            );
+        }
         // The early local wave already owns these actions. Only launch a
         // second wave for predictions learned from the remote or from a local
         // writer that committed while its lookup was in flight.
@@ -709,7 +754,9 @@ impl CacheAgent {
             .cloned()
             .collect();
         self.task_actions.lock().unwrap().insert(run.clone(), state);
-        self.spawn_prefetch_predictions(predictions);
+        if eager_prefetch {
+            self.spawn_prefetch_predictions(predictions);
+        }
         Ok(run)
     }
 
@@ -1762,13 +1809,16 @@ impl CacheAgent {
     ) -> Result<AgentResponse> {
         validate_task_identity(task)?;
         invocation.validate()?;
-        let prediction = self
-            .task_actions
-            .lock()
-            .unwrap()
-            .get(task)
-            .and_then(|state| state.predictions.get(invocation))
-            .cloned();
+        let (prediction, prefetch) = {
+            let mut tasks = self.task_actions.lock().unwrap();
+            let Some(state) = tasks.get_mut(task) else {
+                return Ok(AgentResponse::ActionPrediction { prediction: None });
+            };
+            activate_prediction_adapter(state, invocation)
+        };
+        if let Some(prefetch) = prefetch {
+            self.spawn_prefetch_predictions(prefetch);
+        }
         Ok(AgentResponse::ActionPrediction { prediction })
     }
 

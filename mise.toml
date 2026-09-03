@@ -165,7 +165,7 @@ run = "tak run --record"
 mr-boxington = "1.4.1"
 "github:kunobi-ninja/kache" = { version = "0.16.0", lazy = true, lazy_bins = ["kache"] }
 "github:jdx/tak" = "0.0.9"
-aube = "latest"
+aube = { version = "latest", lazy = true, lazy_bins = ["aube"] }
 communique = "latest"
 lychee = "0.24.2"
 node = "24"
