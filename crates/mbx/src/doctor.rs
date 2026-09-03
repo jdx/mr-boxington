@@ -169,25 +169,34 @@ fn session_check() -> Check {
         }
     };
     let socket = directory.path().join("cache-agent.sock");
-    match std::os::unix::net::UnixListener::bind(&socket) {
-        Ok(_) => Check::pass("session", "Unix-domain listeners are available"),
-        Err(socket_error) => {
-            let fifo = directory.path().join("cache-agent.fifo");
-            match crate::session::create_fifo(&fifo) {
-                Ok(()) => Check::warn(
-                    "session",
-                    format!(
-                        "Unix-domain listener unavailable ({socket_error}); builds will use FIFO transport"
-                    ),
+    let socket_probe = std::os::unix::net::UnixListener::bind(&socket).map(drop);
+    session_check_from(socket_probe, || {
+        crate::session::create_fifo(&directory.path().join("cache-agent.fifo"))
+    })
+}
+
+/// Turn transport probe results into the diagnostic shown by `mbx doctor`.
+#[cfg(unix)]
+fn session_check_from(
+    socket_probe: std::io::Result<()>,
+    fifo_probe: impl FnOnce() -> std::io::Result<()>,
+) -> Check {
+    match socket_probe {
+        Ok(()) => Check::pass("session", "Unix-domain listeners are available"),
+        Err(socket_error) => match fifo_probe() {
+            Ok(()) => Check::warn(
+                "session",
+                format!(
+                    "Unix-domain listener unavailable ({socket_error}); builds will use FIFO transport"
                 ),
-                Err(fifo_error) => Check::warn(
-                    "session",
-                    format!(
-                        "Unix-domain listener unavailable ({socket_error}) and FIFO unavailable ({fifo_error}); builds will run without mbx caching"
-                    ),
+            ),
+            Err(fifo_error) => Check::warn(
+                "session",
+                format!(
+                    "Unix-domain listener unavailable ({socket_error}) and FIFO unavailable ({fifo_error}); builds will run without mbx caching"
                 ),
-            }
-        }
+            ),
+        },
     }
 }
 
@@ -512,6 +521,28 @@ mod tests {
             ),
             Severity::Fail => panic!("session transport probes are advisory"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_blocked_listener_reports_the_fifo_fallback() {
+        let check = session_check_from(
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            || Ok(()),
+        );
+        assert_eq!(check.severity, Severity::Warn);
+        assert!(check.detail.contains("builds will use FIFO transport"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blocked_socket_and_fifo_report_the_uncached_fallback() {
+        let check = session_check_from(
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            || Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        );
+        assert_eq!(check.severity, Severity::Warn);
+        assert!(check.detail.contains("builds will run without mbx caching"));
     }
 
     #[test]

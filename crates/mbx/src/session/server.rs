@@ -178,11 +178,8 @@ fn spawn_fifo_server(
     mut shutdown: oneshot::Receiver<()>,
 ) -> Result<(String, JoinHandle<Result<()>>)> {
     use std::collections::HashSet;
-    use std::os::unix::fs::PermissionsExt as _;
 
-    let directory = session_dir.join("cache-agent-fifo");
-    std::fs::create_dir(&directory)?;
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+    let directory = prepare_fifo_directory(session_dir)?;
     let endpoint = format!("{FIFO_ENDPOINT_PREFIX}{}", directory.to_string_lossy());
     let server = tokio::spawn(async move {
         let _cleanup = FifoCleanup(directory.clone());
@@ -206,24 +203,45 @@ fn spawn_fifo_server(
                         }
                         let agent = agent.clone();
                         let task = Arc::clone(&task);
-                        connections.spawn(async move {
-                            let _cleanup = FifoCleanup(path.clone());
-                            let connection_path = path.clone();
-                            let opened = tokio::task::spawn_blocking(move || {
-                                accept_fifo_client(&connection_path)
-                            })
-                            .await
-                            .map_err(eyre::Report::from)??;
-                            initialize_task(&agent, &task).await;
-                            let (reader, writer) = opened;
-                            let stream = tokio::io::join(
-                                tokio::fs::File::from_std(reader),
-                                tokio::fs::File::from_std(writer),
-                            );
-                            if let Err(error) = agent.handle_connection(stream).await {
-                                debug!("cache agent FIFO connection failed: {error}");
+                        let runtime = tokio::runtime::Handle::current();
+                        let connection_path = path.clone();
+                        let (finished_tx, finished_rx) = oneshot::channel();
+                        let thread = std::thread::Builder::new()
+                            .name("mbx-fifo-session".into())
+                            .spawn(move || {
+                                let _cleanup = FifoCleanup(connection_path.clone());
+                                let result = (|| {
+                                    let (reader, writer) = accept_fifo_client(&connection_path)?;
+                                    runtime.block_on(async {
+                                        initialize_task(&agent, &task).await;
+                                        let stream = tokio::io::join(
+                                            BlockingFifoReader(reader),
+                                            BlockingFifoWriter(writer),
+                                        );
+                                        if let Err(error) = agent.handle_connection(stream).await {
+                                            debug!("cache agent FIFO connection failed: {error}");
+                                        }
+                                        Ok::<(), eyre::Report>(())
+                                    })
+                                })();
+                                let _ = finished_tx.send(result);
+                            });
+                        let thread = match thread {
+                            Ok(thread) => thread,
+                            Err(error) => {
+                                let _cleanup = FifoCleanup(path.clone());
+                                debug!(
+                                    "failed to start cache agent FIFO connection thread: {error}"
+                                );
+                                continue;
                             }
-                            Ok::<(), eyre::Report>(())
+                        };
+                        connections.spawn(async move {
+                            let result = finished_rx.await.map_err(eyre::Report::from)?;
+                            thread
+                                .join()
+                                .map_err(|_| eyre::eyre!("cache agent FIFO thread panicked"))?;
+                            result
                         });
                     }
                     while connections.try_join_next().is_some() {}
@@ -241,6 +259,38 @@ fn spawn_fifo_server(
     Ok((endpoint, server))
 }
 
+/// Create and probe the private directory advertised as the FIFO endpoint.
+#[cfg(unix)]
+fn prepare_fifo_directory(session_dir: &Path) -> Result<PathBuf> {
+    prepare_fifo_directory_with(session_dir, create_fifo)
+}
+
+/// Prepare a FIFO endpoint using an injectable creator for deterministic tests.
+#[cfg(unix)]
+fn prepare_fifo_directory_with(
+    session_dir: &Path,
+    make_fifo: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = session_dir.join("cache-agent-fifo");
+    std::fs::create_dir(&directory)?;
+    let probe = directory.join(".probe");
+    let result = (|| {
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        make_fifo(&probe)?;
+        std::fs::remove_file(&probe)?;
+        Ok::<(), std::io::Error>(())
+    })();
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&probe);
+        let _ = std::fs::remove_dir(&directory);
+        return Err(error.into());
+    }
+    Ok(directory)
+}
+
+/// Open one client's FIFO pair after its rendezvous handshake.
 #[cfg(unix)]
 fn accept_fifo_client(directory: &Path) -> Result<(std::fs::File, std::fs::File)> {
     use std::os::unix::fs::OpenOptionsExt as _;
@@ -264,6 +314,61 @@ fn accept_fifo_client(directory: &Path) -> Result<(std::fs::File, std::fs::File)
     set_blocking(&requests)?;
     set_blocking(&responses)?;
     Ok((requests, responses))
+}
+
+/// A blocking FIFO request stream polled only from its dedicated OS thread.
+#[cfg(unix)]
+struct BlockingFifoReader(std::fs::File);
+
+#[cfg(unix)]
+impl tokio::io::AsyncRead for BlockingFifoReader {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _context: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use std::io::Read as _;
+
+        let read = self.get_mut().0.read(buffer.initialize_unfilled());
+        match read {
+            Ok(read) => {
+                buffer.advance(read);
+                std::task::Poll::Ready(Ok(()))
+            }
+            Err(error) => std::task::Poll::Ready(Err(error)),
+        }
+    }
+}
+
+/// A blocking FIFO response stream polled only from its dedicated OS thread.
+#[cfg(unix)]
+struct BlockingFifoWriter(std::fs::File);
+
+#[cfg(unix)]
+impl tokio::io::AsyncWrite for BlockingFifoWriter {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _context: &mut std::task::Context<'_>,
+        buffer: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        use std::io::Write as _;
+
+        std::task::Poll::Ready(self.get_mut().0.write(buffer))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
 }
 
 #[cfg(unix)]
@@ -340,6 +445,20 @@ mod tests {
             source: std::io::Error::from(std::io::ErrorKind::AddrInUse),
         });
         assert!(!listener_unavailable(&error));
+    }
+
+    #[test]
+    fn a_blocked_mkfifo_prevents_publishing_the_fifo_endpoint() {
+        let session = tempfile::tempdir().unwrap();
+        let error = prepare_fifo_directory_with(session.path(), |_| {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(!session.path().join("cache-agent-fifo").exists());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
