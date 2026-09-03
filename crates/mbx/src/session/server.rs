@@ -9,6 +9,57 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 #[cfg(unix)]
+#[derive(Debug)]
+struct ListenerBindError {
+    path: PathBuf,
+    source: std::io::Error,
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for ListenerBindError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "failed to bind cache session listener at {}: {}",
+            self.path.display(),
+            self.source
+        )
+    }
+}
+
+#[cfg(unix)]
+impl std::error::Error for ListenerBindError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+#[cfg(unix)]
+impl ListenerBindError {
+    fn unavailable(&self) -> bool {
+        matches!(
+            self.source.kind(),
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
+        )
+    }
+}
+
+/// Whether session startup failed because this environment cannot bind the
+/// local listener the compiler shims need.
+#[cfg(unix)]
+pub(crate) fn listener_unavailable(error: &eyre::Report) -> bool {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ListenerBindError>())
+        .is_some_and(ListenerBindError::unavailable)
+}
+
+#[cfg(windows)]
+pub(crate) fn listener_unavailable(_error: &eyre::Report) -> bool {
+    false
+}
+
+#[cfg(unix)]
 pub(super) async fn spawn_server(
     session_dir: &Path,
     agent: CacheAgent,
@@ -18,7 +69,10 @@ pub(super) async fn spawn_server(
     use std::os::unix::fs::PermissionsExt as _;
 
     let socket = session_dir.join("cache-agent.sock");
-    let listener = tokio::net::UnixListener::bind(&socket)?;
+    let listener = tokio::net::UnixListener::bind(&socket).map_err(|source| ListenerBindError {
+        path: socket.clone(),
+        source,
+    })?;
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     let endpoint = socket.to_string_lossy().into_owned();
     let server = tokio::spawn(async move {
@@ -52,6 +106,34 @@ pub(super) async fn spawn_server(
         outcome
     });
     Ok((endpoint, server))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn permission_and_platform_rejections_mean_the_listener_is_unavailable() {
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Unsupported,
+        ] {
+            let error = eyre::Report::from(ListenerBindError {
+                path: "/tmp/cache-agent.sock".into(),
+                source: std::io::Error::from(kind),
+            });
+            assert!(listener_unavailable(&error));
+        }
+    }
+
+    #[test]
+    fn an_address_collision_remains_a_startup_error() {
+        let error = eyre::Report::from(ListenerBindError {
+            path: "/tmp/cache-agent.sock".into(),
+            source: std::io::Error::from(std::io::ErrorKind::AddrInUse),
+        });
+        assert!(!listener_unavailable(&error));
+    }
 }
 
 #[cfg(unix)]

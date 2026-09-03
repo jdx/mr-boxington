@@ -129,6 +129,8 @@ async fn check(config: &Config, toolchain: Option<&str>) -> Vec<Check> {
         command_check("rustc", &rustc, toolchain),
     ];
     checks.push(cache_check(&config.cache_dir));
+    #[cfg(unix)]
+    checks.push(session_check());
     checks.push(Check::pass(
         "config",
         format!(
@@ -143,6 +145,39 @@ async fn check(config: &Config, toolchain: Option<&str>) -> Vec<Check> {
     checks.push(setup_check());
     checks.extend(remote_checks(config).await);
     checks
+}
+
+/// Probe the transport every orchestrated build needs in this environment.
+///
+/// This uses a fresh temporary directory just like a real session. Sandboxes
+/// can permit both creating the directory and opening an AF_UNIX socket while
+/// still rejecting `bind`, so no filesystem-only check can answer this.
+#[cfg(unix)]
+fn session_check() -> Check {
+    let directory = match tempfile::Builder::new()
+        .prefix("mbx-session-probe-")
+        .tempdir()
+    {
+        Ok(directory) => directory,
+        Err(error) => {
+            return Check::warn(
+                "session",
+                format!(
+                    "listener was not tested because a temporary directory could not be created: {error}"
+                ),
+            );
+        }
+    };
+    let socket = directory.path().join("cache-agent.sock");
+    match std::os::unix::net::UnixListener::bind(&socket) {
+        Ok(_) => Check::pass("session", "Unix-domain listeners are available"),
+        Err(error) => Check::warn(
+            "session",
+            format!(
+                "Unix-domain listener unavailable ({error}); builds will run without mbx caching"
+            ),
+        ),
+    }
 }
 
 fn enabled(value: bool) -> &'static str {
@@ -451,6 +486,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         assert_eq!(cache_check(directory.path()).severity, Severity::Pass);
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_build_session_transport_is_probed() {
+        assert_eq!(session_check().severity, Severity::Pass);
     }
 
     #[test]
