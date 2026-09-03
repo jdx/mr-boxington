@@ -249,13 +249,11 @@ mbx's own `tui`, `cache`, `gc`, `doctor`, and diagnostic commands stay under
 
 ## Choose a linker
 
-On Linux and macOS, `rust-lld` is the recommended place to start. It ships with
-the active Rust toolchain, so there is no separate linker version to install or
-pin, and a `cargo +toolchain` command automatically uses that toolchain's LLD.
-Try it for one build first:
+On Linux, pinned mold is the recommended performance-oriented starting point.
+Try the current supported release for one build first:
 
 ```sh
-MBX_LINKER=rust-lld cargo build
+MBX_LINKER=mold@2.42.0 cargo build
 ```
 
 To keep it enabled, add this to your platform
@@ -263,13 +261,16 @@ To keep it enabled, add this to your platform
 
 ```toml
 [linker]
-default = "rust-lld"
+default = "mold@2.42.0"
 ```
 
-Windows should keep the default `system` selection for now. Linux users can
-also choose pinned mold or Wild releases; see
-[managed linkers](/configuration#managed-linkers) for profile- and
-target-specific examples.
+Managed linker selection currently requires `clang` on `PATH`. macOS and
+Windows should keep the default `system` selection for now. On Linux or macOS,
+`rust-lld` is the no-download alternative: it ships with the active Rust
+toolchain, and a `cargo +toolchain` command automatically selects that
+toolchain's LLD. Wild is also available on Linux. See
+[managed linkers](/configuration#managed-linkers) for selectors and
+profile- and target-specific examples.
 
 ## Run multiple Cargo builds at the same time
 
