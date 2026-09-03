@@ -424,12 +424,15 @@ pub(crate) fn compile(
     // The machine-wide permit is taken after every chance to hit the cache,
     // and before anything expensive starts. The timer starts afterwards: time
     // spent waiting for the machine is not time this compilation cost.
-    let required_inputs = invocation.required_inputs_in(&working_dir);
-    let input_identities =
-        crate::util::snapshot_file_identities(required_inputs.iter().map(PathBuf::as_path));
     let demand =
         crate::scheduler::Demand::new(invocation.crate_name(), invocation.links_natively());
     let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
+    // Capture these after admission: an edit while this compile waits for
+    // capacity happened before rustc ran and belongs to the valid compilation
+    // it is about to perform, not to the overlap this snapshot detects.
+    let required_inputs = invocation.required_inputs_in(&working_dir);
+    let input_identities =
+        crate::util::snapshot_file_identities(required_inputs.iter().map(PathBuf::as_path));
     let compilation_started = SystemTime::now();
     let compiler_timer = Instant::now();
     let mut command = compiler_command(rustc, wrapper_argument);
@@ -471,7 +474,6 @@ pub(crate) fn compile(
     } else {
         "unconsulted"
     };
-    let _ = replay_output(&output);
     if let Some(cached) = verification {
         session::record_compiler_invocation_with_diagnostic(
             recorded_outcome,
@@ -479,6 +481,22 @@ pub(crate) fn compile(
             timing.duration_ns,
             current_diagnostic,
         );
+        if output.status.success()
+            && let Err(error) = validate_compiler_inputs(
+                &invocation,
+                &outputs,
+                &working_dir,
+                &portable,
+                compilation_started,
+                &input_identities,
+            )
+        {
+            if discard_modified_compiler_result(&outputs, &input_identities, &error) {
+                let _ = replay_bytes(&[], &output.stderr);
+                return Ok(ExitCode::FAILURE);
+            }
+            eprintln!("mbx[warning]: verification inputs were not validated: {error:#}");
+        }
         let divergence = verification_divergence(&cached, &output);
         record_verification(divergence.is_none(), cached.restore);
         if let Some(divergence) = divergence {
@@ -486,79 +504,99 @@ pub(crate) fn compile(
                 "mbx[warning]: shadow verification diverged from cached output: {divergence}"
             );
         }
+        let _ = replay_output(&output);
         return Ok(exit_code(output.status));
     }
+    let mut compiler_input_invalid = false;
     if output.status.success() {
-        learned.record_compiled();
-        // An incremental artifact is never published, and what it compiled
-        // was fingerprinted before the compiler ran, so nothing has to be
-        // read back for it: rebuilding the action would hash every input
-        // again for a key nothing looks up. Two exceptions. A build script's
-        // execution shim is installed under that key. And the manifest has to
-        // keep naming the inputs the compiler just recorded, because a wiped
-        // target rebuilds the churn comparison from the manifest: an edit
-        // that adds or drops an input, an `include_str!` say, has to reach
-        // it or settled sources would read as another edit.
-        let reads_back = !learned.engaged()
-            || outputs
+        // An incremental artifact is never published, and its inputs were
+        // already fingerprinted while checking whether the manifest still
+        // predicts them. Reuse that discovery to validate the result without
+        // rebuilding an action key nobody looks up. A build script still needs
+        // that key for its execution shim, and a changed input set needs it to
+        // refresh the manifest.
+        let current_manifest_inputs = if learned.engaged()
+            && outputs
                 .build_script_executable(invocation.crate_name())
-                .is_some()
-            || !manifest_predicts_current_inputs(&compilation, &outputs);
-        if reads_back {
-            let publication: Result<Option<ActionDiagnostic>> = (|| {
-                let input_identities = input_identities
-                    .as_ref()
-                    .map_err(|error| eyre::eyre!(error.to_string()))?;
-                let (candidates, discovered) =
-                    action_from_dep_info(&compilation, &outputs.dep_info)?;
-                discovered.verify_not_modified_since_with_identities(
-                    compilation_started,
-                    input_identities,
-                )?;
-                discovered.verify()?;
-                if learned_enabled
-                    && learned.record.is_none()
-                    && source_is_in_workspace(&compilation)
-                {
-                    record_learned_baseline(&compilation, &discovered);
-                }
-                // An incremental artifact carries state from this checkout's edit
-                // history, so it is recorded as what the unit currently contains --
-                // which is how the next build notices the churn ended -- but never
-                // published for another checkout to restore. The literal key is
-                // enough for that, and it skips reading the outputs back.
-                let action = if learned.engaged() {
-                    &candidates.literal
-                } else {
-                    publish_result(
-                        &candidates,
-                        &portable,
-                        &outputs,
-                        &output,
-                        &portable.mappings,
-                    )?
-                };
-                install_build_script_shim(&invocation, &outputs, &action.digest);
-                // The flight prediction is only left behind a *published* result:
-                // an incremental artifact was withheld from the store, so a
-                // waiter restoring through its key could only miss.
-                record_prediction(
-                    &compilation,
-                    &action.digest,
-                    &discovered,
-                    &timing,
-                    flight
+                .is_none()
+        {
+            current_manifest_inputs(&compilation, &outputs)
+        } else {
+            None
+        };
+        let publication: Result<Option<ActionDiagnostic>> =
+            if let Some(discovered) = current_manifest_inputs {
+                (|| {
+                    let input_identities = input_identities
                         .as_ref()
-                        .filter(|_| !learned.engaged())
-                        .map(|flight| &flight.flight),
-                    remote_claim.as_deref().filter(|_| !learned.engaged()),
-                );
-                Ok(compilation_action_diagnostic(&compilation, action).ok())
-            })();
-            match publication {
-                Ok(diagnostic) => current_diagnostic = diagnostic,
-                Err(error) => eprintln!("mbx[warning]: result was not stored: {error:#}"),
+                        .map_err(|error| eyre::eyre!(error.to_string()))?;
+                    discovered.verify_not_modified_since_with_identities(
+                        compilation_started,
+                        input_identities,
+                    )?;
+                    discovered.verify()?;
+                    learned.record_compiled();
+                    Ok(None)
+                })()
+            } else {
+                (|| {
+                    let input_identities = input_identities
+                        .as_ref()
+                        .map_err(|error| eyre::eyre!(error.to_string()))?;
+                    let (candidates, discovered) =
+                        action_from_dep_info(&compilation, &outputs.dep_info)?;
+                    discovered.verify_not_modified_since_with_identities(
+                        compilation_started,
+                        input_identities,
+                    )?;
+                    discovered.verify()?;
+                    learned.record_compiled();
+                    if learned_enabled
+                        && learned.record.is_none()
+                        && source_is_in_workspace(&compilation)
+                    {
+                        record_learned_baseline(&compilation, &discovered);
+                    }
+                    // An incremental artifact carries state from this checkout's edit
+                    // history, so it is recorded as what the unit currently contains --
+                    // which is how the next build notices the churn ended -- but never
+                    // published for another checkout to restore. The literal key is
+                    // enough for that, and it skips reading the outputs back.
+                    let action = if learned.engaged() {
+                        &candidates.literal
+                    } else {
+                        publish_result(
+                            &candidates,
+                            &portable,
+                            &outputs,
+                            &output,
+                            &portable.mappings,
+                        )?
+                    };
+                    install_build_script_shim(&invocation, &outputs, &action.digest);
+                    // The flight prediction is only left behind a *published* result:
+                    // an incremental artifact was withheld from the store, so a
+                    // waiter restoring through its key could only miss.
+                    record_prediction(
+                        &compilation,
+                        &action.digest,
+                        &discovered,
+                        &timing,
+                        flight
+                            .as_ref()
+                            .filter(|_| !learned.engaged())
+                            .map(|flight| &flight.flight),
+                        remote_claim.as_deref().filter(|_| !learned.engaged()),
+                    );
+                    Ok(compilation_action_diagnostic(&compilation, action).ok())
+                })()
+            };
+        match publication {
+            Ok(diagnostic) => current_diagnostic = diagnostic,
+            Err(error) if discard_modified_compiler_result(&outputs, &input_identities, &error) => {
+                compiler_input_invalid = true;
             }
+            Err(error) => eprintln!("mbx[warning]: result was not stored: {error:#}"),
         }
     }
     session::record_compiler_invocation_with_diagnostic(
@@ -567,7 +605,101 @@ pub(crate) fn compile(
         timing.duration_ns,
         current_diagnostic,
     );
-    Ok(exit_code(output.status))
+    if compiler_input_invalid {
+        // Keep rustc's diagnostics, but do not forward stdout notifications
+        // for an artifact that was just rejected. Cargo pipelines dependents
+        // as soon as it observes those notifications.
+        let _ = replay_bytes(&[], &output.stderr);
+        Ok(ExitCode::FAILURE)
+    } else {
+        // Publication validates the inputs and keeps invalid metadata out of
+        // Cargo's hands. Only advertise rustc's result after that completes.
+        let _ = replay_output(&output);
+        Ok(exit_code(output.status))
+    }
+}
+
+/// Whether publication failed because the compiler's inputs moved underneath it.
+///
+/// Other publication failures only prevent caching: rustc's local result is
+/// still valid and Cargo can use it. A content change or an overlap proved by
+/// a pre-compilation file identity instead means the artifact cannot be
+/// trusted. A timestamp-only overlap remains a conservative cache bypass: it
+/// is not reliable enough across skewed filesystem clocks to fail the build.
+fn compiler_input_was_modified(
+    error: &eyre::Report,
+    input_identities: &std::io::Result<BTreeMap<PathBuf, FileIdentity>>,
+) -> bool {
+    match error.downcast_ref::<BypassReason>() {
+        Some(BypassReason::InputChanged(_)) => true,
+        Some(BypassReason::InputModifiedDuringCompilation(path)) => input_identities
+            .as_ref()
+            .ok()
+            .and_then(|identities| identities.get(path))
+            .is_some_and(|identity| identity.changed.is_some()),
+        _ => false,
+    }
+}
+
+/// Reject and remove a successful compiler result whose inputs changed while it ran.
+fn discard_modified_compiler_result(
+    outputs: &RustcOutputs,
+    input_identities: &std::io::Result<BTreeMap<PathBuf, FileIdentity>>,
+    error: &eyre::Report,
+) -> bool {
+    if !compiler_input_was_modified(error, input_identities) {
+        return false;
+    }
+    if let Err(discard_error) = discard_compiler_outputs(outputs) {
+        eprintln!(
+            "mbx[warning]: some invalid compiler outputs could not be removed: {discard_error:#}"
+        );
+    }
+    eprintln!("mbx[error]: compilation result was discarded: {error:#}");
+    true
+}
+
+fn validate_compiler_inputs(
+    invocation: &RustcInvocation,
+    outputs: &RustcOutputs,
+    working_dir: &Path,
+    portable: &Portable,
+    compilation_started: SystemTime,
+    input_identities: &std::io::Result<BTreeMap<PathBuf, FileIdentity>>,
+) -> Result<()> {
+    let input_identities = input_identities
+        .as_ref()
+        .map_err(|error| eyre::eyre!(error.to_string()))?;
+    let dep_info = RustcDepInfo::read(&outputs.dep_info)?;
+    let discovered = invocation.discover_inputs_with_mappings(
+        &dep_info,
+        working_dir,
+        &portable.mappings,
+        session::file_digest_cache(),
+    )?;
+    discovered.verify_not_modified_since_with_identities(compilation_started, input_identities)?;
+    discovered.verify()?;
+    Ok(())
+}
+
+/// Remove an invalid compiler result before Cargo can consume or fingerprint it.
+fn discard_compiler_outputs(outputs: &RustcOutputs) -> Result<()> {
+    let mut failures = Vec::new();
+    for path in outputs
+        .files
+        .iter()
+        .chain(std::iter::once(&outputs.dep_info))
+    {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => failures.push(format!("{}: {error}", path.display())),
+        }
+    }
+    if !failures.is_empty() {
+        bail!("{}", failures.join("; "));
+    }
+    Ok(())
 }
 
 /// Compile a build script whose native link cannot be action-cached, then
@@ -583,6 +715,10 @@ fn compile_execution_only_build_script(
 ) -> Result<ExitCode> {
     let demand = crate::scheduler::Demand::new(invocation.crate_name(), true);
     let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
+    let required_inputs = invocation.required_inputs_in(working_dir);
+    let input_identities =
+        crate::util::snapshot_file_identities(required_inputs.iter().map(PathBuf::as_path));
+    let compilation_started = SystemTime::now();
     let started = Instant::now();
     let output = compiler_command(rustc, wrapper_argument)
         .args(arguments)
@@ -596,7 +732,22 @@ fn compile_execution_only_build_script(
         Some(invocation.crate_name()),
         started.elapsed().as_nanos().try_into().unwrap_or(u64::MAX),
     );
-    let _ = replay_output(&output);
+    if output.status.success()
+        && let Err(error) = validate_compiler_inputs(
+            invocation,
+            outputs,
+            working_dir,
+            portable,
+            compilation_started,
+            &input_identities,
+        )
+    {
+        if discard_modified_compiler_result(outputs, &input_identities, &error) {
+            let _ = replay_bytes(&[], &output.stderr);
+            return Ok(ExitCode::FAILURE);
+        }
+        eprintln!("mbx[warning]: build-script inputs were not validated: {error:#}");
+    }
     if output.status.success()
         && let Some(executable) = outputs.build_script_executable(invocation.crate_name())
     {
@@ -652,6 +803,7 @@ fn compile_execution_only_build_script(
             ));
         }
     }
+    let _ = replay_output(&output);
     Ok(exit_code(output.status))
 }
 
@@ -909,15 +1061,17 @@ fn reuse_hot_workspace_plan(
     }
 }
 
-/// Whether the manifest's prediction for this unit names the inputs its
-/// dep-info now records.
+/// Inputs from dep-info when they still match this unit's manifest prediction.
 ///
 /// The payload is paths and environment names, never digests, so the common
 /// edit, the one that changes a file's contents and nothing else, leaves it
 /// current. Only an edit that changed which files the crate reads makes the
 /// caller record a fresh one, and it pays the full read-back for that.
-fn manifest_predicts_current_inputs(compilation: &Compilation<'_>, outputs: &RustcOutputs) -> bool {
-    let current = (|| -> Result<bool> {
+fn current_manifest_inputs(
+    compilation: &Compilation<'_>,
+    outputs: &RustcOutputs,
+) -> Option<DiscoveredInputs> {
+    let current = (|| -> Result<Option<DiscoveredInputs>> {
         let context = base_action_context(
             compilation.rustc,
             compilation.working_dir,
@@ -932,10 +1086,10 @@ fn manifest_predicts_current_inputs(compilation: &Compilation<'_>, outputs: &Rus
             prediction: Some(prediction),
         }) = responses.into_iter().next()
         else {
-            return Ok(false);
+            return Ok(None);
         };
         if prediction.adapter != "rustc" || prediction.invocation != invocation_digest {
-            return Ok(false);
+            return Ok(None);
         }
         let recorded: RustcInputPrediction = serde_json::from_str(&prediction.payload)?;
         let dep_info = RustcDepInfo::read(&outputs.dep_info)?;
@@ -946,9 +1100,12 @@ fn manifest_predicts_current_inputs(compilation: &Compilation<'_>, outputs: &Rus
             session::file_digest_cache(),
         )?;
         let now = compilation.invocation.prediction(&context, &discovered)?;
-        Ok(now.inputs == recorded.inputs && now.environment == recorded.environment)
+        Ok(
+            (now.inputs == recorded.inputs && now.environment == recorded.environment)
+                .then_some(discovered),
+        )
     })();
-    current.unwrap_or(false)
+    current.ok().flatten()
 }
 
 /// Whether the crate root belongs to the checkout Cargo is building.
