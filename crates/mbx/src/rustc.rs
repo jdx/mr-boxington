@@ -458,11 +458,12 @@ pub(crate) fn compile(
     if output.status.success() {
         learned.record_compiled();
         let publication: Result<Option<ActionDiagnostic>> = (|| {
+            let input_identities = input_identities
+                .as_ref()
+                .map_err(|error| eyre::eyre!(error.to_string()))?;
             let (candidates, discovered) = action_from_dep_info(&compilation, &outputs.dep_info)?;
-            discovered.verify_not_modified_since_with_identities(
-                compilation_started,
-                &input_identities,
-            )?;
+            discovered
+                .verify_not_modified_since_with_identities(compilation_started, input_identities)?;
             discovered.verify()?;
             if learned_enabled && learned.record.is_none() && source_is_in_workspace(&compilation) {
                 record_learned_baseline(&compilation, &discovered);

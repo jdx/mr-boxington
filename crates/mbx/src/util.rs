@@ -9,13 +9,29 @@ use std::time::Duration;
 #[cfg(unix)]
 pub(crate) fn snapshot_file_identities<'a>(
     paths: impl IntoIterator<Item = &'a Path>,
-) -> BTreeMap<PathBuf, FileIdentity> {
+) -> std::io::Result<BTreeMap<PathBuf, FileIdentity>> {
     paths
         .into_iter()
-        .filter_map(|path| {
-            let metadata = std::fs::metadata(path).ok()?;
-            let identity = FileIdentity::describe(path, &metadata)?;
-            Some((path.to_path_buf(), identity))
+        .map(|path| {
+            let metadata = std::fs::metadata(path).map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "failed to capture compiler input identity for {}: {error}",
+                        path.display()
+                    ),
+                )
+            })?;
+            let identity = FileIdentity::describe(path, &metadata).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    format!(
+                        "filesystem supplied no identity for compiler input {}",
+                        path.display()
+                    ),
+                )
+            })?;
+            Ok((path.to_path_buf(), identity))
         })
         .collect()
 }
@@ -23,8 +39,8 @@ pub(crate) fn snapshot_file_identities<'a>(
 #[cfg(not(unix))]
 pub(crate) fn snapshot_file_identities<'a>(
     _paths: impl IntoIterator<Item = &'a Path>,
-) -> BTreeMap<PathBuf, FileIdentity> {
-    BTreeMap::new()
+) -> std::io::Result<BTreeMap<PathBuf, FileIdentity>> {
+    Ok(BTreeMap::new())
 }
 
 /// Find the workspace root above `start`.
@@ -523,6 +539,19 @@ pub fn random_string(length: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn compiler_input_snapshot_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing-input");
+        let error = snapshot_file_identities([missing.as_path()]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failed to capture compiler input identity")
+        );
+    }
 
     #[test]
     fn cgroup_usage_discounts_the_page_cache() {

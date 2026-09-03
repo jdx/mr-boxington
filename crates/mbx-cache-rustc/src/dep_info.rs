@@ -754,7 +754,7 @@ mod tests {
     fn precompile_identity_does_not_depend_on_the_host_clock() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("lib.rs");
-        std::fs::write(&source, "pub fn library() {}\n").unwrap();
+        std::fs::write(&source, "pub fn library() {0}\n").unwrap();
         let invocation = RustcInvocation::parse(&[
             "--crate-name=widget".into(),
             "--crate-type=lib".into(),
@@ -777,7 +777,7 @@ mod tests {
             .unwrap();
 
         // Conversely, a filesystem clock far behind must not conceal a write.
-        std::fs::write(&source, "pub fn library() { }\n").unwrap();
+        std::fs::write(&source, "pub fn library() {1}\n").unwrap();
         assert_eq!(
             discovered.verify_not_modified_since_with_identities(
                 SystemTime::now() + std::time::Duration::from_secs(60),

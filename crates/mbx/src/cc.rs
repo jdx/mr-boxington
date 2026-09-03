@@ -360,7 +360,7 @@ fn publish(
     depfile: &Path,
     output: &Output,
     compilation_started: SystemTime,
-    input_identities: &BTreeMap<PathBuf, FileIdentity>,
+    input_identities: &std::io::Result<BTreeMap<PathBuf, FileIdentity>>,
     task: &str,
     invocation_digest: &CacheDigest,
     duration_ns: u64,
@@ -370,6 +370,9 @@ fn publish(
     remote_claim: Option<&str>,
     portable: &Portable,
 ) -> Result<()> {
+    let input_identities = input_identities
+        .as_ref()
+        .map_err(|error| eyre::eyre!(error.to_string()))?;
     let discovered = discover(invocation, context, depfile)?;
     discovered.verify_not_modified_since_with_identities(compilation_started, input_identities)?;
     verify_search_path_unchanged(searchable, before)?;
