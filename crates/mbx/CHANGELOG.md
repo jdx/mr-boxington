@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0](https://github.com/jdx/mr-boxington/compare/v1.6.0...v1.7.0) - 2026-09-03
+
+### Added
+
+- *(cache)* inherit predictions from earlier lockfiles ([#327](https://github.com/jdx/mr-boxington/pull/327))
+
+### Other
+
+- use blocking Windows agent I/O ([#333](https://github.com/jdx/mr-boxington/pull/333))
+- keep hot-edit bookkeeping off the build's critical path ([#331](https://github.com/jdx/mr-boxington/pull/331))
+- reuse Windows cache agent connections ([#332](https://github.com/jdx/mr-boxington/pull/332))
+- keep the cone above an edited crate incremental ([#326](https://github.com/jdx/mr-boxington/pull/326))
+- *(cache)* gate prefetch on matching adapters ([#321](https://github.com/jdx/mr-boxington/pull/321))
+
 ## [1.6.0](https://github.com/jdx/mr-boxington/compare/v1.5.0...v1.6.0) - 2026-09-03
 
 ### Added
