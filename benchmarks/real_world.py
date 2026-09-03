@@ -537,6 +537,40 @@ PUBLISHED_STATS = (
 PUBLISHED_CONTENTION = ("peak_compilers", "min_available_bytes", "permits")
 
 
+class Progress:
+    """Durable progress lines for long-running benchmark logs."""
+
+    def __init__(self, total: int, width: int = 24) -> None:
+        self.total = total
+        self.width = width
+        self.completed = 0
+        self.started = 0.0
+
+    def bar(self) -> str:
+        filled = self.width * self.completed // self.total
+        percent = 100 * self.completed // self.total
+        return (
+            f"[{'#' * filled}{'-' * (self.width - filled)}] "
+            f"{self.completed}/{self.total} ({percent}%)"
+        )
+
+    def preparing(self) -> None:
+        print(f"{self.bar()} preparing benchmark subject", file=sys.stderr, flush=True)
+
+    def start(self, cell: str) -> None:
+        self.started = time.perf_counter()
+        print(f"{self.bar()} running {cell}", file=sys.stderr, flush=True)
+
+    def finish(self, cell: str, outcome: str = "completed") -> None:
+        elapsed = time.perf_counter() - self.started
+        self.completed += 1
+        print(
+            f"{self.bar()} {outcome} {cell} in {elapsed:.1f}s",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 def publishable(result: dict[str, object]) -> dict[str, object]:
     """Strip a run down to what the documentation site publishes."""
     scenarios = []
@@ -580,12 +614,14 @@ def run_scenario(
     subject: dict[str, object],
     runner: Runner,
     work: Path,
+    progress: Progress,
 ) -> dict[str, object]:
     """Run every tool through one scenario, each in its own store and target."""
     results: list[dict[str, object]] = []
     notes: list[str] = []
     for tool in tools:
         cell = f"{scenario}-{tool}"
+        progress.start(cell)
         store = work / f"store-{cell}"
         target = work / f"target-{cell}"
         try:
@@ -726,6 +762,9 @@ def run_scenario(
                 raise ValueError(f"unknown scenario {scenario}")
         except Skipped as skip:
             notes.append(f"{tool}: {skip}")
+            progress.finish(cell, "skipped")
+        else:
+            progress.finish(cell)
 
     return {
         "scenario": scenario,
@@ -946,6 +985,16 @@ def main() -> int:
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     mbx = args.mbx.resolve() if args.mbx else None
+    plan = []
+    for name in requested_scenarios:
+        tools = tuple(
+            tool for tool in requested_tools if tool in SCENARIOS[name]["tools"]  # type: ignore[operator]
+        )
+        if tools:
+            plan.append((name, tools))
+    progress = Progress(sum(len(tools) for _, tools in plan))
+    if plan:
+        progress.preparing()
 
     # Checkouts, targets, and stores are large and disposable; only the reports
     # under --output survive the run.
@@ -982,14 +1031,8 @@ def main() -> int:
 
         runner = Runner(output, cargo_home, mbx)
         scenarios = []
-        for name in requested_scenarios:
-            tools = tuple(
-                tool for tool in requested_tools if tool in SCENARIOS[name]["tools"]  # type: ignore[operator]
-            )
-            if not tools:
-                continue
-            print(f"running scenario {name} ({', '.join(tools)})", file=sys.stderr)
-            scenarios.append(run_scenario(name, tools, subject, runner, work))
+        for name, tools in plan:
+            scenarios.append(run_scenario(name, tools, subject, runner, work, progress))
 
     failures = validate(scenarios)
     result: dict[str, object] = {
