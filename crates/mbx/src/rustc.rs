@@ -424,12 +424,15 @@ pub(crate) fn compile(
     // The machine-wide permit is taken after every chance to hit the cache,
     // and before anything expensive starts. The timer starts afterwards: time
     // spent waiting for the machine is not time this compilation cost.
-    let required_inputs = invocation.required_inputs_in(&working_dir);
-    let input_identities =
-        crate::util::snapshot_file_identities(required_inputs.iter().map(PathBuf::as_path));
     let demand =
         crate::scheduler::Demand::new(invocation.crate_name(), invocation.links_natively());
     let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
+    // Capture these after admission: an edit while this compile waits for
+    // capacity happened before rustc ran and belongs to the valid compilation
+    // it is about to perform, not to the overlap this snapshot detects.
+    let required_inputs = invocation.required_inputs_in(&working_dir);
+    let input_identities =
+        crate::util::snapshot_file_identities(required_inputs.iter().map(PathBuf::as_path));
     let compilation_started = SystemTime::now();
     let compiler_timer = Instant::now();
     let mut command = compiler_command(rustc, wrapper_argument);

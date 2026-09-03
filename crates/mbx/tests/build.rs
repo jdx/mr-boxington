@@ -4,7 +4,9 @@
 //! dependencies, so nothing here needs the network.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(unix)]
+use std::process::Stdio;
 
 fn write_project(directory: &Path) {
     write_named_project(directory, "fixture");
