@@ -1247,10 +1247,7 @@ pub fn run_rustc_shim() -> ExitCode {
         eprintln!("mbx[error]: the rustc shim expected the rustc executable as its first argument");
         return ExitCode::from(1);
     };
-    let mut arguments = arguments.collect::<Vec<_>>();
-    if let Some(jdxld) = std::env::var_os(JDXLD_BIN_ENV).filter(|path| !path.is_empty()) {
-        use_jdxld_for_native_link(&mut arguments, &jdxld);
-    }
+    let arguments = arguments.collect::<Vec<_>>();
     let is_workspace_wrapper = std::env::var_os(PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV)
         .is_some_and(|wrapper| wrapper == rustc);
     let (wrapper_argument, compiler_arguments) = workspace_wrapper_arguments(&rustc, &arguments);
@@ -1277,7 +1274,7 @@ pub fn run_rustc_shim() -> ExitCode {
 }
 
 /// Pin native links to the worker's executable without changing metadata-only calls.
-fn use_jdxld_for_native_link(arguments: &mut Vec<OsString>, jdxld: &OsStr) {
+pub(crate) fn use_jdxld_for_native_link(arguments: &mut Vec<OsString>, jdxld: &OsStr) {
     if links_natively(arguments)
         && !has_explicit_target(arguments)
         && crate_name_argument(arguments).as_deref() != Some("build_script_build")

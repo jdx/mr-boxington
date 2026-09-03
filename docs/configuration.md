@@ -207,10 +207,11 @@ disables it because a fresh runner has no incremental state to reuse.
 
 ## jdxld session linking
 
-On Linux, `jdxld = "/path/to/jdxld"` (or `MBX_JDXLD`) opts native Rust links
-into jdxld's experimental mr-boxington worker protocol. mbx starts one worker
-for the Cargo command, routes native links to its Unix socket, and stops it as
-soon as the command finishes. The worker does not linger on a timeout.
+On Linux, `jdxld = "/path/to/jdxld"` (or `MBX_JDXLD`) opts learned incremental
+native Rust links into jdxld's experimental mr-boxington worker protocol. mbx
+starts one worker for the Cargo command, routes native links to its Unix socket,
+and stops it as soon as the command finishes. The worker does not linger on a
+timeout.
 
 The current prototype reuses unchanged input mappings within a command and
 writes advisory link manifests under `incremental/jdxld` in mbx's cache

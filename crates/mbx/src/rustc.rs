@@ -403,7 +403,14 @@ pub(crate) fn compile(
     let compilation_started = SystemTime::now();
     let compiler_timer = Instant::now();
     let mut command = compiler_command(rustc, wrapper_argument);
-    command.args(&arguments).current_dir(&working_dir);
+    let jdxld = std::env::var_os(session::JDXLD_BIN_ENV).filter(|path| !path.is_empty());
+    let compiler_arguments = compiler_arguments(&arguments, &learned, jdxld.as_deref());
+    // jdxld is checkout-local acceleration, like rustc incremental state. Add
+    // it only after a miss has selected that mode: the parser must see the
+    // original invocation so a jdxld path cannot contaminate shared action
+    // keys, and a normal cacheable miss must never publish jdxld output under
+    // the default linker's identity. Incremental outputs are withheld below.
+    command.args(&compiler_arguments).current_dir(&working_dir);
     if let Some(directory) = learned.directory.as_deref() {
         // Appended here rather than to the parsed argument vector: the parser
         // treats incremental state as uncacheable and would bypass the whole
@@ -505,6 +512,20 @@ pub(crate) fn compile(
         current_diagnostic,
     );
     Ok(exit_code(output.status))
+}
+
+fn compiler_arguments(
+    arguments: &[OsString],
+    learned: &LearnedPlan,
+    jdxld: Option<&OsStr>,
+) -> Vec<OsString> {
+    let mut arguments = arguments.to_vec();
+    if learned.engaged()
+        && let Some(jdxld) = jdxld
+    {
+        session::use_jdxld_for_native_link(&mut arguments, jdxld);
+    }
+    arguments
 }
 
 /// Compile a build script whose native link cannot be action-cached, then

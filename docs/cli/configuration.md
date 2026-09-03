@@ -136,7 +136,7 @@ Let local workspace members compile incrementally.
 - **Optional:** true
 - **Set with:** `MBX_JDXLD`
 
-On Linux, use this jdxld binary for native Rust links and keep its worker alive for the build session.
+On Linux, use this jdxld binary for learned incremental native Rust links and keep its worker alive for the build session.
 
 ### `learned_incremental`
 

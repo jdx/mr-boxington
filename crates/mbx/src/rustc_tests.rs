@@ -1047,3 +1047,28 @@ fn incremental_state_is_discarded_only_past_its_budget() {
     );
     assert!(fresh.is_dir());
 }
+#[test]
+fn jdxld_is_added_only_after_learned_incremental_engages() {
+    let arguments = vec![
+        "--crate-type=bin".into(),
+        "--emit=link".into(),
+        "src/main.rs".into(),
+    ];
+    let cold = LearnedPlan::default();
+    assert_eq!(
+        compiler_arguments(&arguments, &cold, Some(OsStr::new("/opt/jdxld"))),
+        arguments
+    );
+
+    let hot = LearnedPlan {
+        hot: true,
+        directory: Some(PathBuf::from("incremental")),
+        ..LearnedPlan::default()
+    };
+    let configured = compiler_arguments(&arguments, &hot, Some(OsStr::new("/opt/jdxld")));
+    assert_eq!(&configured[3], "-Clinker=clang");
+    assert_eq!(
+        configured.last().unwrap(),
+        "-Clink-arg=--ld-path=/opt/jdxld"
+    );
+}
