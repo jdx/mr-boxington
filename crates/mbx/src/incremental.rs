@@ -38,7 +38,7 @@ pub(crate) fn touch(root: &Path, workspace_root: &Path) -> Result<PathBuf> {
         workspace_root: workspace_root.to_path_buf(),
         updated_secs: now_secs(),
     };
-    crate::util::write_atomic(&directory.join(RECORD_FILE), &serde_json::to_vec(&record)?)?;
+    crate::util::write_advisory(&directory.join(RECORD_FILE), &serde_json::to_vec(&record)?)?;
     Ok(directory)
 }
 

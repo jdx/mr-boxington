@@ -851,7 +851,7 @@ fn record_view(root: &Path, workspace_root: &Path) -> Result<()> {
     };
     let mut contents = serde_json::to_vec(&record)?;
     contents.push(b'\n');
-    crate::util::write_atomic(&view_record_path(root, workspace_root), &contents)
+    crate::util::write_advisory(&view_record_path(root, workspace_root), &contents)
 }
 
 fn read_record_state(path: &Path) -> Result<Option<Vec<u8>>> {
@@ -864,7 +864,7 @@ fn read_record_state(path: &Path) -> Result<Option<Vec<u8>>> {
 
 fn restore_record_state(path: &Path, previous: Option<Vec<u8>>) -> Result<()> {
     if let Some(contents) = previous {
-        return crate::util::write_atomic(path, &contents);
+        return crate::util::write_advisory(path, &contents);
     }
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),

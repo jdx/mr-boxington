@@ -1953,6 +1953,11 @@ fn a_failed_build_records_the_compilations_it_completed() {
         .env("MBX_GC_AUTO", "0")
         .env_remove("CARGO_TARGET_DIR")
         .env_remove("CARGO_INCREMENTAL")
+        // A test run that is itself under mbx would otherwise hand its
+        // wrapper down, and the build under test would defer to it and
+        // record nothing.
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .output()
         .expect("mbx should run");
 

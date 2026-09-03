@@ -490,53 +490,75 @@ pub(crate) fn compile(
     }
     if output.status.success() {
         learned.record_compiled();
-        let publication: Result<Option<ActionDiagnostic>> = (|| {
-            let input_identities = input_identities
-                .as_ref()
-                .map_err(|error| eyre::eyre!(error.to_string()))?;
-            let (candidates, discovered) = action_from_dep_info(&compilation, &outputs.dep_info)?;
-            discovered
-                .verify_not_modified_since_with_identities(compilation_started, input_identities)?;
-            discovered.verify()?;
-            if learned_enabled && learned.record.is_none() && source_is_in_workspace(&compilation) {
-                record_learned_baseline(&compilation, &discovered);
-            }
-            // An incremental artifact carries state from this checkout's edit
-            // history, so it is recorded as what the unit currently contains --
-            // which is how the next build notices the churn ended -- but never
-            // published for another checkout to restore. The literal key is
-            // enough for that, and it skips reading the outputs back.
-            let action = if learned.engaged() {
-                &candidates.literal
-            } else {
-                publish_result(
-                    &candidates,
-                    &portable,
-                    &outputs,
-                    &output,
-                    &portable.mappings,
-                )?
-            };
-            install_build_script_shim(&invocation, &outputs, &action.digest);
-            // The flight prediction is only left behind a *published* result:
-            // an incremental artifact was withheld from the store, so a
-            // waiter restoring through its key could only miss.
-            record_prediction(
-                &compilation,
-                &action.digest,
-                &discovered,
-                &timing,
-                flight
+        // An incremental artifact is never published, and what it compiled
+        // was fingerprinted before the compiler ran, so nothing has to be
+        // read back for it: rebuilding the action would hash every input
+        // again for a key nothing looks up. Two exceptions. A build script's
+        // execution shim is installed under that key. And the manifest has to
+        // keep naming the inputs the compiler just recorded, because a wiped
+        // target rebuilds the churn comparison from the manifest: an edit
+        // that adds or drops an input, an `include_str!` say, has to reach
+        // it or settled sources would read as another edit.
+        let reads_back = !learned.engaged()
+            || outputs
+                .build_script_executable(invocation.crate_name())
+                .is_some()
+            || !manifest_predicts_current_inputs(&compilation, &outputs);
+        if reads_back {
+            let publication: Result<Option<ActionDiagnostic>> = (|| {
+                let input_identities = input_identities
                     .as_ref()
-                    .filter(|_| !learned.engaged())
-                    .map(|flight| &flight.flight),
-                remote_claim.as_deref().filter(|_| !learned.engaged()),
-            );
-            Ok(compilation_action_diagnostic(&compilation, action).ok())
-        })();
-        match publication {
-            Ok(diagnostic) => current_diagnostic = diagnostic,
-            Err(error) => eprintln!("mbx[warning]: result was not stored: {error:#}"),
+                    .map_err(|error| eyre::eyre!(error.to_string()))?;
+                let (candidates, discovered) =
+                    action_from_dep_info(&compilation, &outputs.dep_info)?;
+                discovered.verify_not_modified_since_with_identities(
+                    compilation_started,
+                    input_identities,
+                )?;
+                discovered.verify()?;
+                if learned_enabled
+                    && learned.record.is_none()
+                    && source_is_in_workspace(&compilation)
+                {
+                    record_learned_baseline(&compilation, &discovered);
+                }
+                // An incremental artifact carries state from this checkout's edit
+                // history, so it is recorded as what the unit currently contains --
+                // which is how the next build notices the churn ended -- but never
+                // published for another checkout to restore. The literal key is
+                // enough for that, and it skips reading the outputs back.
+                let action = if learned.engaged() {
+                    &candidates.literal
+                } else {
+                    publish_result(
+                        &candidates,
+                        &portable,
+                        &outputs,
+                        &output,
+                        &portable.mappings,
+                    )?
+                };
+                install_build_script_shim(&invocation, &outputs, &action.digest);
+                // The flight prediction is only left behind a *published* result:
+                // an incremental artifact was withheld from the store, so a
+                // waiter restoring through its key could only miss.
+                record_prediction(
+                    &compilation,
+                    &action.digest,
+                    &discovered,
+                    &timing,
+                    flight
+                        .as_ref()
+                        .filter(|_| !learned.engaged())
+                        .map(|flight| &flight.flight),
+                    remote_claim.as_deref().filter(|_| !learned.engaged()),
+                );
+                Ok(compilation_action_diagnostic(&compilation, action).ok())
+            })();
+            match publication {
+                Ok(diagnostic) => current_diagnostic = diagnostic,
+                Err(error) => eprintln!("mbx[warning]: result was not stored: {error:#}"),
+            }
         }
     }
     session::record_compiler_invocation_with_diagnostic(
@@ -887,6 +909,48 @@ fn reuse_hot_workspace_plan(
     }
 }
 
+/// Whether the manifest's prediction for this unit names the inputs its
+/// dep-info now records.
+///
+/// The payload is paths and environment names, never digests, so the common
+/// edit, the one that changes a file's contents and nothing else, leaves it
+/// current. Only an edit that changed which files the crate reads makes the
+/// caller record a fresh one, and it pays the full read-back for that.
+fn manifest_predicts_current_inputs(compilation: &Compilation<'_>, outputs: &RustcOutputs) -> bool {
+    let current = (|| -> Result<bool> {
+        let context = base_action_context(
+            compilation.rustc,
+            compilation.working_dir,
+            compilation.portable,
+        )?;
+        let invocation_digest = compilation.invocation.invocation_digest(&context)?;
+        let responses = session::request_agent(&[AgentRequest::FindActionPrediction {
+            task: prediction_task(&invocation_digest),
+            invocation: invocation_digest.clone(),
+        }])?;
+        let Some(AgentResponse::ActionPrediction {
+            prediction: Some(prediction),
+        }) = responses.into_iter().next()
+        else {
+            return Ok(false);
+        };
+        if prediction.adapter != "rustc" || prediction.invocation != invocation_digest {
+            return Ok(false);
+        }
+        let recorded: RustcInputPrediction = serde_json::from_str(&prediction.payload)?;
+        let dep_info = RustcDepInfo::read(&outputs.dep_info)?;
+        let discovered = compilation.invocation.discover_inputs_with_mappings(
+            &dep_info,
+            compilation.working_dir,
+            &compilation.portable.mappings,
+            session::file_digest_cache(),
+        )?;
+        let now = compilation.invocation.prediction(&context, &discovered)?;
+        Ok(now.inputs == recorded.inputs && now.environment == recorded.environment)
+    })();
+    current.unwrap_or(false)
+}
+
 /// Whether the crate root belongs to the checkout Cargo is building.
 fn source_is_in_workspace(compilation: &Compilation<'_>) -> bool {
     let Some(root) = std::env::var_os(session::WORKSPACE_ROOT_ENV).map(PathBuf::from) else {
@@ -1050,7 +1114,7 @@ fn write_churn_state(path: &Path, sources: &CacheDigest, streak: u32) -> Result<
         sources: sources.key(),
         streak,
     };
-    crate::util::write_atomic(path, &serde_json::to_vec(&state)?)
+    crate::util::write_advisory(path, &serde_json::to_vec(&state)?)
         .wrap_err("failed to record what this crate last compiled")
 }
 

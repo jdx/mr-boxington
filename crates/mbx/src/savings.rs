@@ -15,7 +15,7 @@
 //! message, so every failure here is logged and forgotten rather than raised.
 
 use crate::config::SavingsStyle;
-use crate::util::{format_duration, write_atomic};
+use crate::util::{format_duration, write_advisory};
 use bytesize::ByteSize;
 use eyre::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -130,7 +130,7 @@ pub(crate) fn record(store: &Path, delta: &Delta) -> Result<Tally> {
 
     let mut contents = serde_json::to_vec_pretty(&tally)?;
     contents.push(b'\n');
-    write_atomic(&path, &contents)?;
+    write_advisory(&path, &contents)?;
     Ok(tally)
 }
 

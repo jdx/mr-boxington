@@ -770,7 +770,9 @@ pub fn record_checkout(
     };
     let mut contents = serde_json::to_vec(&record)?;
     contents.push(b'\n');
-    write_atomic(
+    // Refreshed by every build and read back only as a last-used stamp, so a
+    // power cut costs one build's worth of recency, not a wait on the disk.
+    write_advisory(
         &checkout_record_path(store, identity, workspace_root),
         &contents,
     )
@@ -1515,6 +1517,27 @@ fn tree_bytes(root: &Path) -> u64 {
 #[cfg(test)]
 #[path = "store_tests.rs"]
 mod tests;
+
+/// [`write_atomic`] without the sync: for records every build rewrites and
+/// that a torn or missing file only makes one build older.
+fn write_advisory(path: &Path, contents: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| eyre::eyre!("path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".mbx-")
+        .tempfile_in(parent)?;
+    use std::io::Write as _;
+    temporary.write_all(contents)?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .wrap_err_with(|| format!("failed atomic write: {}", path.display()))?;
+    Ok(())
+}
 
 fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     let parent = path
