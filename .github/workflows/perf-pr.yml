@@ -14,7 +14,7 @@ concurrency:
 env:
   CARGO_INCREMENTAL: "0"
   # Rust 1.97.1 is part of the digest-pinned benchmark image.
-  MISE_DISABLE_TOOLS: rust
+  MISE_DISABLE_TOOLS: rust,aube
   RUSTUP_TOOLCHAIN: 1.97.1
   TAK_RUNNER: jdx-perf-v1-ubuntu24.04-x64-mr-boxington-rust1.97.1-img5263c143
 
