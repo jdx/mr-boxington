@@ -79,6 +79,38 @@ impl LocalCas {
         self.store_file_inner(digest, source, false)
     }
 
+    /// Move an already-verified temporary file into the CAS when possible.
+    ///
+    /// Remote downloads are staged beneath the cache root, so the usual path
+    /// is an atomic same-filesystem rename. If a caller supplies a path on a
+    /// different filesystem, fall back to the copy-based store operation.
+    pub(crate) fn adopt_verified_file(
+        &self,
+        digest: &CacheDigest,
+        source: &Path,
+    ) -> Result<PathBuf> {
+        if fs::metadata(source)?.len() != digest.size {
+            bail!("staged blob size does not match the declared CAS digest");
+        }
+        let destination = self.path_for(digest)?;
+        match self.find(digest) {
+            Ok(Some(existing)) => return Ok(existing),
+            // Preserve the established repair path for a poisoned destination;
+            // replacing it portably needs the copy-based temporary file flow.
+            Err(_) => return self.store_file_inner(digest, source, false),
+            Ok(None) => {}
+        }
+        fs::create_dir_all(destination.parent().expect("CAS path has a parent"))?;
+        make_owner_writable(source)?;
+        match fs::rename(source, &destination) {
+            Ok(()) => Ok(destination),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => self
+                .find(digest)?
+                .ok_or_else(|| eyre::eyre!("concurrent CAS write did not publish a valid blob")),
+            Err(_) => self.store_file_inner(digest, source, false),
+        }
+    }
+
     fn store_file_inner(
         &self,
         digest: &CacheDigest,
@@ -304,6 +336,23 @@ mod tests {
 
         assert_eq!(fs::read(stored).unwrap(), b"cached object");
         assert!(cas.find(&digest).unwrap().is_some());
+    }
+
+    #[test]
+    fn adopts_verified_files_without_leaving_the_staging_copy() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = LocalCas::new(directory.path().join("cache"));
+        let staging = directory.path().join("remote");
+        fs::create_dir(&staging).unwrap();
+        let source = staging.join("blob");
+        fs::write(&source, b"cached object").unwrap();
+        let digest = CacheDigest::blake3(b"cached object");
+
+        let stored = cas.adopt_verified_file(&digest, &source).unwrap();
+
+        assert!(!source.exists());
+        assert_eq!(fs::read(&stored).unwrap(), b"cached object");
+        assert_eq!(cas.find(&digest).unwrap(), Some(stored));
     }
 
     #[test]
