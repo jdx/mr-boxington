@@ -404,13 +404,20 @@ pub(crate) fn compile(
     let compiler_timer = Instant::now();
     let mut command = compiler_command(rustc, wrapper_argument);
     let jdxld = std::env::var_os(session::JDXLD_BIN_ENV).filter(|path| !path.is_empty());
-    let compiler_arguments = compiler_arguments(&arguments, &learned, jdxld.as_deref());
+    let proc_macro_cache = session::experimental_proc_macro_cache_requested();
+    let compiler_arguments =
+        compiler_arguments(&arguments, &learned, jdxld.as_deref(), proc_macro_cache);
     // jdxld is checkout-local acceleration, like rustc incremental state. Add
     // it only after a miss has selected that mode: the parser must see the
     // original invocation so a jdxld path cannot contaminate shared action
     // keys, and a normal cacheable miss must never publish jdxld output under
     // the default linker's identity. Incremental outputs are withheld below.
     command.args(&compiler_arguments).current_dir(&working_dir);
+    if proc_macro_cache && learned.engaged() {
+        // This is an unstable rustc experiment even on the pinned stable
+        // toolchain. Keep the bootstrap escape hatch on this child only.
+        command.env("RUSTC_BOOTSTRAP", "1");
+    }
     if let Some(directory) = learned.directory.as_deref() {
         // Appended here rather than to the parsed argument vector: the parser
         // treats incremental state as uncacheable and would bypass the whole
@@ -518,12 +525,16 @@ fn compiler_arguments(
     arguments: &[OsString],
     learned: &LearnedPlan,
     jdxld: Option<&OsStr>,
+    proc_macro_cache: bool,
 ) -> Vec<OsString> {
     let mut arguments = arguments.to_vec();
     if learned.engaged()
         && let Some(jdxld) = jdxld
     {
         session::use_jdxld_for_native_link(&mut arguments, jdxld);
+    }
+    if learned.engaged() && proc_macro_cache {
+        arguments.push("-Zcache-proc-macros=yes".into());
     }
     arguments
 }

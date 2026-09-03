@@ -73,6 +73,7 @@ pub(crate) const SHARE_OUT_DIR_ENV: &str = "MBX_SHARE_OUT_DIR";
 pub(crate) const BUILD_SCRIPT_EXECUTION_ENV: &str = "MBX_BUILD_SCRIPT_EXECUTION";
 pub(crate) const LEARNED_INCREMENTAL_ENV: &str = "MBX_LEARNED_INCREMENTAL";
 pub(crate) const LEARNED_INCREMENTAL_MAX_SIZE_ENV: &str = "MBX_LEARNED_INCREMENTAL_MAX_SIZE";
+pub(crate) const EXPERIMENTAL_PROC_MACRO_CACHE_ENV: &str = "MBX_EXPERIMENTAL_PROC_MACRO_CACHE";
 pub(crate) const INCREMENTAL_ROOT_ENV: &str = "MBX_INCREMENTAL_ROOT";
 pub(crate) const JDXLD_BIN_ENV: &str = "MBX_JDXLD_BIN";
 pub(crate) const JDXLD_SOCKET_ENV: &str = "MBX_JDXLD_SOCKET";
@@ -951,12 +952,12 @@ pub fn run_rustdoc_shim() -> ExitCode {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     match crate::rustdoc::document(&rustdoc, &arguments) {
         Ok(code) => code,
-        Err(error) => {
+        Err(_error) => {
             let _ = request_agent(&[AgentRequest::RecordBypass {
                 kind: "rustdoc".into(),
             }]);
             #[cfg(debug_assertions)]
-            eprintln!("mbx[warning]: rustdoc cache bypassed: {error:#}");
+            eprintln!("mbx[warning]: rustdoc cache bypassed: {_error:#}");
             run_transparent_rustdoc(rustdoc, arguments)
         }
     }
@@ -1590,6 +1591,11 @@ pub(crate) fn share_out_dir_requested() -> bool {
 /// state instead of publishing it. Read the same way as verify mode.
 pub(crate) fn learned_incremental_requested() -> bool {
     std::env::var_os(LEARNED_INCREMENTAL_ENV).is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+pub(crate) fn experimental_proc_macro_cache_requested() -> bool {
+    std::env::var_os(EXPERIMENTAL_PROC_MACRO_CACHE_ENV)
+        .is_some_and(|value| !value.is_empty() && value != "0")
 }
 
 /// How much incremental state one crate may keep before the shim discards it;

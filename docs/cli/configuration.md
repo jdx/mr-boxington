@@ -57,6 +57,14 @@ Cache C and C++ compilations run by build scripts.
 
 Record a per-compilation event stream for `mbx tui` to watch.
 
+### `experimental_proc_macro_cache`
+
+- **Type:** `bool`
+- **Default:** `false`
+- **Set with:** `MBX_EXPERIMENTAL_PROC_MACRO_CACHE`
+
+Experimentally cache derive proc-macro results in rustc incremental state. This can be unsound for proc macros that observe inputs outside their token stream.
+
 ### `gc.auto`
 
 - **Type:** `bool`

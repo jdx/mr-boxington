@@ -242,6 +242,16 @@ to each checkout and live under `incremental/` in mbx's cache directory, so
 `cargo clean` does not discard the next edit's speedup. Normal garbage
 collection removes state for deleted or expired checkouts.
 
+`experimental_proc_macro_cache = true` (or
+`MBX_EXPERIMENTAL_PROC_MACRO_CACHE=1`) also passes rustc's unstable
+`-Zcache-proc-macros=yes` option to learned incremental compilations. On Rust
+1.98 this reduced a measured one-line mise edit from 11.76 seconds to 9.62
+seconds by persisting derive proc-macro results. rustc calls the option
+potentially unsound: a proc macro can observe files, environment variables,
+time, or randomness that are absent from its token stream. It is therefore off
+by default and must not be used for release or CI builds whose correctness has
+not been checked independently.
+
 Each crate's state is discarded, with a warning naming the crate, once it
 passes `learned_incremental_max_size` (`MBX_LEARNED_INCREMENTAL_MAX_SIZE`,
 default 8 GiB; `"none"` lifts the limit). rustc keeps about one session's worth

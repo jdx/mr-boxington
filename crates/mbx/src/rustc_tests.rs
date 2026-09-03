@@ -1056,7 +1056,7 @@ fn jdxld_is_added_only_after_learned_incremental_engages() {
     ];
     let cold = LearnedPlan::default();
     assert_eq!(
-        compiler_arguments(&arguments, &cold, Some(OsStr::new("/opt/jdxld"))),
+        compiler_arguments(&arguments, &cold, Some(OsStr::new("/opt/jdxld")), false,),
         arguments
     );
 
@@ -1065,10 +1065,27 @@ fn jdxld_is_added_only_after_learned_incremental_engages() {
         directory: Some(PathBuf::from("incremental")),
         ..LearnedPlan::default()
     };
-    let configured = compiler_arguments(&arguments, &hot, Some(OsStr::new("/opt/jdxld")));
+    let configured = compiler_arguments(&arguments, &hot, Some(OsStr::new("/opt/jdxld")), false);
     assert_eq!(&configured[3], "-Clinker=clang");
     assert_eq!(
         configured.last().unwrap(),
         "-Clink-arg=--ld-path=/opt/jdxld"
     );
+}
+
+#[test]
+fn proc_macro_cache_is_added_only_after_learned_incremental_engages() {
+    let arguments = vec!["--crate-type=bin".into(), "src/main.rs".into()];
+    assert_eq!(
+        compiler_arguments(&arguments, &LearnedPlan::default(), None, true),
+        arguments
+    );
+
+    let hot = LearnedPlan {
+        hot: true,
+        directory: Some(PathBuf::from("incremental")),
+        ..LearnedPlan::default()
+    };
+    let configured = compiler_arguments(&arguments, &hot, None, true);
+    assert_eq!(configured.last().unwrap(), "-Zcache-proc-macros=yes");
 }

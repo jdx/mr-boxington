@@ -206,6 +206,15 @@ fn cargo_with_settings_bypass_log_and_roots(
             if learned_incremental { "1" } else { "0" }.into(),
         );
         environment.insert(
+            session::EXPERIMENTAL_PROC_MACRO_CACHE_ENV.into(),
+            if settings.experimental_proc_macro_cache {
+                "1"
+            } else {
+                "0"
+            }
+            .into(),
+        );
+        environment.insert(
             session::LEARNED_INCREMENTAL_MAX_SIZE_ENV.into(),
             settings
                 .learned_incremental_max_size

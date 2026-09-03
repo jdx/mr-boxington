@@ -131,6 +131,14 @@ pub(crate) struct RawConfig {
         default = true
     )]
     _learned_incremental: bool,
+    /// Experimentally cache derive proc-macro results in rustc incremental state. This can be
+    /// unsound for proc macros that observe inputs outside their token stream.
+    #[usage(
+        key = "experimental_proc_macro_cache",
+        env = "MBX_EXPERIMENTAL_PROC_MACRO_CACHE",
+        default = false
+    )]
+    experimental_proc_macro_cache: bool,
     /// How much learned incremental state one crate may keep, or "none". State
     /// past this is discarded before the crate compiles again.
     #[usage(
@@ -519,6 +527,9 @@ pub(crate) struct CliSettings {
     pub summary: SummaryStyle,
     /// Whether a churning crate may compile with its own incremental state.
     pub learned_incremental: bool,
+    /// Whether learned incremental compilations may use rustc's potentially
+    /// unsound derive proc-macro result cache.
+    pub experimental_proc_macro_cache: bool,
     /// How much of that state one crate may keep, in bytes; `None` is no limit.
     pub learned_incremental_max_size: Option<u64>,
     /// Whether natively linked programs may be cached.
@@ -534,6 +545,7 @@ impl Default for CliSettings {
             savings: SavingsStyle::default(),
             summary: SummaryStyle::default(),
             learned_incremental: true,
+            experimental_proc_macro_cache: false,
             learned_incremental_max_size: Some(DEFAULT_LEARNED_INCREMENTAL_MAX_SIZE),
             cache_links: true,
         }
@@ -831,6 +843,7 @@ impl Config {
                 savings: raw.savings.parse().wrap_err("invalid savings")?,
                 summary: raw.summary.parse().wrap_err("invalid summary")?,
                 learned_incremental: raw._learned_incremental,
+                experimental_proc_macro_cache: raw.experimental_proc_macro_cache,
                 learned_incremental_max_size: parse_optional_byte_size(
                     &raw.learned_incremental_max_size,
                 )
@@ -1423,6 +1436,16 @@ mod tests {
 
         let (_, settings) = configured_for_cli(None, &[("MBX_LEARNED_INCREMENTAL", "0")]).unwrap();
         assert!(!settings.learned_incremental);
+    }
+
+    #[test]
+    fn experimental_proc_macro_cache_requires_an_explicit_opt_in() {
+        let (_, settings) = configured_for_cli(None, &[]).unwrap();
+        assert!(!settings.experimental_proc_macro_cache);
+
+        let (_, settings) =
+            configured_for_cli(None, &[("MBX_EXPERIMENTAL_PROC_MACRO_CACHE", "1")]).unwrap();
+        assert!(settings.experimental_proc_macro_cache);
     }
 
     /// The budget has to hold a real crate's state: rustc keeps one session's
