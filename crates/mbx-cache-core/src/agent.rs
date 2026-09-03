@@ -371,6 +371,7 @@ struct TaskActionState {
     remote_etag: Option<String>,
 }
 
+/// Match an invocation and, on an adapter's first match, select its prefetch wave.
 fn activate_prediction_adapter(
     state: &mut TaskActionState,
     invocation: &CacheDigest,
