@@ -85,6 +85,10 @@ setup() {
 }
 
 @test "explain --last diagnoses a miss from recorded inputs" {
+  # The edited crate would otherwise take private incremental state on its
+  # first edit and skip the lookup this test wants explained. CI sets CI=1,
+  # which disables that already; locally it has to be said.
+  export MBX_LEARNED_INCREMENTAL=0
   cargo init --lib --vcs none missed-project
   cd missed-project
 

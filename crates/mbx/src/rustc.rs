@@ -40,12 +40,16 @@ struct CompileTiming {
 /// guessing wrong is one uncached compilation the unit was going to pay anyway.
 const HOT_STREAK_THRESHOLD: u32 = 3;
 
-/// A workspace unit is hot on its first edit. Its dependent cone still uses
-/// the ordinary cache because churn is measured from each unit's own sources.
+/// A workspace unit is hot on its first edit. Churn is measured from each
+/// unit's own sources, so a dependent is only dragged along when it links
+/// the private artifact the hot unit produced; see [`links_private_artifact`].
 const WORKSPACE_HOT_STREAK_THRESHOLD: u32 = 1;
 
 /// Schema version of the per-checkout churn record.
 const CHURN_STATE_VERSION: u8 = 1;
+
+/// Schema version of a private-artifact marker.
+const PRIVATE_ARTIFACT_VERSION: u8 = 1;
 
 /// What a churning unit gets: its own incremental state, and no publication.
 #[derive(Clone, Debug, Default)]
@@ -108,6 +112,21 @@ struct ChurnState {
     sources: String,
     /// Consecutive compilations whose sources had changed.
     streak: u32,
+}
+
+/// An output this checkout last compiled with private incremental state.
+///
+/// Kept beside the churn records, keyed by the output's path, so the crates
+/// that link it can tell a private artifact from a published one without
+/// knowing which unit produced it. Written before the compiler runs rather
+/// than after: Cargo starts a dependent as soon as this unit's metadata
+/// exists, while the compiler is still running here.
+#[derive(Debug, Serialize, Deserialize)]
+struct PrivateArtifact {
+    /// Version of this marker's schema.
+    version: u8,
+    /// Absolute path of the artifact, as the compiler was told to write it.
+    path: PathBuf,
 }
 
 #[derive(Serialize)]
@@ -174,6 +193,13 @@ pub(crate) fn compile(
         );
     }
 
+    // Whatever this compilation ends up doing -- restoring, publishing, or
+    // keeping private state -- the outputs it is about to write are no longer
+    // the private artifacts an earlier compilation marked them as. A hot
+    // compilation marks them again below, before the compiler starts.
+    if let Some(root) = incremental_root() {
+        forget_private_artifacts(&root, &outputs);
+    }
     let verify = session::verify_requested();
     // A shadow compilation compares its result against a cached one, which an
     // incremental artifact would never match, so the two modes are exclusive.
@@ -415,6 +441,13 @@ pub(crate) fn compile(
         let mut flag = OsString::from("-Cincremental=");
         flag.push(directory);
         command.arg(flag);
+        // Before the compiler starts, so that a dependent Cargo pipelines
+        // behind this unit's metadata already finds the marker in place.
+        if let Some(root) = incremental_root()
+            && let Err(error) = record_private_artifacts(&root, &outputs)
+        {
+            eprintln!("mbx[warning]: private artifacts were not recorded: {error:#}");
+        }
     }
     let output = command.output().wrap_err("failed to execute rustc")?;
     // Released before the outputs are read back and published: hashing and
@@ -629,14 +662,16 @@ fn install_build_script_shim(
 /// The comparison is against this crate's own sources, not against its action
 /// key: a key also hashes the artifacts the crate links against, so a rebuilt
 /// dependency changes it without anybody having touched this crate. Watching
-/// the key would drag the whole cone above an edited crate into compiling
-/// incrementally and withholding its results, which is the sharing loss this
-/// is meant to avoid.
+/// the key would send the whole cone above any rebuilt crate hot, including
+/// the cone above a dependency that was rebuilt normally and published, whose
+/// dependents can publish results other checkouts will restore.
 ///
 /// Unchanged sources are therefore never churn, however the compilation got
 /// here. A miss on them means something else lost the result -- a wiped target
 /// directory, a first build in this checkout -- and recompiling normally
-/// republishes it for everyone.
+/// republishes it for everyone. The one exception is decided by the caller:
+/// a crate linking an artifact that was itself kept private, see
+/// [`links_private_artifact`].
 fn learned_plan(
     recorded: Option<&ChurnState>,
     sources: &CacheDigest,
@@ -764,7 +799,9 @@ fn plan_learned_reuse(
             enabled,
             threshold,
         );
+        let hot = plan.hot || (enabled && links_private_artifact(compilation));
         Ok(LearnedPlan {
+            hot,
             record: Some((state_path, sources)),
             ..plan
         }
@@ -784,7 +821,9 @@ fn plan_learned_reuse(
 ///
 /// An intact dep-info file supplies the source fingerprint without constructing
 /// a shared action. A missing target, settled source, or changed environment
-/// deliberately takes the slower path so it can restore or republish.
+/// deliberately takes the slower path so it can restore or republish. Settled
+/// sources above a private artifact are the exception: no shared action can
+/// describe what they link, so the lookup would only ever miss.
 fn reuse_hot_workspace_plan(
     compilation: &Compilation<'_>,
     outputs: &RustcOutputs,
@@ -815,15 +854,25 @@ fn reuse_hot_workspace_plan(
             session::file_digest_cache(),
         )?;
         let sources = compilation.invocation.source_fingerprint(&discovered);
-        if recorded.streak < WORKSPACE_HOT_STREAK_THRESHOLD || recorded.sources == sources.key() {
+        let changed = recorded.sources != sources.key();
+        let edited = changed && recorded.streak >= WORKSPACE_HOT_STREAK_THRESHOLD;
+        if !edited && !links_private_artifact(compilation) {
             return Ok(LearnedPlan::default());
         }
-        Ok(LearnedPlan {
-            hot: true,
-            streak: recorded
+        // The streak keeps counting this unit's own sources, as the slower
+        // path would: a unit riding along on a private artifact with settled
+        // sources records no churn of its own.
+        let streak = if changed {
+            recorded
                 .streak
                 .saturating_add(1)
-                .min(WORKSPACE_HOT_STREAK_THRESHOLD),
+                .min(WORKSPACE_HOT_STREAK_THRESHOLD)
+        } else {
+            0
+        };
+        Ok(LearnedPlan {
+            hot: true,
+            streak,
             directory: None,
             record: Some((state_path, sources)),
         }
@@ -906,6 +955,80 @@ fn incremental_root() -> Option<PathBuf> {
             })
         })
         .map(PathBuf::from)
+}
+
+/// Where the marker for one output path lives, beside the churn records.
+fn private_artifact_path(root: &Path, artifact: &Path) -> Option<PathBuf> {
+    let key = CacheDigest::blake3(artifact.as_os_str().as_encoded_bytes()).key();
+    let shard = key.get(..16)?;
+    Some(root.join("private").join(format!("{shard}.json")))
+}
+
+/// Mark every output of a compilation about to run with private incremental
+/// state, so the crates that link them know not to publish either.
+fn record_private_artifacts(root: &Path, outputs: &RustcOutputs) -> Result<()> {
+    for artifact in &outputs.files {
+        let Some(path) = private_artifact_path(root, artifact) else {
+            continue;
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .wrap_err("failed to create the private artifact directory")?;
+        }
+        let marker = PrivateArtifact {
+            version: PRIVATE_ARTIFACT_VERSION,
+            path: artifact.clone(),
+        };
+        crate::util::write_atomic(&path, &serde_json::to_vec(&marker)?)
+            .wrap_err_with(|| format!("failed to mark {} as private", artifact.display()))?;
+    }
+    Ok(())
+}
+
+/// Withdraw the markers for outputs this compilation is about to replace.
+///
+/// Best effort: a marker that cannot be removed costs the crates above one
+/// publication they could have made, never a wrong result.
+fn forget_private_artifacts(root: &Path, outputs: &RustcOutputs) {
+    for artifact in &outputs.files {
+        if let Some(path) = private_artifact_path(root, artifact)
+            && let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!(
+                "mbx[warning]: a private artifact marker was not removed for {}: {error}",
+                artifact.display()
+            );
+        }
+    }
+}
+
+/// Whether this compilation links an artifact another unit kept private.
+///
+/// A private artifact describes one checkout's edit history, so an action
+/// keyed on it can never be restored anywhere else: compiling normally here
+/// would pay for a full compilation and a publication nobody can use. Taking
+/// private state instead costs nothing that was available, and gives the edit
+/// loop above an edited dependency the same reuse the dependency itself gets.
+fn links_private_artifact(compilation: &Compilation<'_>) -> bool {
+    let Some(root) = incremental_root() else {
+        return false;
+    };
+    let inputs = compilation
+        .invocation
+        .required_inputs_in(compilation.working_dir);
+    links_private_artifact_in(&root, &inputs)
+}
+
+fn links_private_artifact_in(root: &Path, inputs: &[PathBuf]) -> bool {
+    inputs.iter().any(|input| {
+        private_artifact_path(root, input)
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<PrivateArtifact>(&bytes).ok())
+            .is_some_and(|marker| {
+                marker.version == PRIVATE_ARTIFACT_VERSION && marker.path == *input
+            })
+    })
 }
 
 /// A record this version cannot read is treated as no record: the cost is one

@@ -1008,13 +1008,13 @@ fn churn_earns_nothing_in_ci() {
     );
 }
 
-/// A crate's action key hashes the artifacts it links against, so rebuilding a
-/// dependency changes it without anybody having touched the crate. Watching the
-/// key instead of the sources would send the whole cone above an edited crate
-/// hot, and stop all of it publishing -- the sharing loss this feature exists
-/// to avoid.
+/// A crate's action key hashes the artifacts it links against. Once the crate
+/// below it has taken private incremental state, no other checkout can hold
+/// that artifact, so publishing the crate above would pay for a full
+/// compilation and store a result nothing can restore. It takes private state
+/// too, and the whole cone publishes again once the edited crate settles.
 #[test]
-fn editing_one_crate_leaves_its_dependents_publishing() {
+fn editing_one_crate_takes_its_dependents_private_too() {
     let store = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();
@@ -1040,17 +1040,49 @@ fn editing_one_crate_leaves_its_dependents_publishing() {
 
     assert_eq!(
         compiled_incrementally(&stats),
-        1,
-        "only the edited crate should be compiling incrementally: {stats}"
+        2,
+        "the edited crate and the crate linking it should both compile incrementally: {stats}"
     );
-    assert!(
-        stats["stored_bytes"].as_u64().unwrap_or(0) > 0,
-        "the crate above it never changed, so it should still publish: {stats}"
+    assert_eq!(
+        stats["stored_bytes"].as_u64(),
+        Some(0),
+        "a result keyed on a private artifact cannot be restored anywhere, so nothing should publish: {stats}"
     );
     assert_eq!(
         stats["lookups"].as_u64(),
-        Some(1),
-        "the hot edited crate should skip lookup while its dependent still publishes: {stats}"
+        Some(0),
+        "neither crate can hit a shared action, so neither should look one up: {stats}"
+    );
+
+    // Unchanged sources after a wiped target are not churn, above or below:
+    // the edited crate republishes, and the crate above it, now linking a
+    // published artifact, publishes again too.
+    let cleaned = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        .current_dir(project.path())
+        .arg("clean")
+        .env("MBX_CACHE_DIR", store.path())
+        .env("MBX_GC_AUTO", "0")
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .expect("mbx clean should run");
+    assert!(
+        cleaned.status.success(),
+        "clean failed: {}",
+        String::from_utf8_lossy(&cleaned.stderr)
+    );
+    let settled = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("settled.json"),
+    );
+    assert_eq!(
+        compiled_incrementally(&settled),
+        0,
+        "settled sources should compile normally again: {settled}"
+    );
+    assert!(
+        settled["stored_bytes"].as_u64().unwrap_or(0) > 0,
+        "a settled cone should publish again: {settled}"
     );
 }
 

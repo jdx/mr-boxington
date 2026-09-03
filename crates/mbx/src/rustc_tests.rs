@@ -129,6 +129,35 @@ fn one_changed_workspace_source_is_hot() {
     assert!(plan.hot);
 }
 
+/// A marker names the artifact it was written for and is withdrawn before the
+/// artifact is replaced, so only what a hot compilation wrote reads as private.
+#[test]
+fn private_artifacts_are_recognized_only_while_marked() {
+    let root = tempfile::tempdir().unwrap();
+    let deps = root.path().join("target/debug/deps");
+    let outputs = RustcOutputs {
+        directory: deps.clone(),
+        files: vec![deps.join("libbase-1.rlib"), deps.join("libbase-1.rmeta")],
+        dep_info: deps.join("base-1.d"),
+    };
+    let links = vec![
+        root.path().join("above/src/lib.rs"),
+        deps.join("libbase-1.rmeta"),
+    ];
+    assert!(!links_private_artifact_in(root.path(), &links));
+
+    record_private_artifacts(root.path(), &outputs).unwrap();
+    assert!(links_private_artifact_in(root.path(), &links));
+    assert!(
+        !links_private_artifact_in(root.path(), &[deps.join("libother-1.rlib")]),
+        "a marker must not vouch for an artifact it was not written for"
+    );
+
+    forget_private_artifacts(root.path(), &outputs);
+    assert!(!links_private_artifact_in(root.path(), &links));
+    forget_private_artifacts(root.path(), &outputs);
+}
+
 /// The record belongs to one checkout, so a sibling worktree that cannot read
 /// it simply starts over rather than inheriting somebody else's edit loop.
 #[test]
