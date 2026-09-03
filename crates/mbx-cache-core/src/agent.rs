@@ -105,6 +105,16 @@ const DEFAULT_MAX_REMOTE_DOWNLOAD_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 /// once nothing has been recorded under its own.
 pub type TaskFallbacks = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 
+/// How many of the store's most recently written manifests a task with
+/// fallbacks tries after the named identities yield nothing.
+///
+/// A runner that restored a cache bundle holds the manifests of the builds
+/// that produced it and no version-control history to name them by, so what
+/// was written last is the best remaining guess at the lockfile before this
+/// one. Each candidate costs one parse, and a manifest from an unrelated
+/// workspace only fails to match.
+const NEWEST_MANIFEST_CANDIDATES: usize = 8;
+
 /// Remote action-cache access owned by one task session.
 pub struct AgentRemoteCache {
     /// Remote protocol client used by the agent.
@@ -648,8 +658,10 @@ impl CacheAgent {
     /// The identities are produced on demand rather than taken up front,
     /// because finding them can cost a few version-control commands and most
     /// builds never need them. The first manifest found, locally and then on
-    /// the remote, is adopted under the task's own identity, so this build
-    /// records into it and a trusted build publishes it there.
+    /// the remote, becomes the task's baseline for this session; when none of
+    /// the named identities has one, the store's newest manifests are tried.
+    /// Nothing is written under the task's identity until the build records
+    /// what it used, so a stale inheritance is never carried forward.
     pub fn register_task_fallbacks(
         &self,
         task: &str,
@@ -802,9 +814,11 @@ impl CacheAgent {
 
     /// Adopt the manifest of a fallback identity for a task that has none.
     ///
-    /// The identities are tried in the order given, each in the local store
-    /// and then on the remote, and the first manifest found is persisted under
-    /// `task` so the next session finds it there without asking again.
+    /// The named identities are tried in the order given, each in the local
+    /// store and then on the remote, and then the store's newest manifests,
+    /// locally only. The first one found is returned under `task`'s name but
+    /// not written there: the build records every prediction it uses, so its
+    /// commit leaves exactly the inherited entries that still matched.
     async fn inherit_task_manifest(
         &self,
         task: &str,
@@ -814,13 +828,19 @@ impl CacheAgent {
         let Some(fallbacks) = fallbacks else {
             return Ok(None);
         };
-        let identities = tokio::task::spawn_blocking(move || fallbacks()).await?;
-        for identity in identities {
-            if identity == task || validate_task_identity(&identity).is_err() {
+        let named = tokio::task::spawn_blocking(move || fallbacks()).await?;
+        let mut tried = BTreeSet::from([task.to_string()]);
+        let candidates = named.into_iter().map(|identity| (identity, true)).chain(
+            self.newest_task_identities()
+                .into_iter()
+                .map(|identity| (identity, false)),
+        );
+        for (identity, remote) in candidates {
+            if !tried.insert(identity.clone()) || validate_task_identity(&identity).is_err() {
                 continue;
             }
             let mut found = self.load_task_manifest(&identity)?;
-            if found.is_none() && self.remote_mode.reads() {
+            if found.is_none() && remote && self.remote_mode.reads() {
                 found = match self.get_remote_task_manifest(&identity).await {
                     Ok(manifest) => manifest.map(|(manifest, _)| manifest),
                     Err(error) => {
@@ -838,24 +858,47 @@ impl CacheAgent {
             let Some(mut manifest) = found else {
                 continue;
             };
+            if manifest.predictions.is_empty() {
+                continue;
+            }
             info!(
                 "no predictions were recorded for {task}; inheriting {} from {identity}",
                 manifest.predictions.len()
             );
             manifest.task = task.to_string();
             validate_task_manifest(&manifest, task)?;
-            let _write_guard = self.manifest_write_lock.lock().unwrap();
-            let _file_guard = self.lock_task_manifest(task)?;
             // Another process may have recorded this identity while the
             // fallbacks were being found. What it wrote describes this
             // lockfile and wins over an inheritance.
             if let Some(recorded) = self.load_task_manifest(task)? {
                 return Ok(Some(recorded));
             }
-            self.persist_task_manifest(&manifest)?;
             return Ok(Some(manifest));
         }
         Ok(None)
+    }
+
+    /// The identities of the store's most recently written manifests.
+    fn newest_task_identities(&self) -> Vec<String> {
+        let Ok(entries) = fs::read_dir(self.manifest_dir.as_path()) else {
+            return Vec::new();
+        };
+        let mut manifests: Vec<(std::time::SystemTime, String)> = entries
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let name = entry.file_name();
+                let identity = name.to_str()?.strip_suffix(".json")?.to_string();
+                validate_task_identity(&identity).ok()?;
+                let modified = entry.metadata().ok()?.modified().ok()?;
+                Some((modified, identity))
+            })
+            .collect();
+        manifests.sort_by(|left, right| right.cmp(left));
+        manifests
+            .into_iter()
+            .take(NEWEST_MANIFEST_CANDIDATES)
+            .map(|(_, identity)| identity)
+            .collect()
     }
 
     /// Cancel speculative downloads before the owning session exits.

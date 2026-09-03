@@ -199,7 +199,8 @@ A workspace and command nobody has published a manifest for print
 successfully. There was nothing to fetch, which is normal for a first build.
 A lockfile that has not been built yet borrows the manifest of the lockfile
 before it in Git history, so a dependency bump still prefetches the unchanged
-part of the graph.
+part of the graph. A shallow checkout needs that history fetched: on GitHub
+Actions, `fetch-depth: 2` lets a pull request build reach its base branch.
 A lookup that fails, such as an unreachable host or refused credentials, is an
 error, so CI can tell an empty cache from a broken one. A typical place for the
 command is a runner or devcontainer image's start-up hook, so the store is

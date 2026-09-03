@@ -123,11 +123,13 @@ pub fn build_identity(workspace_root: &Path, _command: &[String]) -> String {
 /// manifest with nothing in it although most of the graph is unchanged and
 /// its results are already cached. Version control remembers what the lockfile
 /// was before: the committed copy first, for an edit that has not been
-/// committed yet, then the copy each commit that touched the file replaced. A
-/// checkout that is not under Git, or a lockfile it does not track, yields
-/// nothing. Every prediction a manifest holds is rehashed before it is
-/// trusted, so an inherited one can only fail to match, never restore the
-/// wrong result.
+/// committed yet, then the copy in `HEAD`'s first parent, which on a pull
+/// request's merge commit is the base branch, then the copy each commit that
+/// touched the file replaced. A shallow clone offers what it can reach, which
+/// on a `fetch-depth: 1` checkout is nothing beyond `HEAD` itself. A checkout
+/// that is not under Git, or a lockfile it does not track, yields nothing.
+/// Every prediction a manifest holds is rehashed before it is trusted, so an
+/// inherited one can only fail to match, never restore the wrong result.
 pub fn previous_build_identities(workspace_root: &Path) -> Vec<String> {
     let Ok(lock) = std::fs::read(workspace_root.join("Cargo.lock")) else {
         return Vec::new();
@@ -143,7 +145,7 @@ pub fn previous_build_identities(workspace_root: &Path) -> Vec<String> {
     // the parent of each commit that touched the file is one state further
     // back; a root commit has no parent and is skipped.
     let revisions = String::from_utf8_lossy(&revisions);
-    let candidates = std::iter::once("HEAD".to_string()).chain(
+    let candidates = ["HEAD", "HEAD^"].into_iter().map(str::to_string).chain(
         revisions
             .lines()
             .map(|revision| format!("{}^", revision.trim())),
@@ -589,6 +591,39 @@ mod tests {
         // its own fallback.
         git(root, &["commit", "-q", "-am", "four"]);
         assert_eq!(previous_build_identities(root), committed);
+    }
+
+    #[test]
+    fn a_shallow_clone_offers_the_states_it_can_reach() {
+        let origin = tempfile::tempdir().unwrap();
+        let root = origin.path();
+        let command = Vec::new();
+        git(root, &["init", "-q"]);
+        let mut committed = Vec::new();
+        for state in ["one", "two", "three", "four"] {
+            std::fs::write(root.join("Cargo.lock"), state).unwrap();
+            committed.push(build_identity(root, &command));
+            git(root, &["add", "Cargo.lock"]);
+            git(root, &["commit", "-q", "-m", state]);
+        }
+        let clones = tempfile::tempdir().unwrap();
+        let shallow = clones.path().join("shallow");
+        git(
+            clones.path(),
+            &[
+                "clone",
+                "-q",
+                "--depth",
+                "2",
+                &format!("file://{}", root.display()),
+                shallow.to_str().unwrap(),
+            ],
+        );
+        // HEAD holds "four"; its parent "three" was fetched and "two" was not.
+        assert_eq!(
+            previous_build_identities(&shallow),
+            vec![committed[2].clone()]
+        );
     }
 
     #[test]

@@ -865,19 +865,74 @@ async fn a_task_without_a_manifest_inherits_the_first_fallback_that_has_one() {
         }
     ));
 
-    // Adopted under the current identity, so a later session finds it
-    // without consulting anything, and the source is left as it was.
-    let adopted = agent.load_task_manifest(&current).unwrap().unwrap();
-    assert_eq!(adopted.task, current);
-    assert_eq!(adopted.predictions.len(), 2);
+    // Nothing is written under the current identity until the build records
+    // what it used, and the source is left as it was.
+    assert!(agent.load_task_manifest(&current).unwrap().is_none());
     assert!(agent.load_task_manifest(&unbuilt).unwrap().is_none());
     assert_eq!(
         agent.load_task_manifest(&previous).unwrap().unwrap().task,
         previous
     );
-    let later = CacheAgent::new(&cache, "test-version");
-    later.begin_task(&current).await.unwrap();
-    assert_eq!(later.stats().predictions_loaded, 2);
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::RecordActionPrediction {
+                task: run.clone(),
+                prediction: seeded_predictions(&["first"]).remove(0),
+            })
+            .await,
+        AgentResponse::ActionPredictionRecorded
+    ));
+    agent.commit_task(&run).await.unwrap();
+    let recorded = agent.load_task_manifest(&current).unwrap().unwrap();
+    assert_eq!(recorded.task, current);
+    assert_eq!(recorded.predictions, seeded_predictions(&["first"]));
+}
+
+#[tokio::test]
+async fn the_newest_manifest_in_the_store_is_the_last_resort() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let older = "5".repeat(64);
+    let newer = "6".repeat(64);
+    let current = "7".repeat(64);
+    let seed = CacheAgent::new(&cache, "test-version");
+    for (task, name, age) in [(&older, "old", 120), (&newer, "new", 60)] {
+        seed.persist_task_manifest(&TaskActionManifest {
+            version: TASK_ACTION_MANIFEST_VERSION,
+            task: task.clone(),
+            predictions: seeded_predictions(&[name]),
+        })
+        .unwrap();
+        let file = std::fs::File::options()
+            .write(true)
+            .open(seed.task_manifest_path(task))
+            .unwrap();
+        file.set_modified(std::time::SystemTime::now() - Duration::from_secs(age))
+            .unwrap();
+    }
+
+    // Without registered fallbacks the store is not searched.
+    let plain = CacheAgent::new(&cache, "test-version");
+    plain.begin_task(&current).await.unwrap();
+    assert_eq!(plain.stats().predictions_loaded, 0);
+
+    let agent = CacheAgent::new(&cache, "test-version");
+    agent
+        .register_task_fallbacks(&current, || vec!["8".repeat(64)])
+        .unwrap();
+    let run = agent.begin_task(&current).await.unwrap();
+    assert_eq!(agent.stats().predictions_loaded, 1);
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::FindActionPrediction {
+                task: run,
+                invocation: CacheDigest::blake3(b"new"),
+            })
+            .await,
+        AgentResponse::ActionPrediction {
+            prediction: Some(_)
+        }
+    ));
 }
 
 #[tokio::test]
@@ -947,11 +1002,20 @@ async fn a_fallback_manifest_is_fetched_from_the_remote_when_absent_locally() {
         move || vec![previous.clone()]
     };
     agent.register_task_fallbacks(&current, fallbacks).unwrap();
-    agent.begin_task(&current).await.unwrap();
+    let run = agent.begin_task(&current).await.unwrap();
     assert_eq!(agent.stats().predictions_loaded, 1);
-    let adopted = agent.load_task_manifest(&current).unwrap().unwrap();
-    assert_eq!(adopted.task, current);
-    assert_eq!(adopted.predictions, remote_manifest.predictions);
+    assert!(agent.load_task_manifest(&current).unwrap().is_none());
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::FindActionPrediction {
+                task: run,
+                invocation: CacheDigest::blake3(b"remote"),
+            })
+            .await,
+        AgentResponse::ActionPrediction {
+            prediction: Some(_)
+        }
+    ));
     missing.assert_async().await;
     found.assert_async().await;
 }
