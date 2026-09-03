@@ -614,17 +614,36 @@ fn materialized_outputs_are_independent_from_the_cas() {
 
 #[test]
 fn only_compiler_input_mutations_invalidate_local_outputs() {
-    let changed = eyre::Report::new(BypassReason::InputChanged("src/lib.rs".into()))
-        .wrap_err("publication failed");
+    let path = PathBuf::from("src/lib.rs");
+    let identity = FileIdentity {
+        path: path.clone(),
+        len: 6,
+        modified: SystemTime::UNIX_EPOCH,
+        changed: Some((1, 2)),
+    };
+    let identities = Ok(BTreeMap::from([(path.clone(), identity)]));
+    let changed =
+        eyre::Report::new(BypassReason::InputChanged(path.clone())).wrap_err("publication failed");
+    let overlapping = eyre::Report::new(BypassReason::InputModifiedDuringCompilation(path));
+
+    assert!(compiler_input_was_modified(&changed, &identities));
+    assert!(compiler_input_was_modified(&overlapping, &identities));
+    assert!(!compiler_input_was_modified(
+        &eyre::eyre!("the cache is unavailable"),
+        &identities
+    ));
+}
+
+#[test]
+fn timestamp_only_input_overlap_does_not_invalidate_local_outputs() {
     let overlapping = eyre::Report::new(BypassReason::InputModifiedDuringCompilation(
-        "src/lib.rs".into(),
+        "src/module.rs".into(),
     ));
 
-    assert!(compiler_input_was_modified(&changed));
-    assert!(compiler_input_was_modified(&overlapping));
-    assert!(!compiler_input_was_modified(&eyre::eyre!(
-        "the cache is unavailable"
-    )));
+    assert!(!compiler_input_was_modified(
+        &overlapping,
+        &Ok(BTreeMap::new())
+    ));
 }
 
 #[test]

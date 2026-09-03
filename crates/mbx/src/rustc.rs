@@ -474,7 +474,6 @@ pub(crate) fn compile(
     } else {
         "unconsulted"
     };
-    let _ = replay_output(&output);
     if let Some(cached) = verification {
         session::record_compiler_invocation_with_diagnostic(
             recorded_outcome,
@@ -492,7 +491,8 @@ pub(crate) fn compile(
                 &input_identities,
             )
         {
-            if discard_modified_compiler_result(&outputs, &error) {
+            if discard_modified_compiler_result(&outputs, &input_identities, &error) {
+                let _ = replay_bytes(&[], &output.stderr);
                 return Ok(ExitCode::FAILURE);
             }
             eprintln!("mbx[warning]: verification inputs were not validated: {error:#}");
@@ -504,6 +504,7 @@ pub(crate) fn compile(
                 "mbx[warning]: shadow verification diverged from cached output: {divergence}"
             );
         }
+        let _ = replay_output(&output);
         return Ok(exit_code(output.status));
     }
     let mut compiler_input_invalid = false;
@@ -592,7 +593,7 @@ pub(crate) fn compile(
             };
         match publication {
             Ok(diagnostic) => current_diagnostic = diagnostic,
-            Err(error) if discard_modified_compiler_result(&outputs, &error) => {
+            Err(error) if discard_modified_compiler_result(&outputs, &input_identities, &error) => {
                 compiler_input_invalid = true;
             }
             Err(error) => eprintln!("mbx[warning]: result was not stored: {error:#}"),
@@ -605,8 +606,15 @@ pub(crate) fn compile(
         current_diagnostic,
     );
     if compiler_input_invalid {
+        // Keep rustc's diagnostics, but do not forward stdout notifications
+        // for an artifact that was just rejected. Cargo pipelines dependents
+        // as soon as it observes those notifications.
+        let _ = replay_bytes(&[], &output.stderr);
         Ok(ExitCode::FAILURE)
     } else {
+        // Publication validates the inputs and keeps invalid metadata out of
+        // Cargo's hands. Only advertise rustc's result after that completes.
+        let _ = replay_output(&output);
         Ok(exit_code(output.status))
     }
 }
@@ -614,18 +622,32 @@ pub(crate) fn compile(
 /// Whether publication failed because the compiler's inputs moved underneath it.
 ///
 /// Other publication failures only prevent caching: rustc's local result is
-/// still valid and Cargo can use it. These two failures instead mean the
-/// artifact cannot be trusted, regardless of whether it was ever published.
-fn compiler_input_was_modified(error: &eyre::Report) -> bool {
-    matches!(
-        error.downcast_ref::<BypassReason>(),
-        Some(BypassReason::InputModifiedDuringCompilation(_) | BypassReason::InputChanged(_))
-    )
+/// still valid and Cargo can use it. A content change or an overlap proved by
+/// a pre-compilation file identity instead means the artifact cannot be
+/// trusted. A timestamp-only overlap remains a conservative cache bypass: it
+/// is not reliable enough across skewed filesystem clocks to fail the build.
+fn compiler_input_was_modified(
+    error: &eyre::Report,
+    input_identities: &std::io::Result<BTreeMap<PathBuf, FileIdentity>>,
+) -> bool {
+    match error.downcast_ref::<BypassReason>() {
+        Some(BypassReason::InputChanged(_)) => true,
+        Some(BypassReason::InputModifiedDuringCompilation(path)) => input_identities
+            .as_ref()
+            .ok()
+            .and_then(|identities| identities.get(path))
+            .is_some_and(|identity| identity.changed.is_some()),
+        _ => false,
+    }
 }
 
 /// Reject and remove a successful compiler result whose inputs changed while it ran.
-fn discard_modified_compiler_result(outputs: &RustcOutputs, error: &eyre::Report) -> bool {
-    if !compiler_input_was_modified(error) {
+fn discard_modified_compiler_result(
+    outputs: &RustcOutputs,
+    input_identities: &std::io::Result<BTreeMap<PathBuf, FileIdentity>>,
+    error: &eyre::Report,
+) -> bool {
+    if !compiler_input_was_modified(error, input_identities) {
         return false;
     }
     if let Err(discard_error) = discard_compiler_outputs(outputs) {
@@ -710,7 +732,6 @@ fn compile_execution_only_build_script(
         Some(invocation.crate_name()),
         started.elapsed().as_nanos().try_into().unwrap_or(u64::MAX),
     );
-    let _ = replay_output(&output);
     if output.status.success()
         && let Err(error) = validate_compiler_inputs(
             invocation,
@@ -721,7 +742,8 @@ fn compile_execution_only_build_script(
             &input_identities,
         )
     {
-        if discard_modified_compiler_result(outputs, &error) {
+        if discard_modified_compiler_result(outputs, &input_identities, &error) {
+            let _ = replay_bytes(&[], &output.stderr);
             return Ok(ExitCode::FAILURE);
         }
         eprintln!("mbx[warning]: build-script inputs were not validated: {error:#}");
@@ -781,6 +803,7 @@ fn compile_execution_only_build_script(
             ));
         }
     }
+    let _ = replay_output(&output);
     Ok(exit_code(output.status))
 }
 
