@@ -35,8 +35,7 @@ steps:
 ```
 
 The action assigns `MBX_CACHE_EXPORT_GROUP` for the job itself, so a workflow
-does not configure the export. The `max-size` input is deprecated and closure
-bundle exports ignore it. Change `cache-generation` when a cache format or
+does not configure the export. Change `cache-generation` when a cache format or
 policy change should start fresh:
 
 ```yaml
