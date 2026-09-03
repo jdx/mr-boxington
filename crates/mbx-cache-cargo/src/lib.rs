@@ -134,6 +134,16 @@ pub fn previous_build_identities(workspace_root: &Path) -> Vec<String> {
     let Ok(lock) = std::fs::read(workspace_root.join("Cargo.lock")) else {
         return Vec::new();
     };
+    // History belongs to the tracked file. A lockfile Cargo generated after a
+    // tracked one was deleted has none, whatever the deleted one's was.
+    if git_output(
+        workspace_root,
+        &["ls-files", "--error-unmatch", "--", "Cargo.lock"],
+    )
+    .is_none()
+    {
+        return Vec::new();
+    }
     let limit = PREVIOUS_LOCKFILE_STATES.to_string();
     let Some(revisions) = git_output(
         workspace_root,
@@ -178,6 +188,8 @@ pub fn previous_build_identities(workspace_root: &Path) -> Vec<String> {
 /// records the newest state.
 const PREVIOUS_LOCKFILE_STATES: usize = 8;
 
+/// Git's standard output for a command run in `workspace_root`, or nothing
+/// when Git is absent or the command fails.
 fn git_output(workspace_root: &Path, arguments: &[&str]) -> Option<Vec<u8>> {
     let output = Command::new("git")
         .arg("-C")
@@ -190,6 +202,7 @@ fn git_output(workspace_root: &Path, arguments: &[&str]) -> Option<Vec<u8>> {
     output.status.success().then_some(output.stdout)
 }
 
+/// The manifest identity for one workspace marker on this platform.
 fn identity_for_workspace(workspace: &str) -> String {
     let bytes = canonical_json(&ActionIdentity {
         version: 3,
@@ -624,6 +637,21 @@ mod tests {
             previous_build_identities(&shallow),
             vec![committed[2].clone()]
         );
+    }
+
+    #[test]
+    fn an_untracked_lockfile_has_no_history_to_borrow_from() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-q"]);
+        std::fs::write(root.join("Cargo.lock"), "tracked").unwrap();
+        git(root, &["add", "Cargo.lock"]);
+        git(root, &["commit", "-q", "-m", "tracked"]);
+        git(root, &["rm", "-q", "Cargo.lock"]);
+        git(root, &["commit", "-q", "-m", "removed"]);
+        // Cargo generated a replacement nobody tracks.
+        std::fs::write(root.join("Cargo.lock"), "generated").unwrap();
+        assert!(previous_build_identities(root).is_empty());
     }
 
     #[test]

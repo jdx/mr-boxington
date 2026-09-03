@@ -865,14 +865,20 @@ async fn a_task_without_a_manifest_inherits_the_first_fallback_that_has_one() {
         }
     ));
 
-    // Nothing is written under the current identity until the build records
-    // what it used, and the source is left as it was.
-    assert!(agent.load_task_manifest(&current).unwrap().is_none());
+    // Adopted under the current identity as a whole, and the source is left
+    // as it was.
+    let adopted = agent.load_task_manifest(&current).unwrap().unwrap();
+    assert_eq!(adopted.task, current);
+    assert_eq!(adopted.predictions.len(), 2);
     assert!(agent.load_task_manifest(&unbuilt).unwrap().is_none());
     assert_eq!(
         agent.load_task_manifest(&previous).unwrap().unwrap().task,
         previous
     );
+
+    // A command that uses only part of it commits the whole: the next
+    // command under this identity, a test run after a build, starts from the
+    // units the first one never compiled rather than from a partial record.
     assert!(matches!(
         agent
             .respond(AgentRequest::RecordActionPrediction {
@@ -883,9 +889,9 @@ async fn a_task_without_a_manifest_inherits_the_first_fallback_that_has_one() {
         AgentResponse::ActionPredictionRecorded
     ));
     agent.commit_task(&run).await.unwrap();
-    let recorded = agent.load_task_manifest(&current).unwrap().unwrap();
-    assert_eq!(recorded.task, current);
-    assert_eq!(recorded.predictions, seeded_predictions(&["first"]));
+    let later = CacheAgent::new(&cache, "test-version");
+    later.begin_task(&current).await.unwrap();
+    assert_eq!(later.stats().predictions_loaded, 2);
 }
 
 #[tokio::test]
@@ -895,12 +901,23 @@ async fn the_newest_manifest_in_the_store_is_the_last_resort() {
     let older = "5".repeat(64);
     let newer = "6".repeat(64);
     let current = "7".repeat(64);
+    let huge = "9".repeat(64);
     let seed = CacheAgent::new(&cache, "test-version");
-    for (task, name, age) in [(&older, "old", 120), (&newer, "new", 60)] {
+    // The newest manifest belongs to some other, enormous workspace: adopting
+    // it would leave this one's recordings no room under the limit.
+    let oversized: Vec<String> = (0..=MAX_TASK_ACTION_PREDICTIONS / 2)
+        .map(|index| format!("huge {index}"))
+        .collect();
+    let oversized: Vec<&str> = oversized.iter().map(String::as_str).collect();
+    for (task, names, age) in [
+        (&older, vec!["old"], 120),
+        (&newer, vec!["new"], 60),
+        (&huge, oversized, 30),
+    ] {
         seed.persist_task_manifest(&TaskActionManifest {
             version: TASK_ACTION_MANIFEST_VERSION,
             task: task.clone(),
-            predictions: seeded_predictions(&[name]),
+            predictions: seeded_predictions(&names),
         })
         .unwrap();
         let file = std::fs::File::options()
@@ -1004,7 +1021,9 @@ async fn a_fallback_manifest_is_fetched_from_the_remote_when_absent_locally() {
     agent.register_task_fallbacks(&current, fallbacks).unwrap();
     let run = agent.begin_task(&current).await.unwrap();
     assert_eq!(agent.stats().predictions_loaded, 1);
-    assert!(agent.load_task_manifest(&current).unwrap().is_none());
+    let adopted = agent.load_task_manifest(&current).unwrap().unwrap();
+    assert_eq!(adopted.task, current);
+    assert_eq!(adopted.predictions, remote_manifest.predictions);
     assert!(matches!(
         agent
             .respond(AgentRequest::FindActionPrediction {

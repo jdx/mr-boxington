@@ -76,9 +76,9 @@ eight states back, and failing that the newest records in the store, which on a
 runner that restored a cache bundle are the builds that produced it. A bump
 leaves most of the graph unchanged, and those predictions still hash to results
 the cache holds; the crates the bump touched miss and are recorded afresh.
-Every prediction the build uses is recorded under the new lockfile, so what
-survives is exactly what still matched, and a trusted build publishes that. A
-shallow clone offers only the history it fetched: a pull request checkout with
+The borrowed record is kept under the new lockfile, so the commands that
+follow, tests and lints included, start from it as well, and a trusted build
+publishes it there. A shallow clone offers only the history it fetched: a pull request checkout with
 `fetch-depth: 2` reaches its base branch's lockfile, and a `fetch-depth: 1`
 checkout relies on the store.
 

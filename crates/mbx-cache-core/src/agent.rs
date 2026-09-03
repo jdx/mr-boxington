@@ -112,7 +112,10 @@ pub type TaskFallbacks = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 /// that produced it and no version-control history to name them by, so what
 /// was written last is the best remaining guess at the lockfile before this
 /// one. Each candidate costs one parse, and a manifest from an unrelated
-/// workspace only fails to match.
+/// workspace only fails to match. One is skipped when it fills more than half
+/// the prediction limit: an inherited manifest is kept under the new identity,
+/// and a foreign one that large would leave this workspace's own recordings
+/// no room.
 const NEWEST_MANIFEST_CANDIDATES: usize = 8;
 
 /// Remote action-cache access owned by one task session.
@@ -658,10 +661,10 @@ impl CacheAgent {
     /// The identities are produced on demand rather than taken up front,
     /// because finding them can cost a few version-control commands and most
     /// builds never need them. The first manifest found, locally and then on
-    /// the remote, becomes the task's baseline for this session; when none of
-    /// the named identities has one, the store's newest manifests are tried.
-    /// Nothing is written under the task's identity until the build records
-    /// what it used, so a stale inheritance is never carried forward.
+    /// the remote, is adopted under the task's own identity, so the commands
+    /// that follow, tests and lints included, start from it too, and a trusted
+    /// build publishes it there. When none of the named identities has one,
+    /// the store's newest manifests are tried.
     pub fn register_task_fallbacks(
         &self,
         task: &str,
@@ -816,9 +819,9 @@ impl CacheAgent {
     ///
     /// The named identities are tried in the order given, each in the local
     /// store and then on the remote, and then the store's newest manifests,
-    /// locally only. The first one found is returned under `task`'s name but
-    /// not written there: the build records every prediction it uses, so its
-    /// commit leaves exactly the inherited entries that still matched.
+    /// locally only. The first one found is persisted under `task` so the
+    /// next command sees a complete baseline rather than only what this one
+    /// recorded, and a later session finds it without asking again.
     async fn inherit_task_manifest(
         &self,
         task: &str,
@@ -835,12 +838,12 @@ impl CacheAgent {
                 .into_iter()
                 .map(|identity| (identity, false)),
         );
-        for (identity, remote) in candidates {
+        for (identity, named) in candidates {
             if !tried.insert(identity.clone()) || validate_task_identity(&identity).is_err() {
                 continue;
             }
             let mut found = self.load_task_manifest(&identity)?;
-            if found.is_none() && remote && self.remote_mode.reads() {
+            if found.is_none() && named && self.remote_mode.reads() {
                 found = match self.get_remote_task_manifest(&identity).await {
                     Ok(manifest) => manifest.map(|(manifest, _)| manifest),
                     Err(error) => {
@@ -858,7 +861,9 @@ impl CacheAgent {
             let Some(mut manifest) = found else {
                 continue;
             };
-            if manifest.predictions.is_empty() {
+            if manifest.predictions.is_empty()
+                || (!named && manifest.predictions.len() > MAX_TASK_ACTION_PREDICTIONS / 2)
+            {
                 continue;
             }
             info!(
@@ -867,12 +872,15 @@ impl CacheAgent {
             );
             manifest.task = task.to_string();
             validate_task_manifest(&manifest, task)?;
+            let _write_guard = self.manifest_write_lock.lock().unwrap();
+            let _file_guard = self.lock_task_manifest(task)?;
             // Another process may have recorded this identity while the
             // fallbacks were being found. What it wrote describes this
             // lockfile and wins over an inheritance.
             if let Some(recorded) = self.load_task_manifest(task)? {
                 return Ok(Some(recorded));
             }
+            self.persist_task_manifest(&manifest)?;
             return Ok(Some(manifest));
         }
         Ok(None)
