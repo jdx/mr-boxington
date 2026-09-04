@@ -540,9 +540,10 @@ pub fn import_archive_with_attachments(store: &Path, archive: &Path) -> Result<I
         let source = staging.path().join(relative);
         let digest = addressed_digest(staging.path(), &source, false)
             .ok_or_else(|| eyre::eyre!("invalid cache object path {}", relative.display()))?;
-        // The extracted file belongs to this import. Verify it in staging and
-        // move it into the CAS instead of copying every archive object again.
-        cas.adopt_file(&digest, &source)?;
+        // `strict_closure` verified every path in `objects` against its
+        // content-addressed name. Preserve that proof and move the owned
+        // staging file instead of hashing or copying the bytes again.
+        cas.adopt_verified_file(&digest, &source)?;
     }
     let action_cache = mbx_cache_core::LocalActionCache::new(store);
     for path in &result_paths {
