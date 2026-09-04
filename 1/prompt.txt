@@ -1,0 +1,5 @@
+contention regressed here: [https://mr-boxington.jdx.dev/benchmarks](https://mr-boxington.jdx.dev/benchmarks) look at the most recent commit, why, and can we fix it? if so, make a pr to improve perf
+
+---
+
+ok let's switch back to those big honkin namespace runners, it's more representative of local dev
