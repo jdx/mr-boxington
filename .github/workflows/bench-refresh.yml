@@ -361,7 +361,7 @@ jobs:
           cache-all-crates: "true"
           cache-workspace-crates: "true"
       - if: matrix.tool == 'mbx-target'
-        uses: jdx/mr-boxington-action@26cb5bf381649eef9804789ae02db36936691f95
+        uses: jdx/mr-boxington-action@ebeea1baba61984aed315d35e376831b76fc5eef
         with:
           backend: github
           cache-links: "false"
@@ -458,7 +458,7 @@ jobs:
         id: mbx_timer
         run: echo "started_ns=$(date +%s%N)" >> "$GITHUB_OUTPUT"
       - id: mbx_restore
-        uses: jdx/mr-boxington-action@26cb5bf381649eef9804789ae02db36936691f95
+        uses: jdx/mr-boxington-action@ebeea1baba61984aed315d35e376831b76fc5eef
         with:
           backend: github
           cache-links: "false"
