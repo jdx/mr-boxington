@@ -105,17 +105,16 @@ manifest readable but not updatable.
 
 ## Rust API compatibility
 
-Published Rust APIs follow semantic versioning independently of the wire
-protocols. Pull requests that touch workspace crates run `cargo-semver-checks`
-against the pull request's base commit with all features enabled. Wire format
-changes still require the protocol-version steps above.
+Published Rust APIs are versioned independently of the wire protocols. The
+subcrates remain on `0.x`, so their APIs may change in a minor release and CI
+does not currently enforce API compatibility. Wire format changes still require
+the protocol-version steps above.
 
 A breaking API change is declared, not numbered by hand: the commit carries
 `feat!:` or a `BREAKING CHANGE:` footer, and release-plz prices it into the
 version when it opens the release PR.
 [RELEASING.md](https://github.com/jdx/mr-boxington/blob/main/RELEASING.md)
-covers what that means for contributors, including why an intended break
-leaves the semver check red until the release PR exists.
+covers what that means for contributors.
 
 The published crates do not all share a version, because they do not promise
 the same things:

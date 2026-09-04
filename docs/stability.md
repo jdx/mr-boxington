@@ -37,8 +37,8 @@ retires a setting fails instead of ignoring what you wrote.
 The local shim/agent protocol requires exact protocol and application-version
 equality. Embedders can connect to it, but must upgrade their client alongside
 mbx when that exact-match version changes. The remote cache protocol is
-versioned under `/v1/` with explicit evolution rules, and published Rust crates
-follow semantic versioning enforced by `cargo-semver-checks` in CI. See
+versioned under `/v1/` with explicit evolution rules. Published Rust subcrates
+remain on `0.x`, so their APIs may change in a minor release. See
 [protocol compatibility](/protocol-compatibility) for the details.
 
 `mbx-cache-cargo`, `mbx-cache-store`, `mbx-cache-core`, `mbx-cache-rustc`, and

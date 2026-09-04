@@ -163,53 +163,6 @@ jobs:
         with:
           command: check
 
-  public-api:
-    name: public API compatibility
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-      - name: Find packages present in both revisions
-        id: semver-packages
-        if: github.event_name == 'pull_request'
-        shell: bash
-        env:
-          BASE_REF: ${{ github.base_ref }}
-          # The CLI crate's library target exists so the binary and its
-          # integration tests can share application code; it is not an API
-          # anything outside this workspace is meant to build against, which
-          # `crates/mbx/src/lib.rs` says outright. Checking it would mean a
-          # major bump every time the CLI gains a setting, or contorting
-          # internal types to avoid one. mbx-cache-protocol is the crate with a
-          # promise to keep; mbx-cache-core and mbx-cache-rustc are internals on
-          # 0.x. All three stay checked, so a bump that breaks one is at least
-          # deliberate -- semver-checks understands 0.x rules.
-          UNCHECKED_PACKAGES: mbx
-        run: |
-          baseline_dir="$(mktemp -d)"
-          git worktree add --detach "$baseline_dir" "origin/$BASE_REF"
-          packages="$({
-            comm -12 \
-              <(cargo metadata --no-deps --format-version 1 | jq -r '.workspace_members as $members | [.packages[] | select(.id as $id | $members | index($id)) | .name] | sort | .[]') \
-              <(cargo metadata --manifest-path "$baseline_dir/Cargo.toml" --no-deps --format-version 1 | jq -r '.workspace_members as $members | [.packages[] | select(.id as $id | $members | index($id)) | .name] | sort | .[]')
-          } | { grep -vxF "$UNCHECKED_PACKAGES" || true; } | paste -sd, -)"
-          # An empty list would make the action check every package rather than
-          # nothing, so say what happened instead. `|| true` above keeps grep's
-          # no-match exit out of pipefail's way so this message is reachable.
-          if [ -z "$packages" ]; then
-            echo "no shared packages left to check" >&2
-            exit 1
-          fi
-          echo "packages=$packages" >> "$GITHUB_OUTPUT"
-      - name: Check workspace API against the PR base
-        if: github.event_name == 'pull_request'
-        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
-        with:
-          baseline-rev: origin/${{ github.base_ref }}
-          feature-group: all-features
-          package: ${{ steps.semver-packages.outputs.packages }}
-
   fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: 15

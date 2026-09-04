@@ -59,23 +59,11 @@ so semver itself says a minor bump may break them. `mbx-cache-cargo` and
 
 Nobody edits a version in a feature pull request. release-plz owns every
 number, and one written by hand either collides with its calculation or is
-overwritten by it. A failing `cargo semver-checks` reports what a change would
-require; it is not a request for a bump. Either the break is unintended, and
-the API is what to fix, or it is intended, and the pull request should say so
+overwritten by it. If an API break is intended, the pull request should say so
 and leave the version alone.
 
 An intended break is declared on the commit — `feat!:`, or a `BREAKING
-CHANGE:` footer — and leaves the `public API compatibility` check red, because
-the version it compares against cannot move until the release PR exists. That
-red check is the expected state of an honest breaking change, not a problem to
-solve inside the pull request.
-
-Read that job's output as a list of what broke, not as an instruction. Its
-summary says "semver requires new major version" whatever the crate's
-position, so for the crates on `0.x` it names a bump Cargo does not want —
-there, a break is a minor. The lint names above the summary are the useful
-part: they say which items changed shape, which is what a reviewer needs to
-judge whether the break was intended.
+CHANGE:` footer — so release-plz can choose the appropriate next version.
 
 release-plz computes each line from the commits that touched it and updates the
 path dependencies' version requirements, so a release can move one crate and
