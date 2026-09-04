@@ -17,6 +17,11 @@ on:
         required: false
         type: string
         default: ""
+      small_edit_mbx_version:
+        description: mbx release to use for the small-edit comparison
+        required: false
+        type: string
+        default: "1.7.0"
 
 permissions: {}
 
@@ -373,7 +378,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mr-boxington-action@adc5c234c02592f7edd008bf81d5bc0e9584dc03 # v1
         with:
-          version: 1.6.0
+          version: ${{ inputs.small_edit_mbx_version || '1.7.0' }}
           cache-key: hk-small-edit-mbx-${{ github.run_id }}-parent
           save-on-workflow-dispatch: "true"
           toolchain: 1.97.1
@@ -407,7 +412,7 @@ jobs:
         run: echo "EDIT_STARTED_NS=$(date +%s%N)" >> "$GITHUB_ENV"
       - uses: jdx/mr-boxington-action@adc5c234c02592f7edd008bf81d5bc0e9584dc03 # v1
         with:
-          version: 1.6.0
+          version: ${{ inputs.small_edit_mbx_version || '1.7.0' }}
           cache-key: hk-small-edit-mbx-${{ github.run_id }}-child
           restore-keys: hk-small-edit-mbx-${{ inputs.small_edit_cache_run_id || github.run_id }}-parent
           toolchain: 1.97.1
@@ -426,9 +431,10 @@ jobs:
         run: |
           mkdir -p target/small-edit
           jq -n --arg tool mbx \
+            --arg version "${{ inputs.small_edit_mbx_version || '1.7.0' }}" \
             --argjson build_duration_ns "$BUILD_DURATION_NS" \
             --argjson restore_and_build_duration_ns "$TOTAL_DURATION_NS" \
-            '{tool:$tool, build_duration_ns:$build_duration_ns, restore_and_build_duration_ns:$restore_and_build_duration_ns}' \
+            '{tool:$tool, version:$version, build_duration_ns:$build_duration_ns, restore_and_build_duration_ns:$restore_and_build_duration_ns}' \
             > target/small-edit/mbx.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -467,7 +473,7 @@ jobs:
       - uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa
         with:
           backend: local
-          version: 1.6.0
+          version: ${{ inputs.small_edit_mbx_version || '1.7.0' }}
           toolchain: 1.97.1
       - working-directory: subject
         run: mbx build --locked
@@ -517,7 +523,7 @@ jobs:
       - uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa
         with:
           backend: local
-          version: 1.6.0
+          version: ${{ inputs.small_edit_mbx_version || '1.7.0' }}
           toolchain: 1.97.1
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -543,9 +549,10 @@ jobs:
         run: |
           mkdir -p target/small-edit
           jq -n --arg tool mbx-direct-hydrated \
+            --arg version "${{ inputs.small_edit_mbx_version || '1.7.0' }}" \
             --argjson build_duration_ns "$BUILD_DURATION_NS" \
             --argjson restore_and_build_duration_ns "$TOTAL_DURATION_NS" \
-            '{tool:$tool, build_duration_ns:$build_duration_ns, restore_and_build_duration_ns:$restore_and_build_duration_ns}' \
+            '{tool:$tool, version:$version, build_duration_ns:$build_duration_ns, restore_and_build_duration_ns:$restore_and_build_duration_ns}' \
             > target/small-edit/mbx-direct-hydrated.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
