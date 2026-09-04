@@ -30,7 +30,8 @@ const CHECKOUT_RECORD_VERSION: u8 = 1;
 const BUILD_RECEIPTS_DIR: &str = "build-receipts/v1";
 const BUILD_RECEIPT_VERSION: u8 = 1;
 const EXPORT_MANIFEST: &str = "mbx-cache-export-v1.json";
-const EXPORT_VERSION: u8 = 1;
+const EXPORT_VERSION: u8 = 2;
+const LEGACY_EXPORT_VERSION: u8 = 1;
 
 const SESSION_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const MAX_SESSIONS: usize = 256;
@@ -111,6 +112,23 @@ pub struct TransferOutcome {
     pub actions: u64,
     pub objects: u64,
     pub bytes: u64,
+    pub attachments: BTreeMap<String, CacheDigest>,
+}
+
+/// Extra CAS roots carried by a cache export for a higher-level transport.
+#[derive(Debug, Default)]
+pub struct ExportAdditions {
+    /// Stable names by which the importer can discover selected objects.
+    pub attachments: BTreeMap<String, CacheDigest>,
+    /// Every object the attachments reach, including the named objects.
+    pub objects: BTreeSet<CacheDigest>,
+}
+
+/// One Cargo workspace and the target directory recorded for its build.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WorkspaceTarget {
+    pub workspace_root: PathBuf,
+    pub target_dir: PathBuf,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -119,6 +137,10 @@ struct ExportManifest {
     version: u8,
     tasks: Vec<TaskActionManifest>,
     actions: Vec<CacheDigest>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    attachments: BTreeMap<String, CacheDigest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    objects: Vec<CacheDigest>,
 }
 
 /// The exact cache predictions completed by one top-level build command.
@@ -242,11 +264,81 @@ pub fn export_checkout(
                 workspace_root.display()
             )
         })?;
-    export_receipts(store, vec![receipt], archive)
+    export_receipts(store, vec![receipt], archive, ExportAdditions::default())
+}
+
+/// Return the target directory recorded for this checkout's latest build.
+pub fn checkout_workspace_target(
+    store: &Path,
+    workspace_root: &Path,
+) -> Result<Option<WorkspaceTarget>> {
+    let Some(receipt) = read_build_receipt(&latest_receipt_path(store, workspace_root))
+        .filter(|receipt| receipt.workspace_root == workspace_root)
+    else {
+        return Ok(None);
+    };
+    Ok(workspace_target_for_receipt(store, &receipt))
+}
+
+/// Return every Cargo target represented by the pending receipts in a group.
+pub fn group_workspace_targets(store: &Path, group: &str) -> Result<Vec<WorkspaceTarget>> {
+    validate_export_group(group)?;
+    let root = store
+        .join(BUILD_RECEIPTS_DIR)
+        .join("groups")
+        .join(group_key(group));
+    let targets = walk_files(&root)?
+        .into_iter()
+        .filter_map(|entry| read_build_receipt(&entry.path))
+        .filter(|receipt| receipt.group.as_deref() == Some(group))
+        .filter_map(|receipt| workspace_target_for_receipt(store, &receipt))
+        .collect::<BTreeSet<_>>();
+    Ok(targets.into_iter().collect())
+}
+
+fn workspace_target_for_receipt(store: &Path, receipt: &BuildReceipt) -> Option<WorkspaceTarget> {
+    let record = read_checkout_record(&checkout_record_path(
+        store,
+        &receipt.identity,
+        &receipt.workspace_root,
+    ))?;
+    (record.workspace_root == receipt.workspace_root && record.target_dir != record.workspace_root)
+        .then_some(WorkspaceTarget {
+            workspace_root: record.workspace_root,
+            target_dir: record.target_dir,
+        })
+}
+
+/// Export one checkout's closure together with higher-level CAS attachments.
+pub fn export_checkout_with(
+    store: &Path,
+    workspace_root: &Path,
+    archive: &Path,
+    additions: ExportAdditions,
+) -> Result<TransferOutcome> {
+    let receipt = read_build_receipt(&latest_receipt_path(store, workspace_root))
+        .filter(|receipt| receipt.workspace_root == workspace_root)
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "no completed mbx build is recorded for {}",
+                workspace_root.display()
+            )
+        })?;
+    export_receipts(store, vec![receipt], archive, additions)
 }
 
 /// Export the union of every completed build recorded under one CI group.
 pub fn export_group(store: &Path, group: &str, archive: &Path) -> Result<TransferOutcome> {
+    export_group_with(store, group, archive, ExportAdditions::default())
+}
+
+/// Export a grouped closure together with higher-level CAS attachments.
+pub fn export_group_with(
+    store: &Path,
+    group: &str,
+    archive: &Path,
+    additions: ExportAdditions,
+) -> Result<TransferOutcome> {
     validate_export_group(group)?;
     let root = store
         .join(BUILD_RECEIPTS_DIR)
@@ -267,6 +359,7 @@ pub fn export_group(store: &Path, group: &str, archive: &Path) -> Result<Transfe
             .map(|(_, receipt)| receipt.clone())
             .collect(),
         archive,
+        additions,
     )?;
     // A receipt is a pending-export root. Retire only the files this export
     // consumed, and only after its complete archive has been published. A
@@ -283,6 +376,7 @@ fn export_receipts(
     store: &Path,
     mut receipts: Vec<BuildReceipt>,
     archive: &Path,
+    additions: ExportAdditions,
 ) -> Result<TransferOutcome> {
     receipts.sort_by_key(|receipt| receipt.completed_nanos);
     let mut actions = BTreeSet::new();
@@ -307,7 +401,12 @@ fn export_receipts(
         );
     }
     let tasks = tasks.into_values().collect::<Vec<_>>();
-    let (objects, result_paths) = strict_closure(store, &actions)?;
+    validate_export_additions(&additions)?;
+    let (mut objects, result_paths) = strict_closure(store, &actions)?;
+    let cas = LocalCas::new(store);
+    for digest in &additions.objects {
+        require_object(&cas, &mut objects, digest)?;
+    }
     let parent = archive
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -321,9 +420,15 @@ fn export_receipts(
         &mut builder,
         Path::new(EXPORT_MANIFEST),
         &serde_json::to_vec(&ExportManifest {
-            version: EXPORT_VERSION,
+            version: if additions.attachments.is_empty() && additions.objects.is_empty() {
+                LEGACY_EXPORT_VERSION
+            } else {
+                EXPORT_VERSION
+            },
             tasks,
             actions: actions.iter().cloned().collect(),
+            attachments: additions.attachments.clone(),
+            objects: additions.objects.iter().cloned().collect(),
         })?,
     )?;
     for path in objects.iter().chain(result_paths.iter()) {
@@ -340,6 +445,7 @@ fn export_receipts(
         actions: actions.len() as u64,
         objects: objects.len() as u64,
         bytes,
+        attachments: additions.attachments,
     })
 }
 
@@ -376,7 +482,9 @@ pub fn import_archive(store: &Path, archive: &Path) -> Result<TransferOutcome> {
         .iter()
         .map(|task| task.task.as_str())
         .collect::<BTreeSet<_>>();
-    if manifest.version != EXPORT_VERSION
+    if !matches!(manifest.version, LEGACY_EXPORT_VERSION | EXPORT_VERSION)
+        || (manifest.version == LEGACY_EXPORT_VERSION
+            && (!manifest.attachments.is_empty() || !manifest.objects.is_empty()))
         || manifest.tasks.is_empty()
         || actions.len() != manifest.actions.len()
         || task_identities.len() != manifest.tasks.len()
@@ -390,11 +498,30 @@ pub fn import_archive(store: &Path, archive: &Path) -> Result<TransferOutcome> {
                 .iter()
                 .any(|prediction| !actions.contains(&prediction.action))
         })
+        || manifest
+            .attachments
+            .keys()
+            .any(|name| !valid_attachment_name(name))
+        || manifest.attachments.values().any(|digest| {
+            digest.algorithm != "blake3"
+                || digest.validate().is_err()
+                || !manifest.objects.contains(digest)
+        })
+        || manifest.objects.iter().collect::<BTreeSet<_>>().len() != manifest.objects.len()
+        || manifest
+            .objects
+            .iter()
+            .any(|digest| digest.algorithm != "blake3" || digest.validate().is_err())
     {
         eyre::bail!("unsupported or invalid cache export manifest");
     }
-    let (objects, result_paths) = strict_closure(staging.path(), &actions)
+    let (mut objects, result_paths) = strict_closure(staging.path(), &actions)
         .wrap_err("cache export is incomplete or corrupt")?;
+    let staged_cas = LocalCas::new(staging.path());
+    for digest in &manifest.objects {
+        require_object(&staged_cas, &mut objects, digest)
+            .wrap_err("cache export attachment is incomplete or corrupt")?;
+    }
 
     let cas = LocalCas::new(store);
     for path in &objects {
@@ -416,7 +543,35 @@ pub fn import_archive(store: &Path, archive: &Path) -> Result<TransferOutcome> {
         actions: actions.len() as u64,
         objects: objects.len() as u64,
         bytes: std::fs::metadata(archive)?.len(),
+        attachments: manifest.attachments,
     })
+}
+
+fn validate_export_additions(additions: &ExportAdditions) -> Result<()> {
+    if additions
+        .attachments
+        .keys()
+        .any(|name| !valid_attachment_name(name))
+        || additions
+            .attachments
+            .values()
+            .any(|digest| !additions.objects.contains(digest))
+        || additions
+            .objects
+            .iter()
+            .any(|digest| digest.algorithm != "blake3" || digest.validate().is_err())
+    {
+        eyre::bail!("invalid cache export attachment");
+    }
+    Ok(())
+}
+
+fn valid_attachment_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn strict_closure(

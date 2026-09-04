@@ -56,3 +56,4 @@ mod materialize;
 mod rustc;
 mod rustdoc;
 mod scheduler;
+mod workspace_state;

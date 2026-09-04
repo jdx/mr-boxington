@@ -1,7 +1,7 @@
 use super::cargo::{absolute, cargo_roots};
 use super::exec::discover_project_root;
 use crate::config::Config;
-use crate::{store, target};
+use crate::{store, target, workspace_state};
 use bytesize::ByteSize;
 use eyre::Result;
 use std::path::{Path, PathBuf};
@@ -105,9 +105,17 @@ pub(super) fn cache_export(config: &Config, archive: &Path, group: Option<&str>)
     let workspace = cargo_roots(&cargo, &[], None)
         .map(|roots| roots.workspace_root)
         .unwrap_or_else(|| discover_project_root(&working_dir));
+    let store_dir = config.store_dir();
+    let targets = match group {
+        Some(group) => store::group_workspace_targets(&store_dir, group)?,
+        None => store::checkout_workspace_target(&store_dir, &workspace)?
+            .into_iter()
+            .collect(),
+    };
+    let additions = workspace_state::capture(&store_dir, &targets)?;
     let outcome = match group {
-        Some(group) => store::export_group(&config.store_dir(), group, archive)?,
-        None => store::export_checkout(&config.store_dir(), &workspace, archive)?,
+        Some(group) => store::export_group_with(&store_dir, group, archive, additions)?,
+        None => store::export_checkout_with(&store_dir, &workspace, archive, additions)?,
     };
     let subject = group.map_or_else(
         || workspace.display().to_string(),
@@ -123,7 +131,26 @@ pub(super) fn cache_export(config: &Config, archive: &Path, group: Option<&str>)
 }
 
 pub(super) fn cache_import(config: &Config, archive: &Path) -> Result<()> {
-    let outcome = store::import_archive(&config.store_dir(), archive)?;
+    let store = config.store_dir();
+    let outcome = store::import_archive(&store, archive)?;
+    let restored = if let Some(attachment) = outcome.attachments.get(workspace_state::ATTACHMENT) {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        if let Some(roots) = cargo_roots(&cargo, &[], None) {
+            workspace_state::restore(
+                config,
+                &store,
+                attachment,
+                &roots.workspace_root,
+                &roots.target_dir,
+                roots.target_dir_requested,
+            )?
+        } else {
+            log::debug!("no Cargo workspace was available for workspace-state restore");
+            None
+        }
+    } else {
+        None
+    };
     println!(
         "imported {} actions and {} objects from {} ({})",
         outcome.actions,
@@ -131,6 +158,13 @@ pub(super) fn cache_import(config: &Config, archive: &Path) -> Result<()> {
         archive.display(),
         ByteSize::b(outcome.bytes).display().iec()
     );
+    if let Some(restored) = restored {
+        println!(
+            "restored Cargo workspace state ({} referenced files, {})",
+            restored.files,
+            ByteSize::b(restored.referenced_bytes).display().iec()
+        );
+    }
     Ok(())
 }
 

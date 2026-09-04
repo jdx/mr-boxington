@@ -348,6 +348,78 @@ fn exports_and_imports_the_last_builds_complete_closure() {
     );
 }
 
+#[test]
+fn exports_and_imports_named_attachment_objects() {
+    let source = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let workspace = source.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let action = store_result(source.path(), "compile action", &[]);
+    record_build(source.path(), &"7".repeat(64), &workspace, &[action]);
+    let attachment = store_object(source.path(), b"Cargo scheduler state");
+    let additions = ExportAdditions {
+        attachments: BTreeMap::from([("cargo-state-v1".into(), attachment.clone())]),
+        objects: BTreeSet::from([attachment.clone()]),
+    };
+    let archive = source.path().join("build.tar");
+
+    let exported = export_checkout_with(source.path(), &workspace, &archive, additions).unwrap();
+    let imported = import_archive(destination.path(), &archive).unwrap();
+
+    assert_eq!(
+        exported.attachments.get("cargo-state-v1"),
+        Some(&attachment)
+    );
+    assert_eq!(
+        imported.attachments.get("cargo-state-v1"),
+        Some(&attachment)
+    );
+    assert!(
+        LocalCas::new(destination.path())
+            .find(&attachment)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn reports_the_targets_represented_by_a_group() {
+    let store = tempfile::tempdir().unwrap();
+    let first = store.path().join("first");
+    let second = store.path().join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let action = store_result(store.path(), "compile action", &[]);
+    record_build_in_group(
+        store.path(),
+        &"6".repeat(64),
+        &first,
+        std::slice::from_ref(&action),
+        Some("ci-job"),
+    );
+    record_build_in_group(
+        store.path(),
+        &"5".repeat(64),
+        &second,
+        &[action],
+        Some("ci-job"),
+    );
+
+    assert_eq!(
+        group_workspace_targets(store.path(), "ci-job").unwrap(),
+        vec![
+            WorkspaceTarget {
+                workspace_root: first.clone(),
+                target_dir: first.join("target"),
+            },
+            WorkspaceTarget {
+                workspace_root: second.clone(),
+                target_dir: second.join("target"),
+            },
+        ]
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn imports_sparse_files_emitted_by_the_exporter() {

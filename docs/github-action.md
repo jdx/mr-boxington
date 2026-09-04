@@ -117,6 +117,13 @@ A restore phase imports a previously cached bundle:
 mbx cache import "$RUNNER_TEMP/mbx-cache.tar"
 ```
 
+The bundle also carries Cargo's scheduler state for each recorded workspace.
+When import runs from a matching checkout whose target directory is absent or
+empty, mbx restores the fingerprints, dep-info, build-script state, and target
+layout alongside the action closure. Large compiler outputs remain CAS objects
+and are reflinked or copied into that layout rather than stored twice. Import
+leaves a non-empty target directory untouched.
+
 A post phase exports the deduplicated closure of every receipt in this job:
 
 ```console
