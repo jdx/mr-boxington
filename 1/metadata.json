@@ -1,0 +1,44 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M1PS8A1B0GH5PJ8ZPN26CVYC",
+  "session_id": "01a06d90-ed7f-71a3-af7e-d21be30fc886",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-04T18:00:25.714295Z",
+  "branch": "codex/fix-small-edit-measure-skip",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/bench-refresh.yml"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.6-sol",
+  "turn_id": "82bf4813ec18",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 148068,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 1676416,
+    "output_tokens": 7483,
+    "api_call_count": 22
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-04T18:00:25.669443Z",
+    "agent_lines": 5,
+    "agent_removed": 1,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 5,
+    "total_lines_changed": 6,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}

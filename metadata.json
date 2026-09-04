@@ -3,7 +3,7 @@
   "checkpoint_id": "01M1PS8A1B0GH5PJ8ZPN26CVYC",
   "strategy": "manual-commit",
   "branch": "codex/fix-small-edit-measure-skip",
-  "checkpoints_count": 2,
+  "checkpoints_count": 3,
   "files_touched": [
     ".github/workflows/bench-refresh.yml"
   ],
@@ -14,13 +14,20 @@
       "compact_transcript": "/0/transcript.jsonl",
       "content_hash": "/0/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/1/metadata.json",
+      "transcript": "/1/full.jsonl",
+      "compact_transcript": "/1/transcript.jsonl",
+      "content_hash": "/1/content_hash.txt",
+      "prompt": ""
     }
   ],
   "token_usage": {
-    "input_tokens": 722851,
+    "input_tokens": 870919,
     "cache_creation_tokens": 0,
-    "cache_read_tokens": 79511424,
-    "output_tokens": 104765,
-    "api_call_count": 2143
+    "cache_read_tokens": 81187840,
+    "output_tokens": 112248,
+    "api_call_count": 2165
   }
 }
