@@ -27,6 +27,11 @@ on:
         required: false
         type: string
         default: ""
+      small_edit_mbx_artifact_run:
+        description: Earlier workflow run containing the candidate mbx artifact
+        required: false
+        type: string
+        default: ""
       small_edit_trials:
         description: JSON array of trial numbers (use [1] for a smoke test)
         required: false
@@ -283,7 +288,7 @@ jobs:
 
   small-edit-build-mbx:
     name: Build candidate mbx
-    if: github.event_name == 'workflow_dispatch' && inputs.small_edit && inputs.small_edit_mbx_ref != ''
+    if: github.event_name == 'workflow_dispatch' && inputs.small_edit && inputs.small_edit_mbx_ref != '' && inputs.small_edit_mbx_artifact_run == ''
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -306,6 +311,8 @@ jobs:
         with:
           name: gha-small-edit-mbx-binary
           path: ${{ runner.temp }}/mbx-bin
+          run-id: ${{ inputs.small_edit_mbx_artifact_run || github.run_id }}
+          github-token: ${{ github.token }}
           if-no-files-found: error
           retention-days: 7
 
@@ -341,6 +348,8 @@ jobs:
         with:
           name: gha-small-edit-mbx-binary
           path: ${{ runner.temp }}/mbx-bin
+          run-id: ${{ inputs.small_edit_mbx_artifact_run || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Select candidate mbx
         if: inputs.small_edit_mbx_ref != '' && matrix.tool != 'rust-cache'
         run: |
