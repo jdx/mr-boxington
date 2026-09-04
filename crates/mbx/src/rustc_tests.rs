@@ -620,6 +620,7 @@ fn only_compiler_input_mutations_invalidate_local_outputs() {
         len: 6,
         modified: SystemTime::UNIX_EPOCH,
         changed: Some((1, 2)),
+        object: None,
     };
     let snapshot = FileSnapshot::from(identity);
     let snapshots = Ok(BTreeMap::from([(path.clone(), snapshot)]));

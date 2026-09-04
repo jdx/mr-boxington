@@ -1548,6 +1548,28 @@ pub(crate) fn verify_requested() -> bool {
 struct AgentFileDigestCache;
 
 impl FileDigestCache for AgentFileDigestCache {
+    fn resolve(
+        &self,
+        scope: FileDigestScope,
+        files: &[FileIdentity],
+    ) -> Vec<mbx_cache_core::FileDigestResolution> {
+        if files.is_empty() {
+            return Vec::new();
+        }
+        let response = request_agent(&[AgentRequest::ResolveFileDigests {
+            scope,
+            files: files.to_vec(),
+        }]);
+        match response.map(|responses| responses.into_iter().next()) {
+            Ok(Some(AgentResponse::FileDigestsResolved { resolutions }))
+                if resolutions.len() == files.len() =>
+            {
+                resolutions
+            }
+            _ => vec![mbx_cache_core::FileDigestResolution::Unresolved; files.len()],
+        }
+    }
+
     fn find(&self, scope: FileDigestScope, files: &[FileIdentity]) -> Vec<Option<CacheDigest>> {
         if files.is_empty() {
             return Vec::new();

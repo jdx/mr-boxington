@@ -5,7 +5,8 @@ use crate::{
     MAX_MANIFEST_ENTRIES, MAX_PREDICTED_INPUTS, normalize_components,
 };
 use mbx_cache_core::{
-    CacheDigest, FileDigestCache, FileDigestScope, FileIdentity, FileSnapshot, RecordedFileDigest,
+    CacheDigest, FileDigestCache, FileDigestResolution, FileDigestScope, FileIdentity,
+    FileSnapshot, RecordedFileDigest, digest_file,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -14,9 +15,6 @@ use std::time::SystemTime;
 
 /// Marker distinguishing an include-directory name manifest from a file input.
 pub const INCLUDE_MANIFEST_PREFIX: &str = "@include-manifest:";
-
-/// Macros whose expansion is not a function of the compilation's inputs.
-const TIMESTAMP_MACROS: &[&[u8]] = &[b"__DATE__", b"__TIME__", b"__TIMESTAMP__"];
 
 /// Directives whose operands are consumed by the assembler, after the
 /// compiler has finished producing its dependency list.
@@ -314,31 +312,39 @@ impl CcDiscoveredInputs {
             .iter()
             .filter_map(|(_, identity)| identity.clone())
             .collect::<Vec<_>>();
-        let mut recorded = digests.find(FileDigestScope::CcInput, &queries).into_iter();
+        let mut recorded = digests
+            .resolve(FileDigestScope::CcInput, &queries)
+            .into_iter();
         let mut identities = Vec::with_capacity(inputs.capacity());
         let mut fresh = Vec::new();
         for (path, identity) in identified {
             identities.push(identity.clone());
-            let remembered = identity
+            let resolution = identity
                 .as_ref()
-                .and_then(|_| recorded.next().flatten())
-                .filter(|digest| {
-                    identity
+                .and_then(|_| recorded.next())
+                .unwrap_or(FileDigestResolution::Unresolved);
+            let digest = match resolution {
+                FileDigestResolution::Digest(digest)
+                    if identity
                         .as_ref()
-                        .is_some_and(|identity| identity.len == digest.size)
-                });
-            let digest = match remembered {
-                Some(digest) => digest,
-                None => {
-                    if contains_timestamp_macro(&path)? {
+                        .is_some_and(|identity| identity.len == digest.size) =>
+                {
+                    digest
+                }
+                FileDigestResolution::EmbeddedTimestampMacro => {
+                    return Err(CcBypassReason::EmbeddedTimestampMacro(path));
+                }
+                FileDigestResolution::Digest(_) | FileDigestResolution::Unresolved => {
+                    let resolution =
+                        digest_file(FileDigestScope::CcInput, &path).map_err(|error| {
+                            CcBypassReason::InputRead {
+                                path: path.clone(),
+                                message: error.to_string(),
+                            }
+                        })?;
+                    let FileDigestResolution::Digest(digest) = resolution else {
                         return Err(CcBypassReason::EmbeddedTimestampMacro(path));
-                    }
-                    let digest = CacheDigest::blake3_file(&path).map_err(|error| {
-                        CcBypassReason::InputRead {
-                            path: path.clone(),
-                            message: error.to_string(),
-                        }
-                    })?;
+                    };
                     if let Some(identity) = identity
                         && identity.len == digest.size
                     {
@@ -404,7 +410,12 @@ impl CcDiscoveredInputs {
                         path: input.path.clone(),
                         message: error.to_string(),
                     })?;
-                let identity = FileIdentity::describe(&input.path, &metadata);
+                let identity = FileIdentity::for_digest_cache(&input.path, &metadata)
+                    .map_err(|error| CcBypassReason::InputRead {
+                        path: input.path.clone(),
+                        message: error.to_string(),
+                    })?
+                    .or_else(|| FileIdentity::describe(&input.path, &metadata));
                 if previous.matches(identity.as_ref(), &input.digest) {
                     continue;
                 }
@@ -463,7 +474,7 @@ impl CcDiscoveredInputs {
                 message: error.to_string(),
             };
             if let Some(Some(identity)) = self.identities.get(index)
-                && identity.changed.is_some()
+                && identity.can_skip_content_verification()
                 && identity.still_describes().map_err(read_error)?
             {
                 continue;
@@ -672,48 +683,6 @@ fn include_manifest(directory: &Path, budget: &mut usize) -> Result<CacheDigest,
     Ok(CacheDigest::blake3(names.join("\n").as_bytes()))
 }
 
-/// Whether a file mentions a macro whose expansion is not a function of the
-/// compilation's inputs.
-///
-/// The token is looked for rather than its expansion: a match inside a comment
-/// or a string literal bypasses a compilation that would in fact have been
-/// cacheable, which is the conservative direction.
-fn contains_timestamp_macro(path: &Path) -> Result<bool, CcBypassReason> {
-    let file = std::fs::File::open(path).map_err(|error| CcBypassReason::InputRead {
-        path: path.to_path_buf(),
-        message: error.to_string(),
-    })?;
-    let longest = TIMESTAMP_MACROS
-        .iter()
-        .map(|macro_name| macro_name.len())
-        .max()
-        .unwrap_or_default();
-    let mut reader = std::io::BufReader::new(file);
-    let mut window = Vec::with_capacity(SCAN_CHUNK_BYTES + longest);
-    let mut chunk = vec![0_u8; SCAN_CHUNK_BYTES];
-    loop {
-        let read = reader
-            .read(&mut chunk)
-            .map_err(|error| CcBypassReason::InputRead {
-                path: path.to_path_buf(),
-                message: error.to_string(),
-            })?;
-        if read == 0 {
-            return Ok(false);
-        }
-        window.extend_from_slice(&chunk[..read]);
-        if TIMESTAMP_MACROS
-            .iter()
-            .any(|macro_name| contains_subslice(&window, macro_name))
-        {
-            return Ok(true);
-        }
-        // Keep the tail so a token split across two reads is still found.
-        let keep = window.len().saturating_sub(longest.saturating_sub(1));
-        window.drain(..keep);
-    }
-}
-
 /// Whether a preprocessor input can make the assembler read another file.
 ///
 /// Searching for the directive text, including in comments and inactive
@@ -769,15 +738,6 @@ fn contains_subslice_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> b
             .zip(needle)
             .all(|(left, right)| left.eq_ignore_ascii_case(right))
     })
-}
-
-fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return false;
-    }
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
 }
 
 #[cfg(test)]

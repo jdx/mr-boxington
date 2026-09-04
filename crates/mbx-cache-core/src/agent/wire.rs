@@ -1,11 +1,11 @@
-use super::{FileDigestScope, FileIdentity, RecordedFileDigest};
+use super::{FileDigestResolution, FileDigestScope, FileIdentity, RecordedFileDigest};
 use crate::{ActionPrediction, CacheDigest, RemoteActionResult};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Wire protocol version used between an in-process cache agent and its shims.
-pub const AGENT_PROTOCOL_VERSION: u8 = 6;
+pub const AGENT_PROTOCOL_VERSION: u8 = 7;
 /// Largest single protocol request the agent will read.
 ///
 /// Requests are small JSON objects; the largest legitimate ones carry an output
@@ -169,6 +169,13 @@ pub enum AgentRequest {
         claim: String,
         /// Prediction through which waiters reconstruct the final action key.
         prediction: ActionPrediction,
+    },
+    /// Resolve file digests, coalescing concurrent reads through the agent.
+    ResolveFileDigests {
+        /// What the digest and any accompanying validation may stand in for.
+        scope: FileDigestScope,
+        /// File identities to resolve, preserving request order.
+        files: Vec<FileIdentity>,
     },
 }
 
@@ -368,4 +375,9 @@ pub enum AgentResponse {
     },
     /// A server-wide compilation promise was fulfilled or safely skipped.
     ActionPromiseCompleted,
+    /// Digests and scope-specific validation outcomes for requested files.
+    FileDigestsResolved {
+        /// Resolution outcomes in request order.
+        resolutions: Vec<FileDigestResolution>,
+    },
 }

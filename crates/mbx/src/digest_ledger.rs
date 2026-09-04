@@ -1,8 +1,8 @@
 //! The file-digest ledger a checkout carries from one session to the next.
 //!
 //! Within a session the cache agent remembers the digest of every file a shim
-//! hashed, keyed by the file's identity (length, modification time, and change
-//! time), so a dependency rlib is read once however many crates link it. The
+//! hashed, keyed by the strongest stable identity its filesystem supplies, so
+//! a dependency rlib is read once however many crates link it. The
 //! agent exits with the build, and without this file the next session would
 //! start from nothing: the crate being edited would read every one of its
 //! unchanged dependencies again before it could look anything up, a gigabyte
@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 const LEDGER_FILE: &str = "file-digests.json";
-const LEDGER_VERSION: u8 = 1;
+const LEDGER_VERSION: u8 = 2;
 
 /// Entries kept on disk. Far above what a workspace and its dependency
 /// graph name, and a bound on a checkout that keeps renaming its outputs.
@@ -192,7 +192,7 @@ fn read(path: &Path) -> Option<Ledger> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbx_cache_core::{CacheDigest, FileIdentity};
+    use mbx_cache_core::{CacheDigest, FileIdentity, FileObjectIdentity};
 
     fn record(path: &Path) -> RecordedFileDigest {
         let metadata = std::fs::metadata(path).unwrap();
@@ -269,5 +269,30 @@ mod tests {
         assert!(load(state.path()).is_empty());
         std::fs::write(path(state.path()), br#"{"version":99,"entries":[]}"#).unwrap();
         assert!(load(state.path()).is_empty());
+    }
+
+    #[test]
+    fn an_nfs_object_identity_survives_a_session_boundary() {
+        let state = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let file = files.path().join("libnfs.rlib");
+        std::fs::write(&file, b"nfs dependency").unwrap();
+        let mut record = record(&file);
+        record.file.changed = None;
+        record.file.object = Some(FileObjectIdentity {
+            device_major: 0,
+            device_minor: 51,
+            mount_id: 12,
+            inode: 9001,
+        });
+
+        save(
+            state.path(),
+            vec![(FileDigestScope::Content, record.clone())],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(load(state.path()), vec![(FileDigestScope::Content, record)]);
     }
 }

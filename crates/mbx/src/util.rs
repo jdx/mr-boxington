@@ -10,10 +10,11 @@ use std::time::Duration;
 pub(crate) fn snapshot_compiler_inputs<'a>(
     paths: impl IntoIterator<Item = &'a Path>,
 ) -> std::io::Result<BTreeMap<PathBuf, FileSnapshot>> {
+    let digests = crate::session::file_digest_cache();
     paths
         .into_iter()
         .map(|path| {
-            let snapshot = FileSnapshot::capture(path).map_err(|error| {
+            let snapshot = FileSnapshot::capture_with_cache(path, digests).map_err(|error| {
                 std::io::Error::new(
                     error.kind(),
                     format!(

@@ -1,4 +1,4 @@
-request.hello	{"client_version":"0.3.0","protocol":6,"type":"hello"}
+request.hello	{"client_version":"0.3.0","protocol":7,"type":"hello"}
 request.begin_task	{"task":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","type":"begin_task"}
 request.commit_task	{"run":"task-run","type":"commit_task"}
 request.find_blob	{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"type":"find_blob"}
@@ -20,7 +20,8 @@ request.find_file_digests	{"files":[{"changed":[1700000000,21],"len":7,"modified
 request.record_file_digests	{"entries":[{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"file":{"changed":[1700000000,21],"len":7,"modified":{"nanos_since_epoch":2100,"secs_since_epoch":1700000000},"path":"target/debug/deps/libserde.rlib"}}],"scope":"cc_input","type":"record_file_digests"}
 request.join_action_promise	{"adapter":"rustc","invocation":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"type":"join_action_promise"}
 request.complete_action_promise	{"claim":"claim-1","prediction":{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"adapter":"rustc","invocation":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"payload":"{}"},"type":"complete_action_promise"}
-response.hello	{"agent_version":"0.3.0","protocol":6,"type":"hello"}
+request.resolve_file_digests	{"files":[{"changed":[1700000000,21],"len":7,"modified":{"nanos_since_epoch":2100,"secs_since_epoch":1700000000},"path":"target/debug/deps/libserde.rlib"}],"scope":"content","type":"resolve_file_digests"}
+response.hello	{"agent_version":"0.3.0","protocol":7,"type":"hello"}
 response.task_begun	{"run":"task-run","type":"task_begun"}
 response.task_committed	{"type":"task_committed"}
 response.blob	{"path":"cache/blob","type":"blob"}
@@ -48,6 +49,7 @@ response.action_promise_claimed	{"claim":"claim-1","prediction":null,"type":"act
 response.action_promise_complete	{"claim":null,"prediction":{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"adapter":"rustc","invocation":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"payload":"{}"},"type":"action_promise"}
 response.action_promise_unavailable	{"claim":null,"prediction":null,"type":"action_promise"}
 response.action_promise_completed	{"type":"action_promise_completed"}
+response.file_digests_resolved	{"resolutions":[{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"digest","size":7},{"kind":"embedded_timestamp_macro"},{"kind":"unresolved"}],"type":"file_digests_resolved"}
 record.action_result	{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"metadata":null,"output_root":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"version":1}
 record.directory	{"directories":[],"files":[{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"executable":false,"mode":420,"name":"lib.rlib"}],"symlinks":[],"version":1}
 record.rustc_metadata	{"kind":"rustc","stderr":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"stdout":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"version":1}
