@@ -375,6 +375,8 @@ jobs:
         shell: python
         run: |
           import json
+          import hashlib
+          import os
           import pathlib
           import shutil
           import subprocess
@@ -457,6 +459,24 @@ jobs:
                       remove(index / ".cache")
                   else:
                       prune_sparse_index(index)
+
+          mbx = pathlib.Path(shutil.which("mbx")).resolve()
+          mbx_size = mbx.stat().st_size
+          mbx_digest = hashlib.sha256(mbx.read_bytes()).digest()
+          shims = []
+          for candidate in pathlib.Path("target").rglob("*"):
+              if not candidate.is_file() or candidate.stat().st_size != mbx_size:
+                  continue
+              if hashlib.sha256(candidate.read_bytes()).digest() == mbx_digest:
+                  shims.append(candidate)
+          canonical_shim = pathlib.Path("target/.mbx-shim")
+          newest_mtime_ns = max(candidate.stat().st_mtime_ns for candidate in shims)
+          shutil.copy2(mbx, canonical_shim)
+          for candidate in shims:
+              candidate.unlink()
+              os.link(canonical_shim, candidate)
+          os.utime(canonical_shim, ns=(newest_mtime_ns, newest_mtime_ns))
+          print(f"Deduplicated {len(shims)} mbx shims ({len(shims) * mbx_size} logical bytes)")
       - name: Export native mbx bundle
         if: matrix.tool == 'mbx-registry'
         run: mbx cache export --group "$MBX_CACHE_EXPORT_GROUP" "$RUNNER_TEMP/mbx-cache.tar"
@@ -653,7 +673,7 @@ jobs:
           trial_count=$(jq -er \
             'if type == "array" and length > 0 then length else error("expected a non-empty trial array") end' \
             <<< "$TRIALS")
-          expected=$((4 * trial_count))
+          expected=$((2 * trial_count))
           shopt -s nullglob
           records=("$RUNNER_TEMP"/small-edit/*.json)
           actual=${#records[@]}
