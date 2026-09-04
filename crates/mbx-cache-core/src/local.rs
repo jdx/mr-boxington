@@ -70,6 +70,17 @@ impl LocalCas {
         self.store_file_inner(digest, source, true)
     }
 
+    /// Verify a staged file, then move it into the CAS when possible.
+    ///
+    /// This is useful for imports that already own their source file: unlike
+    /// [`Self::store_file`], it does not need to preserve that staging copy.
+    pub fn adopt_file(&self, digest: &CacheDigest, source: &Path) -> Result<PathBuf> {
+        if !digest.matches_file(source)? {
+            bail!("file does not match the declared CAS digest");
+        }
+        self.adopt_verified_file(digest, source)
+    }
+
     /// Store a file whose digest was already verified by this crate.
     pub(crate) fn store_verified_file(
         &self,
@@ -353,6 +364,34 @@ mod tests {
         assert!(!source.exists());
         assert_eq!(fs::read(&stored).unwrap(), b"cached object");
         assert_eq!(cas.find(&digest).unwrap(), Some(stored));
+    }
+
+    #[test]
+    fn adopts_files_after_verifying_their_digest() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = LocalCas::new(directory.path().join("cache"));
+        let source = directory.path().join("blob");
+        fs::write(&source, b"cached object").unwrap();
+        let digest = CacheDigest::blake3(b"cached object");
+
+        let stored = cas.adopt_file(&digest, &source).unwrap();
+
+        assert!(!source.exists());
+        assert_eq!(fs::read(stored).unwrap(), b"cached object");
+    }
+
+    #[test]
+    fn refuses_to_adopt_a_file_with_the_wrong_digest() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = LocalCas::new(directory.path().join("cache"));
+        let source = directory.path().join("blob");
+        fs::write(&source, b"other object").unwrap();
+        let digest = CacheDigest::blake3(b"cached object");
+
+        assert!(cas.adopt_file(&digest, &source).is_err());
+
+        assert!(source.exists());
+        assert!(!cas.path_for(&digest).unwrap().exists());
     }
 
     #[test]
