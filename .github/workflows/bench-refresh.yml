@@ -492,7 +492,7 @@ jobs:
             ~/.cargo/git
 
   small-edit-measure:
-    name: Measure ${{ matrix.tool }} (${{ matrix.trial }})
+    name: Measure pair ${{ matrix.trial }} (${{ matrix.order }})
     needs: small-edit-seed
     # `small-edit-seed` deliberately tolerates the candidate-build job being
     # skipped when benchmarking a released mbx. Preserve that tolerance here:
@@ -501,17 +501,17 @@ jobs:
     if: always() && github.event_name == 'workflow_dispatch' && inputs.small_edit && needs.small-edit-seed.result == 'success'
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 2
       matrix:
         trial: ${{ fromJSON(inputs.small_edit_trials || '[1,2,3,4]') }}
-        tool: [rust-cache, mbx-target]
+        order: [rust-first, mbx-first]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       actions: read
       contents: read
     env:
-      MBX_TARGET_VIEWS: ${{ matrix.tool == 'mbx-target' && '0' || '' }}
+      MBX_TARGET_VIEWS: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -529,16 +529,16 @@ jobs:
           run-id: ${{ inputs.small_edit_mbx_artifact_run || github.run_id }}
           github-token: ${{ github.token }}
       - name: Select candidate mbx
-        if: inputs.small_edit_mbx_ref != '' && matrix.tool != 'rust-cache'
+        if: inputs.small_edit_mbx_ref != ''
         run: |
           chmod +x "$RUNNER_TEMP/mbx-bin/mbx"
           echo "$RUNNER_TEMP/mbx-bin" >> "$GITHUB_PATH"
-      # Start after common runner/bootstrap work but before each cache action.
-      # The action's own setup is part of real workflow wall time, as is restore.
-      - name: Start restore-and-build timer
-        run: echo "SMALL_EDIT_STARTED_NS=$(date +%s%N)" >> "$GITHUB_ENV"
-      - if: matrix.tool == 'rust-cache'
-        id: rust_cache_restore
+      - name: Start rust-cache timer (first)
+        if: matrix.order == 'rust-first'
+        id: rust_first_timer
+        run: echo "started_ns=$(date +%s%N)" >> "$GITHUB_OUTPUT"
+      - if: matrix.order == 'rust-first'
+        id: rust_first_restore
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
         with:
           shared-key: gha-small-edit-${{ github.run_id }}-${{ matrix.trial }}
@@ -547,82 +547,86 @@ jobs:
           cache-all-crates: "true"
           cache-workspace-crates: "true"
           save-if: "false"
-      - if: matrix.tool == 'mbx'
-        id: mbx_restore
-        uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
-        with:
-          version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
-          cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
-          toolchain: 1.97.1
-      - if: matrix.tool == 'mbx-target'
+      - name: Build edited commit with rust-cache (first)
+        if: matrix.order == 'rust-first'
+        id: rust_first_build
+        env:
+          STARTED_NS: ${{ steps.rust_first_timer.outputs.started_ns }}
+        run: |
+          started=$(date +%s%N)
+          cargo build --locked
+          finished=$(date +%s%N)
+          echo "build_duration_ns=$((finished - started))" >> "$GITHUB_OUTPUT"
+          echo "total_duration_ns=$((finished - STARTED_NS))" >> "$GITHUB_OUTPUT"
+      - name: Clear first target tree
+        if: matrix.order == 'rust-first'
+        run: find "$GITHUB_WORKSPACE/target" -mindepth 1 -delete
+      - name: Start mbx timer
+        id: mbx_timer
+        run: echo "started_ns=$(date +%s%N)" >> "$GITHUB_OUTPUT"
+      - id: mbx_restore
         uses: jdx/mr-boxington-action@ce762ec323125600a1bcc73750f6e01ec3deb328
         with:
           backend: github
           cache-links: "false"
-          cache-key: gha-small-edit-${{ matrix.tool }}-${{ github.run_id }}-${{ matrix.trial }}-parent
           github-cache-mode: target
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           toolchain: 1.97.1
-      - if: matrix.tool == 'mbx-registry'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          key: gha-small-edit-${{ matrix.tool }}-${{ github.run_id }}-${{ matrix.trial }}-parent
-          fail-on-cache-miss: true
-          path: |
-            ${{ runner.temp }}/mbx-cache.tar
-            ~/.cargo/registry
-            ~/.cargo/git
-      - if: false
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          key: gha-small-edit-${{ matrix.tool }}-${{ github.run_id }}-${{ matrix.trial }}-parent
-          fail-on-cache-miss: true
-          path: |
-            target
-            ~/.cargo/registry
-            ~/.cargo/git
-      - name: Import native mbx bundle
-        if: matrix.tool == 'mbx-registry'
-        run: |
-          set -o pipefail
-          mbx cache import "$RUNNER_TEMP/mbx-cache.tar" | tee "$RUNNER_TEMP/mbx-import.log"
-      - id: build
-        name: Build edited commit
+          cache-key: gha-small-edit-mbx-target-${{ github.run_id }}-${{ matrix.trial }}-parent
+      - id: mbx_build
+        name: Build edited commit with mbx
         env:
-          BUILD_DRIVER: "${{ matrix.tool == 'rust-cache' && 'cargo' || 'mbx' }}"
+          STARTED_NS: ${{ steps.mbx_timer.outputs.started_ns }}
           MBX_REPORT: ${{ runner.temp }}/mbx-report.json
         run: |
           started=$(date +%s%N)
-          "$BUILD_DRIVER" build --locked
+          mbx build --locked
           finished=$(date +%s%N)
           echo "build_duration_ns=$((finished - started))" >> "$GITHUB_OUTPUT"
-          echo "total_duration_ns=$((finished - SMALL_EDIT_STARTED_NS))" >> "$GITHUB_OUTPUT"
-      # Validate after taking the timing so the assertion shell does not bias
-      # one arm. A miss fails the job before it can publish a measurement.
-      - name: Require parent rust-cache hit
-        if: matrix.tool == 'rust-cache'
+          echo "total_duration_ns=$((finished - STARTED_NS))" >> "$GITHUB_OUTPUT"
+      - name: Clear target tree before rust-cache (second)
+        if: matrix.order == 'mbx-first'
+        run: find "$GITHUB_WORKSPACE/target" -mindepth 1 -delete
+      - name: Start rust-cache timer (second)
+        if: matrix.order == 'mbx-first'
+        id: rust_second_timer
+        run: echo "started_ns=$(date +%s%N)" >> "$GITHUB_OUTPUT"
+      - if: matrix.order == 'mbx-first'
+        id: rust_second_restore
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
+        with:
+          shared-key: gha-small-edit-${{ github.run_id }}-${{ matrix.trial }}
+          add-job-id-key: "false"
+          workspaces: . -> target
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+          save-if: "false"
+      - name: Build edited commit with rust-cache (second)
+        if: matrix.order == 'mbx-first'
+        id: rust_second_build
         env:
-          CACHE_HIT: ${{ steps.rust_cache_restore.outputs.cache-hit }}
+          STARTED_NS: ${{ steps.rust_second_timer.outputs.started_ns }}
         run: |
-          if [ "$CACHE_HIT" != "true" ]; then
-            echo "::error::rust-cache did not restore the seeded parent cache"
-            exit 1
-          fi
-      - name: Require parent mbx hit
-        if: matrix.tool == 'mbx'
+          started=$(date +%s%N)
+          cargo build --locked
+          finished=$(date +%s%N)
+          echo "build_duration_ns=$((finished - started))" >> "$GITHUB_OUTPUT"
+          echo "total_duration_ns=$((finished - STARTED_NS))" >> "$GITHUB_OUTPUT"
+      # Validate after timing so assertions do not bias either arm.
+      - name: Require both parent-cache hits
         env:
-          CACHE_HIT: ${{ steps.mbx_restore.outputs.cache-hit }}
+          RUST_CACHE_HIT: ${{ matrix.order == 'rust-first' && steps.rust_first_restore.outputs.cache-hit || steps.rust_second_restore.outputs.cache-hit }}
+          MBX_CACHE_HIT: ${{ steps.mbx_restore.outputs.cache-hit }}
         run: |
-          if [ "$CACHE_HIT" != "true" ]; then
-            echo "::error::mbx did not restore the seeded parent cache"
-            exit 1
-          fi
-      - name: Record trial
+          test "$RUST_CACHE_HIT" = true || { echo "::error::rust-cache did not restore the seeded parent cache"; exit 1; }
+          test "$MBX_CACHE_HIT" = true || { echo "::error::mbx did not restore the seeded parent cache"; exit 1; }
+      - name: Record paired trial
         env:
-          BUILD_DURATION_NS: ${{ steps.build.outputs.build_duration_ns }}
-          TOTAL_DURATION_NS: ${{ steps.build.outputs.total_duration_ns }}
-          TOOL: ${{ matrix.tool }}
-          TRIAL: ${{ matrix.trial }}
+          RUST_BUILD_NS: ${{ matrix.order == 'rust-first' && steps.rust_first_build.outputs.build_duration_ns || steps.rust_second_build.outputs.build_duration_ns }}
+          RUST_TOTAL_NS: ${{ matrix.order == 'rust-first' && steps.rust_first_build.outputs.total_duration_ns || steps.rust_second_build.outputs.total_duration_ns }}
+          MBX_BUILD_NS: ${{ steps.mbx_build.outputs.build_duration_ns }}
+          MBX_TOTAL_NS: ${{ steps.mbx_build.outputs.total_duration_ns }}
+          TRIAL: ${{ matrix.trial }}-${{ matrix.order }}
           REF: ${{ inputs.small_edit_mbx_ref }}
           VERSION: ${{ inputs.small_edit_mbx_version }}
         run: |
@@ -633,15 +637,17 @@ jobs:
           else
             REVISION=""
           fi
-          jq -n --arg tool "$TOOL" --arg ref "$REF" --arg revision "$REVISION" --arg version "$VERSION" \
-            --argjson trial "$TRIAL" \
-            --argjson build_duration_ns "$BUILD_DURATION_NS" \
-            --argjson restore_and_build_duration_ns "$TOTAL_DURATION_NS" \
+          jq -n --arg tool rust-cache --arg trial "$TRIAL" --arg ref "$REF" --arg revision "$REVISION" --arg version "$VERSION" \
+            --argjson build_duration_ns "$RUST_BUILD_NS" --argjson restore_and_build_duration_ns "$RUST_TOTAL_NS" \
             '{schema:1,tool:$tool,mbx_version:$version,mbx_ref:$ref,mbx_revision:$revision,trial:$trial,build_duration_ns:$build_duration_ns,restore_and_build_duration_ns:$restore_and_build_duration_ns}' \
-            > "$RUNNER_TEMP/small-edit/${TOOL}-${TRIAL}.json"
+            > "$RUNNER_TEMP/small-edit/rust-cache-${TRIAL}.json"
+          jq -n --arg tool mbx-target --arg trial "$TRIAL" --arg ref "$REF" --arg revision "$REVISION" --arg version "$VERSION" \
+            --argjson build_duration_ns "$MBX_BUILD_NS" --argjson restore_and_build_duration_ns "$MBX_TOTAL_NS" \
+            '{schema:1,tool:$tool,mbx_version:$version,mbx_ref:$ref,mbx_revision:$revision,trial:$trial,build_duration_ns:$build_duration_ns,restore_and_build_duration_ns:$restore_and_build_duration_ns}' \
+            > "$RUNNER_TEMP/small-edit/mbx-target-${TRIAL}.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: gha-small-edit-${{ matrix.tool }}-${{ matrix.trial }}
+          name: gha-small-edit-pair-${{ matrix.trial }}-${{ matrix.order }}
           path: ${{ runner.temp }}/small-edit/*.json
           if-no-files-found: error
           retention-days: 90
@@ -669,7 +675,7 @@ jobs:
           trial_count=$(jq -er \
             'if type == "array" and length > 0 then length else error("expected a non-empty trial array") end' \
             <<< "$TRIALS")
-          expected=$((2 * trial_count))
+          expected=$((4 * trial_count))
           shopt -s nullglob
           records=("$RUNNER_TEMP"/small-edit/*.json)
           actual=${#records[@]}
