@@ -115,7 +115,8 @@ jobs:
           MISE_LOCKED: "1"
       - name: Install benchmark Rust tooling
         run: |
-          rustup component add clippy --toolchain 1.97.1
+          rustup toolchain install --profile minimal 1.97.1
+          rustup component add --toolchain 1.97.1 clippy
           rustup toolchain install --profile minimal 1.96.0
       # The comparison should track kache itself, not the version that happened
       # to be current when mise.lock was last updated. Install the newest stable
