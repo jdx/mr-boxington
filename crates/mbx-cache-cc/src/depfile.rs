@@ -432,6 +432,19 @@ impl CcDiscoveredInputs {
         Ok(())
     }
 
+    /// Compatibility form for callers that captured metadata identities.
+    pub fn verify_not_modified_since_with_identities(
+        &self,
+        started_at: SystemTime,
+        before: &BTreeMap<PathBuf, FileIdentity>,
+    ) -> Result<(), CcBypassReason> {
+        let snapshots = before
+            .iter()
+            .map(|(path, identity)| (path.clone(), identity.clone().into()))
+            .collect();
+        self.verify_not_modified_since_with_snapshots(started_at, &snapshots)
+    }
+
     /// Confirm every discovered file before publication, degrading a changed
     /// input to a miss rather than storing an object under a stale key.
     ///

@@ -101,6 +101,15 @@ impl FileSnapshot {
     }
 }
 
+impl From<FileIdentity> for FileSnapshot {
+    fn from(identity: FileIdentity) -> Self {
+        Self {
+            identity,
+            content: None,
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn metadata_identity_is_unreliable(path: &Path) -> io::Result<bool> {
     use std::mem::MaybeUninit;

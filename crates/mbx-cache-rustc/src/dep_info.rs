@@ -290,6 +290,19 @@ impl DiscoveredInputs {
         Ok(())
     }
 
+    /// Compatibility form for callers that captured metadata identities.
+    pub fn verify_not_modified_since_with_identities(
+        &self,
+        started_at: SystemTime,
+        before: &BTreeMap<PathBuf, FileIdentity>,
+    ) -> Result<(), BypassReason> {
+        let snapshots = before
+            .iter()
+            .map(|(path, identity)| (path.clone(), identity.clone().into()))
+            .collect();
+        self.verify_not_modified_since_with_snapshots(started_at, &snapshots)
+    }
+
     /// Rehash every discovered file after compilation and before publication.
     /// This closes the discovery/compile race by degrading changed inputs to a
     /// cache miss rather than storing outputs beneath a stale action key.
