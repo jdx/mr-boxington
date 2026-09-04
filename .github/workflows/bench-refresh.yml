@@ -316,13 +316,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tool: [rust-cache, mbx, mbx-registry]
+        tool: [rust-cache, mbx, mbx-registry, mbx-server]
         trial: ${{ fromJSON(inputs.small_edit_trials || '[1,2,3,4]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       actions: write
       contents: read
+      id-token: write
     env:
       MBX_CACHE_EXPORT_GROUP: gha-small-edit-${{ github.run_id }}-${{ matrix.trial }}
     steps:
@@ -365,6 +366,15 @@ jobs:
           backend: local
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           toolchain: 1.97.1
+      - if: matrix.tool == 'mbx-server'
+        uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
+        with:
+          backend: server
+          version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
+          toolchain: 1.97.1
+          server-url: https://cache.mise.jdx.dev
+          namespace: jdx/hk
+          oidc-audience: https://cache.mise.jdx.dev
       - name: Seed parent build
         env:
           BUILD_DRIVER: "${{ matrix.tool == 'rust-cache' && 'cargo' || 'mbx' }}"
@@ -393,13 +403,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tool: [rust-cache, mbx, mbx-registry]
+        tool: [rust-cache, mbx, mbx-registry, mbx-server]
         trial: ${{ fromJSON(inputs.small_edit_trials || '[1,2,3,4]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       actions: read
       contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -446,6 +457,15 @@ jobs:
           backend: local
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           toolchain: 1.97.1
+      - if: matrix.tool == 'mbx-server'
+        uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
+        with:
+          backend: server
+          version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
+          toolchain: 1.97.1
+          server-url: https://cache.mise.jdx.dev
+          namespace: jdx/hk
+          oidc-audience: https://cache.mise.jdx.dev
       - if: matrix.tool == 'mbx-registry'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -543,7 +563,7 @@ jobs:
           trial_count=$(jq -er \
             'if type == "array" and length > 0 then length else error("expected a non-empty trial array") end' \
             <<< "$TRIALS")
-          expected=$((3 * trial_count))
+          expected=$((4 * trial_count))
           shopt -s nullglob
           records=("$RUNNER_TEMP"/small-edit/*.json)
           actual=${#records[@]}
