@@ -74,6 +74,7 @@ pub(crate) const BUILD_ENV: &str = "MBX_BUILD";
 pub(crate) const VERIFY_ENV: &str = "MBX_VERIFY";
 pub(crate) const SHARE_OUT_DIR_ENV: &str = "MBX_SHARE_OUT_DIR";
 pub(crate) const BUILD_SCRIPT_EXECUTION_ENV: &str = "MBX_BUILD_SCRIPT_EXECUTION";
+pub(crate) const BUILD_SCRIPT_SHIM_PATH_ENV: &str = "MBX_BUILD_SCRIPT_SHIM_PATH";
 pub(crate) const LEARNED_INCREMENTAL_ENV: &str = "MBX_LEARNED_INCREMENTAL";
 pub(crate) const LEARNED_INCREMENTAL_MAX_SIZE_ENV: &str = "MBX_LEARNED_INCREMENTAL_MAX_SIZE";
 pub(crate) const INCREMENTAL_ROOT_ENV: &str = "MBX_INCREMENTAL_ROOT";
@@ -1020,7 +1021,7 @@ fn run_transparent_rustdoc(rustdoc: OsString, arguments: Vec<OsString>) -> ExitC
 
 /// Whether this process replaced a Cargo build-script executable.
 pub fn is_build_script_shim() -> bool {
-    let Some(invoked) = std::env::args_os().next().map(PathBuf::from) else {
+    let Some(invoked) = build_script_invocation_path() else {
         return false;
     };
     invoked
@@ -1028,6 +1029,12 @@ pub fn is_build_script_shim() -> bool {
         .and_then(OsStr::to_str)
         .is_some_and(|stem| stem == "build-script-build")
         && find_build_script_real_path(&invoked).is_some()
+}
+
+pub(crate) fn build_script_invocation_path() -> Option<PathBuf> {
+    std::env::var_os(BUILD_SCRIPT_SHIM_PATH_ENV)
+        .map(PathBuf::from)
+        .or_else(|| std::env::args_os().next().map(PathBuf::from))
 }
 
 pub(crate) fn build_script_real_path(executable: &Path) -> PathBuf {

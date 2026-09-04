@@ -14,6 +14,8 @@ use mbx_cache_core::{
 use mbx_cache_rustc::PathMapping;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Instant;
@@ -105,9 +107,14 @@ pub(crate) fn install(executable: &Path, binary_action: &CacheDigest) -> Result<
         canonical_json(binary_action)?,
     )?;
 
+    // Unix needs only a tiny launcher at each Cargo-owned path. Pin one mbx
+    // binary beside the profile and let every launcher exec it while carrying
+    // its own path out of band. Besides saving local disk, keeping the launchers
+    // distinct preserves the mtimes Cargo uses for freshness. Windows keeps the
+    // self-contained executable because Cargo needs a PE binary there.
     let mbx = std::env::current_exe().wrap_err("failed to locate the mbx shim")?;
     let _ = std::fs::remove_file(executable);
-    let installed = std::fs::copy(&mbx, executable).and_then(|_| {
+    let installed = install_launcher(&mbx, executable).and_then(|_| {
         std::fs::OpenOptions::new()
             .write(true)
             .open(executable)?
@@ -120,9 +127,102 @@ pub(crate) fn install(executable: &Path, binary_action: &CacheDigest) -> Result<
     Ok(())
 }
 
+#[cfg(unix)]
+fn install_launcher(mbx: &Path, executable: &Path) -> std::io::Result<()> {
+    let profile = executable
+        .ancestors()
+        .nth(3)
+        .ok_or_else(|| std::io::Error::other("build-script path has no Cargo profile directory"))?;
+    let metadata = std::fs::metadata(mbx)?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+    let absolute = std::path::absolute(mbx)?;
+    let mut identity = absolute.as_os_str().as_encoded_bytes().to_vec();
+    identity.push(0);
+    identity.extend_from_slice(&metadata.len().to_le_bytes());
+    identity.extend_from_slice(&modified.map_or(0, |time| time.as_nanos()).to_le_bytes());
+    let identity = CacheDigest::blake3(&identity);
+    // Build-script executables always sit at `<profile>/build/<unit>/<name>`;
+    // put the pinned binary under that profile so the launcher stays portable
+    // when a target directory moves between checkouts or CI runners.
+    let relative = PathBuf::from(".mbx-build-script-shims")
+        .join(&identity.hash)
+        .join("mbx");
+    let pinned = profile.join(&relative);
+    install_pinned_binary(mbx, &pinned)?;
+
+    let launcher = format!(
+        "#!/bin/sh\n{}=\"$0\" exec \"$(dirname \"$0\")/../../{}\" \"$@\"\n",
+        session::BUILD_SCRIPT_SHIM_PATH_ENV,
+        relative.to_string_lossy(),
+    );
+    std::fs::write(executable, launcher)?;
+    std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755))
+}
+
+#[cfg(unix)]
+fn install_pinned_binary(mbx: &Path, destination: &Path) -> std::io::Result<()> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| std::io::Error::other("pinned shim has no parent directory"))?;
+    std::fs::create_dir_all(parent)?;
+
+    // macOS can SIGKILL an exec through a hard link created moments earlier.
+    // A copied inode published by rename does not hit that kernel race. Races
+    // between installers are harmless because this identity names identical
+    // mbx bytes, and rename keeps the destination complete at every instant.
+    #[cfg(target_os = "macos")]
+    {
+        if destination.exists() {
+            return Ok(());
+        }
+        let temporary = tempfile::NamedTempFile::new_in(parent)?;
+        std::fs::copy(mbx, temporary.path())?;
+        let mut permissions = std::fs::metadata(temporary.path())?.permissions();
+        permissions.set_mode(permissions.mode() | 0o100);
+        std::fs::set_permissions(temporary.path(), permissions)?;
+        let (file, temporary) = temporary.into_parts();
+        drop(file);
+        temporary
+            .persist(destination)
+            .map_err(|error| error.error)?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        match std::fs::hard_link(mbx, destination) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(_) => {}
+        }
+
+        let temporary = tempfile::NamedTempFile::new_in(parent)?;
+        std::fs::copy(mbx, temporary.path())?;
+        let mut permissions = std::fs::metadata(temporary.path())?.permissions();
+        permissions.set_mode(permissions.mode() | 0o100);
+        std::fs::set_permissions(temporary.path(), permissions)?;
+        let (file, temporary) = temporary.into_parts();
+        drop(file);
+        match std::fs::hard_link(&temporary, destination) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(unix))]
+fn install_launcher(mbx: &Path, executable: &Path) -> std::io::Result<()> {
+    std::fs::copy(mbx, executable).map(|_| ())
+}
+
 /// Run the preserved program without consulting the cache.
 pub(crate) fn run_real() -> ExitCode {
-    let Some(invoked) = std::env::args_os().next().map(PathBuf::from) else {
+    let Some(invoked) = session::build_script_invocation_path() else {
         return ExitCode::FAILURE;
     };
     let Some(real) = session::find_build_script_real_path(&invoked) else {
@@ -131,6 +231,7 @@ pub(crate) fn run_real() -> ExitCode {
     };
     let mut command = Command::new(real);
     command.args(std::env::args_os().skip(1));
+    command.env_remove(session::BUILD_SCRIPT_SHIM_PATH_ENV);
     match command.status() {
         Ok(status) => crate::materialize::exit_code(status),
         Err(error) => {
@@ -141,9 +242,7 @@ pub(crate) fn run_real() -> ExitCode {
 }
 
 pub(crate) fn run() -> Result<ExitCode> {
-    let invoked = std::env::args_os()
-        .next()
-        .map(PathBuf::from)
+    let invoked = session::build_script_invocation_path()
         .ok_or_else(|| eyre::eyre!("build-script shim has no argv0"))?;
     let real = session::find_build_script_real_path(&invoked)
         .ok_or_else(|| eyre::eyre!("preserved build script is missing"))?;
@@ -171,6 +270,7 @@ pub(crate) fn run() -> Result<ExitCode> {
 
     let mut command = Command::new(&real);
     command.args(std::env::args_os().skip(1));
+    command.env_remove(session::BUILD_SCRIPT_SHIM_PATH_ENV);
     let output = command
         .output()
         .wrap_err("failed to execute the build script")?;
@@ -878,7 +978,10 @@ mod tests {
     #[test]
     fn build_script_shim_keeps_the_compiled_binary_mtime() {
         let directory = tempfile::tempdir().unwrap();
-        let executable = directory.path().join("build-script-build");
+        let executable = directory
+            .path()
+            .join("target/debug/build/fixture/build-script-build");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
         std::fs::write(&executable, b"compiled build script").unwrap();
         let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         filetime::set_file_mtime(&executable, filetime::FileTime::from_system_time(modified))

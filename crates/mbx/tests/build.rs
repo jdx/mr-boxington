@@ -3,6 +3,8 @@
 //! Each test drives the real binary over a throwaway project with no
 //! dependencies, so nothing here needs the network.
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::process::Command;
 #[cfg(unix)]
@@ -1730,11 +1732,43 @@ fn build_script_shim_does_not_redirty_its_compilation() {
                 (path.is_file()
                     && name.starts_with("build_script_build-")
                     && !name.ends_with(".d")
-                    && !name.ends_with(".pdb"))
+                    && !name.ends_with(".pdb")
+                    && !name.contains(".mbx-real"))
                 .then_some(path)
             })
         })
         .expect("the compiled build script should exist");
+
+    #[cfg(unix)]
+    {
+        assert!(
+            build_script.metadata().unwrap().len() < 1024,
+            "a build-script path should contain the compact launcher"
+        );
+        let pinned = project.path().join("target/debug/.mbx-build-script-shims");
+        let identities = pinned
+            .read_dir()
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            identities.len(),
+            1,
+            "one mbx identity should serve the profile"
+        );
+        let binaries = identities[0]
+            .path()
+            .read_dir()
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(binaries.len(), 1, "the identity should pin one mbx binary");
+        assert_ne!(
+            binaries[0].metadata().unwrap().permissions().mode() & 0o100,
+            0,
+            "the pinned mbx binary should be executable"
+        );
+    }
 
     let build_script_mtime = build_script.metadata().unwrap().modified().unwrap();
     filetime::set_file_mtime(
