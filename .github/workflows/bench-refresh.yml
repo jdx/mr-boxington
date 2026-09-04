@@ -315,9 +315,10 @@ jobs:
     if: always() && github.event_name == 'workflow_dispatch' && inputs.small_edit && (needs.small-edit-build-mbx.result == 'success' || needs.small-edit-build-mbx.result == 'skipped')
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
-        tool: [rust-cache, mbx-target]
         trial: ${{ fromJSON(inputs.small_edit_trials || '[1,2,3,4]') }}
+        tool: [rust-cache, mbx-target]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -361,7 +362,7 @@ jobs:
           save-on-workflow-dispatch: "true"
           toolchain: 1.97.1
       - if: matrix.tool == 'mbx-target'
-        uses: jdx/mr-boxington-action@codex/direct-target-cache
+        uses: jdx/mr-boxington-action@e06a1f6080dc1c71ec5c9bb11b699555dcd57fc7
         with:
           backend: github
           cache-links: "false"
@@ -493,9 +494,10 @@ jobs:
     if: always() && github.event_name == 'workflow_dispatch' && inputs.small_edit && needs.small-edit-seed.result == 'success'
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
-        tool: [rust-cache, mbx-target]
         trial: ${{ fromJSON(inputs.small_edit_trials || '[1,2,3,4]') }}
+        tool: [rust-cache, mbx-target]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -544,7 +546,7 @@ jobs:
           cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
           toolchain: 1.97.1
       - if: matrix.tool == 'mbx-target'
-        uses: jdx/mr-boxington-action@codex/direct-target-cache
+        uses: jdx/mr-boxington-action@e06a1f6080dc1c71ec5c9bb11b699555dcd57fc7
         with:
           backend: github
           cache-links: "false"
