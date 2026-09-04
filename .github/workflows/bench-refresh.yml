@@ -555,6 +555,11 @@ jobs:
   edit-report:
     name: Report small-edit comparison
     needs: [edit-rust-cache-measure, edit-mbx-measure, edit-mbx-direct-measure]
+    if: >-
+      always() &&
+      needs.edit-rust-cache-measure.result == 'success' &&
+      needs.edit-mbx-measure.result == 'success' &&
+      needs.edit-mbx-direct-measure.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
       actions: read
