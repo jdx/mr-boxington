@@ -951,7 +951,10 @@ mod tests {
     #[test]
     fn build_script_shim_keeps_the_compiled_binary_mtime() {
         let directory = tempfile::tempdir().unwrap();
-        let executable = directory.path().join("build-script-build");
+        let executable = directory
+            .path()
+            .join("target/debug/build/fixture/build-script-build");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
         std::fs::write(&executable, b"compiled build script").unwrap();
         let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         filetime::set_file_mtime(&executable, filetime::FileTime::from_system_time(modified))
