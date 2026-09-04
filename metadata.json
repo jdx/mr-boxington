@@ -3,7 +3,7 @@
   "checkpoint_id": "01M1PTD2NZGEGZN9Q8M6DMV2V6",
   "strategy": "manual-commit",
   "branch": "codex/fast-cache-import",
-  "checkpoints_count": 1,
+  "checkpoints_count": 2,
   "files_touched": null,
   "sessions": [
     {
@@ -12,13 +12,20 @@
       "compact_transcript": "/0/transcript.jsonl",
       "content_hash": "/0/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/1/metadata.json",
+      "transcript": "/1/full.jsonl",
+      "compact_transcript": "/1/transcript.jsonl",
+      "content_hash": "/1/content_hash.txt",
+      "prompt": ""
     }
   ],
   "token_usage": {
-    "input_tokens": 804958,
+    "input_tokens": 806578,
     "cache_creation_tokens": 0,
-    "cache_read_tokens": 87185280,
-    "output_tokens": 118629,
-    "api_call_count": 2199
+    "cache_read_tokens": 87307520,
+    "output_tokens": 119356,
+    "api_call_count": 2202
   }
 }
