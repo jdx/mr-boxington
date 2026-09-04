@@ -183,6 +183,8 @@ fn install_pinned_binary(mbx: &Path, destination: &Path) -> std::io::Result<()> 
         let mut permissions = std::fs::metadata(temporary.path())?.permissions();
         permissions.set_mode(permissions.mode() | 0o100);
         std::fs::set_permissions(temporary.path(), permissions)?;
+        let (file, temporary) = temporary.into_parts();
+        drop(file);
         temporary
             .persist(destination)
             .map_err(|error| error.error)?;
@@ -202,7 +204,9 @@ fn install_pinned_binary(mbx: &Path, destination: &Path) -> std::io::Result<()> 
         let mut permissions = std::fs::metadata(temporary.path())?.permissions();
         permissions.set_mode(permissions.mode() | 0o100);
         std::fs::set_permissions(temporary.path(), permissions)?;
-        match std::fs::hard_link(temporary.path(), destination) {
+        let (file, temporary) = temporary.into_parts();
+        drop(file);
+        match std::fs::hard_link(&temporary, destination) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
