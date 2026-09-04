@@ -3,6 +3,8 @@
 //! Each test drives the real binary over a throwaway project with no
 //! dependencies, so nothing here needs the network.
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::process::Command;
 #[cfg(unix)]
@@ -1761,6 +1763,11 @@ fn build_script_shim_does_not_redirty_its_compilation() {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(binaries.len(), 1, "the identity should pin one mbx binary");
+        assert_ne!(
+            binaries[0].metadata().unwrap().permissions().mode() & 0o100,
+            0,
+            "the pinned mbx binary should be executable"
+        );
     }
 
     let build_script_mtime = build_script.metadata().unwrap().modified().unwrap();

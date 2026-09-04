@@ -168,24 +168,47 @@ fn install_pinned_binary(mbx: &Path, destination: &Path) -> std::io::Result<()> 
         .parent()
         .ok_or_else(|| std::io::Error::other("pinned shim has no parent directory"))?;
     std::fs::create_dir_all(parent)?;
-    match std::fs::hard_link(mbx, destination) {
-        Ok(()) => return Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
-        Err(_) => {}
+
+    // macOS can SIGKILL an exec through a hard link created moments earlier.
+    // A copied inode published by rename does not hit that kernel race. Races
+    // between installers are harmless because this identity names identical
+    // mbx bytes, and rename keeps the destination complete at every instant.
+    #[cfg(target_os = "macos")]
+    {
+        if destination.exists() {
+            return Ok(());
+        }
+        let temporary = tempfile::NamedTempFile::new_in(parent)?;
+        std::fs::copy(mbx, temporary.path())?;
+        let mut permissions = std::fs::metadata(temporary.path())?.permissions();
+        permissions.set_mode(permissions.mode() | 0o100);
+        std::fs::set_permissions(temporary.path(), permissions)?;
+        temporary
+            .persist(destination)
+            .map_err(|error| error.error)?;
+        Ok(())
     }
 
-    let temporary = parent.join(format!(".mbx-new-{}", std::process::id()));
-    let _ = std::fs::remove_file(&temporary);
-    std::fs::copy(mbx, &temporary)?;
-    match std::fs::hard_link(&temporary, destination) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(error);
+    #[cfg(not(target_os = "macos"))]
+    {
+        match std::fs::hard_link(mbx, destination) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(_) => {}
         }
+
+        let temporary = tempfile::NamedTempFile::new_in(parent)?;
+        std::fs::copy(mbx, temporary.path())?;
+        let mut permissions = std::fs::metadata(temporary.path())?.permissions();
+        permissions.set_mode(permissions.mode() | 0o100);
+        std::fs::set_permissions(temporary.path(), permissions)?;
+        match std::fs::hard_link(temporary.path(), destination) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        Ok(())
     }
-    std::fs::remove_file(temporary)
 }
 
 #[cfg(not(unix))]
