@@ -369,7 +369,7 @@ jobs:
           save-on-workflow-dispatch: "true"
           toolchain: 1.97.1
       - if: matrix.tool == 'mbx-target'
-        uses: jdx/mr-boxington-action@e06a1f6080dc1c71ec5c9bb11b699555dcd57fc7
+        uses: jdx/mr-boxington-action@ce762ec323125600a1bcc73750f6e01ec3deb328
         with:
           backend: github
           cache-links: "false"
@@ -555,7 +555,7 @@ jobs:
           cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
           toolchain: 1.97.1
       - if: matrix.tool == 'mbx-target'
-        uses: jdx/mr-boxington-action@e06a1f6080dc1c71ec5c9bb11b699555dcd57fc7
+        uses: jdx/mr-boxington-action@ce762ec323125600a1bcc73750f6e01ec3deb328
         with:
           backend: github
           cache-links: "false"
