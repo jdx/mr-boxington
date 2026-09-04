@@ -1,5 +1,6 @@
 ---
 layout: home
+title: Shared, self-pruning Cargo build cache
 
 hero:
   name: "mr boxington"

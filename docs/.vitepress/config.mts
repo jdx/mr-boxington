@@ -16,10 +16,12 @@ if (!versionMatch) {
   throw new Error("could not read the mbx version from crates/mbx/Cargo.toml");
 }
 const latestVersion = versionMatch[1];
+const siteUrl = "https://mr-boxington.jdx.dev";
 
 export default defineConfig({
   title: "mr boxington",
-  description: "Put mbx in front of any cargo command. Every build on the machine shares one self-pruning cache, and you can run multiple Cargo builds in parallel.",
+  description:
+    "Put mbx in front of any cargo command. Every build on the machine shares one self-pruning cache, and you can run multiple Cargo builds in parallel.",
   lang: "en-US",
   lastUpdated: true,
   appearance: "force-dark",
@@ -151,7 +153,12 @@ gtag('js', new Date());
 gtag('config', 'G-0MDX8ZJYFY');`,
     ],
     ["link", { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" }],
-    ["link", { rel: "alternate icon", href: "/favicon.png", type: "image/png" }],
+    [
+      "link",
+      { rel: "icon", href: "/favicon.png", type: "image/png", sizes: "64x64" },
+    ],
+    ["link", { rel: "apple-touch-icon", href: "/favicon.png" }],
+    ["link", { rel: "manifest", href: "/site.webmanifest" }],
     ["link", { rel: "preconnect", href: "https://fonts.googleapis.com" }],
     [
       "link",
@@ -167,10 +174,15 @@ gtag('config', 'G-0MDX8ZJYFY');`,
     ["meta", { name: "theme-color", content: "#d69b42" }],
     ["meta", { property: "og:type", content: "website" }],
     ["meta", { property: "og:site_name", content: "mr boxington" }],
+    ["meta", { property: "og:locale", content: "en_US" }],
     ["meta", { property: "og:title", content: "mr boxington" }],
     [
       "meta",
-      { property: "og:description", content: "Put mbx in front of any cargo command. Every build on the machine shares one self-pruning cache, and you can run multiple Cargo builds in parallel." },
+      {
+        property: "og:description",
+        content:
+          "Put mbx in front of any cargo command. Every build on the machine shares one self-pruning cache, and you can run multiple Cargo builds in parallel.",
+      },
     ],
     [
       "meta",
@@ -181,6 +193,52 @@ gtag('config', 'G-0MDX8ZJYFY');`,
     ],
     ["meta", { property: "og:image:width", content: "1200" }],
     ["meta", { property: "og:image:height", content: "630" }],
+    [
+      "meta",
+      {
+        property: "og:image:alt",
+        content: "mr boxington — a shared, self-pruning Cargo build cache",
+      },
+    ],
     ["meta", { name: "twitter:card", content: "summary_large_image" }],
+    ["meta", { name: "twitter:site", content: "@jdxcode" }],
+    [
+      "meta",
+      { name: "twitter:image", content: "https://mr-boxington.jdx.dev/og.png" },
+    ],
+    [
+      "meta",
+      {
+        name: "twitter:image:alt",
+        content: "mr boxington — a shared, self-pruning Cargo build cache",
+      },
+    ],
   ],
+  transformHead({ pageData, title, description }) {
+    const url = new URL(
+      pageData.relativePath.replace(/index\.md$/, "").replace(/\.md$/, ""),
+      `${siteUrl}/`,
+    ).toString();
+
+    return [
+      ["link", { rel: "canonical", href: url }],
+      ["meta", { property: "og:url", content: url }],
+      ["meta", { property: "og:title", content: title }],
+      ["meta", { property: "og:description", content: description }],
+      ["meta", { name: "twitter:title", content: title }],
+      ["meta", { name: "twitter:description", content: description }],
+      [
+        "script",
+        { type: "application/ld+json" },
+        JSON.stringify({
+          "@context": "https://schema.org",
+          "@type": "WebPage",
+          name: title,
+          description,
+          url,
+          isPartOf: { "@type": "WebSite", name: "mr boxington", url: siteUrl },
+        }),
+      ],
+    ];
+  },
 });
