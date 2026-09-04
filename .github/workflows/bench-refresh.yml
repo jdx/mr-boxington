@@ -470,12 +470,20 @@ jobs:
               if hashlib.sha256(candidate.read_bytes()).digest() == mbx_digest:
                   shims.append(candidate)
           canonical_shim = pathlib.Path("target/.mbx-shim")
-          newest_mtime_ns = max(candidate.stat().st_mtime_ns for candidate in shims)
+          shim_metadata = [
+              {
+                  "path": str(candidate),
+                  "mode": candidate.stat().st_mode,
+                  "mtime_ns": candidate.stat().st_mtime_ns,
+              }
+              for candidate in shims
+          ]
+          manifest = pathlib.Path(os.environ["RUNNER_TEMP"]) / "mbx-target-shims.json"
+          manifest.write_text(json.dumps(shim_metadata))
           shutil.copy2(mbx, canonical_shim)
           for candidate in shims:
               candidate.unlink()
               os.link(canonical_shim, candidate)
-          os.utime(canonical_shim, ns=(newest_mtime_ns, newest_mtime_ns))
           print(f"Deduplicated {len(shims)} mbx shims ({len(shims) * mbx_size} logical bytes)")
       - name: Export native mbx bundle
         if: matrix.tool == 'mbx-registry'
@@ -497,6 +505,7 @@ jobs:
           key: gha-small-edit-${{ matrix.tool }}-${{ github.run_id }}-${{ matrix.trial }}-parent
           path: |
             ${{ runner.temp }}/mbx-target
+            ${{ runner.temp }}/mbx-target-shims.json
             ~/.cargo/registry
             ~/.cargo/git
 
@@ -580,11 +589,31 @@ jobs:
           fail-on-cache-miss: true
           path: |
             ${{ runner.temp }}/mbx-target
+            ${{ runner.temp }}/mbx-target-shims.json
             ~/.cargo/registry
             ~/.cargo/git
       - name: Install target-only transport
         if: matrix.tool == 'mbx-target'
         run: mv "$RUNNER_TEMP/mbx-target" target
+      - name: Restore mbx shim metadata
+        if: matrix.tool == 'mbx-target'
+        shell: python
+        run: |
+          import json
+          import os
+          import pathlib
+          import shutil
+
+          canonical = pathlib.Path("target/.mbx-shim")
+          manifest = pathlib.Path(os.environ["RUNNER_TEMP"]) / "mbx-target-shims.json"
+          for metadata in json.loads(manifest.read_text()):
+              path = pathlib.Path(metadata["path"])
+              temporary = path.with_name(f".{path.name}.mbx-detach")
+              shutil.copyfile(canonical, temporary)
+              os.chmod(temporary, metadata["mode"])
+              os.utime(temporary, ns=(metadata["mtime_ns"], metadata["mtime_ns"]))
+              os.replace(temporary, path)
+          canonical.unlink()
       - name: Import native mbx bundle
         if: matrix.tool == 'mbx-registry'
         run: |
