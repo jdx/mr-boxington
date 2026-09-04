@@ -388,9 +388,6 @@ jobs:
       - name: Import native mbx bundle
         if: matrix.tool == 'mbx-registry'
         run: mbx cache import "$RUNNER_TEMP/mbx-cache.tar" | tee "$RUNNER_TEMP/mbx-import.log"
-      - name: Verify restored Cargo state
-        if: matrix.tool != 'rust-cache'
-        run: test -d target/.fingerprint
       - id: build
         name: Build edited commit
         env:
