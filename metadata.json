@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M1PWY7QYEB298H8BMKDSDDR5",
+  "strategy": "manual-commit",
+  "branch": "codex/fast-cache-import",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/bench-refresh.yml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 12930,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 2763136,
+    "output_tokens": 4612,
+    "api_call_count": 27
+  }
+}
