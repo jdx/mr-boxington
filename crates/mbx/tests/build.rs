@@ -883,6 +883,116 @@ fn a_ci_export_group_collects_every_build_in_the_job() {
 }
 
 #[test]
+fn a_cache_bundle_restores_cargo_workspace_state() {
+    let source_store = tempfile::tempdir().unwrap();
+    let destination_store = tempfile::tempdir().unwrap();
+    let destination_targets = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let group = "github-run-42/workspace-state";
+    build_with(
+        project.path(),
+        source_store.path(),
+        &reports.path().join("source.json"),
+        &[
+            (mbx::session::CACHE_EXPORT_GROUP_ENV, group),
+            ("MBX_LEARNED_INCREMENTAL", "0"),
+        ],
+    );
+    std::fs::write(project.path().join("target/scheduler-marker"), b"warm").unwrap();
+    let archive = reports.path().join("workspace-state.tar");
+    let export = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        .current_dir(project.path())
+        .args(["cache", "export", "--group", group])
+        .arg(&archive)
+        .env("MBX_CACHE_DIR", source_store.path())
+        .output()
+        .unwrap();
+    assert!(
+        export.status.success(),
+        "workspace-state export failed: {}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+    wipe_target(project.path());
+
+    let import = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        .current_dir(project.path())
+        .args(["cache", "import"])
+        .arg(&archive)
+        .env("MBX_CACHE_DIR", destination_store.path())
+        .env("MBX_TARGET_ROOT", destination_targets.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        import.status.success(),
+        "workspace-state import failed: {}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&import.stdout).contains("restored Cargo workspace state"),
+        "import did not report a workspace restore: {}",
+        String::from_utf8_lossy(&import.stdout)
+    );
+    assert_eq!(
+        std::fs::read(project.path().join("target/scheduler-marker")).unwrap(),
+        b"warm"
+    );
+    std::fs::write(project.path().join("target/scheduler-marker"), b"local").unwrap();
+    let repeated_import = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        .current_dir(project.path())
+        .args(["cache", "import"])
+        .arg(&archive)
+        .env("MBX_CACHE_DIR", destination_store.path())
+        .env("MBX_TARGET_ROOT", destination_targets.path())
+        .output()
+        .unwrap();
+    assert!(repeated_import.status.success());
+    assert_eq!(
+        std::fs::read(project.path().join("target/scheduler-marker")).unwrap(),
+        b"local",
+        "import must not replace an existing non-empty target"
+    );
+    let (_, cargo_stderr) = cargo_with(
+        project.path(),
+        destination_store.path(),
+        &reports.path().join("restored.json"),
+        &["build", "--offline", "--verbose"],
+        &[
+            (
+                "MBX_TARGET_ROOT",
+                destination_targets.path().to_str().unwrap(),
+            ),
+            ("MBX_LEARNED_INCREMENTAL", "0"),
+        ],
+    );
+    assert!(
+        !cargo_stderr.contains("Compiling fixture"),
+        "Cargo should accept the restored target as fresh: {}",
+        cargo_stderr
+    );
+
+    let equivalent_project = tempfile::tempdir().unwrap();
+    let equivalent_targets = tempfile::tempdir().unwrap();
+    write_project(equivalent_project.path());
+    let equivalent_import = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        .current_dir(equivalent_project.path())
+        .args(["cache", "import"])
+        .arg(&archive)
+        .env("MBX_CACHE_DIR", destination_store.path())
+        .env("MBX_TARGET_ROOT", equivalent_targets.path())
+        .output()
+        .unwrap();
+    assert!(equivalent_import.status.success());
+    assert_eq!(
+        std::fs::read(equivalent_project.path().join("target/scheduler-marker")).unwrap(),
+        b"warm",
+        "a matching workspace signature should restore into another checkout"
+    );
+}
+
+#[test]
 fn incremental_is_opt_in_and_reaches_cargo() {
     let store = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();

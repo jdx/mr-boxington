@@ -3,7 +3,7 @@
 
 - **Usage:** `mbx cache export [--group <GROUP>] <ARCHIVE>`
 
-Export the cache closure of this checkout's last build.
+Export the cache closure of this checkout's last build. The export includes Cargo scheduler state for recorded workspaces, with compiler outputs referenced from the content-addressed closure instead of duplicated.
 
 ## Arguments
 - **`<ARCHIVE>`** — Tar archive to write.
