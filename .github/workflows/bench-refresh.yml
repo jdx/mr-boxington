@@ -438,6 +438,7 @@ jobs:
           merge-multiple: true
       - name: Summarize medians
         run: |
+          set -o pipefail
           jq -s '
             def median:
               sort as $values |
@@ -448,8 +449,8 @@ jobs:
               tool: .[0].tool,
               mbx_version: .[0].mbx_version,
               trials: length,
-              build_seconds: ([.[].build_duration_ns] | median) / 1e9,
-              restore_and_build_seconds: ([.[].restore_and_build_duration_ns] | median) / 1e9
+              build_seconds: (([.[].build_duration_ns] | median) / 1e9),
+              restore_and_build_seconds: (([.[].restore_and_build_duration_ns] | median) / 1e9)
             })' "$RUNNER_TEMP"/small-edit/*.json \
             | tee "$RUNNER_TEMP/small-edit-summary.json"
           {
