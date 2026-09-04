@@ -176,8 +176,9 @@ def count_compilers() -> int | None:
     Counted by what the process actually is rather than by what started it:
     a shim is invoked under its own name and execs nothing, so matching the
     `rustc` executable itself is what separates the compilations from the
-    wrappers in front of them. Cargo's target-info queries carry
-    `--crate-name` too and compile nothing, so `--print` is excluded.
+    wrappers in front of them. Cargo's target-info and stdin probes carry
+    `--crate-name` too and compile nothing, so `--print` and a standalone
+    stdin argument are excluded just as the scheduler excludes them.
     """
     try:
         listing = subprocess.run(
@@ -189,9 +190,14 @@ def count_compilers() -> int | None:
         return None
     count = 0
     for line in listing.stdout.splitlines():
-        if "--crate-name" not in line or "--print" in line:
+        arguments = line.split()
+        if not arguments or (
+            "--crate-name" not in arguments
+            or any(argument.startswith("--print") for argument in arguments)
+            or "-" in arguments
+        ):
             continue
-        executable = line.split(maxsplit=1)[0]
+        executable = arguments[0]
         if Path(executable).name in ("rustc", "rustc.exe"):
             count += 1
     return count
