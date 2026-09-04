@@ -2,15 +2,16 @@ use mbx_cache_core::{
     ACTION_PROMISE_MEDIA_TYPE, ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE,
     AGENT_PROTOCOL_VERSION, ActionPrediction, AgentRequest, AgentResponse, BLOB_MEDIA_TYPE,
     BLOB_PACK_MEDIA_TYPE, BLOB_PACK_RECEIPT_MEDIA_TYPE, CLIENT_METADATA_MEDIA_TYPE, CacheDigest,
-    CacheDirectory, CacheFileNode, CcMetadata, DIRECTORY_MEDIA_TYPE, FileDigestScope, FileIdentity,
-    PROTOCOL_VERSION, RecordedFileDigest, RemoteActionResult, RestoreStats, RustcMetadata,
-    TASK_ACTION_MANIFEST_MEDIA_TYPE, canonical_json,
+    CacheDirectory, CacheFileNode, CcMetadata, DIRECTORY_MEDIA_TYPE, FileDigestResolution,
+    FileDigestScope, FileIdentity, FileObjectIdentity, PROTOCOL_VERSION, RecordedFileDigest,
+    RemoteActionResult, RestoreStats, RustcMetadata, TASK_ACTION_MANIFEST_MEDIA_TYPE,
+    canonical_json,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v6.jsonl");
+const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v7.jsonl");
 
 fn digest() -> CacheDigest {
     CacheDigest {
@@ -62,6 +63,19 @@ fn file_identity() -> FileIdentity {
         modified: std::time::SystemTime::UNIX_EPOCH
             + std::time::Duration::new(1_700_000_000, 2_100),
         changed: Some((1_700_000_000, 21)),
+        object: None,
+    }
+}
+
+fn object_file_identity() -> FileIdentity {
+    FileIdentity {
+        object: Some(FileObjectIdentity {
+            device_major: 8,
+            device_minor: 1,
+            mount_id: 42,
+            inode: 99,
+        }),
+        ..file_identity()
     }
 }
 
@@ -99,7 +113,7 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
         (
             "request.hello",
             AgentRequest::Hello {
-                protocol: 6,
+                protocol: 7,
                 client_version: "0.3.0".into(),
             },
         ),
@@ -239,6 +253,13 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
                 prediction: prediction(),
             },
         ),
+        (
+            "request.resolve_file_digests",
+            AgentRequest::ResolveFileDigests {
+                scope: FileDigestScope::Content,
+                files: vec![file_identity(), object_file_identity()],
+            },
+        ),
     ]
 }
 
@@ -247,7 +268,7 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
         (
             "response.hello",
             AgentResponse::Hello {
-                protocol: 6,
+                protocol: 7,
                 agent_version: "0.3.0".into(),
             },
         ),
@@ -376,6 +397,16 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
             "response.action_promise_completed",
             AgentResponse::ActionPromiseCompleted,
         ),
+        (
+            "response.file_digests_resolved",
+            AgentResponse::FileDigestsResolved {
+                resolutions: vec![
+                    FileDigestResolution::Digest(digest()),
+                    FileDigestResolution::EmbeddedTimestampMacro,
+                    FileDigestResolution::Unresolved,
+                ],
+            },
+        ),
     ]
 }
 
@@ -399,7 +430,7 @@ fn assert_fixture<T: Serialize>(expected: &mut BTreeMap<&str, &str>, name: &str,
 }
 
 #[test]
-fn agent_protocol_v6_shapes_match_the_conformance_fixture() {
+fn agent_protocol_v7_shapes_match_the_conformance_fixture() {
     let mut expected = fixture();
     for line in AGENT_FIXTURE.lines() {
         let (name, json) = line
@@ -477,7 +508,7 @@ fn agent_protocol_v6_shapes_match_the_conformance_fixture() {
 
 #[test]
 fn protocol_constants_match_the_contract() {
-    assert_eq!(AGENT_PROTOCOL_VERSION, 6);
+    assert_eq!(AGENT_PROTOCOL_VERSION, 7);
     assert_eq!(PROTOCOL_VERSION, 1);
     assert_eq!(
         ACTION_RESULT_MEDIA_TYPE,
@@ -537,6 +568,7 @@ define_variant_coverage!(request_variant_name, EXPECTED_REQUEST_VARIANTS, AgentR
     AgentRequest::RecordFileDigests { .. } => "record_file_digests",
     AgentRequest::JoinActionPromise { .. } => "join_action_promise",
     AgentRequest::CompleteActionPromise { .. } => "complete_action_promise",
+    AgentRequest::ResolveFileDigests { .. } => "resolve_file_digests",
 });
 
 define_variant_coverage!(response_variant_name, EXPECTED_RESPONSE_VARIANTS, AgentResponse, {
@@ -562,4 +594,5 @@ define_variant_coverage!(response_variant_name, EXPECTED_RESPONSE_VARIANTS, Agen
     AgentResponse::FileDigestsRecorded => "file_digests_recorded",
     AgentResponse::ActionPromise { .. } => "action_promise",
     AgentResponse::ActionPromiseCompleted => "action_promise_completed",
+    AgentResponse::FileDigestsResolved { .. } => "file_digests_resolved",
 });

@@ -2,8 +2,11 @@ use super::{
     ActionContext, ActionInput, Argument, BypassReason, MAX_NATIVE_INPUT_BYTES,
     MAX_PREDICTED_INPUTS, PathMapping, RustcInvocation, normalize_components,
 };
+#[cfg(test)]
+use mbx_cache_core::CacheDigest;
 use mbx_cache_core::{
-    CacheDigest, FileDigestCache, FileDigestScope, FileIdentity, FileSnapshot, RecordedFileDigest,
+    FileDigestCache, FileDigestResolution, FileDigestScope, FileIdentity, FileSnapshot,
+    RecordedFileDigest, digest_file,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -185,29 +188,41 @@ impl DiscoveredInputs {
             .iter()
             .filter_map(|(_, identity)| identity.clone())
             .collect::<Vec<_>>();
-        let mut recorded = digests.find(FileDigestScope::Content, &queries).into_iter();
+        let mut recorded = digests
+            .resolve(FileDigestScope::Content, &queries)
+            .into_iter();
         let mut inputs = Vec::with_capacity(identified.len());
         let mut identities = Vec::with_capacity(identified.len());
         let mut fresh = Vec::new();
         for (path, identity) in identified {
             identities.push(identity.clone());
-            let remembered = identity
+            let resolution = identity
                 .as_ref()
-                .and_then(|_| recorded.next().flatten())
-                .filter(|digest| {
-                    identity
+                .and_then(|_| recorded.next())
+                .unwrap_or(FileDigestResolution::Unresolved);
+            let digest = match resolution {
+                FileDigestResolution::Digest(digest)
+                    if identity
                         .as_ref()
-                        .is_some_and(|identity| identity.len == digest.size)
-                });
-            let digest = match remembered {
-                Some(digest) => digest,
-                None => {
-                    let digest = CacheDigest::blake3_file(&path).map_err(|error| {
-                        BypassReason::InputRead {
+                        .is_some_and(|identity| identity.len == digest.size) =>
+                {
+                    digest
+                }
+                FileDigestResolution::Digest(_)
+                | FileDigestResolution::EmbeddedTimestampMacro
+                | FileDigestResolution::Unresolved => {
+                    let digest = digest_file(FileDigestScope::Content, &path)
+                        .and_then(|resolution| {
+                            resolution.into_digest().ok_or_else(|| {
+                                std::io::Error::other(
+                                    "content digest resolution returned no digest",
+                                )
+                            })
+                        })
+                        .map_err(|error| BypassReason::InputRead {
                             path: path.clone(),
                             message: error.to_string(),
-                        }
-                    })?;
+                        })?;
                     if let Some(identity) = identity
                         && identity.len == digest.size
                     {
@@ -262,7 +277,12 @@ impl DiscoveredInputs {
                         path: input.path.clone(),
                         message: error.to_string(),
                     })?;
-                let identity = FileIdentity::describe(&input.path, &metadata);
+                let identity = FileIdentity::for_digest_cache(&input.path, &metadata)
+                    .map_err(|error| BypassReason::InputRead {
+                        path: input.path.clone(),
+                        message: error.to_string(),
+                    })?
+                    .or_else(|| FileIdentity::describe(&input.path, &metadata));
                 if previous.matches(identity.as_ref(), &input.digest) {
                     continue;
                 }
@@ -323,7 +343,7 @@ impl DiscoveredInputs {
             // keying the compilation did: a large binary's dependency rlibs, a
             // gigabyte of them, read twice for every edit.
             if let Some(Some(identity)) = self.identities.get(index)
-                && identity.changed.is_some()
+                && identity.can_skip_content_verification()
                 && identity.still_describes().map_err(read_error)?
             {
                 continue;

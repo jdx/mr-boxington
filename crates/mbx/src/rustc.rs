@@ -9,8 +9,8 @@ use crate::{session, util::workspace_root};
 use eyre::{Context, Result, bail};
 use mbx_cache_core::{
     ActionDiagnostic, ActionPrediction, AgentRequest, AgentResponse, CacheDigest, CacheDirectory,
-    CacheFileNode, FileDigestScope, FileIdentity, FileSnapshot, RecordedFileDigest,
-    RemoteActionResult, RestoreStats, RustcMetadata, canonical_json,
+    CacheFileNode, FileDigestResolution, FileDigestScope, FileIdentity, FileSnapshot,
+    RecordedFileDigest, RemoteActionResult, RestoreStats, RustcMetadata, canonical_json,
 };
 use mbx_cache_rustc::{
     ActionContext, ActionInput, BypassReason, CompilerIdentity, DiscoveredInputs, LinkerIdentity,
@@ -2257,13 +2257,12 @@ pub(crate) fn output_already_in_place(
     {
         return false;
     }
-    if let Some(identity) = FileIdentity::describe(destination, &metadata)
-        && let Some(recorded) = digests
-            .find(FileDigestScope::Content, &[identity])
-            .pop()
-            .flatten()
-    {
-        return recorded == node.digest;
+    if let Ok(Some(identity)) = FileIdentity::for_digest_cache(destination, &metadata) {
+        match digests.resolve(FileDigestScope::Content, &[identity]).pop() {
+            Some(FileDigestResolution::Digest(recorded)) => return recorded == node.digest,
+            Some(FileDigestResolution::EmbeddedTimestampMacro) => return false,
+            Some(FileDigestResolution::Unresolved) | None => {}
+        }
     }
     CacheDigest::blake3_file(destination).is_ok_and(|digest| digest == node.digest)
 }
@@ -2283,7 +2282,7 @@ fn record_output_digests(outputs: &[CachedOutput]) {
                 return None;
             }
             Some(RecordedFileDigest {
-                file: FileIdentity::describe(&output.path, &metadata)?,
+                file: FileIdentity::for_digest_cache(&output.path, &metadata).ok()??,
                 digest: output.digest.clone(),
             })
         })
@@ -2816,7 +2815,7 @@ fn publish_result<'a>(
             // for. The dep-info stays out -- its stored digest describes the
             // placeholder form, not what is on disk.
             if metadata.len() == digest.size
-                && let Some(file) = FileIdentity::describe(path, &metadata)
+                && let Ok(Some(file)) = FileIdentity::for_digest_cache(path, &metadata)
             {
                 hashed_outputs.push(RecordedFileDigest {
                     file,

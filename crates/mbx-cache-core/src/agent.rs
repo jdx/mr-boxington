@@ -31,8 +31,8 @@ mod wire;
 pub(crate) use prefetch::select_prefetch_actions;
 
 pub use file_digest::{
-    FileDigestCache, FileDigestScope, FileIdentity, FileSnapshot, NoFileDigestCache,
-    RecordedFileDigest,
+    FileDigestCache, FileDigestResolution, FileDigestScope, FileIdentity, FileObjectIdentity,
+    FileSnapshot, NoFileDigestCache, RecordedFileDigest, digest_file,
 };
 pub use manifest::{is_task_identity, task_manifest_actions};
 use manifest::{
@@ -67,6 +67,9 @@ const MAX_FILE_DIGEST_BATCH: usize = 16 * 1024;
 /// Roughly two orders of magnitude above the largest workspace measured; the
 /// cap exists so a pathological build bounds the agent instead of growing it.
 const MAX_FILE_DIGEST_ENTRIES: usize = 1024 * 1024;
+/// Distinct cold file reads allowed at once. Identical reads coalesce before
+/// this limit, while the limit prevents a wide cold build from flooding NFS.
+const MAX_CONCURRENT_FILE_DIGESTS: usize = 8;
 const MAX_REMOTE_TRANSFERS: usize = 64;
 const MAX_PREFETCH_TRANSFERS: usize = 48;
 /// Most blob packs downloaded at once.
@@ -105,6 +108,13 @@ const DEFAULT_MAX_REMOTE_DOWNLOAD_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 /// Names the identities a task may inherit predictions from, consulted only
 /// once nothing has been recorded under its own.
 pub type TaskFallbacks = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+type FileDigestFlightKey = (FileDigestScope, FileIdentity);
+type FileDigestFlights = BTreeMap<FileDigestFlightKey, Weak<FileDigestFlight>>;
+
+struct FileDigestFlight {
+    lock: tokio::sync::Mutex<()>,
+    resolution: Mutex<Option<FileDigestResolution>>,
+}
 
 /// How many of the store's most recently written manifests a task with
 /// fallbacks tries after the named identities yield nothing.
@@ -305,6 +315,11 @@ pub struct CacheAgent {
     /// Digests of files shims hashed or wrote this session, keyed by scope and
     /// path, each entry standing while its recorded identity matches the disk.
     file_digests: Arc<Mutex<BTreeMap<(FileDigestScope, PathBuf), RecordedFileDigest>>>,
+    /// Per-identity flights that make concurrent cold lookups share one read.
+    file_digest_locks: Arc<Mutex<FileDigestFlights>>,
+    file_digest_permits: Arc<tokio::sync::Semaphore>,
+    #[cfg(test)]
+    file_digest_reads: Arc<AtomicU64>,
     /// Deferred remote publication, present only when the session may write.
     uploads: Option<UploadQueue>,
 }
@@ -556,6 +571,10 @@ impl CacheAgent {
             prefetch_tasks: Arc::new(Mutex::new(Vec::new())),
             warnings: Arc::new(Mutex::new(BTreeSet::new())),
             file_digests: Arc::new(Mutex::new(BTreeMap::new())),
+            file_digest_locks: Arc::new(Mutex::new(BTreeMap::new())),
+            file_digest_permits: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FILE_DIGESTS)),
+            #[cfg(test)]
+            file_digest_reads: Arc::new(AtomicU64::new(0)),
             uploads,
         }
     }
@@ -1435,6 +1454,9 @@ impl CacheAgent {
             AgentRequest::CompleteActionPromise { claim, prediction } => {
                 self.complete_action_promise(&claim, &prediction).await
             }
+            AgentRequest::ResolveFileDigests { scope, files } => {
+                self.resolve_file_digests(scope, files).await
+            }
             AgentRequest::RecordFileDigests { scope, entries } => {
                 self.record_file_digests(scope, entries)
             }
@@ -1940,6 +1962,106 @@ impl CacheAgent {
             })
             .collect();
         Ok(AgentResponse::FileDigests { digests })
+    }
+
+    /// Resolve ledger misses inside the agent so concurrent shims that name the
+    /// same NFS object wait for and reuse one read instead of stampeding it.
+    async fn resolve_file_digests(
+        &self,
+        scope: FileDigestScope,
+        files: Vec<FileIdentity>,
+    ) -> Result<AgentResponse> {
+        if files.len() > MAX_FILE_DIGEST_BATCH {
+            bail!("too many file-digest resolutions in one request");
+        }
+        for file in &files {
+            if !file.path.is_absolute() {
+                bail!("file-digest resolutions need absolute paths");
+            }
+        }
+        let resolutions = stream::iter(
+            files
+                .into_iter()
+                .map(|file| async move { self.resolve_file_digest(scope, file).await }),
+        )
+        .buffered(MAX_CONCURRENT_FILE_DIGESTS)
+        .collect()
+        .await;
+        Ok(AgentResponse::FileDigestsResolved { resolutions })
+    }
+
+    async fn resolve_file_digest(
+        &self,
+        scope: FileDigestScope,
+        file: FileIdentity,
+    ) -> FileDigestResolution {
+        let lock = {
+            let key = (scope, file.clone());
+            let mut locks = self.file_digest_locks.lock().unwrap();
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(FileDigestFlight {
+                    lock: tokio::sync::Mutex::new(()),
+                    resolution: Mutex::new(None),
+                });
+                locks.insert(key, Arc::downgrade(&lock));
+                lock
+            }
+        };
+        let _flight = lock.lock.lock().await;
+        if let Some(resolution) = lock.resolution.lock().unwrap().clone() {
+            return resolution;
+        }
+        if let Some(digest) = self
+            .file_digests
+            .lock()
+            .unwrap()
+            .get(&(scope, file.path.clone()))
+            .filter(|recorded| recorded.file == file)
+            .map(|recorded| recorded.digest.clone())
+        {
+            return FileDigestResolution::Digest(digest);
+        }
+        let Ok(_permit) = self.file_digest_permits.acquire().await else {
+            return FileDigestResolution::Unresolved;
+        };
+        #[cfg(test)]
+        self.file_digest_reads.fetch_add(1, Ordering::Relaxed);
+        let path = file.path.clone();
+        let resolved = tokio::task::spawn_blocking(move || {
+            let resolution = digest_file(scope, &path)?;
+            let current = std::fs::metadata(&path)
+                .and_then(|metadata| FileIdentity::for_digest_cache(&path, &metadata));
+            Ok::<_, std::io::Error>((resolution, current?))
+        })
+        .await;
+        let Ok(Ok((resolution, current))) = resolved else {
+            return FileDigestResolution::Unresolved;
+        };
+        let resolution = match resolution {
+            FileDigestResolution::Digest(digest)
+                if current.as_ref() == Some(&file) && digest.size == file.len =>
+            {
+                let _ = self.record_file_digests(
+                    scope,
+                    vec![RecordedFileDigest {
+                        file: file.clone(),
+                        digest: digest.clone(),
+                    }],
+                );
+                FileDigestResolution::Digest(digest)
+            }
+            FileDigestResolution::EmbeddedTimestampMacro if current.as_ref() == Some(&file) => {
+                FileDigestResolution::EmbeddedTimestampMacro
+            }
+            FileDigestResolution::Digest(_)
+            | FileDigestResolution::EmbeddedTimestampMacro
+            | FileDigestResolution::Unresolved => FileDigestResolution::Unresolved,
+        };
+        *lock.resolution.lock().unwrap() = Some(resolution.clone());
+        resolution
     }
 
     /// Record digests of files a shim read in full, for later reuse.

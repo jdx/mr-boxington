@@ -4365,6 +4365,7 @@ fn ledger_identity(path: &str, len: u64, nanos: u32) -> FileIdentity {
         len,
         modified: SystemTime::UNIX_EPOCH + Duration::new(1_700_000_000, nanos * 100),
         changed: Some((1_700_000_000, nanos.into())),
+        object: None,
     }
 }
 
@@ -4452,6 +4453,137 @@ async fn file_digest_ledger_scopes_do_not_answer_for_each_other() {
     assert!(
         matches!(response, AgentResponse::FileDigests { digests } if digests == vec![Some(ledger_digest(7))])
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_file_digest_misses_share_one_large_read() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("large-input.rlib");
+    let bytes = vec![b'x'; 256 * 1024];
+    std::fs::write(&path, &bytes).unwrap();
+    let metadata = std::fs::metadata(&path).unwrap();
+    let identity = FileIdentity::for_digest_cache(&path, &metadata)
+        .unwrap()
+        .unwrap();
+    let expected = CacheDigest::blake3(&bytes);
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    let barrier = Arc::new(tokio::sync::Barrier::new(65));
+    let mut tasks = Vec::new();
+    for _ in 0..64 {
+        let agent = agent.clone();
+        let identity = identity.clone();
+        let barrier = Arc::clone(&barrier);
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            agent
+                .resolve_file_digest(FileDigestScope::Content, identity)
+                .await
+        }));
+    }
+    barrier.wait().await;
+    for task in tasks {
+        assert_eq!(
+            task.await.unwrap(),
+            FileDigestResolution::Digest(expected.clone())
+        );
+    }
+    assert_eq!(agent.file_digest_reads.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_timestamp_macro_resolutions_share_one_read() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("timestamp-input.c");
+    std::fs::write(&path, b"const char *built = __DATE__;\n").unwrap();
+    let metadata = std::fs::metadata(&path).unwrap();
+    let identity = FileIdentity::for_digest_cache(&path, &metadata)
+        .unwrap()
+        .unwrap();
+    let key = (FileDigestScope::CcInput, identity.clone());
+    let flight = Arc::new(FileDigestFlight {
+        lock: tokio::sync::Mutex::new(()),
+        resolution: Mutex::new(None),
+    });
+    let owner = flight.lock.lock().await;
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    agent
+        .file_digest_locks
+        .lock()
+        .unwrap()
+        .insert(key, Arc::downgrade(&flight));
+
+    let mut tasks = Vec::new();
+    for _ in 0..64 {
+        let agent = agent.clone();
+        let identity = identity.clone();
+        tasks.push(tokio::spawn(async move {
+            agent
+                .resolve_file_digest(FileDigestScope::CcInput, identity)
+                .await
+        }));
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while Arc::strong_count(&flight) != 65 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("waiters did not join the same digest flight");
+    drop(owner);
+
+    for task in tasks {
+        assert_eq!(
+            task.await.unwrap(),
+            FileDigestResolution::EmbeddedTimestampMacro
+        );
+    }
+    assert_eq!(agent.file_digest_reads.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn abandoned_file_digest_owner_wakes_the_next_waiter() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("input.rlib");
+    std::fs::write(&path, b"dependency bytes").unwrap();
+    let metadata = std::fs::metadata(&path).unwrap();
+    let identity = FileIdentity::for_digest_cache(&path, &metadata)
+        .unwrap()
+        .unwrap();
+    let key = (FileDigestScope::Content, identity.clone());
+    let lock = Arc::new(FileDigestFlight {
+        lock: tokio::sync::Mutex::new(()),
+        resolution: Mutex::new(None),
+    });
+
+    let acquired = Arc::new(tokio::sync::Notify::new());
+    let owner_lock = Arc::clone(&lock);
+    let owner_acquired = Arc::clone(&acquired);
+    let owner = tokio::spawn(async move {
+        let _guard = owner_lock.lock.lock().await;
+        owner_acquired.notify_one();
+        std::future::pending::<()>().await;
+    });
+    acquired.notified().await;
+
+    let agent = CacheAgent::new(directory.path().join("waiter-cache"), "test-version");
+    agent
+        .file_digest_locks
+        .lock()
+        .unwrap()
+        .insert(key, Arc::downgrade(&lock));
+    let waiter_agent = agent.clone();
+    let waiter = tokio::spawn(async move {
+        waiter_agent
+            .resolve_file_digest(FileDigestScope::Content, identity)
+            .await
+    });
+    tokio::task::yield_now().await;
+    owner.abort();
+    let resolution = tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .expect("waiter stayed blocked after its owner was aborted")
+        .unwrap();
+    assert!(matches!(resolution, FileDigestResolution::Digest(_)));
 }
 
 #[tokio::test]
