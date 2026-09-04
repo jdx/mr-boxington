@@ -311,8 +311,6 @@ jobs:
         with:
           name: gha-small-edit-mbx-binary
           path: ${{ runner.temp }}/mbx-bin
-          run-id: ${{ inputs.small_edit_mbx_artifact_run || github.run_id }}
-          github-token: ${{ github.token }}
           if-no-files-found: error
           retention-days: 7
 
@@ -528,6 +526,8 @@ jobs:
         with:
           name: gha-small-edit-mbx-binary
           path: ${{ runner.temp }}/mbx-bin
+          run-id: ${{ inputs.small_edit_mbx_artifact_run || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Select candidate mbx
         if: inputs.small_edit_mbx_ref != '' && matrix.tool != 'rust-cache'
         run: |
