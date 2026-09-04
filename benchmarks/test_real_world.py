@@ -10,6 +10,7 @@ class CountCompilersTest(unittest.TestCase):
         listing = "\n".join(
             (
                 "/opt/rust/bin/rustc --crate-name real src/lib.rs --emit=link",
+                "/opt/rust/bin/rustc --crate-name=also_real src/main.rs --emit=link",
                 "/opt/rust/bin/rustc --crate-name ___ -",
                 "/opt/rust/bin/rustc --crate-name ___ --print=file-names",
                 "/usr/bin/mbx /opt/rust/bin/rustc --crate-name wrapped src/lib.rs",
@@ -20,7 +21,7 @@ class CountCompilersTest(unittest.TestCase):
         )
 
         with mock.patch.object(real_world.subprocess, "run", return_value=completed):
-            self.assertEqual(real_world.count_compilers(), 1)
+            self.assertEqual(real_world.count_compilers(), 2)
 
 
 if __name__ == "__main__":

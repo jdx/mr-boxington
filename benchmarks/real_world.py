@@ -191,8 +191,12 @@ def count_compilers() -> int | None:
     count = 0
     for line in listing.stdout.splitlines():
         arguments = line.split()
+        has_crate_name = any(
+            argument == "--crate-name" or argument.startswith("--crate-name=")
+            for argument in arguments
+        )
         if not arguments or (
-            "--crate-name" not in arguments
+            not has_crate_name
             or any(argument.startswith("--print") for argument in arguments)
             or "-" in arguments
         ):
