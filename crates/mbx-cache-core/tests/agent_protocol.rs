@@ -3,8 +3,9 @@ use mbx_cache_core::{
     AGENT_PROTOCOL_VERSION, ActionPrediction, AgentRequest, AgentResponse, BLOB_MEDIA_TYPE,
     BLOB_PACK_MEDIA_TYPE, BLOB_PACK_RECEIPT_MEDIA_TYPE, CLIENT_METADATA_MEDIA_TYPE, CacheDigest,
     CacheDirectory, CacheFileNode, CcMetadata, DIRECTORY_MEDIA_TYPE, FileDigestResolution,
-    FileDigestScope, FileIdentity, PROTOCOL_VERSION, RecordedFileDigest, RemoteActionResult,
-    RestoreStats, RustcMetadata, TASK_ACTION_MANIFEST_MEDIA_TYPE, canonical_json,
+    FileDigestScope, FileIdentity, FileObjectIdentity, PROTOCOL_VERSION, RecordedFileDigest,
+    RemoteActionResult, RestoreStats, RustcMetadata, TASK_ACTION_MANIFEST_MEDIA_TYPE,
+    canonical_json,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -63,6 +64,18 @@ fn file_identity() -> FileIdentity {
             + std::time::Duration::new(1_700_000_000, 2_100),
         changed: Some((1_700_000_000, 21)),
         object: None,
+    }
+}
+
+fn object_file_identity() -> FileIdentity {
+    FileIdentity {
+        object: Some(FileObjectIdentity {
+            device_major: 8,
+            device_minor: 1,
+            mount_id: 42,
+            inode: 99,
+        }),
+        ..file_identity()
     }
 }
 
@@ -244,7 +257,7 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
             "request.resolve_file_digests",
             AgentRequest::ResolveFileDigests {
                 scope: FileDigestScope::Content,
-                files: vec![file_identity()],
+                files: vec![file_identity(), object_file_identity()],
             },
         ),
     ]

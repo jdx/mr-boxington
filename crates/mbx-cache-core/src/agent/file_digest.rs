@@ -2,6 +2,7 @@ use crate::CacheDigest;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
@@ -355,7 +356,11 @@ fn nfs_file_identity(path: &Path) -> io::Result<Option<FileIdentity>> {
         )
     };
     if result != 0 {
-        return Err(io::Error::last_os_error());
+        let error = io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP) => Ok(None),
+            _ => Err(error),
+        };
     }
     // SAFETY: statx returned success and initialized `status`.
     let status = unsafe { status.assume_init() };
@@ -392,6 +397,7 @@ fn nfs_file_identity(_path: &Path) -> io::Result<Option<FileIdentity>> {
     Ok(None)
 }
 
+#[cfg(target_os = "linux")]
 fn system_time(seconds: i64, nanos: u32) -> io::Result<SystemTime> {
     if seconds >= 0 {
         SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::new(seconds as u64, nanos))

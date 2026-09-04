@@ -109,7 +109,12 @@ const DEFAULT_MAX_REMOTE_DOWNLOAD_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 /// once nothing has been recorded under its own.
 pub type TaskFallbacks = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 type FileDigestFlightKey = (FileDigestScope, FileIdentity);
-type FileDigestFlights = BTreeMap<FileDigestFlightKey, Weak<tokio::sync::Mutex<()>>>;
+type FileDigestFlights = BTreeMap<FileDigestFlightKey, Weak<FileDigestFlight>>;
+
+struct FileDigestFlight {
+    lock: tokio::sync::Mutex<()>,
+    resolution: Mutex<Option<FileDigestResolution>>,
+}
 
 /// How many of the store's most recently written manifests a task with
 /// fallbacks tries after the named identities yield nothing.
@@ -1997,12 +2002,18 @@ impl CacheAgent {
             if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
                 lock
             } else {
-                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                let lock = Arc::new(FileDigestFlight {
+                    lock: tokio::sync::Mutex::new(()),
+                    resolution: Mutex::new(None),
+                });
                 locks.insert(key, Arc::downgrade(&lock));
                 lock
             }
         };
-        let _flight = lock.lock().await;
+        let _flight = lock.lock.lock().await;
+        if let Some(resolution) = lock.resolution.lock().unwrap().clone() {
+            return resolution;
+        }
         if let Some(digest) = self
             .file_digests
             .lock()
@@ -2029,18 +2040,27 @@ impl CacheAgent {
         let Ok(Ok((resolution, current))) = resolved else {
             return FileDigestResolution::Unresolved;
         };
-        if let FileDigestResolution::Digest(digest) = &resolution
-            && current.as_ref() == Some(&file)
-            && digest.size == file.len
-        {
-            let _ = self.record_file_digests(
-                scope,
-                vec![RecordedFileDigest {
-                    file,
-                    digest: digest.clone(),
-                }],
-            );
-        }
+        let resolution = match resolution {
+            FileDigestResolution::Digest(digest)
+                if current.as_ref() == Some(&file) && digest.size == file.len =>
+            {
+                let _ = self.record_file_digests(
+                    scope,
+                    vec![RecordedFileDigest {
+                        file: file.clone(),
+                        digest: digest.clone(),
+                    }],
+                );
+                FileDigestResolution::Digest(digest)
+            }
+            FileDigestResolution::EmbeddedTimestampMacro if current.as_ref() == Some(&file) => {
+                FileDigestResolution::EmbeddedTimestampMacro
+            }
+            FileDigestResolution::Digest(_)
+            | FileDigestResolution::EmbeddedTimestampMacro
+            | FileDigestResolution::Unresolved => FileDigestResolution::Unresolved,
+        };
+        *lock.resolution.lock().unwrap() = Some(resolution.clone());
         resolution
     }
 
