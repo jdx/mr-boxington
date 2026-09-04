@@ -614,10 +614,14 @@ fn materialized_outputs_are_independent_from_the_cas() {
 
 #[test]
 fn only_compiler_input_mutations_invalidate_local_outputs() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("lib.rs");
-    std::fs::write(&path, b"source").unwrap();
-    let snapshot = FileSnapshot::capture(&path).unwrap().unwrap();
+    let path = PathBuf::from("src/lib.rs");
+    let identity = FileIdentity {
+        path: path.clone(),
+        len: 6,
+        modified: SystemTime::UNIX_EPOCH,
+        changed: Some((1, 2)),
+    };
+    let snapshot = FileSnapshot::from(identity);
     let snapshots = Ok(BTreeMap::from([(path.clone(), snapshot)]));
     let changed =
         eyre::Report::new(BypassReason::InputChanged(path.clone())).wrap_err("publication failed");
