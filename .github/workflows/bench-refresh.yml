@@ -330,7 +330,6 @@ jobs:
       actions: write
       contents: read
     env:
-      MBX_CACHE_EXPORT_GROUP: gha-small-edit-${{ github.run_id }}-${{ matrix.trial }}
       MBX_TARGET_VIEWS: ${{ matrix.tool == 'mbx-target' && '0' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -361,13 +360,6 @@ jobs:
           workspaces: . -> target
           cache-all-crates: "true"
           cache-workspace-crates: "true"
-      - if: matrix.tool == 'mbx'
-        uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
-        with:
-          version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
-          cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
-          save-on-workflow-dispatch: "true"
-          toolchain: 1.97.1
       - if: matrix.tool == 'mbx-target'
         uses: jdx/mr-boxington-action@9de6985642d1623bb915b93a310225b5e4a7234a
         with:
@@ -383,113 +375,6 @@ jobs:
           BUILD_DRIVER: "${{ matrix.tool == 'rust-cache' && 'cargo' || 'mbx' }}"
         run: |
           "$BUILD_DRIVER" build --locked
-      - name: Prune target like rust-cache
-        if: false
-        shell: python
-        run: |
-          import json
-          import pathlib
-          import shutil
-          import subprocess
-
-          metadata = json.loads(subprocess.check_output([
-              "cargo", "metadata", "--format-version", "1", "--locked",
-          ]))
-          packages = metadata["packages"]
-          keep_pkg = {
-              name
-              for package in packages
-              for name in [package["name"], *(target["name"].replace("-", "_") for target in package["targets"])]
-          }
-          keep_deps = {
-              name
-              for package in packages
-              for raw_name in [package["name"], *(target["name"] for target in package["targets"])]
-              for name in (raw_name.replace("-", "_"), f"lib{raw_name.replace('-', '_')}")
-          }
-          keep_registry = {package["name"] for package in packages}
-
-          def remove(path):
-              if path.is_dir() and not path.is_symlink():
-                  shutil.rmtree(path)
-              else:
-                  path.unlink(missing_ok=True)
-
-          def matches(entry, keep):
-              name = entry.name
-              if name in keep:
-                  return True
-              stem, separator, _hash = name.rpartition("-")
-              return bool(separator and stem in keep)
-
-          def prune_profile(profile):
-              for entry in profile.iterdir():
-                  if entry.name not in {"build", ".fingerprint", "deps", ".mbx-build-script-shims"}:
-                      remove(entry)
-              for dirname, keep in (("build", keep_pkg), (".fingerprint", keep_pkg), ("deps", keep_deps)):
-                  directory = profile / dirname
-                  if not directory.is_dir():
-                      continue
-                  for entry in directory.iterdir():
-                      if not matches(entry, keep):
-                          remove(entry)
-
-          def prune_target(directory):
-              for entry in list(directory.iterdir()):
-                  if not entry.is_dir():
-                      if entry.name != "CACHEDIR.TAG":
-                          remove(entry)
-                      continue
-                  if any((entry / marker).exists() for marker in ("build", ".fingerprint", "deps")):
-                      prune_profile(entry)
-                  else:
-                      prune_target(entry)
-
-          prune_target(pathlib.Path("target"))
-
-          def prune_sparse_index(directory):
-              empty = True
-              for entry in list(directory.iterdir()):
-                  if entry.is_dir():
-                      if prune_sparse_index(entry):
-                          remove(entry)
-                      else:
-                          empty = False
-                  elif entry.name in keep_registry:
-                      empty = False
-                  else:
-                      remove(entry)
-              return empty
-
-          registry_index = pathlib.Path.home() / ".cargo" / "registry" / "index"
-          if registry_index.is_dir():
-              for index in registry_index.iterdir():
-                  if not index.is_dir():
-                      continue
-                  if (index / ".git").is_dir():
-                      remove(index / ".cache")
-                  else:
-                      prune_sparse_index(index)
-
-      - name: Export native mbx bundle
-        if: matrix.tool == 'mbx-registry'
-        run: mbx cache export --group "$MBX_CACHE_EXPORT_GROUP" "$RUNNER_TEMP/mbx-cache.tar"
-      - if: matrix.tool == 'mbx-registry'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          key: gha-small-edit-${{ matrix.tool }}-${{ github.run_id }}-${{ matrix.trial }}-parent
-          path: |
-            ${{ runner.temp }}/mbx-cache.tar
-            ~/.cargo/registry
-            ~/.cargo/git
-      - if: false
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          key: gha-small-edit-${{ matrix.tool }}-${{ github.run_id }}-${{ matrix.trial }}-parent
-          path: |
-            target
-            ~/.cargo/registry
-            ~/.cargo/git
 
   small-edit-measure:
     name: Measure pair ${{ matrix.trial }} (${{ matrix.order }})
