@@ -1,5 +1,6 @@
 use crate::CacheDigest;
 use serde::{Deserialize, Serialize};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -38,6 +39,19 @@ impl FileIdentity {
         })
     }
 
+    /// Describe a file only when metadata can safely stand in for its digest.
+    ///
+    /// Linux NFS may revise cached timestamps without a write and may delay a
+    /// real writer's final timestamps. Returning no identity makes digest
+    /// users hash the file instead of trusting that ambiguous metadata.
+    pub fn for_digest_cache(path: &Path, metadata: &std::fs::Metadata) -> io::Result<Option<Self>> {
+        Ok(digest_cache_identity(
+            path,
+            metadata,
+            metadata_identity_is_unreliable(path)?,
+        ))
+    }
+
     /// Whether the file at this identity's path still has exactly this
     /// identity, so the digest recorded against it still describes the bytes on
     /// disk without reading them again.
@@ -51,6 +65,89 @@ impl FileIdentity {
     pub fn still_describes(&self) -> std::io::Result<bool> {
         let metadata = std::fs::metadata(&self.path)?;
         Ok(Self::describe(&self.path, &metadata).as_ref() == Some(self))
+    }
+}
+
+/// A pre-operation snapshot that can prove whether a file's contents changed.
+///
+/// Most filesystems provide a stable metadata-change token, so the inexpensive
+/// identity is sufficient. Linux NFS can reconcile client and server
+/// timestamps after a writer has closed the file, making two metadata reads
+/// disagree without any intervening write. Those files carry a content digest
+/// instead. Callers use the same comparison either way and do not need to know
+/// which filesystem supplied the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSnapshot {
+    identity: FileIdentity,
+    content: Option<CacheDigest>,
+}
+
+impl FileSnapshot {
+    /// Capture the strongest comparison the file's filesystem can support.
+    pub fn capture(path: &Path) -> io::Result<Option<Self>> {
+        capture_file_snapshot(path, metadata_identity_is_unreliable(path)?)
+    }
+
+    /// Whether `identity` and `content` still describe this snapshot.
+    pub fn matches(&self, identity: Option<&FileIdentity>, content: &CacheDigest) -> bool {
+        self.content
+            .as_ref()
+            .map_or(identity == Some(&self.identity), |before| before == content)
+    }
+
+    /// Whether a mismatch proves the file's contents changed.
+    pub fn proves_content_change(&self) -> bool {
+        self.content.is_some() || self.identity.changed.is_some()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn metadata_identity_is_unreliable(path: &Path) -> io::Result<bool> {
+    use std::mem::MaybeUninit;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+    let mut status = MaybeUninit::<libc::statfs>::zeroed();
+    // SAFETY: `path` is NUL-terminated and `status` points to writable,
+    // correctly sized storage. statfs initializes it before returning success.
+    let result = unsafe { libc::statfs(path.as_ptr(), status.as_mut_ptr()) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: statfs returned success and initialized `status`.
+    let status = unsafe { status.assume_init() };
+    // libc gives NFS_SUPER_MAGIC a different signedness from statfs::f_type on musl.
+    Ok(status.f_type == 0x6969)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn metadata_identity_is_unreliable(_path: &Path) -> io::Result<bool> {
+    Ok(false)
+}
+
+fn capture_file_snapshot(path: &Path, content_identity: bool) -> io::Result<Option<FileSnapshot>> {
+    let metadata = std::fs::metadata(path)?;
+    let Some(identity) = FileIdentity::describe(path, &metadata) else {
+        return Ok(None);
+    };
+    let content = content_identity
+        .then(|| {
+            CacheDigest::blake3_file(path).map_err(|error| io::Error::other(error.to_string()))
+        })
+        .transpose()?;
+    Ok(Some(FileSnapshot { identity, content }))
+}
+
+fn digest_cache_identity(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    unreliable: bool,
+) -> Option<FileIdentity> {
+    if unreliable {
+        None
+    } else {
+        FileIdentity::describe(path, metadata)
     }
 }
 
@@ -136,5 +233,63 @@ mod tests {
 
         std::fs::remove_file(&path).unwrap();
         assert!(identity.still_describes().is_err());
+    }
+
+    #[test]
+    fn a_metadata_snapshot_detects_a_metadata_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("input.rs");
+        std::fs::write(&path, b"fn main() {}").unwrap();
+        let snapshot = capture_file_snapshot(&path, false).unwrap().unwrap();
+
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+            .unwrap();
+        let identity = FileIdentity::describe(&path, &std::fs::metadata(&path).unwrap());
+        let digest = CacheDigest::blake3_file(&path).unwrap();
+
+        assert!(!snapshot.matches(identity.as_ref(), &digest));
+        assert_eq!(snapshot.proves_content_change(), cfg!(unix));
+    }
+
+    #[test]
+    fn a_content_snapshot_ignores_metadata_churn_but_detects_changed_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("input.rs");
+        std::fs::write(&path, b"fn main() {}").unwrap();
+        let snapshot = capture_file_snapshot(&path, true).unwrap().unwrap();
+
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+            .unwrap();
+        let identity = FileIdentity::describe(&path, &std::fs::metadata(&path).unwrap());
+        let digest = CacheDigest::blake3_file(&path).unwrap();
+        assert!(snapshot.matches(identity.as_ref(), &digest));
+        assert!(snapshot.proves_content_change());
+
+        std::fs::write(&path, b"fn main(){ }").unwrap();
+        let identity = FileIdentity::describe(&path, &std::fs::metadata(&path).unwrap());
+        let digest = CacheDigest::blake3_file(&path).unwrap();
+        assert!(!snapshot.matches(identity.as_ref(), &digest));
+    }
+
+    #[test]
+    fn unreliable_metadata_is_not_used_as_a_digest_cache_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("input.rs");
+        std::fs::write(&path, b"fn main() {}").unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+
+        let identity = digest_cache_identity(&path, &metadata, false).unwrap();
+
+        assert_eq!(identity.path, path);
+        assert_eq!(identity.len, 12);
+        assert!(digest_cache_identity(&identity.path, &metadata, true).is_none());
     }
 }

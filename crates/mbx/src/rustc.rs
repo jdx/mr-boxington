@@ -9,8 +9,8 @@ use crate::{session, util::workspace_root};
 use eyre::{Context, Result, bail};
 use mbx_cache_core::{
     ActionDiagnostic, ActionPrediction, AgentRequest, AgentResponse, CacheDigest, CacheDirectory,
-    CacheFileNode, FileDigestScope, FileIdentity, RecordedFileDigest, RemoteActionResult,
-    RestoreStats, RustcMetadata, canonical_json,
+    CacheFileNode, FileDigestScope, FileIdentity, FileSnapshot, RecordedFileDigest,
+    RemoteActionResult, RestoreStats, RustcMetadata, canonical_json,
 };
 use mbx_cache_rustc::{
     ActionContext, ActionInput, BypassReason, CompilerIdentity, DiscoveredInputs, LinkerIdentity,
@@ -431,8 +431,8 @@ pub(crate) fn compile(
     // capacity happened before rustc ran and belongs to the valid compilation
     // it is about to perform, not to the overlap this snapshot detects.
     let required_inputs = invocation.required_inputs_in(&working_dir);
-    let input_identities =
-        crate::util::snapshot_file_identities(required_inputs.iter().map(PathBuf::as_path));
+    let input_snapshots =
+        crate::util::snapshot_compiler_inputs(required_inputs.iter().map(PathBuf::as_path));
     let compilation_started = SystemTime::now();
     let compiler_timer = Instant::now();
     let mut command = compiler_command(rustc, wrapper_argument);
@@ -488,10 +488,10 @@ pub(crate) fn compile(
                 &working_dir,
                 &portable,
                 compilation_started,
-                &input_identities,
+                &input_snapshots,
             )
         {
-            if discard_modified_compiler_result(&outputs, &input_identities, &error) {
+            if discard_modified_compiler_result(&outputs, &input_snapshots, &error) {
                 let _ = replay_bytes(&[], &output.stderr);
                 return Ok(ExitCode::FAILURE);
             }
@@ -527,12 +527,12 @@ pub(crate) fn compile(
         let publication: Result<Option<ActionDiagnostic>> =
             if let Some(discovered) = current_manifest_inputs {
                 (|| {
-                    let input_identities = input_identities
+                    let input_snapshots = input_snapshots
                         .as_ref()
                         .map_err(|error| eyre::eyre!(error.to_string()))?;
-                    discovered.verify_not_modified_since_with_identities(
+                    discovered.verify_not_modified_since_with_snapshots(
                         compilation_started,
-                        input_identities,
+                        input_snapshots,
                     )?;
                     discovered.verify()?;
                     learned.record_compiled();
@@ -540,14 +540,14 @@ pub(crate) fn compile(
                 })()
             } else {
                 (|| {
-                    let input_identities = input_identities
+                    let input_snapshots = input_snapshots
                         .as_ref()
                         .map_err(|error| eyre::eyre!(error.to_string()))?;
                     let (candidates, discovered) =
                         action_from_dep_info(&compilation, &outputs.dep_info)?;
-                    discovered.verify_not_modified_since_with_identities(
+                    discovered.verify_not_modified_since_with_snapshots(
                         compilation_started,
-                        input_identities,
+                        input_snapshots,
                     )?;
                     discovered.verify()?;
                     learned.record_compiled();
@@ -593,7 +593,7 @@ pub(crate) fn compile(
             };
         match publication {
             Ok(diagnostic) => current_diagnostic = diagnostic,
-            Err(error) if discard_modified_compiler_result(&outputs, &input_identities, &error) => {
+            Err(error) if discard_modified_compiler_result(&outputs, &input_snapshots, &error) => {
                 compiler_input_invalid = true;
             }
             Err(error) => eprintln!("mbx[warning]: result was not stored: {error:#}"),
@@ -623,20 +623,20 @@ pub(crate) fn compile(
 ///
 /// Other publication failures only prevent caching: rustc's local result is
 /// still valid and Cargo can use it. A content change or an overlap proved by
-/// a pre-compilation file identity instead means the artifact cannot be
+/// a pre-compilation file snapshot instead means the artifact cannot be
 /// trusted. A timestamp-only overlap remains a conservative cache bypass: it
 /// is not reliable enough across skewed filesystem clocks to fail the build.
 fn compiler_input_was_modified(
     error: &eyre::Report,
-    input_identities: &std::io::Result<BTreeMap<PathBuf, FileIdentity>>,
+    input_snapshots: &std::io::Result<BTreeMap<PathBuf, FileSnapshot>>,
 ) -> bool {
     match error.downcast_ref::<BypassReason>() {
         Some(BypassReason::InputChanged(_)) => true,
-        Some(BypassReason::InputModifiedDuringCompilation(path)) => input_identities
+        Some(BypassReason::InputModifiedDuringCompilation(path)) => input_snapshots
             .as_ref()
             .ok()
-            .and_then(|identities| identities.get(path))
-            .is_some_and(|identity| identity.changed.is_some()),
+            .and_then(|snapshots| snapshots.get(path))
+            .is_some_and(FileSnapshot::proves_content_change),
         _ => false,
     }
 }
@@ -644,10 +644,10 @@ fn compiler_input_was_modified(
 /// Reject and remove a successful compiler result whose inputs changed while it ran.
 fn discard_modified_compiler_result(
     outputs: &RustcOutputs,
-    input_identities: &std::io::Result<BTreeMap<PathBuf, FileIdentity>>,
+    input_snapshots: &std::io::Result<BTreeMap<PathBuf, FileSnapshot>>,
     error: &eyre::Report,
 ) -> bool {
-    if !compiler_input_was_modified(error, input_identities) {
+    if !compiler_input_was_modified(error, input_snapshots) {
         return false;
     }
     if let Err(discard_error) = discard_compiler_outputs(outputs) {
@@ -665,9 +665,9 @@ fn validate_compiler_inputs(
     working_dir: &Path,
     portable: &Portable,
     compilation_started: SystemTime,
-    input_identities: &std::io::Result<BTreeMap<PathBuf, FileIdentity>>,
+    input_snapshots: &std::io::Result<BTreeMap<PathBuf, FileSnapshot>>,
 ) -> Result<()> {
-    let input_identities = input_identities
+    let input_snapshots = input_snapshots
         .as_ref()
         .map_err(|error| eyre::eyre!(error.to_string()))?;
     let dep_info = RustcDepInfo::read(&outputs.dep_info)?;
@@ -677,7 +677,7 @@ fn validate_compiler_inputs(
         &portable.mappings,
         session::file_digest_cache(),
     )?;
-    discovered.verify_not_modified_since_with_identities(compilation_started, input_identities)?;
+    discovered.verify_not_modified_since_with_snapshots(compilation_started, input_snapshots)?;
     discovered.verify()?;
     Ok(())
 }
@@ -716,8 +716,8 @@ fn compile_execution_only_build_script(
     let demand = crate::scheduler::Demand::new(invocation.crate_name(), true);
     let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
     let required_inputs = invocation.required_inputs_in(working_dir);
-    let input_identities =
-        crate::util::snapshot_file_identities(required_inputs.iter().map(PathBuf::as_path));
+    let input_snapshots =
+        crate::util::snapshot_compiler_inputs(required_inputs.iter().map(PathBuf::as_path));
     let compilation_started = SystemTime::now();
     let started = Instant::now();
     let output = compiler_command(rustc, wrapper_argument)
@@ -739,10 +739,10 @@ fn compile_execution_only_build_script(
             working_dir,
             portable,
             compilation_started,
-            &input_identities,
+            &input_snapshots,
         )
     {
-        if discard_modified_compiler_result(outputs, &input_identities, &error) {
+        if discard_modified_compiler_result(outputs, &input_snapshots, &error) {
             let _ = replay_bytes(&[], &output.stderr);
             return Ok(ExitCode::FAILURE);
         }

@@ -31,7 +31,8 @@ mod wire;
 pub(crate) use prefetch::select_prefetch_actions;
 
 pub use file_digest::{
-    FileDigestCache, FileDigestScope, FileIdentity, NoFileDigestCache, RecordedFileDigest,
+    FileDigestCache, FileDigestScope, FileIdentity, FileSnapshot, NoFileDigestCache,
+    RecordedFileDigest,
 };
 pub use manifest::{is_task_identity, task_manifest_actions};
 use manifest::{

@@ -5,7 +5,7 @@ use crate::{
     MAX_MANIFEST_ENTRIES, MAX_PREDICTED_INPUTS, normalize_components,
 };
 use mbx_cache_core::{
-    CacheDigest, FileDigestCache, FileDigestScope, FileIdentity, RecordedFileDigest,
+    CacheDigest, FileDigestCache, FileDigestScope, FileIdentity, FileSnapshot, RecordedFileDigest,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -302,7 +302,12 @@ impl CcDiscoveredInputs {
             if total_bytes > MAX_INPUT_BYTES {
                 return Err(CcBypassReason::TooManyInputs);
             }
-            let identity = FileIdentity::describe(&path, &metadata);
+            let identity = FileIdentity::for_digest_cache(&path, &metadata).map_err(|error| {
+                CcBypassReason::InputRead {
+                    path: path.clone(),
+                    message: error.to_string(),
+                }
+            })?;
             identified.push((path, identity));
         }
         let queries = identified
@@ -380,33 +385,38 @@ impl CcDiscoveredInputs {
     /// being mistaken for the contents that produced the object; `verify`
     /// closes the remaining race after hashing.
     pub fn verify_not_modified_since(&self, started_at: SystemTime) -> Result<(), CcBypassReason> {
-        self.verify_not_modified_since_with_identities(started_at, &BTreeMap::new())
+        self.verify_not_modified_since_with_snapshots(started_at, &BTreeMap::new())
     }
 
-    /// Reject inputs that changed from identities captured before the driver
+    /// Reject inputs that changed from snapshots captured before the driver
     /// ran, falling back to the wall-clock barrier for discovered headers.
-    pub fn verify_not_modified_since_with_identities(
+    pub fn verify_not_modified_since_with_snapshots(
         &self,
         started_at: SystemTime,
-        before: &BTreeMap<PathBuf, FileIdentity>,
+        before: &BTreeMap<PathBuf, FileSnapshot>,
     ) -> Result<(), CcBypassReason> {
         for input in self.files() {
-            let metadata =
-                std::fs::metadata(&input.path).map_err(|error| CcBypassReason::InputRead {
-                    path: input.path.clone(),
-                    message: error.to_string(),
-                })?;
-            let identity = FileIdentity::describe(&input.path, &metadata);
             if let Some(previous) = before.get(&input.path)
-                && previous.changed.is_some()
+                && previous.proves_content_change()
             {
-                if identity.as_ref() == Some(previous) {
+                let metadata =
+                    std::fs::metadata(&input.path).map_err(|error| CcBypassReason::InputRead {
+                        path: input.path.clone(),
+                        message: error.to_string(),
+                    })?;
+                let identity = FileIdentity::describe(&input.path, &metadata);
+                if previous.matches(identity.as_ref(), &input.digest) {
                     continue;
                 }
                 return Err(CcBypassReason::InputModifiedDuringCompilation(
                     input.path.clone(),
                 ));
             }
+            let metadata =
+                std::fs::metadata(&input.path).map_err(|error| CcBypassReason::InputRead {
+                    path: input.path.clone(),
+                    message: error.to_string(),
+                })?;
             let modified = metadata
                 .modified()
                 .map_err(|error| CcBypassReason::InputRead {

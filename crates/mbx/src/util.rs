@@ -1,45 +1,45 @@
 use eyre::{Context, Result};
-use mbx_cache_core::FileIdentity;
+use mbx_cache_core::FileSnapshot;
 use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Capture clock-independent identities for compiler inputs known up front.
+/// Capture clock-independent snapshots for compiler inputs known up front.
 #[cfg(unix)]
-pub(crate) fn snapshot_file_identities<'a>(
+pub(crate) fn snapshot_compiler_inputs<'a>(
     paths: impl IntoIterator<Item = &'a Path>,
-) -> std::io::Result<BTreeMap<PathBuf, FileIdentity>> {
+) -> std::io::Result<BTreeMap<PathBuf, FileSnapshot>> {
     paths
         .into_iter()
         .map(|path| {
-            let metadata = std::fs::metadata(path).map_err(|error| {
+            let snapshot = FileSnapshot::capture(path).map_err(|error| {
                 std::io::Error::new(
                     error.kind(),
                     format!(
-                        "failed to capture compiler input identity for {}: {error}",
+                        "failed to capture compiler input snapshot for {}: {error}",
                         path.display()
                     ),
                 )
             })?;
-            let identity = FileIdentity::describe(path, &metadata).ok_or_else(|| {
+            let snapshot = snapshot.ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::Unsupported,
                     format!(
-                        "filesystem supplied no identity for compiler input {}",
+                        "filesystem supplied no snapshot for compiler input {}",
                         path.display()
                     ),
                 )
             })?;
-            Ok((path.to_path_buf(), identity))
+            Ok((path.to_path_buf(), snapshot))
         })
         .collect()
 }
 
 #[cfg(not(unix))]
-pub(crate) fn snapshot_file_identities<'a>(
+pub(crate) fn snapshot_compiler_inputs<'a>(
     _paths: impl IntoIterator<Item = &'a Path>,
-) -> std::io::Result<BTreeMap<PathBuf, FileIdentity>> {
+) -> std::io::Result<BTreeMap<PathBuf, FileSnapshot>> {
     Ok(BTreeMap::new())
 }
 
@@ -571,11 +571,11 @@ mod tests {
     fn compiler_input_snapshot_fails_closed() {
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("missing-input");
-        let error = snapshot_file_identities([missing.as_path()]).unwrap_err();
+        let error = snapshot_compiler_inputs([missing.as_path()]).unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("failed to capture compiler input identity")
+                .contains("failed to capture compiler input snapshot")
         );
     }
 

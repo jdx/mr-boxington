@@ -1486,6 +1486,7 @@ dependencies = [
  "fslock",
  "futures-util",
  "hex",
+ "libc",
  "log",
  "mbx-cache-protocol",
  "mockito",
