@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.5](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.11.4...mbx-cache-rustc-v0.11.5) - 2026-09-04
+
+### Fixed
+
+- verify NFS compiler inputs by content ([#338](https://github.com/jdx/mr-boxington/pull/338))
+
 ## [0.11.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.11.2...mbx-cache-rustc-v0.11.3) - 2026-09-03
 
 ### Added
