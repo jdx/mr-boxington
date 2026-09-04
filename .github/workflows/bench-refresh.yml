@@ -12,6 +12,11 @@ on:
         required: false
         type: boolean
         default: false
+      small_edit_cache_run_id:
+        description: Reuse small-edit parent caches from this workflow run ID
+        required: false
+        type: string
+        default: ""
 
 permissions: {}
 
@@ -261,7 +266,10 @@ jobs:
 
   edit-rust-cache-seed:
     name: Seed rust-cache at the parent
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/benchmark-small-edit'
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/codex/benchmark-small-edit' &&
+      inputs.small_edit_cache_run_id == ''
     runs-on: [self-hosted, jdx-perf-v1]
     container:
       image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68
@@ -289,6 +297,11 @@ jobs:
   edit-rust-cache-measure:
     name: Measure rust-cache after the edit
     needs: edit-rust-cache-seed
+    if: >-
+      always() &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/codex/benchmark-small-edit' &&
+      (needs.edit-rust-cache-seed.result == 'success' || inputs.small_edit_cache_run_id != '')
     runs-on: [self-hosted, jdx-perf-v1]
     container:
       image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68
@@ -307,7 +320,7 @@ jobs:
         run: echo "EDIT_STARTED_NS=$(date +%s%N)" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
         with:
-          shared-key: hk-small-edit-${{ github.run_id }}
+          shared-key: hk-small-edit-${{ inputs.small_edit_cache_run_id || github.run_id }}
           add-job-id-key: "false"
           workspaces: subject -> target
           save-if: "false"
@@ -339,7 +352,10 @@ jobs:
 
   edit-mbx-seed:
     name: Seed mbx at the parent
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/benchmark-small-edit'
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/codex/benchmark-small-edit' &&
+      inputs.small_edit_cache_run_id == ''
     runs-on: [self-hosted, jdx-perf-v1]
     container:
       image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68
@@ -367,6 +383,11 @@ jobs:
   edit-mbx-measure:
     name: Measure mbx after the edit
     needs: edit-mbx-seed
+    if: >-
+      always() &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/codex/benchmark-small-edit' &&
+      (needs.edit-mbx-seed.result == 'success' || inputs.small_edit_cache_run_id != '')
     runs-on: [self-hosted, jdx-perf-v1]
     container:
       image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68
@@ -388,7 +409,7 @@ jobs:
         with:
           version: 1.6.0
           cache-key: hk-small-edit-mbx-${{ github.run_id }}-child
-          restore-keys: hk-small-edit-mbx-${{ github.run_id }}-parent
+          restore-keys: hk-small-edit-mbx-${{ inputs.small_edit_cache_run_id || github.run_id }}-parent
           toolchain: 1.97.1
       - id: measure
         working-directory: subject
@@ -416,7 +437,10 @@ jobs:
 
   edit-mbx-direct-seed:
     name: Seed direct hydrated mbx at the parent
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/benchmark-small-edit'
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/codex/benchmark-small-edit' &&
+      inputs.small_edit_cache_run_id == ''
     runs-on: [self-hosted, jdx-perf-v1]
     container:
       image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68
@@ -460,6 +484,11 @@ jobs:
   edit-mbx-direct-measure:
     name: Measure direct hydrated mbx after the edit
     needs: edit-mbx-direct-seed
+    if: >-
+      always() &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/codex/benchmark-small-edit' &&
+      (needs.edit-mbx-direct-seed.result == 'success' || inputs.small_edit_cache_run_id != '')
     runs-on: [self-hosted, jdx-perf-v1]
     container:
       image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68
@@ -492,7 +521,7 @@ jobs:
           toolchain: 1.97.1
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          key: hk-small-edit-mbx-direct-${{ github.run_id }}-parent
+          key: hk-small-edit-mbx-direct-${{ inputs.small_edit_cache_run_id || github.run_id }}-parent
           path: |
             /github/home/mbx-direct/store
             /github/home/mbx-direct/snapshot
