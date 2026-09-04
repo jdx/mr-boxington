@@ -21,6 +21,7 @@ env:
 jobs:
   authorize:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       authorized: ${{ steps.pr.outputs.authorized }}
       base_ref: ${{ steps.pr.outputs.base_ref }}

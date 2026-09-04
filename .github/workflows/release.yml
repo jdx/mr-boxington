@@ -51,6 +51,7 @@ jobs:
   build:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     permissions:
       contents: read
     strategy:
@@ -318,6 +319,7 @@ jobs:
     # than one that arrives late, and the draft stays unpublished either way.
     needs: build
     runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
