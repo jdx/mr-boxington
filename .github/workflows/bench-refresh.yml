@@ -428,31 +428,13 @@ jobs:
           cache-all-crates: "true"
           cache-workspace-crates: "true"
           save-if: "false"
-      - name: Require parent rust-cache hit
-        if: matrix.tool == 'rust-cache'
-        env:
-          CACHE_HIT: ${{ steps.rust_cache_restore.outputs.cache-hit }}
-        run: |
-          if [ "$CACHE_HIT" != "true" ]; then
-            echo "::error::rust-cache did not restore the seeded parent cache"
-            exit 1
-          fi
       - if: matrix.tool == 'mbx'
+        id: mbx_restore
         uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
         with:
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
-          cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-child
-          restore-keys: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
+          cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
           toolchain: 1.97.1
-      # A restore-key match is deliberately not an exact-key hit, so the
-      # action's cache-hit output is false. Verify the restored payload itself.
-      - name: Require parent mbx restore
-        if: matrix.tool == 'mbx'
-        run: |
-          if [ -z "$(find target -type f -print -quit 2>/dev/null)" ]; then
-            echo "::error::mbx did not restore the seeded parent target"
-            exit 1
-          fi
       - if: matrix.tool == 'mbx-registry'
         uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
         with:
@@ -482,6 +464,26 @@ jobs:
           finished=$(date +%s%N)
           echo "build_duration_ns=$((finished - started))" >> "$GITHUB_OUTPUT"
           echo "total_duration_ns=$((finished - SMALL_EDIT_STARTED_NS))" >> "$GITHUB_OUTPUT"
+      # Validate after taking the timing so the assertion shell does not bias
+      # one arm. A miss fails the job before it can publish a measurement.
+      - name: Require parent rust-cache hit
+        if: matrix.tool == 'rust-cache'
+        env:
+          CACHE_HIT: ${{ steps.rust_cache_restore.outputs.cache-hit }}
+        run: |
+          if [ "$CACHE_HIT" != "true" ]; then
+            echo "::error::rust-cache did not restore the seeded parent cache"
+            exit 1
+          fi
+      - name: Require parent mbx hit
+        if: matrix.tool == 'mbx'
+        env:
+          CACHE_HIT: ${{ steps.mbx_restore.outputs.cache-hit }}
+        run: |
+          if [ "$CACHE_HIT" != "true" ]; then
+            echo "::error::mbx did not restore the seeded parent cache"
+            exit 1
+          fi
       - name: Record trial
         env:
           BUILD_DURATION_NS: ${{ steps.build.outputs.build_duration_ns }}
