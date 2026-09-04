@@ -500,7 +500,8 @@ jobs:
         run: |
           archive_bytes=
           for _attempt in 1 2 3 4 5; do
-            archive_bytes=$(gh cache list --key "$CACHE_KEY" --limit 100 \
+            archive_bytes=$(gh cache list --repo "$GITHUB_REPOSITORY" \
+              --key "$CACHE_KEY" --limit 100 \
               --json key,sizeInBytes \
               | jq -r --arg key "$CACHE_KEY" \
                 'map(select(.key == $key))[0].sizeInBytes // empty')
