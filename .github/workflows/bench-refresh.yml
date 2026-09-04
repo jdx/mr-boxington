@@ -532,7 +532,7 @@ jobs:
           merge-multiple: true
       - name: Summarize medians
         env:
-          TRIALS: ${{ inputs.small_edit_trials }}
+          TRIALS: ${{ inputs.small_edit_trials || '[1,2,3,4]' }}
         run: |
           set -o pipefail
           trial_count=$(jq -er \
