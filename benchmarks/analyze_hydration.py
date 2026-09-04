@@ -24,8 +24,9 @@ cas = root / "store/actions/cas/v1"
 mbx = Path(sys.argv[3] if sys.argv[1] in ("snapshot", "hydrate") else sys.argv[2])
 
 
-def clone(source: Path, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
+def clone(source: Path, destination: Path, ensure_parent: bool = True) -> None:
+    if ensure_parent:
+        destination.parent.mkdir(parents=True, exist_ok=True)
     with source.open("rb") as read, destination.open("wb") as write:
         try:
             fcntl.ioctl(write.fileno(), 0x40049409, read.fileno())
@@ -39,24 +40,56 @@ if sys.argv[1] == "hydrate":
     manifest = json.loads((snapshot / "manifest.json").read_text())
     started = time.perf_counter()
     shutil.rmtree(target, ignore_errors=True)
+    inline = snapshot / "inline"
+    if inline.exists():
+        os.replace(inline, target)
+    else:
+        target.mkdir()
     for entry in manifest["directories"]:
         (target / entry["path"]).mkdir(parents=True, exist_ok=True)
-    restored = {}
-    for entry in manifest["files"]:
+
+    directories_finished = time.perf_counter()
+    regular = [
+        entry
+        for entry in manifest["files"]
+        if "link" not in entry
+        and entry["source"] != "inline"
+        and not str(entry["source"]).startswith(str(inline) + os.sep)
+    ]
+    links = [entry for entry in manifest["files"] if "link" in entry]
+
+    def restore_regular(entry: dict) -> None:
         destination = target / entry["path"]
-        if "link" in entry:
-            os.link(target / entry["link"], destination)
-        else:
-            source = mbx if entry["source"] == "shim" else Path(entry["source"])
-            clone(source, destination)
+        source = mbx if entry["source"] == "shim" else Path(entry["source"])
+        clone(source, destination, ensure_parent=False)
         os.chmod(destination, entry["mode"])
         os.utime(destination, ns=(entry["mtime_ns"], entry["mtime_ns"]))
-        restored[entry["path"]] = destination
+
+    for entry in regular:
+        restore_regular(entry)
+
+    regular_finished = time.perf_counter()
+    for entry in links:
+        # The first path for an inode is always a regular entry and already has
+        # the inode's mode and timestamps. Reapplying them through every hard
+        # link only adds metadata round trips.
+        os.link(target / entry["link"], target / entry["path"])
+
+    links_finished = time.perf_counter()
     for entry in reversed(manifest["directories"]):
         path = target / entry["path"]
         os.chmod(path, entry["mode"])
         os.utime(path, ns=(entry["mtime_ns"], entry["mtime_ns"]))
-    print(json.dumps({"hydrate_seconds": time.perf_counter() - started, "files": len(manifest["files"])}))
+    finished = time.perf_counter()
+    print(json.dumps({
+        "hydrate_seconds": finished - started,
+        "directory_create_seconds": directories_finished - started,
+        "regular_files_seconds": regular_finished - directories_finished,
+        "hardlinks_seconds": links_finished - regular_finished,
+        "directory_metadata_seconds": finished - links_finished,
+        "files": len(manifest["files"]),
+        "hardlinks": len(links),
+    }))
     raise SystemExit
 
 cas_hashes = {digest(path) for path in cas.rglob("*") if path.is_file()}
@@ -67,6 +100,16 @@ if sys.argv[1] == "snapshot":
     shutil.rmtree(snapshot, ignore_errors=True)
     inline = snapshot / "inline"
     inline.mkdir(parents=True)
+    directories = []
+    for path in [target, *[path for path in target.rglob("*") if path.is_dir()]]:
+        stat = path.stat()
+        entry = {
+            "path": str(path.relative_to(target)),
+            "mode": stat.st_mode & 0o7777,
+            "mtime_ns": stat.st_mtime_ns,
+        }
+        directories.append(entry)
+        (inline / entry["path"]).mkdir(parents=True, exist_ok=True)
     cas_sources = {digest(path): path for path in cas.rglob("*") if path.is_file()}
     files = []
     inodes = {}
@@ -89,16 +132,14 @@ if sys.argv[1] == "snapshot":
             else:
                 destination = inline / relative
                 clone(path, destination)
-                entry["source"] = str(destination)
+                os.chmod(destination, entry["mode"])
+                os.utime(destination, ns=(entry["mtime_ns"], entry["mtime_ns"]))
+                entry["source"] = "inline"
         files.append(entry)
-    directories = []
-    for path in [target, *[path for path in target.rglob("*") if path.is_dir()]]:
-        stat = path.stat()
-        directories.append({
-            "path": str(path.relative_to(target)),
-            "mode": stat.st_mode & 0o7777,
-            "mtime_ns": stat.st_mtime_ns,
-        })
+    for entry in reversed(directories):
+        path = inline / entry["path"]
+        os.chmod(path, entry["mode"])
+        os.utime(path, ns=(entry["mtime_ns"], entry["mtime_ns"]))
     (snapshot / "manifest.json").write_text(json.dumps({"files": files, "directories": directories}))
     print(json.dumps({"files": len(files), "directories": len(directories)}))
     raise SystemExit
