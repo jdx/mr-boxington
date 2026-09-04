@@ -71,11 +71,13 @@ impl FileIdentity {
 /// A pre-operation snapshot that can prove whether a file's contents changed.
 ///
 /// Most filesystems provide a stable metadata-change token, so the inexpensive
-/// identity is sufficient. Linux NFS can reconcile client and server
-/// timestamps after a writer has closed the file, making two metadata reads
+/// identity is sufficient. Linux NFS can reconcile the client and server
+/// change times after a writer has closed the file, making two metadata reads
 /// disagree without any intervening write. Those files carry a content digest
-/// instead. Callers use the same comparison either way and do not need to know
-/// which filesystem supplied the file.
+/// instead, while retaining length and modification time as an independent
+/// signal for a write that restored the original bytes. Callers use the same
+/// comparison either way and do not need to know which filesystem supplied the
+/// file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileSnapshot {
     identity: FileIdentity,
@@ -89,10 +91,23 @@ impl FileSnapshot {
     }
 
     /// Whether `identity` and `content` still describe this snapshot.
+    ///
+    /// A content-backed snapshot deliberately ignores the unreliable change
+    /// token, but still requires the modification time to remain stable. That
+    /// prevents a write followed by restoration of the original bytes from
+    /// passing only because the endpoint digests agree.
     pub fn matches(&self, identity: Option<&FileIdentity>, content: &CacheDigest) -> bool {
-        self.content
-            .as_ref()
-            .map_or(identity == Some(&self.identity), |before| before == content)
+        self.content.as_ref().map_or_else(
+            || identity == Some(&self.identity),
+            |before| {
+                before == content
+                    && identity.is_some_and(|after| {
+                        self.identity.path == after.path
+                            && self.identity.len == after.len
+                            && self.identity.modified == after.modified
+                    })
+            },
+        )
     }
 
     /// Whether a mismatch proves the file's contents changed.
@@ -265,22 +280,23 @@ mod tests {
     }
 
     #[test]
-    fn a_content_snapshot_ignores_metadata_churn_but_detects_changed_bytes() {
+    fn a_content_snapshot_ignores_change_token_churn_but_detects_other_changes() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("input.rs");
         std::fs::write(&path, b"fn main() {}").unwrap();
         let snapshot = capture_file_snapshot(&path, true).unwrap().unwrap();
 
-        std::fs::File::options()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
-            .unwrap();
-        let identity = FileIdentity::describe(&path, &std::fs::metadata(&path).unwrap());
+        let mut identity =
+            FileIdentity::describe(&path, &std::fs::metadata(&path).unwrap()).unwrap();
+        identity.changed = identity
+            .changed
+            .map(|(seconds, nanos)| (seconds + 1, nanos));
         let digest = CacheDigest::blake3_file(&path).unwrap();
-        assert!(snapshot.matches(identity.as_ref(), &digest));
+        assert!(snapshot.matches(Some(&identity), &digest));
         assert!(snapshot.proves_content_change());
+
+        identity.modified = SystemTime::UNIX_EPOCH;
+        assert!(!snapshot.matches(Some(&identity), &digest));
 
         std::fs::write(&path, b"fn main(){ }").unwrap();
         let identity = FileIdentity::describe(&path, &std::fs::metadata(&path).unwrap());
