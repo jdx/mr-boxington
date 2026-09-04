@@ -32,12 +32,7 @@ fn write_named_project(directory: &Path, name: &str) {
     // Manifest identity follows the lockfile, and cargo would otherwise write
     // it during the first build -- changing the identity between two runs that
     // are supposed to share a manifest.
-    let status = Command::new(cargo())
-        .current_dir(directory)
-        .args(["generate-lockfile", "--offline"])
-        .status()
-        .expect("cargo should run");
-    assert!(status.success(), "the fixture should resolve offline");
+    generate_lockfile(directory);
 }
 
 /// Write a workspace where one member depends on another.
@@ -74,12 +69,7 @@ fn write_dependent_project(directory: &Path) {
         "pub fn doubled() -> u32 { base::value() * 2 }\n",
     )
     .unwrap();
-    let status = Command::new(cargo())
-        .current_dir(directory)
-        .args(["generate-lockfile", "--offline"])
-        .status()
-        .expect("cargo should run");
-    assert!(status.success(), "the fixture should resolve offline");
+    generate_lockfile(directory);
 }
 
 /// Write a workspace whose dependency builds before a member that fails.
@@ -107,16 +97,25 @@ fn write_partially_failing_project(directory: &Path) {
         "use good as _;\ncompile_error!(\"expected failure\");\n",
     )
     .unwrap();
-    let status = Command::new(cargo())
-        .current_dir(directory)
-        .args(["generate-lockfile", "--offline"])
-        .status()
-        .expect("cargo should run");
-    assert!(status.success(), "the fixture should resolve offline");
+    generate_lockfile(directory);
 }
 
 fn cargo() -> std::ffi::OsString {
     std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into())
+}
+
+/// Generate a fixture lockfile without contending on the developer or CI
+/// runner's package cache. The integration tests run concurrently and these
+/// registry-free fixtures do not need anything from the shared Cargo home.
+fn generate_lockfile(directory: &Path) {
+    let cargo_home = tempfile::tempdir().unwrap();
+    let status = Command::new(cargo())
+        .current_dir(directory)
+        .args(["generate-lockfile", "--offline"])
+        .env("CARGO_HOME", cargo_home.path())
+        .status()
+        .expect("cargo should run");
+    assert!(status.success(), "the fixture should resolve offline");
 }
 
 #[cfg(unix)]
@@ -1656,12 +1655,7 @@ fn write_execution_cached_project(directory: &Path, declares_inputs: bool) {
          pub const MANIFEST_COPY: &str = env!(\"MANIFEST_COPY\");\n",
     )
     .unwrap();
-    let status = Command::new(cargo())
-        .current_dir(directory)
-        .args(["generate-lockfile", "--offline"])
-        .status()
-        .unwrap();
-    assert!(status.success());
+    generate_lockfile(directory);
 }
 
 /// Write a build script with a Rust build-dependency. Cargo compares the
@@ -1695,12 +1689,7 @@ fn write_build_dependent_script_project(directory: &Path) {
         "pub fn value() -> u32 { 1 }\n",
     )
     .unwrap();
-    let status = Command::new(cargo())
-        .current_dir(directory)
-        .args(["generate-lockfile", "--offline"])
-        .status()
-        .unwrap();
-    assert!(status.success());
+    generate_lockfile(directory);
 }
 
 #[test]
@@ -1822,12 +1811,7 @@ fn write_default_input_project(directory: &Path, execution_log: &Path) {
         "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\n",
     )
     .unwrap();
-    let status = Command::new(cargo())
-        .current_dir(directory)
-        .args(["generate-lockfile", "--offline"])
-        .status()
-        .unwrap();
-    assert!(status.success());
+    generate_lockfile(directory);
 }
 
 #[test]
@@ -2070,12 +2054,7 @@ fn write_generated_project(directory: &Path, generated: Generated) {
         }
     };
     std::fs::write(directory.join("src/lib.rs"), lib).unwrap();
-    let status = Command::new(cargo())
-        .current_dir(directory)
-        .args(["generate-lockfile", "--offline"])
-        .status()
-        .expect("cargo should run");
-    assert!(status.success());
+    generate_lockfile(directory);
 }
 
 /// Turning sharing off preserves the old checkout-specific behavior for a
@@ -2982,12 +2961,7 @@ fn main() {
         "pub fn value() -> u32 { 7 }\n",
     )
     .unwrap();
-    let status = Command::new(cargo())
-        .current_dir(directory)
-        .args(["generate-lockfile", "--offline"])
-        .status()
-        .expect("cargo should run");
-    assert!(status.success(), "the fixture should resolve offline");
+    generate_lockfile(directory);
 }
 
 /// Whether a C compiler is available to compile the fixture at all.
@@ -3117,12 +3091,7 @@ fn main() {
         "pub fn value() -> u32 { 7 }\n",
     )
     .unwrap();
-    let status = Command::new(cargo())
-        .current_dir(directory)
-        .args(["generate-lockfile", "--offline"])
-        .status()
-        .expect("cargo should run");
-    assert!(status.success(), "the fixture should resolve offline");
+    generate_lockfile(directory);
 }
 
 /// A header generated into `OUT_DIR` is cached like any other, even though the
@@ -3247,12 +3216,7 @@ fn main() {
         "pub fn value() -> u32 { 7 }\n",
     )
     .unwrap();
-    let status = Command::new(cargo())
-        .current_dir(directory)
-        .args(["generate-lockfile", "--offline"])
-        .status()
-        .expect("cargo should run");
-    assert!(status.success(), "the fixture should resolve offline");
+    generate_lockfile(directory);
 }
 
 /// A prediction that no longer describes the tree must not strand the
