@@ -316,7 +316,7 @@ jobs:
       fail-fast: false
       matrix:
         tool: [rust-cache, mbx, mbx-registry]
-        trial: ${{ fromJSON(inputs.small_edit_trials) }}
+        trial: ${{ fromJSON(inputs.small_edit_trials || '[1,2,3,4]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -389,7 +389,7 @@ jobs:
       fail-fast: false
       matrix:
         tool: [rust-cache, mbx, mbx-registry]
-        trial: ${{ fromJSON(inputs.small_edit_trials) }}
+        trial: ${{ fromJSON(inputs.small_edit_trials || '[1,2,3,4]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -452,7 +452,9 @@ jobs:
             ~/.cargo/git
       - name: Import native mbx bundle
         if: matrix.tool == 'mbx-registry'
-        run: mbx cache import "$RUNNER_TEMP/mbx-cache.tar" | tee "$RUNNER_TEMP/mbx-import.log"
+        run: |
+          set -o pipefail
+          mbx cache import "$RUNNER_TEMP/mbx-cache.tar" | tee "$RUNNER_TEMP/mbx-import.log"
       - id: build
         name: Build edited commit
         env:
