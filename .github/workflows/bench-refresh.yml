@@ -44,8 +44,6 @@ concurrency:
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
-  # Rust 1.97.1 is part of the digest-pinned benchmark image.
-  MISE_DISABLE_TOOLS: rust
   RUSTUP_TOOLCHAIN: 1.97.1
 
 jobs:
@@ -95,12 +93,9 @@ jobs:
     if: needs.check.outputs.drift == 'true'
     # Keep the runner class fixed: the six-job contention scenario needs enough
     # CPU to reproduce the large parallel CI job it models, and timings cannot
-    # be compared across machine classes. The host-wide lease serializes this
-    # with every other jdx performance job.
-    runs-on: [self-hosted, jdx-perf-v1]
-    container:
-      image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68
-      options: --cpuset-cpus 0-7
+    # be compared across machine classes. The xlarge Namespace profile is also
+    # representative of the high-core-count local machines this models.
+    runs-on: namespace-profile-endev-linux-amd64-xlarge;overrides.cache-tag=cache
     # The full refresh also runs every cache scenario and the toolchain guard.
     timeout-minutes: 180
     permissions:
@@ -113,9 +108,12 @@ jobs:
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           cache: false
-          install: false
         env:
           MISE_LOCKED: "1"
+      - name: Install benchmark Rust tooling
+        run: |
+          rustup component add clippy --toolchain 1.97.1
+          rustup toolchain install --profile minimal 1.96.0
       # The comparison should track kache itself, not the version that happened
       # to be current when mise.lock was last updated. Install the newest stable
       # release explicitly, then keep its real path for builds that run outside
@@ -133,14 +131,12 @@ jobs:
           {
             echo '### Runner metadata'
             echo '```text'
-            echo 'environment-revision: perf-runner@fd66d9b'
-            echo 'image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68'
+            echo 'runner-profile: namespace-profile-endev-linux-amd64-xlarge'
             uname -a
             lscpu
             mise --version
             rustc --version
             cargo --version
-            valgrind --version
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Install released mbx
@@ -159,8 +155,6 @@ jobs:
             | (cd "$install_dir" && sha256sum --check --strict -)
           tar -xzf "$install_dir/$archive" -C "$install_dir"
           echo "MBX_BENCH_BINARY=$install_dir/mbx" >> "$GITHUB_ENV"
-      # Clippy for 1.97.1 and the alternate 1.96.0 toolchain are part of the
-      # pinned image, so this job never needs static.rust-lang.org at runtime.
       - name: Refresh benchmarks
         env:
           MBX_BENCH_ALTERNATE_TOOLCHAIN: 1.96.0
@@ -263,7 +257,7 @@ jobs:
           cat > "$RUNNER_TEMP/body.md" <<EOF
           ## Refreshed real-world benchmarks
 
-          \`benchmarks/results.json\` was measured with \`${BENCH:-no previous run}\`; the latest release is now \`mbx ${RELEASE}\`. Re-ran the benchmark with that release on the dedicated performance runner: a pinned checkout of jdx/hk built under raw cargo, mbx, and kache across the cold, warm, next-commit, cross-worktree, toolchain-change, and six-job contention scenarios.
+          \`benchmarks/results.json\` was measured with \`${BENCH:-no previous run}\`; the latest release is now \`mbx ${RELEASE}\`. Re-ran the benchmark with that release on the fixed Namespace Linux xlarge profile: a pinned checkout of jdx/hk built under raw cargo, mbx, and kache across the cold, warm, next-commit, cross-worktree, toolchain-change, and six-job contention scenarios.
 
           The [run summary](${RUN_URL}) has the table these numbers came from, and the run's artifacts have the per-build logs.
 
