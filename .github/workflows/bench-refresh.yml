@@ -12,6 +12,16 @@ on:
         required: false
         type: boolean
         default: false
+      small_edit:
+        description: Compare restored parent caches after hk's next small edit
+        required: false
+        type: boolean
+        default: false
+      small_edit_mbx_version:
+        description: Released mbx version used by the small-edit comparison
+        required: false
+        type: string
+        default: "1.8.0"
 
 permissions: {}
 
@@ -35,6 +45,7 @@ jobs:
   # reproduce with the version they can install.
   check:
     name: Check version drift
+    if: github.event_name != 'workflow_dispatch' || !inputs.small_edit
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -258,3 +269,203 @@ jobs:
             gh pr create --base main --head bench-refresh \
               --title "$TITLE" --body-file "$RUNNER_TEMP/body.md"
           fi
+
+  small-edit-seed:
+    name: Seed ${{ matrix.tool }} (${{ matrix.trial }})
+    if: github.event_name == 'workflow_dispatch' && inputs.small_edit
+    strategy:
+      fail-fast: false
+      matrix:
+        tool: [rust-cache, mbx, mbx-registry]
+        trial: [1, 2, 3, 4]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: write
+      contents: read
+    env:
+      MBX_CACHE_EXPORT_GROUP: gha-small-edit-${{ github.run_id }}-${{ matrix.trial }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jdx/hk
+          ref: 27bb615768b85c9ac88e2abf8895219b44462871
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.97.1 --profile minimal --no-self-update
+      - if: matrix.tool == 'rust-cache'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
+        with:
+          shared-key: gha-small-edit-${{ github.run_id }}-${{ matrix.trial }}
+          add-job-id-key: "false"
+          workspaces: . -> target
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+      - if: matrix.tool == 'mbx'
+        uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
+        with:
+          version: ${{ inputs.small_edit_mbx_version }}
+          cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
+          save-on-workflow-dispatch: "true"
+          toolchain: 1.97.1
+      - if: matrix.tool == 'mbx-registry'
+        uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
+        with:
+          backend: local
+          version: ${{ inputs.small_edit_mbx_version }}
+          toolchain: 1.97.1
+      - name: Seed parent build
+        env:
+          BUILD_DRIVER: "${{ matrix.tool == 'rust-cache' && 'cargo' || 'mbx' }}"
+        run: |
+          "$BUILD_DRIVER" build --locked
+      - name: Export native mbx bundle
+        if: matrix.tool == 'mbx-registry'
+        run: mbx cache export --group "$MBX_CACHE_EXPORT_GROUP" "$RUNNER_TEMP/mbx-cache.tar"
+      - if: matrix.tool == 'mbx-registry'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: gha-small-edit-mbx-registry-${{ github.run_id }}-${{ matrix.trial }}-parent
+          path: |
+            ${{ runner.temp }}/mbx-cache.tar
+            ~/.cargo/registry
+            ~/.cargo/git
+
+  small-edit-measure:
+    name: Measure ${{ matrix.tool }} (${{ matrix.trial }})
+    needs: small-edit-seed
+    if: github.event_name == 'workflow_dispatch' && inputs.small_edit
+    strategy:
+      fail-fast: false
+      matrix:
+        tool: [rust-cache, mbx, mbx-registry]
+        trial: [1, 2, 3, 4]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jdx/hk
+          ref: fc29ead1456ba7c1f62826c284126410a4014b00
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.97.1 --profile minimal --no-self-update
+      - name: Start restore-and-build timer
+        run: echo "SMALL_EDIT_STARTED_NS=$(date +%s%N)" >> "$GITHUB_ENV"
+      - if: matrix.tool == 'rust-cache'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
+        with:
+          shared-key: gha-small-edit-${{ github.run_id }}-${{ matrix.trial }}
+          add-job-id-key: "false"
+          workspaces: . -> target
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+          save-if: "false"
+      - if: matrix.tool == 'mbx'
+        uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
+        with:
+          version: ${{ inputs.small_edit_mbx_version }}
+          cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-child
+          restore-keys: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
+          toolchain: 1.97.1
+      - if: matrix.tool == 'mbx-registry'
+        uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
+        with:
+          backend: local
+          version: ${{ inputs.small_edit_mbx_version }}
+          toolchain: 1.97.1
+      - if: matrix.tool == 'mbx-registry'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: gha-small-edit-mbx-registry-${{ github.run_id }}-${{ matrix.trial }}-parent
+          path: |
+            ${{ runner.temp }}/mbx-cache.tar
+            ~/.cargo/registry
+            ~/.cargo/git
+      - name: Import native mbx bundle
+        if: matrix.tool == 'mbx-registry'
+        run: mbx cache import "$RUNNER_TEMP/mbx-cache.tar" | tee "$RUNNER_TEMP/mbx-import.log"
+      - name: Verify restored Cargo state
+        if: matrix.tool != 'rust-cache'
+        run: test -d target/.fingerprint
+      - id: build
+        name: Build edited commit
+        env:
+          BUILD_DRIVER: "${{ matrix.tool == 'rust-cache' && 'cargo' || 'mbx' }}"
+          MBX_REPORT: ${{ runner.temp }}/mbx-report.json
+        run: |
+          started=$(date +%s%N)
+          "$BUILD_DRIVER" build --locked
+          finished=$(date +%s%N)
+          echo "build_duration_ns=$((finished - started))" >> "$GITHUB_OUTPUT"
+          echo "total_duration_ns=$((finished - SMALL_EDIT_STARTED_NS))" >> "$GITHUB_OUTPUT"
+      - name: Record trial
+        env:
+          BUILD_DURATION_NS: ${{ steps.build.outputs.build_duration_ns }}
+          TOTAL_DURATION_NS: ${{ steps.build.outputs.total_duration_ns }}
+          TOOL: ${{ matrix.tool }}
+          TRIAL: ${{ matrix.trial }}
+          VERSION: ${{ inputs.small_edit_mbx_version }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/small-edit"
+          jq -n --arg tool "$TOOL" --arg version "$VERSION" \
+            --argjson trial "$TRIAL" \
+            --argjson build_duration_ns "$BUILD_DURATION_NS" \
+            --argjson restore_and_build_duration_ns "$TOTAL_DURATION_NS" \
+            '{schema:1,tool:$tool,mbx_version:$version,trial:$trial,build_duration_ns:$build_duration_ns,restore_and_build_duration_ns:$restore_and_build_duration_ns}' \
+            > "$RUNNER_TEMP/small-edit/${TOOL}-${TRIAL}.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gha-small-edit-${{ matrix.tool }}-${{ matrix.trial }}
+          path: ${{ runner.temp }}/small-edit/*.json
+          if-no-files-found: error
+          retention-days: 90
+
+  small-edit-report:
+    name: Report small-edit comparison
+    needs: small-edit-measure
+    if: always() && needs.small-edit-measure.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: gha-small-edit-*
+          path: ${{ runner.temp }}/small-edit
+          merge-multiple: true
+      - name: Summarize medians
+        run: |
+          jq -s '
+            def median:
+              sort as $values |
+              ($values | length) as $length |
+              if $length % 2 == 1 then $values[$length / 2 | floor]
+              else (($values[$length / 2 - 1] + $values[$length / 2]) / 2) end;
+            group_by(.tool) | map({
+              tool: .[0].tool,
+              mbx_version: .[0].mbx_version,
+              trials: length,
+              build_seconds: ([.[].build_duration_ns] | median) / 1e9,
+              restore_and_build_seconds: ([.[].restore_and_build_duration_ns] | median) / 1e9
+            })' "$RUNNER_TEMP"/small-edit/*.json \
+            | tee "$RUNNER_TEMP/small-edit-summary.json"
+          {
+            echo '## hk parent-cache + small-edit comparison'
+            echo
+            echo '| Tool | Trials | Median restore + build | Median build |'
+            echo '| :--- | ---: | ---: | ---: |'
+            jq -r '.[] | "| \(.tool) | \(.trials) | \(.restore_and_build_seconds * 100 | round / 100) s | \(.build_seconds * 100 | round / 100) s |"' \
+              "$RUNNER_TEMP/small-edit-summary.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gha-small-edit-summary
+          path: ${{ runner.temp }}/small-edit-summary.json
+          if-no-files-found: error
+          retention-days: 90
