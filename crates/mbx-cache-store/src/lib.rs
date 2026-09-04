@@ -112,6 +112,13 @@ pub struct TransferOutcome {
     pub actions: u64,
     pub objects: u64,
     pub bytes: u64,
+}
+
+/// A cache import together with named higher-level CAS roots it carried.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct ImportOutcome {
+    pub transfer: TransferOutcome,
     pub attachments: BTreeMap<String, CacheDigest>,
 }
 
@@ -445,12 +452,16 @@ fn export_receipts(
         actions: actions.len() as u64,
         objects: objects.len() as u64,
         bytes,
-        attachments: additions.attachments,
     })
 }
 
 /// Validate a cache export in isolation, then publish its objects and actions.
 pub fn import_archive(store: &Path, archive: &Path) -> Result<TransferOutcome> {
+    Ok(import_archive_with_attachments(store, archive)?.transfer)
+}
+
+/// Import a cache archive and return its named higher-level CAS roots.
+pub fn import_archive_with_attachments(store: &Path, archive: &Path) -> Result<ImportOutcome> {
     let staging = tempfile::tempdir()?;
     let file = std::fs::File::open(archive)
         .wrap_err_with(|| format!("failed to open {}", archive.display()))?;
@@ -539,10 +550,12 @@ pub fn import_archive(store: &Path, archive: &Path) -> Result<TransferOutcome> {
     for task in manifest.tasks {
         merge_imported_manifest(store, task)?;
     }
-    Ok(TransferOutcome {
-        actions: actions.len() as u64,
-        objects: objects.len() as u64,
-        bytes: std::fs::metadata(archive)?.len(),
+    Ok(ImportOutcome {
+        transfer: TransferOutcome {
+            actions: actions.len() as u64,
+            objects: objects.len() as u64,
+            bytes: std::fs::metadata(archive)?.len(),
+        },
         attachments: manifest.attachments,
     })
 }

@@ -364,12 +364,9 @@ fn exports_and_imports_named_attachment_objects() {
     let archive = source.path().join("build.tar");
 
     let exported = export_checkout_with(source.path(), &workspace, &archive, additions).unwrap();
-    let imported = import_archive(destination.path(), &archive).unwrap();
+    let imported = import_archive_with_attachments(destination.path(), &archive).unwrap();
 
-    assert_eq!(
-        exported.attachments.get("cargo-state-v1"),
-        Some(&attachment)
-    );
+    assert_eq!(exported.actions, 1);
     assert_eq!(
         imported.attachments.get("cargo-state-v1"),
         Some(&attachment)

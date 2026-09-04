@@ -3,10 +3,7 @@
 
 - **Usage:** `mbx cache import <ARCHIVE>`
 
-Import a cache export into the local store. If the export contains Cargo
-workspace state and the command runs from a matching checkout with an absent or
-empty target directory, restore that state as well. A non-empty target
-directory is never replaced.
+Import a cache export into the local store. If the export contains Cargo workspace state and the command runs from a matching checkout with an absent or empty target directory, restore that state as well. A non-empty target directory is never replaced.
 
 ## Arguments
 - **`<ARCHIVE>`** — Tar archive to import.

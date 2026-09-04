@@ -25,9 +25,14 @@ pub(super) enum CacheCommands {
     Largest(LargestArgs),
     /// Verify local objects and action results.
     Verify,
-    /// Export the cache closure of this checkout's last build.
+    /// Export the cache closure of this checkout's last build. The export includes
+    /// Cargo scheduler state for recorded workspaces, with compiler outputs referenced
+    /// from the content-addressed closure instead of duplicated.
     Export(ExportArgs),
-    /// Import a cache export into the local store.
+    /// Import a cache export into the local store. If the export contains Cargo
+    /// workspace state and the command runs from a matching checkout with an absent or
+    /// empty target directory, restore that state as well. A non-empty target
+    /// directory is never replaced.
     Import(ImportArgs),
     /// Remove one workspace's managed target and cache claims.
     Remove(RemoveCacheArgs),
@@ -132,8 +137,8 @@ pub(super) fn cache_export(config: &Config, archive: &Path, group: Option<&str>)
 
 pub(super) fn cache_import(config: &Config, archive: &Path) -> Result<()> {
     let store = config.store_dir();
-    let outcome = store::import_archive(&store, archive)?;
-    let restored = if let Some(attachment) = outcome.attachments.get(workspace_state::ATTACHMENT) {
+    let imported = store::import_archive_with_attachments(&store, archive)?;
+    let restored = if let Some(attachment) = imported.attachments.get(workspace_state::ATTACHMENT) {
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         if let Some(roots) = cargo_roots(&cargo, &[], None) {
             workspace_state::restore(
@@ -151,6 +156,7 @@ pub(super) fn cache_import(config: &Config, archive: &Path) -> Result<()> {
     } else {
         None
     };
+    let outcome = imported.transfer;
     println!(
         "imported {} actions and {} objects from {} ({})",
         outcome.actions,

@@ -451,20 +451,31 @@ fn file_mode(metadata: &std::fs::Metadata) -> u32 {
 
 fn set_file_metadata(path: &Path, mode: u32, secs: u64, nanos: u32) -> Result<()> {
     let modified = UNIX_EPOCH + std::time::Duration::new(secs, nanos);
+    #[cfg(unix)]
     File::options()
         .read(true)
         .open(path)?
-        .set_times(FileTimes::new().set_modified(modified))?;
+        .set_times(FileTimes::new().set_modified(modified))
+        .wrap_err_with(|| format!("could not restore the timestamp of {}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .wrap_err_with(|| format!("could not restore the mode of {}", path.display()))?;
     }
     #[cfg(not(unix))]
     {
         let mut permissions = std::fs::metadata(path)?.permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(path, permissions.clone())?;
+        File::options()
+            .write(true)
+            .open(path)?
+            .set_times(FileTimes::new().set_modified(modified))
+            .wrap_err_with(|| format!("could not restore the timestamp of {}", path.display()))?;
         permissions.set_readonly(mode != 0);
-        std::fs::set_permissions(path, permissions)?;
+        std::fs::set_permissions(path, permissions)
+            .wrap_err_with(|| format!("could not restore the permissions of {}", path.display()))?;
     }
     Ok(())
 }
