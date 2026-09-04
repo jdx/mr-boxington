@@ -520,6 +520,10 @@ jobs:
           persist-credentials: false
       - name: Install pinned Rust
         run: rustup toolchain install 1.97.1 --profile minimal --no-self-update
+      - name: Start candidate setup timer
+        if: inputs.small_edit_mbx_ref != ''
+        id: candidate_timer
+        run: echo "started_ns=$(date +%s%N)" >> "$GITHUB_OUTPUT"
       - name: Download candidate mbx
         if: inputs.small_edit_mbx_ref != ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -530,9 +534,13 @@ jobs:
           github-token: ${{ github.token }}
       - name: Select candidate mbx
         if: inputs.small_edit_mbx_ref != ''
+        id: candidate_setup
+        env:
+          STARTED_NS: ${{ steps.candidate_timer.outputs.started_ns }}
         run: |
           chmod +x "$RUNNER_TEMP/mbx-bin/mbx"
           echo "$RUNNER_TEMP/mbx-bin" >> "$GITHUB_PATH"
+          echo "duration_ns=$(($(date +%s%N) - STARTED_NS))" >> "$GITHUB_OUTPUT"
       - name: Start rust-cache timer (first)
         if: matrix.order == 'rust-first'
         id: rust_first_timer
@@ -626,6 +634,7 @@ jobs:
           RUST_TOTAL_NS: ${{ matrix.order == 'rust-first' && steps.rust_first_build.outputs.total_duration_ns || steps.rust_second_build.outputs.total_duration_ns }}
           MBX_BUILD_NS: ${{ steps.mbx_build.outputs.build_duration_ns }}
           MBX_TOTAL_NS: ${{ steps.mbx_build.outputs.total_duration_ns }}
+          CANDIDATE_SETUP_NS: ${{ steps.candidate_setup.outputs.duration_ns || '0' }}
           TRIAL: ${{ matrix.trial }}-${{ matrix.order }}
           REF: ${{ inputs.small_edit_mbx_ref }}
           VERSION: ${{ inputs.small_edit_mbx_version }}
@@ -639,11 +648,12 @@ jobs:
           fi
           jq -n --arg tool rust-cache --arg trial "$TRIAL" --arg ref "$REF" --arg revision "$REVISION" --arg version "$VERSION" \
             --argjson build_duration_ns "$RUST_BUILD_NS" --argjson restore_and_build_duration_ns "$RUST_TOTAL_NS" \
-            '{schema:1,tool:$tool,mbx_version:$version,mbx_ref:$ref,mbx_revision:$revision,trial:$trial,build_duration_ns:$build_duration_ns,restore_and_build_duration_ns:$restore_and_build_duration_ns}' \
+            '{schema:1,tool:$tool,mbx_version:$version,mbx_ref:$ref,mbx_revision:$revision,trial:$trial,build_duration_ns:$build_duration_ns,restore_and_build_duration_ns:$restore_and_build_duration_ns,candidate_setup_duration_ns:0,end_to_end_duration_ns:$restore_and_build_duration_ns}' \
             > "$RUNNER_TEMP/small-edit/rust-cache-${TRIAL}.json"
           jq -n --arg tool mbx-target --arg trial "$TRIAL" --arg ref "$REF" --arg revision "$REVISION" --arg version "$VERSION" \
             --argjson build_duration_ns "$MBX_BUILD_NS" --argjson restore_and_build_duration_ns "$MBX_TOTAL_NS" \
-            '{schema:1,tool:$tool,mbx_version:$version,mbx_ref:$ref,mbx_revision:$revision,trial:$trial,build_duration_ns:$build_duration_ns,restore_and_build_duration_ns:$restore_and_build_duration_ns}' \
+            --argjson candidate_setup_duration_ns "$CANDIDATE_SETUP_NS" \
+            '{schema:1,tool:$tool,mbx_version:$version,mbx_ref:$ref,mbx_revision:$revision,trial:$trial,build_duration_ns:$build_duration_ns,restore_and_build_duration_ns:$restore_and_build_duration_ns,candidate_setup_duration_ns:$candidate_setup_duration_ns,end_to_end_duration_ns:($restore_and_build_duration_ns + $candidate_setup_duration_ns)}' \
             > "$RUNNER_TEMP/small-edit/mbx-target-${TRIAL}.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -696,7 +706,8 @@ jobs:
               mbx_revision: .[0].mbx_revision,
               trials: length,
               build_seconds: (([.[].build_duration_ns] | median) / 1e9),
-              restore_and_build_seconds: (([.[].restore_and_build_duration_ns] | median) / 1e9)
+              restore_and_build_seconds: (([.[].restore_and_build_duration_ns] | median) / 1e9),
+              end_to_end_seconds: (([.[] | (.end_to_end_duration_ns // .restore_and_build_duration_ns)] | median) / 1e9)
             })' "$RUNNER_TEMP"/small-edit/*.json \
             | tee "$RUNNER_TEMP/small-edit-summary.json"
           jq -s '
@@ -722,9 +733,9 @@ jobs:
           {
             echo '## hk parent-cache + small-edit comparison'
             echo
-            echo '| Tool | Trials | Median restore + build | Median build |'
-            echo '| :--- | ---: | ---: | ---: |'
-            jq -r '.[] | "| \(.tool) | \(.trials) | \(.restore_and_build_seconds * 100 | round / 100) s | \(.build_seconds * 100 | round / 100) s |"' \
+            echo '| Tool | Trials | Median setup + restore + build | Median restore + build | Median build |'
+            echo '| :--- | ---: | ---: | ---: | ---: |'
+            jq -r '.[] | "| \(.tool) | \(.trials) | \(.end_to_end_seconds * 100 | round / 100) s | \(.restore_and_build_seconds * 100 | round / 100) s | \(.build_seconds * 100 | round / 100) s |"' \
               "$RUNNER_TEMP/small-edit-summary.json"
             echo
             jq -r '"Paired result: mbx won \(.mbx_wins)/\(.pairs | length); median mbx − rust-cache delta \(.median_delta_seconds * 1000 | round) ms."' \
