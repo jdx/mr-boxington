@@ -316,7 +316,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tool: [rust-cache, mbx, mbx-registry, mbx-target]
+        tool: [rust-cache, mbx-target]
         trial: ${{ fromJSON(inputs.small_edit_trials || '[1,2,3,4]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -384,11 +384,17 @@ jobs:
           ]))
           packages = metadata["packages"]
           keep_pkg = {
-              name.replace("-", "_")
+              name
               for package in packages
-              for name in [package["name"], *(target["name"] for target in package["targets"])]
+              for name in [package["name"], *(target["name"].replace("-", "_") for target in package["targets"])]
           }
-          keep_deps = keep_pkg | {f"lib{name}" for name in keep_pkg}
+          keep_deps = {
+              name
+              for package in packages
+              for raw_name in [package["name"], *(target["name"] for target in package["targets"])]
+              for name in (raw_name.replace("-", "_"), f"lib{raw_name.replace('-', '_')}")
+          }
+          keep_registry = {package["name"] for package in packages}
 
           def remove(path):
               if path.is_dir() and not path.is_symlink():
@@ -427,6 +433,30 @@ jobs:
                       prune_target(entry)
 
           prune_target(pathlib.Path("target"))
+
+          def prune_sparse_index(directory):
+              empty = True
+              for entry in list(directory.iterdir()):
+                  if entry.is_dir():
+                      if prune_sparse_index(entry):
+                          remove(entry)
+                      else:
+                          empty = False
+                  elif entry.name in keep_registry:
+                      empty = False
+                  else:
+                      remove(entry)
+              return empty
+
+          registry_index = pathlib.Path.home() / ".cargo" / "registry" / "index"
+          if registry_index.is_dir():
+              for index in registry_index.iterdir():
+                  if not index.is_dir():
+                      continue
+                  if (index / ".git").is_dir():
+                      remove(index / ".cache")
+                  else:
+                      prune_sparse_index(index)
       - name: Export native mbx bundle
         if: matrix.tool == 'mbx-registry'
         run: mbx cache export --group "$MBX_CACHE_EXPORT_GROUP" "$RUNNER_TEMP/mbx-cache.tar"
@@ -461,7 +491,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tool: [rust-cache, mbx, mbx-registry, mbx-target]
+        tool: [rust-cache, mbx-target]
         trial: ${{ fromJSON(inputs.small_edit_trials || '[1,2,3,4]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
