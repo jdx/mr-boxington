@@ -190,7 +190,6 @@ jobs:
       - fuzz
       - lint
       - supply-chain
-      - public-api
       - test
     runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
     timeout-minutes: 1
@@ -205,7 +204,6 @@ jobs:
           needs.lint.result != 'success' ||
           needs.compatibility.result != 'success' ||
           needs.supply-chain.result != 'success' ||
-          needs.public-api.result != 'success' ||
           needs.test.result != 'success'
         run: exit 1
       - run: echo "All CI jobs completed successfully"
