@@ -153,13 +153,12 @@ impl FileIdentity {
 /// A pre-operation snapshot that can prove whether a file's contents changed.
 ///
 /// Most filesystems provide a stable metadata-change token, so the inexpensive
-/// identity is sufficient. Linux NFS can reconcile the client and server
-/// change times after a writer has closed the file, making two metadata reads
-/// disagree without any intervening write. Those files carry a content digest
-/// instead, while retaining length and modification time as an independent
-/// signal for a write that restored the original bytes. Callers use the same
-/// comparison either way and do not need to know which filesystem supplied the
-/// file.
+/// identity is sufficient. Linux NFS can reconcile client and server timestamps
+/// after a writer has closed the file, making two metadata reads disagree
+/// without any intervening write. Those files carry a content digest instead,
+/// while retaining length and file identity to detect replacement. Callers use
+/// the same comparison either way and do not need to know which filesystem
+/// supplied the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileSnapshot {
     identity: FileIdentity,
@@ -195,10 +194,11 @@ impl FileSnapshot {
 
     /// Whether `identity` and `content` still describe this snapshot.
     ///
-    /// A content-backed snapshot deliberately ignores the unreliable change
-    /// token, but still requires the modification time to remain stable. That
-    /// prevents a write followed by restoration of the original bytes from
-    /// passing only because the endpoint digests agree.
+    /// A content-backed snapshot ignores both timestamps: NFS can reconcile
+    /// mtime as well as ctime without a content change. Matching endpoint
+    /// digests cannot detect an intervening edit that restores the original
+    /// bytes. Digest-cache lookup still uses timestamps to decide when a
+    /// digest needs refreshing; this comparison performs no additional reads.
     pub fn matches(&self, identity: Option<&FileIdentity>, content: &CacheDigest) -> bool {
         self.content.as_ref().map_or_else(
             || identity == Some(&self.identity),
@@ -207,7 +207,6 @@ impl FileSnapshot {
                     && identity.is_some_and(|after| {
                         self.identity.path == after.path
                             && self.identity.len == after.len
-                            && self.identity.modified == after.modified
                             && self.identity.object == after.object
                     })
             },
@@ -615,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn a_content_snapshot_ignores_change_token_churn_but_detects_other_changes() {
+    fn a_content_snapshot_ignores_timestamp_churn_but_detects_changed_bytes() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("input.rs");
         std::fs::write(&path, b"fn main() {}").unwrap();
@@ -637,7 +636,7 @@ mod tests {
         assert!(snapshot.proves_content_change());
 
         identity.modified = SystemTime::UNIX_EPOCH;
-        assert!(!snapshot.matches(Some(&identity), &digest));
+        assert!(snapshot.matches(Some(&identity), &digest));
 
         std::fs::write(&path, b"fn main(){ }").unwrap();
         let identity = FileIdentity::describe(&path, &std::fs::metadata(&path).unwrap());
@@ -662,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn content_snapshot_ignores_nfs_ctime_churn_but_not_object_replacement() {
+    fn content_snapshot_ignores_nfs_timestamp_churn_but_not_content_or_identity_changes() {
         let digest = CacheDigest::blake3(b"nfs bytes");
         let identity = FileIdentity {
             path: PathBuf::from("/nfs/input.rlib"),
@@ -680,14 +679,32 @@ mod tests {
             identity: identity.clone(),
             content: Some(digest.clone()),
         };
-        let mut after = identity;
-        after.changed = Some((9, 500));
-        assert!(snapshot.matches(Some(&after), &digest));
+        // Client/server reconciliation can move either timestamp in either
+        // direction. None of these observations proves another write.
+        for seconds in [9, 11] {
+            let mut after = identity.clone();
+            after.changed = Some((seconds, 500));
+            after.modified = SystemTime::UNIX_EPOCH + std::time::Duration::new(seconds as u64, 500);
+            assert!(snapshot.matches(Some(&after), &digest));
+        }
 
+        // Timestamp tolerance does not admit changed bytes, even when their
+        // length and all metadata remain the same.
+        let changed = CacheDigest::blake3(b"NFS bytes");
+        assert_eq!(changed.size, digest.size);
+        assert!(!snapshot.matches(Some(&identity), &changed));
+        assert!(!snapshot.matches(None, &digest));
+
+        let mut after = identity.clone();
         after.object.as_mut().unwrap().inode += 1;
         assert!(!snapshot.matches(Some(&after), &digest));
-        after.object.as_mut().unwrap().inode -= 1;
-        after.modified += std::time::Duration::from_secs(1);
+
+        let mut after = identity.clone();
+        after.len += 1;
+        assert!(!snapshot.matches(Some(&after), &digest));
+
+        let mut after = identity;
+        after.path.set_file_name("replacement.rlib");
         assert!(!snapshot.matches(Some(&after), &digest));
     }
 
