@@ -49,6 +49,9 @@ mockito = "1"
 zstd = "0.13"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [features]
 default = ["rustls"]
 fuzzing = []

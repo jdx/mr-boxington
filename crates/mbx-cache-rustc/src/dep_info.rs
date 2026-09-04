@@ -3,7 +3,7 @@ use super::{
     MAX_PREDICTED_INPUTS, PathMapping, RustcInvocation, normalize_components,
 };
 use mbx_cache_core::{
-    CacheDigest, FileDigestCache, FileDigestScope, FileIdentity, RecordedFileDigest,
+    CacheDigest, FileDigestCache, FileDigestScope, FileIdentity, FileSnapshot, RecordedFileDigest,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -173,7 +173,12 @@ impl DiscoveredInputs {
                     message: "input is not a regular file".into(),
                 });
             }
-            let identity = FileIdentity::describe(&path, &metadata);
+            let identity = FileIdentity::for_digest_cache(&path, &metadata).map_err(|error| {
+                BypassReason::InputRead {
+                    path: path.clone(),
+                    message: error.to_string(),
+                }
+            })?;
             identified.push((path, identity));
         }
         let queries = identified
@@ -234,38 +239,42 @@ impl DiscoveredInputs {
     /// the contents that produced the artifact. `verify` closes the remaining
     /// race after hashing.
     pub fn verify_not_modified_since(&self, started_at: SystemTime) -> Result<(), BypassReason> {
-        self.verify_not_modified_since_with_identities(started_at, &BTreeMap::new())
+        self.verify_not_modified_since_with_snapshots(started_at, &BTreeMap::new())
     }
 
-    /// Reject inputs that changed from identities captured before rustc ran,
+    /// Reject inputs that changed from snapshots captured before rustc ran,
     /// falling back to the wall-clock barrier for inputs only dep-info named.
     ///
-    /// Exact identity comparison does not order a client timestamp against a
-    /// filesystem timestamp, so it remains valid when an NFS server and the
-    /// compiler host use different clocks. Only identities carrying a change
-    /// token qualify: without one a same-length rewrite can restore its mtime.
-    pub fn verify_not_modified_since_with_identities(
+    /// A snapshot may use metadata or content depending on what its filesystem
+    /// can compare reliably. Metadata snapshots need a change token: without
+    /// one a same-length rewrite can restore its mtime.
+    pub fn verify_not_modified_since_with_snapshots(
         &self,
         started_at: SystemTime,
-        before: &BTreeMap<PathBuf, FileIdentity>,
+        before: &BTreeMap<PathBuf, FileSnapshot>,
     ) -> Result<(), BypassReason> {
         for input in &self.inputs {
-            let metadata =
-                std::fs::metadata(&input.path).map_err(|error| BypassReason::InputRead {
-                    path: input.path.clone(),
-                    message: error.to_string(),
-                })?;
-            let identity = FileIdentity::describe(&input.path, &metadata);
             if let Some(previous) = before.get(&input.path)
-                && previous.changed.is_some()
+                && previous.proves_content_change()
             {
-                if identity.as_ref() == Some(previous) {
+                let metadata =
+                    std::fs::metadata(&input.path).map_err(|error| BypassReason::InputRead {
+                        path: input.path.clone(),
+                        message: error.to_string(),
+                    })?;
+                let identity = FileIdentity::describe(&input.path, &metadata);
+                if previous.matches(identity.as_ref(), &input.digest) {
                     continue;
                 }
                 return Err(BypassReason::InputModifiedDuringCompilation(
                     input.path.clone(),
                 ));
             }
+            let metadata =
+                std::fs::metadata(&input.path).map_err(|error| BypassReason::InputRead {
+                    path: input.path.clone(),
+                    message: error.to_string(),
+                })?;
             let modified = metadata
                 .modified()
                 .map_err(|error| BypassReason::InputRead {
@@ -279,6 +288,19 @@ impl DiscoveredInputs {
             }
         }
         Ok(())
+    }
+
+    /// Compatibility form for callers that captured metadata identities.
+    pub fn verify_not_modified_since_with_identities(
+        &self,
+        started_at: SystemTime,
+        before: &BTreeMap<PathBuf, FileIdentity>,
+    ) -> Result<(), BypassReason> {
+        let snapshots = before
+            .iter()
+            .map(|(path, identity)| (path.clone(), identity.clone().into()))
+            .collect();
+        self.verify_not_modified_since_with_snapshots(started_at, &snapshots)
     }
 
     /// Rehash every discovered file after compilation and before publication.
@@ -751,7 +773,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn precompile_identity_does_not_depend_on_the_host_clock() {
+    fn precompile_snapshot_does_not_depend_on_the_host_clock() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("lib.rs");
         std::fs::write(&source, "pub fn library() {0}\n").unwrap();
@@ -766,20 +788,19 @@ mod tests {
         let discovered = invocation
             .discover_inputs(&dep_info, directory.path())
             .unwrap();
-        let identity =
-            FileIdentity::describe(&source, &std::fs::metadata(&source).unwrap()).unwrap();
-        let before = BTreeMap::from([(source.clone(), identity)]);
+        let snapshot = FileSnapshot::capture(&source).unwrap().unwrap();
+        let before = BTreeMap::from([(source.clone(), snapshot)]);
 
         // Every ordinary mtime is after the epoch. The unchanged identity is
         // nevertheless enough proof when the filesystem clock is far ahead.
         discovered
-            .verify_not_modified_since_with_identities(SystemTime::UNIX_EPOCH, &before)
+            .verify_not_modified_since_with_snapshots(SystemTime::UNIX_EPOCH, &before)
             .unwrap();
 
         // Conversely, a filesystem clock far behind must not conceal a write.
         std::fs::write(&source, "pub fn library() {1}\n").unwrap();
         assert_eq!(
-            discovered.verify_not_modified_since_with_identities(
+            discovered.verify_not_modified_since_with_snapshots(
                 SystemTime::now() + std::time::Duration::from_secs(60),
                 &before,
             ),

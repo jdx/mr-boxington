@@ -621,16 +621,17 @@ fn only_compiler_input_mutations_invalidate_local_outputs() {
         modified: SystemTime::UNIX_EPOCH,
         changed: Some((1, 2)),
     };
-    let identities = Ok(BTreeMap::from([(path.clone(), identity)]));
+    let snapshot = FileSnapshot::from(identity);
+    let snapshots = Ok(BTreeMap::from([(path.clone(), snapshot)]));
     let changed =
         eyre::Report::new(BypassReason::InputChanged(path.clone())).wrap_err("publication failed");
     let overlapping = eyre::Report::new(BypassReason::InputModifiedDuringCompilation(path));
 
-    assert!(compiler_input_was_modified(&changed, &identities));
-    assert!(compiler_input_was_modified(&overlapping, &identities));
+    assert!(compiler_input_was_modified(&changed, &snapshots));
+    assert!(compiler_input_was_modified(&overlapping, &snapshots));
     assert!(!compiler_input_was_modified(
         &eyre::eyre!("the cache is unavailable"),
-        &identities
+        &snapshots
     ));
 }
 

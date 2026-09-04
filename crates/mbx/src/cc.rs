@@ -25,8 +25,8 @@ use mbx_cache_cc::{
 };
 use mbx_cache_core::{
     ActionPrediction, AgentRequest, AgentResponse, CacheDigest, CacheDirectory, CacheFileNode,
-    CcMetadata, FileDigestScope, FileIdentity, PathMapping, RecordedFileDigest, RemoteActionResult,
-    RestoreStats, canonical_json, normalize_mapped_path,
+    CcMetadata, FileDigestScope, FileIdentity, FileSnapshot, PathMapping, RecordedFileDigest,
+    RemoteActionResult, RestoreStats, canonical_json, normalize_mapped_path,
 };
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -270,8 +270,8 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         .iter()
         .map(|path| absolute(path, &working_dir))
         .collect::<Vec<_>>();
-    let input_identities =
-        crate::util::snapshot_file_identities(required_inputs.iter().map(PathBuf::as_path));
+    let input_snapshots =
+        crate::util::snapshot_compiler_inputs(required_inputs.iter().map(PathBuf::as_path));
     let demand = crate::scheduler::Demand::new(&compilation_name(&invocation), false);
     let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
     let started = Instant::now();
@@ -318,7 +318,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         &depfile,
         &output,
         compilation_started,
-        &input_identities,
+        &input_snapshots,
         &task,
         &invocation_digest,
         duration_ns,
@@ -360,7 +360,7 @@ fn publish(
     depfile: &Path,
     output: &Output,
     compilation_started: SystemTime,
-    input_identities: &std::io::Result<BTreeMap<PathBuf, FileIdentity>>,
+    input_snapshots: &std::io::Result<BTreeMap<PathBuf, FileSnapshot>>,
     task: &str,
     invocation_digest: &CacheDigest,
     duration_ns: u64,
@@ -370,11 +370,11 @@ fn publish(
     remote_claim: Option<&str>,
     portable: &Portable,
 ) -> Result<()> {
-    let input_identities = input_identities
+    let input_snapshots = input_snapshots
         .as_ref()
         .map_err(|error| eyre::eyre!(error.to_string()))?;
     let discovered = discover(invocation, context, depfile)?;
-    discovered.verify_not_modified_since_with_identities(compilation_started, input_identities)?;
+    discovered.verify_not_modified_since_with_snapshots(compilation_started, input_snapshots)?;
     verify_search_path_unchanged(searchable, before)?;
     discovered.verify()?;
     discovered.apply_to(context)?;
