@@ -117,7 +117,13 @@ pub(super) fn cache_export(config: &Config, archive: &Path, group: Option<&str>)
             .into_iter()
             .collect(),
     };
-    let additions = workspace_state::capture(&store_dir, &targets)?;
+    let additions = match workspace_state::capture(&store_dir, &targets) {
+        Ok(additions) => additions,
+        Err(error) => {
+            log::warn!("Cargo workspace state was not included in the cache export: {error}");
+            store::ExportAdditions::default()
+        }
+    };
     let outcome = match group {
         Some(group) => store::export_group_with(&store_dir, group, archive, additions)?,
         None => store::export_checkout_with(&store_dir, &workspace, archive, additions)?,
@@ -141,14 +147,20 @@ pub(super) fn cache_import(config: &Config, archive: &Path) -> Result<()> {
     let restored = if let Some(attachment) = imported.attachments.get(workspace_state::ATTACHMENT) {
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         if let Some(roots) = cargo_roots(&cargo, &[], None) {
-            workspace_state::restore(
+            match workspace_state::restore(
                 config,
                 &store,
                 attachment,
                 &roots.workspace_root,
                 &roots.target_dir,
                 roots.target_dir_requested,
-            )?
+            ) {
+                Ok(restored) => restored,
+                Err(error) => {
+                    log::warn!("cache imported without restoring Cargo workspace state: {error}");
+                    None
+                }
+            }
         } else {
             log::debug!("no Cargo workspace was available for workspace-state restore");
             None

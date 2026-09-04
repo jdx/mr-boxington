@@ -954,20 +954,23 @@ fn a_cache_bundle_restores_cargo_workspace_state() {
         b"local",
         "import must not replace an existing non-empty target"
     );
-    let cargo = Command::new(env!("CARGO_BIN_EXE_mbx"))
-        .current_dir(project.path())
-        .args(["build", "--offline", "--verbose"])
-        .env("MBX_CACHE_DIR", destination_store.path())
-        .env("MBX_TARGET_ROOT", destination_targets.path())
-        .env("MBX_LEARNED_INCREMENTAL", "0")
-        .env_remove("CARGO_TARGET_DIR")
-        .output()
-        .unwrap();
-    assert!(cargo.status.success());
+    let (_, cargo_stderr) = cargo_with(
+        project.path(),
+        destination_store.path(),
+        &reports.path().join("restored.json"),
+        &["build", "--offline", "--verbose"],
+        &[
+            (
+                "MBX_TARGET_ROOT",
+                destination_targets.path().to_str().unwrap(),
+            ),
+            ("MBX_LEARNED_INCREMENTAL", "0"),
+        ],
+    );
     assert!(
-        !String::from_utf8_lossy(&cargo.stderr).contains("Compiling fixture"),
+        !cargo_stderr.contains("Compiling fixture"),
         "Cargo should accept the restored target as fresh: {}",
-        String::from_utf8_lossy(&cargo.stderr)
+        cargo_stderr
     );
 
     let equivalent_project = tempfile::tempdir().unwrap();

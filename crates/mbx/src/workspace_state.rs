@@ -450,7 +450,12 @@ fn file_mode(metadata: &std::fs::Metadata) -> u32 {
 }
 
 fn set_file_metadata(path: &Path, mode: u32, secs: u64, nanos: u32) -> Result<()> {
-    let modified = UNIX_EPOCH + std::time::Duration::new(secs, nanos);
+    if nanos >= 1_000_000_000 {
+        bail!("workspace state contains an invalid timestamp");
+    }
+    let modified = UNIX_EPOCH
+        .checked_add(std::time::Duration::new(secs, nanos))
+        .ok_or_else(|| eyre::eyre!("workspace state contains an out-of-range timestamp"))?;
     #[cfg(unix)]
     File::options()
         .read(true)
@@ -473,7 +478,7 @@ fn set_file_metadata(path: &Path, mode: u32, secs: u64, nanos: u32) -> Result<()
             .open(path)?
             .set_times(FileTimes::new().set_modified(modified))
             .wrap_err_with(|| format!("could not restore the timestamp of {}", path.display()))?;
-        permissions.set_readonly(mode != 0);
+        permissions.set_readonly(mode == 1);
         std::fs::set_permissions(path, permissions)
             .wrap_err_with(|| format!("could not restore the permissions of {}", path.display()))?;
     }
