@@ -479,7 +479,7 @@ jobs:
         run: mbx build --locked
       - name: Snapshot Cargo scheduling state
         run: python3 driver/benchmarks/analyze_hydration.py snapshot "$MBX_DIRECT_ROOT" "$(command -v mbx)"
-      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           key: hk-small-edit-mbx-direct-${{ github.run_id }}-parent
           path: |
@@ -525,7 +525,7 @@ jobs:
           backend: local
           version: ${{ inputs.small_edit_mbx_version || '1.7.0' }}
           toolchain: 1.97.1
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           key: hk-small-edit-mbx-direct-${{ inputs.small_edit_cache_run_id || github.run_id }}-parent
           path: |
