@@ -360,11 +360,14 @@ jobs:
           cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
           save-on-workflow-dispatch: "true"
           toolchain: 1.97.1
-      - if: matrix.tool == 'mbx-registry' || matrix.tool == 'mbx-target'
-        uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
+      - if: matrix.tool == 'mbx-target'
+        uses: jdx/mr-boxington-action@codex/direct-target-cache
         with:
-          backend: local
-          cache-links: ${{ matrix.tool == 'mbx-target' && 'false' || 'auto' }}
+          backend: github
+          cache-links: "false"
+          cache-key: gha-small-edit-${{ matrix.tool }}-${{ github.run_id }}-${{ matrix.trial }}-parent
+          github-cache-mode: target
+          save-on-workflow-dispatch: "true"
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           toolchain: 1.97.1
       - name: Seed parent build
@@ -373,7 +376,7 @@ jobs:
         run: |
           "$BUILD_DRIVER" build --locked
       - name: Prune target like rust-cache
-        if: matrix.tool == 'mbx-target'
+        if: false
         shell: python
         run: |
           import json
@@ -471,7 +474,7 @@ jobs:
             ${{ runner.temp }}/mbx-cache.tar
             ~/.cargo/registry
             ~/.cargo/git
-      - if: matrix.tool == 'mbx-target'
+      - if: false
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           key: gha-small-edit-${{ matrix.tool }}-${{ github.run_id }}-${{ matrix.trial }}-parent
@@ -540,11 +543,13 @@ jobs:
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
           toolchain: 1.97.1
-      - if: matrix.tool == 'mbx-registry' || matrix.tool == 'mbx-target'
-        uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
+      - if: matrix.tool == 'mbx-target'
+        uses: jdx/mr-boxington-action@codex/direct-target-cache
         with:
-          backend: local
-          cache-links: ${{ matrix.tool == 'mbx-target' && 'false' || 'auto' }}
+          backend: github
+          cache-links: "false"
+          cache-key: gha-small-edit-${{ matrix.tool }}-${{ github.run_id }}-${{ matrix.trial }}-parent
+          github-cache-mode: target
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           toolchain: 1.97.1
       - if: matrix.tool == 'mbx-registry'
@@ -556,7 +561,7 @@ jobs:
             ${{ runner.temp }}/mbx-cache.tar
             ~/.cargo/registry
             ~/.cargo/git
-      - if: matrix.tool == 'mbx-target'
+      - if: false
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           key: gha-small-edit-${{ matrix.tool }}-${{ github.run_id }}-${{ matrix.trial }}-parent
