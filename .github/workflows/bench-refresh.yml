@@ -363,6 +363,7 @@ jobs:
         uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
         with:
           backend: local
+          cache-links: ${{ matrix.tool == 'mbx-target' && 'false' || 'auto' }}
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           toolchain: 1.97.1
       - name: Seed parent build
@@ -571,6 +572,7 @@ jobs:
         uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
         with:
           backend: local
+          cache-links: ${{ matrix.tool == 'mbx-target' && 'false' || 'auto' }}
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           toolchain: 1.97.1
       - if: matrix.tool == 'mbx-registry'
