@@ -699,6 +699,26 @@ jobs:
               restore_and_build_seconds: (([.[].restore_and_build_duration_ns] | median) / 1e9)
             })' "$RUNNER_TEMP"/small-edit/*.json \
             | tee "$RUNNER_TEMP/small-edit-summary.json"
+          jq -s '
+            def median:
+              sort as $values |
+              ($values | length) as $length |
+              if $length % 2 == 1 then $values[$length / 2 | floor]
+              else (($values[$length / 2 - 1] + $values[$length / 2]) / 2) end;
+            group_by(.trial) | map(
+              ([.[] | select(.tool == "mbx-target")][0]) as $mbx |
+              ([.[] | select(.tool == "rust-cache")][0]) as $rust |
+              {
+                trial: .[0].trial,
+                delta_seconds: (($mbx.restore_and_build_duration_ns - $rust.restore_and_build_duration_ns) / 1e9)
+              }
+            ) as $pairs | {
+              pairs: $pairs,
+              mbx_wins: ([$pairs[] | select(.delta_seconds < 0)] | length),
+              rust_cache_wins: ([$pairs[] | select(.delta_seconds > 0)] | length),
+              median_delta_seconds: ([$pairs[].delta_seconds] | median)
+            }' "$RUNNER_TEMP"/small-edit/*.json \
+            | tee "$RUNNER_TEMP/small-edit-pairs.json"
           {
             echo '## hk parent-cache + small-edit comparison'
             echo
@@ -706,10 +726,15 @@ jobs:
             echo '| :--- | ---: | ---: | ---: |'
             jq -r '.[] | "| \(.tool) | \(.trials) | \(.restore_and_build_seconds * 100 | round / 100) s | \(.build_seconds * 100 | round / 100) s |"' \
               "$RUNNER_TEMP/small-edit-summary.json"
+            echo
+            jq -r '"Paired result: mbx won \(.mbx_wins)/\(.pairs | length); median mbx − rust-cache delta \(.median_delta_seconds * 1000 | round) ms."' \
+              "$RUNNER_TEMP/small-edit-pairs.json"
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gha-small-edit-summary
-          path: ${{ runner.temp }}/small-edit-summary.json
+          path: |
+            ${{ runner.temp }}/small-edit-summary.json
+            ${{ runner.temp }}/small-edit-pairs.json
           if-no-files-found: error
           retention-days: 90
