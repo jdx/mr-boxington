@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import shutil
+import stat as stat_module
 import sys
 import time
 from collections import defaultdict
@@ -16,6 +17,36 @@ def digest(path: Path) -> bytes:
         while chunk := handle.read(1024 * 1024):
             value.update(chunk)
     return value.digest()
+
+
+def tree_stats(root: Path, excluded: tuple[Path, ...] = ()) -> dict[str, int]:
+    stats = {
+        "files": 0,
+        "symlinks": 0,
+        "logical_bytes": 0,
+        "allocated_bytes": 0,
+    }
+    seen = set()
+    if not root.exists():
+        return stats
+    for path in root.rglob("*"):
+        if any(path == item or item in path.parents for item in excluded):
+            continue
+        metadata = path.lstat()
+        if stat_module.S_ISLNK(metadata.st_mode):
+            stats["symlinks"] += 1
+            stats["logical_bytes"] += metadata.st_size
+            continue
+        if not stat_module.S_ISREG(metadata.st_mode):
+            continue
+        inode = (metadata.st_dev, metadata.st_ino)
+        if inode in seen:
+            continue
+        seen.add(inode)
+        stats["files"] += 1
+        stats["logical_bytes"] += metadata.st_size
+        stats["allocated_bytes"] += metadata.st_blocks * 512
+    return stats
 
 
 root = Path(sys.argv[2] if sys.argv[1] in ("snapshot", "hydrate") else sys.argv[1])
@@ -113,6 +144,9 @@ if sys.argv[1] == "snapshot":
     cas_sources = {digest(path): path for path in cas.rglob("*") if path.is_file()}
     files = []
     inodes = {}
+    inode_sources = {}
+    target_view = defaultdict(lambda: {"paths": 0, "logical_bytes": 0})
+    hardlinks = 0
     for path in target.rglob("*"):
         if not path.is_file():
             continue
@@ -122,26 +156,58 @@ if sys.argv[1] == "snapshot":
         inode = (stat.st_dev, stat.st_ino)
         if inode in inodes:
             entry["link"] = inodes[inode]
+            source_kind = inode_sources[inode]
+            hardlinks += 1
         else:
             inodes[inode] = relative
             hashed = digest(path)
             if hashed in cas_sources:
                 entry["source"] = str(cas_sources[hashed])
+                source_kind = "cas_reference"
             elif hashed == mbx_hash:
                 entry["source"] = "shim"
+                source_kind = "mbx_shim_reference"
             else:
                 destination = inline / relative
                 clone(path, destination)
                 os.chmod(destination, entry["mode"])
                 os.utime(destination, ns=(entry["mtime_ns"], entry["mtime_ns"]))
                 entry["source"] = "inline"
+                source_kind = "inline"
+            inode_sources[inode] = source_kind
+        target_view[source_kind]["paths"] += 1
+        target_view[source_kind]["logical_bytes"] += stat.st_size
         files.append(entry)
     for entry in reversed(directories):
         path = inline / entry["path"]
         os.chmod(path, entry["mode"])
         os.utime(path, ns=(entry["mtime_ns"], entry["mtime_ns"]))
-    (snapshot / "manifest.json").write_text(json.dumps({"files": files, "directories": directories}))
-    print(json.dumps({"files": len(files), "directories": len(directories)}))
+    manifest = snapshot / "manifest.json"
+    manifest.write_text(json.dumps({"files": files, "directories": directories}))
+    registry = root / "cargo-home/registry"
+    payload = {
+        "cas_objects": tree_stats(cas),
+        "mbx_store_metadata": tree_stats(root / "store", excluded=(cas,)),
+        "cargo_state_inline": tree_stats(inline),
+        "cargo_state_manifest": tree_stats(manifest.parent, excluded=(inline,)),
+        "cargo_registry": tree_stats(registry),
+    }
+    payload_logical_bytes = sum(entry["logical_bytes"] for entry in payload.values())
+    composition = {
+        "schema": 1,
+        "cache_payload": payload,
+        "cache_payload_logical_bytes": payload_logical_bytes,
+        "target_view": dict(sorted(target_view.items())),
+        "target_files": len(files),
+        "target_directories": len(directories),
+        "target_hardlinks": hardlinks,
+        "notes": {
+            "cache_payload_logical_bytes": "Sum before archive compression; hard-linked files are counted once per payload category.",
+            "target_view": "Logical target paths classified by their restore source; CAS and shim references do not add bytes to the Cargo-state sidecar.",
+        },
+    }
+    (snapshot / "composition.json").write_text(json.dumps(composition, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(composition, sort_keys=True))
     raise SystemExit
 totals = defaultdict(lambda: [0, 0, 0])
 missing = defaultdict(lambda: [0, 0, 0])

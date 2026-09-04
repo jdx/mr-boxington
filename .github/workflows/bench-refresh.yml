@@ -493,6 +493,55 @@ jobs:
             /github/home/mbx-direct/store
             /github/home/mbx-direct/snapshot
             /github/home/mbx-direct/cargo-home/registry
+      - name: Record hydrated cache composition
+        env:
+          CACHE_KEY: hk-small-edit-mbx-direct-${{ github.run_id }}-parent
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archive_bytes=
+          for _attempt in 1 2 3 4 5; do
+            archive_bytes=$(gh cache list --key "$CACHE_KEY" --limit 100 \
+              --json key,sizeInBytes \
+              | jq -r --arg key "$CACHE_KEY" \
+                'map(select(.key == $key))[0].sizeInBytes // empty')
+            if [ -n "$archive_bytes" ]; then
+              break
+            fi
+            sleep 2
+          done
+          report="$MBX_DIRECT_ROOT/snapshot/composition.json"
+          updated=$(mktemp)
+          jq --argjson archive_bytes "${archive_bytes:-null}" \
+            '.github_cache_archive_bytes = $archive_bytes' "$report" > "$updated"
+          mv "$updated" "$report"
+          {
+            echo '## Hydrated mbx cache composition'
+            echo
+            echo '| Payload component | Files | Logical size |'
+            echo '| :--- | ---: | ---: |'
+            jq -r '.cache_payload | to_entries[] | [
+              (.key | gsub("_"; " ")),
+              (.value.files | tostring),
+              ((.value.logical_bytes / 1048576 * 100 | round) / 100 | tostring) + " MiB"
+            ] | "| \(.[0]) | \(.[1]) | \(.[2]) |"' "$report"
+            jq -r '"| **Uncompressed payload total** | | **\((.cache_payload_logical_bytes / 1048576 * 100 | round) / 100) MiB** |"' "$report"
+            jq -r 'if .github_cache_archive_bytes then
+              "| **GitHub compressed archive** | | **\((.github_cache_archive_bytes / 1048576 * 100 | round) / 100) MiB** |"
+              else "| **GitHub compressed archive** | | unavailable |" end' "$report"
+            echo
+            echo '| Restored target source | Paths | Logical target size |'
+            echo '| :--- | ---: | ---: |'
+            jq -r '.target_view | to_entries[] | [
+              (.key | gsub("_"; " ")),
+              (.value.paths | tostring),
+              ((.value.logical_bytes / 1048576 * 100 | round) / 100 | tostring) + " MiB"
+            ] | "| \(.[0]) | \(.[1]) | \(.[2]) |"' "$report"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hydration-cache-composition-${{ github.run_id }}
+          path: /github/home/mbx-direct/snapshot/composition.json
+          if-no-files-found: error
 
   edit-mbx-direct-measure:
     name: Measure direct hydrated mbx after the edit
