@@ -1,0 +1,43 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M1PTC5K4ADDDDXDWTWAWQW6Y",
+  "session_id": "01a06923-e53f-76c2-a03d-3a98c5d6aeb3",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-04T18:19:59.833217Z",
+  "branch": "codex/restore-xlarge-bench-runner",
+  "checkpoints_count": 1,
+  "save_step_count": 1,
+  "files_touched": [],
+  "agent": "Codex",
+  "model": "gpt-5.6-sol",
+  "turn_id": "0aeac93a3be6",
+  "checkpoint_transcript_start": 15311,
+  "transcript_lines_at_start": 15311,
+  "compact_transcript_start": 2184,
+  "token_usage": {
+    "input_tokens": 23775,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 3606144,
+    "output_tokens": 4275,
+    "api_call_count": 23
+  },
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 47,
+      "agent_lines_removed": 13
+    }
+  ]
+}

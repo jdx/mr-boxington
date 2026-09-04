@@ -1,0 +1,271 @@
+<recommended_plugins>
+Here is a list of plugins that are available but not installed.
+
+- Airtable (airtable@openai-curated-remote)
+- Apollo.io (apollo@openai-curated-remote)
+- Asana (asana@openai-curated-remote)
+- Atlassian Rovo (atlassian-rovo@openai-curated-remote)
+- Base44 (base44@openai-curated-remote)
+- Box (box@openai-curated-remote)
+- Canva (canva@openai-curated-remote)
+- Clay (clay@openai-curated-remote)
+- Codex Security (codex-security@openai-curated-remote)
+- Datadog (Preview) (datadog@openai-curated-remote)
+- Figma (figma@openai-curated-remote)
+- Google Calendar (google-calendar@openai-curated-remote)
+- Granola (granola@openai-curated-remote)
+- HeyGen (heygen@openai-curated-remote)
+- HubSpot (hubspot@openai-curated-remote)
+- Linear (linear@openai-curated-remote)
+- Lovable (lovable@openai-curated-remote)
+- monday.com (monday-com@openai-curated-remote)
+- Notion (notion@openai-curated-remote)
+- OpenAI Developers (openai-developers@openai-curated-remote)
+- Outlook Calendar (outlook-calendar@openai-curated-remote)
+- Outlook Email (outlook-email@openai-curated-remote)
+- PitchBook (pitchbook@openai-curated-remote)
+- PostHog (posthog@openai-curated-remote)
+- Intuit QuickBooks (quickbooks@openai-curated-remote)
+- Semrush (semrush@openai-curated-remote)
+- Sentry (sentry@openai-curated-remote)
+- SharePoint (sharepoint@openai-curated-remote)
+- Supabase (supabase@openai-curated-remote)
+- Superhuman Mail (superhuman@openai-curated-remote)
+- Superpowers (superpowers@openai-curated-remote)
+- Teams (teams@openai-curated-remote)
+- Vercel (vercel@openai-curated-remote)
+- Zoom (zoom@openai-curated-remote)
+- ZoomInfo (zoominfo@openai-curated-remote)
+</recommended_plugins>
+
+---
+
+# AGENTS.md instructions for /Users/jdx/src/mr-boxington
+
+<INSTRUCTIONS>
+# Global preferences
+
+- Create GitHub pull requests ready for review. Never create draft pull requests unless the user explicitly requests a draft.
+
+--- project-doc ---
+
+# Repository Instructions
+
+## Changelogs
+
+- Do not edit `CHANGELOG.md` files in ordinary pull requests. The release-plz
+  workflow generates changelog entries in release pull requests.
+- Only edit a changelog when the user explicitly requests it or when working on
+  the release process itself.
+
+</INSTRUCTIONS>
+
+---
+
+<environment_context>
+  <cwd>/Users/jdx/src/mr-boxington</cwd>
+  <shell>zsh</shell>
+  <current_date>2026-09-03</current_date>
+  <timezone>America/Chicago</timezone>
+  <filesystem><workspace_roots><root>/Users/jdx/src/mr-boxington</root><root>/Users/jdx/.codex/visualizations/2026/09/03/01a06923-e53f-76c2-a03d-3a98c5d6aeb3</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
+</environment_context>
+
+---
+
+investigate [https://github.com/jdx/mr-boxington/discussions/325](https://github.com/jdx/mr-boxington/discussions/325)
+
+---
+
+make a pr, post a reply
+
+---
+
+address pr feedback and failing pr checks
+
+---
+
+where are we at in terms of perf now?
+
+---
+
+can we measure again?
+
+---
+
+i don't mean in those benchmarks, what I want to know is if hk's perf is beating rust-cache yet
+
+---
+
+btw I suspect that mbx might do better in a situation where it's warm-ish, like if there was a small edit to a file
+
+---
+
+so here is what I want
+
+I want you to measure real-world, like actually run a gha workflow against rust-cache as a baseline then with mbx with a small edit workflow like we discussed, I want to see that better than rust-cache, then we can edit our benchmarks to cover this scenario and promote it. I'll want to see how it increased over time across versions. It'd be good to test locally, maybe on dev.coder though
+
+---
+
+ssh into the perf box and kill the other jobs so this one runs
+
+---
+
+what on earth could we do?
+
+---
+
+yeah but if we make a small edit... does that not make things better for us?
+
+---
+
+keep exploring
+
+---
+
+how does it work?
+
+---
+
+<recommended_plugins>
+Here is a list of plugins that are available but not installed.
+
+- Airtable (airtable@openai-curated-remote)
+- Apollo.io (apollo@openai-curated-remote)
+- Asana (asana@openai-curated-remote)
+- Atlassian Rovo (atlassian-rovo@openai-curated-remote)
+- Base44 (base44@openai-curated-remote)
+- Box (box@openai-curated-remote)
+- Canva (canva@openai-curated-remote)
+- Clay (clay@openai-curated-remote)
+- Codex Security (codex-security@openai-curated-remote)
+- Datadog (Preview) (datadog@openai-curated-remote)
+- Figma (figma@openai-curated-remote)
+- Google Calendar (google-calendar@openai-curated-remote)
+- Granola (granola@openai-curated-remote)
+- HeyGen (heygen@openai-curated-remote)
+- HubSpot (hubspot@openai-curated-remote)
+- Linear (linear@openai-curated-remote)
+- Lovable (lovable@openai-curated-remote)
+- monday.com (monday-com@openai-curated-remote)
+- Notion (notion@openai-curated-remote)
+- OpenAI Developers (openai-developers@openai-curated-remote)
+- Outlook Calendar (outlook-calendar@openai-curated-remote)
+- Outlook Email (outlook-email@openai-curated-remote)
+- PitchBook (pitchbook@openai-curated-remote)
+- PostHog (posthog@openai-curated-remote)
+- Intuit QuickBooks (quickbooks@openai-curated-remote)
+- Semrush (semrush@openai-curated-remote)
+- Sentry (sentry@openai-curated-remote)
+- SharePoint (sharepoint@openai-curated-remote)
+- Supabase (supabase@openai-curated-remote)
+- Superhuman Mail (superhuman@openai-curated-remote)
+- Superpowers (superpowers@openai-curated-remote)
+- Teams (teams@openai-curated-remote)
+- Vercel (vercel@openai-curated-remote)
+- Zoom (zoom@openai-curated-remote)
+- ZoomInfo (zoominfo@openai-curated-remote)
+</recommended_plugins>
+
+---
+
+# AGENTS.md instructions for /Users/jdx/src/mr-boxington
+
+<INSTRUCTIONS>
+# Global preferences
+
+- Create GitHub pull requests ready for review. Never create draft pull requests unless the user explicitly requests a draft.
+
+--- project-doc ---
+
+# Repository Instructions
+
+## Changelogs
+
+- Do not edit `CHANGELOG.md` files in ordinary pull requests. The release-plz
+  workflow generates changelog entries in release pull requests.
+- Only edit a changelog when the user explicitly requests it or when working on
+  the release process itself.
+
+</INSTRUCTIONS>
+
+---
+
+<environment_context>
+  <cwd>/Users/jdx/src/mr-boxington</cwd>
+  <shell>zsh</shell>
+  <current_date>2026-09-03</current_date>
+  <timezone>America/Chicago</timezone>
+  <filesystem><workspace_roots><root>/Users/jdx/src/mr-boxington</root><root>/Users/jdx/.codex/visualizations/2026/09/03/01a06923-e53f-76c2-a03d-3a98c5d6aeb3</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
+</environment_context>
+
+---
+
+wait a tic, is this basically doubling the cache?
+
+---
+
+ok
+
+---
+
+do it
+
+---
+
+what should we do now?
+
+---
+
+ok do it, make a pr, address pr feedback and failing checks until it settles
+
+---
+
+<environment_context>
+  <current_date>2026-09-04</current_date>
+  <timezone>America/Chicago</timezone>
+  <filesystem><workspace_roots><root>/Users/jdx/src/mr-boxington</root><root>/Users/jdx/.codex/visualizations/2026/09/03/01a06923-e53f-76c2-a03d-3a98c5d6aeb3</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
+</environment_context>
+
+---
+
+merged, what should we do next?
+
+---
+
+merged the release
+
+---
+
+ok and we should do what we can to either test locally or test without needing to cut releases
+
+---
+
+address pr feedback
+
+---
+
+merged
+
+---
+
+btw I would really like to have the benchmarks updated on the docs, can we do that first, then continue with tat?
+
+---
+
+merged
+
+---
+
+merged
+
+---
+
+what's the results?
+
+---
+
+did we make it faster than rust-cache?
+
+---
+
+ok test it again and tell me where we're a
