@@ -413,7 +413,7 @@ jobs:
 
           def prune_profile(profile):
               for entry in profile.iterdir():
-                  if entry.name not in {"build", ".fingerprint", "deps"}:
+                  if entry.name not in {"build", ".fingerprint", "deps", ".mbx-build-script-shims"}:
                       remove(entry)
               for dirname, keep in (("build", keep_pkg), (".fingerprint", keep_pkg), ("deps", keep_deps)):
                   directory = profile / dirname
