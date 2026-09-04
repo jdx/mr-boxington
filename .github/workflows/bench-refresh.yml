@@ -316,7 +316,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tool: [rust-cache, mbx, mbx-registry, mbx-replay]
+        tool: [rust-cache, mbx, mbx-registry, mbx-target]
         trial: ${{ fromJSON(inputs.small_edit_trials || '[1,2,3,4]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -359,7 +359,7 @@ jobs:
           cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
           save-on-workflow-dispatch: "true"
           toolchain: 1.97.1
-      - if: matrix.tool == 'mbx-registry' || matrix.tool == 'mbx-replay'
+      - if: matrix.tool == 'mbx-registry' || matrix.tool == 'mbx-target'
         uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
         with:
           backend: local
@@ -371,14 +371,25 @@ jobs:
         run: |
           "$BUILD_DRIVER" build --locked
       - name: Export native mbx bundle
-        if: matrix.tool == 'mbx-registry' || matrix.tool == 'mbx-replay'
+        if: matrix.tool == 'mbx-registry'
         run: mbx cache export --group "$MBX_CACHE_EXPORT_GROUP" "$RUNNER_TEMP/mbx-cache.tar"
-      - if: matrix.tool == 'mbx-registry' || matrix.tool == 'mbx-replay'
+      - if: matrix.tool == 'mbx-registry'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           key: gha-small-edit-${{ matrix.tool }}-${{ github.run_id }}-${{ matrix.trial }}-parent
           path: |
             ${{ runner.temp }}/mbx-cache.tar
+            ~/.cargo/registry
+            ~/.cargo/git
+      - name: Stage target-only transport
+        if: matrix.tool == 'mbx-target'
+        run: cp -aL target "$RUNNER_TEMP/mbx-target"
+      - if: matrix.tool == 'mbx-target'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: gha-small-edit-${{ matrix.tool }}-${{ github.run_id }}-${{ matrix.trial }}-parent
+          path: |
+            ${{ runner.temp }}/mbx-target
             ~/.cargo/registry
             ~/.cargo/git
 
@@ -393,7 +404,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tool: [rust-cache, mbx, mbx-registry, mbx-replay]
+        tool: [rust-cache, mbx, mbx-registry, mbx-target]
         trial: ${{ fromJSON(inputs.small_edit_trials || '[1,2,3,4]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -440,13 +451,13 @@ jobs:
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
           toolchain: 1.97.1
-      - if: matrix.tool == 'mbx-registry' || matrix.tool == 'mbx-replay'
+      - if: matrix.tool == 'mbx-registry' || matrix.tool == 'mbx-target'
         uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
         with:
           backend: local
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           toolchain: 1.97.1
-      - if: matrix.tool == 'mbx-registry' || matrix.tool == 'mbx-replay'
+      - if: matrix.tool == 'mbx-registry'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           key: gha-small-edit-${{ matrix.tool }}-${{ github.run_id }}-${{ matrix.trial }}-parent
@@ -455,13 +466,22 @@ jobs:
             ${{ runner.temp }}/mbx-cache.tar
             ~/.cargo/registry
             ~/.cargo/git
+      - if: matrix.tool == 'mbx-target'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: gha-small-edit-${{ matrix.tool }}-${{ github.run_id }}-${{ matrix.trial }}-parent
+          fail-on-cache-miss: true
+          path: |
+            ${{ runner.temp }}/mbx-target
+            ~/.cargo/registry
+            ~/.cargo/git
+      - name: Install target-only transport
+        if: matrix.tool == 'mbx-target'
+        run: mv "$RUNNER_TEMP/mbx-target" target
       - name: Import native mbx bundle
-        if: matrix.tool == 'mbx-registry' || matrix.tool == 'mbx-replay'
+        if: matrix.tool == 'mbx-registry'
         run: |
           set -o pipefail
-          if [ "${{ matrix.tool }}" = mbx-replay ]; then
-            cd "$RUNNER_TEMP"
-          fi
           mbx cache import "$RUNNER_TEMP/mbx-cache.tar" | tee "$RUNNER_TEMP/mbx-import.log"
       - id: build
         name: Build edited commit
