@@ -675,6 +675,10 @@ fn require_object(
     objects: &mut BTreeSet<PathBuf>,
     digest: &CacheDigest,
 ) -> Result<()> {
+    let expected = cas.path_for(digest)?;
+    if objects.contains(&expected) {
+        return Ok(());
+    }
     let path = cas
         .find(digest)?
         .ok_or_else(|| eyre::eyre!("cache object is missing for {}", digest.hash))?;
