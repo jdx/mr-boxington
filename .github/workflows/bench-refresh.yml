@@ -414,9 +414,12 @@ jobs:
         run: |
           chmod +x "$RUNNER_TEMP/mbx-bin/mbx"
           echo "$RUNNER_TEMP/mbx-bin" >> "$GITHUB_PATH"
+      # Start after common runner/bootstrap work but before each cache action.
+      # The action's own setup is part of real workflow wall time, as is restore.
       - name: Start restore-and-build timer
         run: echo "SMALL_EDIT_STARTED_NS=$(date +%s%N)" >> "$GITHUB_ENV"
       - if: matrix.tool == 'rust-cache'
+        id: rust_cache_restore
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
         with:
           shared-key: gha-small-edit-${{ github.run_id }}-${{ matrix.trial }}
@@ -425,6 +428,15 @@ jobs:
           cache-all-crates: "true"
           cache-workspace-crates: "true"
           save-if: "false"
+      - name: Require parent rust-cache hit
+        if: matrix.tool == 'rust-cache'
+        env:
+          CACHE_HIT: ${{ steps.rust_cache_restore.outputs.cache-hit }}
+        run: |
+          if [ "$CACHE_HIT" != "true" ]; then
+            echo "::error::rust-cache did not restore the seeded parent cache"
+            exit 1
+          fi
       - if: matrix.tool == 'mbx'
         uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
         with:
@@ -432,6 +444,15 @@ jobs:
           cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-child
           restore-keys: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
           toolchain: 1.97.1
+      # A restore-key match is deliberately not an exact-key hit, so the
+      # action's cache-hit output is false. Verify the restored payload itself.
+      - name: Require parent mbx restore
+        if: matrix.tool == 'mbx'
+        run: |
+          if [ -z "$(find target -type f -print -quit 2>/dev/null)" ]; then
+            echo "::error::mbx did not restore the seeded parent target"
+            exit 1
+          fi
       - if: matrix.tool == 'mbx-registry'
         uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
         with:
@@ -442,6 +463,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           key: gha-small-edit-mbx-registry-${{ github.run_id }}-${{ matrix.trial }}-parent
+          fail-on-cache-miss: true
           path: |
             ${{ runner.temp }}/mbx-cache.tar
             ~/.cargo/registry
@@ -505,8 +527,21 @@ jobs:
           path: ${{ runner.temp }}/small-edit
           merge-multiple: true
       - name: Summarize medians
+        env:
+          TRIALS: ${{ inputs.small_edit_trials }}
         run: |
           set -o pipefail
+          trial_count=$(jq -er \
+            'if type == "array" and length > 0 then length else error("expected a non-empty trial array") end' \
+            <<< "$TRIALS")
+          expected=$((3 * trial_count))
+          shopt -s nullglob
+          records=("$RUNNER_TEMP"/small-edit/*.json)
+          actual=${#records[@]}
+          if [ "$actual" -ne "$expected" ]; then
+            echo "::error::expected $expected trial records, found $actual"
+            exit 1
+          fi
           jq -s '
             def median:
               sort as $values |
