@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0](https://github.com/jdx/mr-boxington/compare/v1.7.0...v1.8.0) - 2026-09-04
+
+### Added
+
+- *(cache)* restore Cargo workspace state from exports ([#337](https://github.com/jdx/mr-boxington/pull/337))
+
+### Fixed
+
+- verify NFS compiler inputs by content ([#338](https://github.com/jdx/mr-boxington/pull/338))
+
 ## [1.7.0](https://github.com/jdx/mr-boxington/compare/v1.6.0...v1.7.0) - 2026-09-03
 
 ### Added
