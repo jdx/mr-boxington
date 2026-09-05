@@ -859,6 +859,21 @@ def one_trial(
     raise ValueError(f"unknown scenario {scenario}")
 
 
+def discard(work: Path, cell: str) -> None:
+    """Drop one cell's checkouts, targets, and store once it has been measured.
+
+    Every scenario used to hold its scratch trees until the whole run ended,
+    which was affordable while each tool ran a scenario once. Repeating them
+    multiplies it, and the edit scenario keeps a target with incremental state
+    in it, which is the largest tree the benchmark produces. Nothing after the
+    trial reads any of it: the statistics report and the build logs are
+    written under --output, which is not this directory.
+    """
+    for path in work.iterdir():
+        if path.name.endswith(f"-{cell}") or f"-{cell}-" in path.name:
+            shutil.rmtree(path, ignore_errors=True)
+
+
 def median_cell(cells: list[dict[str, object]]) -> dict[str, object]:
     """One tool's trials reduced to the middle one, with all of them kept.
 
@@ -940,6 +955,7 @@ def run_scenario(
                 break
             else:
                 progress.finish(cell)
+                discard(work, cell)
         if measured:
             results.append(median_cell(measured))
 

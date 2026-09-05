@@ -1,5 +1,7 @@
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import real_world
@@ -143,6 +145,28 @@ class PublishableTest(unittest.TestCase):
         self.assertEqual(cell["stats"], {"hits": 700})
         for dropped in ("seed_wall_duration_ns", "recompiled", "summary"):
             self.assertNotIn(dropped, cell)
+
+
+class DiscardTest(unittest.TestCase):
+    def test_removes_one_cell_without_touching_its_neighbours(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            for name in (
+                "store-warm-mbx-1",
+                "target-warm-mbx-1",
+                "checkout-warm-mbx-1-seed",
+                "store-warm-mbx-10",
+                "target-warm-kache-1",
+                "mirror.git",
+            ):
+                (work / name).mkdir()
+
+            real_world.discard(work, "warm-mbx-1")
+
+            self.assertEqual(
+                sorted(path.name for path in work.iterdir()),
+                ["mirror.git", "store-warm-mbx-10", "target-warm-kache-1"],
+            )
 
 
 class GuardSummaryTest(unittest.TestCase):
