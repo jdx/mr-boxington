@@ -78,6 +78,7 @@ pub(crate) const BUILD_SCRIPT_SHIM_PATH_ENV: &str = "MBX_BUILD_SCRIPT_SHIM_PATH"
 pub(crate) const LEARNED_INCREMENTAL_ENV: &str = "MBX_LEARNED_INCREMENTAL";
 pub(crate) const LEARNED_INCREMENTAL_MAX_SIZE_ENV: &str = "MBX_LEARNED_INCREMENTAL_MAX_SIZE";
 pub(crate) const INCREMENTAL_ROOT_ENV: &str = "MBX_INCREMENTAL_ROOT";
+pub(crate) const MANAGED_TARGET_LINKERS_ENV: &str = "MBX_MANAGED_TARGET_LINKERS";
 pub(crate) const MANAGED_LINKER_ENV: &str = "MBX_MANAGED_LINKER";
 pub const CACHE_LINKS_ENV: &str = "MBX_CACHE_LINKS";
 /// Group completed builds for one later cache export, used by CI actions.
@@ -1300,6 +1301,12 @@ pub fn run_rustc_shim() -> ExitCode {
         return ExitCode::from(1);
     };
     let mut arguments = arguments.collect::<Vec<_>>();
+    if let Ok(selections) = std::env::var(MANAGED_TARGET_LINKERS_ENV)
+        && let Ok(selections) = serde_json::from_str::<BTreeMap<String, PathBuf>>(&selections)
+        && let Some(linker) = target_linker(&arguments, &selections)
+    {
+        use_managed_linker(&mut arguments, linker.as_os_str());
+    }
     if let Some(linker) = std::env::var_os(MANAGED_LINKER_ENV).filter(|path| !path.is_empty()) {
         use_managed_linker(&mut arguments, &linker);
     }
@@ -1326,6 +1333,35 @@ pub fn run_rustc_shim() -> ExitCode {
     }
 
     run_transparent_rustc(rustc, arguments)
+}
+
+/// Explicit Cargo targets must not affect host build scripts or proc macros.
+fn target_linker<'a>(
+    arguments: &[OsString],
+    selections: &'a BTreeMap<String, PathBuf>,
+) -> Option<&'a PathBuf> {
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        let target = if argument == "--target" {
+            arguments.next().and_then(|value| value.to_str())
+        } else {
+            argument
+                .to_str()
+                .and_then(|value| value.strip_prefix("--target="))
+        };
+        if let Some(target) = target {
+            return selections.get(target).or_else(|| {
+                // Cargo versions can pass JSON paths without Windows' verbatim
+                // prefix. Canonicalize both spellings to the stored routing key.
+                if !target.ends_with(".json") {
+                    return None;
+                }
+                let canonical = std::fs::canonicalize(target).ok()?;
+                selections.get(canonical.to_str()?)
+            });
+        }
+    }
+    None
 }
 
 /// Route native links through the selected executable while leaving metadata

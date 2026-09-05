@@ -7,6 +7,7 @@ use reqwest::blocking::Client;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -16,8 +17,9 @@ const LINKER_ENV: &str = "MBX_LINKER";
 
 /// A linker selected for one Cargo invocation.
 #[derive(Debug, Clone)]
-pub(crate) struct Selection {
-    pub(crate) executable: PathBuf,
+pub(crate) enum Selection {
+    Single(PathBuf),
+    Targets(BTreeMap<String, PathBuf>),
 }
 
 /// Resolve and, where necessary, install the linker selected for this build.
@@ -31,29 +33,72 @@ pub(crate) fn resolve(
     let environment = std::env::var(LINKER_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty());
+    let targets = cargo_targets(cargo_arguments);
+    if !targets.is_empty() {
+        let mut selections = BTreeMap::new();
+        for target in targets {
+            let rustc_target = normalize_cargo_target(&target, cargo_arguments)?;
+            // Keep path-keyed policy compatible with the Cargo argument. Only
+            // the host directive needs its concrete triple for policy lookup.
+            let policy_target = if target == "host-tuple" {
+                &rustc_target
+            } else {
+                &target
+            };
+            if let Some(executable) = resolve_target(
+                settings,
+                cache_dir,
+                http,
+                cargo_arguments,
+                &profile,
+                environment.clone(),
+                Some(policy_target),
+            )? {
+                selections.insert(rustc_target, executable);
+            }
+        }
+        return Ok((!selections.is_empty()).then_some(Selection::Targets(selections)));
+    }
     let target = if environment.is_none() && settings.profiles.contains_key(&profile) {
-        cargo_target(cargo_arguments)?.or_else(|| host_target(cargo_arguments))
+        host_target(cargo_arguments)
     } else {
-        cargo_target(cargo_arguments)?
+        None
     };
+    Ok(resolve_target(
+        settings,
+        cache_dir,
+        http,
+        cargo_arguments,
+        &profile,
+        environment,
+        target.as_deref(),
+    )?
+    .map(Selection::Single))
+}
+
+/// Resolve one profile/target selector to an executable; system needs no override.
+fn resolve_target(
+    settings: &LinkerSettings,
+    cache_dir: &Path,
+    http: &HttpSettings,
+    cargo_arguments: &[String],
+    profile: &str,
+    environment: Option<String>,
+    target: Option<&str>,
+) -> Result<Option<PathBuf>> {
     let configured = environment
-        .or_else(|| settings.for_build(&profile, target.as_deref()))
+        .or_else(|| settings.for_build(profile, target))
         .unwrap_or_else(|| settings.default.clone());
     let spec = Spec::parse(&configured)?;
     match spec {
         Spec::System => Ok(None),
-        Spec::Path(path) => Ok(Some(Selection {
-            executable: which::which(&path)
-                .wrap_err_with(|| format!("failed to find selected linker `{}`", path.display()))?,
-        })),
-        Spec::RustLld => Ok(Some(Selection {
-            executable: rust_lld(target.as_deref(), cache_dir, cargo_arguments)?,
-        })),
+        Spec::Path(path) => Ok(Some(which::which(&path).wrap_err_with(|| {
+            format!("failed to find selected linker `{}`", path.display())
+        })?)),
+        Spec::RustLld => Ok(Some(rust_lld(target, cache_dir, cargo_arguments)?)),
         Spec::Managed { provider, version } => {
             let installed = install(provider, &version, cache_dir, http)?;
-            Ok(Some(Selection {
-                executable: installed,
-            }))
+            Ok(Some(installed))
         }
     }
 }
@@ -414,8 +459,9 @@ fn cargo_profile(arguments: &[String]) -> String {
     })
 }
 
-fn cargo_target(arguments: &[String]) -> Result<Option<String>> {
-    let mut target = None;
+/// Collect repeated Cargo target flags, stopping before program arguments.
+fn cargo_targets(arguments: &[String]) -> Vec<String> {
+    let mut targets = Vec::new();
     let mut arguments = arguments
         .iter()
         .take_while(|argument| argument.as_str() != "--");
@@ -425,13 +471,45 @@ fn cargo_target(arguments: &[String]) -> Result<Option<String>> {
         } else {
             argument.strip_prefix("--target=").map(str::to_owned)
         };
-        if let Some(value) = value
-            && target.replace(value).is_some()
-        {
-            bail!("managed linker selection supports one Cargo --target per invocation");
+        if let Some(value) = value {
+            targets.push(value);
         }
     }
-    Ok(target)
+    targets
+}
+
+/// Match Cargo's target spelling before using it as a rustc routing key.
+fn normalize_cargo_target(target: &str, cargo_arguments: &[String]) -> Result<String> {
+    // Cargo substitutes this directive before trimming ordinary target names.
+    if target == "host-tuple" {
+        let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+        if let Some(toolchain) = cargo_arguments
+            .first()
+            .filter(|argument| argument.starts_with('+'))
+        {
+            command.arg(toolchain);
+        }
+        let output = command
+            .arg("-vV")
+            .output()
+            .wrap_err("failed to query Cargo's host target")?;
+        if !output.status.success() {
+            bail!("Cargo could not report its host target");
+        }
+        return String::from_utf8(output.stdout)?
+            .lines()
+            .find_map(|line| line.strip_prefix("host: ").map(str::to_owned))
+            .ok_or_else(|| eyre::eyre!("Cargo did not report its host target"));
+    }
+    let target = target.trim();
+    if target.ends_with(".json") {
+        return fs::canonicalize(target)
+            .wrap_err_with(|| format!("failed to canonicalize Cargo target `{target}`"))?
+            .into_os_string()
+            .into_string()
+            .map_err(|_| eyre::eyre!("Cargo target path is not valid Unicode"));
+    }
+    Ok(target.to_owned())
 }
 
 fn rustc_command(cargo_arguments: &[String]) -> Command {
@@ -511,20 +589,172 @@ mod tests {
     }
 
     #[test]
-    fn target_flag_is_unambiguous() {
-        assert_eq!(cargo_target(&["build".into()]).unwrap(), None);
+    fn parses_multiple_targets_without_reading_program_arguments() {
+        assert!(cargo_targets(&["build".into()]).is_empty());
         assert_eq!(
-            cargo_target(&["build".into(), "--target=aarch64-apple-darwin".into()]).unwrap(),
-            Some("aarch64-apple-darwin".into())
-        );
-        assert!(
-            cargo_target(&[
+            cargo_targets(&[
                 "build".into(),
                 "--target".into(),
-                "one".into(),
-                "--target=two".into(),
-            ])
-            .is_err()
+                "aarch64-apple-darwin".into(),
+                "--target=x86_64-apple-darwin".into(),
+                "--".into(),
+                "--target=ignored".into(),
+            ]),
+            ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+        );
+    }
+
+    #[test]
+    fn system_linker_accepts_universal_macos_build() {
+        let cache = tempfile::tempdir().unwrap();
+        let arguments = [
+            "build",
+            "--release",
+            "--bin",
+            "usage",
+            "--manifest-path",
+            "cli/Cargo.toml",
+            "--target",
+            "aarch64-apple-darwin",
+            "--target",
+            "x86_64-apple-darwin",
+        ]
+        .map(str::to_owned);
+        assert!(
+            resolve(
+                &LinkerSettings::default(),
+                cache.path(),
+                &HttpSettings::default(),
+                &arguments
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn resolves_each_targets_profile_policy() {
+        let cache = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let settings = LinkerSettings {
+            profiles: BTreeMap::from([(
+                "release".into(),
+                BTreeMap::from([
+                    (
+                        "aarch64-apple-darwin".into(),
+                        format!("path:{}", executable.display()),
+                    ),
+                    ("x86_64-apple-darwin".into(), "system".into()),
+                ]),
+            )]),
+            ..Default::default()
+        };
+        let arguments = [
+            "build",
+            "--release",
+            "--target=aarch64-apple-darwin",
+            "--target=x86_64-apple-darwin",
+        ]
+        .map(str::to_owned);
+        let Some(Selection::Targets(selections)) = resolve(
+            &settings,
+            cache.path(),
+            &HttpSettings::default(),
+            &arguments,
+        )
+        .unwrap() else {
+            panic!("expected target-specific selection");
+        };
+        assert_eq!(
+            selections,
+            BTreeMap::from([("aarch64-apple-darwin".into(), executable)])
+        );
+    }
+
+    #[test]
+    fn normalizes_cargo_host_directive_and_target_paths() {
+        assert_eq!(
+            normalize_cargo_target("host-tuple", &[]).unwrap(),
+            host_target(&[]).unwrap()
+        );
+        assert_eq!(
+            normalize_cargo_target(" aarch64-apple-darwin ", &[]).unwrap(),
+            "aarch64-apple-darwin"
+        );
+        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let target = directory.path().join("custom.json");
+        fs::write(&target, "{}").unwrap();
+        let relative = target
+            .strip_prefix(std::env::current_dir().unwrap())
+            .unwrap();
+        assert_eq!(
+            normalize_cargo_target(relative.to_str().unwrap(), &[]).unwrap(),
+            fs::canonicalize(&target).unwrap().to_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn host_directive_uses_concrete_target_profile_policy() {
+        let cache = tempfile::tempdir().unwrap();
+        let host = normalize_cargo_target("host-tuple", &[]).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let settings = LinkerSettings {
+            profiles: BTreeMap::from([(
+                "dev".into(),
+                BTreeMap::from([(host.clone(), format!("path:{}", executable.display()))]),
+            )]),
+            ..Default::default()
+        };
+        let Some(Selection::Targets(selections)) = resolve(
+            &settings,
+            cache.path(),
+            &HttpSettings::default(),
+            &["build".into(), "--target=host-tuple".into()],
+        )
+        .unwrap() else {
+            panic!("expected target-specific selection");
+        };
+        assert_eq!(selections, BTreeMap::from([(host, executable)]));
+    }
+
+    #[test]
+    fn relative_json_target_keeps_its_profile_policy() {
+        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let target = directory.path().join("custom.json");
+        fs::write(&target, "{}").unwrap();
+        let relative = target
+            .strip_prefix(std::env::current_dir().unwrap())
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let executable = std::env::current_exe().unwrap();
+        let settings = LinkerSettings {
+            profiles: BTreeMap::from([(
+                "dev".into(),
+                BTreeMap::from([(relative.clone(), format!("path:{}", executable.display()))]),
+            )]),
+            ..Default::default()
+        };
+        let Some(Selection::Targets(selections)) = resolve(
+            &settings,
+            directory.path(),
+            &HttpSettings::default(),
+            &["build".into(), "--target".into(), relative],
+        )
+        .unwrap() else {
+            panic!("expected target-specific selection");
+        };
+        assert_eq!(
+            selections,
+            BTreeMap::from([(
+                fs::canonicalize(target)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+                executable
+            )])
         );
     }
 
