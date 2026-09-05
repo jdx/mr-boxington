@@ -1139,6 +1139,38 @@ async fn an_unchanged_prediction_is_receipted_without_rewriting_the_manifest() {
         assert_eq!(unchanged.ino(), written.ino(), "the manifest was replaced");
     }
 
+    // A prediction that moved and moved back within one run is no change.
+    let agent = CacheAgent::new(&cache, "test-version");
+    let run = agent.begin_task(&task).await.unwrap();
+    for recorded in [
+        ActionPrediction {
+            action: CacheDigest::blake3(b"a passing action"),
+            ..prediction.clone()
+        },
+        prediction.clone(),
+    ] {
+        assert!(matches!(
+            agent
+                .respond(AgentRequest::RecordActionPrediction {
+                    task: run.clone(),
+                    prediction: recorded,
+                })
+                .await,
+            AgentResponse::ActionPredictionRecorded
+        ));
+    }
+    assert_eq!(
+        agent.commit_task_actions(&run).await.unwrap(),
+        vec![prediction.clone()]
+    );
+    let still = std::fs::metadata(&manifest_path).unwrap();
+    assert_eq!(still.modified().unwrap(), written.modified().unwrap());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        assert_eq!(still.ino(), written.ino(), "the manifest was replaced");
+    }
+
     // A prediction that did change still reaches the manifest.
     let changed = ActionPrediction {
         action: CacheDigest::blake3(b"another action"),

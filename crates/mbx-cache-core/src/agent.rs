@@ -418,10 +418,12 @@ struct TaskActionState {
     predictions: BTreeMap<CacheDigest, ActionPrediction>,
     pending_predictions: BTreeMap<CacheDigest, ActionPrediction>,
     /// The pending predictions that differ from what the manifest already
-    /// held when this run loaded it. A hit re-records its prediction
+    /// held when this run loaded it, each with what it held: nothing, or
+    /// the baseline's own prediction. A hit re-records its prediction
     /// byte-for-byte so the receipt can name it, and that is no reason to
-    /// rewrite the manifest.
-    changed_predictions: BTreeSet<CacheDigest>,
+    /// rewrite the manifest; nor is a prediction that moved and then moved
+    /// back, which is why the baseline value is kept rather than a flag.
+    changed_predictions: BTreeMap<CacheDigest, Option<ActionPrediction>>,
     prefetched_adapters: BTreeSet<String>,
     remote_etag: Option<String>,
 }
@@ -853,7 +855,7 @@ impl CacheAgent {
                     .map(|prediction| (prediction.invocation.clone(), prediction))
                     .collect(),
                 pending_predictions: BTreeMap::new(),
-                changed_predictions: BTreeSet::new(),
+                changed_predictions: BTreeMap::new(),
                 prefetched_adapters: BTreeSet::new(),
                 remote_etag,
             }
@@ -2213,10 +2215,21 @@ impl CacheAgent {
         {
             bail!("task action manifest contains too many predictions");
         }
-        if state.predictions.get(&prediction.invocation) != Some(&prediction) {
-            state
-                .changed_predictions
-                .insert(prediction.invocation.clone());
+        let current = state.predictions.get(&prediction.invocation);
+        if current != Some(&prediction) {
+            match state.changed_predictions.get(&prediction.invocation) {
+                // Back to what the manifest held: no longer a change.
+                Some(baseline) if baseline.as_ref() == Some(&prediction) => {
+                    state.changed_predictions.remove(&prediction.invocation);
+                }
+                // Changed again; the baseline it left is already recorded.
+                Some(_) => {}
+                None => {
+                    state
+                        .changed_predictions
+                        .insert(prediction.invocation.clone(), current.cloned());
+                }
+            }
         }
         state
             .predictions
