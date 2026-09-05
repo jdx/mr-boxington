@@ -198,10 +198,11 @@ EOF
 
 @test "the installed Cargo shim can disable caching without changing CMake compiler identity" {
   export CARGO_HOME="$BATS_TEST_TMPDIR/cargo-home"
+  export MBX_TEST_SHIM_DIR="$BATS_TEST_TMPDIR/cargo-shim"
   mkdir -p "$CARGO_HOME"
   run "$MBX_BIN" setup
   assert_success
-  cmake_transition "$XDG_DATA_HOME/mbx/bin/cargo"
+  cmake_transition "$MBX_TEST_SHIM_DIR/cargo"
 }
 
 @test "a build script's C object restores into a distinct target directory" {
