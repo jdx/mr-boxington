@@ -108,7 +108,17 @@ pub fn normalize_resolved_mapped_path(
 #[derive(Debug, Default)]
 pub struct PathAliases {
     #[cfg(unix)]
-    directories: std::cell::RefCell<std::collections::HashMap<PathBuf, PathBuf>>,
+    directories:
+        std::cell::RefCell<std::collections::HashMap<PathBuf, std::rc::Rc<ResolvedDirectory>>>,
+}
+
+/// A directory as `realpath` would name it, and the names it holds, so a
+/// child can be checked against the listing rather than resolved again.
+#[cfg(unix)]
+#[derive(Debug)]
+struct ResolvedDirectory {
+    path: PathBuf,
+    entries: std::collections::HashSet<std::ffi::OsString>,
 }
 
 /// [`normalize_resolved_mapped_path`], resolving directory aliases through
@@ -200,20 +210,34 @@ impl PathAliases {
             Some(resolved) => resolved,
             None => {
                 let resolved = self.canonicalize(parent)?;
+                // A listing that cannot be read is an empty one: every child
+                // then takes the full call, which is where it started.
+                let entries = std::fs::read_dir(&resolved)
+                    .map(|listing| listing.flatten().map(|entry| entry.file_name()).collect())
+                    .unwrap_or_default();
+                let resolved = std::rc::Rc::new(ResolvedDirectory {
+                    path: resolved,
+                    entries,
+                });
                 self.directories
                     .borrow_mut()
                     .insert(parent.to_path_buf(), resolved.clone());
                 resolved
             }
         };
-        let candidate = resolved_parent.join(name);
-        if std::fs::symlink_metadata(&candidate)?
-            .file_type()
-            .is_symlink()
+        let candidate = resolved_parent.path.join(name);
+        // The name has to be in the listing as written: on a volume that
+        // folds case, `realpath` would answer with the name on disk, and a
+        // spelling the listing does not contain takes the full call so that
+        // it still does. So does a link, and anything the listing predates.
+        if resolved_parent.entries.contains(name)
+            && !std::fs::symlink_metadata(&candidate)?
+                .file_type()
+                .is_symlink()
         {
-            std::fs::canonicalize(&candidate)
-        } else {
             Ok(candidate)
+        } else {
+            std::fs::canonicalize(&candidate)
         }
     }
 
@@ -335,6 +359,19 @@ mod unix_tests {
         assert_eq!(
             normalize_resolved_mapped_path_with(&aliases, &unborn, &root, &mappings).unwrap(),
             "${workspace}/target/deps/out.rlib"
+        );
+        // A file created after its directory was listed is resolved all the
+        // same, by the full call the listing cannot vouch for.
+        std::fs::write(physical.join("src").join("late.rs"), "").unwrap();
+        assert_eq!(
+            normalize_resolved_mapped_path_with(
+                &aliases,
+                &root.join("alias").join("src").join("late.rs"),
+                &root,
+                &mappings
+            )
+            .unwrap(),
+            "${workspace}/src/late.rs"
         );
     }
 

@@ -1,5 +1,29 @@
 use super::*;
 
+/// Only a toolchain's own compiler is pinned: a proxy or shim has no
+/// `rustc_driver` beside it, and its bytes say nothing about the toolchain
+/// it will pick.
+#[test]
+fn compiler_pins_name_a_toolchain_rustc_and_nothing_else() {
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let rustc = bin.join("rustc");
+    std::fs::write(&rustc, "dispatcher").unwrap();
+    assert!(compiler_identity_pins(&rustc).is_empty());
+
+    let lib = directory.path().join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    let driver = lib.join("librustc_driver-0123456789abcdef.so");
+    std::fs::write(&driver, "compiler library").unwrap();
+    let pins = compiler_identity_pins(&rustc);
+    assert_eq!(
+        pins.iter().map(|pin| pin.path.clone()).collect::<Vec<_>>(),
+        vec![rustc, driver]
+    );
+    assert!(pins.iter().all(|pin| pin.state.is_some()));
+}
+
 #[test]
 fn action_diagnostics_name_key_parts_without_retaining_their_values() {
     let bytes = br#"{"adapter_version":1,"arguments":["--crate-name=example","--codegen=metadata=unit-a","--codegen=opt-level=2","--cfg=feature=\"secret-feature\""],"compiler":{"host":"host","rustc_version":"version","toolchain":"toolchain"},"environment":{"SECRET":"do-not-record"},"inputs":[{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"path":"${workspace}/src/lib.rs"}],"kind":"rustc","version":1}"#.to_vec();

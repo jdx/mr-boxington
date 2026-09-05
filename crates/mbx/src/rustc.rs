@@ -2500,33 +2500,50 @@ fn query_compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
     })
 }
 
-/// The files that pin a compiler's identity across sessions: the binary,
-/// as it is right now.
+/// The files that pin a compiler's identity across sessions: the binary and
+/// the compiler library beside it, as they are right now.
 ///
-/// A rustup proxy is not the compiler. It is a copy of rustup that picks a
-/// toolchain when it runs, so its bytes say nothing about what `-vV` will
-/// print, and an executable that looks like one is probed every session.
+/// Only a toolchain's own compiler is pinned. A rustup proxy, a version
+/// manager's shim, or a wrapper script picks a compiler when it runs, so its
+/// bytes say nothing about what `-vV` will print. What tells the two apart
+/// is not where the file sits but what sits beside it: a compiler is linked
+/// against `rustc_driver`, which its toolchain installs next to it, and a
+/// dispatcher has no such thing. An executable without one is probed every
+/// session.
 fn compiler_identity_pins(executable: &Path) -> Vec<PinnedFile> {
-    if is_rustup_proxy(executable) {
+    let Some(driver) = compiler_driver_library(executable) else {
         return Vec::new();
+    };
+    match (
+        PinnedFile::describe(executable),
+        PinnedFile::describe(&driver),
+    ) {
+        (Some(executable), Some(driver)) => vec![executable, driver],
+        _ => Vec::new(),
     }
-    PinnedFile::describe(executable).into_iter().collect()
 }
 
-/// rustup installs its proxies as copies of itself beside a `rustup` binary.
-fn is_rustup_proxy(executable: &Path) -> bool {
-    let Some(directory) = executable.parent() else {
-        return false;
-    };
-    let rustup = directory.join(if cfg!(windows) {
-        "rustup.exe"
-    } else {
-        "rustup"
-    });
-    match (std::fs::metadata(&rustup), std::fs::metadata(executable)) {
-        (Ok(rustup), Ok(executable)) => rustup.len() == executable.len(),
-        _ => false,
+/// The `rustc_driver` library a toolchain installs beside its compiler:
+/// under `lib/` next to `bin/` on Unix, in `bin/` itself on Windows.
+fn compiler_driver_library(executable: &Path) -> Option<PathBuf> {
+    let bin = executable.parent()?;
+    let mut directories = vec![bin.to_path_buf()];
+    if let Some(root) = bin.parent() {
+        directories.push(root.join("lib"));
     }
+    directories.into_iter().find_map(|directory| {
+        std::fs::read_dir(directory)
+            .ok()?
+            .flatten()
+            .find_map(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                let library =
+                    name.starts_with("librustc_driver") || name.starts_with("rustc_driver");
+                (library && entry.file_type().is_ok_and(|kind| kind.is_file()))
+                    .then(|| entry.path())
+            })
+    })
 }
 
 fn identity_field<'a>(verbose: &'a str, field: &str) -> Result<&'a str> {
