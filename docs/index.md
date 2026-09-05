@@ -11,6 +11,9 @@ hero:
     alt: Mr Boxington, a friendly cache box
   actions:
     - theme: brand
+      text: Read the announcement
+      link: https://jdx.dev/posts/2026-09-05-introducing-mr-boxington/
+    - theme: alt
       text: Get started
       link: /getting-started
     - theme: alt
@@ -23,7 +26,3 @@ hero:
       text: Benchmarks
       link: /benchmarks
 ---
-
-Read the [announcement: Introducing mr-boxington — fix `target/`](https://jdx.dev/posts/2026-09-05-introducing-mr-boxington/)
-for a walkthrough of automatic cleanup, shared caching, warm worktrees, and
-memory-aware parallel Cargo builds.
