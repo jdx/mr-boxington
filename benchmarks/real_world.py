@@ -838,7 +838,21 @@ def median_cell(cells: list[dict[str, object]]) -> dict[str, object]:
     chosen = dict(ordered[(len(ordered) - 1) // 2])
     chosen["trials"] = len(cells)
     chosen["wall_durations_ns"] = [int(cell["wall_duration_ns"]) for cell in cells]
+    # Every trial is kept for the gates, which have to see all of them: a
+    # trial that restored nothing, or compiled nothing, or ran the baseline
+    # under a wrapper, is invisible in the median's own metadata and still
+    # sets the spread the page reads a result against. Stripped before
+    # publishing.
+    chosen["trial_cells"] = cells
     return chosen
+
+
+def trials_of(cell: dict[str, object]) -> list[dict[str, object]]:
+    """Every trial behind a cell, or the cell itself before it was reduced."""
+    kept = cell.get("trial_cells")
+    if isinstance(kept, list) and kept:
+        return kept  # type: ignore[return-value]
+    return [cell]
 
 
 def run_scenario(
@@ -922,31 +936,28 @@ def validate(scenarios: list[dict[str, object]]) -> list[str]:
     failures: list[str] = []
     by_name = {entry["scenario"]: entry for entry in scenarios}
 
-    warm_entry = by_name.get("warm")
-    if warm_entry is not None:
-        for cell in warm_entry["results"]:  # type: ignore[index]
-            if cell["tool"] != "mbx":
-                continue
-            if hits(cell) <= 0 or restored_files(cell) <= 0:
-                failures.append("warm: mbx restored nothing, so the timing is not a cache result")
-
     warm = by_name.get("warm")
     if warm:
-        # Against the build that seeded it: same tool, same checkout, same
-        # trial, empty store.
         for cell in warm["results"]:  # type: ignore[index]
-            seed = cell.get("seed_wall_duration_ns")
-            if seed is not None and int(cell["wall_duration_ns"]) >= int(seed):
-                failures.append(
-                    f"warm: {cell['tool']} was no faster than the cold build that seeded it"
-                )
+            for trial in trials_of(cell):
+                if cell["tool"] == "mbx" and (hits(trial) <= 0 or restored_files(trial) <= 0):
+                    failures.append(
+                        "warm: mbx restored nothing, so the timing is not a cache result"
+                    )
+                # Against the build that seeded it: same tool, same checkout,
+                # same trial, empty store.
+                seed = trial.get("seed_wall_duration_ns")
+                if seed is not None and int(trial["wall_duration_ns"]) >= int(seed):
+                    failures.append(
+                        f"warm: {cell['tool']} was no faster than the cold build that seeded it"
+                    )
 
     edit = by_name.get("edit")
     if edit:
         # A rebuild that compiled nothing means the edit never reached the
         # compiler, not that the tool rebuilt quickly.
         for cell in edit["results"]:  # type: ignore[index]
-            if not cell.get("recompiled"):
+            if any(not trial.get("recompiled") for trial in trials_of(cell)):
                 failures.append(
                     f"edit: {cell['tool']} rebuilt without compiling anything, so the "
                     "edit never reached the compiler"
@@ -954,7 +965,7 @@ def validate(scenarios: list[dict[str, object]]) -> list[str]:
 
     for entry in scenarios:
         for cell in entry["results"]:  # type: ignore[index]
-            if cell.get("wrapped"):
+            if any(trial.get("wrapped") for trial in trials_of(cell)):
                 failures.append(
                     f"{entry['scenario']}: the cargo baseline ran under mbx, so it is "
                     "not the uncached control the scenario compares against"
@@ -965,34 +976,42 @@ def validate(scenarios: list[dict[str, object]]) -> list[str]:
         cells = {cell["tool"]: cell for cell in contention["results"]}  # type: ignore[index]
         scheduled = cells.get("mbx")
         unscheduled = cells.get("mbx-unscheduled")
+        # Trial by trial, and paired by trial: a bound that held on the run
+        # that happened to be the median says nothing about the two either
+        # side of it, and a scheduled batch is only bounded relative to the
+        # unscheduled one it ran beside.
         if scheduled is not None:
-            permits = int(scheduled.get("permits") or 0)
-            peak = int(scheduled.get("peak_compilers") or 0)
-            if not scheduled.get("samples"):
-                failures.append(
-                    "contention: the machine was never sampled, so no bound was observed"
-                )
-            elif peak <= 0:
-                failures.append(
-                    "contention: no compiler was ever seen running, so the sampler "
-                    "measured something other than the builds"
-                )
-            elif permits and peak > permits:
-                failures.append(
-                    f"contention: {peak} compilers ran at once against {permits} permits, "
-                    "so the pool did not bound the machine"
-                )
+            for trial in trials_of(scheduled):
+                permits = int(trial.get("permits") or 0)
+                peak = int(trial.get("peak_compilers") or 0)
+                if not trial.get("samples"):
+                    failures.append(
+                        "contention: the machine was never sampled, so no bound was observed"
+                    )
+                elif peak <= 0:
+                    failures.append(
+                        "contention: no compiler was ever seen running, so the sampler "
+                        "measured something other than the builds"
+                    )
+                elif permits and peak > permits:
+                    failures.append(
+                        f"contention: {peak} compilers ran at once against {permits} "
+                        "permits, so the pool did not bound the machine"
+                    )
         if scheduled is not None and unscheduled is not None:
             # Without this the scenario could "pass" on a machine too small,
             # or too fast, for the jobs to ever overlap -- and a bound nothing
             # pushed against proves nothing about the bound.
-            baseline = int(unscheduled.get("peak_compilers") or 0)
-            permits = int(scheduled.get("permits") or 0)
-            if permits and baseline <= permits:
-                failures.append(
-                    f"contention: unscheduled builds peaked at {baseline} compilers, within "
-                    f"the {permits} permits, so this run never actually contended"
-                )
+            for scheduled_trial, unscheduled_trial in zip(
+                trials_of(scheduled), trials_of(unscheduled)
+            ):
+                baseline = int(unscheduled_trial.get("peak_compilers") or 0)
+                permits = int(scheduled_trial.get("permits") or 0)
+                if permits and baseline <= permits:
+                    failures.append(
+                        f"contention: unscheduled builds peaked at {baseline} compilers, "
+                        f"within the {permits} permits, so this run never actually contended"
+                    )
     return failures
 
 

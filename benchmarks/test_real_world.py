@@ -75,6 +75,62 @@ class ValidateTest(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertIn("no faster than the cold build that seeded it", failures[0])
 
+    def test_a_trial_that_restored_nothing_fails_even_when_another_is_median(
+        self,
+    ) -> None:
+        # The median trial's own statistics look fine. The bad trial is still
+        # in the published spread, which is what the page reads a result
+        # against, so it has to fail the run.
+        good = {"stats": {"hits": 700, "restored_output_files": 1500}}
+        scenarios: list[dict[str, object]] = [
+            {
+                "scenario": "warm",
+                "results": [
+                    {
+                        "tool": "mbx",
+                        "wall_duration_ns": 5,
+                        "seed_wall_duration_ns": 20,
+                        **good,
+                        "trial_cells": [
+                            {"tool": "mbx", "wall_duration_ns": 3, "stats": {"hits": 0}},
+                            {"tool": "mbx", "wall_duration_ns": 5, **good},
+                            {"tool": "mbx", "wall_duration_ns": 9, **good},
+                        ],
+                    }
+                ],
+            }
+        ]
+
+        failures = real_world.validate(scenarios)
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("restored nothing", failures[0])
+
+    def test_a_trial_that_compiled_nothing_fails_even_when_another_is_median(
+        self,
+    ) -> None:
+        scenarios: list[dict[str, object]] = [
+            {
+                "scenario": "edit",
+                "results": [
+                    {
+                        "tool": "mbx",
+                        "wall_duration_ns": 5,
+                        "recompiled": True,
+                        "trial_cells": [
+                            {"tool": "mbx", "wall_duration_ns": 3, "recompiled": False},
+                            {"tool": "mbx", "wall_duration_ns": 5, "recompiled": True},
+                        ],
+                    }
+                ],
+            }
+        ]
+
+        failures = real_world.validate(scenarios)
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("rebuilt without compiling anything", failures[0])
+
     def test_warm_restoring_nothing_is_not_a_cache_result(self) -> None:
         scenarios = self.warm(5, 20)
         scenarios[0]["results"][0]["stats"] = {"hits": 0, "restored_output_files": 0}
@@ -132,6 +188,7 @@ class PublishableTest(unittest.TestCase):
                             # by a person in a pull request.
                             "seed_wall_duration_ns": 20,
                             "recompiled": True,
+                            "trial_cells": [{"tool": "mbx", "wall_duration_ns": 9}],
                             "summary": ["noise"],
                             "stats": {"hits": 700, "internal": 1},
                         }
@@ -145,7 +202,7 @@ class PublishableTest(unittest.TestCase):
         self.assertEqual(cell["trials"], 3)
         self.assertEqual(cell["wall_durations_ns"], [9, 5, 7])
         self.assertEqual(cell["stats"], {"hits": 700})
-        for dropped in ("seed_wall_duration_ns", "recompiled", "summary"):
+        for dropped in ("seed_wall_duration_ns", "recompiled", "summary", "trial_cells"):
             self.assertNotIn(dropped, cell)
 
 
