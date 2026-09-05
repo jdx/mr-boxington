@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0](https://github.com/jdx/mr-boxington/compare/v1.8.3...v1.9.0) - 2026-09-05
+
+### Added
+
+- explain object cache results in CI summaries ([#377](https://github.com/jdx/mr-boxington/pull/377))
+
+### Fixed
+
+- support multiple Cargo targets in linker selection ([#379](https://github.com/jdx/mr-boxington/pull/379))
+
+### Other
+
+- generate page-specific social preview images ([#374](https://github.com/jdx/mr-boxington/pull/374))
+
 ## [1.8.3](https://github.com/jdx/mr-boxington/compare/v1.8.2...v1.8.3) - 2026-09-05
 
 ### Other
