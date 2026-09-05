@@ -49,9 +49,7 @@
         >
           <div class="mbx-bench-tool">
             <code>{{ cell.label }}</code>
-            <span v-if="cell.badge" class="mbx-bench-fastest">{{
-              cell.badge
-            }}</span>
+            <span v-if="cell.badge" class="mbx-bench-fastest">{{ cell.badge }}</span>
             <span v-if="cell.fastest" class="mbx-bench-fastest">fastest</span>
           </div>
           <div class="mbx-bench-bar-track" aria-hidden="true">
