@@ -185,9 +185,9 @@ function inconclusive(scenario: BenchmarkScenario): string | null {
   const floor = Math.max(spread(best), spread(next));
   if (margin > floor) return null;
   return (
-    `No tool is marked fastest: the ${(margin / 1e9).toFixed(1)}s between the ` +
-    `fastest two is inside the ${(floor / 1e9).toFixed(1)}s one of them moved ` +
-    `across its own repeats.`
+    `No tool is marked fastest: the ${seconds(margin)}s between the fastest ` +
+    `two is inside the ${seconds(floor)}s one of them moved across its own ` +
+    `repeats.`
   );
 }
 
@@ -206,6 +206,14 @@ function guardText(scenario: BenchmarkScenario) {
 // cannot happen. Read defensively anyway rather than assert it.
 function duration(cell: BenchmarkCell) {
   return cell.wall_duration_ns ?? 0;
+}
+
+// Tenths everywhere else on the page, but a margin this rule rejects can be
+// smaller than that, and "the 0.0s between them" reads as a rounding error
+// rather than as the reason nothing is marked fastest.
+function seconds(ns: number) {
+  const value = ns / 1e9;
+  return value < 0.1 ? value.toFixed(2) : value.toFixed(1);
 }
 
 function spreadLabel(cell: BenchmarkCell) {
