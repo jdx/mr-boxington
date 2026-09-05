@@ -222,11 +222,18 @@ fn cargo_with_settings_bypass_log_and_roots(
                 &mut environment,
             )
             .await;
+        // Clear inherited selections, including when this build uses the system linker.
+        environment.insert(session::MANAGED_LINKER_ENV.into(), String::new());
+        environment.insert(session::MANAGED_TARGET_LINKERS_ENV.into(), String::new());
         if let Some(selection) = &managed_linker {
-            environment.insert(
-                session::MANAGED_LINKER_ENV.into(),
-                selection.executable.to_string_lossy().into_owned(),
-            );
+            match selection {
+                crate::managed_linker::Selection::Single(executable) => {
+                    environment.insert(session::MANAGED_LINKER_ENV.into(), executable.to_string_lossy().into_owned());
+                }
+                crate::managed_linker::Selection::Targets(executables) => {
+                    environment.insert(session::MANAGED_TARGET_LINKERS_ENV.into(), serde_json::to_string(executables)?);
+                }
+            }
         }
         // Stated explicitly for the same reason as the session's own keys: an
         // unset value would let the shim inherit one from the parent, with no

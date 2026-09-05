@@ -1213,3 +1213,35 @@ fn targeted_shim_names_dispatch_to_their_language() {
         assert_eq!(format!("{language:?}"), expected, "{stem}");
     }
 }
+
+#[test]
+fn managed_target_linkers_follow_rustc_target_and_leave_host_alone() {
+    let selections = BTreeMap::from([
+        (
+            "aarch64-apple-darwin".into(),
+            PathBuf::from("/tools/arm/ld64.lld"),
+        ),
+        (
+            "x86_64-apple-darwin".into(),
+            PathBuf::from("/tools/intel/ld64.lld"),
+        ),
+    ]);
+    for (argument, expected) in [
+        (
+            vec!["--target", "aarch64-apple-darwin"],
+            Some("/tools/arm/ld64.lld"),
+        ),
+        (
+            vec!["--target=x86_64-apple-darwin"],
+            Some("/tools/intel/ld64.lld"),
+        ),
+        (vec!["--crate-name", "build_script_build"], None),
+        (vec!["--target=other"], None),
+    ] {
+        let arguments = argument.into_iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            target_linker(&arguments, &selections).map(|p| p.as_path()),
+            expected.map(Path::new)
+        );
+    }
+}
