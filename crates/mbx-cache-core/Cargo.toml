@@ -1,6 +1,6 @@
 [package]
 name = "mbx-cache-core"
-version = "0.13.0"
+version = "0.13.1"
 description = "Unstable CAS, transport, and cache-agent primitives for mbx embedders"
 edition.workspace = true
 rust-version.workspace = true
