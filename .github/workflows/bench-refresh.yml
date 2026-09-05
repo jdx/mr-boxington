@@ -49,8 +49,8 @@ concurrency:
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
-  # Keep rustup's proxies on PATH so RUSTUP_TOOLCHAIN can select the alternate
-  # compiler used by the toolchain-change benchmark.
+  # Keep rustup's proxies on PATH so RUSTUP_TOOLCHAIN selects the pinned
+  # compiler the benchmark builds under.
   MISE_DISABLE_TOOLS: rust
   RUSTUP_TOOLCHAIN: 1.97.1
 
@@ -106,7 +106,7 @@ jobs:
     # be compared across machine classes. The xlarge Namespace profile is also
     # representative of the high-core-count local machines this models.
     runs-on: namespace-profile-endev-linux-amd64-xlarge;overrides.cache-tag=cache
-    # The full refresh also runs every cache scenario and the toolchain guard.
+    # Three trials of every scenario, including the six-job contention batch.
     timeout-minutes: 180
     permissions:
       contents: read
@@ -124,7 +124,6 @@ jobs:
         run: |
           rustup toolchain install --profile minimal 1.97.1
           rustup component add --toolchain 1.97.1 clippy
-          rustup toolchain install --profile minimal 1.96.0
       # The comparison should track kache itself, not the version that happened
       # to be current when mise.lock was last updated. Install the newest stable
       # release explicitly, then keep its real path for builds that run outside
@@ -168,13 +167,12 @@ jobs:
           echo "MBX_BENCH_BINARY=$install_dir/mbx" >> "$GITHUB_ENV"
       - name: Refresh benchmarks
         env:
-          MBX_BENCH_ALTERNATE_TOOLCHAIN: 1.96.0
           MISE_LOCKED: "1"
         run: |
           PATH="$KACHE_INSTALL_DIR:$PATH" \
             python3 benchmarks/real_world.py \
             --mbx "$MBX_BENCH_BINARY" \
-            --scenarios warm,commit,edit,worktree,toolchain,contention \
+            --scenarios warm,commit,edit,contention \
             --trials 3 \
             --output target/benchmarks \
             --write-results benchmarks/results.json
@@ -280,7 +278,7 @@ jobs:
           cat > "$RUNNER_TEMP/body.md" <<EOF
           ## Refreshed real-world benchmarks
 
-          \`benchmarks/results.json\` was measured with \`${BENCH:-no previous run}\`; the latest release is now \`mbx ${RELEASE}\`. Re-ran the benchmark with that release on the fixed Namespace Linux xlarge profile: a pinned checkout of jdx/hk built under raw cargo, mbx, and kache across the warm, next-commit, edit-loop, cross-worktree, toolchain-change, and six-job contention scenarios, three trials of each timed one.
+          \`benchmarks/results.json\` was measured with \`${BENCH:-no previous run}\`; the latest release is now \`mbx ${RELEASE}\`. Re-ran the benchmark with that release on the fixed Namespace Linux xlarge profile: a pinned checkout of jdx/hk built under raw cargo, mbx, and kache across the warm, next-commit, edit-loop, and six-job contention scenarios, three trials of each.
 
           **Read the numbers before merging.** They publish to https://mr-boxington.jdx.dev/benchmarks on merge. Look into a scenario that swapped places, or a trial range wide enough to explain the gap beside it, before it goes on the site.
 

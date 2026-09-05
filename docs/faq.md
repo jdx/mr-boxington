@@ -27,7 +27,6 @@ and Windows, and self-contained WebAssembly targets everywhere. The rest is
 No. The compiler is part of every key, so a toolchain roll invalidates every
 rustc action at once, and the build says so:
 `a manifest predicting N compilations was loaded, but none matched this build`.
-The benchmarks cover this in the [toolchain scenario](/benchmarks#toolchain).
 Actions that do not depend on rustc, such as a build script's C objects,
 survive.
 

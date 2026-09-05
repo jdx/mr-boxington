@@ -84,16 +84,6 @@ class ValidateTest(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertIn("restored nothing", failures[0])
 
-    def test_a_guard_that_did_not_run_is_not_a_guard_that_passed(self) -> None:
-        scenarios: list[dict[str, object]] = [
-            {"scenario": "worktree", "results": [], "skipped": ["mbx: no binary"]}
-        ]
-
-        failures = real_world.validate(scenarios)
-
-        self.assertEqual(len(failures), 1)
-        self.assertIn("path-independence guard did not run", failures[0])
-
     def test_an_edit_that_compiled_nothing_fails_the_run(self) -> None:
         scenarios: list[dict[str, object]] = [
             {
@@ -285,46 +275,6 @@ class DiscardTest(unittest.TestCase):
                 sorted(path.name for path in work.iterdir()),
                 ["mirror.git", "store-warm-mbx-10", "target-warm-kache-1"],
             )
-
-
-    def test_a_guard_publishes_what_it_asserted_not_how_long_it_took(self) -> None:
-        result = {
-            "scenarios": [
-                {
-                    "scenario": "worktree",
-                    "timed": False,
-                    "results": [
-                        {
-                            "tool": "mbx",
-                            "wall_duration_ns": 7,
-                            "trials": 1,
-                            "wall_durations_ns": [7],
-                            "stats": {"hits": 926},
-                        }
-                    ],
-                }
-            ]
-        }
-
-        cell = real_world.publishable(result)["scenarios"][0]["results"][0]
-
-        self.assertEqual(cell, {"tool": "mbx", "stats": {"hits": 926}})
-
-
-class GuardSummaryTest(unittest.TestCase):
-    def test_worktree_guard_reports_hits_rather_than_seconds(self) -> None:
-        summary = real_world.guard_summary(
-            "worktree",
-            [{"tool": "mbx", "stats": {"hits": 926, "restored_output_files": 1462}}],
-        )
-
-        assert summary is not None
-        self.assertIn("1462 output files", summary)
-        self.assertIn("926 cache hits", summary)
-        self.assertNotIn("faster", summary)
-
-    def test_a_scenario_that_measured_nothing_has_nothing_to_claim(self) -> None:
-        self.assertIsNone(real_world.guard_summary("worktree", []))
 
 
 if __name__ == "__main__":

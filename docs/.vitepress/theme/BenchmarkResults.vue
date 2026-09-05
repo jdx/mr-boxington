@@ -21,21 +21,12 @@
           <h3 :id="scenario.scenario">{{ scenario.scenario }}</h3>
           <p class="mbx-bench-caption">{{ scenario.description }}</p>
         </div>
-        <span
-          v-if="scenario.timed && scenario.kind !== 'contention'"
-          class="mbx-bench-direction"
-        >
+        <span v-if="scenario.kind !== 'contention'" class="mbx-bench-direction">
           lower is better
         </span>
       </header>
-      <p
-        v-if="!scenario.timed && scenario.results.length"
-        class="mbx-bench-guard"
-      >
-        Guard held: {{ guardText(scenario) }}
-      </p>
       <div
-        v-else-if="scenario.kind === 'contention' && scenario.results.length"
+        v-if="scenario.kind === 'contention' && scenario.results.length"
         class="mbx-bench-chart"
         role="list"
         aria-label="Contention benchmark results"
@@ -162,9 +153,8 @@ function spread(cell: BenchmarkCell) {
 // Contention is exempt: it compares one binary against itself with the
 // scheduler on and off.
 function inconclusive(scenario: BenchmarkScenario): string | null {
-  if (!scenario.timed) return null;
   const ordered = [...scenario.results].sort(
-    (left, right) => duration(left) - duration(right),
+    (left, right) => left.wall_duration_ns - right.wall_duration_ns,
   );
   // A tool that failed the scenario is left out of the card, so the one
   // that remains has beaten nothing.
@@ -181,7 +171,7 @@ function inconclusive(scenario: BenchmarkScenario): string | null {
   ) {
     return "Measured once per tool, so no tool is marked fastest here.";
   }
-  const margin = duration(next) - duration(best);
+  const margin = next.wall_duration_ns - best.wall_duration_ns;
   const floor = Math.max(spread(best), spread(next));
   if (margin > floor) return null;
   return (
@@ -189,23 +179,6 @@ function inconclusive(scenario: BenchmarkScenario): string | null {
     `two is inside the ${seconds(floor)}s one of them moved across its own ` +
     `repeats.`
   );
-}
-
-function guardText(scenario: BenchmarkScenario) {
-  if (scenario.guard) return scenario.guard;
-  // Runs published before the claim moved into the benchmark that checks it.
-  const stats = scenario.results[0]?.stats;
-  return (
-    `of ${stats?.predictions_loaded ?? 0} predicted compilations, a different ` +
-    `compiler let mbx look up ${stats?.lookups ?? 0}: the ones that do not ` +
-    `depend on rustc at all.`
-  );
-}
-
-// Untimed guards render as a claim, never as a row, so a missing timing here
-// cannot happen. Read defensively anyway rather than assert it.
-function duration(cell: BenchmarkCell) {
-  return cell.wall_duration_ns ?? 0;
 }
 
 // Tenths everywhere else on the page, but a margin this rule rejects can be
@@ -226,10 +199,12 @@ function spreadLabel(cell: BenchmarkCell) {
 
 function rows(scenario: BenchmarkScenario) {
   const slowest = Math.max(
-    ...scenario.results.map((cell) => duration(cell)),
+    ...scenario.results.map((cell) => cell.wall_duration_ns),
     1,
   );
-  const fastest = Math.min(...scenario.results.map((cell) => duration(cell)));
+  const fastest = Math.min(
+    ...scenario.results.map((cell) => cell.wall_duration_ns),
+  );
   const separated = inconclusive(scenario) === null;
   // A Cargo result is meaningful only inside the scenario that measured it,
   // and it is not the same kind of result in each. In the commit case it is
@@ -240,11 +215,13 @@ function rows(scenario: BenchmarkScenario) {
   const baseline = scenario.results.find((cell) => cell.tool === "cargo");
   const baselineLabel = scenario.baseline ?? "uncached baseline";
   return scenario.results.map((cell) => {
-    const seconds = duration(cell) / 1e9;
-    const ratio = baseline ? duration(baseline) / duration(cell) : null;
+    const seconds = cell.wall_duration_ns / 1e9;
+    const ratio = baseline
+      ? baseline.wall_duration_ns / cell.wall_duration_ns
+      : null;
     return {
       tool: cell.tool,
-      fastest: separated && duration(cell) === fastest,
+      fastest: separated && cell.wall_duration_ns === fastest,
       warmup: cell.warmup_wall_duration_ns
         ? `first edit after a build ${(cell.warmup_wall_duration_ns / 1e9).toFixed(1)}s`
         : null,
@@ -253,7 +230,7 @@ function rows(scenario: BenchmarkScenario) {
         seconds >= 60
           ? `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`
           : `${seconds.toFixed(1)}s`,
-      width: barWidth(duration(cell), slowest),
+      width: barWidth(cell.wall_duration_ns, slowest),
       comparison: !baseline
         ? null
         : cell === baseline
@@ -272,19 +249,21 @@ function rows(scenario: BenchmarkScenario) {
 // columns rather than the ordinary cache-build comparison.
 function contentionRows(scenario: BenchmarkScenario) {
   const slowest = Math.max(
-    ...scenario.results.map((cell) => duration(cell)),
+    ...scenario.results.map((cell) => cell.wall_duration_ns),
     1,
   );
   const parallelControl = scenario.results.find(
     (cell) => cell.tool === "mbx-unscheduled",
   );
-  const fastest = Math.min(...scenario.results.map((cell) => duration(cell)));
+  const fastest = Math.min(
+    ...scenario.results.map((cell) => cell.wall_duration_ns),
+  );
   const separated = inconclusive(scenario) === null;
   return scenario.results.map((cell) => {
-    const seconds = duration(cell) / 1e9;
+    const seconds = cell.wall_duration_ns / 1e9;
     const available = cell.min_available_bytes;
     const delta = parallelControl
-      ? (duration(cell) - duration(parallelControl)) / 1e9
+      ? (cell.wall_duration_ns - parallelControl.wall_duration_ns) / 1e9
       : null;
     return {
       tool: cell.tool,
@@ -300,12 +279,12 @@ function contentionRows(scenario: BenchmarkScenario) {
           : cell.tool === "mbx-unscheduled"
             ? "parallel control"
             : null,
-      fastest: separated && duration(cell) === fastest,
+      fastest: separated && cell.wall_duration_ns === fastest,
       seconds:
         seconds >= 60
           ? `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`
           : `${seconds.toFixed(1)}s`,
-      width: barWidth(duration(cell), slowest),
+      width: barWidth(cell.wall_duration_ns, slowest),
       comparison:
         delta === null || cell.tool !== "mbx"
           ? null
@@ -466,7 +445,6 @@ const versionList = computed(() => {
   line-height: 1;
   padding: 5px 7px;
 }
-.mbx-bench-guard,
 .mbx-bench-inconclusive,
 .mbx-bench-skipped,
 .mbx-bench-scenario-provenance,
@@ -474,7 +452,6 @@ const versionList = computed(() => {
   color: var(--vp-c-text-2);
   font-size: 13px;
 }
-.mbx-bench-guard,
 .mbx-bench-inconclusive,
 .mbx-bench-skipped,
 .mbx-bench-scenario-provenance {

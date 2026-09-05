@@ -19,7 +19,6 @@
     {
       "scenario": "warm",
       "description": "warm store, fresh target -- CI restoring the same commit; plain Cargo has no cache to restore",
-      "timed": true,
       "kind": "build",
       "results": [
         {
@@ -57,7 +56,6 @@
     {
       "scenario": "commit",
       "description": "cache tools warmed at the parent commit, build the child -- Cargo is the uncached push-to-push baseline",
-      "timed": true,
       "kind": "build",
       "results": [
         {
@@ -106,7 +104,6 @@
     {
       "scenario": "edit",
       "description": "one line changed and rebuilt in place, incremental on -- the local edit loop in its steady state, where Cargo is the thing to beat",
-      "timed": true,
       "kind": "build",
       "results": [
         {
@@ -156,53 +153,8 @@
       "baseline": "incremental rebuild"
     },
     {
-      "scenario": "worktree",
-      "description": "store warmed in one checkout, rebuilt in a second at another path",
-      "timed": false,
-      "kind": "build",
-      "results": [
-        {
-          "tool": "mbx",
-          "stats": {
-            "lookups": 928,
-            "hits": 926,
-            "misses": 2,
-            "unconsulted": 7,
-            "predictions_loaded": 927,
-            "restored_output_files": 1462,
-            "restored_output_bytes": 1380235168
-          }
-        }
-      ],
-      "skipped": [],
-      "guard": "A second checkout at a different path restored 1462 output files on 926 cache hits, so no absolute path reached the keys."
-    },
-    {
-      "scenario": "toolchain",
-      "description": "store warmed on the pinned toolchain, rebuild on another",
-      "timed": false,
-      "kind": "build",
-      "results": [
-        {
-          "tool": "mbx",
-          "stats": {
-            "lookups": 2,
-            "hits": 2,
-            "misses": 0,
-            "unconsulted": 901,
-            "predictions_loaded": 927,
-            "restored_output_files": 2,
-            "restored_output_bytes": 2624
-          }
-        }
-      ],
-      "skipped": [],
-      "guard": "Of 927 predicted compilations, a different compiler let mbx look up 2: the ones that do not depend on rustc at all."
-    },
-    {
       "scenario": "contention",
       "description": "six overlapping check, Clippy, and test jobs -- sequential for context, then parallel with and without mbx's machine-wide compiler limit",
-      "timed": true,
       "kind": "contention",
       "results": [
         {

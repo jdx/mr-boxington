@@ -38,15 +38,6 @@ the middle trial and carries every trial's timing, and the site will not name
 a fastest tool when the gap between the top two is inside one tool's own
 range.
 
-Two scenarios assert instead of racing and publish no timing. The
-cross-worktree scenario warms a store in one checkout and rebuilds in a second
-at a different path; it passes when the second build restores the first one's
-outputs, which shows absolute paths did not enter the keys. The
-compiler-change scenario fails unless a different rustc leaves almost every
-predicted compilation unlooked-up. Not zero hits: actions that do not depend
-on rustc, such as a build script's C objects, legitimately survive a Rust
-change.
-
 The `contention` scenario is the odd one out: it stacks six overlapping check,
 Clippy, and test-compilation jobs on one runner. It measures sequential context,
 native-step parallelism with mbx scheduling, and the same parallel shape with
@@ -68,11 +59,8 @@ proves nothing. Wall-time ordering remains a reported benchmark result rather
 than a validity condition because a single shared-runner sample is noisy.
 
 `mise run bench` runs the everyday subset once through; `mise run
-bench:refresh` runs everything, three trials of each timed scenario, and
-rewrites `results.json`, which the documentation site reads.
-The refresh needs `MBX_BENCH_ALTERNATE_TOOLCHAIN` set to a second installed
-Rust, and fails without it: a skipped guard is not a passed guard, and a run
-that could not check compiler invalidation must not publish as though it had.
+bench:refresh` runs every scenario, three trials of each, and rewrites
+`results.json`, which the documentation site reads.
 kache is used when it is on `PATH` and skipped with a note otherwise. The
 [bench-refresh workflow](../.github/workflows/bench-refresh.yml) runs it
 weekly, only when the published numbers predate the mbx on `main`, and opens a

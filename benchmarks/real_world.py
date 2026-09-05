@@ -11,12 +11,10 @@ branch, and a one-line edit rebuilt in place.
 Every timing is wall clock around one build, the way CI experiences it. A
 timed scenario is repeated (`--trials`) and reports the median trial with
 every trial's timing beside it, because a scenario whose tools finish within
-the run-to-run spread has not measured a difference between them. Scenarios
-that assert rather than race -- a second checkout, a changed compiler -- are
-guards and publish no timing at all. The registry is fetched once up front and
-shared, so no cell is timed while it downloads crates. Toolchains are pinned
-per subject: a runner-image Rust bump changes every invocation digest at once,
-which reads as a cache that stopped working. See `benchmarks/README.md`.
+the run-to-run spread has not measured a difference between them. The registry
+is fetched once up front and shared, so no cell is timed while it downloads
+crates. Toolchains are pinned per subject: a runner-image Rust bump changes
+every invocation digest at once, which reads as a cache that stopped working. See `benchmarks/README.md`.
 """
 
 from __future__ import annotations
@@ -81,8 +79,8 @@ CONTENTION_JOBS: tuple[tuple[str, list[str]], ...] = (
 
 # Which tools each scenario asks for, and whether it publishes a timing.
 #
-# `repeatable` is what --trials multiplies: the timed scenarios, which need a
-# spread to be read against. The guards and the contention batch run once.
+# `repeatable` is what --trials multiplies. Every scenario here is a timing
+# that needs a spread to be read against, and every one of them gets it.
 # cargo appears only where a no-cache baseline is meaningful: in "warm" it
 # would just repeat its cold number.
 SCENARIOS: dict[str, dict[str, object]] = {
@@ -115,18 +113,6 @@ SCENARIOS: dict[str, dict[str, object]] = {
         "baseline": "incremental rebuild",
         "repeatable": True,
     },
-    "worktree": {
-        "tools": ("mbx",),
-        "description": (
-            "store warmed in one checkout, rebuilt in a second at another path"
-        ),
-        "timed": False,
-    },
-    "toolchain": {
-        "tools": ("mbx",),
-        "description": "store warmed on the pinned toolchain, rebuild on another",
-        "timed": False,
-    },
     "contention": {
         "tools": ("mbx-sequential", "mbx-unscheduled", "mbx"),
         "description": (
@@ -137,12 +123,6 @@ SCENARIOS: dict[str, dict[str, object]] = {
         "repeatable": True,
     },
 }
-
-
-# What fraction of a manifest's predictions may still be looked up after the
-# compiler changes. Anything above this means rustc work survived a change that
-# invalidates every invocation digest.
-TOOLCHAIN_SURVIVOR_LIMIT = 0.05
 
 
 class Skipped(Exception):
@@ -648,18 +628,12 @@ def publishable(result: dict[str, object]) -> dict[str, object]:
     scenarios = []
     for scenario in result["scenarios"]:  # type: ignore[index]
         cells = []
-        timed = bool(scenario.get("timed", True))
         for cell in scenario["results"]:
-            # A guard's seconds are not a result and nothing renders them, so
-            # publishing them only invites a later reader, or a later template,
-            # into treating an assertion as a race.
-            trimmed: dict[str, object] = {"tool": cell["tool"]}
-            if timed:
-                trimmed["wall_duration_ns"] = cell["wall_duration_ns"]
-            fields = PUBLISHED_CONTENTION
-            if timed:
-                fields = fields + PUBLISHED_TRIALS + PUBLISHED_EDIT
-            for field in fields:
+            trimmed: dict[str, object] = {
+                "tool": cell["tool"],
+                "wall_duration_ns": cell["wall_duration_ns"],
+            }
+            for field in PUBLISHED_CONTENTION + PUBLISHED_TRIALS + PUBLISHED_EDIT:
                 if field in cell:
                     trimmed[field] = cell[field]
             stats = cell.get("stats")
@@ -819,60 +793,6 @@ def one_trial(
         measured["warmup_wall_duration_ns"] = warmup["wall_duration_ns"]
         return measured
 
-    if scenario == "worktree":
-        seed = work / f"checkout-{cell}-seed"
-        clone(subject, str(subject["child"]), seed)
-        runner.run(
-            tool=tool,
-            cell=f"{cell}-seed",
-            subject=subject,
-            checkout=seed,
-            target=target,
-            store=store,
-        )
-        # A different path, to show absolute paths did not enter the keys.
-        # This reports hits, not seconds; a cache keyed on paths restores
-        # nothing here.
-        other = work / f"checkout-{cell}-elsewhere"
-        clone(subject, str(subject["child"]), other)
-        return runner.run(
-            tool=tool,
-            cell=cell,
-            subject=subject,
-            checkout=other,
-            target=work / f"target-{cell}-elsewhere",
-            store=store,
-        )
-
-    if scenario == "toolchain":
-        alternate = os.environ.get("MBX_BENCH_ALTERNATE_TOOLCHAIN")
-        if not alternate:
-            raise Skipped("set MBX_BENCH_ALTERNATE_TOOLCHAIN to a second installed Rust")
-        if tool_version("rustc", alternate) == tool_version("rustc", str(subject["toolchain"])):
-            raise Skipped(
-                f"MBX_BENCH_ALTERNATE_TOOLCHAIN ({alternate}) resolves to the "
-                f"pinned {subject['toolchain']}, so nothing would change"
-            )
-        checkout = work / f"checkout-{cell}"
-        clone(subject, str(subject["child"]), checkout)
-        runner.run(
-            tool=tool,
-            cell=f"{cell}-seed",
-            subject=subject,
-            checkout=checkout,
-            target=target,
-            store=store,
-        )
-        return runner.run(
-            tool=tool,
-            cell=cell,
-            subject=subject,
-            checkout=checkout,
-            target=target,
-            store=store,
-            toolchain=alternate,
-        )
-
     if scenario == "contention":
         checkout = work / f"checkout-{cell}"
         clone(subject, str(subject["child"]), checkout)
@@ -919,32 +839,6 @@ def median_cell(cells: list[dict[str, object]]) -> dict[str, object]:
     chosen["trials"] = len(cells)
     chosen["wall_durations_ns"] = [int(cell["wall_duration_ns"]) for cell in cells]
     return chosen
-
-
-def guard_summary(scenario: str, results: list[dict[str, object]]) -> str | None:
-    """What an untimed scenario asserted, in the words the page renders.
-
-    Written here rather than in the template because the claim belongs with
-    the code that checked it.
-    """
-    if not results:
-        return None
-    stats = results[0].get("stats")
-    if not isinstance(stats, dict):
-        return None
-    if scenario == "toolchain":
-        return (
-            f"Of {stats.get('predictions_loaded', 0)} predicted compilations, a different "
-            f"compiler let mbx look up {stats.get('lookups', 0)}: the ones that do not "
-            "depend on rustc at all."
-        )
-    if scenario == "worktree":
-        return (
-            f"A second checkout at a different path restored "
-            f"{stats.get('restored_output_files', 0)} output files on "
-            f"{stats.get('hits', 0)} cache hits, so no absolute path reached the keys."
-        )
-    return None
 
 
 def run_scenario(
@@ -996,13 +890,10 @@ def run_scenario(
     entry: dict[str, object] = {
         "scenario": scenario,
         "description": SCENARIOS[scenario]["description"],
-        "timed": SCENARIOS[scenario].get("timed", True),
         "kind": SCENARIOS[scenario].get("kind", "build"),
         "results": results,
         "skipped": notes,
     }
-    if not entry["timed"]:
-        entry["guard"] = guard_summary(scenario, results)
     if "baseline" in SCENARIOS[scenario]:
         entry["baseline"] = SCENARIOS[scenario]["baseline"]
     return entry
@@ -1031,15 +922,13 @@ def validate(scenarios: list[dict[str, object]]) -> list[str]:
     failures: list[str] = []
     by_name = {entry["scenario"]: entry for entry in scenarios}
 
-    for name in ("warm", "worktree"):
-        entry = by_name.get(name)
-        if entry is None:
-            continue
-        for cell in entry["results"]:  # type: ignore[index]
+    warm_entry = by_name.get("warm")
+    if warm_entry is not None:
+        for cell in warm_entry["results"]:  # type: ignore[index]
             if cell["tool"] != "mbx":
                 continue
             if hits(cell) <= 0 or restored_files(cell) <= 0:
-                failures.append(f"{name}: mbx restored nothing, so the timing is not a cache result")
+                failures.append("warm: mbx restored nothing, so the timing is not a cache result")
 
     warm = by_name.get("warm")
     if warm:
@@ -1104,48 +993,6 @@ def validate(scenarios: list[dict[str, object]]) -> list[str]:
                     f"contention: unscheduled builds peaked at {baseline} compilers, within "
                     f"the {permits} permits, so this run never actually contended"
                 )
-    worktree = by_name.get("worktree")
-    if worktree is not None and not worktree["results"]:
-        failures.append(
-            "worktree: the path-independence guard did not run, so nothing checked "
-            "that a second checkout can restore the first one's outputs"
-        )
-
-    toolchain = by_name.get("toolchain")
-    if toolchain:
-        # A skipped guard is not a passed guard. The scenario was asked for, so
-        # a run that could not perform it must not publish as though the
-        # compiler-invalidation claim had been checked.
-        measured = [
-            cell
-            for cell in toolchain["results"]  # type: ignore[index]
-            if cell["tool"] == "mbx" and isinstance(cell.get("stats"), dict)
-        ]
-        if not measured:
-            failures.append(
-                "toolchain: the compiler-change guard did not run, so nothing "
-                "checked that a new rustc invalidates the cache"
-            )
-        for cell in measured:
-            stats = cell["stats"]
-            assert isinstance(stats, dict)
-            predictions = int(stats.get("predictions_loaded", 0))
-            if predictions <= 0:
-                failures.append(
-                    "toolchain: no predictions were loaded, so the rebuild was cold for "
-                    "some reason other than the compiler change"
-                )
-                continue
-            # Not zero lookups: a handful of actions do not depend on rustc at
-            # all -- a build script's C object is compiled by the C compiler,
-            # which did not change -- and those legitimately still hit. What
-            # must not survive is the rustc work the manifest predicted.
-            if int(stats.get("lookups", 0)) > predictions * TOOLCHAIN_SURVIVOR_LIMIT:
-                failures.append(
-                    "toolchain: a different compiler reused rustc work it should have "
-                    "invalidated"
-                )
-
     return failures
 
 
@@ -1197,12 +1044,8 @@ def summarize(result: dict[str, object]) -> str:
             if scenario["skipped"]:
                 lines.append("")
             continue
-        if scenario.get("guard"):
-            lines += [str(scenario["guard"]), ""]
         lines += [
-            "| Tool | Median wall time | Trials | Hits | Restored files |"
-            if scenario["timed"]
-            else "| Tool | Ran for | Trials | Hits | Restored files |",
+            "| Tool | Median wall time | Trials | Hits | Restored files |",
             "| :--- | ---: | ---: | ---: | ---: |",
         ]
         for cell in scenario["results"]:

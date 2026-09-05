@@ -7,12 +7,8 @@ const resultsPath = resolve(configDir, "../../benchmarks/results.json");
 
 export interface BenchmarkCell {
   tool: string;
-  /**
-   * The median trial's wall clock, or the only one where trials is absent.
-   * Absent on the untimed guards, whose seconds are not a result and which
-   * never reach the functions below.
-   */
-  wall_duration_ns?: number;
+  /** The median trial's wall clock, or the only one where trials is absent. */
+  wall_duration_ns: number;
   /** How many times the scenario was repeated for this tool. */
   trials?: number;
   /** Every trial's wall clock, so the page can see its own noise floor. */
@@ -40,10 +36,6 @@ export interface BenchmarkCell {
 interface BenchmarkScenarioBase {
   scenario: string;
   description: string;
-  /** False for the guards, which assert rather than race. */
-  timed: boolean;
-  /** What an untimed scenario asserted. Absent on runs published before it. */
-  guard?: string | null;
   /**
    * What this scenario's cargo row is, since it is not the same thing in
    * every one: a control with no cache to help it in the commit scenario, the

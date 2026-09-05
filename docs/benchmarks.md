@@ -63,25 +63,6 @@ rebuild against mbx's first and report a setup cost paid once as though it
 were the loop. The card shows what that first edit cost beside the steady
 number, because it is a real wait, just not a repeated one.
 
-### worktree
-
-Not a timing. The store is warmed in one checkout and the build reruns in a
-second checkout at a different path. It passes when the second build restores
-outputs from the first, which shows absolute paths did not enter the keys. A
-cache that keys on paths rebuilds everything here.
-
-### toolchain
-
-Not a timing. The store is warmed on the pinned Rust and the build reruns on a
-different one. The run fails unless almost none of the predicted compilations
-were looked up. A compiler change invalidates every invocation digest at once,
-and the failure this guards against is a cache that claims a hit anyway. A
-handful of hits are expected: a build script's C object is compiled by the C
-compiler, which did not change, so those actions survive.
-
-This also explains a warm build that reports no hits after a runner image
-picked up a new Rust. The store is not broken; the compiler changed.
-
 ### contention
 
 Six overlapping Rust CI jobs from an empty store: default and all-targets/all-
@@ -126,15 +107,13 @@ whether it got there by sharing the machine or by oversubscribing it.
 A benchmark that measured nothing still renders numbers, so the run fails and
 nothing publishes unless:
 
-- the warm and cross-worktree builds report cache hits and restored output
-  files; a fast build that restored nothing was fast for some other reason;
+- the warm build reports cache hits and restored output files; a fast build
+  that restored nothing was fast for some other reason;
 - each warm build beat the cold build that seeded it;
 - the edit rebuild compiled something; an edit that never reached the
   compiler would render as a very fast rebuild;
 - no Cargo baseline ran under mbx; a `cargo` that is itself an mbx shim
   would use the cache it is the control for;
-- the toolchain-change build ran, loaded predictions, and then looked up
-  almost none of them; a guard that was skipped is not a guard that passed;
 - the contention run sampled the machine, saw compilers running, and kept the
   scheduled batch inside its permits, and the unscheduled batch went past
   them; a bound nothing pushed against proves nothing.
@@ -151,9 +130,7 @@ mise run bench
 That builds mbx, clones the pinned subject, and runs the warm, next-commit,
 and edit scenarios once each. kache is included when it is on `PATH` and
 skipped with a note when it is not. `mise run bench:refresh` is what CI runs:
-every scenario, three trials of each timed one, writing
-`benchmarks/results.json`. It needs `MBX_BENCH_ALTERNATE_TOOLCHAIN` set to a
-second installed Rust, which is what the compiler-change guard switches to.
+every scenario, three trials of each, writing `benchmarks/results.json`.
 `--trials` sets the repeat count. The page will not name a fastest tool
 from a single trial.
 
