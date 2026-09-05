@@ -17,6 +17,11 @@ on:
         required: false
         type: boolean
         default: false
+      source:
+        description: Measure mbx built from this ref instead of the latest release (implies dry_run)
+        required: false
+        type: boolean
+        default: false
       small_edit:
         description: Compare restored parent caches after hk's next small edit
         required: false
@@ -79,7 +84,7 @@ jobs:
         env:
           # A dry run is a request to measure, so it skips the drift check
           # the same way `force` does.
-          FORCE_REFRESH: ${{ github.event_name == 'workflow_dispatch' && (inputs.force || inputs.dry_run) }}
+          FORCE_REFRESH: ${{ github.event_name == 'workflow_dispatch' && (inputs.force || inputs.dry_run || inputs.source) }}
           GH_TOKEN: ${{ github.token }}
         run: |
           RELEASE=$(gh release view --json tagName --jq '.tagName | ltrimstr("v")')
@@ -149,7 +154,16 @@ jobs:
             cargo --version
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      # A run from source measures a change before it is released, for the
+      # pull request that makes it. It never proposes: the page reports what
+      # a user can install, and an unreleased binary is not that.
+      - name: Build mbx from this ref
+        if: github.event_name == 'workflow_dispatch' && inputs.source
+        run: |
+          cargo build --locked --release -p mbx
+          echo "MBX_BENCH_BINARY=$PWD/target/release/mbx" >> "$GITHUB_ENV"
       - name: Install released mbx
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.source) }}
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE: v${{ needs.check.outputs.release }}
@@ -218,7 +232,7 @@ jobs:
     # request against main.
     if: |
       github.ref == 'refs/heads/main'
-      && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+      && !(github.event_name == 'workflow_dispatch' && (inputs.dry_run || inputs.source))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

@@ -83,7 +83,10 @@ fn identity_without_agent() -> Result<LinkerIdentity> {
 fn a_probe_pins_the_files_it_read() {
     let driver = which::which("cc").unwrap();
     let (identity, pins) = probe(&driver, None).unwrap();
-    assert!(pins.iter().all(|pin| pin.is_absolute() && pin.is_file()), "{pins:?}");
+    assert!(
+        pins.iter().all(|pin| pin.is_absolute() && pin.is_file()),
+        "{pins:?}"
+    );
     // The driver, the linker, and every object the identity hashed.
     assert_eq!(pins.len(), 2 + identity.crt_objects.len(), "{pins:?}");
 }
