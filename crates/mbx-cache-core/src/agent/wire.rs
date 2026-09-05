@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Wire protocol version used between an in-process cache agent and its shims.
-pub const AGENT_PROTOCOL_VERSION: u8 = 7;
+pub const AGENT_PROTOCOL_VERSION: u8 = 8;
 /// Largest single protocol request the agent will read.
 ///
 /// Requests are small JSON objects; the largest legitimate ones carry an output
@@ -124,6 +124,11 @@ pub enum AgentRequest {
         environment: BTreeMap<String, Option<String>>,
         /// Captured identity-command standard output.
         stdout: Vec<u8>,
+        /// Files whose length and modification time pin the output beyond
+        /// this session, so the next one can skip the probe. Empty keeps the
+        /// identity for this session only.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pins: Vec<PathBuf>,
     },
     /// Surface a shim diagnostic through the session that owns the build.
     ///

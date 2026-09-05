@@ -833,6 +833,7 @@ fn probe_msvc(executable: &Path) -> Result<String> {
         executable: executable.to_path_buf(),
         environment,
         stdout: text.clone().into_bytes(),
+        pins: Vec::new(),
     }]);
     Ok(text)
 }
@@ -924,6 +925,7 @@ fn probe_executable(executable: &Path, arguments: &[&str], memo: &Path) -> Resul
         executable: key,
         environment,
         stdout: text.clone().into_bytes(),
+        pins: Vec::new(),
     }]);
     Ok(text)
 }

@@ -20,7 +20,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Environment that selects what the probes below report.
+///
+/// The search paths are here because they decide which `ld` a driver names,
+/// and the identity is kept across sessions: one recorded under a shell that
+/// found one linker must not answer for a shell that would find another.
 const IDENTITY_ENVIRONMENT: &[&str] = &[
+    "COMPILER_PATH",
+    "PATH",
     "SDKROOT",
     "MACOSX_DEPLOYMENT_TARGET",
     "LIB",
@@ -151,8 +157,8 @@ pub(crate) fn identity_for(
     if let Some(cached) = find_recorded(&driver, &environment)? {
         return Ok(cached);
     }
-    let identity = probe(&driver, fuse_ld.as_deref())?;
-    record(&driver, &environment, &identity)?;
+    let (identity, pins) = probe(&driver, fuse_ld.as_deref())?;
+    record(&driver, &environment, &identity, pins)?;
     Ok(identity)
 }
 
@@ -176,11 +182,13 @@ fn record(
     driver: &Path,
     environment: &BTreeMap<String, Option<String>>,
     identity: &LinkerIdentity,
+    pins: Vec<PathBuf>,
 ) -> Result<()> {
     let responses = session::request_agent(&[AgentRequest::StoreExecutableIdentity {
         executable: driver.to_path_buf(),
         environment: environment.clone(),
         stdout: canonical_json(identity)?,
+        pins,
     }])?;
     match responses.into_iter().next() {
         Some(AgentResponse::ExecutableIdentity { .. }) => Ok(()),
@@ -189,21 +197,36 @@ fn record(
     }
 }
 
-fn probe(driver: &Path, fuse_ld: Option<&Path>) -> Result<LinkerIdentity> {
+/// Describe the linker, and name the files the description was read from.
+///
+/// Those files pin the identity across sessions: the driver, the linker it
+/// names, and the objects it places. A platform whose identity comes from
+/// tools rather than files -- a Windows toolset, a macOS SDK -- pins nothing
+/// and is probed every session.
+fn probe(driver: &Path, fuse_ld: Option<&Path>) -> Result<(LinkerIdentity, Vec<PathBuf>)> {
     if cfg!(windows) {
-        return probe_windows(driver);
+        return Ok((probe_windows(driver)?, Vec::new()));
     }
-    Ok(LinkerIdentity {
+    let (linker_version, linker) = linker_version(driver, fuse_ld)?;
+    let (crt_objects, objects) = crt_objects(driver)?;
+    let sdk = sdk_identity()?;
+    let mut pins = vec![driver.to_path_buf(), linker];
+    pins.extend(objects);
+    if sdk.is_some() {
+        pins.clear();
+    }
+    let identity = LinkerIdentity {
         driver: driver
             .to_str()
             .ok_or_else(|| eyre::eyre!("the linker driver path is not valid UTF-8"))?
             .to_owned(),
         driver_version: run(driver, &["--version"])?,
-        linker_version: linker_version(driver, fuse_ld)?,
-        crt_objects: crt_objects(driver)?,
-        sdk: sdk_identity()?,
+        linker_version,
+        crt_objects,
+        sdk,
         deployment_target: std::env::var("MACOSX_DEPLOYMENT_TARGET").ok(),
-    })
+    };
+    Ok((identity, pins))
 }
 
 /// Bind a Windows link to the MSVC/LLVM linker, toolset, SDK, and CRT import
@@ -484,12 +507,13 @@ fn resolve_fuse_ld(driver: &Path, selection: &str) -> Result<PathBuf> {
     })
 }
 
-/// Version of the linker the driver selects, as opposed to the driver itself.
+/// Version of the linker the driver selects, as opposed to the driver itself,
+/// and the path of the linker it was read from.
 ///
 /// ld reports through stderr on some platforms and stdout on others, so both
 /// are read; only the first line is kept, since later ones list supported
 /// emulations that say nothing about the version.
-fn linker_version(driver: &Path, fuse_ld: Option<&Path>) -> Result<String> {
+fn linker_version(driver: &Path, fuse_ld: Option<&Path>) -> Result<(String, PathBuf)> {
     if let Some(program) = fuse_ld {
         // Already resolved to the binary the driver invokes; pin both its
         // path and its version line: on content-addressed toolchains the
@@ -509,14 +533,25 @@ fn linker_version(driver: &Path, fuse_ld: Option<&Path>) -> Result<String> {
         if version.is_empty() {
             bail!("{} reported no version", program.display());
         }
-        return Ok(format!("{}: {version}", program.display()));
+        return Ok((
+            format!("{}: {version}", program.display()),
+            program.to_path_buf(),
+        ));
     }
     // Asked of the driver rather than resolved from PATH: the `ld` a shell
     // would find is not necessarily the one this driver invokes, and a key
-    // naming the wrong linker is worse than no key at all.
-    let linker = PathBuf::from(
+    // naming the wrong linker is worse than no key at all. A driver that
+    // answers with a bare name is saying it would search PATH itself, so
+    // the same search here names the file it would run.
+    let named = PathBuf::from(
         run(driver, &["-print-prog-name=ld"]).wrap_err("the linker driver named no linker")?,
     );
+    let linker = if named.is_absolute() {
+        named
+    } else {
+        which::which(&named)
+            .wrap_err_with(|| format!("failed to find the linker `{}`", named.display()))?
+    };
     let output = Command::new(&linker)
         .arg("-v")
         .output()
@@ -531,7 +566,7 @@ fn linker_version(driver: &Path, fuse_ld: Option<&Path>) -> Result<String> {
     if version.is_empty() {
         bail!("{} reported no version", linker.display());
     }
-    Ok(version.to_owned())
+    Ok((version.to_owned(), linker))
 }
 
 /// Hash the startup objects and libc the driver resolves.
@@ -542,13 +577,19 @@ fn linker_version(driver: &Path, fuse_ld: Option<&Path>) -> Result<String> {
 /// what that probe stood for. So the inputs a link cannot be described without
 /// -- a startup object and a libc -- have to resolve, and a host where neither
 /// does gets no identity and no cached link.
-fn crt_objects(driver: &Path) -> Result<BTreeMap<String, CacheDigest>> {
-    probe_files(&file_probes(), |name| {
+fn crt_objects(driver: &Path) -> Result<(BTreeMap<String, CacheDigest>, Vec<PathBuf>)> {
+    let placed = std::cell::RefCell::new(Vec::new());
+    let objects = probe_files(&file_probes(), |name| {
         let resolved = run(driver, &[&format!("-print-file-name={name}")]).ok()?;
         let path = PathBuf::from(resolved.trim());
         // The driver echoes the name back when it cannot place it.
-        path.is_absolute().then_some(path)
-    })
+        if !path.is_absolute() {
+            return None;
+        }
+        placed.borrow_mut().push(path.clone());
+        Some(path)
+    })?;
+    Ok((objects, placed.into_inner()))
 }
 
 /// Resolve each probe, hash what came back, and insist on the ones a key

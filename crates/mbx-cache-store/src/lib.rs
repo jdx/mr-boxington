@@ -187,6 +187,20 @@ pub fn record_build_receipt(
     if let Some(group) = group {
         validate_export_group(group)?;
     }
+    // A build that used exactly what the last one did leaves that receipt
+    // standing. Only its timestamp would change, and the export it feeds
+    // wants the prediction set, not the hour. A group receipt is per run and
+    // always written.
+    if group.is_none()
+        && read_build_receipt(&latest_receipt_path(store, workspace_root)).is_some_and(|latest| {
+            latest.identity == identity
+                && latest.workspace_root == workspace_root
+                && latest.group.is_none()
+                && latest.predictions == predictions
+        })
+    {
+        return Ok(());
+    }
     let key = workspace_key(workspace_root);
     let lock_path = store
         .join(BUILD_RECEIPTS_DIR)

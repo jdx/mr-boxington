@@ -1200,7 +1200,7 @@ fn record_private_artifacts(root: &Path, outputs: &RustcOutputs) -> Result<()> {
             version: PRIVATE_ARTIFACT_VERSION,
             path: artifact.clone(),
         };
-        crate::util::write_atomic(&path, &serde_json::to_vec(&marker)?)
+        crate::util::write_advisory(&path, &serde_json::to_vec(&marker)?)
             .wrap_err_with(|| format!("failed to mark {} as private", artifact.display()))?;
     }
     Ok(())
@@ -2451,10 +2451,12 @@ fn query_compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
             stdout.extend_from_slice(output.stdout.trim_ascii());
             stdout.push(b'\n');
         }
+        let pins = compiler_identity_pins(&executable);
         let responses = session::request_agent(&[AgentRequest::StoreExecutableIdentity {
             executable,
             environment,
             stdout,
+            pins,
         }])?;
         let Some(AgentResponse::ExecutableIdentity {
             stdout: Some(stdout),
@@ -2494,6 +2496,35 @@ fn query_compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
             .filter(|value| !value.is_empty())
             .map(str::to_string),
     })
+}
+
+/// The files that pin a compiler's identity across sessions: the binary.
+///
+/// A rustup proxy is not the compiler. It is a copy of rustup that picks a
+/// toolchain when it runs, so its bytes say nothing about what `-vV` will
+/// print, and an executable that looks like one is probed every session.
+fn compiler_identity_pins(executable: &Path) -> Vec<PathBuf> {
+    if is_rustup_proxy(executable) {
+        Vec::new()
+    } else {
+        vec![executable.to_path_buf()]
+    }
+}
+
+/// rustup installs its proxies as copies of itself beside a `rustup` binary.
+fn is_rustup_proxy(executable: &Path) -> bool {
+    let Some(directory) = executable.parent() else {
+        return false;
+    };
+    let rustup = directory.join(if cfg!(windows) {
+        "rustup.exe"
+    } else {
+        "rustup"
+    });
+    match (std::fs::metadata(&rustup), std::fs::metadata(executable)) {
+        (Ok(rustup), Ok(executable)) => rustup.len() == executable.len(),
+        _ => false,
+    }
 }
 
 fn identity_field<'a>(verbose: &'a str, field: &str) -> Result<&'a str> {

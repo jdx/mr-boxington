@@ -73,7 +73,19 @@ fn the_identity_round_trips_through_its_recorded_form() {
 /// Probe this host without the agent round-trip the real path memoizes through.
 fn identity_without_agent() -> Result<LinkerIdentity> {
     let driver = which::which("cc")?;
-    probe(&driver, None)
+    probe(&driver, None).map(|(identity, _)| identity)
+}
+
+/// The files a probe pins are the ones it read, so that a session which
+/// finds them unchanged can trust what an earlier one recorded.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_probe_pins_the_files_it_read() {
+    let driver = which::which("cc").unwrap();
+    let (identity, pins) = probe(&driver, None).unwrap();
+    assert!(pins.iter().all(|pin| pin.is_absolute() && pin.is_file()), "{pins:?}");
+    // The driver, the linker, and every object the identity hashed.
+    assert_eq!(pins.len(), 2 + identity.crt_objects.len(), "{pins:?}");
 }
 
 /// A `-fuse-ld` selection is resolved through the driver first, and a

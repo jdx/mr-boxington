@@ -1,4 +1,4 @@
-request.hello	{"client_version":"0.3.0","protocol":7,"type":"hello"}
+request.hello	{"client_version":"0.3.0","protocol":8,"type":"hello"}
 request.begin_task	{"task":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","type":"begin_task"}
 request.commit_task	{"run":"task-run","type":"commit_task"}
 request.find_blob	{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"type":"find_blob"}
@@ -15,13 +15,13 @@ request.store_action_result	{"result":{"action":{"algorithm":"blake3","hash":"aa
 request.find_action_prediction	{"invocation":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"task":"task-id","type":"find_action_prediction"}
 request.record_action_prediction	{"prediction":{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"adapter":"rustc","invocation":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"payload":"{}"},"task":"task-id","type":"record_action_prediction"}
 request.find_executable_identity	{"environment":{"RUSTFLAGS":"-Cdebuginfo=1","UNSET":null},"executable":"bin/rustc","type":"find_executable_identity"}
-request.store_executable_identity	{"environment":{"RUSTFLAGS":"-Cdebuginfo=1","UNSET":null},"executable":"bin/rustc","stdout":[114,117,115,116,99],"type":"store_executable_identity"}
+request.store_executable_identity	{"environment":{"RUSTFLAGS":"-Cdebuginfo=1","UNSET":null},"executable":"bin/rustc","pins":["bin/rustc"],"stdout":[114,117,115,116,99],"type":"store_executable_identity"}
 request.find_file_digests	{"files":[{"changed":[1700000000,21],"len":7,"modified":{"nanos_since_epoch":2100,"secs_since_epoch":1700000000},"path":"target/debug/deps/libserde.rlib"}],"scope":"content","type":"find_file_digests"}
 request.record_file_digests	{"entries":[{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"file":{"changed":[1700000000,21],"len":7,"modified":{"nanos_since_epoch":2100,"secs_since_epoch":1700000000},"path":"target/debug/deps/libserde.rlib"}}],"scope":"cc_input","type":"record_file_digests"}
 request.join_action_promise	{"adapter":"rustc","invocation":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"type":"join_action_promise"}
 request.complete_action_promise	{"claim":"claim-1","prediction":{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"adapter":"rustc","invocation":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"payload":"{}"},"type":"complete_action_promise"}
 request.resolve_file_digests	{"files":[{"changed":[1700000000,21],"len":7,"modified":{"nanos_since_epoch":2100,"secs_since_epoch":1700000000},"path":"target/debug/deps/libserde.rlib"},{"changed":[1700000000,21],"len":7,"modified":{"nanos_since_epoch":2100,"secs_since_epoch":1700000000},"object":{"device_major":8,"device_minor":1,"inode":99,"mount_id":42},"path":"target/debug/deps/libserde.rlib"}],"scope":"content","type":"resolve_file_digests"}
-response.hello	{"agent_version":"0.3.0","protocol":7,"type":"hello"}
+response.hello	{"agent_version":"0.3.0","protocol":8,"type":"hello"}
 response.task_begun	{"run":"task-run","type":"task_begun"}
 response.task_committed	{"type":"task_committed"}
 response.blob	{"path":"cache/blob","type":"blob"}

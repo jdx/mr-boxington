@@ -121,7 +121,7 @@ fn resolve_path_aliases(path: &Path) -> PathBuf {
     let mut existing = path;
     let mut missing = Vec::new();
     loop {
-        match std::fs::canonicalize(existing) {
+        match canonicalize(existing) {
             Ok(mut resolved) => {
                 for component in missing.iter().rev() {
                     resolved.push(component);
@@ -145,6 +145,59 @@ fn resolve_path_aliases(path: &Path) -> PathBuf {
 #[cfg(not(any(unix, windows)))]
 fn resolve_path_aliases(path: &Path) -> PathBuf {
     path.to_path_buf()
+}
+
+/// `std::fs::canonicalize`, remembering every directory it has resolved.
+///
+/// One compilation normalizes hundreds of input paths that share a handful of
+/// parent directories, and `realpath` walks every component of every one of
+/// them. Resolving the parent once and then only the last component costs one
+/// `lstat` per path instead of one per component. The memo lives as long as
+/// the process, which for a shim is one compilation; a link that changes
+/// under a running compilation was never something one `realpath` call could
+/// see either.
+#[cfg(unix)]
+fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        static DIRECTORIES: RefCell<HashMap<PathBuf, PathBuf>> = RefCell::new(HashMap::new());
+    }
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return std::fs::canonicalize(path);
+    };
+    if parent.as_os_str().is_empty() {
+        return std::fs::canonicalize(path);
+    }
+    let resolved_parent =
+        match DIRECTORIES.with(|directories| directories.borrow().get(parent).cloned()) {
+            Some(resolved) => resolved,
+            None => {
+                let resolved = canonicalize(parent)?;
+                DIRECTORIES.with(|directories| {
+                    directories
+                        .borrow_mut()
+                        .insert(parent.to_path_buf(), resolved.clone())
+                });
+                resolved
+            }
+        };
+    let candidate = resolved_parent.join(name);
+    if std::fs::symlink_metadata(&candidate)?
+        .file_type()
+        .is_symlink()
+    {
+        std::fs::canonicalize(&candidate)
+    } else {
+        Ok(candidate)
+    }
+}
+
+/// Windows keeps the plain call: its canonical paths are verbatim, and a
+/// junction is not what `is_symlink` reports.
+#[cfg(windows)]
+fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(path)
 }
 
 fn resolve_mapping_root(root: &Path) -> PathBuf {
@@ -205,5 +258,50 @@ mod tests {
         .unwrap();
 
         assert_eq!(normalized, "${workspace}/clippy.toml");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_aliases_through_remembered_parents() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let physical = root.join("physical");
+        std::fs::create_dir_all(physical.join("src")).unwrap();
+        std::fs::write(physical.join("src").join("lib.rs"), "").unwrap();
+        std::fs::write(physical.join("real.rs"), "").unwrap();
+        std::os::unix::fs::symlink(&physical, root.join("alias")).unwrap();
+        std::os::unix::fs::symlink(physical.join("real.rs"), physical.join("link.rs")).unwrap();
+        let mappings = [PathMapping::new(&physical, "workspace")];
+
+        // A directory alias, then a sibling that reuses its resolved parent.
+        let through_alias = root.join("alias").join("src").join("lib.rs");
+        assert_eq!(
+            normalize_mapped_path(&through_alias, &root, &mappings).unwrap(),
+            "${workspace}/src/lib.rs"
+        );
+        let sibling = root.join("alias").join("src").join("missing.rs");
+        assert_eq!(
+            normalize_mapped_path(&sibling, &root, &mappings).unwrap(),
+            "${workspace}/src/missing.rs"
+        );
+        // A file that is itself a link resolves to what it names.
+        assert_eq!(
+            normalize_mapped_path(&physical.join("link.rs"), &root, &mappings).unwrap(),
+            "${workspace}/real.rs"
+        );
+        // And a suffix that does not exist yet is kept as written.
+        let unborn = root
+            .join("alias")
+            .join("target")
+            .join("deps")
+            .join("out.rlib");
+        assert_eq!(
+            normalize_mapped_path(&unborn, &root, &mappings).unwrap(),
+            "${workspace}/target/deps/out.rlib"
+        );
     }
 }

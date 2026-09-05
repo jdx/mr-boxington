@@ -96,6 +96,70 @@ fn record_build_in_group(
 }
 
 #[test]
+fn an_identical_receipt_is_left_standing() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    let identity = "a".repeat(64);
+    let workspace = Path::new("/workspace/app");
+    let predictions = vec![ActionPrediction {
+        invocation: CacheDigest::blake3(b"invocation"),
+        action: CacheDigest::blake3(b"action"),
+        adapter: "rustc".into(),
+        payload: "{}".into(),
+    }];
+    let run = |name: &str| CacheDigest::blake3(name.as_bytes()).hash;
+    record_build_receipt(
+        store,
+        &run("first"),
+        &identity,
+        workspace,
+        None,
+        predictions.clone(),
+    )
+    .unwrap();
+    let path = latest_receipt_path(store, workspace);
+    let written = std::fs::metadata(&path).unwrap();
+
+    // Same predictions: only the timestamp would differ, so nothing is written.
+    record_build_receipt(
+        store,
+        &run("second"),
+        &identity,
+        workspace,
+        None,
+        predictions.clone(),
+    )
+    .unwrap();
+    let kept = std::fs::metadata(&path).unwrap();
+    assert_eq!(kept.modified().unwrap(), written.modified().unwrap());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        assert_eq!(kept.ino(), written.ino(), "the receipt was replaced");
+    }
+
+    // A different prediction set replaces it.
+    let mut more = predictions;
+    more.push(ActionPrediction {
+        invocation: CacheDigest::blake3(b"other invocation"),
+        action: CacheDigest::blake3(b"other action"),
+        adapter: "rustc".into(),
+        payload: "{}".into(),
+    });
+    record_build_receipt(
+        store,
+        &run("third"),
+        &identity,
+        workspace,
+        None,
+        more.clone(),
+    )
+    .unwrap();
+    let receipt = read_build_receipt(&path).unwrap();
+    assert_eq!(receipt.predictions, more);
+}
+
+#[test]
 fn reports_an_empty_store() {
     let directory = tempfile::tempdir().unwrap();
     assert_eq!(stats(directory.path()).unwrap(), StoreStats::default());
