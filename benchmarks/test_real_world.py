@@ -24,5 +24,142 @@ class CountCompilersTest(unittest.TestCase):
             self.assertEqual(real_world.count_compilers(), 2)
 
 
+class MedianCellTest(unittest.TestCase):
+    def test_publishes_the_middle_trial_and_keeps_the_rest(self) -> None:
+        trials = [
+            {"tool": "mbx", "wall_duration_ns": 9, "stats": {"hits": 3}},
+            {"tool": "mbx", "wall_duration_ns": 5, "stats": {"hits": 1}},
+            {"tool": "mbx", "wall_duration_ns": 7, "stats": {"hits": 2}},
+        ]
+
+        cell = real_world.median_cell(trials)
+
+        self.assertEqual(cell["wall_duration_ns"], 7)
+        # The statistics come from the trial that produced the timing, not
+        # from whichever trial happened to run last.
+        self.assertEqual(cell["stats"], {"hits": 2})
+        self.assertEqual(cell["trials"], 3)
+        self.assertEqual(cell["wall_durations_ns"], [9, 5, 7])
+
+    def test_even_trial_count_takes_the_lower_middle(self) -> None:
+        trials = [{"tool": "mbx", "wall_duration_ns": ns} for ns in (4, 8, 6, 2)]
+
+        self.assertEqual(real_world.median_cell(trials)["wall_duration_ns"], 4)
+
+
+class ValidateTest(unittest.TestCase):
+    def warm(self, duration: int, seed: int) -> list[dict[str, object]]:
+        return [
+            {
+                "scenario": "warm",
+                "results": [
+                    {
+                        "tool": "mbx",
+                        "wall_duration_ns": duration,
+                        "seed_wall_duration_ns": seed,
+                        "stats": {"hits": 700, "restored_output_files": 1500},
+                    }
+                ],
+            }
+        ]
+
+    def test_warm_must_beat_the_build_that_seeded_it(self) -> None:
+        self.assertEqual(real_world.validate(self.warm(5, 20)), [])
+
+        failures = real_world.validate(self.warm(25, 20))
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("no faster than the cold build that seeded it", failures[0])
+
+    def test_warm_restoring_nothing_is_not_a_cache_result(self) -> None:
+        scenarios = self.warm(5, 20)
+        scenarios[0]["results"][0]["stats"] = {"hits": 0, "restored_output_files": 0}
+
+        failures = real_world.validate(scenarios)
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("restored nothing", failures[0])
+
+    def test_an_edit_that_compiled_nothing_fails_the_run(self) -> None:
+        scenarios: list[dict[str, object]] = [
+            {
+                "scenario": "edit",
+                "results": [
+                    {"tool": "cargo", "wall_duration_ns": 3, "recompiled": True},
+                    {"tool": "mbx", "wall_duration_ns": 2, "recompiled": False},
+                ],
+            }
+        ]
+
+        failures = real_world.validate(scenarios)
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("mbx rebuilt without compiling anything", failures[0])
+
+
+    def test_a_wrapped_cargo_is_not_an_uncached_baseline(self) -> None:
+        scenarios: list[dict[str, object]] = [
+            {
+                "scenario": "commit",
+                "results": [{"tool": "cargo", "wall_duration_ns": 3, "wrapped": True}],
+            }
+        ]
+
+        failures = real_world.validate(scenarios)
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("not the uncached control", failures[0])
+
+
+class PublishableTest(unittest.TestCase):
+    def test_keeps_every_trial_timing_and_drops_the_rest(self) -> None:
+        result = {
+            "scenarios": [
+                {
+                    "scenario": "warm",
+                    "results": [
+                        {
+                            "tool": "mbx",
+                            "wall_duration_ns": 7,
+                            "trials": 3,
+                            "wall_durations_ns": [9, 5, 7],
+                            # Gate inputs and log excerpts stay in the run's
+                            # own output directory; the published file is read
+                            # by a person in a pull request.
+                            "seed_wall_duration_ns": 20,
+                            "recompiled": True,
+                            "summary": ["noise"],
+                            "stats": {"hits": 700, "internal": 1},
+                        }
+                    ],
+                }
+            ]
+        }
+
+        cell = real_world.publishable(result)["scenarios"][0]["results"][0]
+
+        self.assertEqual(cell["trials"], 3)
+        self.assertEqual(cell["wall_durations_ns"], [9, 5, 7])
+        self.assertEqual(cell["stats"], {"hits": 700})
+        for dropped in ("seed_wall_duration_ns", "recompiled", "summary"):
+            self.assertNotIn(dropped, cell)
+
+
+class GuardSummaryTest(unittest.TestCase):
+    def test_worktree_guard_reports_hits_rather_than_seconds(self) -> None:
+        summary = real_world.guard_summary(
+            "worktree",
+            [{"tool": "mbx", "stats": {"hits": 926, "restored_output_files": 1462}}],
+        )
+
+        assert summary is not None
+        self.assertIn("1462 output files", summary)
+        self.assertIn("926 cache hits", summary)
+        self.assertNotIn("faster", summary)
+
+    def test_a_scenario_that_measured_nothing_has_nothing_to_claim(self) -> None:
+        self.assertIsNone(real_world.guard_summary("worktree", []))
+
+
 if __name__ == "__main__":
     unittest.main()

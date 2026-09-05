@@ -7,7 +7,12 @@ const resultsPath = resolve(configDir, "../../benchmarks/results.json");
 
 export interface BenchmarkCell {
   tool: string;
+  /** The median trial's wall clock, or the only one where trials is absent. */
   wall_duration_ns: number;
+  /** How many times the scenario was repeated for this tool. */
+  trials?: number;
+  /** Every trial's wall clock, so the page can see its own noise floor. */
+  wall_durations_ns?: number[];
   /** Contention only: most real compilers seen running at once, machine-wide. */
   peak_compilers?: number;
   /** Contention only: lowest memory the machine had left, where reported. */
@@ -25,8 +30,10 @@ export interface BenchmarkCell {
 interface BenchmarkScenarioBase {
   scenario: string;
   description: string;
-  /** False for the compiler-change guard, which asserts rather than races. */
+  /** False for the guards, which assert rather than race. */
   timed: boolean;
+  /** What an untimed scenario asserted. Absent on runs published before it. */
+  guard?: string | null;
   /**
    * "build" times one build per tool; "contention" compares sequential and
    * parallel commands and reports what the machine did. Absent on runs
@@ -68,7 +75,8 @@ export default {
       ) as BenchmarkResults;
       // A run that failed its own validity checks measured something other
       // than what the page would claim; the empty state is the honest render.
-      if (results.schema !== 1 || !results.passed) return null;
+      // 2 added per-trial timings; 1 renders as a single trial per cell.
+      if (![1, 2].includes(results.schema) || !results.passed) return null;
       return results;
     } catch {
       // No published run yet, or a file this page does not understand.

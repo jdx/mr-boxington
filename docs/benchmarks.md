@@ -8,26 +8,26 @@ The build scenarios run the same `cargo build --locked` through plain Cargo,
 [mbx](/), and [kache](https://github.com/kunobi-ninja/kache), where each tool
 can make a meaningful comparison. Timings are wall clock around one build.
 When Cargo appears, it is an uncached baseline measured in that same scenario;
-cache rows compare only with that result. The warm and worktree scenarios omit
-Cargo because a fresh `target/` or a different checkout gives it nothing to
-reuse. The contention scenario compares sequential and parallel lint
-strategies and measures the machine instead of a single build.
+cache rows compare only with that result. The warm scenario omits Cargo
+because a fresh `target/` gives it nothing to reuse. The contention scenario
+compares sequential and parallel lint strategies and measures the machine
+instead of a single build.
+
+Every timed scenario runs three times per tool. The card shows the middle run
+and the range across all three, and it names a tool fastest only when the gap
+to the next one is larger than the range one of them covered on its own. A
+scenario that cannot clear that bar says so and names nobody.
 
 <BenchmarkResults />
 
 ## What each scenario reproduces
 
-### cold
-
-An empty store and a fresh `target/`: a new machine, or a CI job with no cache
-to restore. There is nothing to hit, so a cache can only cost time here, and
-the gap to cargo is the overhead every cold build pays.
-
 ### warm
 
-The store from the cold build, a fresh `target/`. This is the common CI shape:
-a runner restores a cache, then builds a commit it has already seen. cargo is
-not run, because with a wiped `target/` it would repeat its cold number.
+A store warmed by a first build of the same commit, then a fresh `target/`.
+This is the common CI shape: a runner restores a cache, then builds a commit
+it has already seen. cargo is not run, because with a wiped `target/` it would
+repeat that first build.
 
 ### commit
 
@@ -36,11 +36,22 @@ Push-to-push CI: most of the dependency graph is unchanged, a few crates are
 not. cargo's baseline here is a cold build, because that is what cargo does
 with an empty `target/`.
 
+### edit
+
+A full build, one line changed in the subject's own source, and a rebuild in
+the same `target/` with incremental compilation on. This is the local loop
+rather than a CI job, and it is the shape where a cache has the least to offer
+and the most to get in the way: almost nothing needs rebuilding, so anything
+the cache spends on bookkeeping is the whole difference. Cargo is the thing to
+beat here, not a control.
+
 ### worktree
 
-The store is warmed in one checkout, and the timed build runs in a second
-checkout at a different path. This checks that absolute paths did not enter
-the keys. A cache that keys on paths reports a cold build here.
+Not a timing. The store is warmed in one checkout and the build reruns in a
+second checkout at a different path. It passes when the second build restores
+outputs from the first, which is what says absolute paths did not enter the
+keys. A cache that keys on paths rebuilds everything here, and the seconds
+would not tell you which happened.
 
 ### toolchain
 
@@ -56,7 +67,7 @@ picked up a new Rust. The store is not broken; the compiler changed.
 
 ### contention
 
-Six overlapping Rust CI jobs from a cold store: default and all-targets/all-
+Six overlapping Rust CI jobs from an empty store: default and all-targets/all-
 features variants of `cargo check`, Clippy, and test compilation. The
 `sequential` row is context, with the commands sharing one target directory.
 The parallel rows use separate targets so Cargo's target lock does not
@@ -77,6 +88,8 @@ whether it got there by sharing the machine or by oversubscribing it.
 
 - The registry is fetched once, before any timed build, into a shared
   `CARGO_HOME`. No cell is timed while it downloads crates.
+- Trials share nothing. Each one clones the subject again and starts from its
+  own empty store, so the second run measures the same scenario as the first.
 - The toolchain is pinned per subject. hk does not pin one itself, and a
   runner-image Rust bump changes every invocation digest at once, which would
   land in the series as a step change that looks like a cache that stopped
@@ -97,7 +110,14 @@ nothing publishes unless:
 
 - the warm and cross-worktree builds report cache hits and restored output
   files; a fast build that restored nothing was fast for some other reason;
-- each warm build beat its own cold build;
+- each warm build beat the cold build that seeded it, which is the same tool
+  in the same checkout on the same machine minutes earlier;
+- the edit rebuild actually compiled something, since an edit that never
+  reached the compiler renders as a very fast rebuild rather than as a
+  broken run;
+- no Cargo baseline ran under mbx. Clearing the wrapper variables does not
+  prove they were the only way in, and a `cargo` that is itself an mbx shim
+  produces a baseline that quietly uses the cache it is the control for;
 - the toolchain-change build ran, loaded predictions, and then looked up
   almost none of them; a guard that was skipped is not a guard that passed;
 - the contention run sampled the machine, saw compilers running, and kept the
@@ -113,12 +133,14 @@ state instead.
 mise run bench
 ```
 
-That builds mbx, clones the pinned subject, and runs the cold, warm, and
-next-commit scenarios. kache is included when it is on `PATH` and skipped
-with a note when it is not. `mise run bench:refresh` is what CI runs: every
-scenario, writing `benchmarks/results.json`. It needs
-`MBX_BENCH_ALTERNATE_TOOLCHAIN` set to a second installed Rust, which is what
-the compiler-change guard switches to.
+That builds mbx, clones the pinned subject, and runs the warm, next-commit,
+and edit scenarios once each. kache is included when it is on `PATH` and
+skipped with a note when it is not. `mise run bench:refresh` is what CI runs:
+every scenario, three trials of each timed one, writing
+`benchmarks/results.json`. It needs `MBX_BENCH_ALTERNATE_TOOLCHAIN` set to a
+second installed Rust, which is what the compiler-change guard switches to.
+`--trials` sets the repeat count; one trial publishes a timing with no range
+beside it, and the page will not name a fastest tool from it.
 
 The numbers on this page are refreshed by the
 [bench-refresh workflow](https://github.com/jdx/mr-boxington/actions/workflows/bench-refresh.yml),

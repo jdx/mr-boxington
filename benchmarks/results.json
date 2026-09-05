@@ -17,36 +17,6 @@
   "failures": [],
   "scenarios": [
     {
-      "scenario": "cold",
-      "description": "empty store, fresh target -- a first build on a new machine",
-      "timed": true,
-      "kind": "build",
-      "results": [
-        {
-          "tool": "cargo",
-          "wall_duration_ns": 25367107879
-        },
-        {
-          "tool": "mbx",
-          "wall_duration_ns": 24724192585,
-          "stats": {
-            "lookups": 2,
-            "hits": 2,
-            "misses": 0,
-            "unconsulted": 901,
-            "predictions_loaded": 0,
-            "restored_output_files": 2,
-            "restored_output_bytes": 2624
-          }
-        },
-        {
-          "tool": "kache",
-          "wall_duration_ns": 23824478416
-        }
-      ],
-      "skipped": []
-    },
-    {
       "scenario": "warm",
       "description": "warm store, fresh target -- CI restoring the same commit; plain Cargo has no cache to restore",
       "timed": true,
@@ -104,8 +74,8 @@
     },
     {
       "scenario": "worktree",
-      "description": "warm store, second checkout at a different path; plain Cargo cannot reuse the first checkout's target",
-      "timed": true,
+      "description": "store warmed in one checkout, rebuilt in a second at another path",
+      "timed": false,
       "kind": "build",
       "results": [
         {
@@ -120,13 +90,10 @@
             "restored_output_files": 1462,
             "restored_output_bytes": 1380235168
           }
-        },
-        {
-          "tool": "kache",
-          "wall_duration_ns": 8586729558
         }
       ],
-      "skipped": []
+      "skipped": [],
+      "guard": "A second checkout at a different path restored 1462 output files on 926 cache hits, so no absolute path reached the keys."
     },
     {
       "scenario": "toolchain",
@@ -148,7 +115,8 @@
           }
         }
       ],
-      "skipped": []
+      "skipped": [],
+      "guard": "Of 927 predicted compilations, a different compiler let mbx look up 2: the ones that do not depend on rustc at all."
     },
     {
       "scenario": "contention",

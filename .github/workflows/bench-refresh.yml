@@ -167,7 +167,8 @@ jobs:
           PATH="$KACHE_INSTALL_DIR:$PATH" \
             python3 benchmarks/real_world.py \
             --mbx "$MBX_BENCH_BINARY" \
-            --scenarios cold,warm,commit,worktree,toolchain,contention \
+            --scenarios warm,commit,edit,worktree,toolchain,contention \
+            --trials 3 \
             --output target/benchmarks \
             --write-results benchmarks/results.json
       - name: Publish job summary
@@ -261,7 +262,7 @@ jobs:
           cat > "$RUNNER_TEMP/body.md" <<EOF
           ## Refreshed real-world benchmarks
 
-          \`benchmarks/results.json\` was measured with \`${BENCH:-no previous run}\`; the latest release is now \`mbx ${RELEASE}\`. Re-ran the benchmark with that release on the fixed Namespace Linux xlarge profile: a pinned checkout of jdx/hk built under raw cargo, mbx, and kache across the cold, warm, next-commit, cross-worktree, toolchain-change, and six-job contention scenarios.
+          \`benchmarks/results.json\` was measured with \`${BENCH:-no previous run}\`; the latest release is now \`mbx ${RELEASE}\`. Re-ran the benchmark with that release on the fixed Namespace Linux xlarge profile: a pinned checkout of jdx/hk built under raw cargo, mbx, and kache across the warm, next-commit, edit-loop, cross-worktree, toolchain-change, and six-job contention scenarios, three trials of each timed one.
 
           The [run summary](${RUN_URL}) has the table these numbers came from, and the run's artifacts have the per-build logs.
 

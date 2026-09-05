@@ -137,19 +137,21 @@ depends = ["perf:prepare"]
 run = """
 python3 benchmarks/real_world.py \
   --mbx target/release/mbx \
-  --scenarios cold,warm,commit \
+  --scenarios warm,commit,edit \
   --output target/benchmarks
 """
 
-# What CI runs. Adds the scenarios that need a second checkout or a second
-# toolchain, and rewrites the results file the documentation site reads.
+# What CI runs. Adds the guards that need a second checkout or a second
+# toolchain, repeats every timed scenario so the site can tell a result from
+# the machine, and rewrites the results file the documentation site reads.
 [tasks."bench:refresh"]
 description = "Rerun the real-world benchmark and rewrite benchmarks/results.json"
 depends = ["perf:prepare"]
 run = """
 python3 benchmarks/real_world.py \
   --mbx target/release/mbx \
-  --scenarios cold,warm,commit,worktree,toolchain,contention \
+  --scenarios warm,commit,edit,worktree,toolchain,contention \
+  --trials 3 \
   --output target/benchmarks \
   --write-results benchmarks/results.json
 """

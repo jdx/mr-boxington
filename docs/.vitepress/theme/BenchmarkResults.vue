@@ -32,11 +32,7 @@
         v-if="!scenario.timed && scenario.results.length"
         class="mbx-bench-guard"
       >
-        Guard held: of
-        {{ scenario.results[0].stats?.predictions_loaded ?? 0 }} predicted
-        compilations, a different compiler let mbx look up
-        {{ scenario.results[0].stats?.lookups ?? 0 }} — the ones that do not
-        depend on rustc at all.
+        Guard held: {{ guardText(scenario) }}
       </p>
       <div
         v-else-if="scenario.kind === 'contention' && scenario.results.length"
@@ -53,7 +49,9 @@
         >
           <div class="mbx-bench-tool">
             <code>{{ cell.label }}</code>
-            <span v-if="cell.badge" class="mbx-bench-fastest">{{ cell.badge }}</span>
+            <span v-if="cell.badge" class="mbx-bench-fastest">{{
+              cell.badge
+            }}</span>
             <span v-if="cell.fastest" class="mbx-bench-fastest">fastest</span>
           </div>
           <div class="mbx-bench-bar-track" aria-hidden="true">
@@ -99,9 +97,13 @@
           <div class="mbx-bench-meta">
             <span v-if="cell.comparison">{{ cell.comparison }}</span>
             <span v-if="cell.hits !== '—'">{{ cell.hits }} cache hits</span>
+            <span v-if="cell.spread">{{ cell.spread }}</span>
           </div>
         </div>
       </div>
+      <p v-if="inconclusive(scenario)" class="mbx-bench-inconclusive">
+        {{ inconclusive(scenario) }}
+      </p>
       <p v-if="scenario.skipped.length" class="mbx-bench-skipped">
         Not measured: {{ scenario.skipped.join("; ") }}
       </p>
@@ -135,7 +137,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { data } from "../benchmarks.data";
-import type { BenchmarkScenario } from "../benchmarks.data";
+import type { BenchmarkCell, BenchmarkScenario } from "../benchmarks.data";
 
 // Bars are scaled within a scenario, never across them: each card answers
 // which tool was faster on that workload, not how the workloads compare to
@@ -143,6 +145,57 @@ import type { BenchmarkScenario } from "../benchmarks.data";
 // so the slowest result fills the track and every other result is proportional.
 function barWidth(duration: number, slowest: number) {
   return Math.max(2, (duration / slowest) * 100);
+}
+
+// How far one tool moved between its own repeats. This is the page's noise
+// floor, measured on the same machine, in the same scenario, minutes apart.
+function spread(cell: BenchmarkCell) {
+  const trials = cell.wall_durations_ns;
+  if (!trials || trials.length < 2) return 0;
+  return Math.max(...trials) - Math.min(...trials);
+}
+
+// Why this scenario may not name a winner, or null when it may. A card that
+// crowns the tool which finished 0.6s ahead, on a workload whose own repeats
+// vary by more than that, is reporting the scheduler's mood as though it were
+// a result. The honest render says so and leaves the bars to speak for
+// themselves. Contention is exempt: it compares one binary against itself with
+// the scheduler on and off, and reports what the machine did rather than who
+// won.
+function inconclusive(scenario: BenchmarkScenario): string | null {
+  if (!scenario.timed || scenario.kind === "contention") return null;
+  const ordered = [...scenario.results].sort(
+    (left, right) => left.wall_duration_ns - right.wall_duration_ns,
+  );
+  if (ordered.length < 2) return null;
+  const [best, next] = ordered;
+  // Two timings of the same thing are the least that can show a spread, so a
+  // scenario run once names nobody however wide the gap looks.
+  if (
+    (best.wall_durations_ns?.length ?? 0) < 2 ||
+    (next.wall_durations_ns?.length ?? 0) < 2
+  ) {
+    return "Measured once per tool, so no tool is marked fastest here.";
+  }
+  const margin = next.wall_duration_ns - best.wall_duration_ns;
+  const floor = Math.max(spread(best), spread(next));
+  if (margin > floor) return null;
+  return (
+    `No tool is marked fastest: the ${(margin / 1e9).toFixed(1)}s between the ` +
+    `fastest two is inside the ${(floor / 1e9).toFixed(1)}s one of them moved ` +
+    `across its own repeats.`
+  );
+}
+
+function guardText(scenario: BenchmarkScenario) {
+  if (scenario.guard) return scenario.guard;
+  // Runs published before the claim moved into the benchmark that checks it.
+  const stats = scenario.results[0]?.stats;
+  return (
+    `of ${stats?.predictions_loaded ?? 0} predicted compilations, a different ` +
+    `compiler let mbx look up ${stats?.lookups ?? 0}: the ones that do not ` +
+    `depend on rustc at all.`
+  );
 }
 
 function rows(scenario: BenchmarkScenario) {
@@ -153,6 +206,7 @@ function rows(scenario: BenchmarkScenario) {
   const fastest = Math.min(
     ...scenario.results.map((cell) => cell.wall_duration_ns),
   );
+  const separated = inconclusive(scenario) === null;
   // A Cargo result is meaningful only inside the scenario that measured it.
   // In the commit case it is deliberately an uncached control: Cargo has no
   // portable store to seed from the parent commit, and its target is fresh.
@@ -162,22 +216,28 @@ function rows(scenario: BenchmarkScenario) {
     const ratio = baseline
       ? baseline.wall_duration_ns / cell.wall_duration_ns
       : null;
+    const trials = cell.wall_durations_ns ?? [];
     return {
       tool: cell.tool,
-      fastest: cell.wall_duration_ns === fastest,
+      fastest: separated && cell.wall_duration_ns === fastest,
+      spread:
+        trials.length < 2
+          ? null
+          : `${trials.length} runs, ${(Math.min(...trials) / 1e9).toFixed(1)}–${(
+              Math.max(...trials) / 1e9
+            ).toFixed(1)}s`,
       seconds:
         seconds >= 60
           ? `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`
           : `${seconds.toFixed(1)}s`,
       width: barWidth(cell.wall_duration_ns, slowest),
-      comparison:
-        !baseline
-          ? null
-          : cell === baseline
-            ? "uncached baseline"
-            : ratio! >= 1
-              ? `${ratio!.toFixed(2)}× faster than cargo`
-              : `${(1 / ratio!).toFixed(2)}× slower than cargo`,
+      comparison: !baseline
+        ? null
+        : cell === baseline
+          ? "uncached baseline"
+          : ratio! >= 1
+            ? `${ratio!.toFixed(2)}× faster than cargo`
+            : `${(1 / ratio!).toFixed(2)}× slower than cargo`,
       hits: cell.stats?.hits ?? "—",
     };
   });
@@ -259,13 +319,13 @@ const versionList = computed(() => {
 
 <style scoped>
 .mbx-bench-scenario {
-  background:
-    linear-gradient(
-      145deg,
-      color-mix(in srgb, var(--vp-c-bg-soft) 96%, var(--vp-c-brand-1) 4%),
-      var(--vp-c-bg-soft)
-    );
-  border: 1px solid color-mix(in srgb, var(--vp-c-divider) 80%, var(--vp-c-brand-1) 20%);
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--vp-c-bg-soft) 96%, var(--vp-c-brand-1) 4%),
+    var(--vp-c-bg-soft)
+  );
+  border: 1px solid
+    color-mix(in srgb, var(--vp-c-divider) 80%, var(--vp-c-brand-1) 20%);
   border-radius: 14px;
   margin: 28px 0;
   overflow: hidden;
@@ -384,6 +444,7 @@ const versionList = computed(() => {
   padding: 5px 7px;
 }
 .mbx-bench-guard,
+.mbx-bench-inconclusive,
 .mbx-bench-skipped,
 .mbx-bench-scenario-provenance,
 .mbx-bench-provenance {
@@ -391,6 +452,7 @@ const versionList = computed(() => {
   font-size: 13px;
 }
 .mbx-bench-guard,
+.mbx-bench-inconclusive,
 .mbx-bench-skipped,
 .mbx-bench-scenario-provenance {
   border-top: 1px solid var(--vp-c-divider);

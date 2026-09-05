@@ -5,14 +5,18 @@
 "did mbx regress" but not "what does mbx do to somebody else's build". This
 driver clones a pinned third-party subject and runs the same Cargo invocation
 under raw cargo, mbx, and kache across scenarios drawn from the live hk and
-mise cache workflows: a cold store, a warm store with a fresh target, the
-next commit on the branch, and a second checkout at a different path.
+mise cache workflows: a warm store with a fresh target, the next commit on the
+branch, and a one-line edit rebuilt in place.
 
-Every timing is wall clock around one build, the way CI experiences it. The
-registry is fetched once up front and shared, so no cell is timed while it
-downloads crates. Toolchains are pinned per subject: a runner-image Rust bump
-changes every invocation digest at once, which reads as a cache that stopped
-working. See `benchmarks/README.md`.
+Every timing is wall clock around one build, the way CI experiences it. A
+timed scenario is repeated (`--trials`) and reports the median trial with
+every trial's timing beside it, because a scenario whose tools finish within
+the run-to-run spread has not measured a difference between them. Scenarios
+that assert rather than race -- a second checkout, a changed compiler -- are
+guards and publish no timing at all. The registry is fetched once up front and
+shared, so no cell is timed while it downloads crates. Toolchains are pinned
+per subject: a runner-image Rust bump changes every invocation digest at once,
+which reads as a cache that stopped working. See `benchmarks/README.md`.
 """
 
 from __future__ import annotations
@@ -42,6 +46,10 @@ SUBJECTS: dict[str, dict[str, object]] = {
         # Without this the numbers stop being comparable across runner images.
         "toolchain": "1.97.1",
         "args": ["build", "--locked"],
+        # The edit scenario appends a comment here. Named per subject rather
+        # than discovered, so a moved pin fails loudly instead of quietly
+        # editing some other crate than the one the numbers claim.
+        "edit": "src/main.rs",
     },
 }
 
@@ -72,20 +80,22 @@ CONTENTION_JOBS: tuple[tuple[str, list[str]], ...] = (
     ),
 )
 
-# Which tools each scenario asks for. cargo appears only where a no-cache
-# baseline is meaningful: "warm" and "worktree" describe a cache being reused,
-# and cargo would just repeat its cold number.
+# Which tools each scenario asks for, and whether it publishes a timing.
+#
+# `repeatable` is what --trials multiplies. A scenario is only worth timing if
+# the difference it reports can outrun the spread of repeating it, so a timed
+# scenario has to be cheap enough to repeat; one that cannot be repeated is
+# either a guard or the contention batch, which measures a machine rather than
+# a race. cargo appears only where a no-cache baseline is meaningful: "warm"
+# describes a cache being reused, and cargo would just repeat its cold number.
 SCENARIOS: dict[str, dict[str, object]] = {
-    "cold": {
-        "tools": ("cargo", "mbx", "kache"),
-        "description": "empty store, fresh target -- a first build on a new machine",
-    },
     "warm": {
         "tools": ("mbx", "kache"),
         "description": (
             "warm store, fresh target -- CI restoring the same commit; "
             "plain Cargo has no cache to restore"
         ),
+        "repeatable": True,
     },
     "commit": {
         "tools": ("cargo", "mbx", "kache"),
@@ -93,13 +103,22 @@ SCENARIOS: dict[str, dict[str, object]] = {
             "cache tools warmed at the parent commit, build the child -- "
             "Cargo is the uncached push-to-push baseline"
         ),
+        "repeatable": True,
+    },
+    "edit": {
+        "tools": ("cargo", "mbx", "kache"),
+        "description": (
+            "one line changed and rebuilt in place, incremental on -- "
+            "the local edit loop, where Cargo is the thing to beat"
+        ),
+        "repeatable": True,
     },
     "worktree": {
-        "tools": ("mbx", "kache"),
+        "tools": ("mbx",),
         "description": (
-            "warm store, second checkout at a different path; "
-            "plain Cargo cannot reuse the first checkout's target"
+            "store warmed in one checkout, rebuilt in a second at another path"
         ),
+        "timed": False,
     },
     "toolchain": {
         "tools": ("mbx",),
@@ -278,13 +297,23 @@ class Runner:
         self.cargo_home = cargo_home
         self.mbx = mbx
 
-    def base_environment(self, subject: dict[str, object], target: Path) -> dict[str, str]:
+    def base_environment(
+        self,
+        subject: dict[str, object],
+        target: Path,
+        incremental: bool = False,
+    ) -> dict[str, str]:
         environment = os.environ.copy()
         environment.update(
             {
                 "CARGO_HOME": str(self.cargo_home),
                 "CARGO_TARGET_DIR": str(target),
-                "CARGO_INCREMENTAL": "0",
+                # Off for the CI scenarios, matching what CI sets. The edit
+                # loop is the exception and turns it on: incremental state is
+                # most of what makes a developer's rebuild fast, and measuring
+                # that loop without it would compare against a cargo nobody
+                # runs.
+                "CARGO_INCREMENTAL": "1" if incremental else "0",
                 "CARGO_TERM_COLOR": "never",
                 "RUSTUP_TOOLCHAIN": str(subject["toolchain"]),
             }
@@ -305,6 +334,7 @@ class Runner:
         store: Path,
         args: list[str] | None = None,
         toolchain: str | None = None,
+        incremental: bool = False,
     ) -> tuple[list[str], dict[str, str]]:
         """The command and environment one cell runs the subject under.
 
@@ -313,7 +343,7 @@ class Runner:
         two shapes could drift and the comparison between them would stop
         meaning anything.
         """
-        environment = self.base_environment(subject, target)
+        environment = self.base_environment(subject, target, incremental)
         if toolchain is not None:
             environment["RUSTUP_TOOLCHAIN"] = toolchain
         args = list(subject["args"]) if args is None else args  # type: ignore[arg-type]
@@ -362,9 +392,15 @@ class Runner:
         target: Path,
         store: Path,
         toolchain: str | None = None,
+        incremental: bool = False,
+        fresh_target: bool = True,
     ) -> dict[str, object]:
         """Run one build and return its timing plus whatever the tool reported."""
-        shutil.rmtree(target, ignore_errors=True)
+        # Every scenario but the edit loop starts from a fresh target, which is
+        # what a CI runner has. The edit loop keeps the one its seed build
+        # produced, because rebuilding in place is the thing being measured.
+        if fresh_target:
+            shutil.rmtree(target, ignore_errors=True)
         extra: dict[str, object] = {}
         command, environment = self.invocation(
             tool=tool,
@@ -373,6 +409,7 @@ class Runner:
             target=target,
             store=store,
             toolchain=toolchain,
+            incremental=incremental,
         )
 
         started = time.perf_counter_ns()
@@ -422,6 +459,19 @@ class Runner:
                 check=False,
             )
 
+        # An edit that failed to invalidate anything would render as a very
+        # fast rebuild rather than as a broken scenario, so the gate needs to
+        # know whether a compiler ran at all.
+        extra["recompiled"] = "Compiling " in completed.stderr
+        if tool == "cargo":
+            # Clearing the wrapper variables is not proof that they were the
+            # only way in. A `cargo` that is itself a shim for mbx, which is
+            # what a developer running this on their own machine has, produces
+            # a baseline that quietly benefits from the cache it is supposed
+            # to be the control for -- and the faster that baseline looks, the
+            # worse mbx looks, so nothing about the published numbers would
+            # give it away.
+            extra["wrapped"] = "mbx[" in completed.stderr
         return {"tool": tool, "wall_duration_ns": duration_ns, **extra}
 
     def run_batch(
@@ -546,6 +596,12 @@ PUBLISHED_STATS = (
 # are the point of that scenario, not a detail of it.
 PUBLISHED_CONTENTION = ("peak_compilers", "min_available_bytes", "permits")
 
+# Every trial's timing, published rather than reduced away. A reader cannot
+# tell whether a gap between two tools means anything without knowing how far
+# the same tool moved between its own runs, and the page suppresses the
+# "fastest" label when the gap is inside that spread.
+PUBLISHED_TRIALS = ("trials", "wall_durations_ns")
+
 
 class Progress:
     """Durable progress lines for long-running benchmark logs."""
@@ -591,7 +647,7 @@ def publishable(result: dict[str, object]) -> dict[str, object]:
                 "tool": cell["tool"],
                 "wall_duration_ns": cell["wall_duration_ns"],
             }
-            for field in PUBLISHED_CONTENTION:
+            for field in PUBLISHED_CONTENTION + PUBLISHED_TRIALS:
                 if field in cell:
                     trimmed[field] = cell[field]
             stats = cell.get("stats")
@@ -618,6 +674,234 @@ def restored_files(cell: dict[str, object]) -> int:
     return 0
 
 
+def touch_source(subject: dict[str, object], checkout: Path) -> None:
+    """Make the one-line source change the edit loop is built around.
+
+    A trailing comment is enough: rustc recompiles the crate for any change to
+    the file, and a larger edit would measure a different amount of the
+    subject's own code every time the pinned revision moves.
+    """
+    source = checkout / str(subject["edit"])
+    if not source.is_file():
+        raise RuntimeError(f"{subject['edit']} is not in the pinned checkout")
+    with source.open("a", encoding="utf-8") as handle:
+        handle.write("\n// mbx benchmark edit\n")
+
+
+def one_trial(
+    scenario: str,
+    tool: str,
+    cell: str,
+    subject: dict[str, object],
+    runner: Runner,
+    work: Path,
+) -> dict[str, object]:
+    """Run one tool through one scenario once, in a store and checkout of its own.
+
+    Trials share nothing. A second trial that started from the first one's
+    store would be measuring a different scenario than the first, which is the
+    one thing a repeated measurement must not do.
+    """
+    store = work / f"store-{cell}"
+    target = work / f"target-{cell}"
+
+    if scenario == "warm":
+        checkout = work / f"checkout-{cell}"
+        clone(subject, str(subject["child"]), checkout)
+        seed = runner.run(
+            tool=tool,
+            cell=f"{cell}-seed",
+            subject=subject,
+            checkout=checkout,
+            target=target,
+            store=store,
+        )
+        measured = runner.run(
+            tool=tool,
+            cell=cell,
+            subject=subject,
+            checkout=checkout,
+            target=target,
+            store=store,
+        )
+        # The seed is this tool's own cold build: an empty store, a fresh
+        # target, the same checkout and machine. Carrying its timing is what
+        # lets a warm build still be gated against a cold one without
+        # publishing a cold scenario whose tools finish within a second of
+        # each other.
+        measured["seed_wall_duration_ns"] = seed["wall_duration_ns"]
+        return measured
+
+    if scenario == "commit":
+        checkout = work / f"checkout-{cell}"
+        if tool != "cargo":
+            clone(subject, str(subject["parent"]), checkout)
+            runner.run(
+                tool=tool,
+                cell=f"{cell}-seed",
+                subject=subject,
+                checkout=checkout,
+                target=target,
+                store=store,
+            )
+            git("checkout", "--detach", str(subject["child"]), cwd=checkout)
+        else:
+            # cargo has no store to seed and its target is wiped before every
+            # run, so seeding it would only measure a cold build twice. The
+            # baseline for this scenario is a cold build.
+            clone(subject, str(subject["child"]), checkout)
+        return runner.run(
+            tool=tool,
+            cell=cell,
+            subject=subject,
+            checkout=checkout,
+            target=target,
+            store=store,
+        )
+
+    if scenario == "edit":
+        checkout = work / f"checkout-{cell}"
+        clone(subject, str(subject["child"]), checkout)
+        # The seed leaves its target in place, which is the whole scenario: a
+        # developer edits inside the tree they just built, and the incremental
+        # state in that target is what the rebuild is racing against. cargo is
+        # the baseline here rather than a control, because a cache that slows
+        # this loop down is a cache nobody leaves switched on.
+        runner.run(
+            tool=tool,
+            cell=f"{cell}-seed",
+            subject=subject,
+            checkout=checkout,
+            target=target,
+            store=store,
+            incremental=True,
+        )
+        touch_source(subject, checkout)
+        return runner.run(
+            tool=tool,
+            cell=cell,
+            subject=subject,
+            checkout=checkout,
+            target=target,
+            store=store,
+            incremental=True,
+            fresh_target=False,
+        )
+
+    if scenario == "worktree":
+        seed = work / f"checkout-{cell}-seed"
+        clone(subject, str(subject["child"]), seed)
+        runner.run(
+            tool=tool,
+            cell=f"{cell}-seed",
+            subject=subject,
+            checkout=seed,
+            target=target,
+            store=store,
+        )
+        # A different path, which is the whole point: absolute paths must not
+        # have entered the keys. What this reports is the hits, not the
+        # seconds. A cache that keyed on paths restores nothing here, and that
+        # is a pass or a fail rather than a race.
+        other = work / f"checkout-{cell}-elsewhere"
+        clone(subject, str(subject["child"]), other)
+        return runner.run(
+            tool=tool,
+            cell=cell,
+            subject=subject,
+            checkout=other,
+            target=work / f"target-{cell}-elsewhere",
+            store=store,
+        )
+
+    if scenario == "toolchain":
+        alternate = os.environ.get("MBX_BENCH_ALTERNATE_TOOLCHAIN")
+        if not alternate:
+            raise Skipped("set MBX_BENCH_ALTERNATE_TOOLCHAIN to a second installed Rust")
+        if tool_version("rustc", alternate) == tool_version("rustc", str(subject["toolchain"])):
+            raise Skipped(
+                f"MBX_BENCH_ALTERNATE_TOOLCHAIN ({alternate}) resolves to the "
+                f"pinned {subject['toolchain']}, so nothing would change"
+            )
+        checkout = work / f"checkout-{cell}"
+        clone(subject, str(subject["child"]), checkout)
+        runner.run(
+            tool=tool,
+            cell=f"{cell}-seed",
+            subject=subject,
+            checkout=checkout,
+            target=target,
+            store=store,
+        )
+        return runner.run(
+            tool=tool,
+            cell=cell,
+            subject=subject,
+            checkout=checkout,
+            target=target,
+            store=store,
+            toolchain=alternate,
+        )
+
+    if scenario == "contention":
+        checkout = work / f"checkout-{cell}"
+        clone(subject, str(subject["child"]), checkout)
+        return runner.run_batch(
+            tool=tool,
+            cell=cell,
+            subject=subject,
+            checkout=checkout,
+            work=work,
+            store=store,
+            permits=contention_permits(),
+        )
+
+    raise ValueError(f"unknown scenario {scenario}")
+
+
+def median_cell(cells: list[dict[str, object]]) -> dict[str, object]:
+    """One tool's trials reduced to the middle one, with all of them kept.
+
+    The middle trial rather than an averaged number, so the statistics
+    published beside a timing come from the build that actually produced it.
+    An even number of trials takes the lower middle. Every trial's timing is
+    carried through to the published file: the spread is what tells a reader
+    which differences on the page are real, and it is not the benchmark's
+    place to hide it.
+    """
+    ordered = sorted(cells, key=lambda cell: int(cell["wall_duration_ns"]))
+    chosen = dict(ordered[(len(ordered) - 1) // 2])
+    chosen["trials"] = len(cells)
+    chosen["wall_durations_ns"] = [int(cell["wall_duration_ns"]) for cell in cells]
+    return chosen
+
+
+def guard_summary(scenario: str, results: list[dict[str, object]]) -> str | None:
+    """What an untimed scenario asserted, in the words the page renders.
+
+    Written here rather than in the template because the claim belongs with
+    the code that checked it.
+    """
+    if not results:
+        return None
+    stats = results[0].get("stats")
+    if not isinstance(stats, dict):
+        return None
+    if scenario == "toolchain":
+        return (
+            f"Of {stats.get('predictions_loaded', 0)} predicted compilations, a different "
+            f"compiler let mbx look up {stats.get('lookups', 0)}: the ones that do not "
+            "depend on rustc at all."
+        )
+    if scenario == "worktree":
+        return (
+            f"A second checkout at a different path restored "
+            f"{stats.get('restored_output_files', 0)} output files on "
+            f"{stats.get('hits', 0)} cache hits, so no absolute path reached the keys."
+        )
+    return None
+
+
 def run_scenario(
     scenario: str,
     tools: tuple[str, ...],
@@ -625,158 +909,41 @@ def run_scenario(
     runner: Runner,
     work: Path,
     progress: Progress,
+    trials: int = 1,
 ) -> dict[str, object]:
-    """Run every tool through one scenario, each in its own store and target."""
+    """Run every tool through one scenario, repeating the ones worth repeating."""
+    repeats = trials if SCENARIOS[scenario].get("repeatable") else 1
     results: list[dict[str, object]] = []
     notes: list[str] = []
     for tool in tools:
-        cell = f"{scenario}-{tool}"
-        progress.start(cell)
-        store = work / f"store-{cell}"
-        target = work / f"target-{cell}"
-        try:
-            if scenario == "cold":
-                checkout = work / f"checkout-{cell}"
-                clone(subject, str(subject["child"]), checkout)
-                results.append(
-                    runner.run(
-                        tool=tool,
-                        cell=cell,
-                        subject=subject,
-                        checkout=checkout,
-                        target=target,
-                        store=store,
-                    )
-                )
-            elif scenario == "warm":
-                checkout = work / f"checkout-{cell}"
-                clone(subject, str(subject["child"]), checkout)
-                runner.run(
-                    tool=tool,
-                    cell=f"{cell}-seed",
-                    subject=subject,
-                    checkout=checkout,
-                    target=target,
-                    store=store,
-                )
-                results.append(
-                    runner.run(
-                        tool=tool,
-                        cell=cell,
-                        subject=subject,
-                        checkout=checkout,
-                        target=target,
-                        store=store,
-                    )
-                )
-            elif scenario == "commit":
-                checkout = work / f"checkout-{cell}"
-                if tool != "cargo":
-                    clone(subject, str(subject["parent"]), checkout)
-                    runner.run(
-                        tool=tool,
-                        cell=f"{cell}-seed",
-                        subject=subject,
-                        checkout=checkout,
-                        target=target,
-                        store=store,
-                    )
-                    git("checkout", "--detach", str(subject["child"]), cwd=checkout)
-                else:
-                    # cargo has no store to seed and its target is wiped before
-                    # every run, so seeding it would only measure a cold build
-                    # twice. The baseline for this scenario is a cold build.
-                    clone(subject, str(subject["child"]), checkout)
-                results.append(
-                    runner.run(
-                        tool=tool,
-                        cell=cell,
-                        subject=subject,
-                        checkout=checkout,
-                        target=target,
-                        store=store,
-                    )
-                )
-            elif scenario == "worktree":
-                seed = work / f"checkout-{cell}-seed"
-                clone(subject, str(subject["child"]), seed)
-                runner.run(
-                    tool=tool,
-                    cell=f"{cell}-seed",
-                    subject=subject,
-                    checkout=seed,
-                    target=target,
-                    store=store,
-                )
-                # A different path, which is the whole point: absolute paths
-                # must not have entered the keys.
-                other = work / f"checkout-{cell}-elsewhere"
-                clone(subject, str(subject["child"]), other)
-                results.append(
-                    runner.run(
-                        tool=tool,
-                        cell=cell,
-                        subject=subject,
-                        checkout=other,
-                        target=work / f"target-{cell}-elsewhere",
-                        store=store,
-                    )
-                )
-            elif scenario == "toolchain":
-                alternate = os.environ.get("MBX_BENCH_ALTERNATE_TOOLCHAIN")
-                if not alternate:
-                    raise Skipped("set MBX_BENCH_ALTERNATE_TOOLCHAIN to a second installed Rust")
-                if tool_version("rustc", alternate) == tool_version(
-                    "rustc", str(subject["toolchain"])
-                ):
-                    raise Skipped(
-                        f"MBX_BENCH_ALTERNATE_TOOLCHAIN ({alternate}) resolves to the "
-                        f"pinned {subject['toolchain']}, so nothing would change"
-                    )
-                checkout = work / f"checkout-{cell}"
-                clone(subject, str(subject["child"]), checkout)
-                runner.run(
-                    tool=tool,
-                    cell=f"{cell}-seed",
-                    subject=subject,
-                    checkout=checkout,
-                    target=target,
-                    store=store,
-                )
-                results.append(
-                    runner.run(
-                        tool=tool,
-                        cell=cell,
-                        subject=subject,
-                        checkout=checkout,
-                        target=target,
-                        store=store,
-                        toolchain=alternate,
-                    )
-                )
-            elif scenario == "contention":
-                checkout = work / f"checkout-{cell}"
-                clone(subject, str(subject["child"]), checkout)
-                results.append(
-                    runner.run_batch(
-                        tool=tool,
-                        cell=cell,
-                        subject=subject,
-                        checkout=checkout,
-                        work=work,
-                        store=store,
-                        permits=contention_permits(),
-                    )
-                )
+        measured: list[dict[str, object]] = []
+        for trial in range(1, repeats + 1):
+            cell = f"{scenario}-{tool}" if repeats == 1 else f"{scenario}-{tool}-{trial}"
+            progress.start(cell)
+            try:
+                measured.append(one_trial(scenario, tool, cell, subject, runner, work))
+            except Skipped as skip:
+                notes.append(f"{tool}: {skip}")
+                progress.finish(cell, "skipped")
+                break
+            except RuntimeError as failure:
+                # A tool we do not own failing a scenario is a fact about that
+                # tool, not a reason to publish nothing. It is reported as
+                # unmeasured, the same as a tool that was not installed. mbx
+                # and the cargo baseline still fail the run: those are ours,
+                # and a broken harness must not look like a competitor's
+                # limitation.
+                if tool in MBX_TOOLS or tool == "cargo":
+                    raise
+                notes.append(f"{tool}: {failure}")
+                progress.finish(cell, "failed")
+                break
             else:
-                raise ValueError(f"unknown scenario {scenario}")
-        except Skipped as skip:
-            notes.append(f"{tool}: {skip}")
-            progress.finish(cell, "skipped")
-        else:
-            progress.finish(cell)
+                progress.finish(cell)
+        if measured:
+            results.append(median_cell(measured))
 
-    return {
+    entry: dict[str, object] = {
         "scenario": scenario,
         "description": SCENARIOS[scenario]["description"],
         "timed": SCENARIOS[scenario].get("timed", True),
@@ -784,6 +951,9 @@ def run_scenario(
         "results": results,
         "skipped": notes,
     }
+    if not entry["timed"]:
+        entry["guard"] = guard_summary(scenario, results)
+    return entry
 
 
 def contention_permits() -> int:
@@ -819,15 +989,37 @@ def validate(scenarios: list[dict[str, object]]) -> list[str]:
             if hits(cell) <= 0 or restored_files(cell) <= 0:
                 failures.append(f"{name}: mbx restored nothing, so the timing is not a cache result")
 
-    cold = by_name.get("cold")
     warm = by_name.get("warm")
-    if cold and warm:
-        cold_by_tool = {cell["tool"]: cell for cell in cold["results"]}  # type: ignore[index]
+    if warm:
+        # Against the build that seeded it rather than against a published
+        # cold scenario: same tool, same checkout, same trial, empty store.
+        # That is a stricter comparison than the cold cards ever were, and it
+        # costs no extra build.
         for cell in warm["results"]:  # type: ignore[index]
-            baseline = cold_by_tool.get(cell["tool"])
-            if baseline and cell["wall_duration_ns"] >= baseline["wall_duration_ns"]:
+            seed = cell.get("seed_wall_duration_ns")
+            if seed is not None and int(cell["wall_duration_ns"]) >= int(seed):
                 failures.append(
-                    f"warm: {cell['tool']} was no faster than its own cold build"
+                    f"warm: {cell['tool']} was no faster than the cold build that seeded it"
+                )
+
+    edit = by_name.get("edit")
+    if edit:
+        # A rebuild that compiled nothing is a fast number with no content: it
+        # would mean the edit never reached the compiler, not that the tool
+        # rebuilt quickly.
+        for cell in edit["results"]:  # type: ignore[index]
+            if not cell.get("recompiled"):
+                failures.append(
+                    f"edit: {cell['tool']} rebuilt without compiling anything, so the "
+                    "edit never reached the compiler"
+                )
+
+    for entry in scenarios:
+        for cell in entry["results"]:  # type: ignore[index]
+            if cell.get("wrapped"):
+                failures.append(
+                    f"{entry['scenario']}: the cargo baseline ran under mbx, so it is "
+                    "not the uncached control the scenario compares against"
                 )
 
     contention = by_name.get("contention")
@@ -901,6 +1093,14 @@ def validate(scenarios: list[dict[str, object]]) -> list[str]:
     return failures
 
 
+def trial_range(cell: dict[str, object]) -> str:
+    """How far one tool moved between its own runs, for the job summary."""
+    durations = cell.get("wall_durations_ns")
+    if not isinstance(durations, list) or len(durations) < 2:
+        return "1"
+    return f"{len(durations)} ({min(durations) / 1e9:.1f}-{max(durations) / 1e9:.1f} s)"
+
+
 def summarize(result: dict[str, object]) -> str:
     lines = [
         f"## Real-world benchmark: {result['subject']}",
@@ -941,18 +1141,21 @@ def summarize(result: dict[str, object]) -> str:
             if scenario["skipped"]:
                 lines.append("")
             continue
+        if scenario.get("guard"):
+            lines += [str(scenario["guard"]), ""]
         lines += [
-            "| Tool | Wall time | Hits | Restored files |"
+            "| Tool | Median wall time | Trials | Hits | Restored files |"
             if scenario["timed"]
-            else "| Tool | Ran for | Hits | Restored files |",
-            "| :--- | ---: | ---: | ---: |",
+            else "| Tool | Ran for | Trials | Hits | Restored files |",
+            "| :--- | ---: | ---: | ---: | ---: |",
         ]
         for cell in scenario["results"]:
             stats = cell.get("stats")
             hit = str(hits(cell)) if isinstance(stats, dict) else "-"
             files = str(restored_files(cell)) if isinstance(stats, dict) else "-"
             lines.append(
-                f"| {cell['tool']} | {cell['wall_duration_ns'] / 1e9:.1f} s | {hit} | {files} |"
+                f"| {cell['tool']} | {cell['wall_duration_ns'] / 1e9:.1f} s "
+                f"| {trial_range(cell)} | {hit} | {files} |"
             )
         lines.append("")
         for note in scenario["skipped"]:
@@ -970,7 +1173,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--subject", default="hk", choices=sorted(SUBJECTS))
     parser.add_argument("--tools", default=",".join(TOOLS))
-    parser.add_argument("--scenarios", default="cold,warm,commit")
+    parser.add_argument("--scenarios", default="warm,commit,edit")
+    parser.add_argument(
+        "--trials",
+        type=int,
+        default=1,
+        help=(
+            "times to repeat each timed scenario; the median trial is published "
+            "with every trial's timing beside it (CI uses 3)"
+        ),
+    )
     parser.add_argument("--mbx", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
@@ -979,6 +1191,9 @@ def main() -> int:
         help="rewrite this checked-in results file with the run (the docs site reads it)",
     )
     args = parser.parse_args()
+
+    if args.trials < 1:
+        parser.error("--trials must be at least 1")
 
     requested_tools = tuple(name.strip() for name in args.tools.split(",") if name.strip())
     unknown = set(requested_tools) - set(TOOLS)
@@ -1002,7 +1217,12 @@ def main() -> int:
         )
         if tools:
             plan.append((name, tools))
-    progress = Progress(sum(len(tools) for _, tools in plan))
+    progress = Progress(
+        sum(
+            len(tools) * (args.trials if SCENARIOS[name].get("repeatable") else 1)
+            for name, tools in plan
+        )
+    )
     if plan:
         progress.preparing()
 
@@ -1042,11 +1262,14 @@ def main() -> int:
         runner = Runner(output, cargo_home, mbx)
         scenarios = []
         for name, tools in plan:
-            scenarios.append(run_scenario(name, tools, subject, runner, work, progress))
+            scenarios.append(
+                run_scenario(name, tools, subject, runner, work, progress, args.trials)
+            )
 
     failures = validate(scenarios)
     result: dict[str, object] = {
-        "schema": 1,
+        # 2 added per-trial timings and named the published timing a median.
+        "schema": 2,
         "subject": args.subject,
         "revision": subject["child"],
         "toolchain": subject["toolchain"],
