@@ -5,11 +5,12 @@
 #![deny(missing_docs)]
 
 use mbx_cache_core::{CacheDigest, canonical_json};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 const CARGO_TARGET_DIR_ENV: &str = "CARGO_TARGET_DIR";
 const PROBE_GLOBAL_FLAGS: [&str; 3] = ["-C", "--config", "-Z"];
@@ -35,8 +36,30 @@ pub fn resolve(
     working_dir: &Path,
     target_dir_env: Option<OsString>,
 ) -> CargoInvocation {
+    resolve_in(
+        cache_root().as_deref(),
+        cargo,
+        arguments,
+        working_dir,
+        target_dir_env,
+    )
+}
+
+fn resolve_in(
+    cache: Option<&Path>,
+    cargo: &OsStr,
+    arguments: &[String],
+    working_dir: &Path,
+    target_dir_env: Option<OsString>,
+) -> CargoInvocation {
     let cargo_args = cargo_arguments(arguments);
-    let reported = cargo_roots(cargo, cargo_args, target_dir_env.as_deref());
+    let reported = recalled_cargo_roots(
+        cache,
+        cargo,
+        cargo_args,
+        working_dir,
+        target_dir_env.as_deref(),
+    );
     resolve_with_reported(arguments, working_dir, target_dir_env, reported)
 }
 
@@ -51,7 +74,29 @@ pub fn resolve_reported(
     working_dir: &Path,
     target_dir_env: Option<OsString>,
 ) -> Option<CargoInvocation> {
-    let reported = cargo_roots(cargo, cargo_arguments(arguments), target_dir_env.as_deref())?;
+    resolve_reported_in(
+        cache_root().as_deref(),
+        cargo,
+        arguments,
+        working_dir,
+        target_dir_env,
+    )
+}
+
+fn resolve_reported_in(
+    cache: Option<&Path>,
+    cargo: &OsStr,
+    arguments: &[String],
+    working_dir: &Path,
+    target_dir_env: Option<OsString>,
+) -> Option<CargoInvocation> {
+    let reported = recalled_cargo_roots(
+        cache,
+        cargo,
+        cargo_arguments(arguments),
+        working_dir,
+        target_dir_env.as_deref(),
+    )?;
     Some(resolve_with_reported(
         arguments,
         working_dir,
@@ -285,6 +330,251 @@ fn invocation_dir(arguments: &[String], working_dir: &Path) -> PathBuf {
     flag_value(arguments, "-C")
         .map(|value| absolute(working_dir, value))
         .unwrap_or_else(|| working_dir.to_path_buf())
+}
+
+/// The roots a `cargo metadata` probe reports, remembered under `cache`.
+///
+/// The probe is a Cargo process per build, and it costs more than the shim
+/// work around a hot compile once the rest has been trimmed. Its answer is a
+/// function of things this crate can watch: the Cargo binary, the manifests
+/// and configuration files Cargo reads on the way from the invocation
+/// directory to the root, and the environment that selects a target
+/// directory. A record stands while every one of those is as the probing
+/// run saw it, including the ones that were absent; anything else, or no
+/// cache to remember in, runs the probe.
+fn recalled_cargo_roots(
+    cache: Option<&Path>,
+    cargo: &OsStr,
+    arguments: &[String],
+    working_dir: &Path,
+    target_dir_env: Option<&OsStr>,
+) -> Option<(PathBuf, PathBuf)> {
+    let probe = cache.and_then(|cache| {
+        ProbeRecord::describe(cache, cargo, arguments, working_dir, target_dir_env)
+    });
+    if let Some(recalled) = probe.as_ref().and_then(ProbeRecord::recall) {
+        return Some(recalled);
+    }
+    let roots = cargo_roots(cargo, arguments, target_dir_env)?;
+    if let Some(probe) = probe {
+        probe.remember(&roots);
+    }
+    Some(roots)
+}
+
+const PROBE_RECORD_VERSION: u8 = 1;
+
+/// Everything a probe's answer was a function of, and the answer.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct ProbeRecord {
+    version: u8,
+    key: ProbeKey,
+    /// The files Cargo consulted, present or absent, as they were when the
+    /// probe ran. The root manifest joins them once the probe has named it.
+    pins: Vec<Pin>,
+    #[serde(skip)]
+    path: PathBuf,
+    workspace_root: PathBuf,
+    target_dir: PathBuf,
+}
+
+/// The inputs that select a record: an identical key with intact pins is
+/// the same question, so it gets the same answer.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct ProbeKey {
+    cargo: PathBuf,
+    arguments: Vec<String>,
+    working_dir: PathBuf,
+    target_dir_env: Option<String>,
+    build_target_dir_env: Option<String>,
+    cargo_home: Option<String>,
+}
+
+/// A file as the probe found it: absent, or present with a length and
+/// modification time. Length alone would miss an edit that kept the size.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Pin {
+    path: PathBuf,
+    state: Option<(u64, u64, u32)>,
+}
+
+impl Pin {
+    /// Describe `path`, or nothing when the filesystem cannot say enough
+    /// about it to notice a change.
+    fn describe(path: PathBuf) -> Option<Self> {
+        let state = match std::fs::metadata(&path) {
+            Ok(metadata) => {
+                let modified = metadata
+                    .modified()
+                    .ok()?
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .ok()?;
+                Some((metadata.len(), modified.as_secs(), modified.subsec_nanos()))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return None,
+        };
+        Some(Self { path, state })
+    }
+
+    fn holds(&self) -> bool {
+        Pin::describe(self.path.clone()).as_ref() == Some(self)
+    }
+}
+
+impl ProbeRecord {
+    /// Describe the probe about to run, or nothing when some input cannot be
+    /// pinned, in which case the probe runs and is not remembered.
+    fn describe(
+        cache: &Path,
+        cargo: &OsStr,
+        arguments: &[String],
+        working_dir: &Path,
+        target_dir_env: Option<&OsStr>,
+    ) -> Option<Self> {
+        let cargo = resolve_program(cargo)?;
+        let env =
+            |name: &str| std::env::var_os(name).map(|value| value.to_string_lossy().into_owned());
+        let key = ProbeKey {
+            cargo: cargo.clone(),
+            arguments: probe_arguments(arguments),
+            working_dir: working_dir.to_path_buf(),
+            target_dir_env: target_dir_env.map(|value| value.to_string_lossy().into_owned()),
+            build_target_dir_env: env("CARGO_BUILD_TARGET_DIR"),
+            cargo_home: env("CARGO_HOME"),
+        };
+        let invocation_dir = invocation_dir(arguments, working_dir);
+        // Cargo finds the manifest nearest the invocation directory, or the
+        // one named outright, and walks up from there for the workspace. Its
+        // configuration it reads from every `.cargo` above the invocation
+        // directory itself, wherever the manifest is, and from home last.
+        let manifest_start = flag_value(arguments, "--manifest-path")
+            .map(|manifest| absolute(&invocation_dir, manifest))
+            .and_then(|manifest| manifest.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| invocation_dir.clone());
+        let mut watched = vec![cargo];
+        watched.extend(
+            manifest_start
+                .ancestors()
+                .map(|directory| directory.join("Cargo.toml")),
+        );
+        for directory in invocation_dir.ancestors() {
+            let dot_cargo = directory.join(".cargo");
+            watched.push(dot_cargo.join("config.toml"));
+            watched.push(dot_cargo.join("config"));
+        }
+        if let Some(home) = key
+            .cargo_home
+            .as_deref()
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|home| home.join(".cargo")))
+        {
+            watched.push(home.join("config.toml"));
+            watched.push(home.join("config"));
+        }
+        watched.extend(
+            config_arguments(arguments)
+                .map(|value| absolute(&invocation_dir, value))
+                .filter(|path| path.is_file()),
+        );
+        let pins = watched
+            .into_iter()
+            .map(Pin::describe)
+            .collect::<Option<Vec<_>>>()?;
+        let selector = canonical_json(&key).ok()?;
+        let path = cache
+            .join("cargo-roots")
+            .join("v1")
+            .join(format!("{}.json", CacheDigest::blake3(&selector).hash));
+        Some(Self {
+            version: PROBE_RECORD_VERSION,
+            key,
+            pins,
+            path,
+            workspace_root: PathBuf::new(),
+            target_dir: PathBuf::new(),
+        })
+    }
+
+    /// The answer an earlier probe left for this key, if its pins all hold.
+    fn recall(&self) -> Option<(PathBuf, PathBuf)> {
+        let bytes = std::fs::read(&self.path).ok()?;
+        let recorded: ProbeRecord = serde_json::from_slice(&bytes).ok()?;
+        if recorded.version != PROBE_RECORD_VERSION
+            || recorded.key != self.key
+            || !recorded.pins.iter().all(Pin::holds)
+        {
+            return None;
+        }
+        Some((recorded.workspace_root, recorded.target_dir))
+    }
+
+    /// Leave the answer behind for the next invocation. Best-effort: a
+    /// record that cannot be written costs the next build a probe.
+    fn remember(mut self, roots: &(PathBuf, PathBuf)) {
+        let root_manifest = roots.0.join("Cargo.toml");
+        if !self.pins.iter().any(|pin| pin.path == root_manifest) {
+            let Some(pin) = Pin::describe(root_manifest) else {
+                return;
+            };
+            self.pins.push(pin);
+        }
+        self.workspace_root = roots.0.clone();
+        self.target_dir = roots.1.clone();
+        let Ok(bytes) = serde_json::to_vec(&self) else {
+            return;
+        };
+        let Some(directory) = self.path.parent() else {
+            return;
+        };
+        if std::fs::create_dir_all(directory).is_err() {
+            return;
+        }
+        let staged = directory.join(format!(
+            ".{}.{}",
+            self.path.file_name().unwrap_or_default().to_string_lossy(),
+            std::process::id()
+        ));
+        if std::fs::write(&staged, bytes).is_ok() && std::fs::rename(&staged, &self.path).is_err() {
+            let _ = std::fs::remove_file(&staged);
+        }
+    }
+}
+
+/// The arguments of `arguments` that reach the probe command, for its key.
+fn probe_arguments(arguments: &[String]) -> Vec<String> {
+    let mut probe = forwarded_flags(arguments, &PROBE_GLOBAL_FLAGS);
+    if let Some(manifest) = flag_value(arguments, "--manifest-path") {
+        probe.push("--manifest-path".into());
+        probe.push(manifest.into());
+    }
+    probe.extend(
+        arguments
+            .iter()
+            .filter(|argument| PROBE_MANIFEST_TOGGLES.contains(&argument.as_str()))
+            .cloned(),
+    );
+    probe
+}
+
+/// Where `program` is, the way `Command::new` would find it.
+fn resolve_program(program: &OsStr) -> Option<PathBuf> {
+    let candidate = Path::new(program);
+    if candidate.components().count() > 1 {
+        return candidate.is_file().then(|| candidate.to_path_buf());
+    }
+    let names = if cfg!(windows) {
+        vec![candidate.as_os_str().to_os_string(), {
+            let mut exe = candidate.as_os_str().to_os_string();
+            exe.push(".exe");
+            exe
+        }]
+    } else {
+        vec![candidate.as_os_str().to_os_string()]
+    };
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .flat_map(|directory| names.iter().map(move |name| directory.join(name)))
+        .find(|path| path.is_file())
 }
 
 fn cargo_roots(
@@ -546,10 +836,114 @@ mod tests {
             format!("build.target-dir='{}'", configured.display()),
         ];
 
-        let resolved = resolve_reported(OsStr::new("cargo"), &arguments, root, None).unwrap();
+        let resolved =
+            resolve_reported_in(None, OsStr::new("cargo"), &arguments, root, None).unwrap();
 
         assert_eq!(resolved.target_dir, configured);
         assert!(resolved.target_dir_requested);
+    }
+
+    /// A stand-in Cargo that answers `metadata` and logs every call.
+    #[cfg(unix)]
+    fn logging_cargo(directory: &Path, project: &Path, log: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let script = directory.join("cargo");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\ncase \" $* \" in *' metadata '*) printf '{{\"workspace_root\":\"{root}\",\"target_directory\":\"{root}/target\",\"packages\":[]}}';; esac\n",
+                log = log.display(),
+                root = project.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
+    fn probes(log: &Path) -> usize {
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains("metadata"))
+            .count()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_probe_is_remembered_while_what_cargo_read_stands() {
+        let directory = cargo_fixture();
+        let root = directory.path();
+        let cache = tempfile::tempdir().unwrap();
+        let log = root.join("cargo.log");
+        let cargo = logging_cargo(root, root, &log);
+        let arguments = ["build".to_string(), "--locked".to_string()];
+        let resolve = |target_dir_env: Option<&str>| {
+            resolve_reported_in(
+                Some(cache.path()),
+                cargo.as_os_str(),
+                &arguments,
+                root,
+                target_dir_env.map(OsString::from),
+            )
+            .unwrap()
+        };
+
+        let first = resolve(None);
+        assert_eq!(first.workspace_root, root);
+        assert_eq!(probes(&log), 1);
+        // The same question again is answered from the record.
+        assert_eq!(resolve(None), first);
+        assert_eq!(probes(&log), 1);
+
+        // An edit to a manifest Cargo read runs the probe again.
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.2.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        assert_eq!(resolve(None), first);
+        assert_eq!(probes(&log), 2);
+        assert_eq!(resolve(None), first);
+        assert_eq!(probes(&log), 2);
+
+        // So does a configuration file appearing where Cargo would look.
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::write(root.join(".cargo/config.toml"), "[build]\njobs = 2\n").unwrap();
+        assert_eq!(resolve(None), first);
+        assert_eq!(probes(&log), 3);
+
+        // The environment that selects a target directory is part of the key.
+        assert!(resolve(Some("elsewhere")).target_dir_requested);
+        assert_eq!(probes(&log), 4);
+        assert_eq!(resolve(None), first);
+        assert_eq!(probes(&log), 4);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_failed_probe_is_not_remembered() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = cargo_fixture();
+        let root = directory.path();
+        let cache = tempfile::tempdir().unwrap();
+        let script = root.join("cargo");
+        std::fs::write(&script, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let arguments = ["build".to_string()];
+
+        assert!(
+            resolve_reported_in(
+                Some(cache.path()),
+                script.as_os_str(),
+                &arguments,
+                root,
+                None
+            )
+            .is_none()
+        );
+        assert!(!cache.path().join("cargo-roots").exists());
     }
 
     #[test]
