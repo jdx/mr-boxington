@@ -227,6 +227,34 @@ class RunScenarioTest(unittest.TestCase):
         self.assertIn("build failed", entry["skipped"][0])
 
 
+class LocalEnvironmentTest(unittest.TestCase):
+    def environment(self, local: bool) -> dict[str, str]:
+        runner = real_world.Runner(Path("/out"), Path("/cargo-home"), Path("/mbx"))
+        with mock.patch.dict(
+            real_world.os.environ,
+            {"CI": "true", "GITHUB_ACTIONS": "true", "RUSTC_WRAPPER": "/inherited"},
+        ):
+            return runner.base_environment({"toolchain": "1.97.1"}, Path("/target"), local)
+
+    def test_a_runner_scenario_keeps_the_runner_it_is_on(self) -> None:
+        environment = self.environment(local=False)
+
+        self.assertEqual(environment["CARGO_INCREMENTAL"], "0")
+        self.assertEqual(environment["CI"], "true")
+
+    def test_the_edit_loop_does_not_look_like_ci(self) -> None:
+        # mbx turns learned incremental reuse off when CI is set, so leaving it
+        # would time the local loop with the feature that makes it fast
+        # disabled, on a machine nobody edits code on.
+        environment = self.environment(local=True)
+
+        self.assertEqual(environment["CARGO_INCREMENTAL"], "1")
+        self.assertNotIn("CI", environment)
+        self.assertNotIn("GITHUB_ACTIONS", environment)
+        # The uncached baseline stays uncached either way.
+        self.assertNotIn("RUSTC_WRAPPER", environment)
+
+
 class DiscardTest(unittest.TestCase):
     def test_removes_one_cell_without_touching_its_neighbours(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

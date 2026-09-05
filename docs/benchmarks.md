@@ -44,6 +44,14 @@ A full build, then edits to the subject's own source rebuilt in the same
 than a CI job. Almost nothing needs rebuilding, so the cache's own bookkeeping
 is most of what shows up. Cargo is the thing to beat here, not a control.
 
+The scenario also runs without `CI` set, because it is the one scenario about
+a developer's machine rather than a runner. mbx reads that variable and turns
+[learned incremental reuse](/configuration#learned-incremental-reuse) off when
+it is set, on the reasoning that a fresh runner has no earlier state to build
+on and never edits code anyway. Leaving it set measured the loop with the
+feature that makes the loop fast switched off: every edit recompiled the crate
+in full. It is cleared for every tool, not just mbx.
+
 The first edit after a build is thrown away and the second is timed, because
 the tools do not reach a first edit in the same state. Cargo's own build
 already wrote its incremental state, so its first edit is already a

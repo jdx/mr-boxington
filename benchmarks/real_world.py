@@ -303,7 +303,7 @@ class Runner:
         self,
         subject: dict[str, object],
         target: Path,
-        incremental: bool = False,
+        local: bool = False,
     ) -> dict[str, str]:
         environment = os.environ.copy()
         environment.update(
@@ -312,7 +312,7 @@ class Runner:
                 "CARGO_TARGET_DIR": str(target),
                 # Off for the CI scenarios, matching what CI sets. The edit
                 # loop turns it on, because a developer's rebuild has it on.
-                "CARGO_INCREMENTAL": "1" if incremental else "0",
+                "CARGO_INCREMENTAL": "1" if local else "0",
                 "CARGO_TERM_COLOR": "never",
                 "RUSTUP_TOOLCHAIN": str(subject["toolchain"]),
             }
@@ -321,6 +321,16 @@ class Runner:
         # supposedly uncached baseline.
         for variable in ("RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"):
             environment.pop(variable, None)
+        if local:
+            # The edit loop is the one scenario about a developer's machine,
+            # and it has to look like one. mbx reads CI to decide policy: with
+            # it set, learned incremental reuse is off (policy.rs), because a
+            # runner has no earlier state to build on and never edits code.
+            # Leaving it set would measure the loop with the feature that
+            # makes the loop fast deliberately disabled, on a machine nobody
+            # edits code on. Cleared for every tool, not just mbx.
+            for variable in ("CI", "GITHUB_ACTIONS"):
+                environment.pop(variable, None)
         return environment
 
     def invocation(
@@ -333,7 +343,7 @@ class Runner:
         store: Path,
         args: list[str] | None = None,
         toolchain: str | None = None,
-        incremental: bool = False,
+        local: bool = False,
     ) -> tuple[list[str], dict[str, str]]:
         """The command and environment one cell runs the subject under.
 
@@ -342,7 +352,7 @@ class Runner:
         two shapes could drift and the comparison between them would stop
         meaning anything.
         """
-        environment = self.base_environment(subject, target, incremental)
+        environment = self.base_environment(subject, target, local)
         if toolchain is not None:
             environment["RUSTUP_TOOLCHAIN"] = toolchain
         args = list(subject["args"]) if args is None else args  # type: ignore[arg-type]
@@ -391,7 +401,7 @@ class Runner:
         target: Path,
         store: Path,
         toolchain: str | None = None,
-        incremental: bool = False,
+        local: bool = False,
         fresh_target: bool = True,
     ) -> dict[str, object]:
         """Run one build and return its timing plus whatever the tool reported."""
@@ -407,7 +417,7 @@ class Runner:
             target=target,
             store=store,
             toolchain=toolchain,
-            incremental=incremental,
+            local=local,
         )
 
         started = time.perf_counter_ns()
@@ -763,7 +773,7 @@ def one_trial(
             checkout=checkout,
             target=target,
             store=store,
-            incremental=True,
+            local=True,
         )
         # One edit is thrown away before the timed one, because the tools do
         # not arrive at a first edit in the same state. cargo's seed already
@@ -782,7 +792,7 @@ def one_trial(
             checkout=checkout,
             target=target,
             store=store,
-            incremental=True,
+            local=True,
             fresh_target=False,
         )
         touch_source(subject, checkout, "timed")
@@ -793,7 +803,7 @@ def one_trial(
             checkout=checkout,
             target=target,
             store=store,
-            incremental=True,
+            local=True,
             fresh_target=False,
         )
         # Published rather than dropped. A first edit after a fresh build is a
