@@ -134,6 +134,7 @@ SCENARIOS: dict[str, dict[str, object]] = {
             "then parallel with and without mbx's machine-wide compiler limit"
         ),
         "kind": "contention",
+        "repeatable": True,
     },
 }
 
@@ -647,12 +648,18 @@ def publishable(result: dict[str, object]) -> dict[str, object]:
     scenarios = []
     for scenario in result["scenarios"]:  # type: ignore[index]
         cells = []
+        timed = bool(scenario.get("timed", True))
         for cell in scenario["results"]:
-            trimmed = {
-                "tool": cell["tool"],
-                "wall_duration_ns": cell["wall_duration_ns"],
-            }
-            for field in PUBLISHED_CONTENTION + PUBLISHED_TRIALS + PUBLISHED_EDIT:
+            # A guard's seconds are not a result and nothing renders them, so
+            # publishing them only invites a later reader, or a later template,
+            # into treating an assertion as a race.
+            trimmed: dict[str, object] = {"tool": cell["tool"]}
+            if timed:
+                trimmed["wall_duration_ns"] = cell["wall_duration_ns"]
+            fields = PUBLISHED_CONTENTION
+            if timed:
+                fields = fields + PUBLISHED_TRIALS + PUBLISHED_EDIT
+            for field in fields:
                 if field in cell:
                     trimmed[field] = cell[field]
             stats = cell.get("stats")
@@ -1097,6 +1104,13 @@ def validate(scenarios: list[dict[str, object]]) -> list[str]:
                     f"contention: unscheduled builds peaked at {baseline} compilers, within "
                     f"the {permits} permits, so this run never actually contended"
                 )
+    worktree = by_name.get("worktree")
+    if worktree is not None and not worktree["results"]:
+        failures.append(
+            "worktree: the path-independence guard did not run, so nothing checked "
+            "that a second checkout can restore the first one's outputs"
+        )
+
     toolchain = by_name.get("toolchain")
     if toolchain:
         # A skipped guard is not a passed guard. The scenario was asked for, so

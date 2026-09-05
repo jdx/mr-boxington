@@ -7,8 +7,12 @@ const resultsPath = resolve(configDir, "../../benchmarks/results.json");
 
 export interface BenchmarkCell {
   tool: string;
-  /** The median trial's wall clock, or the only one where trials is absent. */
-  wall_duration_ns: number;
+  /**
+   * The median trial's wall clock, or the only one where trials is absent.
+   * Absent on the untimed guards, whose seconds are not a result and which
+   * never reach the functions below.
+   */
+  wall_duration_ns?: number;
   /** How many times the scenario was repeated for this tool. */
   trials?: number;
   /** Every trial's wall clock, so the page can see its own noise floor. */
