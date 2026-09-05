@@ -1,0 +1,35 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M1S9JYX88110VWH699QG6E85",
+  "strategy": "manual-commit",
+  "branch": "codex/docs-social-images",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "README.md",
+    "docs/.vitepress/check-social-images.mjs",
+    "docs/.vitepress/config.mts",
+    "docs/.vitepress/fonts/OFL.txt",
+    "docs/.vitepress/fonts/README.md",
+    "docs/.vitepress/fonts/SpaceGrotesk.ttf",
+    "docs/.vitepress/social-images.mjs",
+    "docs/.vitepress/social-images.test.mjs",
+    "docs/aube-lock.yaml",
+    "docs/package.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 53850,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 3823488,
+    "output_tokens": 17429,
+    "api_call_count": 29
+  }
+}
