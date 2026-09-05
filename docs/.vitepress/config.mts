@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitepress";
 import { tabsMarkdownPlugin } from "vitepress-plugin-tabs";
+import { socialCard, writeSocialCard } from "./social-images.mjs";
 
 const configDir = dirname(fileURLToPath(import.meta.url));
 const cargoToml = readFileSync(
@@ -175,46 +176,17 @@ gtag('config', 'G-0MDX8ZJYFY');`,
     ["meta", { property: "og:type", content: "website" }],
     ["meta", { property: "og:site_name", content: "mr boxington" }],
     ["meta", { property: "og:locale", content: "en_US" }],
-    ["meta", { property: "og:title", content: "mr boxington" }],
-    [
-      "meta",
-      {
-        property: "og:description",
-        content:
-          "Put mbx in front of any cargo command. Every build on the machine shares one self-pruning cache, and you can run multiple Cargo builds in parallel.",
-      },
-    ],
-    [
-      "meta",
-      {
-        property: "og:image",
-        content: "https://mr-boxington.jdx.dev/og.png",
-      },
-    ],
     ["meta", { property: "og:image:width", content: "1200" }],
     ["meta", { property: "og:image:height", content: "630" }],
-    [
-      "meta",
-      {
-        property: "og:image:alt",
-        content: "mr boxington — a shared, self-pruning Cargo build cache",
-      },
-    ],
     ["meta", { name: "twitter:card", content: "summary_large_image" }],
     ["meta", { name: "twitter:site", content: "@jdxcode" }],
-    [
-      "meta",
-      { name: "twitter:image", content: "https://mr-boxington.jdx.dev/og.png" },
-    ],
-    [
-      "meta",
-      {
-        name: "twitter:image:alt",
-        content: "mr boxington — a shared, self-pruning Cargo build cache",
-      },
-    ],
   ],
-  transformHead({ pageData, title, description }) {
+  transformHead({ pageData, title, description, siteConfig }) {
+    const heading = pageData.title || "mr boxington";
+    const card = socialCard(heading);
+    writeSocialCard(siteConfig.outDir, card);
+    const image = new URL(card.path, `${siteUrl}/`).toString();
+    const imageAlt = `${heading} — mr boxington docs`;
     const url = new URL(
       pageData.relativePath.replace(/index\.md$/, "").replace(/\.md$/, ""),
       `${siteUrl}/`,
@@ -223,6 +195,10 @@ gtag('config', 'G-0MDX8ZJYFY');`,
     return [
       ["link", { rel: "canonical", href: url }],
       ["meta", { property: "og:url", content: url }],
+      ["meta", { property: "og:image", content: image }],
+      ["meta", { property: "og:image:alt", content: imageAlt }],
+      ["meta", { name: "twitter:image", content: image }],
+      ["meta", { name: "twitter:image:alt", content: imageAlt }],
       ["meta", { property: "og:title", content: title }],
       ["meta", { property: "og:description", content: description }],
       ["meta", { name: "twitter:title", content: title }],
