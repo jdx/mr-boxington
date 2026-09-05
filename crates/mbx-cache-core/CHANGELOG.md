@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.11.5...mbx-cache-core-v0.12.0) - 2026-09-05
+
+### Fixed
+
+- restore NFS digest reuse without read storms ([#341](https://github.com/jdx/mr-boxington/pull/341))
+
+### Other
+
+- *(cache)* avoid redundant import copies and hashes ([#353](https://github.com/jdx/mr-boxington/pull/353))
+
 ## [0.11.5](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.11.4...mbx-cache-core-v0.11.5) - 2026-09-04
 
 ### Fixed
