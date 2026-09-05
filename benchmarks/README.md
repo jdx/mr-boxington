@@ -25,13 +25,18 @@ shared performance series to `refs/notes/tak`.
 `real_world.py` measures somebody else's project instead of this one. It
 clones a pinned checkout of [jdx/hk](https://github.com/jdx/hk) and runs the
 same `cargo build --locked` under raw cargo, mbx, and kache across the
-situations CI actually hits: a cold store, a warm store with a fresh target,
-the next commit on the branch, a second checkout at a different path, and a
-compiler change. The last of those is a correctness cell rather than a timing —
-it fails unless a different rustc leaves almost every predicted compilation
-unlooked-up, which is the shape the hk benchmark hit when a runner image
-rolled a new Rust. Not zero hits: actions that do not depend on rustc, such as
-a build script's C objects, legitimately survive a Rust change.
+timed scenarios CI and developers actually hit: a warm store with a fresh
+target, the next commit on the branch, and a one-line edit rebuilt in place
+with incremental compilation on. That last one runs without `CI` set, since it
+models a developer's machine and mbx turns learned incremental reuse off on a
+runner. It also discards a first edit and times the second: Cargo reaches its first edit with incremental state its own build
+wrote, while mbx has to build a crate's private state on the first edit and
+reuse it after, so timing the first would report a setup cost as though it
+were the loop. Each runs `--trials` times per tool, three in
+CI, from a fresh clone and an empty store every time. The published cell is
+the middle trial and carries every trial's timing, and the site will not name
+a fastest tool when the gap between the top two is inside one tool's own
+range.
 
 The `contention` scenario is the odd one out: it stacks six overlapping check,
 Clippy, and test-compilation jobs on one runner. It measures sequential context,
@@ -45,17 +50,17 @@ The comparison is kept fair by fetching the registry once outside every timed
 build, pinning the toolchain (hk does not pin one itself), giving each cell
 its own store and target, clearing any inherited `RUSTC_WRAPPER`, and running
 both caches local-only. Validity gates reject a run whose warm builds restored
-nothing or were no faster than cold, because those numbers would still render.
+nothing or were no faster than the build that seeded them, whose edit rebuild
+compiled nothing, or whose cargo baseline ran under mbx after all, as it does
+when `cargo` on `PATH` is an mbx shim.
 The contention gates verify that the scheduled batch stays inside its permits
 and the unscheduled one exceeds them, since a bound nothing pushed against
 proves nothing. Wall-time ordering remains a reported benchmark result rather
 than a validity condition because a single shared-runner sample is noisy.
 
-`mise run bench` runs the everyday subset; `mise run bench:refresh` runs
-everything and rewrites `results.json`, which the documentation site reads.
-The refresh needs `MBX_BENCH_ALTERNATE_TOOLCHAIN` set to a second installed
-Rust, and fails without it: a skipped guard is not a passed guard, and a run
-that could not check compiler invalidation must not publish as though it had.
+`mise run bench` runs the everyday subset once through; `mise run
+bench:refresh` runs every scenario, three trials of each, and rewrites
+`results.json`, which the documentation site reads.
 kache is used when it is on `PATH` and skipped with a note otherwise. The
 [bench-refresh workflow](../.github/workflows/bench-refresh.yml) runs it
 weekly, only when the published numbers predate the mbx on `main`, and opens a

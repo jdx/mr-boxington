@@ -12,8 +12,8 @@ build, never a wrong one. See [stability](/stability#the-store-is-disposable).
 A first build has an empty store. There is nothing to hit, so it can only
 cost time, and the summary's "could not look up" line dominates. Time the
 second build instead. See
-[cache results](/cache-results#troubleshooting-a-low-hit-rate) and the cold
-scenario in [benchmarks](/benchmarks#cold).
+[cache results](/cache-results#troubleshooting-a-low-hit-rate), and the
+[warm scenario](/benchmarks#warm) for what that second build gets.
 
 ## Why does a fully warm build still take time?
 
@@ -27,7 +27,6 @@ and Windows, and self-contained WebAssembly targets everywhere. The rest is
 No. The compiler is part of every key, so a toolchain roll invalidates every
 rustc action at once, and the build says so:
 `a manifest predicting N compilations was loaded, but none matched this build`.
-The benchmarks cover this in the [toolchain scenario](/benchmarks#toolchain).
 Actions that do not depend on rustc, such as a build script's C objects,
 survive.
 

@@ -21,25 +21,12 @@
           <h3 :id="scenario.scenario">{{ scenario.scenario }}</h3>
           <p class="mbx-bench-caption">{{ scenario.description }}</p>
         </div>
-        <span
-          v-if="scenario.timed && scenario.kind !== 'contention'"
-          class="mbx-bench-direction"
-        >
+        <span v-if="scenario.kind !== 'contention'" class="mbx-bench-direction">
           lower is better
         </span>
       </header>
-      <p
-        v-if="!scenario.timed && scenario.results.length"
-        class="mbx-bench-guard"
-      >
-        Guard held: of
-        {{ scenario.results[0].stats?.predictions_loaded ?? 0 }} predicted
-        compilations, a different compiler let mbx look up
-        {{ scenario.results[0].stats?.lookups ?? 0 }} — the ones that do not
-        depend on rustc at all.
-      </p>
       <div
-        v-else-if="scenario.kind === 'contention' && scenario.results.length"
+        v-if="scenario.kind === 'contention' && scenario.results.length"
         class="mbx-bench-chart"
         role="list"
         aria-label="Contention benchmark results"
@@ -53,7 +40,9 @@
         >
           <div class="mbx-bench-tool">
             <code>{{ cell.label }}</code>
-            <span v-if="cell.badge" class="mbx-bench-fastest">{{ cell.badge }}</span>
+            <span v-if="cell.badge" class="mbx-bench-fastest">{{
+              cell.badge
+            }}</span>
             <span v-if="cell.fastest" class="mbx-bench-fastest">fastest</span>
           </div>
           <div class="mbx-bench-bar-track" aria-hidden="true">
@@ -66,6 +55,7 @@
           <strong class="mbx-bench-seconds">{{ cell.seconds }}</strong>
           <div class="mbx-bench-meta">
             <span v-if="cell.comparison">{{ cell.comparison }}</span>
+            <span v-if="cell.spread">{{ cell.spread }}</span>
             <span>{{ cell.compilers }}</span>
             <span>{{ cell.memory }}</span>
           </div>
@@ -99,9 +89,14 @@
           <div class="mbx-bench-meta">
             <span v-if="cell.comparison">{{ cell.comparison }}</span>
             <span v-if="cell.hits !== '—'">{{ cell.hits }} cache hits</span>
+            <span v-if="cell.spread">{{ cell.spread }}</span>
+            <span v-if="cell.warmup">{{ cell.warmup }}</span>
           </div>
         </div>
       </div>
+      <p v-if="inconclusive(scenario)" class="mbx-bench-inconclusive">
+        {{ inconclusive(scenario) }}
+      </p>
       <p v-if="scenario.skipped.length" class="mbx-bench-skipped">
         Not measured: {{ scenario.skipped.join("; ") }}
       </p>
@@ -135,7 +130,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { data } from "../benchmarks.data";
-import type { BenchmarkScenario } from "../benchmarks.data";
+import type { BenchmarkCell, BenchmarkScenario } from "../benchmarks.data";
 
 // Bars are scaled within a scenario, never across them: each card answers
 // which tool was faster on that workload, not how the workloads compare to
@@ -143,6 +138,63 @@ import type { BenchmarkScenario } from "../benchmarks.data";
 // so the slowest result fills the track and every other result is proportional.
 function barWidth(duration: number, slowest: number) {
   return Math.max(2, (duration / slowest) * 100);
+}
+
+// How far one tool moved between its own repeats. This is the page's noise
+// floor, measured on the same machine, in the same scenario, minutes apart.
+function spread(cell: BenchmarkCell) {
+  const trials = cell.wall_durations_ns;
+  if (!trials || trials.length < 2) return 0;
+  return Math.max(...trials) - Math.min(...trials);
+}
+
+// Why this scenario may not name a winner, or null when it may. A lead
+// smaller than a tool's own spread across repeats is noise, not a result.
+// Contention is exempt: it compares one binary against itself with the
+// scheduler on and off.
+function inconclusive(scenario: BenchmarkScenario): string | null {
+  const ordered = [...scenario.results].sort(
+    (left, right) => left.wall_duration_ns - right.wall_duration_ns,
+  );
+  // A tool that failed the scenario is left out of the card, so the one
+  // that remains has beaten nothing.
+  if (ordered.length < 2) {
+    return ordered.length === 1
+      ? "Only one tool completed this scenario, so nothing is marked fastest."
+      : null;
+  }
+  const [best, next] = ordered;
+  // A single trial shows no spread, so it names nobody.
+  if (
+    (best.wall_durations_ns?.length ?? 0) < 2 ||
+    (next.wall_durations_ns?.length ?? 0) < 2
+  ) {
+    return "Measured once per tool, so no tool is marked fastest here.";
+  }
+  const margin = next.wall_duration_ns - best.wall_duration_ns;
+  const floor = Math.max(spread(best), spread(next));
+  if (margin > floor) return null;
+  return (
+    `No tool is marked fastest: the ${seconds(margin)}s between the fastest ` +
+    `two is inside the ${seconds(floor)}s one of them moved across its own ` +
+    `repeats.`
+  );
+}
+
+// Tenths everywhere else on the page, but a margin this rule rejects can be
+// smaller than that, and "the 0.0s between them" reads as a rounding error
+// rather than as the reason nothing is marked fastest.
+function seconds(ns: number) {
+  const value = ns / 1e9;
+  return value < 0.1 ? value.toFixed(2) : value.toFixed(1);
+}
+
+function spreadLabel(cell: BenchmarkCell) {
+  const trials = cell.wall_durations_ns ?? [];
+  if (trials.length < 2) return null;
+  const low = (Math.min(...trials) / 1e9).toFixed(1);
+  const high = (Math.max(...trials) / 1e9).toFixed(1);
+  return `${trials.length} runs, ${low}–${high}s`;
 }
 
 function rows(scenario: BenchmarkScenario) {
@@ -153,10 +205,15 @@ function rows(scenario: BenchmarkScenario) {
   const fastest = Math.min(
     ...scenario.results.map((cell) => cell.wall_duration_ns),
   );
-  // A Cargo result is meaningful only inside the scenario that measured it.
-  // In the commit case it is deliberately an uncached control: Cargo has no
-  // portable store to seed from the parent commit, and its target is fresh.
+  const separated = inconclusive(scenario) === null;
+  // A Cargo result is meaningful only inside the scenario that measured it,
+  // and it is not the same kind of result in each. In the commit case it is
+  // deliberately an uncached control: Cargo has no portable store to seed
+  // from the parent commit, and its target is fresh. In the edit case it
+  // keeps its target and its incremental state, so it is the thing the caches
+  // have to beat rather than a control. The run says which it was.
   const baseline = scenario.results.find((cell) => cell.tool === "cargo");
+  const baselineLabel = scenario.baseline ?? "uncached baseline";
   return scenario.results.map((cell) => {
     const seconds = cell.wall_duration_ns / 1e9;
     const ratio = baseline
@@ -164,20 +221,23 @@ function rows(scenario: BenchmarkScenario) {
       : null;
     return {
       tool: cell.tool,
-      fastest: cell.wall_duration_ns === fastest,
+      fastest: separated && cell.wall_duration_ns === fastest,
+      warmup: cell.warmup_wall_duration_ns
+        ? `first edit after a build ${(cell.warmup_wall_duration_ns / 1e9).toFixed(1)}s`
+        : null,
+      spread: spreadLabel(cell),
       seconds:
         seconds >= 60
           ? `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`
           : `${seconds.toFixed(1)}s`,
       width: barWidth(cell.wall_duration_ns, slowest),
-      comparison:
-        !baseline
-          ? null
-          : cell === baseline
-            ? "uncached baseline"
-            : ratio! >= 1
-              ? `${ratio!.toFixed(2)}× faster than cargo`
-              : `${(1 / ratio!).toFixed(2)}× slower than cargo`,
+      comparison: !baseline
+        ? null
+        : cell === baseline
+          ? baselineLabel
+          : ratio! >= 1
+            ? `${ratio!.toFixed(2)}× faster than cargo`
+            : `${(1 / ratio!).toFixed(2)}× slower than cargo`,
       hits: cell.stats?.hits ?? "—",
     };
   });
@@ -198,6 +258,7 @@ function contentionRows(scenario: BenchmarkScenario) {
   const fastest = Math.min(
     ...scenario.results.map((cell) => cell.wall_duration_ns),
   );
+  const separated = inconclusive(scenario) === null;
   return scenario.results.map((cell) => {
     const seconds = cell.wall_duration_ns / 1e9;
     const available = cell.min_available_bytes;
@@ -218,7 +279,7 @@ function contentionRows(scenario: BenchmarkScenario) {
           : cell.tool === "mbx-unscheduled"
             ? "parallel control"
             : null,
-      fastest: cell.wall_duration_ns === fastest,
+      fastest: separated && cell.wall_duration_ns === fastest,
       seconds:
         seconds >= 60
           ? `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`
@@ -228,6 +289,7 @@ function contentionRows(scenario: BenchmarkScenario) {
         delta === null || cell.tool !== "mbx"
           ? null
           : `${Math.abs(delta).toFixed(1)}s ${delta >= 0 ? "slower" : "faster"} than scheduler off`,
+      spread: spreadLabel(cell),
       compilers: cell.permits
         ? `${cell.peak_compilers ?? 0} of ${cell.permits} compiler slots used`
         : `${cell.peak_compilers ?? 0} peak compilers`,
@@ -259,13 +321,13 @@ const versionList = computed(() => {
 
 <style scoped>
 .mbx-bench-scenario {
-  background:
-    linear-gradient(
-      145deg,
-      color-mix(in srgb, var(--vp-c-bg-soft) 96%, var(--vp-c-brand-1) 4%),
-      var(--vp-c-bg-soft)
-    );
-  border: 1px solid color-mix(in srgb, var(--vp-c-divider) 80%, var(--vp-c-brand-1) 20%);
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--vp-c-bg-soft) 96%, var(--vp-c-brand-1) 4%),
+    var(--vp-c-bg-soft)
+  );
+  border: 1px solid
+    color-mix(in srgb, var(--vp-c-divider) 80%, var(--vp-c-brand-1) 20%);
   border-radius: 14px;
   margin: 28px 0;
   overflow: hidden;
@@ -383,14 +445,14 @@ const versionList = computed(() => {
   line-height: 1;
   padding: 5px 7px;
 }
-.mbx-bench-guard,
+.mbx-bench-inconclusive,
 .mbx-bench-skipped,
 .mbx-bench-scenario-provenance,
 .mbx-bench-provenance {
   color: var(--vp-c-text-2);
   font-size: 13px;
 }
-.mbx-bench-guard,
+.mbx-bench-inconclusive,
 .mbx-bench-skipped,
 .mbx-bench-scenario-provenance {
   border-top: 1px solid var(--vp-c-divider);

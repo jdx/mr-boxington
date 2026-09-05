@@ -5,14 +5,16 @@
 "did mbx regress" but not "what does mbx do to somebody else's build". This
 driver clones a pinned third-party subject and runs the same Cargo invocation
 under raw cargo, mbx, and kache across scenarios drawn from the live hk and
-mise cache workflows: a cold store, a warm store with a fresh target, the
-next commit on the branch, and a second checkout at a different path.
+mise cache workflows: a warm store with a fresh target, the next commit on the
+branch, and a one-line edit rebuilt in place.
 
-Every timing is wall clock around one build, the way CI experiences it. The
-registry is fetched once up front and shared, so no cell is timed while it
-downloads crates. Toolchains are pinned per subject: a runner-image Rust bump
-changes every invocation digest at once, which reads as a cache that stopped
-working. See `benchmarks/README.md`.
+Every timing is wall clock around one build, the way CI experiences it. A
+timed scenario is repeated (`--trials`) and reports the median trial with
+every trial's timing beside it, because a scenario whose tools finish within
+the run-to-run spread has not measured a difference between them. The registry
+is fetched once up front and shared, so no cell is timed while it downloads
+crates. Toolchains are pinned per subject: a runner-image Rust bump changes
+every invocation digest at once, which reads as a cache that stopped working. See `benchmarks/README.md`.
 """
 
 from __future__ import annotations
@@ -42,6 +44,9 @@ SUBJECTS: dict[str, dict[str, object]] = {
         # Without this the numbers stop being comparable across runner images.
         "toolchain": "1.97.1",
         "args": ["build", "--locked"],
+        # The edit scenario appends a comment here. Named per subject so a
+        # moved pin fails instead of editing some other crate.
+        "edit": "src/main.rs",
     },
 }
 
@@ -72,20 +77,20 @@ CONTENTION_JOBS: tuple[tuple[str, list[str]], ...] = (
     ),
 )
 
-# Which tools each scenario asks for. cargo appears only where a no-cache
-# baseline is meaningful: "warm" and "worktree" describe a cache being reused,
-# and cargo would just repeat its cold number.
+# Which tools each scenario asks for, and whether it publishes a timing.
+#
+# `repeatable` is what --trials multiplies. Every scenario here is a timing
+# that needs a spread to be read against, and every one of them gets it.
+# cargo appears only where a no-cache baseline is meaningful: in "warm" it
+# would just repeat its cold number.
 SCENARIOS: dict[str, dict[str, object]] = {
-    "cold": {
-        "tools": ("cargo", "mbx", "kache"),
-        "description": "empty store, fresh target -- a first build on a new machine",
-    },
     "warm": {
         "tools": ("mbx", "kache"),
         "description": (
             "warm store, fresh target -- CI restoring the same commit; "
             "plain Cargo has no cache to restore"
         ),
+        "repeatable": True,
     },
     "commit": {
         "tools": ("cargo", "mbx", "kache"),
@@ -93,18 +98,20 @@ SCENARIOS: dict[str, dict[str, object]] = {
             "cache tools warmed at the parent commit, build the child -- "
             "Cargo is the uncached push-to-push baseline"
         ),
+        "baseline": "uncached baseline",
+        "repeatable": True,
     },
-    "worktree": {
-        "tools": ("mbx", "kache"),
+    "edit": {
+        "tools": ("cargo", "mbx", "kache"),
         "description": (
-            "warm store, second checkout at a different path; "
-            "plain Cargo cannot reuse the first checkout's target"
+            "one line changed and rebuilt in place, incremental on -- "
+            "the local edit loop in its steady state, where Cargo is the "
+            "thing to beat"
         ),
-    },
-    "toolchain": {
-        "tools": ("mbx",),
-        "description": "store warmed on the pinned toolchain, rebuild on another",
-        "timed": False,
+        # Everywhere else cargo is a control with no cache to help it. Here
+        # it keeps its target and incremental state, and is the thing to beat.
+        "baseline": "incremental rebuild",
+        "repeatable": True,
     },
     "contention": {
         "tools": ("mbx-sequential", "mbx-unscheduled", "mbx"),
@@ -113,14 +120,9 @@ SCENARIOS: dict[str, dict[str, object]] = {
             "then parallel with and without mbx's machine-wide compiler limit"
         ),
         "kind": "contention",
+        "repeatable": True,
     },
 }
-
-
-# What fraction of a manifest's predictions may still be looked up after the
-# compiler changes. Anything above this means rustc work survived a change that
-# invalidates every invocation digest.
-TOOLCHAIN_SURVIVOR_LIMIT = 0.05
 
 
 class Skipped(Exception):
@@ -278,13 +280,20 @@ class Runner:
         self.cargo_home = cargo_home
         self.mbx = mbx
 
-    def base_environment(self, subject: dict[str, object], target: Path) -> dict[str, str]:
+    def base_environment(
+        self,
+        subject: dict[str, object],
+        target: Path,
+        local: bool = False,
+    ) -> dict[str, str]:
         environment = os.environ.copy()
         environment.update(
             {
                 "CARGO_HOME": str(self.cargo_home),
                 "CARGO_TARGET_DIR": str(target),
-                "CARGO_INCREMENTAL": "0",
+                # Off for the CI scenarios, matching what CI sets. The edit
+                # loop turns it on, because a developer's rebuild has it on.
+                "CARGO_INCREMENTAL": "1" if local else "0",
                 "CARGO_TERM_COLOR": "never",
                 "RUSTUP_TOOLCHAIN": str(subject["toolchain"]),
             }
@@ -293,6 +302,16 @@ class Runner:
         # supposedly uncached baseline.
         for variable in ("RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"):
             environment.pop(variable, None)
+        if local:
+            # The edit loop is the one scenario about a developer's machine,
+            # and it has to look like one. mbx reads CI to decide policy: with
+            # it set, learned incremental reuse is off (policy.rs), because a
+            # runner has no earlier state to build on and never edits code.
+            # Leaving it set would measure the loop with the feature that
+            # makes the loop fast deliberately disabled, on a machine nobody
+            # edits code on. Cleared for every tool, not just mbx.
+            for variable in ("CI", "GITHUB_ACTIONS"):
+                environment.pop(variable, None)
         return environment
 
     def invocation(
@@ -305,6 +324,7 @@ class Runner:
         store: Path,
         args: list[str] | None = None,
         toolchain: str | None = None,
+        local: bool = False,
     ) -> tuple[list[str], dict[str, str]]:
         """The command and environment one cell runs the subject under.
 
@@ -313,7 +333,7 @@ class Runner:
         two shapes could drift and the comparison between them would stop
         meaning anything.
         """
-        environment = self.base_environment(subject, target)
+        environment = self.base_environment(subject, target, local)
         if toolchain is not None:
             environment["RUSTUP_TOOLCHAIN"] = toolchain
         args = list(subject["args"]) if args is None else args  # type: ignore[arg-type]
@@ -362,9 +382,14 @@ class Runner:
         target: Path,
         store: Path,
         toolchain: str | None = None,
+        local: bool = False,
+        fresh_target: bool = True,
     ) -> dict[str, object]:
         """Run one build and return its timing plus whatever the tool reported."""
-        shutil.rmtree(target, ignore_errors=True)
+        # Every scenario but the edit loop starts from a fresh target, as a CI
+        # runner does. The edit loop rebuilds in the one its seed produced.
+        if fresh_target:
+            shutil.rmtree(target, ignore_errors=True)
         extra: dict[str, object] = {}
         command, environment = self.invocation(
             tool=tool,
@@ -373,6 +398,7 @@ class Runner:
             target=target,
             store=store,
             toolchain=toolchain,
+            local=local,
         )
 
         started = time.perf_counter_ns()
@@ -422,6 +448,14 @@ class Runner:
                 check=False,
             )
 
+        # An edit that invalidated nothing would render as a very fast
+        # rebuild, so the gate needs to know whether a compiler ran at all.
+        extra["recompiled"] = "Compiling " in completed.stderr
+        if tool == "cargo":
+            # Clearing the wrapper variables is not proof they were the only
+            # way in. A `cargo` that is itself an mbx shim, as on a developer's
+            # own machine, gives the baseline the cache it is the control for.
+            extra["wrapped"] = "mbx[" in completed.stderr
         return {"tool": tool, "wall_duration_ns": duration_ns, **extra}
 
     def run_batch(
@@ -546,6 +580,14 @@ PUBLISHED_STATS = (
 # are the point of that scenario, not a detail of it.
 PUBLISHED_CONTENTION = ("peak_compilers", "min_available_bytes", "permits")
 
+# Every trial's timing. The page needs the spread to decide whether the gap
+# between two tools means anything.
+PUBLISHED_TRIALS = ("trials", "wall_durations_ns")
+
+# The edit scenario's discarded first edit. It is not the loop, which is why it
+# is not the timing, but it is what the loop costs to get into.
+PUBLISHED_EDIT = ("warmup_wall_duration_ns",)
+
 
 class Progress:
     """Durable progress lines for long-running benchmark logs."""
@@ -587,11 +629,11 @@ def publishable(result: dict[str, object]) -> dict[str, object]:
     for scenario in result["scenarios"]:  # type: ignore[index]
         cells = []
         for cell in scenario["results"]:
-            trimmed = {
+            trimmed: dict[str, object] = {
                 "tool": cell["tool"],
                 "wall_duration_ns": cell["wall_duration_ns"],
             }
-            for field in PUBLISHED_CONTENTION:
+            for field in PUBLISHED_CONTENTION + PUBLISHED_TRIALS + PUBLISHED_EDIT:
                 if field in cell:
                     trimmed[field] = cell[field]
             stats = cell.get("stats")
@@ -618,6 +660,201 @@ def restored_files(cell: dict[str, object]) -> int:
     return 0
 
 
+def touch_source(subject: dict[str, object], checkout: Path, marker: str) -> None:
+    """Make the one-line source change the edit loop is built around.
+
+    A trailing comment is enough: rustc recompiles the crate for any change to
+    the file, and a larger edit would measure a different amount of the
+    subject's own code every time the pinned revision moves.
+    """
+    source = checkout / str(subject["edit"])
+    if not source.is_file():
+        raise RuntimeError(f"{subject['edit']} is not in the pinned checkout")
+    with source.open("a", encoding="utf-8") as handle:
+        handle.write(f"\n// mbx benchmark edit {marker}\n")
+
+
+def one_trial(
+    scenario: str,
+    tool: str,
+    cell: str,
+    subject: dict[str, object],
+    runner: Runner,
+    work: Path,
+) -> dict[str, object]:
+    """Run one tool through one scenario once, in a store and checkout of its own.
+
+    Trials share nothing. A second trial that started from the first one's
+    store would be measuring a different scenario than the first, which is the
+    one thing a repeated measurement must not do.
+    """
+    store = work / f"store-{cell}"
+    target = work / f"target-{cell}"
+
+    if scenario == "warm":
+        checkout = work / f"checkout-{cell}"
+        clone(subject, str(subject["child"]), checkout)
+        seed = runner.run(
+            tool=tool,
+            cell=f"{cell}-seed",
+            subject=subject,
+            checkout=checkout,
+            target=target,
+            store=store,
+        )
+        measured = runner.run(
+            tool=tool,
+            cell=cell,
+            subject=subject,
+            checkout=checkout,
+            target=target,
+            store=store,
+        )
+        # The seed is this tool's own cold build in the same checkout. Its
+        # timing is what the warm gate compares against.
+        measured["seed_wall_duration_ns"] = seed["wall_duration_ns"]
+        return measured
+
+    if scenario == "commit":
+        checkout = work / f"checkout-{cell}"
+        if tool != "cargo":
+            clone(subject, str(subject["parent"]), checkout)
+            runner.run(
+                tool=tool,
+                cell=f"{cell}-seed",
+                subject=subject,
+                checkout=checkout,
+                target=target,
+                store=store,
+            )
+            git("checkout", "--detach", str(subject["child"]), cwd=checkout)
+        else:
+            # cargo has no store to seed and its target is wiped before every
+            # run, so seeding it would only measure a cold build twice. The
+            # baseline for this scenario is a cold build.
+            clone(subject, str(subject["child"]), checkout)
+        return runner.run(
+            tool=tool,
+            cell=cell,
+            subject=subject,
+            checkout=checkout,
+            target=target,
+            store=store,
+        )
+
+    if scenario == "edit":
+        checkout = work / f"checkout-{cell}"
+        clone(subject, str(subject["child"]), checkout)
+        # The seed leaves its target in place: a developer edits inside the
+        # tree they just built, and the rebuild races that incremental state.
+        runner.run(
+            tool=tool,
+            cell=f"{cell}-seed",
+            subject=subject,
+            checkout=checkout,
+            target=target,
+            store=store,
+            local=True,
+        )
+        # One edit is thrown away before the timed one, because the tools do
+        # not arrive at a first edit in the same state. cargo's seed already
+        # wrote its incremental state, so its first edit is a steady-state
+        # edit. mbx overrides CARGO_INCREMENTAL to 0 and gives an edited crate
+        # private incremental state instead, which the first edit has to build
+        # from nothing. Timing that one compares cargo's second rebuild with
+        # mbx's first, and reports a setup cost paid once as though it were the
+        # loop. Measured on hk: mbx 7.5s for the first edit and 2.3s for every
+        # one after it, against 2.1s flat for cargo.
+        touch_source(subject, checkout, "warmup")
+        warmup = runner.run(
+            tool=tool,
+            cell=f"{cell}-warmup",
+            subject=subject,
+            checkout=checkout,
+            target=target,
+            store=store,
+            local=True,
+            fresh_target=False,
+        )
+        touch_source(subject, checkout, "timed")
+        measured = runner.run(
+            tool=tool,
+            cell=cell,
+            subject=subject,
+            checkout=checkout,
+            target=target,
+            store=store,
+            local=True,
+            fresh_target=False,
+        )
+        # Published rather than dropped. A first edit after a fresh build is a
+        # real thing a developer waits for, and hiding what the warm loop cost
+        # to set up would be its own kind of dishonesty.
+        measured["warmup_wall_duration_ns"] = warmup["wall_duration_ns"]
+        return measured
+
+    if scenario == "contention":
+        checkout = work / f"checkout-{cell}"
+        clone(subject, str(subject["child"]), checkout)
+        return runner.run_batch(
+            tool=tool,
+            cell=cell,
+            subject=subject,
+            checkout=checkout,
+            work=work,
+            store=store,
+            permits=contention_permits(),
+        )
+
+    raise ValueError(f"unknown scenario {scenario}")
+
+
+def discard(work: Path, cell: str) -> None:
+    """Drop one cell's checkouts, targets, and store once it has been measured.
+
+    Every scenario used to hold its scratch trees until the whole run ended,
+    which was affordable while each tool ran a scenario once. Repeating them
+    multiplies it, and the edit scenario keeps a target with incremental state
+    in it, which is the largest tree the benchmark produces. Nothing after the
+    trial reads any of it: the statistics report and the build logs are
+    written under --output, which is not this directory.
+    """
+    for path in work.iterdir():
+        if path.name.endswith(f"-{cell}") or f"-{cell}-" in path.name:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def median_cell(cells: list[dict[str, object]]) -> dict[str, object]:
+    """One tool's trials reduced to the middle one, with all of them kept.
+
+    The middle trial rather than an averaged number, so the statistics
+    published beside a timing come from the build that actually produced it.
+    An even number of trials takes the lower middle. Every trial's timing is
+    carried through to the published file: the spread is what tells a reader
+    which differences on the page are real, and it is not the benchmark's
+    place to hide it.
+    """
+    ordered = sorted(cells, key=lambda cell: int(cell["wall_duration_ns"]))
+    chosen = dict(ordered[(len(ordered) - 1) // 2])
+    chosen["trials"] = len(cells)
+    chosen["wall_durations_ns"] = [int(cell["wall_duration_ns"]) for cell in cells]
+    # Every trial is kept for the gates, which have to see all of them: a
+    # trial that restored nothing, or compiled nothing, or ran the baseline
+    # under a wrapper, is invisible in the median's own metadata and still
+    # sets the spread the page reads a result against. Stripped before
+    # publishing.
+    chosen["trial_cells"] = cells
+    return chosen
+
+
+def trials_of(cell: dict[str, object]) -> list[dict[str, object]]:
+    """Every trial behind a cell, or the cell itself before it was reduced."""
+    kept = cell.get("trial_cells")
+    if isinstance(kept, list) and kept:
+        return kept  # type: ignore[return-value]
+    return [cell]
+
+
 def run_scenario(
     scenario: str,
     tools: tuple[str, ...],
@@ -625,165 +862,55 @@ def run_scenario(
     runner: Runner,
     work: Path,
     progress: Progress,
+    trials: int = 1,
 ) -> dict[str, object]:
-    """Run every tool through one scenario, each in its own store and target."""
+    """Run every tool through one scenario, repeating the ones worth repeating."""
+    repeats = trials if SCENARIOS[scenario].get("repeatable") else 1
     results: list[dict[str, object]] = []
     notes: list[str] = []
     for tool in tools:
-        cell = f"{scenario}-{tool}"
-        progress.start(cell)
-        store = work / f"store-{cell}"
-        target = work / f"target-{cell}"
-        try:
-            if scenario == "cold":
-                checkout = work / f"checkout-{cell}"
-                clone(subject, str(subject["child"]), checkout)
-                results.append(
-                    runner.run(
-                        tool=tool,
-                        cell=cell,
-                        subject=subject,
-                        checkout=checkout,
-                        target=target,
-                        store=store,
-                    )
-                )
-            elif scenario == "warm":
-                checkout = work / f"checkout-{cell}"
-                clone(subject, str(subject["child"]), checkout)
-                runner.run(
-                    tool=tool,
-                    cell=f"{cell}-seed",
-                    subject=subject,
-                    checkout=checkout,
-                    target=target,
-                    store=store,
-                )
-                results.append(
-                    runner.run(
-                        tool=tool,
-                        cell=cell,
-                        subject=subject,
-                        checkout=checkout,
-                        target=target,
-                        store=store,
-                    )
-                )
-            elif scenario == "commit":
-                checkout = work / f"checkout-{cell}"
-                if tool != "cargo":
-                    clone(subject, str(subject["parent"]), checkout)
-                    runner.run(
-                        tool=tool,
-                        cell=f"{cell}-seed",
-                        subject=subject,
-                        checkout=checkout,
-                        target=target,
-                        store=store,
-                    )
-                    git("checkout", "--detach", str(subject["child"]), cwd=checkout)
-                else:
-                    # cargo has no store to seed and its target is wiped before
-                    # every run, so seeding it would only measure a cold build
-                    # twice. The baseline for this scenario is a cold build.
-                    clone(subject, str(subject["child"]), checkout)
-                results.append(
-                    runner.run(
-                        tool=tool,
-                        cell=cell,
-                        subject=subject,
-                        checkout=checkout,
-                        target=target,
-                        store=store,
-                    )
-                )
-            elif scenario == "worktree":
-                seed = work / f"checkout-{cell}-seed"
-                clone(subject, str(subject["child"]), seed)
-                runner.run(
-                    tool=tool,
-                    cell=f"{cell}-seed",
-                    subject=subject,
-                    checkout=seed,
-                    target=target,
-                    store=store,
-                )
-                # A different path, which is the whole point: absolute paths
-                # must not have entered the keys.
-                other = work / f"checkout-{cell}-elsewhere"
-                clone(subject, str(subject["child"]), other)
-                results.append(
-                    runner.run(
-                        tool=tool,
-                        cell=cell,
-                        subject=subject,
-                        checkout=other,
-                        target=work / f"target-{cell}-elsewhere",
-                        store=store,
-                    )
-                )
-            elif scenario == "toolchain":
-                alternate = os.environ.get("MBX_BENCH_ALTERNATE_TOOLCHAIN")
-                if not alternate:
-                    raise Skipped("set MBX_BENCH_ALTERNATE_TOOLCHAIN to a second installed Rust")
-                if tool_version("rustc", alternate) == tool_version(
-                    "rustc", str(subject["toolchain"])
-                ):
-                    raise Skipped(
-                        f"MBX_BENCH_ALTERNATE_TOOLCHAIN ({alternate}) resolves to the "
-                        f"pinned {subject['toolchain']}, so nothing would change"
-                    )
-                checkout = work / f"checkout-{cell}"
-                clone(subject, str(subject["child"]), checkout)
-                runner.run(
-                    tool=tool,
-                    cell=f"{cell}-seed",
-                    subject=subject,
-                    checkout=checkout,
-                    target=target,
-                    store=store,
-                )
-                results.append(
-                    runner.run(
-                        tool=tool,
-                        cell=cell,
-                        subject=subject,
-                        checkout=checkout,
-                        target=target,
-                        store=store,
-                        toolchain=alternate,
-                    )
-                )
-            elif scenario == "contention":
-                checkout = work / f"checkout-{cell}"
-                clone(subject, str(subject["child"]), checkout)
-                results.append(
-                    runner.run_batch(
-                        tool=tool,
-                        cell=cell,
-                        subject=subject,
-                        checkout=checkout,
-                        work=work,
-                        store=store,
-                        permits=contention_permits(),
-                    )
-                )
+        measured: list[dict[str, object]] = []
+        for trial in range(1, repeats + 1):
+            cell = f"{scenario}-{tool}" if repeats == 1 else f"{scenario}-{tool}-{trial}"
+            progress.start(cell)
+            try:
+                measured.append(one_trial(scenario, tool, cell, subject, runner, work))
+            except Skipped as skip:
+                notes.append(f"{tool}: {skip}")
+                progress.finish(cell, "skipped")
+                break
+            except RuntimeError as failure:
+                # A tool we do not own failing is reported as unmeasured, the
+                # same as one that was not installed. mbx and the cargo
+                # baseline still fail the run: a broken harness must not look
+                # like a competitor's limitation.
+                if tool in MBX_TOOLS or tool == "cargo":
+                    raise
+                notes.append(f"{tool}: {failure}")
+                progress.finish(cell, "failed")
+                break
             else:
-                raise ValueError(f"unknown scenario {scenario}")
-        except Skipped as skip:
-            notes.append(f"{tool}: {skip}")
-            progress.finish(cell, "skipped")
-        else:
-            progress.finish(cell)
+                progress.finish(cell)
+            finally:
+                # Whatever the trial left goes now, not at the end of the run.
+                # A tool that fails late in a big scenario would otherwise
+                # hold its target and store for every trial that follows it.
+                discard(work, cell)
+        # All trials or none: a tool that dropped out partway must not publish
+        # a median over the trials that happened to finish.
+        if len(measured) == repeats:
+            results.append(median_cell(measured))
 
-    return {
+    entry: dict[str, object] = {
         "scenario": scenario,
         "description": SCENARIOS[scenario]["description"],
-        "timed": SCENARIOS[scenario].get("timed", True),
         "kind": SCENARIOS[scenario].get("kind", "build"),
         "results": results,
         "skipped": notes,
     }
+    if "baseline" in SCENARIOS[scenario]:
+        entry["baseline"] = SCENARIOS[scenario]["baseline"]
+    return entry
 
 
 def contention_permits() -> int:
@@ -809,25 +936,39 @@ def validate(scenarios: list[dict[str, object]]) -> list[str]:
     failures: list[str] = []
     by_name = {entry["scenario"]: entry for entry in scenarios}
 
-    for name in ("warm", "worktree"):
-        entry = by_name.get(name)
-        if entry is None:
-            continue
-        for cell in entry["results"]:  # type: ignore[index]
-            if cell["tool"] != "mbx":
-                continue
-            if hits(cell) <= 0 or restored_files(cell) <= 0:
-                failures.append(f"{name}: mbx restored nothing, so the timing is not a cache result")
-
-    cold = by_name.get("cold")
     warm = by_name.get("warm")
-    if cold and warm:
-        cold_by_tool = {cell["tool"]: cell for cell in cold["results"]}  # type: ignore[index]
+    if warm:
         for cell in warm["results"]:  # type: ignore[index]
-            baseline = cold_by_tool.get(cell["tool"])
-            if baseline and cell["wall_duration_ns"] >= baseline["wall_duration_ns"]:
+            for trial in trials_of(cell):
+                if cell["tool"] == "mbx" and (hits(trial) <= 0 or restored_files(trial) <= 0):
+                    failures.append(
+                        "warm: mbx restored nothing, so the timing is not a cache result"
+                    )
+                # Against the build that seeded it: same tool, same checkout,
+                # same trial, empty store.
+                seed = trial.get("seed_wall_duration_ns")
+                if seed is not None and int(trial["wall_duration_ns"]) >= int(seed):
+                    failures.append(
+                        f"warm: {cell['tool']} was no faster than the cold build that seeded it"
+                    )
+
+    edit = by_name.get("edit")
+    if edit:
+        # A rebuild that compiled nothing means the edit never reached the
+        # compiler, not that the tool rebuilt quickly.
+        for cell in edit["results"]:  # type: ignore[index]
+            if any(not trial.get("recompiled") for trial in trials_of(cell)):
                 failures.append(
-                    f"warm: {cell['tool']} was no faster than its own cold build"
+                    f"edit: {cell['tool']} rebuilt without compiling anything, so the "
+                    "edit never reached the compiler"
+                )
+
+    for entry in scenarios:
+        for cell in entry["results"]:  # type: ignore[index]
+            if any(trial.get("wrapped") for trial in trials_of(cell)):
+                failures.append(
+                    f"{entry['scenario']}: the cargo baseline ran under mbx, so it is "
+                    "not the uncached control the scenario compares against"
                 )
 
     contention = by_name.get("contention")
@@ -835,70 +976,51 @@ def validate(scenarios: list[dict[str, object]]) -> list[str]:
         cells = {cell["tool"]: cell for cell in contention["results"]}  # type: ignore[index]
         scheduled = cells.get("mbx")
         unscheduled = cells.get("mbx-unscheduled")
+        # Trial by trial, and paired by trial: a bound that held on the run
+        # that happened to be the median says nothing about the two either
+        # side of it, and a scheduled batch is only bounded relative to the
+        # unscheduled one it ran beside.
         if scheduled is not None:
-            permits = int(scheduled.get("permits") or 0)
-            peak = int(scheduled.get("peak_compilers") or 0)
-            if not scheduled.get("samples"):
-                failures.append(
-                    "contention: the machine was never sampled, so no bound was observed"
-                )
-            elif peak <= 0:
-                failures.append(
-                    "contention: no compiler was ever seen running, so the sampler "
-                    "measured something other than the builds"
-                )
-            elif permits and peak > permits:
-                failures.append(
-                    f"contention: {peak} compilers ran at once against {permits} permits, "
-                    "so the pool did not bound the machine"
-                )
+            for trial in trials_of(scheduled):
+                permits = int(trial.get("permits") or 0)
+                peak = int(trial.get("peak_compilers") or 0)
+                if not trial.get("samples"):
+                    failures.append(
+                        "contention: the machine was never sampled, so no bound was observed"
+                    )
+                elif peak <= 0:
+                    failures.append(
+                        "contention: no compiler was ever seen running, so the sampler "
+                        "measured something other than the builds"
+                    )
+                elif permits and peak > permits:
+                    failures.append(
+                        f"contention: {peak} compilers ran at once against {permits} "
+                        "permits, so the pool did not bound the machine"
+                    )
         if scheduled is not None and unscheduled is not None:
             # Without this the scenario could "pass" on a machine too small,
             # or too fast, for the jobs to ever overlap -- and a bound nothing
             # pushed against proves nothing about the bound.
-            baseline = int(unscheduled.get("peak_compilers") or 0)
-            permits = int(scheduled.get("permits") or 0)
-            if permits and baseline <= permits:
-                failures.append(
-                    f"contention: unscheduled builds peaked at {baseline} compilers, within "
-                    f"the {permits} permits, so this run never actually contended"
-                )
-    toolchain = by_name.get("toolchain")
-    if toolchain:
-        # A skipped guard is not a passed guard. The scenario was asked for, so
-        # a run that could not perform it must not publish as though the
-        # compiler-invalidation claim had been checked.
-        measured = [
-            cell
-            for cell in toolchain["results"]  # type: ignore[index]
-            if cell["tool"] == "mbx" and isinstance(cell.get("stats"), dict)
-        ]
-        if not measured:
-            failures.append(
-                "toolchain: the compiler-change guard did not run, so nothing "
-                "checked that a new rustc invalidates the cache"
-            )
-        for cell in measured:
-            stats = cell["stats"]
-            assert isinstance(stats, dict)
-            predictions = int(stats.get("predictions_loaded", 0))
-            if predictions <= 0:
-                failures.append(
-                    "toolchain: no predictions were loaded, so the rebuild was cold for "
-                    "some reason other than the compiler change"
-                )
-                continue
-            # Not zero lookups: a handful of actions do not depend on rustc at
-            # all -- a build script's C object is compiled by the C compiler,
-            # which did not change -- and those legitimately still hit. What
-            # must not survive is the rustc work the manifest predicted.
-            if int(stats.get("lookups", 0)) > predictions * TOOLCHAIN_SURVIVOR_LIMIT:
-                failures.append(
-                    "toolchain: a different compiler reused rustc work it should have "
-                    "invalidated"
-                )
-
+            for scheduled_trial, unscheduled_trial in zip(
+                trials_of(scheduled), trials_of(unscheduled)
+            ):
+                baseline = int(unscheduled_trial.get("peak_compilers") or 0)
+                permits = int(scheduled_trial.get("permits") or 0)
+                if permits and baseline <= permits:
+                    failures.append(
+                        f"contention: unscheduled builds peaked at {baseline} compilers, "
+                        f"within the {permits} permits, so this run never actually contended"
+                    )
     return failures
+
+
+def trial_range(cell: dict[str, object]) -> str:
+    """How far one tool moved between its own runs, for the job summary."""
+    durations = cell.get("wall_durations_ns")
+    if not isinstance(durations, list) or len(durations) < 2:
+        return "1"
+    return f"{len(durations)} ({min(durations) / 1e9:.1f}-{max(durations) / 1e9:.1f} s)"
 
 
 def summarize(result: dict[str, object]) -> str:
@@ -942,17 +1064,16 @@ def summarize(result: dict[str, object]) -> str:
                 lines.append("")
             continue
         lines += [
-            "| Tool | Wall time | Hits | Restored files |"
-            if scenario["timed"]
-            else "| Tool | Ran for | Hits | Restored files |",
-            "| :--- | ---: | ---: | ---: |",
+            "| Tool | Median wall time | Trials | Hits | Restored files |",
+            "| :--- | ---: | ---: | ---: | ---: |",
         ]
         for cell in scenario["results"]:
             stats = cell.get("stats")
             hit = str(hits(cell)) if isinstance(stats, dict) else "-"
             files = str(restored_files(cell)) if isinstance(stats, dict) else "-"
             lines.append(
-                f"| {cell['tool']} | {cell['wall_duration_ns'] / 1e9:.1f} s | {hit} | {files} |"
+                f"| {cell['tool']} | {cell['wall_duration_ns'] / 1e9:.1f} s "
+                f"| {trial_range(cell)} | {hit} | {files} |"
             )
         lines.append("")
         for note in scenario["skipped"]:
@@ -970,7 +1091,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--subject", default="hk", choices=sorted(SUBJECTS))
     parser.add_argument("--tools", default=",".join(TOOLS))
-    parser.add_argument("--scenarios", default="cold,warm,commit")
+    parser.add_argument("--scenarios", default="warm,commit,edit")
+    parser.add_argument(
+        "--trials",
+        type=int,
+        default=1,
+        help=(
+            "times to repeat each timed scenario; the median trial is published "
+            "with every trial's timing beside it (CI uses 3)"
+        ),
+    )
     parser.add_argument("--mbx", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
@@ -979,6 +1109,9 @@ def main() -> int:
         help="rewrite this checked-in results file with the run (the docs site reads it)",
     )
     args = parser.parse_args()
+
+    if args.trials < 1:
+        parser.error("--trials must be at least 1")
 
     requested_tools = tuple(name.strip() for name in args.tools.split(",") if name.strip())
     unknown = set(requested_tools) - set(TOOLS)
@@ -1002,7 +1135,12 @@ def main() -> int:
         )
         if tools:
             plan.append((name, tools))
-    progress = Progress(sum(len(tools) for _, tools in plan))
+    progress = Progress(
+        sum(
+            len(tools) * (args.trials if SCENARIOS[name].get("repeatable") else 1)
+            for name, tools in plan
+        )
+    )
     if plan:
         progress.preparing()
 
@@ -1042,11 +1180,14 @@ def main() -> int:
         runner = Runner(output, cargo_home, mbx)
         scenarios = []
         for name, tools in plan:
-            scenarios.append(run_scenario(name, tools, subject, runner, work, progress))
+            scenarios.append(
+                run_scenario(name, tools, subject, runner, work, progress, args.trials)
+            )
 
     failures = validate(scenarios)
     result: dict[str, object] = {
-        "schema": 1,
+        # 2 added per-trial timings and named the published timing a median.
+        "schema": 2,
         "subject": args.subject,
         "revision": subject["child"],
         "toolchain": subject["toolchain"],
