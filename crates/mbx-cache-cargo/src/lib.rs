@@ -55,6 +55,7 @@ fn resolve_in(
     let cargo_args = cargo_arguments(arguments);
     let reported = recalled_cargo_roots(
         cache,
+        effective_cargo_home().as_deref(),
         cargo,
         cargo_args,
         working_dir,
@@ -90,8 +91,36 @@ fn resolve_reported_in(
     working_dir: &Path,
     target_dir_env: Option<OsString>,
 ) -> Option<CargoInvocation> {
+    resolve_reported_from_home(
+        cache,
+        effective_cargo_home().as_deref(),
+        cargo,
+        arguments,
+        working_dir,
+        target_dir_env,
+    )
+}
+
+/// The directory Cargo reads its home configuration from: `CARGO_HOME`, or
+/// `.cargo` under the home directory when it is unset.
+fn effective_cargo_home() -> Option<PathBuf> {
+    std::env::var_os("CARGO_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".cargo")))
+}
+
+fn resolve_reported_from_home(
+    cache: Option<&Path>,
+    cargo_home: Option<&Path>,
+    cargo: &OsStr,
+    arguments: &[String],
+    working_dir: &Path,
+    target_dir_env: Option<OsString>,
+) -> Option<CargoInvocation> {
     let reported = recalled_cargo_roots(
         cache,
+        cargo_home,
         cargo,
         cargo_arguments(arguments),
         working_dir,
@@ -344,13 +373,21 @@ fn invocation_dir(arguments: &[String], working_dir: &Path) -> PathBuf {
 /// cache to remember in, runs the probe.
 fn recalled_cargo_roots(
     cache: Option<&Path>,
+    cargo_home: Option<&Path>,
     cargo: &OsStr,
     arguments: &[String],
     working_dir: &Path,
     target_dir_env: Option<&OsStr>,
 ) -> Option<(PathBuf, PathBuf)> {
     let probe = cache.and_then(|cache| {
-        ProbeRecord::describe(cache, cargo, arguments, working_dir, target_dir_env)
+        ProbeRecord::describe(
+            cache,
+            cargo_home,
+            cargo,
+            arguments,
+            working_dir,
+            target_dir_env,
+        )
     });
     if let Some(recalled) = probe.as_ref().and_then(ProbeRecord::recall) {
         return Some(recalled);
@@ -427,6 +464,7 @@ impl ProbeRecord {
     /// pinned, in which case the probe runs and is not remembered.
     fn describe(
         cache: &Path,
+        cargo_home: Option<&Path>,
         cargo: &OsStr,
         arguments: &[String],
         working_dir: &Path,
@@ -441,7 +479,10 @@ impl ProbeRecord {
             working_dir: working_dir.to_path_buf(),
             target_dir_env: target_dir_env.map(|value| value.to_string_lossy().into_owned()),
             build_target_dir_env: env("CARGO_BUILD_TARGET_DIR"),
-            cargo_home: env("CARGO_HOME"),
+            // The directory itself rather than the variable: with the
+            // variable unset it follows the home directory, and a record
+            // made under one home must not answer under another.
+            cargo_home: cargo_home.map(|home| home.to_string_lossy().into_owned()),
         };
         let invocation_dir = invocation_dir(arguments, working_dir);
         // Cargo finds the manifest nearest the invocation directory, or the
@@ -463,12 +504,7 @@ impl ProbeRecord {
             watched.push(dot_cargo.join("config.toml"));
             watched.push(dot_cargo.join("config"));
         }
-        if let Some(home) = key
-            .cargo_home
-            .as_deref()
-            .map(PathBuf::from)
-            .or_else(|| dirs::home_dir().map(|home| home.join(".cargo")))
-        {
+        if let Some(home) = cargo_home {
             watched.push(home.join("config.toml"));
             watched.push(home.join("config"));
         }
@@ -907,9 +943,11 @@ mod tests {
         let log = root.join("cargo.log");
         let cargo = logging_cargo(root, root, &log);
         let arguments = ["build".to_string(), "--locked".to_string()];
+        let home = root.join("cargo-home");
         let resolve = |target_dir_env: Option<&str>| {
-            resolve_reported_in(
+            resolve_reported_from_home(
                 Some(cache.path()),
+                Some(&home),
                 cargo.as_os_str(),
                 &arguments,
                 root,
@@ -948,6 +986,35 @@ mod tests {
         assert_eq!(resolve(None), first);
         assert_eq!(probes(&log), 4);
 
+        // So is the Cargo home, which follows HOME when CARGO_HOME is unset,
+        // and whose configuration is watched like the project's.
+        let other_home = root.join("other-home");
+        let from_other_home = resolve_reported_from_home(
+            Some(cache.path()),
+            Some(&other_home),
+            cargo.as_os_str(),
+            &arguments,
+            root,
+            None,
+        )
+        .unwrap();
+        assert_eq!(from_other_home.workspace_root, first.workspace_root);
+        assert_eq!(probes(&log), 5);
+        std::fs::create_dir_all(&other_home).unwrap();
+        std::fs::write(other_home.join("config.toml"), "[build]\njobs = 4\n").unwrap();
+        resolve_reported_from_home(
+            Some(cache.path()),
+            Some(&other_home),
+            cargo.as_os_str(),
+            &arguments,
+            root,
+            None,
+        )
+        .unwrap();
+        assert_eq!(probes(&log), 6);
+        assert_eq!(resolve(None), first);
+        assert_eq!(probes(&log), 6);
+
         // A configuration that includes files this cannot see is never
         // remembered: every build probes.
         std::fs::write(
@@ -957,7 +1024,7 @@ mod tests {
         .unwrap();
         assert_eq!(resolve(None).workspace_root, first.workspace_root);
         assert_eq!(resolve(None).workspace_root, first.workspace_root);
-        assert_eq!(probes(&log), 6);
+        assert_eq!(probes(&log), 8);
     }
 
     #[test]

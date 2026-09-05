@@ -4354,6 +4354,40 @@ async fn a_pinned_executable_identity_outlives_the_session() {
     ));
 }
 
+/// A pin notices a replacement of the same length with its timestamp put
+/// back, and a permission change, neither of which moves length or mtime.
+#[test]
+#[cfg(unix)]
+fn a_pin_notices_what_length_and_mtime_cannot() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = tempfile::tempdir().unwrap();
+    let executable = directory.path().join("rustc");
+    std::fs::write(&executable, "compiler bytes").unwrap();
+    let pin = PinnedFile::describe(&executable).unwrap();
+    assert!(pin.holds());
+
+    // Replaced by a file of the same length, dated as the original was.
+    let modified = std::fs::metadata(&executable).unwrap().modified().unwrap();
+    let replacement = directory.path().join("rustc.new");
+    std::fs::write(&replacement, "compiler BYTES").unwrap();
+    std::fs::rename(&replacement, &executable).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&executable)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    let now = std::fs::metadata(&executable).unwrap();
+    assert_eq!(now.len(), 14);
+    assert_eq!(now.modified().unwrap(), modified);
+    assert!(!pin.holds(), "a replaced file must not hold");
+
+    // Made executable in place.
+    let pin = PinnedFile::describe(&executable).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!pin.holds(), "a permission change must not hold");
+}
+
 #[tokio::test]
 async fn an_identity_whose_pin_moved_during_the_probe_is_not_kept() {
     let directory = tempfile::tempdir().unwrap();

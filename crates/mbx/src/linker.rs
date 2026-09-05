@@ -200,23 +200,38 @@ struct SearchDirs {
 }
 
 fn search_dirs(driver: &Path) -> Option<SearchDirs> {
-    run(driver, &["-print-search-dirs"])
-        .ok()
-        .map(|text| parse_search_dirs(&text))
+    // The field names are translated strings in GCC, so the question is
+    // asked in the C locale, and an answer without both lists is no map:
+    // a driver that accepts the flag but prints something else would
+    // otherwise pass for one that searched nowhere.
+    let output = Command::new(driver)
+        .arg("-print-search-dirs")
+        .env("LC_ALL", "C")
+        .env("LANGUAGE", "C")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_search_dirs(&String::from_utf8_lossy(&output.stdout))
 }
 
-fn parse_search_dirs(text: &str) -> SearchDirs {
+fn parse_search_dirs(text: &str) -> Option<SearchDirs> {
     let list = |field: &str| {
         text.lines()
             .find_map(|line| line.strip_prefix(field))
             .map(|value| value.trim().trim_start_matches('='))
-            .map(|value| std::env::split_paths(value).collect::<Vec<_>>())
-            .unwrap_or_default()
+            .map(|value| {
+                std::env::split_paths(value)
+                    .filter(|directory| !directory.as_os_str().is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|directories| !directories.is_empty())
     };
-    SearchDirs {
-        programs: list("programs:"),
-        libraries: list("libraries:"),
-    }
+    Some(SearchDirs {
+        programs: list("programs:")?,
+        libraries: list("libraries:")?,
+    })
 }
 
 /// Whether `candidate` is the file the driver printed as `found`.

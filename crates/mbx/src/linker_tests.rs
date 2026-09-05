@@ -79,8 +79,12 @@ fn identity_without_agent() -> Result<LinkerIdentity> {
 
 #[test]
 fn search_dirs_are_read_in_the_order_the_driver_looks() {
-    let text = "install: /usr/lib/gcc/x86_64-linux-gnu/13/\nprograms: =/opt/x/:/usr/libexec/gcc/x86_64-linux-gnu/13/\nlibraries: =/usr/lib/gcc/x86_64-linux-gnu/13/:/lib/x86_64-linux-gnu/\n";
-    let dirs = parse_search_dirs(text);
+    // The driver separates its lists the way the host separates PATH.
+    let separator = if cfg!(windows) { ';' } else { ':' };
+    let text = format!(
+        "install: /usr/lib/gcc/x86_64-linux-gnu/13/\nprograms: =/opt/x/{separator}/usr/libexec/gcc/x86_64-linux-gnu/13/\nlibraries: =/usr/lib/gcc/x86_64-linux-gnu/13/{separator}/lib/x86_64-linux-gnu/\n"
+    );
+    let dirs = parse_search_dirs(&text).expect("both lists are present");
     assert_eq!(
         dirs.programs,
         vec![
@@ -95,7 +99,32 @@ fn search_dirs_are_read_in_the_order_the_driver_looks() {
             PathBuf::from("/lib/x86_64-linux-gnu/")
         ]
     );
-    assert_eq!(parse_search_dirs("nothing here"), SearchDirs::default());
+    // An answer without both lists is no map, whichever language it is in.
+    assert_eq!(parse_search_dirs("nothing here"), None);
+    assert_eq!(
+        parse_search_dirs("Programme: =/opt/x/\nBibliotheken: =/lib/\n"),
+        None
+    );
+    assert_eq!(
+        parse_search_dirs("programs: =/opt/x/\nlibraries: =\n"),
+        None
+    );
+}
+
+/// A candidate the search passed over because it could not run is pinned
+/// with its permissions, so `chmod +x` is a change.
+#[test]
+#[cfg(unix)]
+fn a_candidate_made_executable_breaks_its_pin() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = tempfile::tempdir().unwrap();
+    let candidate = directory.path().join("ld");
+    std::fs::write(&candidate, "not yet a linker").unwrap();
+    std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let pin = PinnedFile::describe(&candidate).unwrap();
+    assert!(pin.holds());
+    std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!pin.holds());
 }
 
 /// A program the driver found in one of its own directories is pinned with

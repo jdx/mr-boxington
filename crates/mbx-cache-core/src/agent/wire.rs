@@ -26,7 +26,16 @@ pub struct PinnedFile {
     pub state: Option<PinnedState>,
 }
 
-/// The length and modification time of a present pinned file.
+/// What a present pinned file looked like: enough to notice it being
+/// written, replaced, or made executable, without reading it.
+///
+/// Length and modification time alone would miss a replacement of the same
+/// length whose timestamp was preserved, and a `chmod +x`, which touches
+/// neither. So the inode says whether it is the same file, the change time,
+/// which the kernel sets on every write, rename and permission change and
+/// which no program can set back, says whether it was touched, and the mode
+/// says whether it can run. Windows has no change time or inode to offer
+/// through the standard library; its creation time and attributes stand in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PinnedState {
     /// Length in bytes.
@@ -35,6 +44,15 @@ pub struct PinnedState {
     pub modified_secs: u64,
     /// Modification time, nanoseconds past `modified_secs`.
     pub modified_nanos: u32,
+    /// Change time on Unix, creation time on Windows, seconds since the
+    /// Unix epoch.
+    pub changed_secs: u64,
+    /// Nanoseconds past `changed_secs`.
+    pub changed_nanos: u32,
+    /// The inode on Unix; zero on Windows.
+    pub inode: u64,
+    /// Permission bits on Unix, file attributes on Windows.
+    pub mode: u32,
 }
 
 impl PinnedFile {
@@ -43,18 +61,7 @@ impl PinnedFile {
     pub fn describe(path: impl Into<PathBuf>) -> Option<Self> {
         let path = path.into();
         let state = match std::fs::metadata(&path) {
-            Ok(metadata) => {
-                let modified = metadata
-                    .modified()
-                    .ok()?
-                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                    .ok()?;
-                Some(PinnedState {
-                    len: metadata.len(),
-                    modified_secs: modified.as_secs(),
-                    modified_nanos: modified.subsec_nanos(),
-                })
-            }
+            Ok(metadata) => Some(PinnedState::of(&metadata)?),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => return None,
         };
@@ -64,6 +71,56 @@ impl PinnedFile {
     /// Whether the file is still as this pin describes it.
     pub fn holds(&self) -> bool {
         PinnedFile::describe(self.path.clone()).as_ref() == Some(self)
+    }
+}
+
+impl PinnedState {
+    #[cfg(unix)]
+    fn of(metadata: &std::fs::Metadata) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt as _;
+        let modified = metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .ok()?;
+        Some(Self {
+            len: metadata.len(),
+            modified_secs: modified.as_secs(),
+            modified_nanos: modified.subsec_nanos(),
+            changed_secs: u64::try_from(metadata.ctime()).ok()?,
+            changed_nanos: u32::try_from(metadata.ctime_nsec()).ok()?,
+            inode: metadata.ino(),
+            mode: metadata.mode(),
+        })
+    }
+
+    #[cfg(windows)]
+    fn of(metadata: &std::fs::Metadata) -> Option<Self> {
+        use std::os::windows::fs::MetadataExt as _;
+        let modified = metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .ok()?;
+        let created = metadata
+            .created()
+            .ok()?
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .ok()?;
+        Some(Self {
+            len: metadata.len(),
+            modified_secs: modified.as_secs(),
+            modified_nanos: modified.subsec_nanos(),
+            changed_secs: created.as_secs(),
+            changed_nanos: created.subsec_nanos(),
+            inode: 0,
+            mode: metadata.file_attributes(),
+        })
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn of(_metadata: &std::fs::Metadata) -> Option<Self> {
+        None
     }
 }
 
