@@ -192,6 +192,31 @@ class RunScenarioTest(unittest.TestCase):
         self.assertEqual(entry["results"][0]["trials"], 3)
         self.assertEqual(entry["skipped"], [])
 
+    def test_a_failed_trial_does_not_keep_its_work_directories(self) -> None:
+        # A late failure in a big scenario would otherwise hold its target and
+        # store for every trial that follows it.
+        seen: list[Path] = []
+
+        def trial(scenario, tool, cell, subject, runner, work):  # noqa: ANN001
+            (work / f"target-{cell}").mkdir()
+            seen.append(work)
+            raise RuntimeError(f"{cell}/{tool} build failed")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with contextlib.redirect_stderr(io.StringIO()):
+                with mock.patch.object(real_world, "one_trial", side_effect=trial):
+                    real_world.run_scenario(
+                        "warm",
+                        ("kache",),
+                        {},
+                        None,
+                        Path(temporary),
+                        real_world.Progress(3),
+                        3,
+                    )
+
+            self.assertEqual(list(Path(temporary).iterdir()), [])
+
     def test_a_tool_that_dropped_out_partway_publishes_nothing(self) -> None:
         # Otherwise the note calling it unmeasured sits beside a cell holding
         # a median of whichever trials happened to finish first.

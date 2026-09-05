@@ -961,6 +961,10 @@ def run_scenario(
                 break
             else:
                 progress.finish(cell)
+            finally:
+                # Whatever the trial left goes now, not at the end of the run.
+                # A tool that fails late in a big scenario would otherwise
+                # hold its target and store for every trial that follows it.
                 discard(work, cell)
         # All of them or none. A tool that dropped out partway has both a
         # note saying it was not measured and, without this, a published cell

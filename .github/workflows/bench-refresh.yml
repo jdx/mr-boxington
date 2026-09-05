@@ -77,7 +77,11 @@ jobs:
       - name: Compare latest release against published benchmark
         id: drift
         env:
-          FORCE_REFRESH: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+          # A dry run is a request to measure. Without this it would inherit
+          # the drift check and quietly skip the benchmark whenever the
+          # published numbers already match the release, which is exactly the
+          # case someone testing a change to the benchmark is in.
+          FORCE_REFRESH: ${{ github.event_name == 'workflow_dispatch' && (inputs.force || inputs.dry_run) }}
           GH_TOKEN: ${{ github.token }}
         run: |
           RELEASE=$(gh release view --json tagName --jq '.tagName | ltrimstr("v")')
