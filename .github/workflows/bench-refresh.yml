@@ -27,25 +27,54 @@ on:
         required: false
         type: string
         default: ""
+      small_edit_mbx_artifact_run:
+        description: Earlier workflow run containing the candidate mbx artifact
+        required: false
+        type: string
+        default: ""
       small_edit_trials:
         description: JSON array of trial numbers (use [1] for a smoke test)
         required: false
         type: string
         default: "[1,2,3,4]"
+      small_edit_jobs:
+        description: JSON array of workloads to compare (build, clippy, test)
+        required: false
+        type: string
+        default: '["build"]'
+      small_edit_runner:
+        description: GitHub-hosted runner label for the seed and measure jobs
+        required: false
+        type: string
+        default: ubuntu-24.04
+      small_edit_parent:
+        description: hk commit whose caches are seeded
+        required: false
+        type: string
+        default: 27bb615768b85c9ac88e2abf8895219b44462871
+      small_edit_child:
+        description: hk commit built from the restored caches
+        required: false
+        type: string
+        default: fc29ead1456ba7c1f62826c284126410a4014b00
+      small_edit_build_args:
+        description: Extra Cargo arguments for every arm (for example Windows vendored features)
+        required: false
+        type: string
+        default: ""
 
 permissions: {}
 
 # Two refreshes would race the force-push to the shared `bench-refresh`
 # branch. A manual dispatch supersedes an in-flight scheduled run.
 concurrency:
-  group: bench-refresh
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.small_edit && format('small-edit-{0}', github.run_id) || 'bench-refresh' }}
   cancel-in-progress: true
 
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
-  # Keep rustup's proxies on PATH so RUSTUP_TOOLCHAIN can select the alternate
-  # compiler used by the toolchain-change benchmark.
+  # Rust 1.97.1 is part of the digest-pinned benchmark image.
   MISE_DISABLE_TOOLS: rust
   RUSTUP_TOOLCHAIN: 1.97.1
 
@@ -96,9 +125,12 @@ jobs:
     if: needs.check.outputs.drift == 'true'
     # Keep the runner class fixed: the six-job contention scenario needs enough
     # CPU to reproduce the large parallel CI job it models, and timings cannot
-    # be compared across machine classes. The xlarge Namespace profile is also
-    # representative of the high-core-count local machines this models.
-    runs-on: namespace-profile-endev-linux-amd64-xlarge;overrides.cache-tag=cache
+    # be compared across machine classes. The host-wide lease serializes this
+    # with every other jdx performance job.
+    runs-on: [self-hosted, jdx-perf-v1]
+    container:
+      image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68
+      options: --cpuset-cpus 0-7
     # The full refresh also runs every cache scenario and the toolchain guard.
     timeout-minutes: 180
     permissions:
@@ -111,13 +143,9 @@ jobs:
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           cache: false
+          install: false
         env:
           MISE_LOCKED: "1"
-      - name: Install benchmark Rust tooling
-        run: |
-          rustup toolchain install --profile minimal 1.97.1
-          rustup component add --toolchain 1.97.1 clippy
-          rustup toolchain install --profile minimal 1.96.0
       # The comparison should track kache itself, not the version that happened
       # to be current when mise.lock was last updated. Install the newest stable
       # release explicitly, then keep its real path for builds that run outside
@@ -135,12 +163,14 @@ jobs:
           {
             echo '### Runner metadata'
             echo '```text'
-            echo 'runner-profile: namespace-profile-endev-linux-amd64-xlarge'
+            echo 'environment-revision: perf-runner@fd66d9b'
+            echo 'image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68'
             uname -a
             lscpu
             mise --version
             rustc --version
             cargo --version
+            valgrind --version
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Install released mbx
@@ -159,6 +189,8 @@ jobs:
             | (cd "$install_dir" && sha256sum --check --strict -)
           tar -xzf "$install_dir/$archive" -C "$install_dir"
           echo "MBX_BENCH_BINARY=$install_dir/mbx" >> "$GITHUB_ENV"
+      # Clippy for 1.97.1 and the alternate 1.96.0 toolchain are part of the
+      # pinned image, so this job never needs static.rust-lang.org at runtime.
       - name: Refresh benchmarks
         env:
           MBX_BENCH_ALTERNATE_TOOLCHAIN: 1.96.0
@@ -261,7 +293,7 @@ jobs:
           cat > "$RUNNER_TEMP/body.md" <<EOF
           ## Refreshed real-world benchmarks
 
-          \`benchmarks/results.json\` was measured with \`${BENCH:-no previous run}\`; the latest release is now \`mbx ${RELEASE}\`. Re-ran the benchmark with that release on the fixed Namespace Linux xlarge profile: a pinned checkout of jdx/hk built under raw cargo, mbx, and kache across the cold, warm, next-commit, cross-worktree, toolchain-change, and six-job contention scenarios.
+          \`benchmarks/results.json\` was measured with \`${BENCH:-no previous run}\`; the latest release is now \`mbx ${RELEASE}\`. Re-ran the benchmark with that release on the dedicated performance runner: a pinned checkout of jdx/hk built under raw cargo, mbx, and kache across the cold, warm, next-commit, cross-worktree, toolchain-change, and six-job contention scenarios.
 
           The [run summary](${RUN_URL}) has the table these numbers came from, and the run's artifacts have the per-build logs.
 
@@ -281,9 +313,9 @@ jobs:
 
   small-edit-build-mbx:
     name: Build candidate mbx
-    if: github.event_name == 'workflow_dispatch' && inputs.small_edit && inputs.small_edit_mbx_ref != ''
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    if: github.event_name == 'workflow_dispatch' && inputs.small_edit && inputs.small_edit_mbx_ref != '' && inputs.small_edit_mbx_artifact_run == ''
+    runs-on: ${{ inputs.small_edit_runner }}
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -292,13 +324,20 @@ jobs:
           ref: ${{ inputs.small_edit_mbx_ref }}
           persist-credentials: false
       - name: Install pinned Rust
+        shell: bash
         run: rustup toolchain install 1.97.1 --profile minimal --no-self-update
       - name: Build candidate
+        shell: bash
         run: cargo build --locked --release -p mbx
       - name: Stage candidate
+        shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/mbx-bin"
-          cp target/release/mbx "$RUNNER_TEMP/mbx-bin/mbx"
+          if [ -f target/release/mbx.exe ]; then
+            cp target/release/mbx.exe "$RUNNER_TEMP/mbx-bin/mbx.exe"
+          else
+            cp target/release/mbx "$RUNNER_TEMP/mbx-bin/mbx"
+          fi
           git rev-parse HEAD > "$RUNNER_TEMP/mbx-bin/source-revision"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -307,81 +346,110 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # One cold build per (job, tool, trial) at the parent commit. Every arm saves
+  # its own cache under a run-scoped key so nothing leaks between trials.
   small-edit-seed:
-    name: Seed ${{ matrix.tool }} (${{ matrix.trial }})
+    name: Seed ${{ matrix.job }} ${{ matrix.tool }} (${{ matrix.trial }})
     needs: small-edit-build-mbx
     if: always() && github.event_name == 'workflow_dispatch' && inputs.small_edit && (needs.small-edit-build-mbx.result == 'success' || needs.small-edit-build-mbx.result == 'skipped')
     strategy:
       fail-fast: false
+      max-parallel: 6
       matrix:
-        tool: [rust-cache, mbx, mbx-registry]
         trial: ${{ fromJSON(inputs.small_edit_trials || '[1,2,3,4]') }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+        job: ${{ fromJSON(inputs.small_edit_jobs || '["build"]') }}
+        tool: [rust-cache, mbx-objects, mbx-target]
+    runs-on: ${{ inputs.small_edit_runner }}
+    timeout-minutes: 90
     permissions:
       actions: write
       contents: read
     env:
-      MBX_CACHE_EXPORT_GROUP: gha-small-edit-${{ github.run_id }}-${{ matrix.trial }}
+      MBX_TARGET_VIEWS: "0"
     steps:
+      - name: Isolate the mbx object store
+        shell: bash
+        run: echo "MBX_CACHE_DIR=$RUNNER_TEMP/mbx-cache" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: jdx/hk
-          ref: 27bb615768b85c9ac88e2abf8895219b44462871
+          ref: ${{ inputs.small_edit_parent }}
           persist-credentials: false
       - name: Install pinned Rust
-        run: rustup toolchain install 1.97.1 --profile minimal --no-self-update
+        shell: bash
+        env:
+          JOB: ${{ matrix.job }}
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --no-self-update
+          if [ "$JOB" = clippy ]; then rustup component add clippy --toolchain 1.97.1; fi
       - name: Download candidate mbx
         if: inputs.small_edit_mbx_ref != '' && matrix.tool != 'rust-cache'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: gha-small-edit-mbx-binary
           path: ${{ runner.temp }}/mbx-bin
+          run-id: ${{ inputs.small_edit_mbx_artifact_run || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Select candidate mbx
         if: inputs.small_edit_mbx_ref != '' && matrix.tool != 'rust-cache'
+        shell: bash
         run: |
-          chmod +x "$RUNNER_TEMP/mbx-bin/mbx"
+          chmod +x "$RUNNER_TEMP"/mbx-bin/mbx*
           echo "$RUNNER_TEMP/mbx-bin" >> "$GITHUB_PATH"
       - if: matrix.tool == 'rust-cache'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
         with:
-          shared-key: gha-small-edit-${{ github.run_id }}-${{ matrix.trial }}
+          shared-key: gha-small-edit-${{ github.run_id }}-${{ matrix.trial }}-${{ matrix.job }}
           add-job-id-key: "false"
+          # The environment hash folds in every Rust toolchain rust-cache can
+          # see, which differs on macOS once an mbx arm has run in the same
+          # job. The seeded key must survive arm order, so key on lockfiles only.
+          add-rust-environment-hash-key: "false"
           workspaces: . -> target
           cache-all-crates: "true"
           cache-workspace-crates: "true"
-      - if: matrix.tool == 'mbx'
-        uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
+      - if: matrix.tool == 'mbx-objects'
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
-          version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
-          cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
+          backend: github
+          cache-key: gha-small-edit-mbx-objects-${{ github.run_id }}-${{ matrix.trial }}-${{ matrix.job }}-parent
+          github-cache-mode: objects
           save-on-workflow-dispatch: "true"
+          version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           toolchain: 1.97.1
-      - if: matrix.tool == 'mbx-registry'
-        uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
+      - if: matrix.tool == 'mbx-target'
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
-          backend: local
+          backend: github
+          cache-links: "false"
+          cache-key: gha-small-edit-mbx-target-${{ github.run_id }}-${{ matrix.trial }}-${{ matrix.job }}-parent
+          github-cache-mode: target
+          save-on-workflow-dispatch: "true"
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           toolchain: 1.97.1
       - name: Seed parent build
+        shell: bash
         env:
-          BUILD_DRIVER: "${{ matrix.tool == 'rust-cache' && 'cargo' || 'mbx' }}"
+          TOOL: ${{ matrix.tool }}
+          JOB: ${{ matrix.job }}
+          BUILD_ARGS: ${{ inputs.small_edit_build_args }}
         run: |
-          "$BUILD_DRIVER" build --locked
-      - name: Export native mbx bundle
-        if: matrix.tool == 'mbx-registry'
-        run: mbx cache export --group "$MBX_CACHE_EXPORT_GROUP" "$RUNNER_TEMP/mbx-cache.tar"
-      - if: matrix.tool == 'mbx-registry'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          key: gha-small-edit-mbx-registry-${{ github.run_id }}-${{ matrix.trial }}-parent
-          path: |
-            ${{ runner.temp }}/mbx-cache.tar
-            ~/.cargo/registry
-            ~/.cargo/git
+          case "$TOOL" in rust-cache) driver=cargo ;; *) driver=mbx ;; esac
+          case "$JOB" in
+            build) sub="build" ;;
+            clippy) sub="clippy --all-targets" ;;
+            test) sub="test --no-run" ;;
+            *) echo "::error::unknown job $JOB"; exit 1 ;;
+          esac
+          # shellcheck disable=SC2086
+          "$driver" $sub --locked $BUILD_ARGS
 
+  # Every arm restores its parent cache and builds the child commit on one
+  # runner. Slots rotate through a Latin square so each arm occupies each
+  # position once per trial; all cache state is wiped between arms so a later
+  # arm cannot inherit a registry or object store from an earlier one.
   small-edit-measure:
-    name: Measure ${{ matrix.tool }} (${{ matrix.trial }})
+    name: Measure ${{ matrix.job }} ${{ matrix.trial }} (${{ matrix.order }})
     needs: small-edit-seed
     # `small-edit-seed` deliberately tolerates the candidate-build job being
     # skipped when benchmarking a released mbx. Preserve that tolerance here:
@@ -390,130 +458,326 @@ jobs:
     if: always() && github.event_name == 'workflow_dispatch' && inputs.small_edit && needs.small-edit-seed.result == 'success'
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix:
-        tool: [rust-cache, mbx, mbx-registry]
         trial: ${{ fromJSON(inputs.small_edit_trials || '[1,2,3,4]') }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+        job: ${{ fromJSON(inputs.small_edit_jobs || '["build"]') }}
+        order: [rust-first, target-first, objects-first]
+        include:
+          - order: rust-first
+            slot1: rust-cache
+            slot2: mbx-objects
+            slot3: mbx-target
+          - order: target-first
+            slot1: mbx-target
+            slot2: rust-cache
+            slot3: mbx-objects
+          - order: objects-first
+            slot1: mbx-objects
+            slot2: mbx-target
+            slot3: rust-cache
+    runs-on: ${{ inputs.small_edit_runner }}
+    timeout-minutes: 90
     permissions:
       actions: read
       contents: read
+    env:
+      MBX_TARGET_VIEWS: "0"
     steps:
+      - name: Isolate the mbx object store
+        shell: bash
+        run: echo "MBX_CACHE_DIR=$RUNNER_TEMP/mbx-cache" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: jdx/hk
-          ref: fc29ead1456ba7c1f62826c284126410a4014b00
+          ref: ${{ inputs.small_edit_child }}
           persist-credentials: false
       - name: Install pinned Rust
-        run: rustup toolchain install 1.97.1 --profile minimal --no-self-update
+        shell: bash
+        env:
+          JOB: ${{ matrix.job }}
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --no-self-update
+          if [ "$JOB" = clippy ]; then rustup component add clippy --toolchain 1.97.1; fi
+      # The objects arm is the only one that cannot recover mbx from its cache,
+      # so an unreleased candidate has to be staged for it outside the timer.
       - name: Download candidate mbx
         if: inputs.small_edit_mbx_ref != ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: gha-small-edit-mbx-binary
           path: ${{ runner.temp }}/mbx-bin
+          run-id: ${{ inputs.small_edit_mbx_artifact_run || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Select candidate mbx
-        if: inputs.small_edit_mbx_ref != '' && matrix.tool != 'rust-cache'
+        if: inputs.small_edit_mbx_ref != ''
+        shell: bash
         run: |
-          chmod +x "$RUNNER_TEMP/mbx-bin/mbx"
+          chmod +x "$RUNNER_TEMP"/mbx-bin/mbx*
           echo "$RUNNER_TEMP/mbx-bin" >> "$GITHUB_PATH"
-      # Start after common runner/bootstrap work but before each cache action.
-      # The action's own setup is part of real workflow wall time, as is restore.
-      - name: Start restore-and-build timer
-        run: echo "SMALL_EDIT_STARTED_NS=$(date +%s%N)" >> "$GITHUB_ENV"
-      - if: matrix.tool == 'rust-cache'
-        id: rust_cache_restore
+
+      # ---- slot 1 ----
+      - name: Prepare slot 1
+        id: slot1_timer
+        shell: bash
+        run: |
+          rm -rf target "${CARGO_HOME:-$HOME/.cargo}/registry" "${CARGO_HOME:-$HOME/.cargo}/git" "$MBX_CACHE_DIR" "$RUNNER_TEMP/mbx-target-tool"
+          echo "started_ns=$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1e9')" >> "$GITHUB_OUTPUT"
+      - if: matrix.slot1 == 'rust-cache'
+        id: slot1_rust
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
         with:
-          shared-key: gha-small-edit-${{ github.run_id }}-${{ matrix.trial }}
+          shared-key: gha-small-edit-${{ github.run_id }}-${{ matrix.trial }}-${{ matrix.job }}
           add-job-id-key: "false"
+          # The environment hash folds in every Rust toolchain rust-cache can
+          # see, which differs on macOS once an mbx arm has run in the same
+          # job. The seeded key must survive arm order, so key on lockfiles only.
+          add-rust-environment-hash-key: "false"
           workspaces: . -> target
           cache-all-crates: "true"
           cache-workspace-crates: "true"
           save-if: "false"
-      - if: matrix.tool == 'mbx'
-        id: mbx_restore
-        uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
+      - if: matrix.slot1 == 'mbx-objects'
+        id: slot1_objects
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
-          version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
-          cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
-          toolchain: 1.97.1
-      - if: matrix.tool == 'mbx-registry'
-        uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
-        with:
-          backend: local
+          backend: github
+          cache-key: gha-small-edit-mbx-objects-${{ github.run_id }}-${{ matrix.trial }}-${{ matrix.job }}-parent
+          github-cache-mode: objects
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           toolchain: 1.97.1
-      - if: matrix.tool == 'mbx-registry'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - if: matrix.slot1 == 'mbx-target'
+        id: slot1_target
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
-          key: gha-small-edit-mbx-registry-${{ github.run_id }}-${{ matrix.trial }}-parent
-          fail-on-cache-miss: true
-          path: |
-            ${{ runner.temp }}/mbx-cache.tar
-            ~/.cargo/registry
-            ~/.cargo/git
-      - name: Import native mbx bundle
-        if: matrix.tool == 'mbx-registry'
-        run: |
-          set -o pipefail
-          mbx cache import "$RUNNER_TEMP/mbx-cache.tar" | tee "$RUNNER_TEMP/mbx-import.log"
-      - id: build
-        name: Build edited commit
+          backend: github
+          cache-links: "false"
+          cache-key: gha-small-edit-mbx-target-${{ github.run_id }}-${{ matrix.trial }}-${{ matrix.job }}-parent
+          github-cache-mode: target
+          version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
+          toolchain: 1.97.1
+      - name: Build slot 1
+        id: slot1_build
+        shell: bash
         env:
-          BUILD_DRIVER: "${{ matrix.tool == 'rust-cache' && 'cargo' || 'mbx' }}"
-          MBX_REPORT: ${{ runner.temp }}/mbx-report.json
+          TOOL: ${{ matrix.slot1 }}
+          JOB: ${{ matrix.job }}
+          BUILD_ARGS: ${{ inputs.small_edit_build_args }}
+          STARTED_NS: ${{ steps.slot1_timer.outputs.started_ns }}
         run: |
-          started=$(date +%s%N)
-          "$BUILD_DRIVER" build --locked
-          finished=$(date +%s%N)
+          case "$TOOL" in rust-cache) driver=cargo ;; *) driver=mbx ;; esac
+          case "$JOB" in
+            build) sub="build" ;;
+            clippy) sub="clippy --all-targets" ;;
+            test) sub="test --no-run" ;;
+            *) echo "::error::unknown job $JOB"; exit 1 ;;
+          esac
+          restored=$(find target -mindepth 3 -maxdepth 3 -type d -path '*/.fingerprint/*' 2>/dev/null | wc -l | tr -d ' ')
+          echo "restored_fingerprints=$restored" >> "$GITHUB_OUTPUT"
+          started=$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1e9')
+          # shellcheck disable=SC2086
+          "$driver" $sub --locked $BUILD_ARGS
+          finished=$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1e9')
           echo "build_duration_ns=$((finished - started))" >> "$GITHUB_OUTPUT"
-          echo "total_duration_ns=$((finished - SMALL_EDIT_STARTED_NS))" >> "$GITHUB_OUTPUT"
-      # Validate after taking the timing so the assertion shell does not bias
-      # one arm. A miss fails the job before it can publish a measurement.
-      - name: Require parent rust-cache hit
-        if: matrix.tool == 'rust-cache'
-        env:
-          CACHE_HIT: ${{ steps.rust_cache_restore.outputs.cache-hit }}
+          echo "total_duration_ns=$((finished - STARTED_NS))" >> "$GITHUB_OUTPUT"
+
+      # ---- slot 2 ----
+      - name: Prepare slot 2
+        id: slot2_timer
+        shell: bash
         run: |
-          if [ "$CACHE_HIT" != "true" ]; then
-            echo "::error::rust-cache did not restore the seeded parent cache"
-            exit 1
-          fi
-      - name: Require parent mbx hit
-        if: matrix.tool == 'mbx'
+          rm -rf target "${CARGO_HOME:-$HOME/.cargo}/registry" "${CARGO_HOME:-$HOME/.cargo}/git" "$MBX_CACHE_DIR" "$RUNNER_TEMP/mbx-target-tool"
+          echo "started_ns=$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1e9')" >> "$GITHUB_OUTPUT"
+      - if: matrix.slot2 == 'rust-cache'
+        id: slot2_rust
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
+        with:
+          shared-key: gha-small-edit-${{ github.run_id }}-${{ matrix.trial }}-${{ matrix.job }}
+          add-job-id-key: "false"
+          # The environment hash folds in every Rust toolchain rust-cache can
+          # see, which differs on macOS once an mbx arm has run in the same
+          # job. The seeded key must survive arm order, so key on lockfiles only.
+          add-rust-environment-hash-key: "false"
+          workspaces: . -> target
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+          save-if: "false"
+      - if: matrix.slot2 == 'mbx-objects'
+        id: slot2_objects
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          cache-key: gha-small-edit-mbx-objects-${{ github.run_id }}-${{ matrix.trial }}-${{ matrix.job }}-parent
+          github-cache-mode: objects
+          version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
+          toolchain: 1.97.1
+      - if: matrix.slot2 == 'mbx-target'
+        id: slot2_target
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          cache-links: "false"
+          cache-key: gha-small-edit-mbx-target-${{ github.run_id }}-${{ matrix.trial }}-${{ matrix.job }}-parent
+          github-cache-mode: target
+          version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
+          toolchain: 1.97.1
+      - name: Build slot 2
+        id: slot2_build
+        shell: bash
         env:
-          CACHE_HIT: ${{ steps.mbx_restore.outputs.cache-hit }}
+          TOOL: ${{ matrix.slot2 }}
+          JOB: ${{ matrix.job }}
+          BUILD_ARGS: ${{ inputs.small_edit_build_args }}
+          STARTED_NS: ${{ steps.slot2_timer.outputs.started_ns }}
         run: |
-          if [ "$CACHE_HIT" != "true" ]; then
-            echo "::error::mbx did not restore the seeded parent cache"
-            exit 1
-          fi
+          case "$TOOL" in rust-cache) driver=cargo ;; *) driver=mbx ;; esac
+          case "$JOB" in
+            build) sub="build" ;;
+            clippy) sub="clippy --all-targets" ;;
+            test) sub="test --no-run" ;;
+            *) echo "::error::unknown job $JOB"; exit 1 ;;
+          esac
+          restored=$(find target -mindepth 3 -maxdepth 3 -type d -path '*/.fingerprint/*' 2>/dev/null | wc -l | tr -d ' ')
+          echo "restored_fingerprints=$restored" >> "$GITHUB_OUTPUT"
+          started=$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1e9')
+          # shellcheck disable=SC2086
+          "$driver" $sub --locked $BUILD_ARGS
+          finished=$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1e9')
+          echo "build_duration_ns=$((finished - started))" >> "$GITHUB_OUTPUT"
+          echo "total_duration_ns=$((finished - STARTED_NS))" >> "$GITHUB_OUTPUT"
+
+      # ---- slot 3 ----
+      - name: Prepare slot 3
+        id: slot3_timer
+        shell: bash
+        run: |
+          rm -rf target "${CARGO_HOME:-$HOME/.cargo}/registry" "${CARGO_HOME:-$HOME/.cargo}/git" "$MBX_CACHE_DIR" "$RUNNER_TEMP/mbx-target-tool"
+          echo "started_ns=$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1e9')" >> "$GITHUB_OUTPUT"
+      - if: matrix.slot3 == 'rust-cache'
+        id: slot3_rust
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
+        with:
+          shared-key: gha-small-edit-${{ github.run_id }}-${{ matrix.trial }}-${{ matrix.job }}
+          add-job-id-key: "false"
+          # The environment hash folds in every Rust toolchain rust-cache can
+          # see, which differs on macOS once an mbx arm has run in the same
+          # job. The seeded key must survive arm order, so key on lockfiles only.
+          add-rust-environment-hash-key: "false"
+          workspaces: . -> target
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+          save-if: "false"
+      - if: matrix.slot3 == 'mbx-objects'
+        id: slot3_objects
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          cache-key: gha-small-edit-mbx-objects-${{ github.run_id }}-${{ matrix.trial }}-${{ matrix.job }}-parent
+          github-cache-mode: objects
+          version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
+          toolchain: 1.97.1
+      - if: matrix.slot3 == 'mbx-target'
+        id: slot3_target
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          cache-links: "false"
+          cache-key: gha-small-edit-mbx-target-${{ github.run_id }}-${{ matrix.trial }}-${{ matrix.job }}-parent
+          github-cache-mode: target
+          version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
+          toolchain: 1.97.1
+      - name: Build slot 3
+        id: slot3_build
+        shell: bash
+        env:
+          TOOL: ${{ matrix.slot3 }}
+          JOB: ${{ matrix.job }}
+          BUILD_ARGS: ${{ inputs.small_edit_build_args }}
+          STARTED_NS: ${{ steps.slot3_timer.outputs.started_ns }}
+        run: |
+          case "$TOOL" in rust-cache) driver=cargo ;; *) driver=mbx ;; esac
+          case "$JOB" in
+            build) sub="build" ;;
+            clippy) sub="clippy --all-targets" ;;
+            test) sub="test --no-run" ;;
+            *) echo "::error::unknown job $JOB"; exit 1 ;;
+          esac
+          restored=$(find target -mindepth 3 -maxdepth 3 -type d -path '*/.fingerprint/*' 2>/dev/null | wc -l | tr -d ' ')
+          echo "restored_fingerprints=$restored" >> "$GITHUB_OUTPUT"
+          started=$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1e9')
+          # shellcheck disable=SC2086
+          "$driver" $sub --locked $BUILD_ARGS
+          finished=$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1e9')
+          echo "build_duration_ns=$((finished - started))" >> "$GITHUB_OUTPUT"
+          echo "total_duration_ns=$((finished - STARTED_NS))" >> "$GITHUB_OUTPUT"
+
+      # Validate after timing so assertions do not bias any arm.
+      # rust-cache keys on the Cargo.lock hash, so a child that changes the lock
+      # restores the parent by prefix and reports no exact hit; a restored
+      # fingerprint tree is the evidence that arm actually got its cache. The
+      # mbx arms use explicit parent keys, so an exact hit is required there.
+      - name: Require every parent-cache restore
+        shell: bash
+        env:
+          TOOL1: ${{ matrix.slot1 }}
+          TOOL2: ${{ matrix.slot2 }}
+          TOOL3: ${{ matrix.slot3 }}
+          HIT1: ${{ steps.slot1_rust.outputs.cache-hit || steps.slot1_objects.outputs.cache-hit || steps.slot1_target.outputs.cache-hit }}
+          HIT2: ${{ steps.slot2_rust.outputs.cache-hit || steps.slot2_objects.outputs.cache-hit || steps.slot2_target.outputs.cache-hit }}
+          HIT3: ${{ steps.slot3_rust.outputs.cache-hit || steps.slot3_objects.outputs.cache-hit || steps.slot3_target.outputs.cache-hit }}
+          RESTORED1: ${{ steps.slot1_build.outputs.restored_fingerprints }}
+          RESTORED2: ${{ steps.slot2_build.outputs.restored_fingerprints }}
+          RESTORED3: ${{ steps.slot3_build.outputs.restored_fingerprints }}
+        run: |
+          check() {
+            case "$1" in
+              rust-cache) test "${3:-0}" -gt 0 ;;
+              mbx-objects) test "$2" = true ;;
+              mbx-target) test "$2" = true && test "${3:-0}" -gt 0 ;;
+            esac || { echo "::error::$1 did not restore its seeded parent cache (exact hit: $2, restored fingerprints: ${3:-0})"; exit 1; }
+          }
+          check "$TOOL1" "$HIT1" "$RESTORED1"
+          check "$TOOL2" "$HIT2" "$RESTORED2"
+          check "$TOOL3" "$HIT3" "$RESTORED3"
       - name: Record trial
+        shell: bash
         env:
-          BUILD_DURATION_NS: ${{ steps.build.outputs.build_duration_ns }}
-          TOTAL_DURATION_NS: ${{ steps.build.outputs.total_duration_ns }}
-          TOOL: ${{ matrix.tool }}
+          TOOL1: ${{ matrix.slot1 }}
+          TOOL2: ${{ matrix.slot2 }}
+          TOOL3: ${{ matrix.slot3 }}
+          BUILD1: ${{ steps.slot1_build.outputs.build_duration_ns }}
+          BUILD2: ${{ steps.slot2_build.outputs.build_duration_ns }}
+          BUILD3: ${{ steps.slot3_build.outputs.build_duration_ns }}
+          TOTAL1: ${{ steps.slot1_build.outputs.total_duration_ns }}
+          TOTAL2: ${{ steps.slot2_build.outputs.total_duration_ns }}
+          TOTAL3: ${{ steps.slot3_build.outputs.total_duration_ns }}
+          RESTORED1: ${{ steps.slot1_build.outputs.restored_fingerprints }}
+          RESTORED2: ${{ steps.slot2_build.outputs.restored_fingerprints }}
+          RESTORED3: ${{ steps.slot3_build.outputs.restored_fingerprints }}
+          JOB: ${{ matrix.job }}
           TRIAL: ${{ matrix.trial }}
+          ORDER: ${{ matrix.order }}
+          RUNNER_LABEL: ${{ inputs.small_edit_runner }}
+          PARENT: ${{ inputs.small_edit_parent }}
+          CHILD: ${{ inputs.small_edit_child }}
           REF: ${{ inputs.small_edit_mbx_ref }}
           VERSION: ${{ inputs.small_edit_mbx_version }}
         run: |
           mkdir -p "$RUNNER_TEMP/small-edit"
-          if [ -n "$REF" ]; then
-            VERSION=""
-            REVISION=$(cat "$RUNNER_TEMP/mbx-bin/source-revision")
-          else
-            REVISION=""
-          fi
-          jq -n --arg tool "$TOOL" --arg ref "$REF" --arg revision "$REVISION" --arg version "$VERSION" \
-            --argjson trial "$TRIAL" \
-            --argjson build_duration_ns "$BUILD_DURATION_NS" \
-            --argjson restore_and_build_duration_ns "$TOTAL_DURATION_NS" \
-            '{schema:1,tool:$tool,mbx_version:$version,mbx_ref:$ref,mbx_revision:$revision,trial:$trial,build_duration_ns:$build_duration_ns,restore_and_build_duration_ns:$restore_and_build_duration_ns}' \
-            > "$RUNNER_TEMP/small-edit/${TOOL}-${TRIAL}.json"
+          if [ -n "$REF" ]; then VERSION=""; fi
+          record() {
+            jq -n --arg tool "$1" --arg job "$JOB" --arg trial "$TRIAL" --arg order "$ORDER" --arg position "$4" \
+              --arg runner "$RUNNER_LABEL" --arg parent "$PARENT" --arg child "$CHILD" --arg ref "$REF" --arg version "$VERSION" \
+              --argjson build_duration_ns "$2" --argjson restore_and_build_duration_ns "$3" --argjson restored_fingerprints "${5:-0}" \
+              '{schema:2,tool:$tool,job:$job,trial:$trial,order:$order,position:($position|tonumber),runner:$runner,parent:$parent,child:$child,mbx_ref:$ref,mbx_version:$version,build_duration_ns:$build_duration_ns,restore_and_build_duration_ns:$restore_and_build_duration_ns,restored_fingerprints:$restored_fingerprints}' \
+              > "$RUNNER_TEMP/small-edit/$1-$JOB-$TRIAL-$ORDER.json"
+          }
+          record "$TOOL1" "$BUILD1" "$TOTAL1" 1 "$RESTORED1"
+          record "$TOOL2" "$BUILD2" "$TOTAL2" 2 "$RESTORED2"
+          record "$TOOL3" "$BUILD3" "$TOTAL3" 3 "$RESTORED3"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: gha-small-edit-${{ matrix.tool }}-${{ matrix.trial }}
+          name: gha-small-edit-pair-${{ matrix.job }}-${{ matrix.trial }}-${{ matrix.order }}
           path: ${{ runner.temp }}/small-edit/*.json
           if-no-files-found: error
           retention-days: 90
@@ -530,18 +794,35 @@ jobs:
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: gha-small-edit-*
+          pattern: gha-small-edit-pair-*
           path: ${{ runner.temp }}/small-edit
           merge-multiple: true
-      - name: Summarize medians
+      - name: Collect cache sizes
         env:
-          TRIALS: ${{ inputs.small_edit_trials || '[1,2,3,4]' }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           set -o pipefail
-          trial_count=$(jq -er \
-            'if type == "array" and length > 0 then length else error("expected a non-empty trial array") end' \
-            <<< "$TRIALS")
-          expected=$((3 * trial_count))
+          {
+            gh cache list --limit 500 --key "v0-rust-gha-small-edit-$RUN_ID-" --json key,sizeInBytes
+            gh cache list --limit 500 --key "gha-small-edit-mbx-objects-$RUN_ID-" --json key,sizeInBytes
+            gh cache list --limit 500 --key "gha-small-edit-mbx-target-$RUN_ID-" --json key,sizeInBytes
+          } | jq -s --arg run "$RUN_ID" 'add | map(
+              . + {tool: (if (.key | startswith("v0-rust-")) then "rust-cache"
+                          elif (.key | startswith("gha-small-edit-mbx-objects-")) then "mbx-objects"
+                          else "mbx-target" end)}
+            )' > "$RUNNER_TEMP/small-edit-caches.json"
+          jq . "$RUNNER_TEMP/small-edit-caches.json"
+      - name: Summarize
+        env:
+          TRIALS: ${{ inputs.small_edit_trials || '[1,2,3,4]' }}
+          JOBS: ${{ inputs.small_edit_jobs || '["build"]' }}
+        run: |
+          set -o pipefail
+          trial_count=$(jq -er 'if type == "array" and length > 0 then length else error("expected a non-empty trial array") end' <<< "$TRIALS")
+          job_count=$(jq -er 'if type == "array" and length > 0 then length else error("expected a non-empty job array") end' <<< "$JOBS")
+          expected=$((3 * 3 * trial_count * job_count))
           shopt -s nullglob
           records=("$RUNNER_TEMP"/small-edit/*.json)
           actual=${#records[@]}
@@ -555,27 +836,73 @@ jobs:
               ($values | length) as $length |
               if $length % 2 == 1 then $values[$length / 2 | floor]
               else (($values[$length / 2 - 1] + $values[$length / 2]) / 2) end;
-            group_by(.tool) | map({
+            group_by([.job, .tool]) | map({
+              job: .[0].job,
               tool: .[0].tool,
-              mbx_version: .[0].mbx_version,
+              runner: .[0].runner,
               mbx_ref: .[0].mbx_ref,
-              mbx_revision: .[0].mbx_revision,
-              trials: length,
+              mbx_version: .[0].mbx_version,
+              observations: length,
               build_seconds: (([.[].build_duration_ns] | median) / 1e9),
-              restore_and_build_seconds: (([.[].restore_and_build_duration_ns] | median) / 1e9)
-            })' "$RUNNER_TEMP"/small-edit/*.json \
-            | tee "$RUNNER_TEMP/small-edit-summary.json"
+              restore_and_build_seconds: (([.[].restore_and_build_duration_ns] | median) / 1e9),
+              min_seconds: (([.[].restore_and_build_duration_ns] | min) / 1e9),
+              max_seconds: (([.[].restore_and_build_duration_ns] | max) / 1e9)
+            })' "$RUNNER_TEMP"/small-edit/*.json | tee "$RUNNER_TEMP/small-edit-summary.json"
+          jq -s '
+            def median:
+              sort as $values |
+              ($values | length) as $length |
+              if $length % 2 == 1 then $values[$length / 2 | floor]
+              else (($values[$length / 2 - 1] + $values[$length / 2]) / 2) end;
+            group_by([.job, .trial, .order]) | map(
+              ([.[] | select(.tool == "rust-cache")][0]) as $rust |
+              ([.[] | select(.tool == "mbx-target")][0]) as $target |
+              ([.[] | select(.tool == "mbx-objects")][0]) as $objects |
+              {
+                job: .[0].job, trial: .[0].trial, order: .[0].order,
+                target_minus_rust_seconds: (($target.restore_and_build_duration_ns - $rust.restore_and_build_duration_ns) / 1e9),
+                objects_minus_rust_seconds: (($objects.restore_and_build_duration_ns - $rust.restore_and_build_duration_ns) / 1e9),
+                target_minus_objects_seconds: (($target.restore_and_build_duration_ns - $objects.restore_and_build_duration_ns) / 1e9)
+              }
+            ) as $pairs |
+            ($pairs | map(.job) | unique) as $jobs |
+            {
+              pairs: $pairs,
+              by_job: [$jobs[] as $j | {
+                job: $j,
+                target_wins_vs_rust: ([$pairs[] | select(.job == $j and .target_minus_rust_seconds < 0)] | length),
+                objects_wins_vs_rust: ([$pairs[] | select(.job == $j and .objects_minus_rust_seconds < 0)] | length),
+                target_wins_vs_objects: ([$pairs[] | select(.job == $j and .target_minus_objects_seconds < 0)] | length),
+                pairs: ([$pairs[] | select(.job == $j)] | length),
+                median_target_minus_rust_seconds: ([$pairs[] | select(.job == $j) | .target_minus_rust_seconds] | median),
+                median_objects_minus_rust_seconds: ([$pairs[] | select(.job == $j) | .objects_minus_rust_seconds] | median),
+                median_target_minus_objects_seconds: ([$pairs[] | select(.job == $j) | .target_minus_objects_seconds] | median)
+              }]
+            }' "$RUNNER_TEMP"/small-edit/*.json | tee "$RUNNER_TEMP/small-edit-pairs.json"
+          jq 'group_by(.tool) | map({tool: .[0].tool, caches: length, total_bytes: ([.[].sizeInBytes] | add), mean_bytes: (([.[].sizeInBytes] | add) / length)})' \
+            "$RUNNER_TEMP/small-edit-caches.json" | tee "$RUNNER_TEMP/small-edit-bytes.json"
           {
             echo '## hk parent-cache + small-edit comparison'
             echo
-            echo '| Tool | Trials | Median restore + build | Median build |'
-            echo '| :--- | ---: | ---: | ---: |'
-            jq -r '.[] | "| \(.tool) | \(.trials) | \(.restore_and_build_seconds * 100 | round / 100) s | \(.build_seconds * 100 | round / 100) s |"' \
+            echo '| Job | Tool | n | Median restore + build | Min | Max | Median build |'
+            echo '| :--- | :--- | ---: | ---: | ---: | ---: | ---: |'
+            jq -r '.[] | "| \(.job) | \(.tool) | \(.observations) | \(.restore_and_build_seconds * 100 | round / 100) s | \(.min_seconds * 100 | round / 100) s | \(.max_seconds * 100 | round / 100) s | \(.build_seconds * 100 | round / 100) s |"' \
               "$RUNNER_TEMP/small-edit-summary.json"
+            echo
+            jq -r '.by_job[] | "- \(.job): target beat rust-cache \(.target_wins_vs_rust)/\(.pairs) (median \(.median_target_minus_rust_seconds * 1000 | round) ms); objects beat rust-cache \(.objects_wins_vs_rust)/\(.pairs) (median \(.median_objects_minus_rust_seconds * 1000 | round) ms); target beat objects \(.target_wins_vs_objects)/\(.pairs) (median \(.median_target_minus_objects_seconds * 1000 | round) ms)"' \
+              "$RUNNER_TEMP/small-edit-pairs.json"
+            echo
+            echo '| Tool | Caches | Total MB | Mean MB |'
+            echo '| :--- | ---: | ---: | ---: |'
+            jq -r '.[] | "| \(.tool) | \(.caches) | \(.total_bytes / 1e6 | round) | \(.mean_bytes / 1e6 | round) |"' "$RUNNER_TEMP/small-edit-bytes.json"
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gha-small-edit-summary
-          path: ${{ runner.temp }}/small-edit-summary.json
+          path: |
+            ${{ runner.temp }}/small-edit-summary.json
+            ${{ runner.temp }}/small-edit-pairs.json
+            ${{ runner.temp }}/small-edit-bytes.json
+            ${{ runner.temp }}/small-edit-caches.json
           if-no-files-found: error
           retention-days: 90
