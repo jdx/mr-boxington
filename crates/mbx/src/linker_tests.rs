@@ -73,7 +73,119 @@ fn the_identity_round_trips_through_its_recorded_form() {
 /// Probe this host without the agent round-trip the real path memoizes through.
 fn identity_without_agent() -> Result<LinkerIdentity> {
     let driver = which::which("cc")?;
-    probe(&driver, None).map(|(identity, _)| identity)
+    let search = search_dirs(&driver);
+    probe(&driver, None, search.as_ref()).map(|(identity, _)| identity)
+}
+
+#[test]
+fn search_dirs_are_read_in_the_order_the_driver_looks() {
+    let text = "install: /usr/lib/gcc/x86_64-linux-gnu/13/\nprograms: =/opt/x/:/usr/libexec/gcc/x86_64-linux-gnu/13/\nlibraries: =/usr/lib/gcc/x86_64-linux-gnu/13/:/lib/x86_64-linux-gnu/\n";
+    let dirs = parse_search_dirs(text);
+    assert_eq!(
+        dirs.programs,
+        vec![
+            PathBuf::from("/opt/x/"),
+            PathBuf::from("/usr/libexec/gcc/x86_64-linux-gnu/13/")
+        ]
+    );
+    assert_eq!(
+        dirs.libraries,
+        vec![
+            PathBuf::from("/usr/lib/gcc/x86_64-linux-gnu/13/"),
+            PathBuf::from("/lib/x86_64-linux-gnu/")
+        ]
+    );
+    assert_eq!(parse_search_dirs("nothing here"), SearchDirs::default());
+}
+
+/// A program the driver found in one of its own directories is pinned with
+/// every directory the driver looked in first, so a same-named file
+/// appearing in one of them is noticed, and not with the ones after.
+#[test]
+#[cfg(unix)]
+fn a_driver_named_program_pins_the_directories_searched_before_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let (first, second, third) = (
+        directory.path().join("first"),
+        directory.path().join("second"),
+        directory.path().join("third"),
+    );
+    for dir in [&first, &second, &third] {
+        std::fs::create_dir(dir).unwrap();
+    }
+    std::fs::write(second.join("ld"), "linker").unwrap();
+    let search = SearchDirs {
+        programs: vec![first.clone(), second.clone(), third.clone()],
+        libraries: Vec::new(),
+    };
+
+    let located = Located::program(OsStr::new("ld"), &second.join("ld"), Some(&search)).unwrap();
+    let pins = located.pins.clone().into_vec();
+    assert_eq!(
+        pins.iter().map(|pin| pin.path.clone()).collect::<Vec<_>>(),
+        vec![first.join("ld"), second.join("ld")]
+    );
+    assert!(pins[0].state.is_none() && pins[1].state.is_some());
+
+    // A shadow appearing where the search looked first breaks the pins.
+    std::fs::write(first.join("ld"), "another linker").unwrap();
+    assert!(!pins[0].holds() && pins[1].holds());
+
+    // Without the map the program resolves as before and pins nothing.
+    let unmapped = Located::program(OsStr::new("ld"), &second.join("ld"), None).unwrap();
+    assert_eq!(unmapped.path, second.join("ld"));
+    assert!(unmapped.pins.into_vec().is_empty());
+}
+
+/// A bare answer means the driver searched its own directories, found
+/// nothing, and would leave it to PATH: those directories are pinned along
+/// with the PATH candidates before the program.
+#[test]
+#[cfg(unix)]
+fn a_bare_program_name_pins_the_driver_directories_and_the_path_search() {
+    let directory = tempfile::tempdir().unwrap();
+    let search = SearchDirs {
+        programs: vec![directory.path().to_path_buf()],
+        libraries: Vec::new(),
+    };
+    let shell = which::which("sh").unwrap();
+    let located = Located::program(OsStr::new("sh"), Path::new("sh"), Some(&search)).unwrap();
+    assert_eq!(located.path, shell);
+    let pins = located.pins.into_vec();
+    assert_eq!(
+        pins.first().map(|pin| pin.path.clone()),
+        Some(directory.path().join("sh"))
+    );
+    assert!(pins.first().is_some_and(|pin| pin.state.is_none()));
+    assert_eq!(pins.last().map(|pin| pin.path.clone()), Some(shell));
+}
+
+/// A startup object is pinned with every library directory the driver
+/// looked in before the one that held it.
+#[test]
+fn a_found_object_pins_the_library_directories_searched_before_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let (early, late) = (
+        directory.path().join("early"),
+        directory.path().join("late"),
+    );
+    std::fs::create_dir_all(&late).unwrap();
+    std::fs::create_dir_all(&early).unwrap();
+    std::fs::write(late.join("crt1.o"), "startup").unwrap();
+    let mut pins = Pins::default();
+    pin_search(
+        &mut pins,
+        OsStr::new("crt1.o"),
+        &late.join("crt1.o"),
+        &[early.clone(), late.clone(), directory.path().join("never")],
+    );
+    assert_eq!(
+        pins.into_vec()
+            .iter()
+            .map(|pin| (pin.path.clone(), pin.state.is_some()))
+            .collect::<Vec<_>>(),
+        vec![(early.join("crt1.o"), false), (late.join("crt1.o"), true)]
+    );
 }
 
 /// A file the filesystem will not describe leaves the identity unpinned
@@ -113,14 +225,22 @@ fn an_undescribable_file_unpins_without_failing() {
 #[cfg(target_os = "linux")]
 fn a_probe_pins_the_files_it_read() {
     let driver = which::which("cc").unwrap();
-    let (identity, pins) = probe(&driver, None).unwrap();
+    let search = search_dirs(&driver).expect("the driver reports its search directories");
+    let (identity, pins) = probe(&driver, None, Some(&search)).unwrap();
     assert!(pins.iter().all(|pin| pin.path.is_absolute()), "{pins:?}");
     assert!(pins.iter().all(PinnedFile::holds), "{pins:?}");
     let present = pins.iter().filter(|pin| pin.state.is_some()).count();
-    // The driver, the linker, and every object the identity hashed; a
-    // linker found on PATH adds the places the search passed over.
+    // The driver, the linker, and every object the identity hashed; the
+    // directories searched before each of them are pinned absent.
     assert!(present >= 2 + identity.crt_objects.len(), "{pins:?}");
     assert_eq!(pins[0].path, driver);
+    // Every program directory the driver would try before PATH is covered.
+    let first_program_dir = search.programs.first().expect("a program directory");
+    assert!(
+        pins.iter()
+            .any(|pin| pin.path == first_program_dir.join("ld")),
+        "{pins:?}"
+    );
 }
 
 /// A `-fuse-ld` selection is resolved through the driver first, and a
@@ -132,7 +252,11 @@ fn a_fuse_ld_selection_resolves_or_is_refused() {
         return;
     };
 
-    let bogus = resolve_fuse_ld(&driver, "definitely-not-a-real-linker");
+    let bogus = resolve_fuse_ld(
+        &driver,
+        "definitely-not-a-real-linker",
+        search_dirs(&driver).as_ref(),
+    );
     assert!(
         bogus.is_err(),
         "a nonexistent linker must not resolve: {bogus:?}"
@@ -141,16 +265,20 @@ fn a_fuse_ld_selection_resolves_or_is_refused() {
     // An absolute selection names the linker directly, no resolution needed.
     let direct = Path::new(if cfg!(windows) { "C:/ld" } else { "/opt/ld" });
     assert_eq!(
-        resolve_fuse_ld(&driver, direct.to_str().unwrap())
-            .unwrap()
-            .path,
+        resolve_fuse_ld(
+            &driver,
+            direct.to_str().unwrap(),
+            search_dirs(&driver).as_ref()
+        )
+        .unwrap()
+        .path,
         direct
     );
 
     // Whatever the host does provide resolves to an absolute path that
     // exists: anything less could alias two linkers in one memoization key.
     for name in ["mold", "lld", "bfd", "gold"] {
-        if let Ok(located) = resolve_fuse_ld(&driver, name) {
+        if let Ok(located) = resolve_fuse_ld(&driver, name, search_dirs(&driver).as_ref()) {
             let program = &located.path;
             assert!(
                 program.is_absolute() && program.exists(),

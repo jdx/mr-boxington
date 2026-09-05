@@ -486,7 +486,8 @@ struct ExecutableIdentityKey {
     environment: BTreeMap<String, Option<String>>,
 }
 
-const PERSISTED_EXECUTABLE_IDENTITY_VERSION: u8 = 1;
+// 2: pins carry the state the shim saw, and cover the search directories.
+const PERSISTED_EXECUTABLE_IDENTITY_VERSION: u8 = 2;
 
 /// An executable identity kept across sessions.
 ///
@@ -2240,6 +2241,8 @@ impl CacheAgent {
             matches!(
                 name.as_str(),
                 "COMPILER_PATH"
+                    | "GCC_EXEC_PREFIX"
+                    | "LIBRARY_PATH"
                     | "MBX_FUSE_LD"
                     | "PATH"
                     | "RUSTUP_HOME"

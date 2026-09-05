@@ -4258,6 +4258,8 @@ async fn identity_keys_admit_only_names_that_select_the_answer() {
 
     for name in [
         "COMPILER_PATH",
+        "GCC_EXEC_PREFIX",
+        "LIBRARY_PATH",
         "PATH",
         "SDKROOT",
         "MACOSX_DEPLOYMENT_TARGET",
