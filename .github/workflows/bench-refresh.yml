@@ -77,10 +77,8 @@ jobs:
       - name: Compare latest release against published benchmark
         id: drift
         env:
-          # A dry run is a request to measure. Without this it would inherit
-          # the drift check and quietly skip the benchmark whenever the
-          # published numbers already match the release, which is exactly the
-          # case someone testing a change to the benchmark is in.
+          # A dry run is a request to measure, so it skips the drift check
+          # the same way `force` does.
           FORCE_REFRESH: ${{ github.event_name == 'workflow_dispatch' && (inputs.force || inputs.dry_run) }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -204,9 +202,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: results-json-${{ github.run_id }}-${{ github.run_attempt }}
-          # The rendered table travels with the numbers: the pull request body
-          # is where they are read, and a reviewer should not have to open a
-          # run summary to see what changed.
+          # The rendered table goes into the pull request body.
           path: |
             benchmarks/results.json
             target/benchmarks/real-world.md
@@ -218,12 +214,10 @@ jobs:
   propose:
     name: Propose the refreshed numbers
     needs: [check, refresh]
-    # Two ways to measure without proposing anything. `dry_run` is for testing
-    # a change to the benchmark itself: the numbers land as an artifact and go
-    # wherever the person who asked for them wants. The branch check is the
-    # standing one, because this job force-pushes a shared branch and edits a
-    # pull request against main: a run dispatched from a feature branch would
-    # aim that machinery at whatever the branch happened to contain.
+    # `dry_run` measures without proposing, for testing a change to the
+    # benchmark itself; the numbers land as an artifact. The branch check
+    # stays because this job force-pushes a shared branch and edits a pull
+    # request against main.
     if: |
       github.ref == 'refs/heads/main'
       && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
@@ -288,12 +282,10 @@ jobs:
 
           \`benchmarks/results.json\` was measured with \`${BENCH:-no previous run}\`; the latest release is now \`mbx ${RELEASE}\`. Re-ran the benchmark with that release on the fixed Namespace Linux xlarge profile: a pinned checkout of jdx/hk built under raw cargo, mbx, and kache across the warm, next-commit, edit-loop, cross-worktree, toolchain-change, and six-job contention scenarios, three trials of each timed one.
 
-          **Read the numbers before merging.** They publish to https://mr-boxington.jdx.dev/benchmarks on merge. A scenario that swapped places is worth investigating before it goes on the site, and so is a trial range wide enough to explain the gap beside it.
+          **Read the numbers before merging.** They publish to https://mr-boxington.jdx.dev/benchmarks on merge. Look into a scenario that swapped places, or a trial range wide enough to explain the gap beside it, before it goes on the site.
 
           EOF
-          # The same table the job summary prints. A reviewer deciding whether
-          # these numbers should go on the site reads them here, in the diff's
-          # own tab, rather than in a run that expires.
+          # The same table the job summary prints.
           if [ -f "$SUMMARY" ]; then
             cat "$SUMMARY" >> "$RUNNER_TEMP/body.md"
           else

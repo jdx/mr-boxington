@@ -49,7 +49,9 @@
         >
           <div class="mbx-bench-tool">
             <code>{{ cell.label }}</code>
-            <span v-if="cell.badge" class="mbx-bench-fastest">{{ cell.badge }}</span>
+            <span v-if="cell.badge" class="mbx-bench-fastest">{{
+              cell.badge
+            }}</span>
             <span v-if="cell.fastest" class="mbx-bench-fastest">fastest</span>
           </div>
           <div class="mbx-bench-bar-track" aria-hidden="true">
@@ -153,29 +155,24 @@ function spread(cell: BenchmarkCell) {
   return Math.max(...trials) - Math.min(...trials);
 }
 
-// Why this scenario may not name a winner, or null when it may. A card that
-// crowns the tool which finished 0.6s ahead, on a workload whose own repeats
-// vary by more than that, is reporting the scheduler's mood as though it were
-// a result. The honest render says so and leaves the bars to speak for
-// themselves. Contention is exempt: it compares one binary against itself with
-// the scheduler on and off, and reports what the machine did rather than who
-// won.
+// Why this scenario may not name a winner, or null when it may. A lead
+// smaller than a tool's own spread across repeats is noise, not a result.
+// Contention is exempt: it compares one binary against itself with the
+// scheduler on and off.
 function inconclusive(scenario: BenchmarkScenario): string | null {
   if (!scenario.timed || scenario.kind === "contention") return null;
   const ordered = [...scenario.results].sort(
     (left, right) => left.wall_duration_ns - right.wall_duration_ns,
   );
-  // Fastest against nobody is not a result. A comparator that failed the
-  // scenario leaves its tool out of the card entirely, and the one that
-  // remains has beaten nothing.
+  // A tool that failed the scenario is left out of the card, so the one
+  // that remains has beaten nothing.
   if (ordered.length < 2) {
     return ordered.length === 1
       ? "Only one tool completed this scenario, so nothing is marked fastest."
       : null;
   }
   const [best, next] = ordered;
-  // Two timings of the same thing are the least that can show a spread, so a
-  // scenario run once names nobody however wide the gap looks.
+  // A single trial shows no spread, so it names nobody.
   if (
     (best.wall_durations_ns?.length ?? 0) < 2 ||
     (next.wall_durations_ns?.length ?? 0) < 2

@@ -46,9 +46,8 @@ SUBJECTS: dict[str, dict[str, object]] = {
         # Without this the numbers stop being comparable across runner images.
         "toolchain": "1.97.1",
         "args": ["build", "--locked"],
-        # The edit scenario appends a comment here. Named per subject rather
-        # than discovered, so a moved pin fails loudly instead of quietly
-        # editing some other crate than the one the numbers claim.
+        # The edit scenario appends a comment here. Named per subject so a
+        # moved pin fails instead of editing some other crate.
         "edit": "src/main.rs",
     },
 }
@@ -82,12 +81,10 @@ CONTENTION_JOBS: tuple[tuple[str, list[str]], ...] = (
 
 # Which tools each scenario asks for, and whether it publishes a timing.
 #
-# `repeatable` is what --trials multiplies. A scenario is only worth timing if
-# the difference it reports can outrun the spread of repeating it, so a timed
-# scenario has to be cheap enough to repeat; one that cannot be repeated is
-# either a guard or the contention batch, which measures a machine rather than
-# a race. cargo appears only where a no-cache baseline is meaningful: "warm"
-# describes a cache being reused, and cargo would just repeat its cold number.
+# `repeatable` is what --trials multiplies: the timed scenarios, which need a
+# spread to be read against. The guards and the contention batch run once.
+# cargo appears only where a no-cache baseline is meaningful: in "warm" it
+# would just repeat its cold number.
 SCENARIOS: dict[str, dict[str, object]] = {
     "warm": {
         "tools": ("mbx", "kache"),
@@ -112,10 +109,8 @@ SCENARIOS: dict[str, dict[str, object]] = {
             "one line changed and rebuilt in place, incremental on -- "
             "the local edit loop, where Cargo is the thing to beat"
         ),
-        # What the cargo row in this scenario is, since it is not the same
-        # thing in both. Everywhere else cargo is a control with no cache to
-        # help it. Here it keeps its target and its incremental state, and
-        # beating it is the entire question.
+        # Everywhere else cargo is a control with no cache to help it. Here
+        # it keeps its target and incremental state, and is the thing to beat.
         "baseline": "incremental rebuild",
         "repeatable": True,
     },
@@ -315,10 +310,7 @@ class Runner:
                 "CARGO_HOME": str(self.cargo_home),
                 "CARGO_TARGET_DIR": str(target),
                 # Off for the CI scenarios, matching what CI sets. The edit
-                # loop is the exception and turns it on: incremental state is
-                # most of what makes a developer's rebuild fast, and measuring
-                # that loop without it would compare against a cargo nobody
-                # runs.
+                # loop turns it on, because a developer's rebuild has it on.
                 "CARGO_INCREMENTAL": "1" if incremental else "0",
                 "CARGO_TERM_COLOR": "never",
                 "RUSTUP_TOOLCHAIN": str(subject["toolchain"]),
@@ -402,9 +394,8 @@ class Runner:
         fresh_target: bool = True,
     ) -> dict[str, object]:
         """Run one build and return its timing plus whatever the tool reported."""
-        # Every scenario but the edit loop starts from a fresh target, which is
-        # what a CI runner has. The edit loop keeps the one its seed build
-        # produced, because rebuilding in place is the thing being measured.
+        # Every scenario but the edit loop starts from a fresh target, as a CI
+        # runner does. The edit loop rebuilds in the one its seed produced.
         if fresh_target:
             shutil.rmtree(target, ignore_errors=True)
         extra: dict[str, object] = {}
@@ -465,18 +456,13 @@ class Runner:
                 check=False,
             )
 
-        # An edit that failed to invalidate anything would render as a very
-        # fast rebuild rather than as a broken scenario, so the gate needs to
-        # know whether a compiler ran at all.
+        # An edit that invalidated nothing would render as a very fast
+        # rebuild, so the gate needs to know whether a compiler ran at all.
         extra["recompiled"] = "Compiling " in completed.stderr
         if tool == "cargo":
-            # Clearing the wrapper variables is not proof that they were the
-            # only way in. A `cargo` that is itself a shim for mbx, which is
-            # what a developer running this on their own machine has, produces
-            # a baseline that quietly benefits from the cache it is supposed
-            # to be the control for -- and the faster that baseline looks, the
-            # worse mbx looks, so nothing about the published numbers would
-            # give it away.
+            # Clearing the wrapper variables is not proof they were the only
+            # way in. A `cargo` that is itself an mbx shim, as on a developer's
+            # own machine, gives the baseline the cache it is the control for.
             extra["wrapped"] = "mbx[" in completed.stderr
         return {"tool": tool, "wall_duration_ns": duration_ns, **extra}
 
@@ -602,10 +588,8 @@ PUBLISHED_STATS = (
 # are the point of that scenario, not a detail of it.
 PUBLISHED_CONTENTION = ("peak_compilers", "min_available_bytes", "permits")
 
-# Every trial's timing, published rather than reduced away. A reader cannot
-# tell whether a gap between two tools means anything without knowing how far
-# the same tool moved between its own runs, and the page suppresses the
-# "fastest" label when the gap is inside that spread.
+# Every trial's timing. The page needs the spread to decide whether the gap
+# between two tools means anything.
 PUBLISHED_TRIALS = ("trials", "wall_durations_ns")
 
 
@@ -730,11 +714,8 @@ def one_trial(
             target=target,
             store=store,
         )
-        # The seed is this tool's own cold build: an empty store, a fresh
-        # target, the same checkout and machine. Carrying its timing is what
-        # lets a warm build still be gated against a cold one without
-        # publishing a cold scenario whose tools finish within a second of
-        # each other.
+        # The seed is this tool's own cold build in the same checkout. Its
+        # timing is what the warm gate compares against.
         measured["seed_wall_duration_ns"] = seed["wall_duration_ns"]
         return measured
 
@@ -768,11 +749,8 @@ def one_trial(
     if scenario == "edit":
         checkout = work / f"checkout-{cell}"
         clone(subject, str(subject["child"]), checkout)
-        # The seed leaves its target in place, which is the whole scenario: a
-        # developer edits inside the tree they just built, and the incremental
-        # state in that target is what the rebuild is racing against. cargo is
-        # the baseline here rather than a control, because a cache that slows
-        # this loop down is a cache nobody leaves switched on.
+        # The seed leaves its target in place: a developer edits inside the
+        # tree they just built, and the rebuild races that incremental state.
         runner.run(
             tool=tool,
             cell=f"{cell}-seed",
@@ -805,10 +783,9 @@ def one_trial(
             target=target,
             store=store,
         )
-        # A different path, which is the whole point: absolute paths must not
-        # have entered the keys. What this reports is the hits, not the
-        # seconds. A cache that keyed on paths restores nothing here, and that
-        # is a pass or a fail rather than a race.
+        # A different path, to show absolute paths did not enter the keys.
+        # This reports hits, not seconds; a cache keyed on paths restores
+        # nothing here.
         other = work / f"checkout-{cell}-elsewhere"
         clone(subject, str(subject["child"]), other)
         return runner.run(
@@ -948,12 +925,10 @@ def run_scenario(
                 progress.finish(cell, "skipped")
                 break
             except RuntimeError as failure:
-                # A tool we do not own failing a scenario is a fact about that
-                # tool, not a reason to publish nothing. It is reported as
-                # unmeasured, the same as a tool that was not installed. mbx
-                # and the cargo baseline still fail the run: those are ours,
-                # and a broken harness must not look like a competitor's
-                # limitation.
+                # A tool we do not own failing is reported as unmeasured, the
+                # same as one that was not installed. mbx and the cargo
+                # baseline still fail the run: a broken harness must not look
+                # like a competitor's limitation.
                 if tool in MBX_TOOLS or tool == "cargo":
                     raise
                 notes.append(f"{tool}: {failure}")
@@ -966,10 +941,8 @@ def run_scenario(
                 # A tool that fails late in a big scenario would otherwise
                 # hold its target and store for every trial that follows it.
                 discard(work, cell)
-        # All of them or none. A tool that dropped out partway has both a
-        # note saying it was not measured and, without this, a published cell
-        # contradicting the note: a median over whichever trials happened to
-        # finish, compared on the page against tools that ran every one.
+        # All trials or none: a tool that dropped out partway must not publish
+        # a median over the trials that happened to finish.
         if len(measured) == repeats:
             results.append(median_cell(measured))
 
@@ -1023,10 +996,8 @@ def validate(scenarios: list[dict[str, object]]) -> list[str]:
 
     warm = by_name.get("warm")
     if warm:
-        # Against the build that seeded it rather than against a published
-        # cold scenario: same tool, same checkout, same trial, empty store.
-        # That is a stricter comparison than the cold cards ever were, and it
-        # costs no extra build.
+        # Against the build that seeded it: same tool, same checkout, same
+        # trial, empty store.
         for cell in warm["results"]:  # type: ignore[index]
             seed = cell.get("seed_wall_duration_ns")
             if seed is not None and int(cell["wall_duration_ns"]) >= int(seed):
@@ -1036,9 +1007,8 @@ def validate(scenarios: list[dict[str, object]]) -> list[str]:
 
     edit = by_name.get("edit")
     if edit:
-        # A rebuild that compiled nothing is a fast number with no content: it
-        # would mean the edit never reached the compiler, not that the tool
-        # rebuilt quickly.
+        # A rebuild that compiled nothing means the edit never reached the
+        # compiler, not that the tool rebuilt quickly.
         for cell in edit["results"]:  # type: ignore[index]
             if not cell.get("recompiled"):
                 failures.append(

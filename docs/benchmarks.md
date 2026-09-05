@@ -7,19 +7,17 @@ measure anything useful against. Every scenario is one CI actually hits.
 The build scenarios run the same `cargo build --locked` through plain Cargo,
 [mbx](/), and [kache](https://github.com/kunobi-ninja/kache), where each tool
 can make a meaningful comparison. Timings are wall clock around one build.
-When Cargo appears, it is measured in that same scenario and the cache rows
-compare only with that result. What it is differs by scenario: in the commit
-case it is an uncached control, because Cargo has no store to seed from the
-parent commit, and in the edit case it is the same in-place incremental
-rebuild the caches are asked to beat. The warm scenario omits Cargo because a
-fresh `target/` gives it nothing to reuse. The contention scenario
+Where Cargo appears, the cache rows compare only with that result. In the
+commit scenario it is an uncached control; in the edit scenario it is the
+incremental rebuild the caches have to beat. The warm scenario omits Cargo
+because a fresh `target/` gives it nothing to reuse. The contention scenario
 compares sequential and parallel lint strategies and measures the machine
 instead of a single build.
 
 Every timed scenario runs three times per tool. The card shows the middle run
-and the range across all three, and it names a tool fastest only when the gap
-to the next one is larger than the range one of them covered on its own. A
-scenario that cannot clear that bar says so and names nobody.
+and the range across all three. A tool is marked fastest only when its lead
+over the next one is wider than either tool's own range; otherwise the card
+says so.
 
 <BenchmarkResults />
 
@@ -42,19 +40,17 @@ with an empty `target/`.
 ### edit
 
 A full build, one line changed in the subject's own source, and a rebuild in
-the same `target/` with incremental compilation on. This is the local loop
-rather than a CI job, and it is the shape where a cache has the least to offer
-and the most to get in the way: almost nothing needs rebuilding, so anything
-the cache spends on bookkeeping is the whole difference. Cargo is the thing to
-beat here, not a control.
+the same `target/` with incremental compilation on. This is the local edit
+loop rather than a CI job. Almost nothing needs rebuilding, so the cache's
+own bookkeeping is most of what shows up. Cargo is the thing to beat here,
+not a control.
 
 ### worktree
 
 Not a timing. The store is warmed in one checkout and the build reruns in a
 second checkout at a different path. It passes when the second build restores
-outputs from the first, which is what says absolute paths did not enter the
-keys. A cache that keys on paths rebuilds everything here, and the seconds
-would not tell you which happened.
+outputs from the first, which shows absolute paths did not enter the keys. A
+cache that keys on paths rebuilds everything here.
 
 ### toolchain
 
@@ -92,15 +88,16 @@ whether it got there by sharing the machine or by oversubscribing it.
 - The registry is fetched once, before any timed build, into a shared
   `CARGO_HOME`. No cell is timed while it downloads crates.
 - Trials share nothing. Each one clones the subject again and starts from its
-  own empty store, so the second run measures the same scenario as the first.
+  own empty store.
 - The toolchain is pinned per subject. hk does not pin one itself, and a
   runner-image Rust bump changes every invocation digest at once, which would
   land in the series as a step change that looks like a cache that stopped
   working.
 - Each cell gets its own store and `target/`, created fresh. No tool benefits
   from another's leftovers.
-- `CARGO_INCREMENTAL=0` is set, matching CI, and any `RUSTC_WRAPPER` inherited
-  from the caller is cleared so the uncached baseline is uncached.
+- `CARGO_INCREMENTAL=0` is set, matching CI, except in the edit scenario.
+  Any `RUSTC_WRAPPER` inherited from the caller is cleared so the uncached
+  baseline is uncached.
 - Both caches run local-only. A remote would measure a network.
 - Every scenario's rows come from one CI run, so the tools within it are
   comparable. A scenario refreshed separately carries its own run link;
@@ -113,14 +110,11 @@ nothing publishes unless:
 
 - the warm and cross-worktree builds report cache hits and restored output
   files; a fast build that restored nothing was fast for some other reason;
-- each warm build beat the cold build that seeded it, which is the same tool
-  in the same checkout on the same machine minutes earlier;
-- the edit rebuild actually compiled something, since an edit that never
-  reached the compiler renders as a very fast rebuild rather than as a
-  broken run;
-- no Cargo baseline ran under mbx. Clearing the wrapper variables does not
-  prove they were the only way in, and a `cargo` that is itself an mbx shim
-  produces a baseline that quietly uses the cache it is the control for;
+- each warm build beat the cold build that seeded it;
+- the edit rebuild compiled something; an edit that never reached the
+  compiler would render as a very fast rebuild;
+- no Cargo baseline ran under mbx; a `cargo` that is itself an mbx shim
+  would use the cache it is the control for;
 - the toolchain-change build ran, loaded predictions, and then looked up
   almost none of them; a guard that was skipped is not a guard that passed;
 - the contention run sampled the machine, saw compilers running, and kept the
@@ -142,8 +136,8 @@ skipped with a note when it is not. `mise run bench:refresh` is what CI runs:
 every scenario, three trials of each timed one, writing
 `benchmarks/results.json`. It needs `MBX_BENCH_ALTERNATE_TOOLCHAIN` set to a
 second installed Rust, which is what the compiler-change guard switches to.
-`--trials` sets the repeat count; one trial publishes a timing with no range
-beside it, and the page will not name a fastest tool from it.
+`--trials` sets the repeat count. The page will not name a fastest tool
+from a single trial.
 
 The numbers on this page are refreshed by the
 [bench-refresh workflow](https://github.com/jdx/mr-boxington/actions/workflows/bench-refresh.yml),
