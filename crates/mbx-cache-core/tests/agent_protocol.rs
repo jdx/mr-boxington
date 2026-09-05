@@ -3,15 +3,15 @@ use mbx_cache_core::{
     AGENT_PROTOCOL_VERSION, ActionPrediction, AgentRequest, AgentResponse, BLOB_MEDIA_TYPE,
     BLOB_PACK_MEDIA_TYPE, BLOB_PACK_RECEIPT_MEDIA_TYPE, CLIENT_METADATA_MEDIA_TYPE, CacheDigest,
     CacheDirectory, CacheFileNode, CcMetadata, DIRECTORY_MEDIA_TYPE, FileDigestResolution,
-    FileDigestScope, FileIdentity, FileObjectIdentity, PROTOCOL_VERSION, RecordedFileDigest,
-    RemoteActionResult, RestoreStats, RustcMetadata, TASK_ACTION_MANIFEST_MEDIA_TYPE,
-    canonical_json,
+    FileDigestScope, FileIdentity, FileObjectIdentity, PROTOCOL_VERSION, PinnedFile, PinnedState,
+    RecordedFileDigest, RemoteActionResult, RestoreStats, RustcMetadata,
+    TASK_ACTION_MANIFEST_MEDIA_TYPE, canonical_json,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v7.jsonl");
+const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v8.jsonl");
 
 fn digest() -> CacheDigest {
     CacheDigest {
@@ -113,7 +113,7 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
         (
             "request.hello",
             AgentRequest::Hello {
-                protocol: 7,
+                protocol: 8,
                 client_version: "0.3.0".into(),
             },
         ),
@@ -220,6 +220,18 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
                 executable: PathBuf::from("bin/rustc"),
                 environment: environment(),
                 stdout: b"rustc".to_vec(),
+                pins: vec![PinnedFile {
+                    path: PathBuf::from("bin/rustc"),
+                    state: Some(PinnedState {
+                        len: 5,
+                        modified_secs: 6,
+                        modified_nanos: 7,
+                        changed_secs: 8,
+                        changed_nanos: 9,
+                        inode: 10,
+                        mode: 11,
+                    }),
+                }],
             },
         ),
         (
@@ -268,7 +280,7 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
         (
             "response.hello",
             AgentResponse::Hello {
-                protocol: 7,
+                protocol: 8,
                 agent_version: "0.3.0".into(),
             },
         ),
@@ -430,7 +442,7 @@ fn assert_fixture<T: Serialize>(expected: &mut BTreeMap<&str, &str>, name: &str,
 }
 
 #[test]
-fn agent_protocol_v7_shapes_match_the_conformance_fixture() {
+fn agent_protocol_v8_shapes_match_the_conformance_fixture() {
     let mut expected = fixture();
     for line in AGENT_FIXTURE.lines() {
         let (name, json) = line
@@ -508,7 +520,7 @@ fn agent_protocol_v7_shapes_match_the_conformance_fixture() {
 
 #[test]
 fn protocol_constants_match_the_contract() {
-    assert_eq!(AGENT_PROTOCOL_VERSION, 7);
+    assert_eq!(AGENT_PROTOCOL_VERSION, 8);
     assert_eq!(PROTOCOL_VERSION, 1);
     assert_eq!(
         ACTION_RESULT_MEDIA_TYPE,

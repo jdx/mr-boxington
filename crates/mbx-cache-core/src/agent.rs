@@ -7,7 +7,8 @@ use crate::{
 };
 use eyre::{Context, Result, bail};
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream};
-use log::{info, warn};
+use log::{debug, info, warn};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -43,7 +44,7 @@ pub use stats::{AgentStats, CompilerStats};
 use wire::MAX_REQUEST_BYTES;
 pub use wire::{
     AGENT_PROTOCOL_VERSION, ActionDiagnostic, AgentEvent, AgentEventObserver, AgentRequest,
-    AgentResponse, RestoreStats,
+    AgentResponse, PinnedFile, PinnedState, RestoreStats,
 };
 
 const MAX_EXECUTABLE_IDENTITIES: usize = 64;
@@ -294,6 +295,8 @@ pub struct CacheAgent {
     /// only reports a bypass never waits for a manifest it will not read.
     task_loader: Option<Arc<TaskLoader>>,
     executable_identities: Arc<Mutex<BTreeMap<ExecutableIdentityKey, Vec<u8>>>>,
+    /// Where identities pinned to their executables outlive the session.
+    identity_dir: Arc<PathBuf>,
     manifest_dir: Arc<PathBuf>,
     task_actions: Arc<Mutex<BTreeMap<String, TaskActionState>>>,
     /// Where a task may inherit predictions from, by task identity.
@@ -414,6 +417,13 @@ struct TaskActionState {
     baseline_loaded: bool,
     predictions: BTreeMap<CacheDigest, ActionPrediction>,
     pending_predictions: BTreeMap<CacheDigest, ActionPrediction>,
+    /// The pending predictions that differ from what the manifest already
+    /// held when this run loaded it, each with what it held: nothing, or
+    /// the baseline's own prediction. A hit re-records its prediction
+    /// byte-for-byte so the receipt can name it, and that is no reason to
+    /// rewrite the manifest; nor is a prediction that moved and then moved
+    /// back, which is why the baseline value is kept rather than a flag.
+    changed_predictions: BTreeMap<CacheDigest, Option<ActionPrediction>>,
     prefetched_adapters: BTreeSet<String>,
     remote_etag: Option<String>,
 }
@@ -476,6 +486,23 @@ impl Drop for RemoteDownloadReservation {
 struct ExecutableIdentityKey {
     executable: PathBuf,
     environment: BTreeMap<String, Option<String>>,
+}
+
+// 2: pins carry the state the shim saw, and cover the search directories.
+const PERSISTED_EXECUTABLE_IDENTITY_VERSION: u8 = 2;
+
+/// An executable identity kept across sessions.
+///
+/// It stands while every pinned file is as the probing shim saw it. The
+/// probe reads those files and nothing else, so an unchanged set of them
+/// would print the same answer again.
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedExecutableIdentity {
+    version: u8,
+    executable: PathBuf,
+    environment: BTreeMap<String, Option<String>>,
+    pins: Vec<PinnedFile>,
+    stdout: String,
 }
 
 impl CacheAgent {
@@ -555,6 +582,7 @@ impl CacheAgent {
             observer_emission: Arc::new(Mutex::new(())),
             task_loader: None,
             executable_identities: Arc::new(Mutex::new(BTreeMap::new())),
+            identity_dir: Arc::new(cache_dir.join("executable-identities").join("v1")),
             manifest_dir: Arc::new(task_manifest_dir(&cache_dir)),
             task_actions: Arc::new(Mutex::new(BTreeMap::new())),
             task_fallbacks: Arc::new(Mutex::new(BTreeMap::new())),
@@ -827,6 +855,7 @@ impl CacheAgent {
                     .map(|prediction| (prediction.invocation.clone(), prediction))
                     .collect(),
                 pending_predictions: BTreeMap::new(),
+                changed_predictions: BTreeMap::new(),
                 prefetched_adapters: BTreeSet::new(),
                 remote_etag,
             }
@@ -1031,11 +1060,18 @@ impl CacheAgent {
             // say so, and a remote that is only read has nothing to learn
             // either. Decided before the baseline is cloned: the baseline is
             // every prediction the manifest holds.
-            if state.pending_predictions.is_empty()
+            debug!(
+                "committing {} changed of {} recorded predictions for {}",
+                state.changed_predictions.len(),
+                state.pending_predictions.len(),
+                state.manifest
+            );
+            if state.changed_predictions.is_empty()
                 && (self.remote.is_none() || !self.remote_mode.writes())
             {
+                let completed = state.pending_predictions.values().cloned().collect();
                 runs.remove(run);
-                return Ok(Vec::new());
+                return Ok(completed);
             }
             state.clone()
         };
@@ -1505,7 +1541,8 @@ impl CacheAgent {
                 executable,
                 environment,
                 stdout,
-            } => self.store_executable_identity(executable, environment, stdout),
+                pins,
+            } => self.store_executable_identity(executable, environment, stdout, pins),
             AgentRequest::Hello { .. } => {
                 Err(eyre::eyre!("hello is only valid as the first request"))
             }
@@ -2178,6 +2215,22 @@ impl CacheAgent {
         {
             bail!("task action manifest contains too many predictions");
         }
+        let current = state.predictions.get(&prediction.invocation);
+        if current != Some(&prediction) {
+            match state.changed_predictions.get(&prediction.invocation) {
+                // Back to what the manifest held: no longer a change.
+                Some(baseline) if baseline.as_ref() == Some(&prediction) => {
+                    state.changed_predictions.remove(&prediction.invocation);
+                }
+                // Changed again; the baseline it left is already recorded.
+                Some(_) => {}
+                None => {
+                    state
+                        .changed_predictions
+                        .insert(prediction.invocation.clone(), current.cloned());
+                }
+            }
+        }
         state
             .predictions
             .insert(prediction.invocation.clone(), prediction.clone());
@@ -2194,12 +2247,17 @@ impl CacheAgent {
     ) -> Result<ExecutableIdentityKey> {
         // Restricted to the variables that actually select what an identity
         // probe reports: the toolchain rustup resolves, the SDK a linker
-        // driver builds against, and a `-fuse-ld` linker selection. Anything
-        // else would let one key stand for two different compilers.
+        // driver builds against, a `-fuse-ld` linker selection, and the
+        // search path a driver finds its linker on. Anything else would let
+        // one key stand for two different compilers.
         if !environment.keys().all(|name| {
             matches!(
                 name.as_str(),
-                "MBX_FUSE_LD"
+                "COMPILER_PATH"
+                    | "GCC_EXEC_PREFIX"
+                    | "LIBRARY_PATH"
+                    | "MBX_FUSE_LD"
+                    | "PATH"
                     | "RUSTUP_HOME"
                     | "RUSTUP_TOOLCHAIN"
                     | "SDKROOT"
@@ -2227,12 +2285,24 @@ impl CacheAgent {
         environment: BTreeMap<String, Option<String>>,
     ) -> Result<AgentResponse> {
         let key = self.executable_identity_key(executable, environment)?;
-        let stdout = self
+        let remembered = self
             .executable_identities
             .lock()
             .unwrap()
             .get(&key)
             .cloned();
+        let stdout = match remembered {
+            Some(stdout) => Some(stdout),
+            None => {
+                let persisted = self.load_persisted_identity(&key);
+                if let Some(stdout) = &persisted {
+                    // Memoized like a fresh probe: the pins were checked once
+                    // for this session, which is as often as a probe runs.
+                    let _ = self.remember_executable_identity(&key, stdout.clone());
+                }
+                persisted
+            }
+        };
         Ok(AgentResponse::ExecutableIdentity { stdout })
     }
 
@@ -2241,14 +2311,36 @@ impl CacheAgent {
         executable: PathBuf,
         environment: BTreeMap<String, Option<String>>,
         stdout: Vec<u8>,
+        pins: Vec<PinnedFile>,
     ) -> Result<AgentResponse> {
         if stdout.len() > MAX_EXECUTABLE_IDENTITY_SIZE {
             bail!("executable identity exceeds {MAX_EXECUTABLE_IDENTITY_SIZE} bytes");
         }
         let key = self.executable_identity_key(executable, environment)?;
+        self.remember_executable_identity(&key, stdout.clone())?;
+        // Best-effort, like the ledger: a session that cannot write it probes
+        // again next time, which is what it would have done anyway. A pin
+        // that no longer holds means a file moved under the probe, and what
+        // it printed describes neither the old file nor the new one.
+        if pins.is_empty() {
+        } else if !pins.iter().all(PinnedFile::holds) {
+            debug!("executable identity was not persisted: a pinned file changed during the probe");
+        } else if let Err(error) = self.persist_executable_identity(&key, pins, &stdout) {
+            debug!("executable identity was not persisted: {error:#}");
+        }
+        Ok(AgentResponse::ExecutableIdentity {
+            stdout: Some(stdout),
+        })
+    }
+
+    fn remember_executable_identity(
+        &self,
+        key: &ExecutableIdentityKey,
+        stdout: Vec<u8>,
+    ) -> Result<()> {
         let mut identities = self.executable_identities.lock().unwrap();
-        let is_new = !identities.contains_key(&key);
-        let previous_size = identities.get(&key).map_or(0, Vec::len);
+        let is_new = !identities.contains_key(key);
+        let previous_size = identities.get(key).map_or(0, Vec::len);
         if is_new && identities.len() >= MAX_EXECUTABLE_IDENTITIES {
             bail!("executable identity cache contains too many entries");
         }
@@ -2256,10 +2348,61 @@ impl CacheAgent {
         if retained_bytes - previous_size + stdout.len() > MAX_EXECUTABLE_IDENTITY_BYTES {
             bail!("executable identity cache contains too many bytes");
         }
-        identities.insert(key, stdout.clone());
-        Ok(AgentResponse::ExecutableIdentity {
-            stdout: Some(stdout),
-        })
+        identities.insert(key.clone(), stdout);
+        Ok(())
+    }
+
+    fn persisted_identity_path(&self, key: &ExecutableIdentityKey) -> Result<PathBuf> {
+        let selector = serde_json::to_vec(&(&key.executable, &key.environment))?;
+        let digest = CacheDigest::blake3(&selector);
+        Ok(self.identity_dir.join(format!("{}.json", digest.hash)))
+    }
+
+    /// What an earlier session recorded for `key`, if every file it was
+    /// pinned to is still as that session saw it.
+    fn load_persisted_identity(&self, key: &ExecutableIdentityKey) -> Option<Vec<u8>> {
+        let path = self.persisted_identity_path(key).ok()?;
+        let bytes = fs::read(path).ok()?;
+        let persisted: PersistedExecutableIdentity = serde_json::from_slice(&bytes).ok()?;
+        if persisted.version != PERSISTED_EXECUTABLE_IDENTITY_VERSION
+            || persisted.executable != key.executable
+            || persisted.environment != key.environment
+            || persisted.pins.is_empty()
+            || persisted.stdout.len() > MAX_EXECUTABLE_IDENTITY_SIZE
+        {
+            return None;
+        }
+        persisted
+            .pins
+            .iter()
+            .all(PinnedFile::holds)
+            .then(|| persisted.stdout.into_bytes())
+    }
+
+    fn persist_executable_identity(
+        &self,
+        key: &ExecutableIdentityKey,
+        pins: Vec<PinnedFile>,
+        stdout: &[u8],
+    ) -> Result<()> {
+        // An identity that is not text is kept for this session only.
+        let Ok(stdout) = std::str::from_utf8(stdout) else {
+            return Ok(());
+        };
+        let persisted = PersistedExecutableIdentity {
+            version: PERSISTED_EXECUTABLE_IDENTITY_VERSION,
+            executable: key.executable.clone(),
+            environment: key.environment.clone(),
+            pins,
+            stdout: stdout.to_owned(),
+        };
+        let path = self.persisted_identity_path(key)?;
+        fs::create_dir_all(self.identity_dir.as_path())?;
+        // Not synced: a torn record reads as no record, and costs one probe.
+        let mut temporary = tempfile::NamedTempFile::new_in(self.identity_dir.as_path())?;
+        std::io::Write::write_all(temporary.as_file_mut(), &serde_json::to_vec(&persisted)?)?;
+        temporary.persist(path).map_err(|error| error.error)?;
+        Ok(())
     }
 
     /// Serve newline-delimited protocol requests on an authenticated session stream.

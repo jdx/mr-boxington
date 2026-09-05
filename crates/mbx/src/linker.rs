@@ -13,14 +13,23 @@
 
 use crate::session;
 use eyre::{Context, Result, bail};
-use mbx_cache_core::{AgentRequest, AgentResponse, CacheDigest, canonical_json};
+use mbx_cache_core::{AgentRequest, AgentResponse, CacheDigest, PinnedFile, canonical_json};
 use mbx_cache_rustc::LinkerIdentity;
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Environment that selects what the probes below report.
+///
+/// The search paths are here because they decide which `ld` a driver names,
+/// and the identity is kept across sessions: one recorded under a shell that
+/// found one linker must not answer for a shell that would find another.
 const IDENTITY_ENVIRONMENT: &[&str] = &[
+    "COMPILER_PATH",
+    "GCC_EXEC_PREFIX",
+    "LIBRARY_PATH",
+    "PATH",
     "SDKROOT",
     "MACOSX_DEPLOYMENT_TARGET",
     "LIB",
@@ -142,18 +151,227 @@ pub(crate) fn identity_for(
         .iter()
         .map(|name| ((*name).into(), std::env::var(name).ok()))
         .collect::<BTreeMap<_, _>>();
+    // The map of where the driver looks, which is what the pins have to
+    // cover. Asked once, and only on the way to a probe: a memoized identity
+    // must not cost a process to find.
+    let search_dirs_once = std::cell::OnceCell::new();
+    let search = || {
+        search_dirs_once
+            .get_or_init(|| {
+                if cfg!(windows) {
+                    None
+                } else {
+                    search_dirs(&driver)
+                }
+            })
+            .as_ref()
+    };
     let fuse_ld = fuse_ld
-        .map(|selection| resolve_fuse_ld(&driver, selection))
+        .map(|selection| resolve_fuse_ld(&driver, selection, search()))
         .transpose()?;
-    if let Some(program) = &fuse_ld {
-        environment.insert("MBX_FUSE_LD".into(), Some(program.display().to_string()));
+    if let Some(located) = &fuse_ld {
+        environment.insert(
+            "MBX_FUSE_LD".into(),
+            Some(located.path.display().to_string()),
+        );
     }
     if let Some(cached) = find_recorded(&driver, &environment)? {
         return Ok(cached);
     }
-    let identity = probe(&driver, fuse_ld.as_deref())?;
-    record(&driver, &environment, &identity)?;
+    let (identity, pins) = probe(&driver, fuse_ld.as_ref(), search())?;
+    record(&driver, &environment, &identity, pins)?;
     Ok(identity)
+}
+
+/// Where the driver looks for programs and for startup objects, in the
+/// order it looks, as `-print-search-dirs` reports them.
+///
+/// This is the map the pins have to cover. A linker or a CRT object the
+/// driver names today was found in one of these directories, or in none of
+/// them; a same-named file appearing in an earlier one would be found first
+/// tomorrow, under an unchanged `COMPILER_PATH` or `LIBRARY_PATH`, with the
+/// file the probe pinned still exactly as it was. So every candidate the
+/// search rejected on its way is pinned too, absent as it is. A driver that
+/// cannot report its search directories leaves the identity unpinned.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SearchDirs {
+    programs: Vec<PathBuf>,
+    libraries: Vec<PathBuf>,
+}
+
+fn search_dirs(driver: &Path) -> Option<SearchDirs> {
+    // The field names are translated strings in GCC, so the question is
+    // asked in the C locale, and an answer without both lists is no map:
+    // a driver that accepts the flag but prints something else would
+    // otherwise pass for one that searched nowhere.
+    let output = Command::new(driver)
+        .arg("-print-search-dirs")
+        .env("LC_ALL", "C")
+        .env("LANGUAGE", "C")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_search_dirs(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_search_dirs(text: &str) -> Option<SearchDirs> {
+    let list = |field: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(field))
+            .map(|value| value.trim().trim_start_matches('='))
+            .map(|value| {
+                std::env::split_paths(value)
+                    .filter(|directory| !directory.as_os_str().is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|directories| !directories.is_empty())
+    };
+    Some(SearchDirs {
+        programs: list("programs:")?,
+        libraries: list("libraries:")?,
+    })
+}
+
+/// Whether `candidate` is the file the driver printed as `found`.
+///
+/// The driver prints the directory it searched joined to the name, so the
+/// two usually compare equal as written; a directory listed under one
+/// spelling and printed under another is settled on disk.
+fn same_file(candidate: &Path, found: &Path) -> bool {
+    candidate == found
+        || matches!(
+            (std::fs::canonicalize(candidate), std::fs::canonicalize(found)),
+            (Ok(left), Ok(right)) if left == right
+        )
+}
+
+/// Pin `found`, which a search for `name` through `directories` in order
+/// produced, together with every candidate that search rejected first.
+///
+/// A file the search never reached is not pinned: it could not shadow the
+/// one found. A `found` that is under none of the directories, which a
+/// `-B` prefix can produce, pins every candidate and itself.
+fn pin_search(pins: &mut Pins, name: &OsStr, found: &Path, directories: &[PathBuf]) {
+    for directory in directories {
+        let candidate = directory.join(name);
+        pins.add(&candidate);
+        if same_file(&candidate, found) {
+            return;
+        }
+    }
+    pins.add(found);
+}
+
+/// A program the probe resolved, and where a search for it looked first.
+///
+/// A name found on PATH is pinned with every place the search passed over
+/// on the way: a linker appearing in one of those would be the one found
+/// next time, under the same PATH string, and the identity must notice.
+#[derive(Debug)]
+struct Located {
+    path: PathBuf,
+    pins: Pins,
+}
+
+impl Located {
+    /// A program named outright, pinned by itself.
+    fn named(path: PathBuf) -> Self {
+        let mut pins = Pins::default();
+        pins.add(&path);
+        Self { path, pins }
+    }
+
+    /// A program the driver was asked for by `name`, given what it printed:
+    /// an absolute path it found in one of its own program directories, or
+    /// the bare name, meaning it would leave the search to PATH when it
+    /// runs. Either way the directories the driver searched first are
+    /// pinned, and so are the ones on PATH before the program when PATH is
+    /// where it was found.
+    fn program(name: &OsStr, printed: &Path, search: Option<&SearchDirs>) -> Result<Self> {
+        let programs = search.map(|search| search.programs.as_slice());
+        if printed.is_absolute() {
+            let mut pins = Pins::default();
+            match programs {
+                Some(programs) => pin_search(&mut pins, name, printed, programs),
+                None => pins.0 = None,
+            }
+            return Ok(Self {
+                path: printed.to_path_buf(),
+                pins,
+            });
+        }
+        let mut pins = Pins::default();
+        match programs {
+            Some(programs) => {
+                for directory in programs {
+                    pins.add(&directory.join(name));
+                }
+            }
+            None => pins.0 = None,
+        }
+        let searched = Located::searched(name)?;
+        pins.extend(searched.pins);
+        Ok(Self {
+            path: searched.path,
+            pins,
+        })
+    }
+
+    /// A program found by searching PATH for `name`, pinned by itself and by
+    /// every candidate the search rejected before it.
+    fn searched(name: &OsStr) -> Result<Self> {
+        let path = which::which(name)
+            .wrap_err_with(|| format!("failed to find `{}`", name.to_string_lossy()))?;
+        let mut pins = Pins::default();
+        if let Some(search) = std::env::var_os("PATH") {
+            for directory in std::env::split_paths(&search) {
+                if Some(directory.as_path()) == path.parent() {
+                    break;
+                }
+                pins.add(&directory.join(name));
+            }
+        }
+        pins.add(&path);
+        Ok(Self { path, pins })
+    }
+}
+
+/// The files a probe has read, or nothing once one of them could not be
+/// described.
+///
+/// The probe itself is unaffected: a file the filesystem will not describe
+/// is still run or hashed as before, and the identity it contributes to is
+/// as valid as ever. It is only not one a later session can trust without
+/// probing again, so it is kept for this session alone.
+#[derive(Debug, Clone)]
+struct Pins(Option<Vec<PinnedFile>>);
+
+impl Default for Pins {
+    fn default() -> Self {
+        Self(Some(Vec::new()))
+    }
+}
+
+impl Pins {
+    fn add(&mut self, path: &Path) {
+        match (&mut self.0, PinnedFile::describe(path)) {
+            (Some(pins), Some(pin)) => pins.push(pin),
+            _ => self.0 = None,
+        }
+    }
+
+    fn extend(&mut self, more: Pins) {
+        match (&mut self.0, more.0) {
+            (Some(pins), Some(more)) => pins.extend(more),
+            _ => self.0 = None,
+        }
+    }
+
+    fn into_vec(self) -> Vec<PinnedFile> {
+        self.0.unwrap_or_default()
+    }
 }
 
 fn find_recorded(
@@ -176,11 +394,13 @@ fn record(
     driver: &Path,
     environment: &BTreeMap<String, Option<String>>,
     identity: &LinkerIdentity,
+    pins: Vec<PinnedFile>,
 ) -> Result<()> {
     let responses = session::request_agent(&[AgentRequest::StoreExecutableIdentity {
         executable: driver.to_path_buf(),
         environment: environment.clone(),
         stdout: canonical_json(identity)?,
+        pins,
     }])?;
     match responses.into_iter().next() {
         Some(AgentResponse::ExecutableIdentity { .. }) => Ok(()),
@@ -189,21 +409,44 @@ fn record(
     }
 }
 
-fn probe(driver: &Path, fuse_ld: Option<&Path>) -> Result<LinkerIdentity> {
+/// Describe the linker, and name the files the description was read from.
+///
+/// Those files pin the identity across sessions: the driver, the linker it
+/// names, and the objects it places, each described as the probe reads it.
+/// A platform whose identity comes from tools rather than files -- a Windows
+/// toolset, a macOS SDK -- pins nothing and is probed every session.
+fn probe(
+    driver: &Path,
+    fuse_ld: Option<&Located>,
+    search: Option<&SearchDirs>,
+) -> Result<(LinkerIdentity, Vec<PinnedFile>)> {
     if cfg!(windows) {
-        return probe_windows(driver);
+        return Ok((probe_windows(driver)?, Vec::new()));
     }
-    Ok(LinkerIdentity {
+    let mut pins = Pins::default();
+    pins.add(driver);
+    let (linker_version, linker) = linker_version(driver, fuse_ld, search)?;
+    pins.extend(linker);
+    let (crt_objects, objects) = crt_objects(driver, search)?;
+    pins.extend(objects);
+    let sdk = sdk_identity()?;
+    let pins = if sdk.is_some() {
+        Vec::new()
+    } else {
+        pins.into_vec()
+    };
+    let identity = LinkerIdentity {
         driver: driver
             .to_str()
             .ok_or_else(|| eyre::eyre!("the linker driver path is not valid UTF-8"))?
             .to_owned(),
         driver_version: run(driver, &["--version"])?,
-        linker_version: linker_version(driver, fuse_ld)?,
-        crt_objects: crt_objects(driver)?,
-        sdk: sdk_identity()?,
+        linker_version,
+        crt_objects,
+        sdk,
         deployment_target: std::env::var("MACOSX_DEPLOYMENT_TARGET").ok(),
-    })
+    };
+    Ok((identity, pins))
 }
 
 /// Bind a Windows link to the MSVC/LLVM linker, toolset, SDK, and CRT import
@@ -465,32 +708,40 @@ fn windows_crt_objects_in(directories: &[PathBuf]) -> Result<BTreeMap<String, Ca
 /// will invoke. The driver answers from its own search path first, which
 /// covers COMPILER_PATH and toolchain-internal linkers; a name it does not
 /// know falls back to PATH. An absolute selection names the linker directly.
-fn resolve_fuse_ld(driver: &Path, selection: &str) -> Result<PathBuf> {
+fn resolve_fuse_ld(driver: &Path, selection: &str, search: Option<&SearchDirs>) -> Result<Located> {
     if Path::new(selection).is_absolute() {
-        return Ok(PathBuf::from(selection));
+        return Ok(Located::named(PathBuf::from(selection)));
     }
     let name = format!("ld.{selection}");
     let argument = format!("-print-prog-name={name}");
     let printed = run(driver, &[argument.as_str()])
         .wrap_err_with(|| format!("the linker driver named nothing for `{name}`"))?;
     let candidate = PathBuf::from(&printed);
-    if candidate.is_absolute() && candidate.exists() {
-        return Ok(candidate);
-    }
-    which::which(&name).wrap_err_with(|| {
+    let printed = if candidate.is_absolute() && candidate.exists() {
+        candidate
+    } else {
+        PathBuf::from(&name)
+    };
+    Located::program(OsStr::new(&name), &printed, search).wrap_err_with(|| {
         format!(
             "`-fuse-ld={selection}` selects `{name}`, which neither the driver nor PATH provides"
         )
     })
 }
 
-/// Version of the linker the driver selects, as opposed to the driver itself.
+/// Version of the linker the driver selects, as opposed to the driver itself,
+/// and the pins that say which linker that was.
 ///
 /// ld reports through stderr on some platforms and stdout on others, so both
 /// are read; only the first line is kept, since later ones list supported
 /// emulations that say nothing about the version.
-fn linker_version(driver: &Path, fuse_ld: Option<&Path>) -> Result<String> {
-    if let Some(program) = fuse_ld {
+fn linker_version(
+    driver: &Path,
+    fuse_ld: Option<&Located>,
+    search: Option<&SearchDirs>,
+) -> Result<(String, Pins)> {
+    if let Some(located) = fuse_ld {
+        let program = located.path.as_path();
         // Already resolved to the binary the driver invokes; pin both its
         // path and its version line: on content-addressed toolchains the
         // path alone identifies the build, and elsewhere the version line
@@ -509,15 +760,23 @@ fn linker_version(driver: &Path, fuse_ld: Option<&Path>) -> Result<String> {
         if version.is_empty() {
             bail!("{} reported no version", program.display());
         }
-        return Ok(format!("{}: {version}", program.display()));
+        return Ok((
+            format!("{}: {version}", program.display()),
+            located.pins.clone(),
+        ));
     }
     // Asked of the driver rather than resolved from PATH: the `ld` a shell
     // would find is not necessarily the one this driver invokes, and a key
-    // naming the wrong linker is worse than no key at all.
-    let linker = PathBuf::from(
+    // naming the wrong linker is worse than no key at all. A driver that
+    // answers with a bare name is saying it would search PATH itself, so
+    // the same search here names the file it would run.
+    let named = PathBuf::from(
         run(driver, &["-print-prog-name=ld"]).wrap_err("the linker driver named no linker")?,
     );
-    let output = Command::new(&linker)
+    let located = Located::program(OsStr::new("ld"), &named, search)
+        .wrap_err_with(|| format!("failed to find the linker `{}`", named.display()))?;
+    let linker = located.path.as_path();
+    let output = Command::new(linker)
         .arg("-v")
         .output()
         .wrap_err_with(|| format!("failed to query the linker {}", linker.display()))?;
@@ -531,7 +790,7 @@ fn linker_version(driver: &Path, fuse_ld: Option<&Path>) -> Result<String> {
     if version.is_empty() {
         bail!("{} reported no version", linker.display());
     }
-    Ok(version.to_owned())
+    Ok((version.to_owned(), located.pins))
 }
 
 /// Hash the startup objects and libc the driver resolves.
@@ -542,13 +801,28 @@ fn linker_version(driver: &Path, fuse_ld: Option<&Path>) -> Result<String> {
 /// what that probe stood for. So the inputs a link cannot be described without
 /// -- a startup object and a libc -- have to resolve, and a host where neither
 /// does gets no identity and no cached link.
-fn crt_objects(driver: &Path) -> Result<BTreeMap<String, CacheDigest>> {
-    probe_files(&file_probes(), |name| {
+fn crt_objects(
+    driver: &Path,
+    search: Option<&SearchDirs>,
+) -> Result<(BTreeMap<String, CacheDigest>, Pins)> {
+    let placed = std::cell::RefCell::new(Pins::default());
+    let objects = probe_files(&file_probes(), |name| {
         let resolved = run(driver, &[&format!("-print-file-name={name}")]).ok()?;
         let path = PathBuf::from(resolved.trim());
         // The driver echoes the name back when it cannot place it.
-        path.is_absolute().then_some(path)
-    })
+        if !path.is_absolute() {
+            return None;
+        }
+        // Described before it is hashed, so the pin says what was hashed,
+        // along with every library directory the driver looked in first.
+        let mut placed = placed.borrow_mut();
+        match search {
+            Some(search) => pin_search(&mut placed, OsStr::new(name), &path, &search.libraries),
+            None => placed.0 = None,
+        }
+        Some(path)
+    })?;
+    Ok((objects, placed.into_inner()))
 }
 
 /// Resolve each probe, hash what came back, and insist on the ones a key

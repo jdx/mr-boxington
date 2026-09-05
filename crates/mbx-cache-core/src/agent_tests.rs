@@ -1,4 +1,5 @@
 use super::*;
+use crate::PinnedFile;
 use crate::{
     ACTION_PROMISE_MEDIA_TYPE, ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE,
     BLOB_PACK_BLOBS_HEADER, MAX_ACTION_PREDICTION_PAYLOAD,
@@ -1084,6 +1085,116 @@ async fn commit_receipt_contains_this_runs_predictions_not_its_baseline() {
 
     assert_eq!(completed, vec![second]);
     assert_eq!(task_manifest_actions(&cache, &task).unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn an_unchanged_prediction_is_receipted_without_rewriting_the_manifest() {
+    // A hit re-records its prediction byte for byte so the receipt can name
+    // it. The manifest already says it, so the commit must not rewrite it.
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let task = "8".repeat(64);
+    let prediction = ActionPrediction {
+        invocation: CacheDigest::blake3(b"invocation"),
+        action: CacheDigest::blake3(b"action"),
+        adapter: "rustc".into(),
+        payload: "{}".into(),
+    };
+    let seed = CacheAgent::new(&cache, "test-version");
+    let seed_run = seed.begin_task(&task).await.unwrap();
+    assert!(matches!(
+        seed.respond(AgentRequest::RecordActionPrediction {
+            task: seed_run.clone(),
+            prediction: prediction.clone(),
+        })
+        .await,
+        AgentResponse::ActionPredictionRecorded
+    ));
+    seed.commit_task(&seed_run).await.unwrap();
+    let manifest_path = cache
+        .join("task-manifests")
+        .join("v1")
+        .join(format!("{task}.json"));
+    let written = std::fs::metadata(&manifest_path).unwrap();
+
+    let agent = CacheAgent::new(&cache, "test-version");
+    let run = agent.begin_task(&task).await.unwrap();
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::RecordActionPrediction {
+                task: run.clone(),
+                prediction: prediction.clone(),
+            })
+            .await,
+        AgentResponse::ActionPredictionRecorded
+    ));
+    let completed = agent.commit_task_actions(&run).await.unwrap();
+
+    assert_eq!(completed, vec![prediction.clone()]);
+    let unchanged = std::fs::metadata(&manifest_path).unwrap();
+    assert_eq!(unchanged.modified().unwrap(), written.modified().unwrap());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        assert_eq!(unchanged.ino(), written.ino(), "the manifest was replaced");
+    }
+
+    // A prediction that moved and moved back within one run is no change.
+    let agent = CacheAgent::new(&cache, "test-version");
+    let run = agent.begin_task(&task).await.unwrap();
+    for recorded in [
+        ActionPrediction {
+            action: CacheDigest::blake3(b"a passing action"),
+            ..prediction.clone()
+        },
+        prediction.clone(),
+    ] {
+        assert!(matches!(
+            agent
+                .respond(AgentRequest::RecordActionPrediction {
+                    task: run.clone(),
+                    prediction: recorded,
+                })
+                .await,
+            AgentResponse::ActionPredictionRecorded
+        ));
+    }
+    assert_eq!(
+        agent.commit_task_actions(&run).await.unwrap(),
+        vec![prediction.clone()]
+    );
+    let still = std::fs::metadata(&manifest_path).unwrap();
+    assert_eq!(still.modified().unwrap(), written.modified().unwrap());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        assert_eq!(still.ino(), written.ino(), "the manifest was replaced");
+    }
+
+    // A prediction that did change still reaches the manifest.
+    let changed = ActionPrediction {
+        action: CacheDigest::blake3(b"another action"),
+        ..prediction
+    };
+    let agent = CacheAgent::new(&cache, "test-version");
+    let run = agent.begin_task(&task).await.unwrap();
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::RecordActionPrediction {
+                task: run.clone(),
+                prediction: changed.clone(),
+            })
+            .await,
+        AgentResponse::ActionPredictionRecorded
+    ));
+    assert_eq!(
+        agent.commit_task_actions(&run).await.unwrap(),
+        vec![changed.clone()]
+    );
+    assert_eq!(
+        task_manifest_actions(&cache, &task).unwrap(),
+        vec![changed.action]
+    );
 }
 
 #[tokio::test]
@@ -4143,6 +4254,7 @@ async fn memoizes_client_observed_executable_identities() {
             executable: executable.clone(),
             environment: environment.clone(),
             stdout: b"rustc identity".to_vec(),
+            pins: Vec::new(),
         })
         .await;
     assert!(matches!(
@@ -4177,6 +4289,10 @@ async fn identity_keys_admit_only_names_that_select_the_answer() {
     let executable = directory.path().join("cc");
 
     for name in [
+        "COMPILER_PATH",
+        "GCC_EXEC_PREFIX",
+        "LIBRARY_PATH",
+        "PATH",
         "SDKROOT",
         "MACOSX_DEPLOYMENT_TARGET",
         "LIB",
@@ -4192,6 +4308,7 @@ async fn identity_keys_admit_only_names_that_select_the_answer() {
                 executable: executable.clone(),
                 environment: BTreeMap::from([(name.into(), Some("value".into()))]),
                 stdout: b"cc identity".to_vec(),
+                pins: Vec::new(),
             })
             .await;
         assert!(
@@ -4203,11 +4320,171 @@ async fn identity_keys_admit_only_names_that_select_the_answer() {
     let response = agent
         .respond(AgentRequest::StoreExecutableIdentity {
             executable,
-            environment: BTreeMap::from([("PATH".into(), Some("/usr/bin".into()))]),
+            environment: BTreeMap::from([("HOME".into(), Some("/home/user".into()))]),
             stdout: b"cc identity".to_vec(),
+            pins: Vec::new(),
         })
         .await;
     assert!(matches!(response, AgentResponse::Error { .. }));
+}
+
+#[tokio::test]
+async fn a_pinned_executable_identity_outlives_the_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let executable = directory.path().join("rustc");
+    std::fs::write(&executable, "compiler bytes").unwrap();
+    let environment = BTreeMap::from([("RUSTUP_TOOLCHAIN".into(), Some("stable".into()))]);
+
+    let first = CacheAgent::new(&cache, "test-version");
+    assert!(matches!(
+        first
+            .respond(AgentRequest::StoreExecutableIdentity {
+                executable: executable.clone(),
+                environment: environment.clone(),
+                stdout: b"rustc identity".to_vec(),
+                pins: vec![PinnedFile::describe(&executable).unwrap()],
+            })
+            .await,
+        AgentResponse::ExecutableIdentity { .. }
+    ));
+
+    // A later session finds it without probing.
+    let second = CacheAgent::new(&cache, "test-version");
+    assert!(matches!(
+        second
+            .respond(AgentRequest::FindExecutableIdentity {
+                executable: executable.clone(),
+                environment: environment.clone(),
+            })
+            .await,
+        AgentResponse::ExecutableIdentity { stdout: Some(stdout) } if stdout == b"rustc identity"
+    ));
+
+    // Keyed on the environment as well as the path.
+    assert!(matches!(
+        second
+            .respond(AgentRequest::FindExecutableIdentity {
+                executable: executable.clone(),
+                environment: BTreeMap::from([("RUSTUP_TOOLCHAIN".into(), Some("beta".into()))]),
+            })
+            .await,
+        AgentResponse::ExecutableIdentity { stdout: None }
+    ));
+
+    // A rewritten executable is a different compiler until it is probed again.
+    std::fs::write(&executable, "different compiler bytes").unwrap();
+    let third = CacheAgent::new(&cache, "test-version");
+    assert!(matches!(
+        third
+            .respond(AgentRequest::FindExecutableIdentity {
+                executable,
+                environment,
+            })
+            .await,
+        AgentResponse::ExecutableIdentity { stdout: None }
+    ));
+}
+
+/// A pin notices a replacement of the same length with its timestamp put
+/// back, and a permission change, neither of which moves length or mtime.
+#[test]
+#[cfg(unix)]
+fn a_pin_notices_what_length_and_mtime_cannot() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = tempfile::tempdir().unwrap();
+    let executable = directory.path().join("rustc");
+    std::fs::write(&executable, "compiler bytes").unwrap();
+    let pin = PinnedFile::describe(&executable).unwrap();
+    assert!(pin.holds());
+
+    // Replaced by a file of the same length, dated as the original was.
+    let modified = std::fs::metadata(&executable).unwrap().modified().unwrap();
+    let replacement = directory.path().join("rustc.new");
+    std::fs::write(&replacement, "compiler BYTES").unwrap();
+    std::fs::rename(&replacement, &executable).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&executable)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    let now = std::fs::metadata(&executable).unwrap();
+    assert_eq!(now.len(), 14);
+    assert_eq!(now.modified().unwrap(), modified);
+    assert!(!pin.holds(), "a replaced file must not hold");
+
+    // Made executable in place.
+    let pin = PinnedFile::describe(&executable).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!pin.holds(), "a permission change must not hold");
+}
+
+#[tokio::test]
+async fn an_identity_whose_pin_moved_during_the_probe_is_not_kept() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let executable = directory.path().join("rustc");
+    std::fs::write(&executable, "compiler bytes").unwrap();
+    // Described, then replaced before the identity reaches the agent.
+    let pin = PinnedFile::describe(&executable).unwrap();
+    std::fs::write(&executable, "replacement compiler bytes").unwrap();
+
+    let first = CacheAgent::new(&cache, "test-version");
+    assert!(matches!(
+        first
+            .respond(AgentRequest::StoreExecutableIdentity {
+                executable: executable.clone(),
+                environment: BTreeMap::new(),
+                stdout: b"rustc identity".to_vec(),
+                pins: vec![pin],
+            })
+            .await,
+        AgentResponse::ExecutableIdentity { .. }
+    ));
+
+    let second = CacheAgent::new(&cache, "test-version");
+    assert!(matches!(
+        second
+            .respond(AgentRequest::FindExecutableIdentity {
+                executable,
+                environment: BTreeMap::new(),
+            })
+            .await,
+        AgentResponse::ExecutableIdentity { stdout: None }
+    ));
+}
+
+#[tokio::test]
+async fn an_unpinned_executable_identity_lasts_one_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let executable = directory.path().join("cc");
+    std::fs::write(&executable, "driver bytes").unwrap();
+
+    let first = CacheAgent::new(&cache, "test-version");
+    assert!(matches!(
+        first
+            .respond(AgentRequest::StoreExecutableIdentity {
+                executable: executable.clone(),
+                environment: BTreeMap::new(),
+                stdout: b"cc identity".to_vec(),
+                pins: Vec::new(),
+            })
+            .await,
+        AgentResponse::ExecutableIdentity { .. }
+    ));
+
+    let second = CacheAgent::new(&cache, "test-version");
+    assert!(matches!(
+        second
+            .respond(AgentRequest::FindExecutableIdentity {
+                executable,
+                environment: BTreeMap::new(),
+            })
+            .await,
+        AgentResponse::ExecutableIdentity { stdout: None }
+    ));
 }
 
 #[test]
@@ -4220,6 +4497,7 @@ fn bounds_executable_identity_entry_count() {
                 directory.path().join(format!("rustc-{index}")),
                 BTreeMap::new(),
                 vec![b'x'],
+                Vec::new(),
             )
             .unwrap();
     }
@@ -4230,6 +4508,7 @@ fn bounds_executable_identity_entry_count() {
                 directory.path().join("one-too-many"),
                 BTreeMap::new(),
                 vec![b'x'],
+                Vec::new(),
             )
             .is_err()
     );
@@ -4245,6 +4524,7 @@ fn bounds_executable_identity_retained_bytes() {
                 directory.path().join(format!("rustc-{index}")),
                 BTreeMap::new(),
                 vec![b'x'; MAX_EXECUTABLE_IDENTITY_SIZE],
+                Vec::new(),
             )
             .unwrap();
     }
@@ -4255,6 +4535,7 @@ fn bounds_executable_identity_retained_bytes() {
                 directory.path().join("one-byte-too-many"),
                 BTreeMap::new(),
                 vec![b'x'],
+                Vec::new(),
             )
             .is_err()
     );

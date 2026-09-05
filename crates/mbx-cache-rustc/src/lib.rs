@@ -29,9 +29,10 @@
 #![deny(missing_docs)]
 
 use mbx_cache_core::{
-    CacheDigest, FileDigestCache, PathMapping as SharedPathMapping, PathNormalizationError,
-    canonical_json, normalize_mapped_path as normalize_shared_path,
-    normalize_resolved_mapped_path as normalize_resolved_shared_path, resolve_path_mappings,
+    CacheDigest, FileDigestCache, PathAliases, PathMapping as SharedPathMapping,
+    PathNormalizationError, canonical_json, normalize_mapped_path as normalize_shared_path,
+    normalize_resolved_mapped_path_with as normalize_resolved_shared_path_with,
+    resolve_path_mappings,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1908,6 +1909,10 @@ struct ActionBuilder<'a> {
     invocation: &'a RustcInvocation,
     context: ActionContext,
     mappings: Vec<SharedPathMapping>,
+    /// The directories resolved while building this one action. Its inputs
+    /// share a few parents, and resolving each once is what keeps a crate
+    /// with hundreds of them from paying a `realpath` walk per input.
+    aliases: PathAliases,
     linker: Option<LinkerIdentity>,
 }
 
@@ -1919,6 +1924,7 @@ impl<'a> ActionBuilder<'a> {
             linker: None,
             invocation,
             mappings,
+            aliases: PathAliases::default(),
             context,
         }
     }
@@ -2125,8 +2131,13 @@ impl<'a> ActionBuilder<'a> {
     }
 
     fn normalize_path(&self, path: &Path) -> Result<String, BypassReason> {
-        normalize_resolved_shared_path(path, &self.context.working_dir, &self.mappings)
-            .map_err(Into::into)
+        normalize_resolved_shared_path_with(
+            &self.aliases,
+            path,
+            &self.context.working_dir,
+            &self.mappings,
+        )
+        .map_err(Into::into)
     }
 }
 

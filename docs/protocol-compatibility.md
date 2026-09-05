@@ -13,7 +13,7 @@ the handshake and do not exchange cache requests. Adding, removing, or changing
 a request or response therefore requires incrementing `AGENT_PROTOCOL_VERSION`.
 
 `crates/mbx-cache-core/tests/agent_protocol.rs` exercises every request and
-response variant against `tests/fixtures/agent-protocol-v6.jsonl`. Its exhaustive
+response variant against `tests/fixtures/agent-protocol-v8.jsonl`. Its exhaustive
 matches make a newly added variant fail to compile until the fixture and the
 protocol-version decision are reviewed together.
 
@@ -28,8 +28,13 @@ prints each distinct message once from the process that owns the build. v5 adds
 digest of a file the session already read in full instead of rehashing it. v6
 adds `join_action_promise` and `complete_action_promise`, carrying the local
 shim's invocation identity and the server lease or completed prediction needed
-for fleet-wide in-flight deduplication. The client and agent still require
-exact protocol and application-version equality, including when different
+for fleet-wide in-flight deduplication. v7 adds `resolve_file_digests`, which
+has the agent read a ledger miss once and hand the digest to every shim that
+asked for it at the same time. v8 adds `pins` to `store_executable_identity`:
+the files a probe read, as they were when it read them, whose presence, length
+and modification time let the agent keep a compiler or linker identity across
+sessions instead of probing it in every build. The client and agent still require exact
+protocol and application-version equality, including when different
 applications ship them.
 
 ## Remote cache protocol

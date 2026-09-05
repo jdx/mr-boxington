@@ -9,7 +9,7 @@ use crate::{session, util::workspace_root};
 use eyre::{Context, Result, bail};
 use mbx_cache_core::{
     ActionDiagnostic, ActionPrediction, AgentRequest, AgentResponse, CacheDigest, CacheDirectory,
-    CacheFileNode, FileDigestResolution, FileDigestScope, FileIdentity, FileSnapshot,
+    CacheFileNode, FileDigestResolution, FileDigestScope, FileIdentity, FileSnapshot, PinnedFile,
     RecordedFileDigest, RemoteActionResult, RestoreStats, RustcMetadata, canonical_json,
 };
 use mbx_cache_rustc::{
@@ -1200,7 +1200,7 @@ fn record_private_artifacts(root: &Path, outputs: &RustcOutputs) -> Result<()> {
             version: PRIVATE_ARTIFACT_VERSION,
             path: artifact.clone(),
         };
-        crate::util::write_atomic(&path, &serde_json::to_vec(&marker)?)
+        crate::util::write_advisory(&path, &serde_json::to_vec(&marker)?)
             .wrap_err_with(|| format!("failed to mark {} as private", artifact.display()))?;
     }
     Ok(())
@@ -2409,6 +2409,9 @@ fn query_compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
     let stdout = if let Some(stdout) = stdout {
         stdout
     } else {
+        // Described before the compiler runs, so a binary replaced while it
+        // prints its version is never recorded under the replacement.
+        let pins = compiler_identity_pins(&executable);
         let mut command = Command::new(&executable);
         command.arg("-vV");
         for (name, value) in &environment {
@@ -2455,6 +2458,7 @@ fn query_compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
             executable,
             environment,
             stdout,
+            pins,
         }])?;
         let Some(AgentResponse::ExecutableIdentity {
             stdout: Some(stdout),
@@ -2493,6 +2497,52 @@ fn query_compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
             .find_map(|line| line.strip_prefix("mbx-driver: "))
             .filter(|value| !value.is_empty())
             .map(str::to_string),
+    })
+}
+
+/// The files that pin a compiler's identity across sessions: the binary and
+/// the compiler library beside it, as they are right now.
+///
+/// Only a toolchain's own compiler is pinned. A rustup proxy, a version
+/// manager's shim, or a wrapper script picks a compiler when it runs, so its
+/// bytes say nothing about what `-vV` will print. What tells the two apart
+/// is not where the file sits but what sits beside it: a compiler is linked
+/// against `rustc_driver`, which its toolchain installs next to it, and a
+/// dispatcher has no such thing. An executable without one is probed every
+/// session.
+fn compiler_identity_pins(executable: &Path) -> Vec<PinnedFile> {
+    let Some(driver) = compiler_driver_library(executable) else {
+        return Vec::new();
+    };
+    match (
+        PinnedFile::describe(executable),
+        PinnedFile::describe(&driver),
+    ) {
+        (Some(executable), Some(driver)) => vec![executable, driver],
+        _ => Vec::new(),
+    }
+}
+
+/// The `rustc_driver` library a toolchain installs beside its compiler:
+/// under `lib/` next to `bin/` on Unix, in `bin/` itself on Windows.
+fn compiler_driver_library(executable: &Path) -> Option<PathBuf> {
+    let bin = executable.parent()?;
+    let mut directories = vec![bin.to_path_buf()];
+    if let Some(root) = bin.parent() {
+        directories.push(root.join("lib"));
+    }
+    directories.into_iter().find_map(|directory| {
+        std::fs::read_dir(directory)
+            .ok()?
+            .flatten()
+            .find_map(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                let library =
+                    name.starts_with("librustc_driver") || name.starts_with("rustc_driver");
+                (library && entry.file_type().is_ok_and(|kind| kind.is_file()))
+                    .then(|| entry.path())
+            })
     })
 }
 

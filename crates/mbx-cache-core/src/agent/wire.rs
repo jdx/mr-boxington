@@ -5,12 +5,124 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Wire protocol version used between an in-process cache agent and its shims.
-pub const AGENT_PROTOCOL_VERSION: u8 = 7;
+pub const AGENT_PROTOCOL_VERSION: u8 = 8;
 /// Largest single protocol request the agent will read.
 ///
 /// Requests are small JSON objects; the largest legitimate ones carry an output
 /// tree or a batch of digests, which stay far below this.
 pub(super) const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+
+/// A file as a probe found it: absent, or present with a length and
+/// modification time. Length alone would miss a rewrite that kept the size.
+///
+/// Described by the shim at the moment it reads the file, not by the agent
+/// afterwards, so an executable replaced while its probe ran cannot be
+/// recorded under the replacement's identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinnedFile {
+    /// The file, absent or present.
+    pub path: PathBuf,
+    /// What was there, or `None` for nothing.
+    pub state: Option<PinnedState>,
+}
+
+/// What a present pinned file looked like: enough to notice it being
+/// written, replaced, or made executable, without reading it.
+///
+/// Length and modification time alone would miss a replacement of the same
+/// length whose timestamp was preserved, and a `chmod +x`, which touches
+/// neither. So the inode says whether it is the same file, the change time,
+/// which the kernel sets on every write, rename and permission change and
+/// which no program can set back, says whether it was touched, and the mode
+/// says whether it can run. Windows has no change time or inode to offer
+/// through the standard library; its creation time and attributes stand in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinnedState {
+    /// Length in bytes.
+    pub len: u64,
+    /// Modification time, seconds since the Unix epoch.
+    pub modified_secs: u64,
+    /// Modification time, nanoseconds past `modified_secs`.
+    pub modified_nanos: u32,
+    /// Change time on Unix, creation time on Windows, seconds since the
+    /// Unix epoch.
+    pub changed_secs: u64,
+    /// Nanoseconds past `changed_secs`.
+    pub changed_nanos: u32,
+    /// The inode on Unix; zero on Windows.
+    pub inode: u64,
+    /// Permission bits on Unix, file attributes on Windows.
+    pub mode: u32,
+}
+
+impl PinnedFile {
+    /// Describe `path` as it is now, or nothing when the filesystem cannot
+    /// say enough about it to notice a change later.
+    pub fn describe(path: impl Into<PathBuf>) -> Option<Self> {
+        let path = path.into();
+        let state = match std::fs::metadata(&path) {
+            Ok(metadata) => Some(PinnedState::of(&metadata)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return None,
+        };
+        Some(Self { path, state })
+    }
+
+    /// Whether the file is still as this pin describes it.
+    pub fn holds(&self) -> bool {
+        PinnedFile::describe(self.path.clone()).as_ref() == Some(self)
+    }
+}
+
+impl PinnedState {
+    #[cfg(unix)]
+    fn of(metadata: &std::fs::Metadata) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt as _;
+        let modified = metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .ok()?;
+        Some(Self {
+            len: metadata.len(),
+            modified_secs: modified.as_secs(),
+            modified_nanos: modified.subsec_nanos(),
+            changed_secs: u64::try_from(metadata.ctime()).ok()?,
+            changed_nanos: u32::try_from(metadata.ctime_nsec()).ok()?,
+            inode: metadata.ino(),
+            mode: metadata.mode(),
+        })
+    }
+
+    #[cfg(windows)]
+    fn of(metadata: &std::fs::Metadata) -> Option<Self> {
+        use std::os::windows::fs::MetadataExt as _;
+        let modified = metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .ok()?;
+        let created = metadata
+            .created()
+            .ok()?
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .ok()?;
+        Some(Self {
+            len: metadata.len(),
+            modified_secs: modified.as_secs(),
+            modified_nanos: modified.subsec_nanos(),
+            changed_secs: created.as_secs(),
+            changed_nanos: created.subsec_nanos(),
+            inode: 0,
+            mode: metadata.file_attributes(),
+        })
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn of(_metadata: &std::fs::Metadata) -> Option<Self> {
+        None
+    }
+}
 
 /// A request accepted by the task-scoped cache agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +236,11 @@ pub enum AgentRequest {
         environment: BTreeMap<String, Option<String>>,
         /// Captured identity-command standard output.
         stdout: Vec<u8>,
+        /// Files the probe read, as they were when it read them, which pin
+        /// the output beyond this session so the next one can skip the
+        /// probe. Empty keeps the identity for this session only.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pins: Vec<PinnedFile>,
     },
     /// Surface a shim diagnostic through the session that owns the build.
     ///

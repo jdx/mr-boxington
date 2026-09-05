@@ -4,9 +4,9 @@
   "revision": "fc29ead1456ba7c1f62826c284126410a4014b00",
   "toolchain": "1.97.1",
   "platform": "Linux-7.1.4-x86_64-with-glibc2.39",
-  "runner": "nsc-runner-d2pt8ce9teuig",
-  "workflow_run": "33945364086",
-  "commit": "656c7d1d2bb99aba1cf4544f7205fb0513eb6f1b",
+  "runner": "nsc-runner-5cp8sbbeio8po",
+  "workflow_run": "33965148646",
+  "commit": "3fb60e2a50928d26eee5712d35d83e3ab957a9d9",
   "versions": {
     "mbx": "1.8.1",
     "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
@@ -23,12 +23,12 @@
       "results": [
         {
           "tool": "mbx",
-          "wall_duration_ns": 6210660517,
+          "wall_duration_ns": 6839758355,
           "trials": 3,
           "wall_durations_ns": [
-            6383523618,
-            5887933054,
-            6210660517
+            6745851196,
+            7100419379,
+            6839758355
           ],
           "stats": {
             "lookups": 722,
@@ -42,12 +42,12 @@
         },
         {
           "tool": "kache",
-          "wall_duration_ns": 7344983785,
+          "wall_duration_ns": 7819176192,
           "trials": 3,
           "wall_durations_ns": [
-            7344983785,
-            7110257576,
-            7423702802
+            7819176192,
+            7772398974,
+            7926953105
           ]
         }
       ],
@@ -60,22 +60,22 @@
       "results": [
         {
           "tool": "cargo",
-          "wall_duration_ns": 18329996466,
+          "wall_duration_ns": 19502527937,
           "trials": 3,
           "wall_durations_ns": [
-            18645475941,
-            18329996466,
-            18009108996
+            19607006745,
+            19502527937,
+            18660376260
           ]
         },
         {
           "tool": "mbx",
-          "wall_duration_ns": 13114059818,
+          "wall_duration_ns": 14600330702,
           "trials": 3,
           "wall_durations_ns": [
-            13114059818,
-            12645804917,
-            13117290047
+            14416131347,
+            14600330702,
+            14886178228
           ],
           "stats": {
             "lookups": 723,
@@ -89,12 +89,12 @@
         },
         {
           "tool": "kache",
-          "wall_duration_ns": 13998622835,
+          "wall_duration_ns": 15316054700,
           "trials": 3,
           "wall_durations_ns": [
-            13974567432,
-            14083296694,
-            13998622835
+            15228936947,
+            15389930599,
+            15316054700
           ]
         }
       ],
@@ -108,25 +108,25 @@
       "results": [
         {
           "tool": "cargo",
-          "wall_duration_ns": 2575147564,
+          "wall_duration_ns": 2990686571,
           "trials": 3,
           "wall_durations_ns": [
-            2575147564,
-            2594488541,
-            2503892405
+            2990686571,
+            2996549860,
+            2934647785
           ],
-          "warmup_wall_duration_ns": 2604413483
+          "warmup_wall_duration_ns": 2965220787
         },
         {
           "tool": "mbx",
-          "wall_duration_ns": 2888673159,
+          "wall_duration_ns": 2960046224,
           "trials": 3,
           "wall_durations_ns": [
-            2970176292,
-            2888673159,
-            2759265336
+            2949615516,
+            3008158129,
+            2960046224
           ],
-          "warmup_wall_duration_ns": 9017281214,
+          "warmup_wall_duration_ns": 9322088198,
           "stats": {
             "lookups": 1,
             "hits": 1,
@@ -139,14 +139,14 @@
         },
         {
           "tool": "kache",
-          "wall_duration_ns": 2551145913,
+          "wall_duration_ns": 2856428370,
           "trials": 3,
           "wall_durations_ns": [
-            2506446747,
-            2551145913,
-            2606817444
+            2807849460,
+            2856428370,
+            2947946171
           ],
-          "warmup_wall_duration_ns": 8688280016
+          "warmup_wall_duration_ns": 9493082274
         }
       ],
       "skipped": [],
@@ -159,15 +159,15 @@
       "results": [
         {
           "tool": "mbx-sequential",
-          "wall_duration_ns": 46161672715,
-          "peak_compilers": 31,
-          "min_available_bytes": 62707011584,
+          "wall_duration_ns": 47752684033,
+          "peak_compilers": 32,
+          "min_available_bytes": 62826651648,
           "permits": null,
           "trials": 3,
           "wall_durations_ns": [
-            46161672715,
-            45874259097,
-            48340544295
+            47752684033,
+            47552622205,
+            48121037386
           ],
           "stats": {
             "hits": 8
@@ -175,15 +175,15 @@
         },
         {
           "tool": "mbx-unscheduled",
-          "wall_duration_ns": 40150110916,
-          "peak_compilers": 178,
-          "min_available_bytes": 53602336768,
+          "wall_duration_ns": 39673460753,
+          "peak_compilers": 155,
+          "min_available_bytes": 54652903424,
           "permits": null,
           "trials": 3,
           "wall_durations_ns": [
-            42411318261,
-            39679542370,
-            40150110916
+            41543218091,
+            39673460753,
+            39474533965
           ],
           "stats": {
             "hits": 12
@@ -191,15 +191,15 @@
         },
         {
           "tool": "mbx",
-          "wall_duration_ns": 28222182315,
+          "wall_duration_ns": 32501410646,
           "peak_compilers": 32,
-          "min_available_bytes": 61656604672,
+          "min_available_bytes": 61672169472,
           "permits": 32,
           "trials": 3,
           "wall_durations_ns": [
-            31086769684,
-            28222182315,
-            27501869992
+            33456166599,
+            32501410646,
+            29582219926
           ],
           "stats": {
             "hits": 4280
