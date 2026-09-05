@@ -174,17 +174,15 @@ pub(crate) fn identity_for(
 #[derive(Debug)]
 struct Located {
     path: PathBuf,
-    pins: Vec<PinnedFile>,
+    pins: Pins,
 }
 
 impl Located {
     /// A program named outright, pinned by itself.
-    fn named(path: PathBuf) -> Option<Self> {
-        let pin = PinnedFile::describe(&path)?;
-        Some(Self {
-            path,
-            pins: vec![pin],
-        })
+    fn named(path: PathBuf) -> Self {
+        let mut pins = Pins::default();
+        pins.add(&path);
+        Self { path, pins }
     }
 
     /// A program found by searching PATH for `name`, pinned by itself and by
@@ -192,23 +190,53 @@ impl Located {
     fn searched(name: &OsStr) -> Result<Self> {
         let path = which::which(name)
             .wrap_err_with(|| format!("failed to find `{}`", name.to_string_lossy()))?;
-        let mut pins = Vec::new();
+        let mut pins = Pins::default();
         if let Some(search) = std::env::var_os("PATH") {
             for directory in std::env::split_paths(&search) {
                 if Some(directory.as_path()) == path.parent() {
                     break;
                 }
-                let candidate = directory.join(name);
-                let pin = PinnedFile::describe(&candidate)
-                    .ok_or_else(|| eyre::eyre!("cannot pin {}", candidate.display()))?;
-                pins.push(pin);
+                pins.add(&directory.join(name));
             }
         }
-        pins.push(
-            PinnedFile::describe(&path)
-                .ok_or_else(|| eyre::eyre!("cannot pin {}", path.display()))?,
-        );
+        pins.add(&path);
         Ok(Self { path, pins })
+    }
+}
+
+/// The files a probe has read, or nothing once one of them could not be
+/// described.
+///
+/// The probe itself is unaffected: a file the filesystem will not describe
+/// is still run or hashed as before, and the identity it contributes to is
+/// as valid as ever. It is only not one a later session can trust without
+/// probing again, so it is kept for this session alone.
+#[derive(Debug, Clone)]
+struct Pins(Option<Vec<PinnedFile>>);
+
+impl Default for Pins {
+    fn default() -> Self {
+        Self(Some(Vec::new()))
+    }
+}
+
+impl Pins {
+    fn add(&mut self, path: &Path) {
+        match (&mut self.0, PinnedFile::describe(path)) {
+            (Some(pins), Some(pin)) => pins.push(pin),
+            _ => self.0 = None,
+        }
+    }
+
+    fn extend(&mut self, more: Pins) {
+        match (&mut self.0, more.0) {
+            (Some(pins), Some(more)) => pins.extend(more),
+            _ => self.0 = None,
+        }
+    }
+
+    fn into_vec(self) -> Vec<PinnedFile> {
+        self.0.unwrap_or_default()
     }
 }
 
@@ -257,15 +285,18 @@ fn probe(driver: &Path, fuse_ld: Option<&Located>) -> Result<(LinkerIdentity, Ve
     if cfg!(windows) {
         return Ok((probe_windows(driver)?, Vec::new()));
     }
-    let mut pins = PinnedFile::describe(driver).into_iter().collect::<Vec<_>>();
+    let mut pins = Pins::default();
+    pins.add(driver);
     let (linker_version, linker) = linker_version(driver, fuse_ld)?;
     pins.extend(linker);
     let (crt_objects, objects) = crt_objects(driver)?;
     pins.extend(objects);
     let sdk = sdk_identity()?;
-    if sdk.is_some() {
-        pins.clear();
-    }
+    let pins = if sdk.is_some() {
+        Vec::new()
+    } else {
+        pins.into_vec()
+    };
     let identity = LinkerIdentity {
         driver: driver
             .to_str()
@@ -540,12 +571,8 @@ fn windows_crt_objects_in(directories: &[PathBuf]) -> Result<BTreeMap<String, Ca
 /// covers COMPILER_PATH and toolchain-internal linkers; a name it does not
 /// know falls back to PATH. An absolute selection names the linker directly.
 fn resolve_fuse_ld(driver: &Path, selection: &str) -> Result<Located> {
-    let outright = |path: PathBuf| {
-        Located::named(path.clone())
-            .ok_or_else(|| eyre::eyre!("the linker {} cannot be described", path.display()))
-    };
     if Path::new(selection).is_absolute() {
-        return outright(PathBuf::from(selection));
+        return Ok(Located::named(PathBuf::from(selection)));
     }
     let name = format!("ld.{selection}");
     let argument = format!("-print-prog-name={name}");
@@ -553,7 +580,7 @@ fn resolve_fuse_ld(driver: &Path, selection: &str) -> Result<Located> {
         .wrap_err_with(|| format!("the linker driver named nothing for `{name}`"))?;
     let candidate = PathBuf::from(&printed);
     if candidate.is_absolute() && candidate.exists() {
-        return outright(candidate);
+        return Ok(Located::named(candidate));
     }
     Located::searched(OsStr::new(&name)).wrap_err_with(|| {
         format!(
@@ -568,7 +595,7 @@ fn resolve_fuse_ld(driver: &Path, selection: &str) -> Result<Located> {
 /// ld reports through stderr on some platforms and stdout on others, so both
 /// are read; only the first line is kept, since later ones list supported
 /// emulations that say nothing about the version.
-fn linker_version(driver: &Path, fuse_ld: Option<&Located>) -> Result<(String, Vec<PinnedFile>)> {
+fn linker_version(driver: &Path, fuse_ld: Option<&Located>) -> Result<(String, Pins)> {
     if let Some(located) = fuse_ld {
         let program = located.path.as_path();
         // Already resolved to the binary the driver invokes; pin both its
@@ -603,8 +630,7 @@ fn linker_version(driver: &Path, fuse_ld: Option<&Located>) -> Result<(String, V
         run(driver, &["-print-prog-name=ld"]).wrap_err("the linker driver named no linker")?,
     );
     let located = if named.is_absolute() {
-        Located::named(named.clone())
-            .ok_or_else(|| eyre::eyre!("the linker {} cannot be described", named.display()))?
+        Located::named(named)
     } else {
         Located::searched(named.as_os_str())
             .wrap_err_with(|| format!("failed to find the linker `{}`", named.display()))?
@@ -635,8 +661,8 @@ fn linker_version(driver: &Path, fuse_ld: Option<&Located>) -> Result<(String, V
 /// what that probe stood for. So the inputs a link cannot be described without
 /// -- a startup object and a libc -- have to resolve, and a host where neither
 /// does gets no identity and no cached link.
-fn crt_objects(driver: &Path) -> Result<(BTreeMap<String, CacheDigest>, Vec<PinnedFile>)> {
-    let placed = std::cell::RefCell::new(Vec::new());
+fn crt_objects(driver: &Path) -> Result<(BTreeMap<String, CacheDigest>, Pins)> {
+    let placed = std::cell::RefCell::new(Pins::default());
     let objects = probe_files(&file_probes(), |name| {
         let resolved = run(driver, &[&format!("-print-file-name={name}")]).ok()?;
         let path = PathBuf::from(resolved.trim());
@@ -645,7 +671,7 @@ fn crt_objects(driver: &Path) -> Result<(BTreeMap<String, CacheDigest>, Vec<Pinn
             return None;
         }
         // Described before it is hashed, so the pin says what was hashed.
-        placed.borrow_mut().push(PinnedFile::describe(&path)?);
+        placed.borrow_mut().add(&path);
         Some(path)
     })?;
     Ok((objects, placed.into_inner()))

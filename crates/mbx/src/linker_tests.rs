@@ -76,6 +76,37 @@ fn identity_without_agent() -> Result<LinkerIdentity> {
     probe(&driver, None).map(|(identity, _)| identity)
 }
 
+/// A file the filesystem will not describe leaves the identity unpinned
+/// rather than unprobed: the link is as cacheable as it was, for this
+/// session.
+#[test]
+#[cfg(unix)]
+fn an_undescribable_file_unpins_without_failing() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = tempfile::tempdir().unwrap();
+    let closed = directory.path().join("closed");
+    std::fs::create_dir(&closed).unwrap();
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let inside = closed.join("ld");
+    let describable = std::fs::metadata(&inside)
+        .map(|_| true)
+        .unwrap_or_else(|error| error.kind() == std::io::ErrorKind::NotFound);
+    let mut pins = Pins::default();
+    pins.add(directory.path());
+    pins.add(&inside);
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Running as root sees through the mode; anyone else cannot describe it.
+    if describable {
+        assert_eq!(pins.into_vec().len(), 2);
+    } else {
+        assert!(pins.clone().into_vec().is_empty(), "{pins:?}");
+        let mut more = Pins::default();
+        more.add(directory.path());
+        more.extend(pins);
+        assert!(more.into_vec().is_empty());
+    }
+}
+
 /// The files a probe pins are the ones it read, so that a session which
 /// finds them unchanged can trust what an earlier one recorded.
 #[test]
@@ -126,7 +157,8 @@ fn a_fuse_ld_selection_resolves_or_is_refused() {
                 "{name} resolved to {program:?}"
             );
             // Found on PATH or named by the driver, it pins itself last.
-            assert_eq!(located.pins.last().map(|pin| &pin.path), Some(program));
+            let pins = located.pins.clone().into_vec();
+            assert_eq!(pins.last().map(|pin| &pin.path), Some(program));
         }
     }
 }

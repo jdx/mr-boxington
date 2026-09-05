@@ -478,12 +478,13 @@ impl ProbeRecord {
                 .filter(|path| path.is_file()),
         );
         // A configuration file may `include` others this list does not
-        // name, and a command-line `include` does the same. Their target
-        // directory cannot be pinned, so it is not remembered.
+        // name, and a command-line `include=` does the same. Their target
+        // directory cannot be pinned, so it is not remembered. A `--config`
+        // naming a file is on the list above and read like the rest.
         if config_arguments(arguments).any(|value| {
             value
                 .split_once('=')
-                .is_none_or(|(key, _)| key.trim() == "include")
+                .is_some_and(|(key, _)| key.trim() == "include")
         }) || watched
             .iter()
             .skip(1)
@@ -957,6 +958,46 @@ mod tests {
         assert_eq!(resolve(None).workspace_root, first.workspace_root);
         assert_eq!(resolve(None).workspace_root, first.workspace_root);
         assert_eq!(probes(&log), 6);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_config_file_named_on_the_command_line_is_pinned() {
+        let directory = cargo_fixture();
+        let root = directory.path();
+        let cache = tempfile::tempdir().unwrap();
+        let log = root.join("cargo.log");
+        let cargo = logging_cargo(root, root, &log);
+        let extra = root.join("extra.toml");
+        std::fs::write(&extra, "[build]\njobs = 2\n").unwrap();
+        let arguments = [
+            "build".to_string(),
+            "--config".to_string(),
+            extra.display().to_string(),
+        ];
+        let resolve = || {
+            resolve_reported_in(
+                Some(cache.path()),
+                cargo.as_os_str(),
+                &arguments,
+                root,
+                None,
+            )
+            .unwrap()
+        };
+
+        let first = resolve();
+        assert_eq!(resolve(), first);
+        assert_eq!(probes(&log), 1);
+        // The file is watched like any other configuration.
+        std::fs::write(&extra, "[build]\njobs = 3\n").unwrap();
+        assert_eq!(resolve(), first);
+        assert_eq!(probes(&log), 2);
+        // Until it includes something that cannot be.
+        std::fs::write(&extra, "include = \"more.toml\"\n").unwrap();
+        resolve();
+        resolve();
+        assert_eq!(probes(&log), 4);
     }
 
     #[test]
