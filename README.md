@@ -161,6 +161,15 @@ incrementally with state that never enters the shared cache.
 - [CLI reference](https://mr-boxington.jdx.dev/cli)
 - [Current limits](https://mr-boxington.jdx.dev/limits)
 
+### Documentation social previews
+
+The documentation build generates page-specific 1200×630 PNGs for Open Graph
+and Twitter previews. `.vitepress/social-images.mjs` uses the page title, the
+project logo, and a bundled OFL-licensed font; it requires no remote rendering
+service or system fonts. Content hashes in image URLs refresh previews when
+titles or artwork change. `aube run docs:build` from `docs/` tests the renderer
+and verifies that each built page references an emitted PNG.
+
 ## Acknowledgements
 
 mbx relies on [Cargo](https://github.com/rust-lang/cargo) and follows earlier
