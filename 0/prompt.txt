@@ -1,0 +1,56 @@
+draft a blog post in a worktree for jdx/blog to announce mr-boxington
+
+---
+
+rebase, make a pr
+
+---
+
+make it non-draft
+
+---
+
+I also want to delete that worktree without having to think about which build artifacts are worth keeping. - nobody does this
+
+I think the benefits are the auto-pruned target, shared cache, warm worktrees, memory watcher thing, parallel cargo
+
+---
+
+Open a new shell after setup - that shouldn't be necessary I don't think
+
+---
+
+```sh
+mbx cache stats
+mbx gc --dry-run
+```
+
+we should have example output
+
+
+
+same for `cargo/mbx build`
+
+
+
+we can just stick to the mise install method, maybe mention that it sets up a wrapper in the global mise config
+
+
+
+we should generally use `cargo buil`d but mention that `mbx build` can be used in a tip instead
+
+
+
+show a wraning callout about reflinks that they will show up as disk space but don't actually use extra space
+
+
+
+maybe mention the memory use budget after the parallelism because parallelism is why we needed it
+
+---
+
+merged, can you add a link to it to the mr-boxington docs somewhere?
+
+---
+
+can you make it so the og image for the blog posts actually shows the blog instead of only information about me? make a pr for that as well as mr-boxington docs
