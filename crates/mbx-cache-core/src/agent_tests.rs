@@ -1,4 +1,5 @@
 use super::*;
+use crate::PinnedFile;
 use crate::{
     ACTION_PROMISE_MEDIA_TYPE, ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE,
     BLOB_PACK_BLOBS_HEADER, MAX_ACTION_PREDICTION_PAYLOAD,
@@ -4308,7 +4309,7 @@ async fn a_pinned_executable_identity_outlives_the_session() {
                 executable: executable.clone(),
                 environment: environment.clone(),
                 stdout: b"rustc identity".to_vec(),
-                pins: vec![executable.clone()],
+                pins: vec![PinnedFile::describe(&executable).unwrap()],
             })
             .await,
         AgentResponse::ExecutableIdentity { .. }
@@ -4345,6 +4346,41 @@ async fn a_pinned_executable_identity_outlives_the_session() {
             .respond(AgentRequest::FindExecutableIdentity {
                 executable,
                 environment,
+            })
+            .await,
+        AgentResponse::ExecutableIdentity { stdout: None }
+    ));
+}
+
+#[tokio::test]
+async fn an_identity_whose_pin_moved_during_the_probe_is_not_kept() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let executable = directory.path().join("rustc");
+    std::fs::write(&executable, "compiler bytes").unwrap();
+    // Described, then replaced before the identity reaches the agent.
+    let pin = PinnedFile::describe(&executable).unwrap();
+    std::fs::write(&executable, "replacement compiler bytes").unwrap();
+
+    let first = CacheAgent::new(&cache, "test-version");
+    assert!(matches!(
+        first
+            .respond(AgentRequest::StoreExecutableIdentity {
+                executable: executable.clone(),
+                environment: BTreeMap::new(),
+                stdout: b"rustc identity".to_vec(),
+                pins: vec![pin],
+            })
+            .await,
+        AgentResponse::ExecutableIdentity { .. }
+    ));
+
+    let second = CacheAgent::new(&cache, "test-version");
+    assert!(matches!(
+        second
+            .respond(AgentRequest::FindExecutableIdentity {
+                executable,
+                environment: BTreeMap::new(),
             })
             .await,
         AgentResponse::ExecutableIdentity { stdout: None }

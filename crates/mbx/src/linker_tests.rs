@@ -83,12 +83,13 @@ fn identity_without_agent() -> Result<LinkerIdentity> {
 fn a_probe_pins_the_files_it_read() {
     let driver = which::which("cc").unwrap();
     let (identity, pins) = probe(&driver, None).unwrap();
-    assert!(
-        pins.iter().all(|pin| pin.is_absolute() && pin.is_file()),
-        "{pins:?}"
-    );
-    // The driver, the linker, and every object the identity hashed.
-    assert_eq!(pins.len(), 2 + identity.crt_objects.len(), "{pins:?}");
+    assert!(pins.iter().all(|pin| pin.path.is_absolute()), "{pins:?}");
+    assert!(pins.iter().all(PinnedFile::holds), "{pins:?}");
+    let present = pins.iter().filter(|pin| pin.state.is_some()).count();
+    // The driver, the linker, and every object the identity hashed; a
+    // linker found on PATH adds the places the search passed over.
+    assert!(present >= 2 + identity.crt_objects.len(), "{pins:?}");
+    assert_eq!(pins[0].path, driver);
 }
 
 /// A `-fuse-ld` selection is resolved through the driver first, and a
@@ -109,18 +110,23 @@ fn a_fuse_ld_selection_resolves_or_is_refused() {
     // An absolute selection names the linker directly, no resolution needed.
     let direct = Path::new(if cfg!(windows) { "C:/ld" } else { "/opt/ld" });
     assert_eq!(
-        resolve_fuse_ld(&driver, direct.to_str().unwrap()).unwrap(),
+        resolve_fuse_ld(&driver, direct.to_str().unwrap())
+            .unwrap()
+            .path,
         direct
     );
 
     // Whatever the host does provide resolves to an absolute path that
     // exists: anything less could alias two linkers in one memoization key.
     for name in ["mold", "lld", "bfd", "gold"] {
-        if let Ok(program) = resolve_fuse_ld(&driver, name) {
+        if let Ok(located) = resolve_fuse_ld(&driver, name) {
+            let program = &located.path;
             assert!(
                 program.is_absolute() && program.exists(),
                 "{name} resolved to {program:?}"
             );
+            // Found on PATH or named by the driver, it pins itself last.
+            assert_eq!(located.pins.last().map(|pin| &pin.path), Some(program));
         }
     }
 }

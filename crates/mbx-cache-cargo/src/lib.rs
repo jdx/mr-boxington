@@ -477,6 +477,21 @@ impl ProbeRecord {
                 .map(|value| absolute(&invocation_dir, value))
                 .filter(|path| path.is_file()),
         );
+        // A configuration file may `include` others this list does not
+        // name, and a command-line `include` does the same. Their target
+        // directory cannot be pinned, so it is not remembered.
+        if config_arguments(arguments).any(|value| {
+            value
+                .split_once('=')
+                .is_none_or(|(key, _)| key.trim() == "include")
+        }) || watched
+            .iter()
+            .skip(1)
+            .filter(|path| path.file_name().is_some_and(|name| name != "Cargo.toml"))
+            .any(|path| config_includes_files(path))
+        {
+            return None;
+        }
         let pins = watched
             .into_iter()
             .map(Pin::describe)
@@ -541,9 +556,30 @@ impl ProbeRecord {
     }
 }
 
-/// The arguments of `arguments` that reach the probe command, for its key.
+/// Whether a Cargo configuration file names others through `include`.
+///
+/// A file that cannot be read or parsed is treated as though it did: the
+/// question is whether the probe can be pinned, and a file this cannot see
+/// into is one it cannot pin.
+fn config_includes_files(path: &Path) -> bool {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    toml::from_str::<toml::Value>(&contents).is_ok_and(|config| config.get("include").is_some())
+        || toml::from_str::<toml::Value>(&contents).is_err()
+}
+
+/// The probe command's arguments, in the order it runs them: Cargo's global
+/// flags, then `metadata`, then the options that pick the manifest.
 fn probe_arguments(arguments: &[String]) -> Vec<String> {
     let mut probe = forwarded_flags(arguments, &PROBE_GLOBAL_FLAGS);
+    probe.extend(
+        ["metadata", "--no-deps", "--format-version", "1"]
+            .iter()
+            .map(|argument| (*argument).to_string()),
+    );
     if let Some(manifest) = flag_value(arguments, "--manifest-path") {
         probe.push("--manifest-path".into());
         probe.push(manifest.into());
@@ -587,16 +623,7 @@ fn cargo_roots(
         Some(value) => command.env(CARGO_TARGET_DIR_ENV, value),
         None => command.env_remove(CARGO_TARGET_DIR_ENV),
     };
-    command.args(forwarded_flags(arguments, &PROBE_GLOBAL_FLAGS));
-    command.args(["metadata", "--no-deps", "--format-version", "1"]);
-    if let Some(manifest) = flag_value(arguments, "--manifest-path") {
-        command.args(["--manifest-path", manifest]);
-    }
-    command.args(
-        arguments
-            .iter()
-            .filter(|argument| PROBE_MANIFEST_TOGGLES.contains(&argument.as_str())),
-    );
+    command.args(probe_arguments(arguments));
     let output = command.output().ok()?;
     if !output.status.success() {
         return None;
@@ -919,6 +946,17 @@ mod tests {
         assert_eq!(probes(&log), 4);
         assert_eq!(resolve(None), first);
         assert_eq!(probes(&log), 4);
+
+        // A configuration that includes files this cannot see is never
+        // remembered: every build probes.
+        std::fs::write(
+            root.join(".cargo/config.toml"),
+            "include = \"other.toml\"\n",
+        )
+        .unwrap();
+        assert_eq!(resolve(None).workspace_root, first.workspace_root);
+        assert_eq!(resolve(None).workspace_root, first.workspace_root);
+        assert_eq!(probes(&log), 6);
     }
 
     #[test]

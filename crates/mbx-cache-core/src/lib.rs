@@ -49,8 +49,8 @@ pub use agent::{
     AGENT_PROTOCOL_VERSION, ActionDiagnostic, AgentEvent, AgentEventObserver, AgentRemoteCache,
     AgentRequest, AgentResponse, AgentStats, CacheAgent, CompilerStats, FileDigestCache,
     FileDigestResolution, FileDigestScope, FileIdentity, FileObjectIdentity, FileSnapshot,
-    NoFileDigestCache, RecordedFileDigest, RestoreStats, digest_file, is_task_identity,
-    task_manifest_actions,
+    NoFileDigestCache, PinnedFile, PinnedState, RecordedFileDigest, RestoreStats, digest_file,
+    is_task_identity, task_manifest_actions,
 };
 pub use client::BlockingAgentClient;
 pub use local::{LocalActionCache, LocalCas};
@@ -68,8 +68,8 @@ pub use mbx_cache_protocol::{
     TaskActionManifest,
 };
 pub use path_mapping::{
-    PathMapping, PathNormalizationError, normalize_mapped_path, normalize_resolved_mapped_path,
-    resolve_path_mappings,
+    PathAliases, PathMapping, PathNormalizationError, normalize_mapped_path,
+    normalize_resolved_mapped_path, normalize_resolved_mapped_path_with, resolve_path_mappings,
 };
 use remote_http::HttpRemoteCache;
 #[cfg(feature = "fuzzing")]

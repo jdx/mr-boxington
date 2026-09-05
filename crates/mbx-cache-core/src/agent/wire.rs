@@ -12,6 +12,61 @@ pub const AGENT_PROTOCOL_VERSION: u8 = 8;
 /// tree or a batch of digests, which stay far below this.
 pub(super) const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
+/// A file as a probe found it: absent, or present with a length and
+/// modification time. Length alone would miss a rewrite that kept the size.
+///
+/// Described by the shim at the moment it reads the file, not by the agent
+/// afterwards, so an executable replaced while its probe ran cannot be
+/// recorded under the replacement's identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinnedFile {
+    /// The file, absent or present.
+    pub path: PathBuf,
+    /// What was there, or `None` for nothing.
+    pub state: Option<PinnedState>,
+}
+
+/// The length and modification time of a present pinned file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinnedState {
+    /// Length in bytes.
+    pub len: u64,
+    /// Modification time, seconds since the Unix epoch.
+    pub modified_secs: u64,
+    /// Modification time, nanoseconds past `modified_secs`.
+    pub modified_nanos: u32,
+}
+
+impl PinnedFile {
+    /// Describe `path` as it is now, or nothing when the filesystem cannot
+    /// say enough about it to notice a change later.
+    pub fn describe(path: impl Into<PathBuf>) -> Option<Self> {
+        let path = path.into();
+        let state = match std::fs::metadata(&path) {
+            Ok(metadata) => {
+                let modified = metadata
+                    .modified()
+                    .ok()?
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .ok()?;
+                Some(PinnedState {
+                    len: metadata.len(),
+                    modified_secs: modified.as_secs(),
+                    modified_nanos: modified.subsec_nanos(),
+                })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return None,
+        };
+        Some(Self { path, state })
+    }
+
+    /// Whether the file is still as this pin describes it.
+    pub fn holds(&self) -> bool {
+        PinnedFile::describe(self.path.clone()).as_ref() == Some(self)
+    }
+}
+
 /// A request accepted by the task-scoped cache agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -124,11 +179,11 @@ pub enum AgentRequest {
         environment: BTreeMap<String, Option<String>>,
         /// Captured identity-command standard output.
         stdout: Vec<u8>,
-        /// Files whose length and modification time pin the output beyond
-        /// this session, so the next one can skip the probe. Empty keeps the
-        /// identity for this session only.
+        /// Files the probe read, as they were when it read them, which pin
+        /// the output beyond this session so the next one can skip the
+        /// probe. Empty keeps the identity for this session only.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        pins: Vec<PathBuf>,
+        pins: Vec<PinnedFile>,
     },
     /// Surface a shim diagnostic through the session that owns the build.
     ///

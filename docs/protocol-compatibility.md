@@ -29,10 +29,11 @@ digest of a file the session already read in full instead of rehashing it. v6
 adds `join_action_promise` and `complete_action_promise`, carrying the local
 shim's invocation identity and the server lease or completed prediction needed
 for fleet-wide in-flight deduplication. v7 adds `resolve_file_digests`, which
-has the agent read a ledger miss once for every shim that names it. v8 adds
-`pins` to `store_executable_identity`: the files whose length and modification
-time let the agent keep a compiler or linker identity across sessions instead
-of probing it in every build. The client and agent still require exact
+has the agent read a ledger miss once and hand the digest to every shim that
+asked for it at the same time. v8 adds `pins` to `store_executable_identity`:
+the files a probe read, as they were when it read them, whose presence, length
+and modification time let the agent keep a compiler or linker identity across
+sessions instead of probing it in every build. The client and agent still require exact
 protocol and application-version equality, including when different
 applications ship them.
 

@@ -9,7 +9,7 @@ use crate::{session, util::workspace_root};
 use eyre::{Context, Result, bail};
 use mbx_cache_core::{
     ActionDiagnostic, ActionPrediction, AgentRequest, AgentResponse, CacheDigest, CacheDirectory,
-    CacheFileNode, FileDigestResolution, FileDigestScope, FileIdentity, FileSnapshot,
+    CacheFileNode, FileDigestResolution, FileDigestScope, FileIdentity, FileSnapshot, PinnedFile,
     RecordedFileDigest, RemoteActionResult, RestoreStats, RustcMetadata, canonical_json,
 };
 use mbx_cache_rustc::{
@@ -2409,6 +2409,9 @@ fn query_compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
     let stdout = if let Some(stdout) = stdout {
         stdout
     } else {
+        // Described before the compiler runs, so a binary replaced while it
+        // prints its version is never recorded under the replacement.
+        let pins = compiler_identity_pins(&executable);
         let mut command = Command::new(&executable);
         command.arg("-vV");
         for (name, value) in &environment {
@@ -2451,7 +2454,6 @@ fn query_compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
             stdout.extend_from_slice(output.stdout.trim_ascii());
             stdout.push(b'\n');
         }
-        let pins = compiler_identity_pins(&executable);
         let responses = session::request_agent(&[AgentRequest::StoreExecutableIdentity {
             executable,
             environment,
@@ -2498,17 +2500,17 @@ fn query_compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
     })
 }
 
-/// The files that pin a compiler's identity across sessions: the binary.
+/// The files that pin a compiler's identity across sessions: the binary,
+/// as it is right now.
 ///
 /// A rustup proxy is not the compiler. It is a copy of rustup that picks a
 /// toolchain when it runs, so its bytes say nothing about what `-vV` will
 /// print, and an executable that looks like one is probed every session.
-fn compiler_identity_pins(executable: &Path) -> Vec<PathBuf> {
+fn compiler_identity_pins(executable: &Path) -> Vec<PinnedFile> {
     if is_rustup_proxy(executable) {
-        Vec::new()
-    } else {
-        vec![executable.to_path_buf()]
+        return Vec::new();
     }
+    PinnedFile::describe(executable).into_iter().collect()
 }
 
 /// rustup installs its proxies as copies of itself beside a `rustup` binary.

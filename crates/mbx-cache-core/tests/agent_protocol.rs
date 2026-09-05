@@ -3,9 +3,9 @@ use mbx_cache_core::{
     AGENT_PROTOCOL_VERSION, ActionPrediction, AgentRequest, AgentResponse, BLOB_MEDIA_TYPE,
     BLOB_PACK_MEDIA_TYPE, BLOB_PACK_RECEIPT_MEDIA_TYPE, CLIENT_METADATA_MEDIA_TYPE, CacheDigest,
     CacheDirectory, CacheFileNode, CcMetadata, DIRECTORY_MEDIA_TYPE, FileDigestResolution,
-    FileDigestScope, FileIdentity, FileObjectIdentity, PROTOCOL_VERSION, RecordedFileDigest,
-    RemoteActionResult, RestoreStats, RustcMetadata, TASK_ACTION_MANIFEST_MEDIA_TYPE,
-    canonical_json,
+    FileDigestScope, FileIdentity, FileObjectIdentity, PROTOCOL_VERSION, PinnedFile, PinnedState,
+    RecordedFileDigest, RemoteActionResult, RestoreStats, RustcMetadata,
+    TASK_ACTION_MANIFEST_MEDIA_TYPE, canonical_json,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -220,7 +220,14 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
                 executable: PathBuf::from("bin/rustc"),
                 environment: environment(),
                 stdout: b"rustc".to_vec(),
-                pins: vec![PathBuf::from("bin/rustc")],
+                pins: vec![PinnedFile {
+                    path: PathBuf::from("bin/rustc"),
+                    state: Some(PinnedState {
+                        len: 5,
+                        modified_secs: 6,
+                        modified_nanos: 7,
+                    }),
+                }],
             },
         ),
         (

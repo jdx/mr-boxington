@@ -44,7 +44,7 @@ pub use stats::{AgentStats, CompilerStats};
 use wire::MAX_REQUEST_BYTES;
 pub use wire::{
     AGENT_PROTOCOL_VERSION, ActionDiagnostic, AgentEvent, AgentEventObserver, AgentRequest,
-    AgentResponse, RestoreStats,
+    AgentResponse, PinnedFile, PinnedState, RestoreStats,
 };
 
 const MAX_EXECUTABLE_IDENTITIES: usize = 64;
@@ -490,7 +490,7 @@ const PERSISTED_EXECUTABLE_IDENTITY_VERSION: u8 = 1;
 
 /// An executable identity kept across sessions.
 ///
-/// It stands while every pinned file is as the probing session saw it. The
+/// It stands while every pinned file is as the probing shim saw it. The
 /// probe reads those files and nothing else, so an unchanged set of them
 /// would print the same answer again.
 #[derive(Debug, Serialize, Deserialize)]
@@ -500,33 +500,6 @@ struct PersistedExecutableIdentity {
     environment: BTreeMap<String, Option<String>>,
     pins: Vec<PinnedFile>,
     stdout: String,
-}
-
-/// A file's length and modification time, which is what a persisted identity
-/// is conditioned on. Length alone would miss a rewrite that kept the size.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct PinnedFile {
-    path: PathBuf,
-    len: u64,
-    modified_secs: u64,
-    modified_nanos: u32,
-}
-
-impl PinnedFile {
-    fn describe(path: &Path) -> Option<Self> {
-        let metadata = fs::metadata(path).ok()?;
-        let modified = metadata
-            .modified()
-            .ok()?
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .ok()?;
-        Some(Self {
-            path: path.to_path_buf(),
-            len: metadata.len(),
-            modified_secs: modified.as_secs(),
-            modified_nanos: modified.subsec_nanos(),
-        })
-    }
 }
 
 impl CacheAgent {
@@ -2322,7 +2295,7 @@ impl CacheAgent {
         executable: PathBuf,
         environment: BTreeMap<String, Option<String>>,
         stdout: Vec<u8>,
-        pins: Vec<PathBuf>,
+        pins: Vec<PinnedFile>,
     ) -> Result<AgentResponse> {
         if stdout.len() > MAX_EXECUTABLE_IDENTITY_SIZE {
             bail!("executable identity exceeds {MAX_EXECUTABLE_IDENTITY_SIZE} bytes");
@@ -2330,10 +2303,13 @@ impl CacheAgent {
         let key = self.executable_identity_key(executable, environment)?;
         self.remember_executable_identity(&key, stdout.clone())?;
         // Best-effort, like the ledger: a session that cannot write it probes
-        // again next time, which is what it would have done anyway.
-        if !pins.is_empty()
-            && let Err(error) = self.persist_executable_identity(&key, &pins, &stdout)
-        {
+        // again next time, which is what it would have done anyway. A pin
+        // that no longer holds means a file moved under the probe, and what
+        // it printed describes neither the old file nor the new one.
+        if pins.is_empty() {
+        } else if !pins.iter().all(PinnedFile::holds) {
+            debug!("executable identity was not persisted: a pinned file changed during the probe");
+        } else if let Err(error) = self.persist_executable_identity(&key, pins, &stdout) {
             debug!("executable identity was not persisted: {error:#}");
         }
         Ok(AgentResponse::ExecutableIdentity {
@@ -2383,26 +2359,18 @@ impl CacheAgent {
         persisted
             .pins
             .iter()
-            .all(|pin| PinnedFile::describe(&pin.path).as_ref() == Some(pin))
+            .all(PinnedFile::holds)
             .then(|| persisted.stdout.into_bytes())
     }
 
     fn persist_executable_identity(
         &self,
         key: &ExecutableIdentityKey,
-        pins: &[PathBuf],
+        pins: Vec<PinnedFile>,
         stdout: &[u8],
     ) -> Result<()> {
-        // An identity that is not text, or a pin that cannot be described,
-        // is kept for this session only.
+        // An identity that is not text is kept for this session only.
         let Ok(stdout) = std::str::from_utf8(stdout) else {
-            return Ok(());
-        };
-        let Some(pins) = pins
-            .iter()
-            .map(|path| PinnedFile::describe(path))
-            .collect::<Option<Vec<_>>>()
-        else {
             return Ok(());
         };
         let persisted = PersistedExecutableIdentity {
