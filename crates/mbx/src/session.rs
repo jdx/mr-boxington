@@ -27,6 +27,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 mod client;
+pub mod cmake;
 mod diagnostics;
 mod server;
 mod shims;
@@ -99,6 +100,7 @@ pub struct CacheSession {
     rustc_shim: PathBuf,
     rustdoc_shim: PathBuf,
     cc_shims: Option<CcShims>,
+    cmake_environment: BTreeMap<String, String>,
     staging: PathBuf,
     verify: bool,
     incremental: bool,
@@ -156,6 +158,10 @@ impl CacheSession {
         } else {
             None
         };
+        let cmake_environment = match &cc_shims {
+            Some(shims) => cmake::environment(&config.cache_dir.join("shims"), shims)?,
+            None => BTreeMap::new(),
+        };
         let staging = session_dir.join("staging");
         std::fs::create_dir(&staging)?;
         let store = config.store_dir();
@@ -205,6 +211,7 @@ impl CacheSession {
             rustc_shim: shim,
             rustdoc_shim,
             cc_shims,
+            cmake_environment,
             staging,
             verify: config.verify,
             incremental: config.incremental,
@@ -382,6 +389,7 @@ impl CacheSession {
             self.rustdoc_shim.to_string_lossy().into_owned(),
         );
         self.begin_cc(environment);
+        environment.extend(self.cmake_environment.clone());
         if self.incremental {
             // Hand the decision back to cargo, which compiles local packages
             // incrementally in dev profiles and never in release. Not
