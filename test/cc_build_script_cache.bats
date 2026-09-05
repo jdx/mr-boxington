@@ -11,6 +11,8 @@ setup() {
   # choice would make mbx stand aside and the fixture prove nothing.
   unset CARGO_TARGET_DIR MBX_INCREMENTAL CARGO_INCREMENTAL CI MBX_CC MBX_CACHE_LINKS
   unset CC CXX HOST_CC HOST_CXX TARGET_CC TARGET_CXX MBX_REAL_CC MBX_REAL_CXX
+  unset CMAKE HOST_CMAKE TARGET_CMAKE CMAKE_TOOLCHAIN_FILE
+  unset CMAKE_C_COMPILER_LAUNCHER CMAKE_CXX_COMPILER_LAUNCHER
   export MBX_CACHE_DIR="$BATS_TEST_TMPDIR/store"
   # Every test in this file measures the compiler shim a build script calls.
   # Keep execution caching from restoring the script before it reaches that
@@ -70,6 +72,127 @@ EOF
 # Find the fixture's object beneath a target directory.
 object_in() {
   find "$1" -name hello.o -type f | head -n 1
+}
+
+cmake_transition() {
+  if ! command -v cmake >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
+    skip "cmake and make are required"
+  fi
+  if ! command -v c++ >/dev/null 2>&1; then
+    skip "a C++ compiler is required"
+  fi
+  export CMAKE_GENERATOR="Unix Makefiles"
+  cat >"$PROJECT/CMakeLists.txt" <<'EOF'
+cmake_minimum_required(VERSION 3.20)
+project(transition C CXX ASM)
+# Like packaged aws-lc, the optional source trees are absent. A compiler
+# identity change makes CMake restart and lose the command-line OFF values.
+option(BUILD_TESTING "Build unpackaged tests" ON)
+option(BUILD_TOOL "Build unpackaged tools" ON)
+if(BUILD_TESTING OR BUILD_TOOL)
+  message(FATAL_ERROR "optional sources are not packaged")
+endif()
+add_library(hello STATIC src/hello.c src/extra.cpp)
+target_include_directories(hello PRIVATE include)
+EOF
+  echo 'int extra_value() { return 42; }' >"$PROJECT/src/extra.cpp"
+  cat >"$PROJECT/build.rs" <<'EOF'
+use std::{env, path::PathBuf, process::Command};
+
+fn main() {
+    println!("cargo:rerun-if-env-changed=RECONFIGURE");
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    // This must survive every transition: the test reuses build-script state.
+    let marker = out.join("runs");
+    let runs = std::fs::read_to_string(&marker).unwrap_or_default();
+    let cmake = env::var_os("CMAKE").unwrap_or_else(|| "cmake".into());
+    let cc = env::var("HOST_CC").unwrap_or_else(|_| "cc".into());
+    let cxx = env::var("HOST_CXX").unwrap_or_else(|_| "c++".into());
+    // Mirror cmake-rs: resolve cc::Tool::path(), then pass each compiler
+    // explicitly, including ASM, which uses the C compiler.
+    let resolve = |compiler: &str| {
+        env::split_paths(&env::var_os("PATH").unwrap())
+            .map(|dir| dir.join(compiler))
+            .find(|path| path.is_file()).unwrap()
+    };
+    let status = Command::new(&cmake)
+        .args(["-S", ".", "-B"]).arg(out.join("build"))
+        .arg(format!("-DCMAKE_C_COMPILER={}", resolve(&cc).display()))
+        .arg(format!("-DCMAKE_CXX_COMPILER={}", resolve(&cxx).display()))
+        .arg(format!("-DCMAKE_ASM_COMPILER={}", resolve(&cc).display()))
+        .args(["-DBUILD_TESTING=OFF", "-DBUILD_TOOL=OFF"])
+        .status().unwrap();
+    assert!(status.success());
+    // Force a real native compilation on every run, including the plain
+    // Cargo fallback after the session that installed any launcher has ended.
+    let status = Command::new(&cmake).arg("--build").arg(out.join("build"))
+        .arg("--clean-first").status().unwrap();
+    assert!(status.success());
+    std::fs::write(marker, format!("{runs}{}\n", env::var("RECONFIGURE").unwrap())).unwrap();
+}
+EOF
+  export CARGO_TARGET_DIR="$BATS_TEST_TMPDIR/reused-target"
+  export CARGO_INCREMENTAL=0
+  export MBX_INCREMENTAL=0 MBX_LEARNED_INCREMENTAL=0
+  export RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER=
+  local step cache original_compilers
+  for step in cargo-1 mbx-2 cargo-3 mbx-4; do
+    if [[ "$step" == cargo-* ]]; then
+      run env RECONFIGURE="$step" MBX_DISABLE=1 RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER= \
+        cargo build --offline --manifest-path "$PROJECT/Cargo.toml"
+    else
+      run env RECONFIGURE="$step" MBX_STATS_REPORT="$BATS_TEST_TMPDIR/$step.json" \
+        "$MBX_BIN" build --offline --manifest-path "$PROJECT/Cargo.toml"
+    fi
+    assert_success
+    cache="$(find "$CARGO_TARGET_DIR" -name CMakeCache.txt -type f)"
+    [ -n "$cache" ]
+    local compilers
+    compilers="$(grep -E '^CMAKE_(C|CXX|ASM)_COMPILER:' "$cache" | sed -E 's/:[^=]*=/=/')"
+    if [[ "$step" == cargo-1 ]]; then
+      original_compilers="$compilers"
+    fi
+    [ "$compilers" = "$original_compilers" ]
+    run grep -E '^BUILD_(TESTING|TOOL):BOOL=OFF$' "$cache"
+    assert_success
+    [ "${#lines[@]}" -eq 2 ]
+  done
+  run cat "$(dirname "$(dirname "$cache")")/runs"
+  assert_output $'cargo-1\nmbx-2\ncargo-3\nmbx-4'
+}
+
+@test "CMake build scripts can switch between Cargo and mbx in one target directory" {
+  cmake_transition
+  # Cleaning native outputs before the second mbx run must still allow both
+  # C and C++ objects to restore through CMake's persisted launchers, alongside
+  # the Rust library whose build-script output has not changed.
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*3' "$BATS_TEST_TMPDIR/mbx-4.json"
+  assert_success
+}
+
+@test "CMake compiler transitions preserve a configured launcher" {
+  local launcher="$BATS_TEST_TMPDIR/user-launcher"
+  cat >"$launcher" <<'EOF'
+#!/bin/sh
+echo called >> "$LAUNCHER_LOG"
+exec "$@"
+EOF
+  chmod +x "$launcher"
+  export LAUNCHER_LOG="$BATS_TEST_TMPDIR/launcher.log"
+  export CMAKE_C_COMPILER_LAUNCHER="$launcher"
+  export CMAKE_CXX_COMPILER_LAUNCHER="$launcher"
+  cmake_transition
+  local cache
+  cache="$(find "$CARGO_TARGET_DIR" -name CMakeCache.txt -type f)"
+  run grep -Fx "CMAKE_C_COMPILER_LAUNCHER:STRING=$launcher" "$cache"
+  assert_success
+  run grep -Fx "CMAKE_CXX_COMPILER_LAUNCHER:STRING=$launcher" "$cache"
+  assert_success
+  run cat "$LAUNCHER_LOG"
+  assert_success
+  # At least the two native sources on all four runs; some CMake versions
+  # also launch the compiler through this command during their initial probes.
+  [ "${#lines[@]}" -ge 8 ]
 }
 
 @test "a build script's C object restores into a distinct target directory" {

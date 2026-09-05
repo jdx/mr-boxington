@@ -12,6 +12,9 @@ fn main() -> ExitCode {
     if mbx::session::is_rustdoc_shim() {
         return mbx::session::run_rustdoc_shim();
     }
+    if let Some(code) = mbx::session::cmake::dispatch() {
+        return code;
+    }
     if let Some(language) = mbx::session::is_cc_shim() {
         return mbx::session::run_cc_shim(language);
     }

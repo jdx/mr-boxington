@@ -298,7 +298,7 @@ pub fn install_path_shims(directory: &Path) -> Result<Option<PathShims>> {
 /// replaced, and `rename` leaves it resolvable at every instant where removing
 /// and recreating would not.
 #[cfg(unix)]
-fn link_path_shim(executable: &Path, destination: &Path) -> Result<()> {
+pub(super) fn link_path_shim(executable: &Path, destination: &Path) -> Result<()> {
     // Absolutized for the same reason [`symlink_shim`] does it: a symlink is
     // resolved from the directory holding it, which here is the cache's shim
     // directory and never the caller's. `current_exe` has been absolute on
@@ -350,7 +350,7 @@ pub(super) fn link_path_shim(executable: &Path, destination: &Path) -> Result<()
 }
 
 #[cfg(not(any(unix, windows)))]
-fn link_path_shim(_executable: &Path, _destination: &Path) -> Result<()> {
+pub(super) fn link_path_shim(_executable: &Path, _destination: &Path) -> Result<()> {
     eyre::bail!("PATH shims are not supported on this platform")
 }
 
