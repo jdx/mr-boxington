@@ -383,7 +383,11 @@ jobs:
   small-edit-measure:
     name: Measure ${{ matrix.tool }} (${{ matrix.trial }})
     needs: small-edit-seed
-    if: github.event_name == 'workflow_dispatch' && inputs.small_edit
+    # `small-edit-seed` deliberately tolerates the candidate-build job being
+    # skipped when benchmarking a released mbx. Preserve that tolerance here:
+    # without `always()`, GitHub propagates the transitive skipped dependency
+    # and silently skips this matrix even though every seed job succeeded.
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.small_edit && needs.small-edit-seed.result == 'success'
     strategy:
       fail-fast: false
       matrix:
