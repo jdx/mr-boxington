@@ -37,6 +37,7 @@ pub(crate) fn resolve(
     if !targets.is_empty() {
         let mut selections = BTreeMap::new();
         for target in targets {
+            let target = normalize_cargo_target(&target, cargo_arguments)?;
             if let Some(executable) = resolve_target(
                 settings,
                 cache_dir,
@@ -68,6 +69,7 @@ pub(crate) fn resolve(
     .map(Selection::Single))
 }
 
+/// Resolve one profile/target selector to an executable; system needs no override.
 fn resolve_target(
     settings: &LinkerSettings,
     cache_dir: &Path,
@@ -450,6 +452,7 @@ fn cargo_profile(arguments: &[String]) -> String {
     })
 }
 
+/// Collect repeated Cargo target flags, stopping before program arguments.
 fn cargo_targets(arguments: &[String]) -> Vec<String> {
     let mut targets = Vec::new();
     let mut arguments = arguments
@@ -466,6 +469,40 @@ fn cargo_targets(arguments: &[String]) -> Vec<String> {
         }
     }
     targets
+}
+
+/// Match Cargo's target spelling before using it as a rustc routing key.
+fn normalize_cargo_target(target: &str, cargo_arguments: &[String]) -> Result<String> {
+    // Cargo substitutes this directive before trimming ordinary target names.
+    if target == "host-tuple" {
+        let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+        if let Some(toolchain) = cargo_arguments
+            .first()
+            .filter(|argument| argument.starts_with('+'))
+        {
+            command.arg(toolchain);
+        }
+        let output = command
+            .arg("-vV")
+            .output()
+            .wrap_err("failed to query Cargo's host target")?;
+        if !output.status.success() {
+            bail!("Cargo could not report its host target");
+        }
+        return String::from_utf8(output.stdout)?
+            .lines()
+            .find_map(|line| line.strip_prefix("host: ").map(str::to_owned))
+            .ok_or_else(|| eyre::eyre!("Cargo did not report its host target"));
+    }
+    let target = target.trim();
+    if target.ends_with(".json") {
+        return fs::canonicalize(target)
+            .wrap_err_with(|| format!("failed to canonicalize Cargo target `{target}`"))?
+            .into_os_string()
+            .into_string()
+            .map_err(|_| eyre::eyre!("Cargo target path is not valid Unicode"));
+    }
+    Ok(target.to_owned())
 }
 
 fn rustc_command(cargo_arguments: &[String]) -> Command {
@@ -625,6 +662,52 @@ mod tests {
             selections,
             BTreeMap::from([("aarch64-apple-darwin".into(), executable)])
         );
+    }
+
+    #[test]
+    fn normalizes_cargo_host_directive_and_target_paths() {
+        assert_eq!(
+            normalize_cargo_target("host-tuple", &[]).unwrap(),
+            host_target(&[]).unwrap()
+        );
+        assert_eq!(
+            normalize_cargo_target(" aarch64-apple-darwin ", &[]).unwrap(),
+            "aarch64-apple-darwin"
+        );
+        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let target = directory.path().join("custom.json");
+        fs::write(&target, "{}").unwrap();
+        let relative = target
+            .strip_prefix(std::env::current_dir().unwrap())
+            .unwrap();
+        assert_eq!(
+            normalize_cargo_target(relative.to_str().unwrap(), &[]).unwrap(),
+            fs::canonicalize(&target).unwrap().to_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn host_directive_uses_concrete_target_profile_policy() {
+        let cache = tempfile::tempdir().unwrap();
+        let host = normalize_cargo_target("host-tuple", &[]).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let settings = LinkerSettings {
+            profiles: BTreeMap::from([(
+                "dev".into(),
+                BTreeMap::from([(host.clone(), format!("path:{}", executable.display()))]),
+            )]),
+            ..Default::default()
+        };
+        let Some(Selection::Targets(selections)) = resolve(
+            &settings,
+            cache.path(),
+            &HttpSettings::default(),
+            &["build".into(), "--target=host-tuple".into()],
+        )
+        .unwrap() else {
+            panic!("expected target-specific selection");
+        };
+        assert_eq!(selections, BTreeMap::from([(host, executable)]));
     }
 
     #[cfg(unix)]
