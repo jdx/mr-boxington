@@ -50,6 +50,7 @@ pub(crate) use setup::{
 use {cache::*, cargo::*, exec::*, gc::*, setup::*};
 
 #[derive(usage::Cli)]
+#[usage(completion = true)]
 #[usage(
     bin = "mbx",
     version,
@@ -76,6 +77,12 @@ struct Cli {
 
 #[derive(usage::Subcommands)]
 enum Commands {
+    /// Generate a self-contained shell completion script.
+    Completion {
+        /// Shell: bash, zsh, fish, or powershell.
+        #[usage(arg)]
+        shell: String,
+    },
     /// Check the local installation, cache, toolchain, and remote connection.
     Doctor(doctor::DoctorArgs),
     /// Explain cache bypasses, or replay the last build and diagnose its misses.
@@ -125,6 +132,7 @@ fn with_toolchain(toolchain: Option<&str>, arguments: Vec<String>) -> Vec<String
 /// which kind it is instead of inheriting an answer.
 fn compiles_nothing(command: &Commands) -> Option<&'static str> {
     match command {
+        Commands::Completion { .. } => Some("completion"),
         Commands::Setup(_) => Some("setup"),
         Commands::Gc(_) => Some("gc"),
         Commands::Cache(_) => Some("cache"),
@@ -142,6 +150,10 @@ fn compiles_nothing(command: &Commands) -> Option<&'static str> {
 /// Parse the command line and run it.
 pub fn run() -> Result<ExitCode> {
     let original = std::env::args_os().collect::<Vec<_>>();
+    if let Some(answer) = Cli::completion_request(&original[1..]) {
+        print!("{answer}");
+        return Ok(ExitCode::SUCCESS);
+    }
     let mut cli = Cli::parse();
     let toolchain = cli.toolchain.take();
     let toolchain = toolchain.as_deref();
@@ -165,8 +177,17 @@ pub fn run() -> Result<ExitCode> {
         // through to an unrelated Cargo later on PATH.
         return doctor::run(args, toolchain);
     }
+    if let Commands::Completion { shell } = &cli.command {
+        let shell = usage::complete::Shell::from_name(shell)
+            .ok_or_else(|| eyre::eyre!("unsupported shell: {shell}"))?;
+        print!("{}", Cli::completion_script(shell));
+        return Ok(ExitCode::SUCCESS);
+    }
     let (config, settings) = Config::load_for_cli()?;
     match cli.command {
+        Commands::Completion { .. } => {
+            unreachable!("completion was handled before configuration loading")
+        }
         Commands::Doctor(_) => unreachable!("doctor was handled before configuration loading"),
         Commands::Explain(args) => {
             shim::prepare_explicit_cargo()?;

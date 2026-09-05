@@ -383,11 +383,34 @@ jobs:
       # jdx/mr-boxington's identity with no key to distribute. Runs after the
       # upload above, which is what guarantees the release exists.
       # See https://packslip.dev.
+      - name: Publish the CLI specification and completions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir -p bin
+          tar -xzf release-assets/mbx-x86_64-unknown-linux-gnu.tar.gz -C bin
+          bin/mbx __usage_spec__ > mbx.usage.kdl
+          for shell in bash zsh fish powershell; do
+            bin/mbx completion "$shell" > mbx.$shell
+            test -s mbx.$shell
+            grep -Fq '__complete_word__' mbx.$shell
+            bin/mbx __complete_word__ --shell "$shell" --line 'mbx do' | grep -Fq -- 'doctor'
+          done
+          bash -n mbx.bash
+          gh release upload "$TAG" mbx.usage.kdl mbx.bash mbx.zsh mbx.fish mbx.powershell --repo "$REPO" --clobber
       - uses: jdx/packslip@a0d434ad57571c62dbd0ab5095b4eff607a71fd3 # v1.1.1
         with:
           tag: ${{ inputs.tag }}
           artifacts: release-assets/mbx-*.tar.gz release-assets/mbx-*.zip
           bin: mbx
+          resources: |
+            cli-spec/usage=asset:mbx.usage.kdl
+            completion/bash=asset:mbx.bash
+            completion/zsh=asset:mbx.zsh
+            completion/fish=asset:mbx.fish
+            completion/powershell=asset:mbx.powershell
 
       # Called from release-plz.yml, undrafting is that workflow's job — it
       # happens after this one returns. Run by hand, nothing else will do it,

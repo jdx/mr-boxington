@@ -16,6 +16,7 @@
 
 ## Subcommands
 
+- [`mbx completion <SHELL>`](/cli/completion.md)
 - [`mbx doctor [--json]`](/cli/doctor.md)
 - [`mbx explain [--last] [CARGO_COMMAND] [CARGO_ARGS]…`](/cli/explain.md)
 - [`mbx setup [FLAGS]`](/cli/setup.md)

@@ -2969,6 +2969,16 @@ dependencies = [
  "usage-argv",
  "usage-config",
  "usage-derive",
+ "usage-test",
+]
+
+[[package]]
+name = "usage-test"
+version = "6.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d3b624c2128c68c730930654cb718ef03c3792bfd7b2e8d4447ee58c2e4dfe7"
+dependencies = [
+ "usage-argv",
 ]
 
 [[package]]
