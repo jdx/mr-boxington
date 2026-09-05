@@ -1,6 +1,6 @@
 [package]
 name = "mbx-cache-cargo"
-version = "0.1.19"
+version = "0.1.20"
 description = "Unstable Cargo invocation integration for mbx cache embedders"
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,7 @@ readme.workspace = true
 
 [dependencies]
 dirs = "6"
-mbx-cache-core = { path = "../mbx-cache-core", version = "0.12.0", default-features = false }
+mbx-cache-core = { path = "../mbx-cache-core", version = "0.13.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"

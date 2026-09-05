@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.19](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.18...mbx-cache-store-v0.1.19) - 2026-09-05
+
+### Other
+
+- take the bookkeeping out of the hot edit loop ([#362](https://github.com/jdx/mr-boxington/pull/362))
+
 ## [0.1.18](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.17...mbx-cache-store-v0.1.18) - 2026-09-05
 
 ### Other
