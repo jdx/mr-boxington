@@ -383,7 +383,7 @@ jobs:
       # jdx/mr-boxington's identity with no key to distribute. Runs after the
       # upload above, which is what guarantees the release exists.
       # See https://packslip.dev.
-      - uses: jdx/packslip@433c0c0f033e64c22f12433471768c255ef2bd93 # v0.3.0
+      - uses: jdx/packslip@0121abf6972fe6ca13633233402439a715f4cc0e # v1.0.0
         with:
           tag: ${{ inputs.tag }}
           artifacts: release-assets/mbx-*.tar.gz release-assets/mbx-*.zip
