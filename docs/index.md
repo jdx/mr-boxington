@@ -23,3 +23,7 @@ hero:
       text: Benchmarks
       link: /benchmarks
 ---
+
+Read the [announcement: Introducing mr-boxington — fix `target/`](https://jdx.dev/posts/2026-09-05-introducing-mr-boxington/)
+for a walkthrough of automatic cleanup, shared caching, warm worktrees, and
+memory-aware parallel Cargo builds.
