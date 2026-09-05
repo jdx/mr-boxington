@@ -165,7 +165,14 @@ function inconclusive(scenario: BenchmarkScenario): string | null {
   const ordered = [...scenario.results].sort(
     (left, right) => left.wall_duration_ns - right.wall_duration_ns,
   );
-  if (ordered.length < 2) return null;
+  // Fastest against nobody is not a result. A comparator that failed the
+  // scenario leaves its tool out of the card entirely, and the one that
+  // remains has beaten nothing.
+  if (ordered.length < 2) {
+    return ordered.length === 1
+      ? "Only one tool completed this scenario, so nothing is marked fastest."
+      : null;
+  }
   const [best, next] = ordered;
   // Two timings of the same thing are the least that can show a spread, so a
   // scenario run once names nobody however wide the gap looks.

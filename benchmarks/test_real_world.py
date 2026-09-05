@@ -1,3 +1,5 @@
+import contextlib
+import io
 import subprocess
 import tempfile
 import unittest
@@ -145,6 +147,45 @@ class PublishableTest(unittest.TestCase):
         self.assertEqual(cell["stats"], {"hits": 700})
         for dropped in ("seed_wall_duration_ns", "recompiled", "summary"):
             self.assertNotIn(dropped, cell)
+
+
+class RunScenarioTest(unittest.TestCase):
+    def run_trials(self, failing_trial: int | None) -> dict[str, object]:
+        seen: list[str] = []
+
+        def trial(scenario, tool, cell, subject, runner, work):  # noqa: ANN001
+            seen.append(cell)
+            if len(seen) == failing_trial:
+                raise RuntimeError(f"{cell}/{tool} build failed")
+            return {"tool": tool, "wall_duration_ns": 5}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with contextlib.redirect_stderr(io.StringIO()):
+                with mock.patch.object(real_world, "one_trial", side_effect=trial):
+                    return real_world.run_scenario(
+                        "warm",
+                        ("kache",),
+                        {},
+                        None,
+                        Path(temporary),
+                        real_world.Progress(3),
+                        3,
+                    )
+
+    def test_a_tool_that_finished_every_trial_is_published(self) -> None:
+        entry = self.run_trials(None)
+
+        self.assertEqual(entry["results"][0]["trials"], 3)
+        self.assertEqual(entry["skipped"], [])
+
+    def test_a_tool_that_dropped_out_partway_publishes_nothing(self) -> None:
+        # Otherwise the note calling it unmeasured sits beside a cell holding
+        # a median of whichever trials happened to finish first.
+        entry = self.run_trials(2)
+
+        self.assertEqual(entry["results"], [])
+        self.assertEqual(len(entry["skipped"]), 1)
+        self.assertIn("build failed", entry["skipped"][0])
 
 
 class DiscardTest(unittest.TestCase):

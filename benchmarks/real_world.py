@@ -956,7 +956,11 @@ def run_scenario(
             else:
                 progress.finish(cell)
                 discard(work, cell)
-        if measured:
+        # All of them or none. A tool that dropped out partway has both a
+        # note saying it was not measured and, without this, a published cell
+        # contradicting the note: a median over whichever trials happened to
+        # finish, compared on the page against tools that ran every one.
+        if len(measured) == repeats:
             results.append(median_cell(measured))
 
     entry: dict[str, object] = {
