@@ -55,7 +55,7 @@ fn main() {
         Remove-Item -Recurse -Force target
         $warm = & mbx build 2>&1 | Out-String
         $LASTEXITCODE | Should -Be 0 -Because $warm
-        $warm | Should -Match 'mbx\[cache\]: [1-9][0-9]* hits'
+        $warm | Should -Match 'mbx\[cache\]: (?:object cache: )?[1-9][0-9]* hits'
     }
 
     It 'restores a natively linked executable' {
@@ -76,7 +76,7 @@ edition = "2024"
         Remove-Item -Recurse -Force target
         $warm = & mbx build --release 2>&1 | Out-String
         $LASTEXITCODE | Should -Be 0 -Because $warm
-        $warm | Should -Match 'mbx\[cache\]: [1-9][0-9]* hits'
+        $warm | Should -Match 'mbx\[cache\]: (?:object cache: )?[1-9][0-9]* hits'
         Test-Path target\release\native-link-fixture.exe | Should -BeTrue
     }
 
@@ -91,7 +91,7 @@ edition = "2024"
         Remove-Item hello.obj
         $warm = & mbx exec cl.exe /nologo /Z7 /Brepro /Fohello.obj /c src\hello.c 2>&1 | Out-String
         $LASTEXITCODE | Should -Be 0 -Because $warm
-        $warm | Should -Match 'mbx\[cache\]: 1 hit'
+        $warm | Should -Match 'mbx\[cache\]: (?:object cache: )?1 hits'
         Test-Path hello.obj | Should -BeTrue
     }
 }

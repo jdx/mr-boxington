@@ -590,6 +590,7 @@ pub(crate) enum SummaryStyle {
 }
 
 impl SummaryStyle {
+    /// Select the environment's default report while preserving explicit styles.
     pub(crate) fn resolve(self, ci: bool) -> Self {
         match self {
             Self::Auto if ci => Self::Ci,

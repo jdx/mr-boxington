@@ -388,6 +388,7 @@ pub(super) fn ci_summary(stats: &AgentStats) -> String {
     lines.join("\n")
 }
 
+/// Identify compiler discovery and stdin probes that are routine build traffic.
 fn routine_probe(kind: &str) -> bool {
     matches!(
         kind,
@@ -395,6 +396,7 @@ fn routine_probe(kind: &str) -> bool {
     )
 }
 
+/// Count bypasses worth reporting, excluding routine compiler probes.
 fn unexpected_bypasses(stats: &AgentStats) -> u64 {
     stats
         .bypasses
@@ -404,6 +406,8 @@ fn unexpected_bypasses(stats: &AgentStats) -> u64 {
         .sum()
 }
 
+/// Show short and CI reports only for cache activity or failures, so compiler
+/// probes alone do not turn a no-op build into a cache report.
 pub(super) fn should_display_short_stats(stats: &AgentStats) -> bool {
     stats.lookups > 0
         || stats.unconsulted > 0
