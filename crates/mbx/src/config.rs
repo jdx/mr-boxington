@@ -107,11 +107,12 @@ pub(crate) struct RawConfig {
     /// Write a JSON build report to this path.
     #[usage(env = "MBX_STATS_REPORT")]
     stats_report: Option<PathBuf>,
-    /// Detail printed after a build: one line, the full breakdown, or nothing.
+    /// Detail printed after a build. Auto uses an explanatory CI report in CI
+    /// and one line locally; short, ci, full, and off select a fixed style.
     #[usage(
         env = "MBX_SUMMARY",
-        default = "short",
-        choices("off", "short", "full")
+        default = "auto",
+        choices("auto", "off", "short", "ci", "full")
     )]
     summary: String,
     /// Compile and consult the cache, then compare outputs.
@@ -580,10 +581,22 @@ impl Default for CliSettings {
 /// How much of the per-build cache summary is printed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SummaryStyle {
-    Off,
     #[default]
+    Auto,
+    Off,
     Short,
+    Ci,
     Full,
+}
+
+impl SummaryStyle {
+    pub(crate) fn resolve(self, ci: bool) -> Self {
+        match self {
+            Self::Auto if ci => Self::Ci,
+            Self::Auto => Self::Short,
+            style => style,
+        }
+    }
 }
 
 impl std::str::FromStr for SummaryStyle {
@@ -591,11 +604,13 @@ impl std::str::FromStr for SummaryStyle {
 
     fn from_str(value: &str) -> Result<Self> {
         match value {
+            "auto" => Ok(Self::Auto),
             "off" => Ok(Self::Off),
             "short" => Ok(Self::Short),
+            "ci" => Ok(Self::Ci),
             "full" => Ok(Self::Full),
             other => Err(eyre::eyre!(
-                "summary must be off, short, or full, not {other:?}"
+                "summary must be auto, off, short, ci, or full, not {other:?}"
             )),
         }
     }
@@ -1865,13 +1880,24 @@ default = "rust-lld"
     }
 
     #[test]
-    fn summaries_default_to_short_with_off_and_full_as_choices() {
+    fn summaries_default_to_auto_and_allow_fixed_styles() {
         let (_, settings) = configured_for_cli(None, &[]).unwrap();
-        assert_eq!(settings.summary, SummaryStyle::Short);
-        let (_, settings) = configured_for_cli(None, &[("MBX_SUMMARY", "off")]).unwrap();
-        assert_eq!(settings.summary, SummaryStyle::Off);
-        let (_, settings) = configured_for_cli(None, &[("MBX_SUMMARY", "full")]).unwrap();
-        assert_eq!(settings.summary, SummaryStyle::Full);
+        assert_eq!(settings.summary, SummaryStyle::Auto);
+        assert_eq!(settings.summary.resolve(false), SummaryStyle::Short);
+        assert_eq!(settings.summary.resolve(true), SummaryStyle::Ci);
+        for (value, style) in [
+            ("off", SummaryStyle::Off),
+            ("short", SummaryStyle::Short),
+            ("ci", SummaryStyle::Ci),
+            ("full", SummaryStyle::Full),
+        ] {
+            let (_, settings) = configured_for_cli(None, &[("MBX_SUMMARY", value)]).unwrap();
+            assert_eq!(settings.summary.resolve(false), style);
+            assert_eq!(settings.summary.resolve(true), style);
+            let (_, settings) =
+                configured_for_cli(Some(&format!("summary = {value:?}")), &[]).unwrap();
+            assert_eq!(settings.summary.resolve(true), style);
+        }
         assert!(
             configured_for_cli(None, &[("MBX_SUMMARY", "verbose")]).is_err(),
             "an unknown style is an error, not a silent default"

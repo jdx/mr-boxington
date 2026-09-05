@@ -148,11 +148,18 @@ pub(crate) fn display_stats(stats: &AgentStats, config: &Config, style: SummaryS
             path.display()
         );
     }
-    match style {
+    match style.resolve(crate::policy::is_ci()) {
+        SummaryStyle::Auto => unreachable!("auto summary was resolved"),
         SummaryStyle::Off => return,
         SummaryStyle::Short => {
             if should_display_short_stats(stats) {
                 note(&short_summary(stats));
+            }
+            return;
+        }
+        SummaryStyle::Ci => {
+            if should_display_short_stats(stats) {
+                note(&ci_summary(stats));
             }
             return;
         }
@@ -333,16 +340,66 @@ pub(super) fn short_summary(stats: &AgentStats) -> String {
     )
 }
 
+/// These counters cover mbx objects, not a CI action's archive transfers or
+/// artifacts Cargo found fresh before invoking a compiler wrapper.
+pub(super) fn ci_summary(stats: &AgentStats) -> String {
+    let mut lines =
+        vec![short_summary(stats).replacen("mbx[cache]: ", "mbx[cache]: object cache: ", 1)];
+    lines.push(format!(
+        "mbx[cache]: {} session; {} estimated compiler time avoided (summed across compilations)",
+        format_nanos(stats.session_duration_ns),
+        format_nanos(stats.avoided_compiler_duration_ns),
+    ));
+    if stats.unconsulted > 0 {
+        lines.push(format!(
+            "mbx[cache]: {} compilations had no usable prior inputs or matching prediction for a lookup",
+            stats.unconsulted,
+        ));
+        if let Some(explanation) = stale_manifest_note(stats) {
+            lines.push(explanation);
+        }
+    }
+    let mut bypasses = stats
+        .bypasses
+        .iter()
+        .filter(|(kind, _)| !routine_probe(kind))
+        .collect::<Vec<_>>();
+    bypasses.sort_by(|left, right| right.1.cmp(left.1).then(left.0.cmp(right.0)));
+    if !bypasses.is_empty() {
+        lines.push(format!(
+            "mbx[cache]: bypass reasons: {}",
+            bypasses
+                .into_iter()
+                .map(|(kind, count)| format!("{count} {kind}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
+    }
+    if stats.background_upload_failures > 0 {
+        lines.push(format!(
+            "mbx[cache]: {} background uploads failed; see warnings above",
+            stats.background_upload_failures,
+        ));
+    }
+    lines.push(
+        "mbx[cache]: Cargo artifact reuse and CI cache archive transfers are not included above"
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+fn routine_probe(kind: &str) -> bool {
+    matches!(
+        kind,
+        "compiler-query" | "standard-input" | "cc-compiler-query" | "cc-standard-input"
+    )
+}
+
 fn unexpected_bypasses(stats: &AgentStats) -> u64 {
     stats
         .bypasses
         .iter()
-        .filter(|(kind, _)| {
-            !matches!(
-                kind.as_str(),
-                "compiler-query" | "standard-input" | "cc-compiler-query" | "cc-standard-input"
-            )
-        })
+        .filter(|(kind, _)| !routine_probe(kind))
         .map(|(_, count)| count)
         .sum()
 }
@@ -356,6 +413,7 @@ pub(super) fn should_display_short_stats(stats: &AgentStats) -> bool {
         || stats.downloaded_bytes > 0
         || stats.uploaded_bytes > 0
         || stats.background_uploads > 0
+        || stats.background_upload_failures > 0
         || unexpected_bypasses(stats) > 0
         || stats.avoided_compiler_duration_ns > 0
         || stats.remote_failures > 0

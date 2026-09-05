@@ -168,6 +168,7 @@ setup() {
 }
 
 @test "the first build explains what mbx set up, once" {
+  export CI=false GITHUB_ACTIONS=false
   local project="$BATS_TEST_TMPDIR/first-run"
   mkdir -p "$project/src"
   cat >"$project/Cargo.toml" <<'EOF'
@@ -198,4 +199,50 @@ EOF
   run "$MBX_BIN" build --offline --manifest-path "$project/Cargo.toml"
   assert_success
   refute_output --partial "first build on this machine"
+}
+
+@test "CI explains object cache results without consuming local onboarding" {
+  cargo init --lib --vcs none ci-output
+  cd ci-output
+
+  run env CI=true MBX_STATS_REPORT="$PWD/stats.json" "$MBX_BIN" check --offline
+  assert_success
+  refute_output --partial "first build on this machine"
+  assert_output --partial "object cache:"
+  assert_output --partial "no usable prior inputs or matching prediction"
+  assert_output --partial "Cargo artifact reuse and CI cache archive transfers"
+  assert_file_exist "$PWD/stats.json"
+
+  # No-op builds should not print a report just for Cargo's compiler probes.
+  run env CI=true "$MBX_BIN" check --offline
+  assert_success
+  refute_output --partial "mbx[cache]:"
+
+  for style in short full off; do
+    touch src/lib.rs
+    run env CI=true MBX_SUMMARY="$style" "$MBX_BIN" check --offline
+    assert_success
+    refute_output --partial "object cache:"
+    if [[ "$style" == off ]]; then
+      refute_output --partial "mbx[cache]:"
+    else
+      assert_output --partial "mbx[cache]:"
+    fi
+  done
+
+  touch src/lib.rs
+  run env CI=false GITHUB_ACTIONS=true "$MBX_BIN" check --offline --quiet
+  assert_success
+  refute_output --partial "mbx[cache]:"
+  refute_output --partial "first build on this machine"
+
+  touch src/lib.rs
+  run env CI=false GITHUB_ACTIONS=true "$MBX_BIN" check --offline
+  assert_success
+  assert_output --partial "object cache:"
+  refute_output --partial "first build on this machine"
+
+  run env CI=false GITHUB_ACTIONS=false "$MBX_BIN" check --offline
+  assert_success
+  assert_output --partial "first build on this machine"
 }
