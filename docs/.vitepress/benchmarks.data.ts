@@ -13,6 +13,12 @@ export interface BenchmarkCell {
   trials?: number;
   /** Every trial's wall clock, so the page can see its own noise floor. */
   wall_durations_ns?: number[];
+  /**
+   * Edit scenario only: the discarded first edit after a build. Not the loop,
+   * which is why it is not the timing, but it is what the loop cost to get
+   * into, and a developer waits for it once per fresh build.
+   */
+  warmup_wall_duration_ns?: number;
   /** Contention only: most real compilers seen running at once, machine-wide. */
   peak_compilers?: number;
   /** Contention only: lowest memory the machine had left, where reported. */

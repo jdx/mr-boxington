@@ -107,7 +107,8 @@ SCENARIOS: dict[str, dict[str, object]] = {
         "tools": ("cargo", "mbx", "kache"),
         "description": (
             "one line changed and rebuilt in place, incremental on -- "
-            "the local edit loop, where Cargo is the thing to beat"
+            "the local edit loop in its steady state, where Cargo is the "
+            "thing to beat"
         ),
         # Everywhere else cargo is a control with no cache to help it. Here
         # it keeps its target and incremental state, and is the thing to beat.
@@ -592,6 +593,10 @@ PUBLISHED_CONTENTION = ("peak_compilers", "min_available_bytes", "permits")
 # between two tools means anything.
 PUBLISHED_TRIALS = ("trials", "wall_durations_ns")
 
+# The edit scenario's discarded first edit. It is not the loop, which is why it
+# is not the timing, but it is what the loop costs to get into.
+PUBLISHED_EDIT = ("warmup_wall_duration_ns",)
+
 
 class Progress:
     """Durable progress lines for long-running benchmark logs."""
@@ -637,7 +642,7 @@ def publishable(result: dict[str, object]) -> dict[str, object]:
                 "tool": cell["tool"],
                 "wall_duration_ns": cell["wall_duration_ns"],
             }
-            for field in PUBLISHED_CONTENTION + PUBLISHED_TRIALS:
+            for field in PUBLISHED_CONTENTION + PUBLISHED_TRIALS + PUBLISHED_EDIT:
                 if field in cell:
                     trimmed[field] = cell[field]
             stats = cell.get("stats")
@@ -664,7 +669,7 @@ def restored_files(cell: dict[str, object]) -> int:
     return 0
 
 
-def touch_source(subject: dict[str, object], checkout: Path) -> None:
+def touch_source(subject: dict[str, object], checkout: Path, marker: str) -> None:
     """Make the one-line source change the edit loop is built around.
 
     A trailing comment is enough: rustc recompiles the crate for any change to
@@ -675,7 +680,7 @@ def touch_source(subject: dict[str, object], checkout: Path) -> None:
     if not source.is_file():
         raise RuntimeError(f"{subject['edit']} is not in the pinned checkout")
     with source.open("a", encoding="utf-8") as handle:
-        handle.write("\n// mbx benchmark edit\n")
+        handle.write(f"\n// mbx benchmark edit {marker}\n")
 
 
 def one_trial(
@@ -760,8 +765,28 @@ def one_trial(
             store=store,
             incremental=True,
         )
-        touch_source(subject, checkout)
-        return runner.run(
+        # One edit is thrown away before the timed one, because the tools do
+        # not arrive at a first edit in the same state. cargo's seed already
+        # wrote its incremental state, so its first edit is a steady-state
+        # edit. mbx overrides CARGO_INCREMENTAL to 0 and gives an edited crate
+        # private incremental state instead, which the first edit has to build
+        # from nothing. Timing that one compares cargo's second rebuild with
+        # mbx's first, and reports a setup cost paid once as though it were the
+        # loop. Measured on hk: mbx 7.5s for the first edit and 2.3s for every
+        # one after it, against 2.1s flat for cargo.
+        touch_source(subject, checkout, "warmup")
+        warmup = runner.run(
+            tool=tool,
+            cell=f"{cell}-warmup",
+            subject=subject,
+            checkout=checkout,
+            target=target,
+            store=store,
+            incremental=True,
+            fresh_target=False,
+        )
+        touch_source(subject, checkout, "timed")
+        measured = runner.run(
             tool=tool,
             cell=cell,
             subject=subject,
@@ -771,6 +796,11 @@ def one_trial(
             incremental=True,
             fresh_target=False,
         )
+        # Published rather than dropped. A first edit after a fresh build is a
+        # real thing a developer waits for, and hiding what the warm loop cost
+        # to set up would be its own kind of dishonesty.
+        measured["warmup_wall_duration_ns"] = warmup["wall_duration_ns"]
+        return measured
 
     if scenario == "worktree":
         seed = work / f"checkout-{cell}-seed"

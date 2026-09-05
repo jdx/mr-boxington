@@ -39,11 +39,21 @@ with an empty `target/`.
 
 ### edit
 
-A full build, one line changed in the subject's own source, and a rebuild in
-the same `target/` with incremental compilation on. This is the local edit
-loop rather than a CI job. Almost nothing needs rebuilding, so the cache's
-own bookkeeping is most of what shows up. Cargo is the thing to beat here,
-not a control.
+A full build, then edits to the subject's own source rebuilt in the same
+`target/` with incremental compilation on. This is the local edit loop rather
+than a CI job. Almost nothing needs rebuilding, so the cache's own bookkeeping
+is most of what shows up. Cargo is the thing to beat here, not a control.
+
+The first edit after a build is thrown away and the second is timed, because
+the tools do not reach a first edit in the same state. Cargo's own build
+already wrote its incremental state, so its first edit is already a
+steady-state edit. mbx overrides `CARGO_INCREMENTAL` to 0 and gives an edited
+crate [private incremental
+state](/configuration#learned-incremental-reuse) instead, which the first edit
+has to build from nothing. Timing that one would compare Cargo's second
+rebuild against mbx's first and report a setup cost paid once as though it
+were the loop. The card shows what that first edit cost beside the steady
+number, because it is a real wait, just not a repeated one.
 
 ### worktree
 

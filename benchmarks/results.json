@@ -104,55 +104,6 @@
       "baseline": "uncached baseline"
     },
     {
-      "scenario": "edit",
-      "description": "one line changed and rebuilt in place, incremental on -- the local edit loop, where Cargo is the thing to beat",
-      "timed": true,
-      "kind": "build",
-      "results": [
-        {
-          "tool": "cargo",
-          "wall_duration_ns": 2625470117,
-          "trials": 3,
-          "wall_durations_ns": [
-            2535901380,
-            2712215638,
-            2625470117
-          ]
-        },
-        {
-          "tool": "mbx",
-          "wall_duration_ns": 7282096192,
-          "trials": 3,
-          "wall_durations_ns": [
-            7661572146,
-            7282096192,
-            7207945097
-          ],
-          "stats": {
-            "lookups": 3,
-            "hits": 1,
-            "misses": 2,
-            "unconsulted": 0,
-            "predictions_loaded": 927,
-            "restored_output_files": 2,
-            "restored_output_bytes": 10242953
-          }
-        },
-        {
-          "tool": "kache",
-          "wall_duration_ns": 9130599219,
-          "trials": 3,
-          "wall_durations_ns": [
-            9130599219,
-            9105140290,
-            9183863649
-          ]
-        }
-      ],
-      "skipped": [],
-      "baseline": "incremental rebuild"
-    },
-    {
       "scenario": "worktree",
       "description": "store warmed in one checkout, rebuilt in a second at another path",
       "timed": false,

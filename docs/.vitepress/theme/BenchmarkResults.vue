@@ -98,6 +98,7 @@
             <span v-if="cell.comparison">{{ cell.comparison }}</span>
             <span v-if="cell.hits !== '—'">{{ cell.hits }} cache hits</span>
             <span v-if="cell.spread">{{ cell.spread }}</span>
+            <span v-if="cell.warmup">{{ cell.warmup }}</span>
           </div>
         </div>
       </div>
@@ -226,6 +227,9 @@ function rows(scenario: BenchmarkScenario) {
     return {
       tool: cell.tool,
       fastest: separated && cell.wall_duration_ns === fastest,
+      warmup: cell.warmup_wall_duration_ns
+        ? `first edit after a build ${(cell.warmup_wall_duration_ns / 1e9).toFixed(1)}s`
+        : null,
       spread:
         trials.length < 2
           ? null

@@ -27,7 +27,11 @@ clones a pinned checkout of [jdx/hk](https://github.com/jdx/hk) and runs the
 same `cargo build --locked` under raw cargo, mbx, and kache across the
 timed scenarios CI and developers actually hit: a warm store with a fresh
 target, the next commit on the branch, and a one-line edit rebuilt in place
-with incremental compilation on. Each runs `--trials` times per tool, three in
+with incremental compilation on. That last one discards a first edit and times
+the second: Cargo reaches its first edit with incremental state its own build
+wrote, while mbx has to build a crate's private state on the first edit and
+reuse it after, so timing the first would report a setup cost as though it
+were the loop. Each runs `--trials` times per tool, three in
 CI, from a fresh clone and an empty store every time. The published cell is
 the middle trial and carries every trial's timing, and the site will not name
 a fastest tool when the gap between the top two is inside one tool's own
