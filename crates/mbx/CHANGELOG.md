@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.2](https://github.com/jdx/mr-boxington/compare/v1.8.1...v1.8.2) - 2026-09-05
+
+### Other
+
+- take the bookkeeping out of the hot edit loop ([#362](https://github.com/jdx/mr-boxington/pull/362))
+
 ## [1.8.1](https://github.com/jdx/mr-boxington/compare/v1.8.0...v1.8.1) - 2026-09-05
 
 ### Fixed
