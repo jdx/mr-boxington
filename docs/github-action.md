@@ -5,20 +5,15 @@ installs mbx and connects it to either GitHub Actions cache or an mbx-compatible
 server. The examples below show the inputs that matter for each backend; the
 action's repository documents the complete list.
 
-::: warning Current performance
-mbx performs well for local development. Remote caching works and is actively
-improving, but does not yet consistently outperform
-[Swatinem/rust-cache](https://github.com/Swatinem/rust-cache) on GitHub-hosted
-runners. Benchmark your complete workflow before switching. Investigations,
-discussions, and pull requests to improve it are welcome.
-:::
-
 ## GitHub Actions cache
 
-The default backend restores the action closure from the previous compatible
-cache entry, imports that bundle before any build steps, and afterward exports
-the deduplicated closure of every `mbx` command the job completed. An entry
-carries what the job actually used rather than the whole local store. A new
+The default backend restores Cargo's pruned target directory and its registry
+from the previous compatible cache entry, the same shape of entry
+[Swatinem/rust-cache](https://github.com/Swatinem/rust-cache) restores, so a
+job that changes a few files recompiles only those crates. Paired measurements
+on GitHub-hosted Linux and macOS runners put restore-plus-build within noise
+of rust-cache, ahead on build and test jobs, with a cache entry of the same
+size; Windows runners still restore more slowly. A new
 immutable entry is saved after a push to the repository's default branch, and
 after a trusted `workflow_dispatch` run when the action's
 `save-on-workflow-dispatch` input is enabled. Pull requests, including pull
@@ -34,9 +29,14 @@ steps:
   - run: mbx test --workspace
 ```
 
-The action assigns `MBX_CACHE_EXPORT_GROUP` for the job itself, so a workflow
-does not configure the export. Change `cache-generation` when a cache format or
-policy change should start fresh:
+The earlier payload, mbx's own object store exported as the closure of every
+`mbx` command the job completed, remains available as
+`github-cache-mode: objects`. It suits builds that must share one entry across
+differing target directories or checkout layouts; it omits the Cargo registry,
+which Cargo then downloads again during the build, and measured about ten
+seconds slower per job. The action assigns `MBX_CACHE_EXPORT_GROUP` for that
+mode itself. Change `cache-generation` when a cache format or policy change
+should start fresh:
 
 ```yaml
 - uses: jdx/mr-boxington-action@v1

@@ -122,25 +122,21 @@ rustc through `RUSTC_WRAPPER`, so they cannot be combined for the same build.
 
 ## Tarball CI caches
 
-::: warning Current GitHub Actions results
-mbx performs well for local development. Remote caching works and is actively
-improving, but does not yet consistently outperform
-[Swatinem/rust-cache](https://github.com/Swatinem/rust-cache) on GitHub-hosted
-runners. Benchmark your complete workflow before switching. Investigations,
-discussions, and pull requests to improve it are welcome.
-:::
-
 Actions such as `actions/cache` over `target/` (or `Swatinem/rust-cache`)
 save and restore the whole directory as one archive. That is simple and needs
 no extra tooling, but the archive is all-or-nothing: one changed crate still
 uploads and downloads everything, the entry grows until it hits the platform's
 size cap, and stale artifacts accumulate inside it.
 
-mbx restores exactly the actions a build needs from a store it prunes itself.
-[`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action) uses
-GitHub Actions cache as the transport for that store, so per-action
-granularity rides on the platform cache you already have. See
-[GitHub Actions](/github-action).
+On GitHub-hosted runners,
+[`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action)
+restores the same pruned target tree those actions do, so its restore and
+build times match rust-cache on Linux and macOS, and it then runs the build
+through mbx: the
+compile scheduler, the toolchain guard, and per-action reuse inside the job.
+The per-action store is what the [cache server](/cache-server) transports,
+where one entry can serve every job and branch instead of one archive per
+job. See [GitHub Actions](/github-action).
 
 ## Cargo's incremental compilation
 

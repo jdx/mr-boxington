@@ -25,11 +25,11 @@ steps:
   - run: mbx test --workspace
 ```
 
-One thing the swap gives up: rust-cache also cached Cargo's download caches
-under `~/.cargo`, and the plain action does not, so each run re-fetches the
-registry. To keep those cached too, use the
-[manual GitHub cache setup](/github-action#manual-github-cache-setup), which
-shares one entry between Cargo's download caches and the mbx store.
+The action's default entry carries Cargo's target directory and its download
+caches under `~/.cargo`, so nothing rust-cache restored is lost in the swap.
+The `github-cache-mode: objects` payload omits the download caches; pair it
+with the [manual GitHub cache setup](/github-action#manual-github-cache-setup)
+to keep them.
 
 Leave release jobs out of the migration: a production release should not
 restore any compiler cache, mbx's or the one being removed. See the
