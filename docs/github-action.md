@@ -13,7 +13,7 @@ from the previous compatible cache entry, the same shape of entry
 job that changes a few files recompiles only those crates. Paired measurements
 on GitHub-hosted Linux and macOS runners put restore-plus-build within noise
 of rust-cache, ahead on build and test jobs, with a cache entry of the same
-size; Windows runners still restore more slowly. A new
+size; in the one Windows warm benchmark so far, restore was slower. A new
 immutable entry is saved after a push to the repository's default branch, and
 after a trusted `workflow_dispatch` run when the action's
 `save-on-workflow-dispatch` input is enabled. Pull requests, including pull

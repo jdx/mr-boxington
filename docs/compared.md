@@ -130,9 +130,9 @@ size cap, and stale artifacts accumulate inside it.
 
 On GitHub-hosted runners,
 [`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action)
-restores the same pruned target tree those actions do, so its restore and
-build times match rust-cache on Linux and macOS, and it then runs the build
-through mbx: the
+restores a pruned target tree of the same shape rust-cache saves, so its
+restore and build times match rust-cache on Linux and macOS, and it then runs
+the build through mbx: the
 compile scheduler, the toolchain guard, and per-action reuse inside the job.
 The per-action store is what the [cache server](/cache-server) transports,
 where one entry can serve every job and branch instead of one archive per
