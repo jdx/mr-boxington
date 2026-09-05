@@ -540,7 +540,10 @@ pub fn import_archive_with_attachments(store: &Path, archive: &Path) -> Result<I
         let source = staging.path().join(relative);
         let digest = addressed_digest(staging.path(), &source, false)
             .ok_or_else(|| eyre::eyre!("invalid cache object path {}", relative.display()))?;
-        cas.store_file(&digest, &source)?;
+        // `strict_closure` verified every path in `objects` against its
+        // content-addressed name. Preserve that proof and move the owned
+        // staging file instead of hashing or copying the bytes again.
+        cas.adopt_verified_file(&digest, &source)?;
     }
     let action_cache = mbx_cache_core::LocalActionCache::new(store);
     for path in &result_paths {
@@ -672,6 +675,10 @@ fn require_object(
     objects: &mut BTreeSet<PathBuf>,
     digest: &CacheDigest,
 ) -> Result<()> {
+    let expected = cas.path_for(digest)?;
+    if objects.contains(&expected) {
+        return Ok(());
+    }
     let path = cas
         .find(digest)?
         .ok_or_else(|| eyre::eyre!("cache object is missing for {}", digest.hash))?;

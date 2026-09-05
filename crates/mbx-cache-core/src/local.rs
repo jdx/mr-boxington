@@ -84,11 +84,7 @@ impl LocalCas {
     /// Remote downloads are staged beneath the cache root, so the usual path
     /// is an atomic same-filesystem rename. If a caller supplies a path on a
     /// different filesystem, fall back to the copy-based store operation.
-    pub(crate) fn adopt_verified_file(
-        &self,
-        digest: &CacheDigest,
-        source: &Path,
-    ) -> Result<PathBuf> {
+    pub fn adopt_verified_file(&self, digest: &CacheDigest, source: &Path) -> Result<PathBuf> {
         if fs::metadata(source)?.len() != digest.size {
             bail!("staged blob size does not match the declared CAS digest");
         }
