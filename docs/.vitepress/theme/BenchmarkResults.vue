@@ -163,8 +163,11 @@ const CONTENTION_LABELS: Record<string, { label: string; tag: string | null }> =
 
 function seconds(ns: number) {
   const s = ns / 1e9;
-  if (s >= 60) return `${Math.floor(s / 60)}m ${(s % 60).toFixed(0)}s`;
-  return `${s.toFixed(1)}s`;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  // Rounded once, then split: rounding the remainder on its own turns
+  // 119.6s into "1m 60s".
+  const whole = Math.round(s);
+  return `${Math.floor(whole / 60)}m ${whole % 60}s`;
 }
 
 // A margin the fastest rule rejects can be smaller than a tenth, and "0.0s"
@@ -185,11 +188,17 @@ function spread(cell: BenchmarkCell) {
   return t.length < 2 ? 0 : Math.max(...t) - Math.min(...t);
 }
 
+// Whether both cells were measured more than once. A single trial has no
+// spread to compare against, so it can neither separate two results nor
+// call them level.
+function repeated(a: BenchmarkCell, b: BenchmarkCell) {
+  return trials(a).length >= 2 && trials(b).length >= 2;
+}
+
 // Two results are separated when the gap between them is wider than either
-// tool's own spread. Anything closer is noise, and a single trial has no
-// spread to compare against, so it separates nothing.
+// tool's own spread. Anything closer is noise.
 function separated(a: BenchmarkCell, b: BenchmarkCell) {
-  if (trials(a).length < 2 || trials(b).length < 2) return false;
+  if (!repeated(a, b)) return false;
   const margin = Math.abs(a.wall_duration_ns - b.wall_duration_ns);
   return margin > Math.max(spread(a), spread(b));
 }
@@ -287,11 +296,15 @@ function buildCard(scenario: BenchmarkScenario): {
     let note = "";
     if (baseline && cell !== baseline) {
       const r = baseline.wall_duration_ns / cell.wall_duration_ns;
-      note = separated(cell, baseline)
-        ? r >= 1
-          ? `${ratio(r)} faster than Cargo`
-          : `${fine(cell.wall_duration_ns - baseline.wall_duration_ns)} behind Cargo`
-        : "level with Cargo";
+      // Measured once, the row makes no claim either way: the verdict below
+      // already says why.
+      note = !repeated(cell, baseline)
+        ? ""
+        : separated(cell, baseline)
+          ? r >= 1
+            ? `${ratio(r)} faster than Cargo`
+            : `${fine(cell.wall_duration_ns - baseline.wall_duration_ns)} behind Cargo`
+          : "level with Cargo";
     }
     return {
       tool: cell.tool,
@@ -356,11 +369,13 @@ function buildCard(scenario: BenchmarkScenario): {
     let note = "";
     if (other) {
       const r = other.wall_duration_ns / mbx.wall_duration_ns;
-      note = !separated(mbx, other)
-        ? `level with ${name(other)}`
-        : r >= 1
-          ? `${ratio(r)} faster than ${name(other)}`
-          : `${fine(mbx.wall_duration_ns - other.wall_duration_ns)} behind ${name(other)}`;
+      note = !repeated(mbx, other)
+        ? "measured once"
+        : !separated(mbx, other)
+          ? `level with ${name(other)}`
+          : r >= 1
+            ? `${ratio(r)} faster than ${name(other)}`
+            : `${fine(mbx.wall_duration_ns - other.wall_duration_ns)} behind ${name(other)}`;
     }
     tile = {
       id: scenario.scenario,
@@ -479,11 +494,13 @@ function contentionCard(scenario: BenchmarkScenario): {
         value: seconds(scheduled.wall_duration_ns),
         note: !unscheduled
           ? ""
-          : !decisive
-            ? "level with the scheduler off"
-            : unscheduled.wall_duration_ns > scheduled.wall_duration_ns
-              ? `${fine(unscheduled.wall_duration_ns - scheduled.wall_duration_ns)} sooner than scheduler off`
-              : `${fine(scheduled.wall_duration_ns - unscheduled.wall_duration_ns)} later than scheduler off`,
+          : !repeated(scheduled, unscheduled)
+            ? "measured once"
+            : !decisive
+              ? "level with the scheduler off"
+              : unscheduled.wall_duration_ns > scheduled.wall_duration_ns
+                ? `${fine(unscheduled.wall_duration_ns - scheduled.wall_duration_ns)} sooner than scheduler off`
+                : `${fine(scheduled.wall_duration_ns - unscheduled.wall_duration_ns)} later than scheduler off`,
         ahead: decisive && fastest === scheduled,
       }
     : null;
