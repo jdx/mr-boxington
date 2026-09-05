@@ -37,7 +37,14 @@ pub(crate) fn resolve(
     if !targets.is_empty() {
         let mut selections = BTreeMap::new();
         for target in targets {
-            let target = normalize_cargo_target(&target, cargo_arguments)?;
+            let rustc_target = normalize_cargo_target(&target, cargo_arguments)?;
+            // Keep path-keyed policy compatible with the Cargo argument. Only
+            // the host directive needs its concrete triple for policy lookup.
+            let policy_target = if target == "host-tuple" {
+                &rustc_target
+            } else {
+                &target
+            };
             if let Some(executable) = resolve_target(
                 settings,
                 cache_dir,
@@ -45,9 +52,9 @@ pub(crate) fn resolve(
                 cargo_arguments,
                 &profile,
                 environment.clone(),
-                Some(&target),
+                Some(policy_target),
             )? {
-                selections.insert(target, executable);
+                selections.insert(rustc_target, executable);
             }
         }
         return Ok((!selections.is_empty()).then_some(Selection::Targets(selections)));
@@ -708,6 +715,47 @@ mod tests {
             panic!("expected target-specific selection");
         };
         assert_eq!(selections, BTreeMap::from([(host, executable)]));
+    }
+
+    #[test]
+    fn relative_json_target_keeps_its_profile_policy() {
+        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let target = directory.path().join("custom.json");
+        fs::write(&target, "{}").unwrap();
+        let relative = target
+            .strip_prefix(std::env::current_dir().unwrap())
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let executable = std::env::current_exe().unwrap();
+        let settings = LinkerSettings {
+            profiles: BTreeMap::from([(
+                "dev".into(),
+                BTreeMap::from([(relative.clone(), format!("path:{}", executable.display()))]),
+            )]),
+            ..Default::default()
+        };
+        let Some(Selection::Targets(selections)) = resolve(
+            &settings,
+            directory.path(),
+            &HttpSettings::default(),
+            &["build".into(), "--target".into(), relative],
+        )
+        .unwrap() else {
+            panic!("expected target-specific selection");
+        };
+        assert_eq!(
+            selections,
+            BTreeMap::from([(
+                fs::canonicalize(target)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+                executable
+            )])
+        );
     }
 
     #[cfg(unix)]

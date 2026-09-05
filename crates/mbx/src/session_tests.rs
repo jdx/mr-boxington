@@ -1245,3 +1245,27 @@ fn managed_target_linkers_follow_rustc_target_and_leave_host_alone() {
         );
     }
 }
+
+#[test]
+fn json_target_linkers_match_equivalent_paths() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("custom.json");
+    std::fs::write(&target, "{}").unwrap();
+    let canonical = std::fs::canonicalize(&target).unwrap();
+    let linker = PathBuf::from("/tools/linker");
+    let selections = BTreeMap::from([(canonical.to_str().unwrap().to_owned(), linker.clone())]);
+    // tempdir's ordinary Windows path lacks canonicalize's verbatim prefix.
+    assert_eq!(
+        target_linker(&["--target".into(), target.into_os_string()], &selections),
+        Some(&linker)
+    );
+    #[cfg(unix)]
+    {
+        let alias = directory.path().join("alias.json");
+        std::os::unix::fs::symlink(&canonical, &alias).unwrap();
+        assert_eq!(
+            target_linker(&["--target".into(), alias.into_os_string()], &selections),
+            Some(&linker)
+        );
+    }
+}

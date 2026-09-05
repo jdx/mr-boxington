@@ -1350,7 +1350,15 @@ fn target_linker<'a>(
                 .and_then(|value| value.strip_prefix("--target="))
         };
         if let Some(target) = target {
-            return selections.get(target);
+            return selections.get(target).or_else(|| {
+                // Cargo versions can pass JSON paths without Windows' verbatim
+                // prefix. Canonicalize both spellings to the stored routing key.
+                if !target.ends_with(".json") {
+                    return None;
+                }
+                let canonical = std::fs::canonicalize(target).ok()?;
+                selections.get(canonical.to_str()?)
+            });
         }
     }
     None
