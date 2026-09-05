@@ -74,6 +74,51 @@ fn test_config(cache_dir: &Path) -> Config {
 }
 
 #[tokio::test]
+async fn cmake_selection_uses_the_final_build_environment() {
+    let cache = tempfile::tempdir().unwrap();
+    let session_dir = tempfile::tempdir().unwrap();
+    let mut session = CacheSession::start(session_dir.path(), &test_config(cache.path()))
+        .await
+        .unwrap();
+    // Exercise CMake selection even on a runner with no native toolchain.
+    session.cc_shims = Some(CcShims {
+        cc: None,
+        cxx: None,
+        targeted: Vec::new(),
+    });
+    let workspace = tempfile::tempdir().unwrap();
+    let selected = BTreeMap::from([
+        ("CMAKE".to_string(), "/per-build/cmake".to_string()),
+        ("HOST_CMAKE".into(), "/per-build/host-cmake".into()),
+        ("TARGET_CMAKE".into(), "/per-build/target-cmake".into()),
+        (
+            "CMAKE_aarch64_unknown_linux_gnu".into(),
+            "/per-build/arm-cmake".into(),
+        ),
+    ]);
+    let mut environment = selected.clone();
+    session
+        .begin(
+            workspace.path(),
+            &workspace.path().join("target"),
+            &["build".into()],
+            &mut environment,
+        )
+        .await;
+    let programs: BTreeMap<String, PathBuf> =
+        serde_json::from_str(&environment["MBX_CMAKE_PROGRAMS"]).unwrap();
+    for (variable, program) in selected {
+        let shim = Path::new(&environment[&variable]);
+        assert!(shim.is_file());
+        assert_eq!(
+            programs[shim.file_stem().unwrap().to_str().unwrap()],
+            PathBuf::from(program)
+        );
+    }
+    session.finish().await.unwrap();
+}
+
+#[tokio::test]
 async fn session_environment_directs_cargo_at_the_shim() {
     let cache = tempfile::tempdir().unwrap();
     let session_dir = tempfile::tempdir().unwrap();

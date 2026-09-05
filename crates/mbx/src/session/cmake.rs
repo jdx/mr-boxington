@@ -23,11 +23,17 @@ const CXX_LAUNCHER: &str = "mbx-cmake-launch-cxx";
 pub(super) fn environment(
     directory: &Path,
     compilers: &CcShims,
+    build_environment: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>> {
     let executable = std::env::current_exe()?;
     let mut environment = BTreeMap::new();
     let mut programs = BTreeMap::new();
     let mut choices: BTreeMap<_, _> = std::env::vars()
+        .chain(
+            build_environment
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        )
         .filter(|(name, _)| {
             matches!(name.as_str(), "CMAKE" | "HOST_CMAKE" | "TARGET_CMAKE")
                 || name.strip_prefix("CMAKE_").is_some_and(is_target_triple)
@@ -42,7 +48,10 @@ pub(super) fn environment(
         let name = format!("{SHIM}-{}", variable.to_ascii_lowercase().replace('.', "_"));
         let shim = directory.join(super::shim_file_name(&name));
         // Nested sessions must keep the outer shim's original program.
-        let program = read_map(PROGRAMS)
+        let program = build_environment
+            .get(PROGRAMS)
+            .and_then(|encoded| serde_json::from_str::<BTreeMap<String, PathBuf>>(encoded).ok())
+            .unwrap_or_else(|| read_map(PROGRAMS))
             .remove(
                 Path::new(&program)
                     .file_stem()

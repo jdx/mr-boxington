@@ -75,6 +75,7 @@ object_in() {
 }
 
 cmake_transition() {
+  local plain_cargo="${1:-cargo}"
   if ! command -v cmake >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
     skip "cmake and make are required"
   fi
@@ -139,7 +140,7 @@ EOF
   for step in cargo-1 mbx-2 cargo-3 mbx-4; do
     if [[ "$step" == cargo-* ]]; then
       run env RECONFIGURE="$step" MBX_DISABLE=1 RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER= \
-        cargo build --offline --manifest-path "$PROJECT/Cargo.toml"
+        "$plain_cargo" build --offline --manifest-path "$PROJECT/Cargo.toml"
     else
       run env RECONFIGURE="$step" MBX_STATS_REPORT="$BATS_TEST_TMPDIR/$step.json" \
         "$MBX_BIN" build --offline --manifest-path "$PROJECT/Cargo.toml"
@@ -193,6 +194,14 @@ EOF
   # At least the two native sources on all four runs; some CMake versions
   # also launch the compiler through this command during their initial probes.
   [ "${#lines[@]}" -ge 8 ]
+}
+
+@test "the installed Cargo shim can disable caching without changing CMake compiler identity" {
+  export CARGO_HOME="$BATS_TEST_TMPDIR/cargo-home"
+  mkdir -p "$CARGO_HOME"
+  run "$MBX_BIN" setup
+  assert_success
+  cmake_transition "$XDG_DATA_HOME/mbx/bin/cargo"
 }
 
 @test "a build script's C object restores into a distinct target directory" {

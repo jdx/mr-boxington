@@ -356,7 +356,7 @@ EOF
   assert_output "1"
 }
 
-@test "disabled Cargo preserves persistent native compiler paths" {
+@test "disabled Cargo leaves native compiler choices unchanged" {
   local real_bin="$BATS_TEST_TMPDIR/disabled-real-bin"
   local executable_suffix=""
   if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]]; then
@@ -376,8 +376,14 @@ EOF
   run env MBX_DISABLE=1 PATH="$MBX_SHIM_DIR:$real_bin:/usr/bin:/bin" cargo build
 
   assert_success
-  assert_line "HOST_CC=$cc_shim"
-  assert_line "HOST_CXX=$cxx_shim"
+  assert_line "HOST_CC="
+  assert_line "HOST_CXX="
+
+  run env MBX_DISABLE=1 HOST_CC=custom-cc HOST_CXX=custom-cxx \
+    PATH="$MBX_SHIM_DIR:$real_bin:/usr/bin:/bin" cargo build
+  assert_success
+  assert_line "HOST_CC=custom-cc"
+  assert_line "HOST_CXX=custom-cxx"
 }
 
 @test "the Cargo shim reuses its workspace metadata probe" {
