@@ -7,9 +7,12 @@ measure anything useful against. Every scenario is one CI actually hits.
 The build scenarios run the same `cargo build --locked` through plain Cargo,
 [mbx](/), and [kache](https://github.com/kunobi-ninja/kache), where each tool
 can make a meaningful comparison. Timings are wall clock around one build.
-When Cargo appears, it is an uncached baseline measured in that same scenario;
-cache rows compare only with that result. The warm scenario omits Cargo
-because a fresh `target/` gives it nothing to reuse. The contention scenario
+When Cargo appears, it is measured in that same scenario and the cache rows
+compare only with that result. What it is differs by scenario: in the commit
+case it is an uncached control, because Cargo has no store to seed from the
+parent commit, and in the edit case it is the same in-place incremental
+rebuild the caches are asked to beat. The warm scenario omits Cargo because a
+fresh `target/` gives it nothing to reuse. The contention scenario
 compares sequential and parallel lint strategies and measures the machine
 instead of a single build.
 

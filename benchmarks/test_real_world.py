@@ -150,7 +150,21 @@ class PublishableTest(unittest.TestCase):
 
 
 class RunScenarioTest(unittest.TestCase):
-    def run_trials(self, failing_trial: int | None) -> dict[str, object]:
+    def test_each_scenario_says_what_its_cargo_row_is(self) -> None:
+        # The same tool means two different things: a control with no cache to
+        # help it in one scenario, the incremental rebuild to beat in the
+        # other. The page labels the row from this rather than assuming.
+        self.assertEqual(
+            self.run_trials(None, scenario="edit")["baseline"], "incremental rebuild"
+        )
+        self.assertEqual(
+            self.run_trials(None, scenario="commit")["baseline"], "uncached baseline"
+        )
+        self.assertNotIn("baseline", self.run_trials(None))
+
+    def run_trials(
+        self, failing_trial: int | None, scenario: str = "warm"
+    ) -> dict[str, object]:
         seen: list[str] = []
 
         def trial(scenario, tool, cell, subject, runner, work):  # noqa: ANN001
@@ -163,7 +177,7 @@ class RunScenarioTest(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()):
                 with mock.patch.object(real_world, "one_trial", side_effect=trial):
                     return real_world.run_scenario(
-                        "warm",
+                        scenario,
                         ("kache",),
                         {},
                         None,

@@ -103,6 +103,7 @@ SCENARIOS: dict[str, dict[str, object]] = {
             "cache tools warmed at the parent commit, build the child -- "
             "Cargo is the uncached push-to-push baseline"
         ),
+        "baseline": "uncached baseline",
         "repeatable": True,
     },
     "edit": {
@@ -111,6 +112,11 @@ SCENARIOS: dict[str, dict[str, object]] = {
             "one line changed and rebuilt in place, incremental on -- "
             "the local edit loop, where Cargo is the thing to beat"
         ),
+        # What the cargo row in this scenario is, since it is not the same
+        # thing in both. Everywhere else cargo is a control with no cache to
+        # help it. Here it keeps its target and its incremental state, and
+        # beating it is the entire question.
+        "baseline": "incremental rebuild",
         "repeatable": True,
     },
     "worktree": {
@@ -973,6 +979,8 @@ def run_scenario(
     }
     if not entry["timed"]:
         entry["guard"] = guard_summary(scenario, results)
+    if "baseline" in SCENARIOS[scenario]:
+        entry["baseline"] = SCENARIOS[scenario]["baseline"]
     return entry
 
 

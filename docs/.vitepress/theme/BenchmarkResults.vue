@@ -212,10 +212,14 @@ function rows(scenario: BenchmarkScenario) {
     ...scenario.results.map((cell) => cell.wall_duration_ns),
   );
   const separated = inconclusive(scenario) === null;
-  // A Cargo result is meaningful only inside the scenario that measured it.
-  // In the commit case it is deliberately an uncached control: Cargo has no
-  // portable store to seed from the parent commit, and its target is fresh.
+  // A Cargo result is meaningful only inside the scenario that measured it,
+  // and it is not the same kind of result in each. In the commit case it is
+  // deliberately an uncached control: Cargo has no portable store to seed
+  // from the parent commit, and its target is fresh. In the edit case it
+  // keeps its target and its incremental state, so it is the thing the caches
+  // have to beat rather than a control. The run says which it was.
   const baseline = scenario.results.find((cell) => cell.tool === "cargo");
+  const baselineLabel = scenario.baseline ?? "uncached baseline";
   return scenario.results.map((cell) => {
     const seconds = cell.wall_duration_ns / 1e9;
     const ratio = baseline
@@ -239,7 +243,7 @@ function rows(scenario: BenchmarkScenario) {
       comparison: !baseline
         ? null
         : cell === baseline
-          ? "uncached baseline"
+          ? baselineLabel
           : ratio! >= 1
             ? `${ratio!.toFixed(2)}× faster than cargo`
             : `${(1 / ratio!).toFixed(2)}× slower than cargo`,

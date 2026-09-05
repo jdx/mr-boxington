@@ -35,6 +35,13 @@ interface BenchmarkScenarioBase {
   /** What an untimed scenario asserted. Absent on runs published before it. */
   guard?: string | null;
   /**
+   * What this scenario's cargo row is, since it is not the same thing in
+   * every one: a control with no cache to help it in the commit scenario, the
+   * incremental rebuild the caches have to beat in the edit one. Absent on
+   * runs published before the edit scenario existed, which are all controls.
+   */
+  baseline?: string;
+  /**
    * "build" times one build per tool; "contention" compares sequential and
    * parallel commands and reports what the machine did. Absent on runs
    * published before the contention scenario existed, which are all "build".
