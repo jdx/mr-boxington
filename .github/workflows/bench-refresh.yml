@@ -314,7 +314,7 @@ jobs:
   small-edit-build-mbx:
     name: Build candidate mbx
     if: github.event_name == 'workflow_dispatch' && inputs.small_edit && inputs.small_edit_mbx_ref != '' && inputs.small_edit_mbx_artifact_run == ''
-    runs-on: ${{ inputs.small_edit_runner }}
+    runs-on: ${{ inputs.small_edit_runner || 'ubuntu-24.04' }}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -359,7 +359,7 @@ jobs:
         trial: ${{ fromJSON(inputs.small_edit_trials || '[1,2,3,4]') }}
         job: ${{ fromJSON(inputs.small_edit_jobs || '["build"]') }}
         tool: [rust-cache, mbx-objects, mbx-target]
-    runs-on: ${{ inputs.small_edit_runner }}
+    runs-on: ${{ inputs.small_edit_runner || 'ubuntu-24.04' }}
     timeout-minutes: 90
     permissions:
       actions: write
@@ -476,7 +476,7 @@ jobs:
             slot1: mbx-objects
             slot2: mbx-target
             slot3: rust-cache
-    runs-on: ${{ inputs.small_edit_runner }}
+    runs-on: ${{ inputs.small_edit_runner || 'ubuntu-24.04' }}
     timeout-minutes: 90
     permissions:
       actions: read
