@@ -350,14 +350,16 @@ Write a JSON build report to this path.
 ### `summary`
 
 - **Type:** `string`
-- **Default:** `short`
+- **Default:** `auto`
 - **Set with:** `MBX_SUMMARY`
 
-Detail printed after a build: one line, the full breakdown, or nothing.
+Detail printed after a build. Auto uses an explanatory CI report in CI and one line locally; short, ci, full, and off select a fixed style.
 
 **Choices:**
+- `auto`
 - `off`
 - `short`
+- `ci`
 - `full`
 
 

@@ -5,6 +5,13 @@ installs mbx and connects it to either GitHub Actions cache or an mbx-compatible
 server. The examples below show the inputs that matter for each backend; the
 action's repository documents the complete list.
 
+mbx automatically uses its explanatory CI build summary in GitHub Actions and
+skips local first-run onboarding. The summary describes mbx's **object cache**;
+it does not count artifacts Cargo reused directly from the restored target
+directory or the action's archive downloads and uploads. The action reports
+archive restore/save results separately. Use `MBX_SUMMARY=short`, `full`, or
+`off` to override the default; see [build summaries](/configuration#build-summaries).
+
 ## GitHub Actions cache
 
 The default backend restores Cargo's pruned target directory and its registry

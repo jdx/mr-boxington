@@ -729,6 +729,72 @@ fn short_summary_omits_routine_compiler_probe_bypasses() {
 }
 
 #[test]
+fn ci_summary_explains_a_cold_object_cache_and_real_bypasses() {
+    let stats = agent_stats(|stats| {
+        stats.unconsulted = 669;
+        stats.session_duration_ns = 202_000_000_000;
+        stats.bypasses = BTreeMap::from([
+            ("compiler-query".into(), 7),
+            ("standard-input".into(), 3),
+            ("native-library".into(), 4),
+            ("linking-disabled".into(), 160),
+        ]);
+    });
+    let summary = ci_summary(&stats);
+    assert!(
+        summary.contains("object cache: 0 hits, 0 misses, 669 not looked up, 164 bypassed"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("no usable prior inputs or matching prediction"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("160 linking-disabled, 4 native-library"),
+        "{summary}"
+    );
+    assert!(!summary.contains("compiler-query"), "{summary}");
+    assert!(!summary.contains("standard-input"), "{summary}");
+    assert!(
+        summary.contains("Cargo artifact reuse and CI cache archive transfers are not included"),
+        "{summary}"
+    );
+}
+
+#[test]
+fn ci_summary_preserves_verification_and_failure_diagnostics() {
+    let stats = agent_stats(|stats| {
+        stats.lookups = 10;
+        stats.hits = 6;
+        stats.verifications = 2;
+        stats.divergences = 1;
+        stats.remote_failures = 3;
+        stats.background_upload_failures = 4;
+        stats.avoided_compiler_duration_ns = 10_000_000_000;
+    });
+    let summary = ci_summary(&stats);
+    assert!(summary.contains("6 hits, 2 misses"), "{summary}");
+    assert!(summary.contains("2 verified, 1 diverged"), "{summary}");
+    assert!(summary.contains("3 remote failures"), "{summary}");
+    assert!(summary.contains("4 background uploads failed"), "{summary}");
+    assert!(
+        summary.contains("estimated compiler time avoided (summed across compilations)"),
+        "{summary}"
+    );
+    let upload_only = agent_stats(|stats| stats.background_upload_failures = 1);
+    assert!(should_display_short_stats(&upload_only));
+}
+
+#[test]
+fn ci_summary_explains_an_unmatched_manifest() {
+    let stats = agent_stats(|stats| {
+        stats.unconsulted = 20;
+        stats.predictions_loaded = 20;
+    });
+    assert!(ci_summary(&stats).contains("none matched this build"));
+}
+
+#[test]
 fn an_off_summary_still_writes_the_versioned_stats_report() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("nested").join("stats.json");

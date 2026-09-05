@@ -37,7 +37,7 @@ learned_incremental_max_size = "8GiB"  # or "none"
 share_out_dir = true
 build_script_execution = true
 cc = true
-summary = "short"        # or "off", "full"
+summary = "auto"         # or "short", "ci", "full", "off"
 savings = "quips"        # or "plain", "off"
 
 [linker]
@@ -249,9 +249,17 @@ anything.
 ## Build summaries
 
 `summary` controls the cache report printed to stderr after a build
-(`MBX_SUMMARY` from the environment). `short`, the default, prints one line
-and leaves routine `compiler-query` and `standard-input` probes out of its
-bypass count. `full` prints the detailed timing, compiler, bypass, transfer,
+(`MBX_SUMMARY` from the environment). `auto`, the default, selects `ci` when
+`CI` or `GITHUB_ACTIONS` is `1`, `true`, or `yes` (case-insensitive), and `short`
+otherwise. `short` prints one line and leaves routine `compiler-query` and
+`standard-input` probes out of its bypass count. `ci` adds session timing,
+estimated compiler time avoided, explanations for compilations that could not
+be looked up, and bypass reasons. Its object-cache counts and transfers exclude
+artifacts Cargo reused directly and archives restored or saved by a CI action.
+Compiler time avoided is summed across compilations, not elapsed job time saved.
+CI also skips the first-build notice about local cache management.
+
+Set a fixed style to override automatic selection. `full` prints the detailed timing, compiler, bypass, transfer,
 and materialization breakdown. `off` prints no cache summary, while still
 writing `MBX_STATS_REPORT` when configured. Cargo's `-q` and `--quiet` also
 suppress the summary for that invocation.

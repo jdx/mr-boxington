@@ -158,7 +158,7 @@ fn cargo_with_settings_bypass_log_and_roots(
     // something about it. Placement is best-effort, so wait until it has
     // finished and probe the directory cargo will actually use rather than
     // predicting that a managed target will win.
-    if !cargo_help_requested(arguments) && !was_explained(&config.store_dir()) {
+    if !policy::is_ci() && !cargo_help_requested(arguments) && !was_explained(&config.store_dir()) {
         let target_dir = placement.directory.as_deref().unwrap_or(&roots.target_dir);
         let reflinks = crate::util::reflinks_work(&config.cache_dir, target_dir);
         crate::session::note(&first_run_notice(config, retention, reflinks));

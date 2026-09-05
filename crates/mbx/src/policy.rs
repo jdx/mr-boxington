@@ -6,6 +6,11 @@
 
 use mbx_cache_core::RemoteCacheMode;
 
+/// Whether output is being read in a CI job rather than on a developer's machine.
+pub(crate) fn is_ci() -> bool {
+    env_truthy(std::env::var("CI").ok()) || env_truthy(std::env::var("GITHUB_ACTIONS").ok())
+}
+
 /// Resolve the remote-cache mode that is actually permitted here.
 ///
 /// Returns `None` when the configured mode leaves nothing to do.

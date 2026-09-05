@@ -57,7 +57,7 @@ pub(crate) use stats::display_stats;
 pub(crate) use stats::session_was_active;
 #[cfg(test)]
 use stats::{
-    cache_misses, short_summary, should_display_short_stats, should_display_stats,
+    cache_misses, ci_summary, short_summary, should_display_short_stats, should_display_stats,
     stale_manifest_note,
 };
 
