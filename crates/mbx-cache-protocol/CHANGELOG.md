@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.14](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.5.13...mbx-cache-protocol-v0.5.14) - 2026-09-06
+
+### Added
+
+- *(tui)* add cache insights and lifetime statistics ([#389](https://github.com/jdx/mr-boxington/pull/389))
+
+### Other
+
+- refresh guides and redesign the documentation site ([#395](https://github.com/jdx/mr-boxington/pull/395))
+- generate page-specific social preview images ([#374](https://github.com/jdx/mr-boxington/pull/374))
+
 ## [0.5.13](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.5.12...mbx-cache-protocol-v0.5.13) - 2026-09-03
 
 ### Added

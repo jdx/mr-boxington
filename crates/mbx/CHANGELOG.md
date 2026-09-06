@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0](https://github.com/jdx/mr-boxington/compare/v1.8.3...v1.9.0) - 2026-09-06
+
+### Added
+
+- *(verify)* sample compilation identities deterministically ([#391](https://github.com/jdx/mr-boxington/pull/391))
+- *(cc)* cache named preprocessor outputs ([#394](https://github.com/jdx/mr-boxington/pull/394))
+- *(report)* record wrapper phases and export Perfetto traces ([#390](https://github.com/jdx/mr-boxington/pull/390))
+- *(tui)* add cache insights and lifetime statistics ([#389](https://github.com/jdx/mr-boxington/pull/389))
+- *(cli)* publish native completions in packslip ([#381](https://github.com/jdx/mr-boxington/pull/381))
+- explain object cache results in CI summaries ([#377](https://github.com/jdx/mr-boxington/pull/377))
+
+### Fixed
+
+- *(gc)* distinguish logical removal from physical reclamation ([#392](https://github.com/jdx/mr-boxington/pull/392))
+- *(doctor)* probe reflinks from cache to target filesystems ([#387](https://github.com/jdx/mr-boxington/pull/387))
+- *(scheduler)* respect nested cgroup memory limits ([#386](https://github.com/jdx/mr-boxington/pull/386))
+- *(cc)* cache gdb and full debug compilations portably ([#384](https://github.com/jdx/mr-boxington/pull/384))
+- preserve CMake compiler identity across Cargo transitions ([#380](https://github.com/jdx/mr-boxington/pull/380))
+- support multiple Cargo targets in linker selection ([#379](https://github.com/jdx/mr-boxington/pull/379))
+
+### Other
+
+- refresh guides and redesign the documentation site ([#395](https://github.com/jdx/mr-boxington/pull/395))
+- *(cache)* compare semantic changes against bare rustc ([#393](https://github.com/jdx/mr-boxington/pull/393))
+- generate page-specific social preview images ([#374](https://github.com/jdx/mr-boxington/pull/374))
+
 ## [1.8.3](https://github.com/jdx/mr-boxington/compare/v1.8.2...v1.8.3) - 2026-09-05
 
 ### Other

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.13.1...mbx-cache-rustc-v0.14.0) - 2026-09-06
+
+### Added
+
+- *(tui)* add cache insights and lifetime statistics ([#389](https://github.com/jdx/mr-boxington/pull/389))
+
+### Other
+
+- refresh guides and redesign the documentation site ([#395](https://github.com/jdx/mr-boxington/pull/395))
+- generate page-specific social preview images ([#374](https://github.com/jdx/mr-boxington/pull/374))
+
 ## [0.13.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.12.0...mbx-cache-rustc-v0.13.0) - 2026-09-05
 
 ### Other

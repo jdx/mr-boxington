@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.13.1...mbx-cache-cc-v0.14.0) - 2026-09-06
+
+### Added
+
+- *(cc)* cache named preprocessor outputs ([#394](https://github.com/jdx/mr-boxington/pull/394))
+- *(tui)* add cache insights and lifetime statistics ([#389](https://github.com/jdx/mr-boxington/pull/389))
+
+### Fixed
+
+- *(cc)* cache gdb and full debug compilations portably ([#384](https://github.com/jdx/mr-boxington/pull/384))
+
+### Other
+
+- refresh guides and redesign the documentation site ([#395](https://github.com/jdx/mr-boxington/pull/395))
+- *(cc)* reuse unchanged include directory manifests ([#388](https://github.com/jdx/mr-boxington/pull/388))
+- generate page-specific social preview images ([#374](https://github.com/jdx/mr-boxington/pull/374))
+
 ## [0.12.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.11.5...mbx-cache-cc-v0.12.0) - 2026-09-05
 
 ### Fixed
