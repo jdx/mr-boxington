@@ -1052,11 +1052,13 @@ pub fn is_build_script_shim() -> bool {
     let Some(invoked) = build_script_invocation_path() else {
         return false;
     };
-    invoked
-        .file_stem()
-        .and_then(OsStr::to_str)
-        .is_some_and(|stem| stem == "build-script-build")
-        && find_build_script_real_path(&invoked).is_some()
+    is_build_script_executable(&invoked) && find_build_script_real_path(&invoked).is_some()
+}
+
+fn is_build_script_executable(path: &Path) -> bool {
+    path.file_stem().is_some_and(|stem| {
+        stem == OsStr::new("build-script-build") || stem == OsStr::new("build_script_build")
+    })
 }
 
 pub(crate) fn build_script_invocation_path() -> Option<PathBuf> {

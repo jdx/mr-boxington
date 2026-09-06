@@ -51,6 +51,13 @@ fn ambiguous_build_script_sidecars_are_refused() {
     assert_eq!(find_build_script_real_path(&invoked), None);
 }
 
+#[test]
+fn cargo_build_script_executable_names_are_recognized() {
+    assert!(is_build_script_executable(Path::new("build-script-build")));
+    assert!(is_build_script_executable(Path::new("build_script_build")));
+    assert!(!is_build_script_executable(Path::new("build-script")));
+}
+
 fn test_config(cache_dir: &Path) -> Config {
     Config {
         cache_dir: cache_dir.to_path_buf(),
