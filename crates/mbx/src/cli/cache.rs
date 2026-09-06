@@ -269,6 +269,8 @@ pub(super) struct CacheStatsReport {
 #[derive(serde::Serialize)]
 pub(super) struct GcReport {
     pub(super) version: u8,
+    /// Byte counts sum file lengths, not physical blocks released.
+    pub(super) byte_accounting: &'static str,
     pub(super) max_bytes: u64,
     pub(super) dry_run: bool,
     pub(super) action_store: GcActionStoreReport,
@@ -368,7 +370,7 @@ pub(super) fn cache_remove(config: &Config, workspace: &Path) -> Result<()> {
             },
         );
         println!(
-            "freed managed target directory ({})",
+            "removed managed target directory ({} logical)",
             ByteSize::b(bytes).display().iec()
         );
     }

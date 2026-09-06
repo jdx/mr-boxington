@@ -125,6 +125,7 @@ setup() {
   run "$MBX_BIN" gc --json
   assert_success
   assert_output --partial '"action_store"'
+  assert_output --partial '"byte_accounting": "logical"'
   assert_output --partial '"targets"'
 
   run "$MBX_BIN" doctor --json

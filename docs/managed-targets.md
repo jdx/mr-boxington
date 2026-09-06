@@ -137,3 +137,17 @@ workspaces and are reclaimed by normal garbage collection.
 Creating the link requires Developer Mode or a privileged process on Windows.
 If Windows cannot create it, mbx lets Cargo use its ordinary target directory.
 :::
+
+### Collection byte counts
+
+Collection reports **logical bytes**: the sum of removed file lengths. The
+`removed_bytes` and `remaining_bytes` fields in `mbx gc --json` use this measure;
+`byte_accounting: "logical"` identifies it explicitly. The lifetime `savings`
+object in `mbx stats --json` also carries that marker. Lifetime savings totals
+and cleanup messages use the same measure. Existing `freed_*_bytes` fields in
+the saved lifetime tally retain their names for compatibility.
+
+Physical disk space released can differ. Reflinks and hard links may leave data
+referenced by another file; sparse files may occupy fewer blocks than their
+length. Filesystem snapshots and delayed allocation also affect reclamation.
+These counters do not estimate physical space released.

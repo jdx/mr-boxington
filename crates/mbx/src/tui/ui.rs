@@ -209,13 +209,13 @@ pub(super) fn pressure(frame: &mut Frame, area: Rect, app: &App) {
     let thrashing = app.health.possible_thrashing(app.store_budget);
     let message = if thrashing {
         format!(
-            "! POSSIBLE CACHE THRASHING · {} evicted / 5m · {:.0}% misses",
+            "! POSSIBLE CACHE THRASHING · {} logical evicted / 5m · {:.0}% misses",
             size(app.health.evicted),
             app.health.miss_rate()
         )
     } else {
         format!(
-            "Evicted {} / 5m · {} total{}",
+            "Evicted {} logical / 5m · {} logical total{}",
             size(app.health.evicted),
             size(app.savings.freed_store_bytes),
             if app.gc_auto { "" } else { " · auto GC off" }
@@ -750,7 +750,7 @@ fn store_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         if app.gc_auto { "on" } else { "off" }
     )));
     lines.push(Line::from(format!(
-        "evicted while watching (last 5m): {}",
+        "evicted while watching (last 5m): {} logical",
         size(app.health.evicted)
     )));
     lines.push(Line::from(format!(
@@ -763,7 +763,7 @@ fn store_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             Style::new().fg(theme::MISS).bold(),
         ));
         lines.push(Line::from(format!(
-            "{} evicted with {:.0}% misses in the last 5m.",
+            "{} logical evicted with {:.0}% misses in the last 5m.",
             size(app.health.evicted),
             app.health.miss_rate()
         )));
@@ -811,7 +811,7 @@ fn store_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     }
     lines.push(Line::default());
     lines.push(Line::from(
-        "Pruned totals include automatic sweeps and mbx gc.",
+        "Pruned totals are logical file sizes, not physical space reclaimed.",
     ));
     lines.push(Line::from(
         "Reflinks are cumulative, not current disk savings.",

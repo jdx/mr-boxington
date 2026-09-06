@@ -143,7 +143,7 @@ fn cargo_with_settings_bypass_log_and_roots(
     };
     if let Some(bytes) = removed_target_bytes {
         crate::session::note(&format!(
-            "mbx[gc]: freed {} by removing the existing target/ directory",
+            "mbx[gc]: removed the existing target/ directory ({} logical)",
             ByteSize::b(bytes).display().iec()
         ));
     }

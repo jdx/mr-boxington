@@ -2685,7 +2685,7 @@ mod target_views {
             "the target directory of a checkout that is gone should be freed"
         );
         assert!(
-            output.contains("freed 1 target directories"),
+            output.contains("removed 1 target directories"),
             "gc should say what it freed: {output}"
         );
     }
@@ -2765,11 +2765,11 @@ mod target_views {
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            stdout.contains("freed 1 target directories"),
+            stdout.contains("removed 1 target directories"),
             "successful target collection should still be reported"
         );
         assert!(
-            stdout.contains("freed 1 learned incremental directories"),
+            stdout.contains("removed 1 learned incremental directories"),
             "successful incremental collection should still be reported: {stdout}"
         );
         assert!(

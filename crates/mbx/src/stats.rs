@@ -54,6 +54,7 @@ pub(crate) struct Report {
 
 #[derive(Serialize)]
 pub(crate) struct Lifetime {
+    byte_accounting: &'static str,
     since_unix_secs: Option<u64>,
     builds: u64,
     cached_compilations: u64,
@@ -96,6 +97,7 @@ pub(crate) fn collect(store: &Path, target_root: &Path) -> Result<Report> {
 impl From<&savings::Tally> for Lifetime {
     fn from(tally: &savings::Tally) -> Self {
         Self {
+            byte_accounting: "logical",
             since_unix_secs: (tally.since_secs > 0).then_some(tally.since_secs),
             builds: tally.builds,
             cached_compilations: tally.cached_compilations,
@@ -118,6 +120,10 @@ fn size(bytes: u64) -> String {
     ByteSize::b(bytes).display().iec().to_string()
 }
 
+fn logical_size(bytes: u64) -> String {
+    format!("{} logical", size(bytes))
+}
+
 impl Lifetime {
     pub(crate) fn since(&self) -> String {
         self.since_unix_secs
@@ -135,13 +141,13 @@ impl Lifetime {
             ),
             ("builds", self.builds.to_string()),
             ("cache hits", self.cached_compilations.to_string()),
-            ("pruned by mbx", size(self.pruned_bytes)),
+            ("pruned by mbx", logical_size(self.pruned_bytes)),
             (
                 "  targets / cache",
                 format!(
                     "{} / {}",
-                    size(self.pruned_target_bytes),
-                    size(self.pruned_store_bytes)
+                    logical_size(self.pruned_target_bytes),
+                    logical_size(self.pruned_store_bytes)
                 ),
             ),
             (
@@ -151,13 +157,16 @@ impl Lifetime {
                     |since| {
                         format!(
                             "{} {}",
-                            size(self.automatically_pruned_bytes),
+                            logical_size(self.automatically_pruned_bytes),
                             savings::since(since)
                         )
                     },
                 ),
             ),
-            ("requested removals", size(self.requested_removal_bytes)),
+            (
+                "requested removals",
+                logical_size(self.requested_removal_bytes),
+            ),
             (
                 "copying avoided",
                 format!("{} reflinked (cumulative)", size(self.reflinked_bytes)),
@@ -170,7 +179,7 @@ impl Lifetime {
         if self.automatically_pruned_bytes > 0 {
             Some(format!(
                 "{} taken out with the trash. You did not lift a finger.",
-                size(self.automatically_pruned_bytes)
+                logical_size(self.automatically_pruned_bytes)
             ))
         } else if self.cached_compilations > 0 {
             Some(format!(
@@ -218,7 +227,7 @@ impl Report {
             "Sharing is a lower-bound estimate of logical cache bytes, excluding targets.".into(),
         );
         lines.push(
-            "Pruned totals include automatic sweeps and mbx gc; requested removals are separate."
+            "Pruned totals are logical file sizes, not physical space reclaimed; requested removals are separate."
                 .into(),
         );
         lines.push("Compiler time and reflinked bytes are cumulative, not wall time or current disk savings.".into());

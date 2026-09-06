@@ -105,6 +105,7 @@ pub(super) fn run(
         let pruned = pruned?;
         print_json(&GcReport {
             version: 1,
+            byte_accounting: "logical",
             max_bytes,
             dry_run,
             action_store: GcActionStoreReport {
@@ -137,9 +138,9 @@ fn print_incremental_removals(outcome: &crate::incremental::PruneOutcome, dry_ru
     if outcome.removed_directories == 0 {
         return;
     }
-    let verb = if dry_run { "would free" } else { "freed" };
+    let verb = if dry_run { "would remove" } else { "removed" };
     println!(
-        "{verb} {} learned incremental directories ({})",
+        "{verb} {} learned incremental directories ({} logical)",
         outcome.removed_directories,
         ByteSize::b(outcome.removed_bytes).display().iec()
     );
@@ -181,9 +182,9 @@ pub(super) fn print_gc_store_outcome(outcome: &store::GcOutcome, dry_run: bool) 
 
 /// One line describing the target directories a sweep freed.
 pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool) -> String {
-    let verb = if dry_run { "would free" } else { "freed" };
+    let verb = if dry_run { "would remove" } else { "removed" };
     format!(
-        "{verb} {} target directories ({}, {} abandoned and {} live); {} remain",
+        "{verb} {} target directories ({} logical, {} abandoned and {} live); {} logical remain",
         outcome.removed_views,
         ByteSize::b(outcome.removed_bytes).display().iec(),
         outcome.removed_stale_views,
@@ -198,7 +199,7 @@ pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool
 /// describing the same outcome two different ways.
 pub(super) fn evictions(outcome: &store::GcOutcome) -> String {
     format!(
-        "evicted {} objects and {} action results ({}); {} remain",
+        "evicted {} objects and {} action results ({} logical); {} logical remain",
         outcome.removed_objects,
         outcome.removed_action_results,
         ByteSize::b(outcome.removed_bytes).display().iec(),

@@ -42,13 +42,15 @@ pub(crate) struct Tally {
     pub cached_compilations: u64,
     pub avoided_compiler_ns: u64,
     pub reflinked_bytes: u64,
+    /// Sum of removed file lengths; does not measure physical reclamation.
     pub freed_target_bytes: u64,
+    /// Logical bytes removed from the store.
     pub freed_store_bytes: u64,
-    /// Automatic sweeps only. Older ledgers combined automatic and explicit GC,
+    /// Logical bytes removed by automatic sweeps only. Older ledgers combined automatic and explicit GC,
     /// so this counter has its own start date instead of backfilling a guess.
     pub auto_pruned_bytes: u64,
     pub auto_pruned_since_secs: u64,
-    /// Bytes the user asked to have removed: a confirmed `target/` migration,
+    /// Logical bytes the user asked to have removed: a confirmed `target/` migration,
     /// or `mbx cache remove`. Kept apart from the collection counters because
     /// every line about those brags that nobody had to do anything -- which is
     /// exactly untrue of a removal somebody confirmed.
@@ -69,7 +71,9 @@ pub(crate) struct Delta {
     pub cached_compilations: u64,
     pub avoided_compiler_ns: u64,
     pub reflinked_bytes: u64,
+    /// Sum of removed file lengths; does not measure physical reclamation.
     pub freed_target_bytes: u64,
+    /// Logical bytes removed from the store.
     pub freed_store_bytes: u64,
     pub auto_pruned_bytes: u64,
     pub freed_requested_bytes: u64,
@@ -259,25 +263,25 @@ fn facts_worth_telling(tally: &Tally, facts: &SessionFacts) -> Vec<Candidate> {
         });
     }
     if freed >= MIN_FREED_BYTES {
-        let size = iec(freed);
+        let size = format!("{} logical", iec(freed));
         eligible.push(Candidate {
             cheeky: tellings![
                 "mbx[savings]: {size} of build debris binned so far. cargo clean remains unemployed.",
                 "mbx[savings]: has quietly disposed of {size} of build leftovers. nobody saw anything.",
-                "mbx[savings]: {size} reclaimed to date. the disk sends its regards.",
+                "mbx[savings]: {size} of old files removed to date. the broom sends its regards.",
                 "mbx[savings]: {size} of build debris has left the building.",
                 "mbx[savings]: swept up {size} so far. the broom is content-addressed.",
                 "mbx[savings]: {size} tidied away. you may continue not thinking about it.",
-                "mbx[savings]: {size} reclaimed while you were busy compiling other things.",
+                "mbx[savings]: {size} of old files removed while you were busy compiling other things.",
                 "mbx[savings]: {size} of old build output has been shown the door.",
                 "mbx[savings]: disposed of {size} without being asked. that is rather the point.",
                 "mbx[savings]: the sweep found {size} nobody would miss. nobody has.",
             ],
-            plain: format!("mbx[savings]: {size} reclaimed by collection so far"),
+            plain: format!("mbx[savings]: {size} of files removed by collection so far"),
         });
     }
     if tally.freed_target_bytes >= MIN_FREED_TARGET_BYTES {
-        let size = iec(tally.freed_target_bytes);
+        let size = format!("{} logical", iec(tally.freed_target_bytes));
         eligible.push(Candidate {
             cheeky: tellings![
                 "mbx[savings]: {size} of target/ had outlived its checkouts. it has been dealt with.",
@@ -291,7 +295,7 @@ fn facts_worth_telling(tally: &Tally, facts: &SessionFacts) -> Vec<Candidate> {
                 "mbx[savings]: escorted {size} of ownerless outputs off the premises.",
                 "mbx[savings]: worktrees come and go. their {size} now goes with them.",
             ],
-            plain: format!("mbx[savings]: {size} of abandoned target directories reclaimed"),
+            plain: format!("mbx[savings]: {size} of abandoned target directories removed"),
         });
     }
     if tally.reflinked_bytes >= MIN_REFLINKED_BYTES {

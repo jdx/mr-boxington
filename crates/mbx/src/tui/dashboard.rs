@@ -116,7 +116,7 @@ pub(super) fn header(frame: &mut Frame, area: Rect, app: &App) {
             .use_unicode(true),
         Rect::new(store.x, store.y + 1, store.width, 1),
     );
-    let evictions = card(frame, columns[2], "Evictions / 5m", theme::PURPLE);
+    let evictions = card(frame, columns[2], "Evictions / 5m · logical", theme::PURPLE);
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
@@ -130,7 +130,7 @@ pub(super) fn header(frame: &mut Frame, area: Rect, app: &App) {
                 ),
             ]),
             Line::styled(
-                format!("{} lifetime", size(app.savings.freed_store_bytes)),
+                format!("{} logical lifetime", size(app.savings.freed_store_bytes)),
                 Style::new().fg(theme::MUTED),
             ),
         ]),
@@ -425,7 +425,7 @@ pub(super) fn store(frame: &mut Frame, area: Rect, app: &App) -> bool {
     }
     notes.extend([
         Line::styled(
-            "Pruned totals include automatic sweeps and mbx gc. Requested removals are separate.",
+            "Pruned totals are logical file sizes, not physical space reclaimed. Requested removals are separate.",
             Style::new().fg(theme::MUTED),
         ),
         Line::styled(
