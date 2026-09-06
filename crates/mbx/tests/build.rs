@@ -3406,13 +3406,18 @@ fn wrapper_phase_reports_and_trace_cover_real_cold_and_warm_builds() {
     let reports = tempfile::tempdir().unwrap();
     write_project(project.path());
     let settings = [("MBX_TARGET_VIEWS", "0"), ("MBX_INCREMENTAL", "0")];
-    let (cold, _) = build_with(
+    let (cold, stderr) = build_with(
         project.path(),
         store.path(),
         &reports.path().join("cold.json"),
         &settings,
     );
-    assert!(cold["wrapper_phases_ns"]["compiler"].as_u64().unwrap() > 0);
+    assert!(
+        cold["wrapper_phases_ns"]["compiler"]
+            .as_u64()
+            .is_some_and(|n| n > 0),
+        "cold report: {cold}\n{stderr}"
+    );
     assert!(cold["wrapper_phases_ns"]["store"].as_u64().unwrap() > 0);
     std::fs::remove_dir_all(project.path().join("target")).unwrap();
     let (warm, _) = build_with(
