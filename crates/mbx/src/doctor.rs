@@ -141,7 +141,9 @@ async fn check(config: &Config, toolchain: Option<&str>) -> Vec<Check> {
             config.target.root.display(),
         ),
     ));
-    checks.push(reflink_check(&config.cache_dir));
+    for destination in restore_destinations(config, &cargo, toolchain) {
+        checks.push(reflink_check(&config.cache_dir, &destination));
+    }
     checks.push(setup_check());
     checks.extend(remote_checks(config).await);
     checks
@@ -275,21 +277,88 @@ fn cache_check(cache_dir: &Path) -> Check {
     }
 }
 
-fn reflink_check(cache_dir: &Path) -> Check {
-    let Ok(directory) = tempfile::tempdir_in(cache_dir) else {
-        return Check::warn("reflink", "not tested because the cache is not writable");
-    };
-    let source = directory.path().join("source");
-    let destination = directory.path().join("destination");
-    if let Err(error) = std::fs::write(&source, b"mbx reflink probe") {
-        return Check::warn("reflink", format!("probe could not be written: {error}"));
+/// Probe both the managed root and Cargo's resolved output location. An existing
+/// target or an explicit Cargo target setting can keep a build outside the
+/// managed root, even when managed views are enabled.
+fn restore_destinations(config: &Config, cargo: &OsStr, toolchain: Option<&str>) -> Vec<PathBuf> {
+    let mut destinations = Vec::new();
+    if config.target.views {
+        destinations.push(config.target.root.clone());
     }
-    match reflink_copy::reflink(&source, &destination) {
-        Ok(()) => Check::pass("reflink", "supported by the cache filesystem"),
-        Err(error) => Check::warn(
-            "reflink",
-            format!("unavailable ({error}); restored outputs will be copied"),
-        ),
+    let mut command = Command::new(cargo);
+    if let Some(toolchain) = toolchain {
+        command.arg(format!("+{toolchain}"));
+    }
+    let target = command
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
+        .and_then(|value| value.get("target_directory")?.as_str().map(PathBuf::from))
+        .or_else(|| std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from));
+    if let Some(target) = target {
+        destinations.push(target);
+    } else if !config.target.views
+        && let Ok(cwd) = std::env::current_dir()
+    {
+        destinations.push(cwd.join("target"));
+    }
+    destinations.sort();
+    destinations.dedup();
+    destinations
+}
+
+fn reflink_check(cache_dir: &Path, target_dir: &Path) -> Check {
+    reflink_check_with(cache_dir, target_dir, |source, destination| {
+        reflink_copy::reflink(source, destination)
+    })
+}
+
+fn reflink_check_with(
+    cache_dir: &Path,
+    target_dir: &Path,
+    clone: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Check {
+    let layout = format!("{} -> {}", cache_dir.display(), target_dir.display());
+    let probe = || -> std::io::Result<()> {
+        let source_dir = tempfile::Builder::new()
+            .prefix("mbx-reflink-")
+            .tempdir_in(cache_dir)?;
+        // Avoid creating target directories just to inspect them. The closest
+        // existing ancestor uses the destination filesystem; an existing target
+        // symlink is followed by tempdir_in, just as a real restore follows it.
+        let absolute_target = std::path::absolute(target_dir)?;
+        let parent = absolute_target
+            .ancestors()
+            .find(|path| path.exists())
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no target ancestor exists")
+            })?;
+        let destination_dir = tempfile::Builder::new()
+            .prefix("mbx-reflink-")
+            .tempdir_in(parent)?;
+        let source = source_dir.path().join("source");
+        let destination = destination_dir.path().join("destination");
+        std::fs::write(&source, b"mbx reflink probe")?;
+        clone(&source, &destination)
+    };
+    match probe() {
+        Ok(()) => Check::pass("reflink", format!("{layout}: cloning is supported")),
+        Err(error) => {
+            let reason = match error.kind() {
+                std::io::ErrorKind::CrossesDevices => "different filesystems",
+                std::io::ErrorKind::PermissionDenied => "permission denied",
+                std::io::ErrorKind::Unsupported => "cloning unsupported",
+                _ => "clone probe failed",
+            };
+            Check::warn(
+                "reflink",
+                format!(
+                    "{layout}: {reason} ({error}); restores to this location may require copying"
+                ),
+            )
+        }
     }
 }
 
@@ -733,5 +802,84 @@ mod tests {
                 .iter()
                 .any(|check| { check.name == "remote" && check.detail.contains("probe skipped") })
         );
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn probe_crosses_from_cache_into_target_and_cleans_up() {
+        let cache = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let missing = target.path().join("not-created/deps");
+        let result = reflink_check_with(cache.path(), &missing, |source, destination| {
+            assert!(source.starts_with(cache.path()));
+            assert!(destination.starts_with(target.path()));
+            assert_eq!(std::fs::read(source).unwrap(), b"mbx reflink probe");
+            std::fs::copy(source, destination).map(|_| ())
+        });
+        assert_eq!(result.severity, Severity::Pass);
+        assert!(result.detail.contains(&missing.display().to_string()));
+        assert_eq!(std::fs::read_dir(cache.path()).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(target.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn cross_device_and_permission_failures_name_both_locations() {
+        let cache = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        for (kind, reason) in [
+            (std::io::ErrorKind::CrossesDevices, "different filesystems"),
+            (std::io::ErrorKind::PermissionDenied, "permission denied"),
+            (std::io::ErrorKind::Unsupported, "cloning unsupported"),
+        ] {
+            let result = reflink_check_with(cache.path(), target.path(), |_, _| Err(kind.into()));
+            assert_eq!(result.severity, Severity::Warn);
+            assert!(result.detail.contains(reason));
+            assert!(result.detail.contains(&cache.path().display().to_string()));
+            assert!(result.detail.contains(&target.path().display().to_string()));
+        }
+        assert_eq!(std::fs::read_dir(target.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_target_symlink_is_probed_on_its_destination() {
+        let cache = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let link = workspace.path().join("target");
+        std::os::unix::fs::symlink(target.path(), &link).unwrap();
+        let result = reflink_check_with(cache.path(), &link, |_, destination| {
+            assert!(
+                destination
+                    .parent()
+                    .unwrap()
+                    .canonicalize()
+                    .unwrap()
+                    .starts_with(target.path())
+            );
+            Ok(())
+        });
+        assert_eq!(result.severity, Severity::Pass);
+        assert_eq!(std::fs::read_dir(target.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn real_cross_device_probe_warns() {
+        use std::os::unix::fs::MetadataExt;
+        let cache = tempfile::tempdir().unwrap();
+        let Ok(target) = tempfile::tempdir_in("/dev/shm") else {
+            return;
+        };
+        if cache.path().metadata().unwrap().dev() == target.path().metadata().unwrap().dev() {
+            return;
+        }
+        let result = reflink_check(cache.path(), target.path());
+        assert_eq!(result.severity, Severity::Warn);
+        assert!(result.detail.contains("copying"));
     }
 }
