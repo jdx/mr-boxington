@@ -104,6 +104,27 @@ fn placing_a_target_directory_twice_reaches_the_same_one() {
 }
 
 #[test]
+fn changing_roots_preserves_a_target_while_cargo_is_writing_diagnostics() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = test_config(&directory.path().join("first"), true);
+    let second = test_config(&directory.path().join("second"), true);
+    let workspace = checkout(directory.path(), "project");
+    let target = workspace.join("target");
+    let old = place(&first, &workspace, &target, false).unwrap();
+    let fingerprint = old.join("release/.fingerprint/example-hash");
+    std::fs::create_dir_all(&fingerprint).unwrap();
+    let mut cargo_lock = fslock::LockFile::open(&old.join("release/.cargo-lock")).unwrap();
+    cargo_lock.lock().unwrap();
+
+    assert!(place(&second, &workspace, &target, false).is_none());
+
+    assert_eq!(std::fs::read_link(&target).unwrap(), old);
+    // Cargo may retain the resolved old path while consuming rustc's output.
+    std::fs::write(fingerprint.join("output-lib-example"), b"warning\n").unwrap();
+    assert!(old.with_extension("json").is_file());
+}
+
+#[test]
 fn replaces_an_outdated_managed_target_link() {
     let directory = tempfile::tempdir().unwrap();
     let first = test_config(&directory.path().join("first"), true);

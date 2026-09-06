@@ -1025,12 +1025,12 @@ pub fn run_rustdoc_shim() -> ExitCode {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     match crate::rustdoc::document(&rustdoc, &arguments) {
         Ok(code) => code,
-        Err(error) => {
+        Err(_error) => {
             let _ = request_agent(&[AgentRequest::RecordBypass {
                 kind: "rustdoc".into(),
             }]);
             #[cfg(debug_assertions)]
-            eprintln!("mbx[warning]: rustdoc cache bypassed: {error:#}");
+            eprintln!("mbx[warning]: rustdoc cache bypassed: {_error:#}");
             run_transparent_rustdoc(rustdoc, arguments)
         }
     }

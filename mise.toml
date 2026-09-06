@@ -52,10 +52,12 @@ depends = ["bootstrap"]
 run = [
   "./target/mbx-bootstrap/mbx fmt --all --check",
   "./target/mbx-bootstrap/mbx clippy --workspace --all-features --all-targets -- -D warnings",
+  "./target/mbx-bootstrap/mbx clippy --release --workspace --all-features --all-targets -- -D warnings",
 ]
 run_windows = [
   "./target/mbx-bootstrap/mbx.exe fmt --all --check",
   "./target/mbx-bootstrap/mbx.exe clippy --workspace --all-features --all-targets -- -D warnings",
+  "./target/mbx-bootstrap/mbx.exe clippy --release --workspace --all-features --all-targets -- -D warnings",
 ]
 
 [tasks.lint-fix]
