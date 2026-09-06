@@ -10,6 +10,9 @@ use std::process::Command;
 #[cfg(unix)]
 use std::process::Stdio;
 
+#[path = "build/semantic_oracle.rs"]
+mod semantic_oracle;
+
 fn write_project(directory: &Path) {
     write_named_project(directory, "fixture");
 }
