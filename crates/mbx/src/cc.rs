@@ -537,11 +537,15 @@ impl Portable {
             Path::new(value).is_absolute()
                 && std::fs::canonicalize(value).is_ok_and(|path| path == physical_dir)
         });
+        // This working-directory remap is for GCC/Clang debug objects. MSVC
+        // ignores /pathmap without /experimental:deterministic; preserve its
+        // existing compilation mode rather than injecting an ignored map.
         let values = working_dir
             .to_str()
             .map(str::to_owned)
             .into_iter()
             .chain(logical_dir)
+            .filter(|_| !family.is_msvc())
             .chain(
                 PORTABLE_ENVIRONMENT
                     .iter()
