@@ -183,12 +183,19 @@ fn store_scroll_reaches_the_report_notes_and_plain_mode_omits_quips() {
     assert!(narrow.contains("current disk"), "{narrow}");
     assert!(narrow.contains("savings."), "{narrow}");
     app.store_scroll = 0;
-    let wide = render(&app, 120, 40);
+    // macOS and Windows temporary roots can exceed one dashboard column.
+    // Give this fixture enough room to exercise the panel layout, rather than
+    // the intentional fallback used when the store path cannot fit.
+    let wide_width = (Line::from(store.path().display().to_string()).width() * 2 + 10)
+        .max(120)
+        .try_into()
+        .unwrap();
+    let wide = render(&app, wide_width, 40);
     assert!(wide.contains("You did not lift a finger"));
     assert!(wide.contains("Store / inventory"));
     assert!(wide.contains("Workspace sharing / estimated"));
     app.cheeky = false;
-    let screen = render(&app, 120, 40);
+    let screen = render(&app, wide_width, 40);
     assert!(!screen.contains("You did not lift a finger"));
     assert!(screen.contains("automatically pruned"));
 }
