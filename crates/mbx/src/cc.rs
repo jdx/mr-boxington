@@ -48,7 +48,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     let identity = compiler_identity(compiler, language)?;
     // Appended before anything parses, so the flag is part of the key the same
     // way the caller's own prefix maps are.
-    let portable = Portable::detect(&mappings, identity.family);
+    let portable = Portable::detect(&mappings, identity.family, &working_dir);
     let arguments = portable.applied_to(arguments);
     let arguments = arguments.as_ref();
     let invocation = CcInvocation::parse_for(arguments, identity.family)?;
@@ -523,25 +523,41 @@ struct Portable {
 }
 
 impl Portable {
-    fn detect(mappings: &[PathMapping], family: CcCompilerFamily) -> Self {
+    fn detect(mappings: &[PathMapping], family: CcCompilerFamily, working_dir: &Path) -> Self {
         let mut portable = Self {
             arguments: Vec::new(),
             values: Vec::new(),
         };
-        if !session::share_out_dir_requested() {
-            return portable;
-        }
-        for name in PORTABLE_ENVIRONMENT {
-            let Some(value) = std::env::var(name)
-                .ok()
-                .filter(|value| Path::new(value).is_absolute())
-            else {
-                continue;
-            };
-            // A value under no known root is one no key could agree on
-            // anyway, so there is nothing to remap and nothing to promise.
+        // Debug information records the compiler's working directory even
+        // when every source argument is relative. Normalize it as well as
+        // OUT_DIR so equivalent checkouts produce identical debug objects.
+        // Clang honors the logical PWD (e.g. /var on macOS), while Rust's
+        // current_dir reports /private/var. Map both spellings only when they
+        // identify the same directory.
+        let physical_dir =
+            std::fs::canonicalize(working_dir).unwrap_or_else(|_| working_dir.to_path_buf());
+        let logical_dir = std::env::var("PWD").ok().filter(|value| {
+            Path::new(value).is_absolute()
+                && std::fs::canonicalize(value).is_ok_and(|path| path == physical_dir)
+        });
+        let values = working_dir
+            .to_str()
+            .map(str::to_owned)
+            .into_iter()
+            .chain(logical_dir)
+            .chain(
+                PORTABLE_ENVIRONMENT
+                    .iter()
+                    .filter(|_| session::share_out_dir_requested())
+                    .filter_map(|name| std::env::var(name).ok()),
+            );
+        for value in values.filter(|value| Path::new(value).is_absolute()) {
+            // Resolve aliases for mapping without changing the spelling the
+            // compiler's debug information needs to replace.
+            let canonical = std::fs::canonicalize(&value).unwrap_or_else(|_| PathBuf::from(&value));
             let Ok(placeholder) =
                 normalize_mapped_path(Path::new(&value), Path::new("/"), mappings)
+                    .or_else(|_| normalize_mapped_path(&canonical, Path::new("/"), mappings))
             else {
                 continue;
             };

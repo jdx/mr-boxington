@@ -239,6 +239,12 @@ const SUPPORTED_G_FLAGS: &[&str] = &[
     "-gdwarf-3",
     "-gdwarf-4",
     "-gdwarf-5",
+    "-gfull",
+    "-ggdb",
+    "-ggdb0",
+    "-ggdb1",
+    "-ggdb2",
+    "-ggdb3",
 ];
 
 const SUPPORTED_BARE_FLAGS: &[&str] = &[

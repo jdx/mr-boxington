@@ -150,3 +150,43 @@ EOF
   # Nothing was cached, so no store was ever created.
   assert_not_exists "$MBX_CACHE_DIR"
 }
+
+@test "gdb and full debug objects restore across checkouts and invalidate on source changes" {
+  local flag
+  for flag in -ggdb -gfull; do
+    # GCC does not support Apple's -gfull; exercise it wherever the driver does.
+    echo 'int probe(void) { return 0; }' >"$BATS_TEST_TMPDIR/probe.c"
+    if ! cc "$flag" -c "$BATS_TEST_TMPDIR/probe.c" -o "$BATS_TEST_TMPDIR/probe.o" 2>/dev/null; then
+      continue
+    fi
+    local first="$BATS_TEST_TMPDIR/first-$flag"
+    local second="$BATS_TEST_TMPDIR/second-$flag"
+    local report="$BATS_TEST_TMPDIR/report-$flag.json"
+    write_project "$first"
+    write_project "$second"
+    (cd "$first" && "$MBX_BIN" exec make "CFLAGS=$flag -Iinclude" hello)
+    (cd "$second" && MBX_STATS_REPORT="$report" "$MBX_BIN" exec make "CFLAGS=$flag -Iinclude" hello)
+    run grep -E '"hits"[[:space:]]*:[[:space:]]*2' "$report"
+    assert_success
+    run cmp "$first/hello.o" "$second/hello.o"
+    assert_success
+    "$second/hello"
+
+    # A successful fresh compiler run must reproduce the cached debug objects.
+    rm "$second/hello.o" "$second/main.o"
+    (cd "$second" && MBX_VERIFY=1 MBX_STATS_REPORT="$report" "$MBX_BIN" exec make "CFLAGS=$flag -Iinclude" hello)
+    run grep -E '"verifications"[[:space:]]*:[[:space:]]*2' "$report"
+    assert_success
+    run grep -E '"divergences"[[:space:]]*:[[:space:]]*0' "$report"
+    assert_success
+    "$second/hello"
+
+    echo 'int hello_value(void) { return 9; }' >"$second/src/hello.c"
+    rm "$second/hello.o" "$second/hello"
+    (cd "$second" && MBX_STATS_REPORT="$report" "$MBX_BIN" exec make "CFLAGS=$flag -Iinclude" hello)
+    run grep -E '"hits"[[:space:]]*:[[:space:]]*0' "$report"
+    assert_success
+    run "$second/hello"
+    assert_failure
+  done
+}

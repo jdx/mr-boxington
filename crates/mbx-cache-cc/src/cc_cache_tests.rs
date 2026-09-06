@@ -1198,3 +1198,28 @@ fn assembler_input_directives_bypass_only_preprocessed_assembly() {
     c.validate_discovered_inputs([source.as_path()])
         .expect("assembler syntax in C text is irrelevant");
 }
+
+#[test]
+fn debug_dialects_and_levels_have_distinct_action_keys() {
+    let mut keys = BTreeSet::new();
+    for flag in [
+        "-g0", "-gfull", "-ggdb", "-ggdb0", "-ggdb1", "-ggdb2", "-ggdb3",
+    ] {
+        let (workspace, target) = checkout("debug");
+        let invocation = CcInvocation::parse(&argv(&[flag, "-c", "-o", "out.o", "src/a.c"]))
+            .expect("object-only debug option should be admitted");
+        let mut context = context(&workspace, &target);
+        context.inputs.push(CcActionInput {
+            path: workspace.join("src/a.c"),
+            digest: digest_of("source"),
+        });
+        let action = invocation.action(context).unwrap();
+        assert!(
+            keys.insert(action.digest.hash),
+            "{flag} must remain in the key"
+        );
+    }
+    for flag in ["-ggdb4", "-gfull-extra", "-gmodules", "-gsplit-dwarf"] {
+        assert!(CcInvocation::parse(&argv(&[flag, "-c", "-o", "out.o", "src/a.c"])).is_err());
+    }
+}
