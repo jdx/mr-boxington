@@ -31,7 +31,10 @@ jobs:
       - uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1.6.1
         with:
           cache: rust
-      - run: rustup target add wasm32-unknown-unknown
+      - name: Install Rust lint components and test target
+        run: |
+          rustup component add rustfmt clippy
+          rustup target add wasm32-unknown-unknown
       - name: Test benchmark driver
         run: python3 -m unittest discover -s benchmarks -p 'test_*.py'
       - name: Check dependencies
