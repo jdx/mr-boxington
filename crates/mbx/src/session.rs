@@ -682,6 +682,7 @@ impl EventStream {
 impl AgentEventObserver for EventStream {
     fn event(&self, event: AgentEvent) {
         match event {
+            AgentEvent::WrapperTiming { timing } => self.writer.wrapper_timing(timing),
             AgentEvent::ActionHit {
                 crate_name,
                 restore,
@@ -1883,6 +1884,21 @@ fn append_line(path: &OsStr, line: &str) -> std::io::Result<()> {
 }
 
 pub(crate) fn request_agent(requests: &[AgentRequest]) -> Result<Vec<AgentResponse>> {
+    let _phase = requests
+        .first()
+        .and_then(|request| match request {
+            AgentRequest::FindActionResult { .. } | AgentRequest::FindActionPrediction { .. } => {
+                Some("lookup")
+            }
+            AgentRequest::FindBlobs { .. } => Some("blob_transfer"),
+            AgentRequest::JoinActionPromise { .. } => Some("flight_wait"),
+            AgentRequest::ResolveFileDigests { .. } | AgentRequest::FindFileDigests { .. } => {
+                Some("key")
+            }
+            _ => None,
+        })
+        .map(crate::phase_timing::phase);
+
     match session_socket() {
         Some(socket) => request_agent_at(&socket, requests),
         None => request_standalone_agent(requests),

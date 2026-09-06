@@ -397,6 +397,7 @@ pub(crate) fn flight(adapter: &'static str, invocation: &str) -> Option<Flight> 
 }
 
 fn flight_at(pool_dir: &Path, adapter: &'static str, invocation: &str) -> Result<Flight> {
+    let _phase = crate::phase_timing::phase("flight_wait");
     let dir = pool_dir.join(INFLIGHT_DIR);
     std::fs::create_dir_all(&dir)
         .wrap_err_with(|| format!("failed to create {}", dir.display()))?;
@@ -596,6 +597,7 @@ impl Pool {
     /// `None` means the pool could not be used and the compilation should run
     /// unscheduled; it never means the compilation should not run.
     pub(crate) fn admit(&self, demand: &Demand) -> Option<Permit> {
+        let _phase = crate::phase_timing::phase("permit_wait");
         let (weight, predicted) = self.plan(demand);
         let started = Instant::now();
         let mut delay = POLL_INITIAL;

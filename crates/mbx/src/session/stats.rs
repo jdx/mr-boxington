@@ -13,6 +13,7 @@ use std::path::Path;
 pub(super) struct StatsReport {
     version: u8,
     session_duration_ns: u64,
+    wrapper_phases_ns: BTreeMap<String, u64>,
     lookups: u64,
     hits: u64,
     misses: u64,
@@ -73,6 +74,7 @@ impl From<&AgentStats> for StatsReport {
     fn from(stats: &AgentStats) -> Self {
         Self {
             version: 4,
+            wrapper_phases_ns: stats.wrapper_phases_ns.clone(),
             session_duration_ns: stats.session_duration_ns,
             lookups: stats.lookups,
             hits: stats.hits,
@@ -255,6 +257,17 @@ pub(crate) fn display_stats(stats: &AgentStats, config: &Config, style: SummaryS
                     .join(", ")
             ));
         }
+    }
+    if !stats.wrapper_phases_ns.is_empty() {
+        note(&format!(
+            "mbx[cache]: wrapper phases (cumulative, exclusive): {}",
+            stats
+                .wrapper_phases_ns
+                .iter()
+                .map(|(phase, ns)| format!("{phase} {}", format_nanos(*ns)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     let remote_lookup_duration_ns = stats
         .remote_manifest_lookup_duration_ns

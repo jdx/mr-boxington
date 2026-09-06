@@ -152,6 +152,8 @@ pub(crate) fn compile(
     arguments: &[OsString],
     wrapper_argument: Option<&OsStr>,
 ) -> Result<ExitCode> {
+    let _timing = crate::phase_timing::start("rustc", session::crate_name_argument(arguments));
+    let setup = crate::phase_timing::phase("key");
     let working_dir = std::env::current_dir()?;
     // The orchestrated session supplies the target root. A persistent wrapper
     // has no parent session, so first parse just enough of the invocation to
@@ -181,6 +183,7 @@ pub(crate) fn compile(
     let invocation = RustcInvocation::parse_with(&arguments, options)?;
     let outputs = invocation.outputs(&working_dir)?;
 
+    drop(setup);
     if execution_only_build_script {
         return compile_execution_only_build_script(
             rustc,
@@ -452,7 +455,8 @@ pub(crate) fn compile(
             eprintln!("mbx[warning]: private artifacts were not recorded: {error:#}");
         }
     }
-    let output = command.output().wrap_err("failed to execute rustc")?;
+    let output = crate::phase_timing::measure("compiler", || command.output())
+        .wrap_err("failed to execute rustc")?;
     // Released before the outputs are read back and published: hashing and
     // storing cost I/O, not the CPU and memory the permit stands for.
     drop(permit);
@@ -1356,6 +1360,7 @@ fn restore_prediction_payload(
     learned: &mut LearnedPlan,
     diagnostic: Option<&mut Option<ActionDiagnostic>>,
 ) -> Result<Option<CachedCompilation>> {
+    let _phase = crate::phase_timing::phase("key");
     let Compilation {
         invocation,
         working_dir,
@@ -1659,6 +1664,7 @@ fn action_from_parsed_dep_info(
     compilation: &Compilation<'_>,
     dep_info: &RustcDepInfo,
 ) -> Result<(ActionCandidates, DiscoveredInputs)> {
+    let _phase = crate::phase_timing::phase("key");
     let Compilation {
         invocation,
         working_dir,
@@ -1682,6 +1688,7 @@ fn base_action_context(
     working_dir: &Path,
     portable: &Portable,
 ) -> Result<ActionContext> {
+    let _phase = crate::phase_timing::phase("key");
     let compiler = compiler_identity(rustc)?;
     let mut context = ActionContext {
         compiler,
@@ -2053,6 +2060,7 @@ fn restore_result(
     restore_outputs: bool,
     mappings: &[PathMapping],
 ) -> Result<Option<CachedCompilation>> {
+    let _phase = crate::phase_timing::phase("restore");
     let responses = session::request_agent(&[AgentRequest::FindActionResult {
         action: action.digest.clone(),
     }])?;
@@ -2378,6 +2386,7 @@ fn validated_outputs(
 }
 
 fn compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
+    let _phase = crate::phase_timing::phase("key");
     // One shim process serves one compiler, but several steps of one
     // compilation each build an action context. Asking the agent every time
     // turns one identity into several round trips per compilation.
@@ -2421,8 +2430,7 @@ fn query_compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
                 command.env_remove(name);
             }
         }
-        let output = command
-            .output()
+        let output = crate::phase_timing::measure("compiler", || command.output())
             .wrap_err("failed to query the rustc identity")?;
         if !output.status.success() {
             bail!(
@@ -2441,8 +2449,7 @@ fn query_compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
                     command.env_remove(name);
                 }
             }
-            let output = command
-                .output()
+            let output = crate::phase_timing::measure("compiler", || command.output())
                 .wrap_err("failed to query the clippy-driver identity")?;
             if !output.status.success() {
                 bail!(
@@ -2807,6 +2814,7 @@ fn publish_result<'a>(
     output: &Output,
     mappings: &[PathMapping],
 ) -> Result<&'a RustcAction> {
+    let _phase = crate::phase_timing::phase("store");
     if outputs.files.is_empty() {
         bail!("rustc produced no cacheable outputs");
     }

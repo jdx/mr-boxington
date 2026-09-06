@@ -17,4 +17,5 @@ Inspect the local store.
 - [`mbx cache projects`](/cli/cache/projects.md)
 - [`mbx cache remove <WORKSPACE>`](/cli/cache/remove.md)
 - [`mbx cache stats [--json]`](/cli/cache/stats.md)
+- [`mbx cache trace <SESSION>`](/cli/cache/trace.md)
 - [`mbx cache verify`](/cli/cache/verify.md)

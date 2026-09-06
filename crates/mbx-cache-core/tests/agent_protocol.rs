@@ -111,6 +111,12 @@ fn assert_variant_coverage<'a>(
 fn requests() -> Vec<(&'static str, AgentRequest)> {
     vec![
         (
+            "request.record_wrapper_timing",
+            AgentRequest::RecordWrapperTiming {
+                timing: mbx_cache_core::WrapperTiming::default(),
+            },
+        ),
+        (
             "request.hello",
             AgentRequest::Hello {
                 protocol: 8,
@@ -277,6 +283,10 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
 
 fn responses() -> Vec<(&'static str, AgentResponse)> {
     vec![
+        (
+            "response.wrapper_timing_recorded",
+            AgentResponse::WrapperTimingRecorded,
+        ),
         (
             "response.hello",
             AgentResponse::Hello {
@@ -581,6 +591,7 @@ define_variant_coverage!(request_variant_name, EXPECTED_REQUEST_VARIANTS, AgentR
     AgentRequest::JoinActionPromise { .. } => "join_action_promise",
     AgentRequest::CompleteActionPromise { .. } => "complete_action_promise",
     AgentRequest::ResolveFileDigests { .. } => "resolve_file_digests",
+    AgentRequest::RecordWrapperTiming { .. } => "record_wrapper_timing",
 });
 
 define_variant_coverage!(response_variant_name, EXPECTED_RESPONSE_VARIANTS, AgentResponse, {
@@ -607,4 +618,5 @@ define_variant_coverage!(response_variant_name, EXPECTED_RESPONSE_VARIANTS, Agen
     AgentResponse::ActionPromise { .. } => "action_promise",
     AgentResponse::ActionPromiseCompleted => "action_promise_completed",
     AgentResponse::FileDigestsResolved { .. } => "file_digests_resolved",
+    AgentResponse::WrapperTimingRecorded => "wrapper_timing_recorded",
 });

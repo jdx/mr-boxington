@@ -1,6 +1,7 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    mbx::phase_timing::initialize();
     if mbx::session::is_build_script_shim() {
         return mbx::session::run_build_script_shim();
     }

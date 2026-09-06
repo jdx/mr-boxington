@@ -44,7 +44,7 @@ pub use stats::{AgentStats, CompilerStats};
 use wire::MAX_REQUEST_BYTES;
 pub use wire::{
     AGENT_PROTOCOL_VERSION, ActionDiagnostic, AgentEvent, AgentEventObserver, AgentRequest,
-    AgentResponse, PinnedFile, PinnedState, RestoreStats,
+    AgentResponse, PinnedFile, PinnedState, RestoreStats, WrapperSpan, WrapperTiming,
 };
 
 const MAX_EXECUTABLE_IDENTITIES: usize = 64;
@@ -142,6 +142,7 @@ pub struct AgentRemoteCache {
 
 #[derive(Default)]
 struct AtomicAgentStats {
+    wrapper_phases_ns: Mutex<BTreeMap<String, u64>>,
     lookups: AtomicU64,
     unconsulted: AtomicU64,
     hits: AtomicU64,
@@ -1323,6 +1324,7 @@ impl CacheAgent {
                 .stats
                 .avoided_compiler_duration_ns
                 .load(Ordering::Relaxed),
+            wrapper_phases_ns: self.stats.wrapper_phases_ns.lock().unwrap().clone(),
             compiler: self.stats.compiler.lock().unwrap().clone(),
             slow_compilations: self.stats.slow_compilations.lock().unwrap().clone(),
             remote_failures: self.stats.remote_failures.load(Ordering::Relaxed),
@@ -1496,6 +1498,26 @@ impl CacheAgent {
             AgentRequest::RecordFileDigests { scope, entries } => {
                 self.record_file_digests(scope, entries)
             }
+            AgentRequest::RecordWrapperTiming { timing } => (|| {
+                if timing.spans.len() > 512
+                    || timing.phases_ns.len() > 32
+                    || timing.adapter.len() > 64
+                    || timing.unit.as_ref().is_some_and(|s| s.len() > 1024)
+                    || timing.phases_ns.keys().any(|s| s.len() > 64)
+                    || timing.spans.iter().any(|s| s.name.len() > 64)
+                {
+                    bail!("wrapper timing exceeds telemetry limits");
+                }
+                {
+                    let mut phases = self.stats.wrapper_phases_ns.lock().unwrap();
+                    for (phase, duration) in &timing.phases_ns {
+                        let total = phases.entry(phase.clone()).or_default();
+                        *total = total.saturating_add(*duration);
+                    }
+                }
+                self.emit(|| AgentEvent::WrapperTiming { timing });
+                Ok(AgentResponse::WrapperTimingRecorded)
+            })(),
             AgentRequest::RecordCompilerInvocation {
                 outcome,
                 crate_name,

@@ -15,6 +15,8 @@ pub(super) struct CacheArgs {
 
 #[derive(usage::Subcommands)]
 pub(super) enum CacheCommands {
+    /// Export wrapper timings from a session JSONL file as Perfetto-compatible trace JSON.
+    Trace(TraceArgs),
     /// Print the store directory.
     Dir(JsonArgs),
     /// Summarize what the store holds.
@@ -36,6 +38,12 @@ pub(super) enum CacheCommands {
     Import(ImportArgs),
     /// Remove one workspace's managed target and cache claims.
     Remove(RemoveCacheArgs),
+}
+
+#[derive(usage::Args)]
+pub(super) struct TraceArgs {
+    /// Session JSONL file under the store's sessions/v1 directory.
+    session: PathBuf,
 }
 
 #[derive(usage::Args)]
@@ -75,6 +83,10 @@ pub(super) struct RemoveCacheArgs {
 
 pub(super) fn run(config: &Config, command: CacheCommands) -> Result<ExitCode> {
     match command {
+        CacheCommands::Trace(args) => {
+            print_json(&crate::phase_timing::export(&args.session)?)?;
+            Ok(ExitCode::SUCCESS)
+        }
         CacheCommands::Dir(args) => {
             if args.json {
                 print_json(&CacheDirReport {

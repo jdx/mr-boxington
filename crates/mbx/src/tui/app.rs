@@ -104,6 +104,7 @@ impl Session {
                     duration_ns,
                 });
             }
+            SessionEvent::WrapperTiming { .. } => {}
             SessionEvent::Truncated { .. } => self.truncated = true,
             SessionEvent::SessionFinished { ts_ms, stats, .. } => {
                 self.finished_ms = Some(ts_ms);

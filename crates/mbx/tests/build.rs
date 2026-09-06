@@ -3398,3 +3398,72 @@ fn find_object(project: &Path) -> Option<std::path::PathBuf> {
     }
     None
 }
+
+#[test]
+fn wrapper_phase_reports_and_trace_cover_real_cold_and_warm_builds() {
+    let project = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let settings = [("MBX_TARGET_VIEWS", "0"), ("MBX_INCREMENTAL", "0")];
+    let (cold, _) = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+        &settings,
+    );
+    assert!(cold["wrapper_phases_ns"]["compiler"].as_u64().unwrap() > 0);
+    assert!(cold["wrapper_phases_ns"]["store"].as_u64().unwrap() > 0);
+    std::fs::remove_dir_all(project.path().join("target")).unwrap();
+    let (warm, _) = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("warm.json"),
+        &settings,
+    );
+    assert!(count(&warm, "hits") > 0);
+    for name in ["startup", "key", "lookup", "restore", "unattributed"] {
+        assert!(
+            warm["wrapper_phases_ns"][name].as_u64().unwrap() > 0,
+            "{name}: {warm}"
+        );
+    }
+    // Follow the same discovery a user does: session streams live under the
+    // store, and cache trace reads their published JSONL contract.
+    let store_path = store.path().join("actions/sessions/v1");
+    let mut exported = 0;
+    for entry in std::fs::read_dir(&store_path).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|ext| ext != "jsonl") {
+            continue;
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+            .args(["cache", "trace"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let trace: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!trace["traceEvents"].as_array().unwrap().is_empty());
+        for line in std::fs::read_to_string(path).unwrap().lines() {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            if event["type"] != "wrapper_timing" {
+                continue;
+            }
+            let timing = &event["timing"];
+            let total: u64 = timing["phases_ns"]
+                .as_object()
+                .unwrap()
+                .values()
+                .map(|v| v.as_u64().unwrap())
+                .sum();
+            assert_eq!(total, timing["duration_ns"].as_u64().unwrap());
+        }
+        exported += 1;
+    }
+    assert!(exported >= 2);
+}

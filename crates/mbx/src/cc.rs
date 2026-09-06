@@ -43,6 +43,8 @@ const ADAPTER: &str = "cc";
 /// a successful compile is ever published, so a compiler error always reaches
 /// the build exactly as it would have without mbx.
 pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -> Result<ExitCode> {
+    let _timing = crate::phase_timing::start("cc", None);
+    let setup = crate::phase_timing::phase("key");
     let working_dir = std::env::current_dir()?;
     let mappings = path_mappings(&working_dir);
     let identity = compiler_identity(compiler, language)?;
@@ -69,6 +71,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         inputs: Vec::new(),
     };
 
+    drop(setup);
     let verify = session::verify_requested();
     let invocation_digest = invocation.invocation_digest(&context)?;
     let task = prediction_task(&invocation_digest);
@@ -80,6 +83,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     // with the same stale prediction failing the same way on every later build.
     // Falling through compiles and republishes, which replaces it.
     let usable = find_prediction(&task, &invocation_digest)?.and_then(|prediction| {
+        let _phase = crate::phase_timing::phase("key");
         let discovered = prediction
             .discover(
                 &working_dir,
@@ -96,7 +100,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     if let Some((prediction, discovered)) = usable {
         let mut candidate = context.clone();
         discovered.clone().apply_to(&mut candidate)?;
-        let action = invocation.action(candidate)?;
+        let action = crate::phase_timing::measure("key", || invocation.action(candidate))?;
         looked_up = true;
         // A restore that fails is a miss, not a bypass. Bypassing would leave
         // the compilation uncached and publish nothing, so a partial or corrupt
@@ -279,8 +283,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     let mut command = Command::new(compiler);
     command.args(&compiler_arguments);
     command.args(invocation.dependency_arguments_for(&depfile, context.compiler.family));
-    let output = command
-        .output()
+    let output = crate::phase_timing::measure("compiler", || command.output())
         .wrap_err_with(|| format!("failed to run {}", Path::new(compiler).display()))?;
     drop(permit);
     crate::scheduler::record_compiler_memory(&demand, &output.status);
@@ -419,6 +422,7 @@ fn restore_flight_prediction(
     looked_up: &mut bool,
     recorded_action: Option<&CacheDigest>,
 ) -> Result<Option<(CacheDigest, CachedCompilation, CcDiscoveredInputs)>> {
+    let _phase = crate::phase_timing::phase("key");
     let prediction: CcInputPrediction = serde_json::from_str(payload)?;
     let discovered = prediction.discover(
         &context.working_dir,
@@ -427,7 +431,7 @@ fn restore_flight_prediction(
     )?;
     let mut candidate = context.clone();
     discovered.clone().apply_to(&mut candidate)?;
-    let action = invocation.action(candidate)?;
+    let action = crate::phase_timing::measure("key", || invocation.action(candidate))?;
     if recorded_action.is_some_and(|recorded| recorded != &action.digest) {
         bail!("the action promise no longer matches its predicted inputs");
     }
@@ -806,6 +810,7 @@ fn session_path(name: &str) -> Option<PathBuf> {
 /// compile hundreds of translation units and each one would otherwise re-run
 /// the compiler just to ask its version.
 fn compiler_identity(compiler: &OsStr, language: CcLanguage) -> Result<CcCompilerIdentity> {
+    let _phase = crate::phase_timing::phase("key");
     let executable = resolve_executable(compiler)?;
     let is_cl = executable
         .file_stem()
@@ -1061,6 +1066,7 @@ fn restore_result(
     mappings: &[PathMapping],
     working_dir: &Path,
 ) -> Result<Option<CachedCompilation>> {
+    let _phase = crate::phase_timing::phase("restore");
     let text_mappings = rustc_path_mappings(mappings);
     let responses = session::request_agent(&[AgentRequest::FindActionResult {
         action: action.digest.clone(),
@@ -1223,6 +1229,7 @@ fn publish_result(
     output: &Output,
     mappings: &[PathMapping],
 ) -> Result<()> {
+    let _phase = crate::phase_timing::phase("store");
     let text_mappings = rustc_path_mappings(mappings);
     let metadata = std::fs::metadata(object)
         .wrap_err_with(|| format!("failed to inspect cc output {}", object.display()))?;

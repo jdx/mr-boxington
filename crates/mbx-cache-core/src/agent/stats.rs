@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AgentStats {
+    /// Cumulative exclusive wrapper durations, including an unattributed remainder.
+    pub wrapper_phases_ns: BTreeMap<String, u64>,
     /// End-to-end lifetime of the task-scoped cache session.
     pub session_duration_ns: u64,
     /// Number of action-result lookups.

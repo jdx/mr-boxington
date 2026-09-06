@@ -110,3 +110,24 @@ The event files are an implementation detail of `mbx tui` and may change in any
 release. Scripts should read `MBX_STATS_REPORT`, which is
 [versioned](/stability#json-output-is-versioned).
 :::
+
+## Wrapper phase traces
+
+Rustc and C/C++ cache attempts also record startup, key construction, cache
+lookup, blob transfer, restore, store, compiler execution, and scheduler waits.
+`MBX_STATS_REPORT` includes these as `wrapper_phases_ns`. The durations are
+cumulative across wrappers and exclusive: nested work is subtracted from its
+parent phase. They do not add up to build wall time because compilers run in
+parallel. Work without a phase is reported as `unattributed`.
+
+To inspect a saved build in Perfetto, export its session file:
+
+```sh
+mbx cache trace "$(mbx cache dir)/sessions/v1/<session>.jsonl" > trace.json
+```
+
+Open `trace.json` in [Perfetto](https://ui.perfetto.dev). Each wrapper process
+has its own lane, with nested phases under the invocation. Trace spans are
+bounded to 512 per wrapper; totals continue accumulating after that limit.
+Telemetry delivery itself is excluded. A declined cache attempt ends before
+the transparent compiler fallback, and rustdoc is not instrumented.

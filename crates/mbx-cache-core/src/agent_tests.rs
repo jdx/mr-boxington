@@ -4991,3 +4991,34 @@ fn seeded_file_digests_answer_lookups_and_yield_to_this_sessions_records() {
         ]
     );
 }
+
+#[tokio::test]
+async fn wrapper_timing_aggregates_without_changing_action_counters() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    let mut timing = WrapperTiming::default();
+    timing.phases_ns.insert("key".into(), 20);
+    timing.phases_ns.insert("unattributed".into(), 5);
+    for _ in 0..2 {
+        let response = agent
+            .respond(AgentRequest::RecordWrapperTiming {
+                timing: timing.clone(),
+            })
+            .await;
+        assert!(matches!(response, AgentResponse::WrapperTimingRecorded));
+    }
+    let stats = agent.stats();
+    assert_eq!(stats.wrapper_phases_ns["key"], 40);
+    assert_eq!(stats.wrapper_phases_ns["unattributed"], 10);
+    assert_eq!(stats.lookups, 0);
+    assert_eq!(stats.hits, 0);
+    assert!(stats.compiler.is_empty());
+    timing.spans.resize(513, WrapperSpan::default());
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::RecordWrapperTiming { timing })
+            .await,
+        AgentResponse::Error { .. }
+    ));
+    assert_eq!(agent.stats(), stats);
+}

@@ -22,6 +22,7 @@
 - [`mbx setup [FLAGS]`](/cli/setup.md)
 - [`mbx gc [FLAGS]`](/cli/gc.md)
 - [`mbx cache <SUBCOMMAND>`](/cli/cache.md)
+- [`mbx cache trace <SESSION>`](/cli/cache/trace.md)
 - [`mbx cache dir [--json]`](/cli/cache/dir.md)
 - [`mbx cache stats [--json]`](/cli/cache/stats.md)
 - [`mbx cache projects`](/cli/cache/projects.md)

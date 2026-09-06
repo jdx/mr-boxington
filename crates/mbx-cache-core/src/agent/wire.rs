@@ -294,6 +294,43 @@ pub enum AgentRequest {
         /// File identities to resolve, preserving request order.
         files: Vec<FileIdentity>,
     },
+    /// Record exclusive wrapper phase durations and bounded trace spans.
+    RecordWrapperTiming {
+        /// Completed invocation timings.
+        timing: WrapperTiming,
+    },
+}
+
+/// One wrapper invocation, independent of its cache hit/miss accounting.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct WrapperTiming {
+    /// Compiler adapter, such as rustc or cc.
+    pub adapter: String,
+    /// Crate or source name, when known.
+    pub unit: Option<String>,
+    /// Wrapper process, used as the trace lane.
+    pub pid: u32,
+    /// Wall-clock start in microseconds since the Unix epoch.
+    pub start_us: u64,
+    /// Monotonic elapsed time, excluding telemetry delivery.
+    pub duration_ns: u64,
+    /// Exclusive durations; nested work is subtracted from its parent.
+    pub phases_ns: std::collections::BTreeMap<String, u64>,
+    /// Nested spans relative to this wrapper's start, capped at 512.
+    pub spans: Vec<WrapperSpan>,
+}
+
+/// A trace interval inside one wrapper process.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct WrapperSpan {
+    /// Phase name.
+    pub name: String,
+    /// Monotonic offset from wrapper entry.
+    pub start_ns: u64,
+    /// Inclusive elapsed time.
+    pub duration_ns: u64,
 }
 
 /// Local output restoration work performed by one action-cache adapter hit.
@@ -333,6 +370,11 @@ pub struct RestoreStats {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum AgentEvent {
+    /// An invocation completed its wrapper instrumentation.
+    WrapperTiming {
+        /// Completed invocation timings.
+        timing: WrapperTiming,
+    },
     /// An action's outputs were restored from cache.
     ActionHit {
         /// Compiler crate name, when the invocation supplied one.
@@ -497,4 +539,6 @@ pub enum AgentResponse {
         /// Resolution outcomes in request order.
         resolutions: Vec<FileDigestResolution>,
     },
+    /// Wrapper phase timings were recorded.
+    WrapperTimingRecorded,
 }

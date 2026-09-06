@@ -48,6 +48,12 @@ const MAX_EVENT_FILE_BYTES: u64 = 16 * 1024 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum SessionEvent {
+    /// Wrapper phase data, separate from action counters.
+    WrapperTiming {
+        v: u8,
+        ts_ms: u64,
+        timing: mbx_cache_core::WrapperTiming,
+    },
     /// The build that owns this stream, written before its first decision.
     SessionStarted {
         v: u8,
@@ -357,6 +363,14 @@ impl EventWriter {
             duration_ns,
             detail,
             diagnostic,
+        });
+    }
+
+    pub(crate) fn wrapper_timing(&self, timing: mbx_cache_core::WrapperTiming) {
+        self.write(&SessionEvent::WrapperTiming {
+            v: EVENT_VERSION,
+            ts_ms: now_ms(),
+            timing,
         });
     }
 
