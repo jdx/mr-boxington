@@ -290,7 +290,14 @@ fn restore_destinations(config: &Config, cargo: &OsStr, toolchain: Option<&str>)
         command.arg(format!("+{toolchain}"));
     }
     let target = command
-        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .args([
+            "metadata",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--offline",
+            "--locked",
+        ])
         .output()
         .ok()
         .filter(|output| output.status.success())
@@ -859,7 +866,7 @@ mod layout_tests {
                     .unwrap()
                     .canonicalize()
                     .unwrap()
-                    .starts_with(target.path())
+                    .starts_with(target.path().canonicalize().unwrap())
             );
             Ok(())
         });
