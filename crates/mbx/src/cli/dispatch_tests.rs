@@ -135,6 +135,7 @@ fn a_toolchain_is_refused_where_no_compiler_would_see_it() {
         (vec!["mbx", "+1.91", "gc"], "gc"),
         (vec!["mbx", "+1.91", "cache", "dir"], "cache"),
         (vec!["mbx", "+1.91", "tui"], "tui"),
+        (vec!["mbx", "+1.91", "stats", "--json"], "stats"),
         (vec!["mbx", "+1.91", "exec", "make"], "exec"),
         (vec!["mbx", "+1.91", "setup"], "setup"),
     ] {

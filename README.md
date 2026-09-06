@@ -25,6 +25,7 @@ cargo build                # cached by mbx
 cargo test --all-features  # cached by mbx
 cargo clippy --workspace   # cached by mbx
 mbx tui                    # watch every build's cache activity live
+mbx stats                  # lifetime savings, pruning, and workspace sharing
 mbx gc --dry-run           # preview what cleanup would reclaim
 ```
 

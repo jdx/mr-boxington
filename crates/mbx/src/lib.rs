@@ -39,6 +39,7 @@ pub mod remote;
 pub(crate) mod savings;
 #[doc(hidden)]
 pub mod session;
+pub(crate) mod stats;
 #[doc(hidden)]
 pub mod store;
 #[doc(hidden)]

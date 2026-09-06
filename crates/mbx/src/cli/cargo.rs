@@ -333,6 +333,9 @@ pub(super) fn account_session(
         Err(error) => (Err(error), None),
     };
     let mut delta = sweep_store(config, retention);
+    delta.auto_pruned_bytes = delta
+        .freed_target_bytes
+        .saturating_add(delta.freed_store_bytes);
     // Removing the checkout's own `target/` on the way in freed disk too, and
     // it is the largest single reclaim a first build ever reports -- but the
     // user confirmed it, so it must not feed the counters the collection

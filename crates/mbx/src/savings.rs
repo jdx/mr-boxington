@@ -44,6 +44,10 @@ pub(crate) struct Tally {
     pub reflinked_bytes: u64,
     pub freed_target_bytes: u64,
     pub freed_store_bytes: u64,
+    /// Automatic sweeps only. Older ledgers combined automatic and explicit GC,
+    /// so this counter has its own start date instead of backfilling a guess.
+    pub auto_pruned_bytes: u64,
+    pub auto_pruned_since_secs: u64,
     /// Bytes the user asked to have removed: a confirmed `target/` migration,
     /// or `mbx cache remove`. Kept apart from the collection counters because
     /// every line about those brags that nobody had to do anything -- which is
@@ -67,6 +71,7 @@ pub(crate) struct Delta {
     pub reflinked_bytes: u64,
     pub freed_target_bytes: u64,
     pub freed_store_bytes: u64,
+    pub auto_pruned_bytes: u64,
     pub freed_requested_bytes: u64,
 }
 
@@ -110,6 +115,12 @@ pub(crate) fn record(store: &Path, delta: &Delta) -> Result<Tally> {
         tally.version = TALLY_VERSION;
         tally.since_secs = now_secs();
     }
+    if tally.auto_pruned_since_secs == 0 {
+        tally.auto_pruned_since_secs = now_secs();
+    }
+    tally.auto_pruned_bytes = tally
+        .auto_pruned_bytes
+        .saturating_add(delta.auto_pruned_bytes);
     tally.builds = tally.builds.saturating_add(delta.builds);
     tally.cached_compilations = tally
         .cached_compilations
@@ -148,6 +159,16 @@ fn read(path: &Path) -> Tally {
 /// The stored totals for `store`, or an empty tally when there are none yet.
 pub(crate) fn read_tally(store: &Path) -> Tally {
     read(&tally_path(store))
+}
+
+/// A fixed UTC date makes a lifetime total unambiguous, including after a pause.
+pub(crate) fn since(seconds: u64) -> String {
+    i64::try_from(seconds)
+        .ok()
+        .filter(|seconds| *seconds > 0)
+        .and_then(|seconds| jiff::Timestamp::from_second(seconds).ok())
+        .map(|timestamp| format!("since {}", timestamp.strftime("%Y-%m-%d")))
+        .unwrap_or_else(|| "since an unknown date".into())
 }
 
 fn now_secs() -> u64 {
@@ -358,7 +379,10 @@ fn iec(bytes: u64) -> String {
 /// [`format_duration`] is for measurements and renders six hours as
 /// `22440.00s`, which is no way to tell somebody good news. Two units carry
 /// all the precision a brag needs.
-fn nanos(nanoseconds: u64) -> String {
+pub(crate) fn nanos(nanoseconds: u64) -> String {
+    if nanoseconds == 0 {
+        return "0s".into();
+    }
     let total = Duration::from_nanos(nanoseconds).as_secs();
     if total == 0 {
         return format_duration(Duration::from_nanos(nanoseconds));

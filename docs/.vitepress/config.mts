@@ -72,6 +72,7 @@ export default defineConfig({
           { text: "Managed targets", link: "/managed-targets" },
           { text: "Standalone C and C++", link: "/standalone-builds" },
           { text: "Watching builds", link: "/tui" },
+          { text: "Savings and statistics", link: "/stats" },
         ],
       },
       {
@@ -119,6 +120,7 @@ export default defineConfig({
             ],
           },
           { text: "tui", link: "/cli/tui" },
+          { text: "stats", link: "/cli/stats" },
           { text: "prefetch", link: "/cli/prefetch" },
           { text: "Settings", link: "/configuration#settings" },
         ],

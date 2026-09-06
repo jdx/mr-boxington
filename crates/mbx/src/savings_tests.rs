@@ -402,3 +402,30 @@ fn the_full_pool_reads_like_a_person_wrote_it() {
         println!();
     }
 }
+
+#[test]
+fn automatic_pruning_gets_its_own_start_date_without_reclassifying_old_gc() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = record(
+        directory.path(),
+        &Delta {
+            freed_store_bytes: 100,
+            ..Delta::default()
+        },
+    )
+    .unwrap();
+    assert!(first.auto_pruned_since_secs > 0);
+    assert_eq!(first.auto_pruned_bytes, 0);
+    let second = record(
+        directory.path(),
+        &Delta {
+            freed_target_bytes: 40,
+            auto_pruned_bytes: 40,
+            ..Delta::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(second.auto_pruned_bytes, 40);
+    assert_eq!(second.auto_pruned_since_secs, first.auto_pruned_since_secs);
+    assert_eq!(second.freed_store_bytes + second.freed_target_bytes, 140);
+}

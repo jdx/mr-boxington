@@ -1,290 +1,617 @@
 //! Drawing the dashboard.
 
-use super::app::{App, Row, Session, Tab};
+use super::app::{App, Session, Tab};
+use super::theme;
 use crate::events::{ActionOutcome, SessionState};
 use crate::util::format_duration;
 use bytesize::ByteSize;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row as TableRow, Table, Tabs};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Cell, Gauge, Paragraph, Row as TableRow, Table, TableState, Wrap,
+};
 use std::time::Duration;
 
-/// The color an outcome is shown in.
-///
-/// A bypass is yellow rather than red: it is a deliberate refusal to cache, not
-/// a failure, and coloring it like one would teach the wrong lesson about a
-/// perfectly healthy build.
-fn outcome_style(outcome: &ActionOutcome) -> Style {
+pub(super) fn panel(title: impl Into<Line<'static>>) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme::BORDER))
+        .style(Style::new().fg(theme::TEXT).bg(theme::PANEL))
+        .title_style(Style::new().fg(theme::ACCENT).bold())
+        .title(title)
+}
+
+/// Bypasses are deliberate refusals to cache, not failures.
+pub(super) fn outcome_style(outcome: &ActionOutcome) -> Style {
     match outcome {
-        ActionOutcome::Hit => Style::new().fg(Color::Green),
-        ActionOutcome::Miss => Style::new().fg(Color::Red),
-        ActionOutcome::Unconsulted => Style::new().fg(Color::DarkGray),
-        ActionOutcome::Verification { matched: true } => Style::new().fg(Color::Cyan),
-        ActionOutcome::Verification { matched: false } => Style::new().fg(Color::Magenta).bold(),
-        ActionOutcome::Bypass { .. } => Style::new().fg(Color::Yellow),
+        ActionOutcome::Hit => Style::new().fg(theme::HIT),
+        ActionOutcome::Miss => Style::new().fg(theme::MISS),
+        ActionOutcome::Unconsulted => Style::new().fg(theme::MUTED),
+        ActionOutcome::Verification { matched: true } => Style::new().fg(theme::ACCENT),
+        ActionOutcome::Verification { matched: false } => Style::new().fg(theme::PURPLE).bold(),
+        ActionOutcome::Bypass { .. } => Style::new().fg(theme::WARNING),
     }
 }
 
-fn state_style(state: SessionState) -> Style {
+pub(super) fn state_style(state: SessionState) -> Style {
     match state {
-        SessionState::Live => Style::new().fg(Color::Green).bold(),
-        SessionState::Finished => Style::new().fg(Color::DarkGray),
-        SessionState::Abandoned => Style::new().fg(Color::Red),
+        SessionState::Live => Style::new().fg(theme::HIT).bold(),
+        SessionState::Finished => Style::new().fg(theme::MUTED),
+        SessionState::Abandoned => Style::new().fg(theme::MISS),
+    }
+}
+
+pub(super) use crate::savings::nanos as saved_duration;
+
+fn main_area(area: Rect) -> std::rc::Rc<[Rect]> {
+    Layout::vertical([
+        Constraint::Length(5),
+        Constraint::Length(3),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(area)
+}
+
+fn live_columns(area: Rect) -> (Rect, Option<Rect>) {
+    if area.width >= 110 && area.height >= 22 {
+        let columns = Layout::horizontal([
+            Constraint::Min(64),
+            Constraint::Length(1),
+            Constraint::Length((area.width / 3).clamp(36, 48)),
+        ])
+        .split(area);
+        (columns[0], Some(columns[2]))
+    } else {
+        (area, None)
+    }
+}
+
+fn live_areas(area: Rect, app: &App) -> std::rc::Rc<[Rect]> {
+    // Let small histories take less room, and leave activity readable on short terminals.
+    let builds = (app.sessions().count().min(5) as u16 + 3)
+        .min(area.height.saturating_sub(7))
+        .max(4);
+    Layout::vertical([Constraint::Length(builds), Constraint::Min(0)]).split(area)
+}
+
+pub(super) fn action_page_size(area: Rect, app: &App) -> usize {
+    let body = main_area(area)[2];
+    live_areas(body, app)[1].height.saturating_sub(6).max(1) as usize
+}
+
+pub(super) fn scroll_page(app: &mut App, area: Rect, down: bool) {
+    if app.tab == Tab::Insights {
+        super::insights::scroll(app, main_area(area)[2], down);
+    } else if app.tab == Tab::Store {
+        let body = main_area(area)[2];
+        let page = body.height.saturating_sub(2).max(1) as usize;
+        let max = store_lines(app, body.width.saturating_sub(2))
+            .len()
+            .saturating_sub(page);
+        app.store_scroll = if down {
+            app.store_scroll.min(max).saturating_add(page).min(max)
+        } else {
+            app.store_scroll.min(max).saturating_sub(page)
+        };
+    } else if down {
+        app.newer_actions(action_page_size(area, app));
+    } else {
+        app.older_actions(action_page_size(area, app));
+    }
+}
+
+pub(super) fn move_vertical(app: &mut App, area: Rect, down: bool) {
+    if app.tab == Tab::Store {
+        let body = main_area(area)[2];
+        let max = store_lines(app, body.width.saturating_sub(2))
+            .len()
+            .saturating_sub(body.height.saturating_sub(2) as usize);
+        app.store_scroll = if down {
+            app.store_scroll.min(max).saturating_add(1).min(max)
+        } else {
+            app.store_scroll.min(max).saturating_sub(1)
+        };
+    } else if down {
+        app.select_next();
+    } else {
+        app.select_previous();
     }
 }
 
 pub(super) fn draw(frame: &mut Frame, app: &App) {
-    let areas = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Length(1),
-        Constraint::Min(0),
-        Constraint::Length(1),
-    ])
-    .split(frame.area());
-
+    frame.render_widget(
+        Block::default().style(Style::new().fg(theme::TEXT).bg(theme::BACKGROUND)),
+        frame.area(),
+    );
+    if frame.area().width < 48 || frame.area().height < 22 {
+        frame.render_widget(
+            Paragraph::new("Enlarge the terminal to at least 48 × 22.\nUse mbx tui --once for a text snapshot.\nq quit")
+                .wrap(Wrap { trim: false }),
+            frame.area(),
+        );
+        return;
+    }
+    let areas = main_area(frame.area());
     header(frame, areas[0], app);
     tabs(frame, areas[1], app);
     match app.tab {
         Tab::Live => live(frame, areas[2], app),
         Tab::Sessions => sessions(frame, areas[2], app),
         Tab::Store => store(frame, areas[2], app),
+        Tab::Insights => super::insights::draw(frame, areas[2], app),
     }
     footer(frame, areas[3], app);
 }
 
+fn size(bytes: u64) -> String {
+    ByteSize::b(bytes).display().iec().to_string()
+}
+
 fn header(frame: &mut Frame, area: Rect, app: &App) {
-    let mut spans = vec![Span::styled(
-        app.store_dir().display().to_string(),
-        Style::new().fg(Color::Cyan),
-    )];
-    if let Some(stats) = &app.store_stats {
-        spans.push(Span::raw("  ·  "));
-        spans.push(Span::raw(format!(
-            "{} in {} objects",
-            ByteSize::b(stats.total_bytes()).display().iec(),
-            stats.objects
-        )));
+    if area.width >= 110 {
+        super::dashboard::header(frame, area, app);
+        return;
     }
-    let saved = Duration::from_nanos(app.savings.avoided_compiler_ns);
-    if !saved.is_zero() {
-        spans.push(Span::raw("  ·  "));
-        spans.push(Span::styled(
-            format!("{} of compiling saved so far", format_duration(saved)),
-            Style::new().fg(Color::Green),
-        ));
-    }
+    let running = app
+        .sessions()
+        .filter(|session| session.state == SessionState::Live)
+        .count();
+    let status = if app.paused {
+        " PAUSED ".into()
+    } else {
+        format!(" {running} running ")
+    };
+    let block = panel(" mbx ").title_top(
+        Line::styled(
+            status,
+            Style::new()
+                .fg(if app.paused {
+                    theme::WARNING
+                } else {
+                    theme::HIT
+                })
+                .bold(),
+        )
+        .right_aligned(),
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
     frame.render_widget(
-        Paragraph::new(Line::from(spans))
-            .block(Block::default().borders(Borders::ALL).title(" mbx ")),
-        area,
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                saved_duration(app.savings.avoided_compiler_ns),
+                Style::new().fg(theme::HIT).bold(),
+            ),
+            Span::raw(if app.savings.since_secs > 0 {
+                format!(
+                    " compiling saved {}",
+                    crate::savings::since(app.savings.since_secs)
+                )
+            } else {
+                " compiling saved · no history yet".into()
+            }),
+        ])),
+        rows[0],
+    );
+    capacity(frame, rows[1], app);
+    pressure(frame, rows[2], app);
+}
+
+pub(super) fn pressure(frame: &mut Frame, area: Rect, app: &App) {
+    let thrashing = app.health.possible_thrashing(app.store_budget);
+    let message = if thrashing {
+        format!(
+            "! POSSIBLE CACHE THRASHING · {} evicted / 5m · {:.0}% misses",
+            size(app.health.evicted),
+            app.health.miss_rate()
+        )
+    } else {
+        format!(
+            "Evicted {} / 5m · {} total{}",
+            size(app.health.evicted),
+            size(app.savings.freed_store_bytes),
+            if app.gc_auto { "" } else { " · auto GC off" }
+        )
+    };
+    let style = if thrashing && app.health.bright() {
+        Style::new().fg(theme::BACKGROUND).bg(theme::MISS).bold()
+    } else if thrashing {
+        Style::new().fg(theme::WARNING).bold()
+    } else {
+        Style::new().fg(if app.health.evicted > 0 {
+            theme::WARNING
+        } else {
+            theme::MUTED
+        })
+    };
+    frame.render_widget(Paragraph::new(message).style(style), area);
+}
+
+fn capacity(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(stats) = &app.store_stats else {
+        frame.render_widget(Paragraph::new("Store usage unavailable"), area);
+        return;
+    };
+    let used = stats.total_bytes();
+    let Some(budget) = app.store_budget else {
+        frame.render_widget(
+            Paragraph::new(format!("Store {} · budget unavailable", size(used))),
+            area,
+        );
+        return;
+    };
+    let ratio = if budget == 0 {
+        f64::from(used > 0)
+    } else {
+        used as f64 / budget as f64
+    };
+    let color = if ratio >= 1.0 {
+        theme::MISS
+    } else if ratio >= 0.9 {
+        theme::WARNING
+    } else {
+        theme::ACCENT
+    };
+    let areas = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(if area.width < 78 { 8 } else { 14 }),
+    ])
+    .split(area);
+    let percent = if budget == 0 {
+        "zero budget".into()
+    } else {
+        format!("{:.0}%", ratio * 100.0)
+    };
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Store {} / {} · {percent}",
+            size(used),
+            size(budget)
+        ))
+        .style(Style::new().fg(color)),
+        areas[0],
+    );
+    frame.render_widget(
+        Gauge::default()
+            .ratio(ratio.clamp(0.0, 1.0))
+            .label("")
+            .gauge_style(Style::new().fg(color).bg(theme::BORDER))
+            .use_unicode(true),
+        areas[2],
     );
 }
 
 fn tabs(frame: &mut Frame, area: Rect, app: &App) {
-    let selected = Tab::ALL.iter().position(|tab| *tab == app.tab).unwrap_or(0);
-    frame.render_widget(
-        Tabs::new(Tab::ALL.map(Tab::title).to_vec())
-            .select(selected)
-            .highlight_style(Style::new().bold().fg(Color::Cyan))
-            .divider(" "),
-        area,
-    );
+    let mut x = area.x;
+    for (index, tab) in Tab::ALL.iter().enumerate() {
+        let title = format!("{} {}", index + 1, tab.title());
+        let width = (title.len() as u16 + 2).min(area.right().saturating_sub(x));
+        let selected = *tab == app.tab;
+        let style = if selected {
+            Style::new().fg(theme::ACCENT).bg(theme::SELECTION).bold()
+        } else {
+            Style::new().fg(theme::MUTED).bg(theme::BACKGROUND)
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(style)
+            .style(style);
+        frame.render_widget(
+            Paragraph::new(title)
+                .alignment(Alignment::Center)
+                .style(style)
+                .block(block),
+            Rect::new(x, area.y, width, area.height),
+        );
+        x = x.saturating_add(width + 1);
+    }
 }
 
-/// The live view: which builds are running, and what the selected one is doing.
 fn live(frame: &mut Frame, area: Rect, app: &App) {
     if app.is_empty() {
         frame.render_widget(
-            Paragraph::new(
-                "No builds recorded yet.\n\nRun `mbx build` in another terminal and it will appear here.",
-            )
-            .block(Block::default().borders(Borders::ALL).title(" builds ")),
+            Paragraph::new("Waiting for builds…\n\nRun `mbx build` in another terminal.\nBuilds from every workspace will appear here.")
+                .wrap(Wrap { trim: false })
+                .block(panel(" Builds ")),
             area,
         );
         return;
     }
-    let areas = Layout::vertical([Constraint::Length(8), Constraint::Min(0)]).split(area);
+    let (main, sidebar) = live_columns(area);
+    if let Some(sidebar) = sidebar {
+        super::dashboard::sidebar(frame, sidebar, app);
+    }
+    let areas = live_areas(main, app);
     session_list(frame, areas[0], app);
     if let Some(session) = app.selected_session() {
-        action_rows(frame, areas[1], session);
+        action_rows(frame, areas[1], session, app.action_scroll);
     }
 }
 
-fn session_list(frame: &mut Frame, area: Rect, app: &App) {
-    let rows: Vec<TableRow> = app
-        .sessions()
-        .enumerate()
-        .map(|(index, session)| {
-            let marker = if index == app.selected { "▸" } else { " " };
-            let hit_rate = session
-                .hit_rate()
-                .map(|rate| format!("{rate:.0}%"))
-                .unwrap_or_else(|| "-".into());
-            TableRow::new(vec![
-                Cell::from(marker),
-                Cell::from(session.title()),
-                Cell::from(session.workspace_name().unwrap_or("").to_string()),
-                Cell::from(Span::styled(
-                    session.state.label(),
-                    state_style(session.state),
-                )),
-                Cell::from(Span::styled(
-                    session.count("hit").to_string(),
-                    Style::new().fg(Color::Green),
-                )),
-                Cell::from(Span::styled(
-                    session.count("miss").to_string(),
-                    Style::new().fg(Color::Red),
-                )),
-                Cell::from(Span::styled(
-                    session.count("unconsulted").to_string(),
-                    Style::new().fg(Color::DarkGray),
-                )),
-                Cell::from(Span::styled(
-                    session
-                        .bypasses()
-                        .iter()
-                        .map(|(_, count)| count)
-                        .sum::<u64>()
-                        .to_string(),
-                    Style::new().fg(Color::Yellow),
-                )),
-                Cell::from(hit_rate),
-            ])
-        })
-        .collect();
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(1),
-            Constraint::Min(20),
-            Constraint::Length(16),
-            Constraint::Length(10),
-            Constraint::Length(6),
-            Constraint::Length(6),
-            Constraint::Length(12),
-            Constraint::Length(8),
-            Constraint::Length(6),
-        ],
-    )
-    .header(
-        TableRow::new(vec![
-            "",
-            "command",
-            "workspace",
-            "state",
-            "hit",
-            "miss",
-            "unconsulted",
-            "bypass",
-            "rate",
-        ])
-        .style(Style::new().bold()),
-    )
-    .block(Block::default().borders(Borders::ALL).title(" builds "));
-    frame.render_widget(table, area);
+fn right(value: impl Into<String>, style: Style) -> Cell<'static> {
+    Cell::from(Line::styled(value.into(), style).right_aligned())
 }
 
-fn action_rows(frame: &mut Frame, area: Rect, session: &Session) {
-    let title = match session.truncated {
-        true => format!(" {} (history capped) ", session.title()),
-        false => format!(" {} ", session.title()),
+fn count(value: u64, color: Color) -> Cell<'static> {
+    right(
+        value.to_string(),
+        Style::new().fg(if value == 0 { theme::MUTED } else { color }),
+    )
+}
+
+fn table_header(labels: &[&str], numeric_from: usize) -> TableRow<'static> {
+    TableRow::new(
+        labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| {
+                let line = Line::from((*label).to_string());
+                Cell::from(if i >= numeric_from {
+                    line.right_aligned()
+                } else {
+                    line
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .style(Style::new().fg(theme::MUTED).bold())
+}
+
+fn session_list(frame: &mut Frame, area: Rect, app: &App) {
+    let wide = area.width >= 120;
+    let medium = area.width >= 80;
+    let mut labels = vec!["command"];
+    let mut widths = vec![Constraint::Min(16)];
+    if wide {
+        labels.push("workspace");
+        widths.push(Constraint::Length(18));
+    }
+    labels.push("state");
+    widths.push(Constraint::Length(9));
+    let numeric_from = labels.len();
+    if medium {
+        labels.extend(["hit", "miss"]);
+        widths.extend([Constraint::Length(6), Constraint::Length(6)]);
+    }
+    if wide {
+        labels.extend(["unconsulted", "bypass"]);
+        widths.extend([Constraint::Length(11), Constraint::Length(6)]);
+    }
+    labels.push("rate");
+    widths.push(Constraint::Length(5));
+    let rows = app
+        .sessions()
+        .map(|session| {
+            let mut cells = vec![Cell::from(session.title())];
+            if wide {
+                cells.push(Cell::from(
+                    session.workspace_name().unwrap_or("").to_string(),
+                ));
+            }
+            cells.push(Cell::from(Span::styled(
+                session.state.label(),
+                state_style(session.state),
+            )));
+            if medium {
+                cells.extend([
+                    count(session.count("hit"), theme::HIT),
+                    count(session.count("miss"), theme::MISS),
+                ]);
+            }
+            if wide {
+                cells.extend([
+                    count(session.count("unconsulted"), theme::MUTED),
+                    count(
+                        session.bypasses().iter().map(|(_, count)| count).sum(),
+                        theme::WARNING,
+                    ),
+                ]);
+            }
+            cells.push(right(
+                session
+                    .hit_rate()
+                    .map(|rate| format!("{rate:.0}%"))
+                    .unwrap_or_else(|| "-".into()),
+                Style::new(),
+            ));
+            TableRow::new(cells)
+        })
+        .collect::<Vec<_>>();
+    let table = Table::new(rows, widths)
+        .header(table_header(&labels, numeric_from))
+        .highlight_symbol("▸ ")
+        .row_highlight_style(Style::new().bg(theme::SELECTION).bold())
+        .block(panel(format!(
+            " Builds · {}/{} ",
+            app.selected + 1,
+            app.sessions().count()
+        )));
+    // A stateful table keeps the selected row visible, including after a resize.
+    let mut state = TableState::default().with_selected(app.selected);
+    frame.render_stateful_widget(table, area, &mut state);
+}
+
+fn action_rows(frame: &mut Frame, area: Rect, session: &Session, scroll: usize) {
+    let height = area.height.saturating_sub(6) as usize;
+    let scroll = scroll.min(session.rows.len().saturating_sub(height.max(1)));
+    let end = session.rows.len().saturating_sub(scroll);
+    let start = end.saturating_sub(height);
+    let position = if end == 0 {
+        "no actions".to_string()
+    } else {
+        format!("{}–{} of {}", start + 1, end, session.rows.len())
     };
-    // The visible window is the tail of the build: what just happened is what a
-    // watcher is looking for, so rows are shown newest-last and scrolled to the
-    // end.
-    let height = area.height.saturating_sub(2) as usize;
-    let start = session.rows.len().saturating_sub(height);
-    let rows: Vec<TableRow> = session.rows[start..]
+    let mode = if scroll == 0 { "latest" } else { "history" };
+    let capped = if session.truncated {
+        " · history capped"
+    } else {
+        ""
+    };
+    let block = panel(format!(" Activity · {mode} "))
+        .title_bottom(Line::from(format!(" {position}{capped} ")).right_aligned());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let sections = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Min(0),
+    ])
+    .split(inner);
+    let workspace = session.workspace_name().unwrap_or("unknown workspace");
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!("{workspace} · "), Style::new().fg(theme::ACCENT)),
+            Span::styled(session.title(), Style::new().bold()),
+        ])),
+        sections[0],
+    );
+    let bypasses: u64 = session.bypasses().iter().map(|(_, count)| count).sum();
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("{} hit", session.count("hit")),
+                Style::new().fg(theme::HIT),
+            ),
+            Span::raw(" · "),
+            Span::styled(
+                format!("{} miss", session.count("miss")),
+                Style::new().fg(theme::MISS),
+            ),
+            Span::raw(format!(" · {} unconsulted", session.count("unconsulted"))),
+            Span::styled(
+                format!(" · {bypasses} bypass"),
+                Style::new().fg(theme::WARNING),
+            ),
+            Span::styled(
+                format!(" · {} saved", saved_duration(session.avoided_compiler_ns)),
+                Style::new().fg(theme::HIT),
+            ),
+        ]))
+        .wrap(Wrap { trim: true }),
+        sections[1],
+    );
+    if session.rows.is_empty() {
+        let message = if session.state == SessionState::Live {
+            "Waiting for compilation events…"
+        } else {
+            "No compilation events recorded for this build."
+        };
+        frame.render_widget(
+            Paragraph::new(message).wrap(Wrap { trim: true }),
+            sections[2],
+        );
+        return;
+    }
+    let outcome_width = session.rows[start..end]
+        .iter()
+        .map(|row| Line::from(row.outcome.label()).width() as u16)
+        .max()
+        .unwrap_or(7)
+        .clamp(7, (inner.width / 3).max(7));
+    let rows = session.rows[start..end]
         .iter()
         .map(|row| {
-            let Row {
-                outcome,
-                crate_name,
-                duration_ns,
-            } = row;
             TableRow::new(vec![
+                Cell::from(row.crate_name.clone().unwrap_or_else(|| "-".into())),
                 Cell::from(Span::styled(
-                    outcome.label().to_string(),
-                    outcome_style(outcome),
+                    row.outcome.label().to_string(),
+                    outcome_style(&row.outcome),
                 )),
-                Cell::from(crate_name.clone().unwrap_or_else(|| "-".into())),
-                Cell::from(format_duration(Duration::from_nanos(*duration_ns))),
+                right(
+                    format_duration(Duration::from_nanos(row.duration_ns)),
+                    Style::new(),
+                ),
             ])
         })
-        .collect();
+        .collect::<Vec<_>>();
     frame.render_widget(
         Table::new(
             rows,
             [
-                Constraint::Length(24),
-                Constraint::Min(20),
+                Constraint::Min(12),
+                Constraint::Length(outcome_width),
                 Constraint::Length(10),
             ],
         )
-        .block(Block::default().borders(Borders::ALL).title(title)),
-        area,
+        .column_spacing(2)
+        .header(table_header(&["crate", "outcome", "duration"], 2)),
+        sections[2],
     );
 }
 
-/// Finished builds, read from the totals each stream ends with.
 fn sessions(frame: &mut Frame, area: Rect, app: &App) {
-    let rows: Vec<TableRow> = app
+    let wide = area.width >= 100;
+    let medium = area.width >= 70;
+    let mut labels = vec!["command", "state"];
+    let mut widths = vec![Constraint::Min(16), Constraint::Length(9)];
+    if medium {
+        labels.extend(["hits", "misses"]);
+        widths.extend([Constraint::Length(6), Constraint::Length(6)]);
+    }
+    if wide {
+        labels.push("unconsulted");
+        widths.push(Constraint::Length(11));
+    }
+    labels.push("saved");
+    widths.push(Constraint::Length(10));
+    let rows = app
         .sessions()
         .skip(app.scroll)
         .map(|session| {
             let totals = session.totals.as_ref();
-            let field = |key: &str| {
+            let field = |key: &str, color| {
                 totals
-                    .map(|totals| crate::events::stat(totals, key))
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "-".into())
+                    .map(|totals| count(crate::events::stat(totals, key), color))
+                    .unwrap_or_else(|| right("-", Style::new().fg(theme::MUTED)))
             };
-            let saved = totals
-                .map(|totals| crate::events::stat(totals, "estimated_compiler_duration_avoided_ns"))
-                .map(|ns| format_duration(Duration::from_nanos(ns)))
-                .unwrap_or_else(|| "-".into());
-            TableRow::new(vec![
+            let mut cells = vec![
                 Cell::from(session.title()),
                 Cell::from(Span::styled(
                     session.state.label(),
                     state_style(session.state),
                 )),
-                Cell::from(field("hits")),
-                Cell::from(field("misses")),
-                Cell::from(field("unconsulted")),
-                Cell::from(saved),
-            ])
+            ];
+            if medium {
+                cells.extend([field("hits", theme::HIT), field("misses", theme::MISS)]);
+            }
+            if wide {
+                cells.push(field("unconsulted", theme::MUTED));
+            }
+            cells.push(right(
+                totals
+                    .map(|totals| {
+                        saved_duration(crate::events::stat(
+                            totals,
+                            "estimated_compiler_duration_avoided_ns",
+                        ))
+                    })
+                    .unwrap_or_else(|| "-".into()),
+                Style::new().fg(theme::HIT),
+            ));
+            TableRow::new(cells)
         })
-        .collect();
+        .collect::<Vec<_>>();
     frame.render_widget(
-        Table::new(
-            rows,
-            [
-                Constraint::Min(24),
-                Constraint::Length(10),
-                Constraint::Length(8),
-                Constraint::Length(8),
-                Constraint::Length(12),
-                Constraint::Length(12),
-            ],
-        )
-        .header(
-            TableRow::new(vec![
-                "command",
-                "state",
-                "hits",
-                "misses",
-                "unconsulted",
-                "saved",
-            ])
-            .style(Style::new().bold()),
-        )
-        .block(Block::default().borders(Borders::ALL).title(" sessions ")),
+        Table::new(rows, widths)
+            .header(table_header(&labels, 2))
+            .block(panel(format!(
+                " Sessions · {} builds ",
+                app.sessions().count()
+            ))),
         area,
     );
 }
 
-fn store(frame: &mut Frame, area: Rect, app: &App) {
+fn store_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     match &app.store_stats {
         Some(stats) => {
@@ -309,41 +636,161 @@ fn store(frame: &mut Frame, area: Rect, app: &App) {
         }
         None => lines.push(Line::from("the store could not be read")),
     }
-    let tally = &app.savings;
-    if tally.builds > 0 {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "since mbx started counting",
-            Style::new().bold(),
-        )));
-        lines.push(Line::from(format!("builds:         {}", tally.builds)));
+    lines.push(Line::from(format!("store: {}", app.store_dir().display())));
+    if let Some(budget) = app.store_budget {
         lines.push(Line::from(format!(
-            "compilations:   {} restored",
-            tally.cached_compilations
+            "configured store budget: {}",
+            size(budget)
         )));
-        lines.push(Line::from(format!(
-            "compiling:      {} saved",
-            format_duration(Duration::from_nanos(tally.avoided_compiler_ns))
-        )));
-        lines.push(Line::from(format!(
-            "target/:        {} collected",
-            ByteSize::b(tally.freed_target_bytes).display().iec()
-        )));
+        lines.push(Line::from(
+            "A combined target/store budget can reduce this limit.",
+        ));
     }
+    lines.push(Line::from(format!(
+        "automatic collection: {}",
+        if app.gc_auto { "on" } else { "off" }
+    )));
+    lines.push(Line::from(format!(
+        "evicted while watching (last 5m): {}",
+        size(app.health.evicted)
+    )));
+    lines.push(Line::from(format!(
+        "eviction counter increases (last 5m): {}",
+        app.health.eviction_updates
+    )));
+    if app.health.possible_thrashing(app.store_budget) {
+        lines.push(Line::styled(
+            "! POSSIBLE CACHE THRASHING",
+            Style::new().fg(theme::MISS).bold(),
+        ));
+        lines.push(Line::from(format!(
+            "{} evicted with {:.0}% misses in the last 5m.",
+            size(app.health.evicted),
+            app.health.miss_rate()
+        )));
+        lines.push(Line::from(
+            "Consider a larger gc.max_size budget; inspect misses.",
+        ));
+    }
+    let lifetime = crate::stats::Lifetime::from(&app.savings);
+    lines.push(Line::default());
+    lines.push(Line::styled(
+        lifetime.since(),
+        Style::new().fg(theme::ACCENT).bold(),
+    ));
+    lines.extend(
+        lifetime
+            .rows()
+            .into_iter()
+            .map(|(label, value)| Line::from(format!("{label:<23} {value}"))),
+    );
+    if let Some(sharing) = &app.sharing {
+        lines.push(Line::default());
+        lines.push(Line::styled(
+            "Workspace sharing · estimated",
+            Style::new().fg(theme::ACCENT).bold(),
+        ));
+        lines.extend(
+            sharing
+                .rows()
+                .into_iter()
+                .map(|(label, value)| Line::from(format!("{label:<23} {value}"))),
+        );
+        lines.push(Line::from(
+            "Logical cache bytes; excludes target directories.",
+        ));
+    }
+    if app.cheeky
+        && let Some(quip) = lifetime.quip()
+    {
+        lines.push(Line::default());
+        lines.push(Line::styled(quip, Style::new().fg(theme::HIT)));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(
+        "Pruned totals include automatic sweeps and mbx gc.",
+    ));
+    lines.push(Line::from(
+        "Reflinks are cumulative, not current disk savings.",
+    ));
+    wrap_lines(lines, width)
+}
+
+pub(super) fn wrap_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
+    let mut wrapped = Vec::new();
+    for line in lines {
+        if line.width() <= width as usize {
+            wrapped.push(line);
+            continue;
+        }
+        let mut part = String::new();
+        for word in line.to_string().split_whitespace() {
+            if !part.is_empty() && Line::from(format!("{part} {word}")).width() > width as usize {
+                wrapped.push(Line::styled(std::mem::take(&mut part), line.style));
+            }
+            if !part.is_empty() {
+                part.push(' ');
+            }
+            part.push_str(word);
+        }
+        wrapped.push(Line::styled(part, line.style));
+    }
+    wrapped
+}
+
+fn store(frame: &mut Frame, area: Rect, app: &App) {
+    if area.width >= 110
+        && area.height >= 27
+        && app.store_scroll == 0
+        && super::dashboard::store(frame, area, app)
+    {
+        return;
+    }
+    let lines = store_lines(app, area.width.saturating_sub(2));
+    let offset = app.store_scroll.min(
+        lines
+            .len()
+            .saturating_sub(area.height.saturating_sub(2) as usize),
+    );
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" store ")),
+        Paragraph::new(lines)
+            .scroll((offset as u16, 0))
+            .block(panel(" Store · mbx stats for a text report ")),
         area,
     );
 }
 
 fn footer(frame: &mut Frame, area: Rect, app: &App) {
-    let keys = if app.paused {
-        "paused — p resume · tab switch · j/k move · q quit"
-    } else {
-        "p pause · tab switch · 1-3 jump · j/k move · q quit"
-    };
-    frame.render_widget(
-        Paragraph::new(Span::styled(keys, Style::new().fg(Color::DarkGray))),
-        area,
-    );
+    let mut keys = vec![
+        ("q", "quit"),
+        ("p", if app.paused { "resume" } else { "pause" }),
+        ("←→/tab", "tabs"),
+    ];
+    keys.push((
+        "↑↓",
+        if app.tab == Tab::Store || app.tab == Tab::Sessions {
+            "scroll"
+        } else {
+            "build"
+        },
+    ));
+    if app.tab == Tab::Live && area.width >= 76 {
+        keys.extend([("PgUp/Dn", "history"), ("End", "latest")]);
+    } else if matches!(app.tab, Tab::Live | Tab::Insights | Tab::Store) {
+        keys.push(("PgUp/Dn", "scroll"));
+    }
+    let spans = keys
+        .into_iter()
+        .flat_map(|(key, label)| {
+            [
+                Span::styled(key, Style::new().fg(theme::ACCENT).bold()),
+                Span::styled(format!(" {label}  "), Style::new().fg(theme::MUTED)),
+            ]
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
+
+#[cfg(test)]
+#[path = "ui_tests.rs"]
+mod tests;

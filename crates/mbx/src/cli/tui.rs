@@ -9,6 +9,6 @@ pub(super) struct TuiArgs {
     once: bool,
 }
 
-pub(super) fn run(config: &Config, args: TuiArgs) -> Result<ExitCode> {
-    crate::tui::run(config, args.once)
+pub(super) fn run(config: &Config, args: TuiArgs, cheeky: bool) -> Result<ExitCode> {
+    crate::tui::run(config, args.once, cheeky)
 }

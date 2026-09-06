@@ -14,7 +14,7 @@ the `target` symlink in each checkout keeps working across upgrades.
 
 ## JSON output is versioned
 
-`mbx doctor --json`, `mbx cache stats --json`, `mbx gc --json`, and
+`mbx doctor --json`, `mbx stats --json`, `mbx cache stats --json`, `mbx gc --json`, and
 `MBX_STATS_REPORT` emit versioned documents; fields are added compatibly and a
 shape change bumps the version. Scripts should read the version field and
 parse the JSON. The `mbx[...]` stderr lines are written for people and may be

@@ -200,6 +200,8 @@ fn tabs_cycle_and_can_be_jumped_to() {
     app.next_tab();
     assert_eq!(app.tab, Tab::Store);
     app.next_tab();
+    assert_eq!(app.tab, Tab::Insights);
+    app.next_tab();
     assert_eq!(app.tab, Tab::Live);
 
     app.select_tab(Tab::Store);
@@ -221,4 +223,86 @@ fn selection_stays_inside_the_list() {
     app.select_previous();
     assert_eq!(app.selected, 0);
     assert!(app.selected_session().is_some());
+}
+
+#[test]
+fn selection_follows_the_build_when_sessions_reorder() {
+    let store = tempfile::tempdir().unwrap();
+    let first = writer(store.path());
+    let second = writer(store.path());
+    let mut app = App::new(store.path(), 10);
+    app.tick(10);
+    let selected_id = app.selected_session().unwrap().id.clone();
+    // Finish the selected build, forcing it below the other running build.
+    let selected_writer = if selected_id == first.id() {
+        &first
+    } else {
+        &second
+    };
+    selected_writer.finished(serde_json::json!({}));
+    app.tick(10);
+    assert_eq!(app.selected, 1);
+    assert_eq!(app.selected_session().unwrap().id, selected_id);
+}
+
+#[test]
+fn new_actions_do_not_shift_the_history_being_read() {
+    let store = tempfile::tempdir().unwrap();
+    let build = writer(store.path());
+    for i in 0..30 {
+        build.action(
+            ActionOutcome::Hit,
+            Some(format!("crate_{i}")),
+            1,
+            ActionDetail::default(),
+        );
+    }
+    let mut app = App::new(store.path(), 10);
+    app.tick(10);
+    app.older_actions(10);
+    let end = app.selected_session().unwrap().rows.len() - app.action_scroll;
+    build.action(
+        ActionOutcome::Miss,
+        Some("new_crate".into()),
+        1,
+        ActionDetail::default(),
+    );
+    app.tick(10);
+    assert_eq!(
+        app.selected_session().unwrap().rows.len() - app.action_scroll,
+        end
+    );
+    app.newer_actions(10);
+    assert_eq!(app.action_scroll, 1);
+    app.follow_actions();
+    assert_eq!(app.action_scroll, 0);
+}
+
+#[test]
+fn sessions_scroll_is_bounded_and_store_does_not_scroll() {
+    let store = tempfile::tempdir().unwrap();
+    let _build = writer(store.path());
+    let mut app = App::new(store.path(), 10);
+    app.tick(10);
+    for tab in [Tab::Sessions, Tab::Store] {
+        app.select_tab(tab);
+        for _ in 0..10 {
+            app.select_next();
+        }
+        assert_eq!(app.scroll, 0);
+    }
+}
+
+#[test]
+fn resuming_does_not_count_paused_evictions_as_recent() {
+    let store = tempfile::tempdir().unwrap();
+    let mut app = App::new(store.path(), 50);
+    let now = Instant::now();
+    app.health.observe_evictions(now, 1, 0);
+    app.health.observe_evictions(now, 1, 100);
+    assert_eq!(app.health.evicted, 100);
+    app.toggle_pause();
+    app.toggle_pause();
+    app.health.observe_evictions(now, 1, 10_000);
+    assert_eq!(app.health.evicted, 0);
 }

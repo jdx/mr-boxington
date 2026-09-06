@@ -246,3 +246,25 @@ EOF
   assert_success
   assert_output --partial "first build on this machine"
 }
+
+@test "stats reports lifetime savings and a separate automatic pruning period" {
+  mkdir -p "$MBX_CACHE_DIR/actions/savings/v1"
+  cat > "$MBX_CACHE_DIR/actions/savings/v1/tally.json" <<'JSON'
+{"version":1,"since_secs":1700000000,"builds":42,"cached_compilations":321,"avoided_compiler_ns":3059100000000,"freed_target_bytes":1073741824,"freed_store_bytes":1073741824,"auto_pruned_bytes":1073741824,"auto_pruned_since_secs":1750000000,"freed_requested_bytes":1073741824}
+JSON
+
+  run "$MBX_BIN" stats
+  assert_success
+  assert_output --partial "since 2023-11-14"
+  assert_output --partial "50m 59s"
+  assert_output --partial "automatically pruned"
+  assert_output --partial "since 2025-06-15"
+  assert_output --partial "duplication avoided"
+
+  run "$MBX_BIN" stats --json
+  assert_success
+  assert_output --partial '"version": 1'
+  assert_output --partial '"pruned_bytes": 2147483648'
+  assert_output --partial '"automatically_pruned_bytes": 1073741824'
+  assert_output --partial '"requested_removal_bytes": 1073741824'
+}

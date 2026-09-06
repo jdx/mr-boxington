@@ -22,6 +22,7 @@ mod gc;
 mod prefetch;
 mod setup;
 mod shim;
+mod stats;
 mod tui;
 
 const CARGO_SHIM_TARGET_FILE: &str = "mbx-target";
@@ -56,7 +57,7 @@ use {cache::*, cargo::*, exec::*, gc::*, setup::*};
     version,
     config = crate::config::RawConfig,
     about = "A build cache for Rust projects",
-    long_about = "Run `mbx setup` once, then keep using Cargo normally. Compiled work is shared across every checkout and build storage prunes itself. Use mbx directly for its own commands, such as `tui`, `cache`, `gc`, and `doctor`, or prefix Cargo commands with `mbx` for zero-config use.\n\nExamples:\n  mbx setup\n  cargo build --release\n  cargo test --workspace\n  cargo clippy --all-targets -- -D warnings\n  mbx gc --dry-run",
+    long_about = "Run `mbx setup` once, then keep using Cargo normally. Compiled work is shared across every checkout and build storage prunes itself. Use mbx directly for its own commands, such as `tui`, `stats`, `cache`, `gc`, and `doctor`, or prefix Cargo commands with `mbx` for zero-config use.\n\nExamples:\n  mbx setup\n  cargo build --release\n  cargo test --workspace\n  cargo clippy --all-targets -- -D warnings\n  mbx gc --dry-run",
     unknown_flags = "error"
 )]
 struct Cli {
@@ -99,6 +100,8 @@ enum Commands {
     Clean(clean::CleanArgs),
     /// Watch cache activity across every build on this machine.
     Tui(tui::TuiArgs),
+    /// Show lifetime savings, pruning totals, and estimated storage shared across workspaces.
+    Stats(stats::StatsArgs),
     /// Download predicted remote artifacts without running Cargo.
     Prefetch(prefetch::PrefetchArgs),
     /// Run a build command outside cargo with its C and C++ compiles cached.
@@ -138,6 +141,7 @@ fn compiles_nothing(command: &Commands) -> Option<&'static str> {
         Commands::Cache(_) => Some("cache"),
         Commands::Clean(_) => Some("clean"),
         Commands::Tui(_) => Some("tui"),
+        Commands::Stats(_) => Some("stats"),
         // Its whole subject is the C and C++ compiles of a build cargo is not
         // running, so a Rust toolchain has nothing to select here.
         Commands::Exec(_) => Some("exec"),
@@ -205,7 +209,12 @@ pub fn run() -> Result<ExitCode> {
         .map(|()| ExitCode::SUCCESS),
         Commands::Cache(args) => cache::run(&config, args.command),
         Commands::Clean(args) => clean::run(&config, &args),
-        Commands::Tui(args) => tui::run(&config, args),
+        Commands::Tui(args) => tui::run(
+            &config,
+            args,
+            settings.savings == crate::config::SavingsStyle::Quips,
+        ),
+        Commands::Stats(args) => stats::run(&config, args, settings.savings),
         Commands::Prefetch(args) => {
             shim::prepare_explicit_cargo()?;
             prefetch::run(&config, &args.cargo_args)

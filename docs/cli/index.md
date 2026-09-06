@@ -32,6 +32,7 @@
 - [`mbx cache remove <WORKSPACE>`](/cli/cache/remove.md)
 - [`mbx clean [WORKSPACE]`](/cli/clean.md)
 - [`mbx tui [--once]`](/cli/tui.md)
+- [`mbx stats [--json]`](/cli/stats.md)
 - [`mbx prefetch <CARGO_ARGS>…`](/cli/prefetch.md)
 - [`mbx exec [--project-root <DIR>] <COMMAND>…`](/cli/exec.md)
 
