@@ -1,5 +1,1 @@
-build [https://github.com/jdx/mr-boxington/pull/389](https://github.com/jdx/mr-boxington/pull/389) locally and replace (which mbx) with that new bin
-
----
-
 modify this pr, make the mouse work
