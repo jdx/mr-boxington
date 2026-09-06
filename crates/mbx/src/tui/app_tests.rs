@@ -306,3 +306,49 @@ fn resuming_does_not_count_paused_evictions_as_recent() {
     app.health.observe_evictions(now, 1, 10_000);
     assert_eq!(app.health.evicted, 0);
 }
+
+#[test]
+fn pending_sharing_does_not_block_navigation_and_applies_when_ready() {
+    let store = tempfile::tempdir().unwrap();
+    let mut app = App::new(store.path(), 50);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.sharing_worker = Some(receiver);
+    app.select_tab(Tab::Store);
+    // The worker has not sent anything: this must return without waiting.
+    app.tick(50);
+    assert!(app.sharing_loading());
+    app.select_tab(Tab::Live);
+    app.tick(50);
+    assert_eq!(app.tab, Tab::Live);
+    assert!(app.sharing_loading());
+    sender
+        .send(Some(crate::stats::SharingEstimate {
+            live_workspaces: 7,
+            ..Default::default()
+        }))
+        .unwrap();
+    app.tick(50);
+    assert!(!app.sharing_loading());
+    assert_eq!(app.sharing.as_ref().unwrap().live_workspaces, 7);
+    app.select_tab(Tab::Store);
+    app.tick(50);
+    assert!(
+        !app.sharing_loading(),
+        "do not immediately repeat a completed scan"
+    );
+}
+
+#[test]
+fn failed_sharing_worker_does_not_restart_every_tick() {
+    let store = tempfile::tempdir().unwrap();
+    let mut app = App::new(store.path(), 50);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.sharing_worker = Some(receiver);
+    app.select_tab(Tab::Store);
+    drop(sender);
+    app.tick(50);
+    assert!(!app.sharing_loading());
+    assert!(app.last_sharing_refresh.is_some());
+    app.tick(50);
+    assert!(!app.sharing_loading());
+}

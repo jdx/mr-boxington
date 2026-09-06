@@ -195,6 +195,7 @@ pub(crate) struct App {
     pub gc_auto: bool,
     monitoring_since_ms: u64,
     last_sharing_refresh: Option<Instant>,
+    sharing_worker: Option<std::sync::mpsc::Receiver<Option<crate::stats::SharingEstimate>>>,
 }
 
 impl App {
@@ -221,6 +222,7 @@ impl App {
                 .unwrap_or_default()
                 .as_millis() as u64,
             last_sharing_refresh: None,
+            sharing_worker: None,
         };
         app.discover(limit);
         app.refresh_store();
@@ -282,17 +284,51 @@ impl App {
             self.selected = index;
         }
         self.selected = self.selected.min(self.tails.len().saturating_sub(1));
-        // Workspace attribution walks cache closures and targets. Only do it
-        // on the Store screen, and less often than the lightweight counters.
-        if self.tab == Tab::Store
-            && self
+        self.refresh_sharing();
+    }
+
+    pub(crate) fn sharing_loading(&self) -> bool {
+        self.sharing_worker.is_some()
+    }
+
+    fn refresh_sharing(&mut self) {
+        if let Some(worker) = &self.sharing_worker {
+            match worker.try_recv() {
+                Ok(sharing) => {
+                    self.sharing = sharing;
+                    self.sharing_worker = None;
+                    self.last_sharing_refresh = Some(Instant::now());
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.sharing_worker = None;
+                    self.last_sharing_refresh = Some(Instant::now());
+                }
+            }
+        }
+        // Attribution walks every workspace's cache closure. Never wait for it
+        // on the input thread, and allow only one scan in flight at a time.
+        if self.tab != Tab::Store
+            || self
                 .last_sharing_refresh
-                .is_none_or(|last| last.elapsed() >= Duration::from_secs(30))
+                .is_some_and(|last| last.elapsed() < Duration::from_secs(30))
         {
-            self.sharing = self.store_stats.as_ref().and_then(|stats| {
-                crate::stats::SharingEstimate::read(&self.store, stats.total_bytes()).ok()
-            });
-            self.last_sharing_refresh = Some(Instant::now());
+            return;
+        }
+        let Some(stats) = &self.store_stats else {
+            return;
+        };
+        let bytes = stats.total_bytes();
+        let store = self.store.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        match std::thread::Builder::new()
+            .name("tui-sharing".into())
+            .spawn(move || {
+                let result = crate::stats::SharingEstimate::read(&store, bytes).ok();
+                let _ = sender.send(result);
+            }) {
+            Ok(_) => self.sharing_worker = Some(receiver),
+            Err(_) => self.last_sharing_refresh = Some(Instant::now()),
         }
     }
 

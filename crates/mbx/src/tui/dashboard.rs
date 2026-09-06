@@ -395,7 +395,13 @@ pub(super) fn store(frame: &mut Frame, area: Rect, app: &App) -> bool {
         ])
     }));
     let mut sharing = app.sharing.as_ref().map_or_else(
-        || vec![Line::from("Workspace sharing unavailable")],
+        || {
+            vec![Line::from(if app.sharing_loading() {
+                "Calculating workspace sharing…"
+            } else {
+                "Workspace sharing unavailable"
+            })]
+        },
         |sharing| {
             sharing
                 .rows()

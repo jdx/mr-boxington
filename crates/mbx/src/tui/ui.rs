@@ -799,6 +799,10 @@ fn store_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             "Logical cache bytes; excludes target directories.",
         ));
     }
+    if app.sharing.is_none() && app.sharing_loading() {
+        lines.push(Line::default());
+        lines.push(Line::from("Calculating workspace sharing…"));
+    }
     if app.cheeky
         && let Some(quip) = lifetime.quip()
     {
