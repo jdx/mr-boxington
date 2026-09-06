@@ -1441,7 +1441,8 @@ impl<'a> Parser<'a> {
         if let Some(attached) = value.strip_prefix("-Z") {
             let option = self.take_value("-Z", (!attached.is_empty()).then_some(attached))?;
             match option.as_str() {
-                "shell-argfiles" | "unstable-options" => {
+                "embed-metadata=no" | "embed-metadata=yes" | "shell-argfiles"
+                | "unstable-options" => {
                     self.parsed.push(Argument::Plain(format!("-Z{option}")));
                     return Ok(());
                 }
