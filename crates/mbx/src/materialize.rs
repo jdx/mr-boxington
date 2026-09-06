@@ -491,6 +491,8 @@ pub(crate) fn exit_code(status: ExitStatus) -> ExitCode {
 
 #[cfg(windows)]
 pub(crate) fn exit_code(status: ExitStatus) -> ExitCode {
+    // ExitProcess skips Rust destructors, including the invocation timer.
+    crate::phase_timing::finish();
     // SAFETY: this process is only a compiler wrapper and must preserve the
     // compiler's full Windows status code, which stable ExitCode cannot hold.
     unsafe { windows_sys::Win32::System::Threading::ExitProcess(status.code().unwrap_or(1) as u32) }

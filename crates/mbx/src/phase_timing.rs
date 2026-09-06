@@ -96,6 +96,11 @@ impl Tracker {
     }
 
     fn finish(mut self, elapsed: u64) -> WrapperTiming {
+        // Windows can finish explicitly before ExitProcess, while RAII phase
+        // guards are still alive. Close those intervals at the same boundary.
+        while !self.stack.is_empty() {
+            self.end_phase(elapsed);
+        }
         self.timing.duration_ns = elapsed;
         let attributed = self
             .timing
@@ -122,14 +127,20 @@ impl Drop for Phase {
 }
 impl Drop for Invocation {
     fn drop(&mut self) {
-        let tracker = ACTIVE.with(|active| active.borrow_mut().take());
-        if let Some(tracker) = tracker {
-            let elapsed = nanos(tracker.start.elapsed());
-            let timing = tracker.finish(elapsed);
-            // A failed telemetry request must neither affect compilation nor
-            // pollute compiler stderr (cc-rs uses stderr to interpret probes).
-            let _ = crate::session::request_agent(&[AgentRequest::RecordWrapperTiming { timing }]);
-        }
+        finish();
+    }
+}
+
+/// Send the completed timing once, including when the platform exit path
+/// terminates without running destructors. Later guard drops become no-ops.
+pub(crate) fn finish() {
+    let tracker = ACTIVE.with(|active| active.borrow_mut().take());
+    if let Some(tracker) = tracker {
+        let elapsed = nanos(tracker.start.elapsed());
+        let timing = tracker.finish(elapsed);
+        // A failed telemetry request must neither affect compilation nor
+        // pollute compiler stderr (cc-rs uses stderr to interpret probes).
+        let _ = crate::session::request_agent(&[AgentRequest::RecordWrapperTiming { timing }]);
     }
 }
 fn nanos(duration: std::time::Duration) -> u64 {
@@ -219,6 +230,32 @@ mod tests {
         assert_eq!(timing.spans[1].duration_ns, 70);
         assert_eq!(timing.phases_ns.values().sum::<u64>(), timing.duration_ns);
     }
+    #[test]
+    fn explicit_finish_closes_nested_phases_before_process_exit() {
+        let tracker = Tracker {
+            start: Instant::now(),
+            timing: WrapperTiming::default(),
+            stack: vec![
+                Frame {
+                    name: "key",
+                    start: 10,
+                    children: 0,
+                },
+                Frame {
+                    name: "lookup",
+                    start: 20,
+                    children: 0,
+                },
+            ],
+        };
+        let timing = tracker.finish(100);
+        assert_eq!(timing.phases_ns["key"], 10);
+        assert_eq!(timing.phases_ns["lookup"], 80);
+        assert_eq!(timing.phases_ns["unattributed"], 10);
+        assert_eq!(timing.spans.len(), 2);
+        assert_eq!(timing.phases_ns.values().sum::<u64>(), timing.duration_ns);
+    }
+
     #[test]
     fn trace_keeps_submicrosecond_work_and_clamps_children() {
         let mut timing = WrapperTiming::default();
