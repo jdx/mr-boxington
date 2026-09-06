@@ -21,7 +21,10 @@ use crate::config::Config;
 use app::{App, Tab};
 use eyre::{Context, Result};
 use ratatui::crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -85,13 +88,14 @@ type Terminal = ratatui::Terminal<CrosstermBackend<io::Stdout>>;
 fn enter() -> Result<Terminal> {
     enable_raw_mode().wrap_err("failed to put the terminal in raw mode")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen).wrap_err("failed to switch screens")?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .wrap_err("failed to switch screens")?;
     // A panic in drawing would otherwise leave the alternate screen up and raw
     // mode on, with the backtrace invisible.
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
         previous(info);
     }));
     ratatui::Terminal::new(CrosstermBackend::new(stdout)).wrap_err("failed to start the terminal")
@@ -99,8 +103,12 @@ fn enter() -> Result<Terminal> {
 
 fn leave(terminal: &mut Terminal) -> Result<()> {
     disable_raw_mode().wrap_err("failed to restore the terminal")?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)
-        .wrap_err("failed to restore the screen")?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )
+    .wrap_err("failed to restore the screen")?;
     terminal
         .show_cursor()
         .wrap_err("failed to show the cursor")?;
@@ -126,11 +134,13 @@ fn event_loop(terminal: &mut Terminal, config: &Config, cheeky: bool) -> Result<
         if !event::poll(TICK)? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if handle_key(&mut app, key, terminal.size()?.into()) {
-            return Ok(ExitCode::SUCCESS);
+        let area = terminal.size()?.into();
+        match event::read()? {
+            Event::Key(key) if handle_key(&mut app, key, area) => {
+                return Ok(ExitCode::SUCCESS);
+            }
+            Event::Mouse(mouse) => ui::handle_mouse(&mut app, mouse, area),
+            _ => {}
         }
     }
 }

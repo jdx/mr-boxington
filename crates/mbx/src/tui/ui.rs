@@ -5,6 +5,7 @@ use super::theme;
 use crate::events::{ActionOutcome, SessionState};
 use crate::util::format_duration;
 use bytesize::ByteSize;
+use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::prelude::*;
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Gauge, Paragraph, Row as TableRow, Table, TableState, Wrap,
@@ -289,12 +290,109 @@ fn capacity(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-fn tabs(frame: &mut Frame, area: Rect, app: &App) {
+fn tab_areas(area: Rect) -> Vec<(Tab, Rect)> {
     let mut x = area.x;
-    for (index, tab) in Tab::ALL.iter().enumerate() {
+    Tab::ALL
+        .iter()
+        .enumerate()
+        .map(|(index, tab)| {
+            let width = (format!("{} {}", index + 1, tab.title()).len() as u16 + 2)
+                .min(area.right().saturating_sub(x));
+            let rect = Rect::new(x, area.y, width, area.height);
+            x = x.saturating_add(width + 1);
+            (*tab, rect)
+        })
+        .collect()
+}
+
+fn build_offset(app: &App, area: Rect) -> usize {
+    app.selected
+        .saturating_add(1)
+        .saturating_sub(area.height.saturating_sub(3) as usize)
+}
+
+pub(super) fn handle_mouse(app: &mut App, mouse: MouseEvent, area: Rect) {
+    if area.width < 48 || area.height < 22 {
+        return;
+    }
+    let point = Position::new(mouse.column, mouse.row);
+    let areas = main_area(area);
+    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+        for (tab, rect) in tab_areas(areas[1]) {
+            if rect.contains(point) {
+                app.select_tab(tab);
+                return;
+            }
+        }
+    }
+    let body = areas[2];
+    if !body.contains(point) {
+        return;
+    }
+    let builds = match app.tab {
+        Tab::Live if !app.is_empty() => Some(live_areas(live_columns(body).0, app)[0]),
+        Tab::Sessions => Some(body),
+        _ => None,
+    };
+    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+        if let Some(builds) = builds {
+            let rows = Rect::new(
+                builds.x + 1,
+                builds.y + 2,
+                builds.width.saturating_sub(2),
+                builds.height.saturating_sub(3),
+            );
+            let offset = if app.tab == Tab::Sessions {
+                app.scroll
+            } else {
+                build_offset(app, builds)
+            };
+            let selected = offset + mouse.row.saturating_sub(rows.y) as usize;
+            if rows.contains(point) && selected < app.sessions().count() {
+                if app.selected != selected {
+                    app.selected = selected;
+                    app.action_scroll = 0;
+                    app.insight_scroll = 0;
+                }
+                if app.tab == Tab::Sessions {
+                    app.select_tab(Tab::Live);
+                }
+            }
+        }
+        return;
+    }
+    let down = match mouse.kind {
+        MouseEventKind::ScrollDown => true,
+        MouseEventKind::ScrollUp => false,
+        _ => return,
+    };
+    match app.tab {
+        Tab::Live if !app.is_empty() => {
+            let panels = live_areas(live_columns(body).0, app);
+            if panels[0].contains(point) {
+                move_vertical(app, area, down);
+            } else if panels[1].contains(point) {
+                let page = action_page_size(area, app);
+                let max = app
+                    .selected_session()
+                    .map_or(0, |session| session.rows.len().saturating_sub(page));
+                app.action_scroll = if down {
+                    app.action_scroll.min(max).saturating_sub(3)
+                } else {
+                    app.action_scroll.min(max).saturating_add(3).min(max)
+                };
+            }
+        }
+        Tab::Sessions | Tab::Store => move_vertical(app, area, down),
+        Tab::Insights => super::insights::scroll(app, body, down),
+        _ => {}
+    }
+}
+
+fn tabs(frame: &mut Frame, area: Rect, app: &App) {
+    for (index, (tab, rect)) in tab_areas(area).into_iter().enumerate() {
         let title = format!("{} {}", index + 1, tab.title());
-        let width = (title.len() as u16 + 2).min(area.right().saturating_sub(x));
-        let selected = *tab == app.tab;
+        let selected = tab == app.tab;
         let style = if selected {
             Style::new().fg(theme::ACCENT).bg(theme::SELECTION).bold()
         } else {
@@ -310,9 +408,8 @@ fn tabs(frame: &mut Frame, area: Rect, app: &App) {
                 .alignment(Alignment::Center)
                 .style(style)
                 .block(block),
-            Rect::new(x, area.y, width, area.height),
+            rect,
         );
-        x = x.saturating_add(width + 1);
     }
 }
 
@@ -436,7 +533,9 @@ fn session_list(frame: &mut Frame, area: Rect, app: &App) {
             app.sessions().count()
         )));
     // A stateful table keeps the selected row visible, including after a resize.
-    let mut state = TableState::default().with_selected(app.selected);
+    let mut state = TableState::default()
+        .with_selected(app.selected)
+        .with_offset(build_offset(app, area));
     frame.render_stateful_widget(table, area, &mut state);
 }
 

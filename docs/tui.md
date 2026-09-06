@@ -144,6 +144,12 @@ exact count of GC runs; several runs may fall between reads.
 | `End` | follow the latest activity in Live |
 | `p` | pause and resume reading |
 
+Click a tab to switch screens. Click a build in Live to select it, or a row in
+Sessions to open that build in Live. The mouse wheel selects builds over the
+Live build list, browses history over Activity, and scrolls the Sessions,
+Store, and Insights reports. Scrolling up in Activity shows older events;
+scrolling down returns toward the latest events.
+
 ## Without a terminal
 
 `mbx tui --once` prints one plain-text snapshot and exits, for a pipe, a CI log,

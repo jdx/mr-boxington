@@ -243,3 +243,126 @@ fn thrashing_is_prominent_on_every_tab_and_both_flash_phases() {
     assert_ne!(terminal.backend().buffer()[(1, 3)].bg, first_color);
     assert!(render(&app, 48, 22).contains("POSSIBLE CACHE THRASHING"));
 }
+
+fn mouse(kind: MouseEventKind, x: u16, y: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column: x,
+        row: y,
+        modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+    }
+}
+
+#[test]
+fn mouse_tabs_use_rendered_bounds_and_ignore_other_buttons() {
+    let store = tempfile::tempdir().unwrap();
+    let mut app = App::new(store.path(), 50);
+    let area = Rect::new(3, 2, 80, 24);
+    for (tab, rect) in tab_areas(main_area(area)[1]) {
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), rect.x, rect.y),
+            area,
+        );
+        assert_eq!(app.tab, tab);
+    }
+    handle_mouse(
+        &mut app,
+        mouse(MouseEventKind::Down(MouseButton::Right), 3, 7),
+        area,
+    );
+    assert_eq!(app.tab, Tab::Insights);
+    handle_mouse(
+        &mut app,
+        mouse(MouseEventKind::Down(MouseButton::Left), 0, 0),
+        Rect::new(0, 0, 40, 20),
+    );
+    assert_eq!(app.tab, Tab::Insights);
+}
+
+#[test]
+fn mouse_selects_visible_builds_and_scrolls_only_hovered_panel() {
+    let store = tempfile::tempdir().unwrap();
+    let _builds: Vec<_> = (0..12)
+        .map(|i| build(store.path(), &format!("build-{i:02}"), 40))
+        .collect();
+    let mut app = App::new(store.path(), 50);
+    app.tick(50);
+    for width in [48, 80, 120, 160] {
+        let area = Rect::new(0, 0, width, 30);
+        app.select_tab(Tab::Live);
+        app.selected = 9;
+        let panels = live_areas(live_columns(main_area(area)[2]).0, &app);
+        let first = build_offset(&app, panels[0]);
+        let screen = render(&app, width, 30);
+        assert!(
+            screen
+                .lines()
+                .nth((panels[0].y + 2) as usize)
+                .unwrap()
+                .contains(&app.sessions().nth(first).unwrap().title())
+        );
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 2, panels[0].y + 2),
+            area,
+        );
+        assert_eq!(app.selected, first);
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::ScrollUp, 2, panels[1].y + 2),
+            area,
+        );
+        assert_eq!(app.action_scroll, 3);
+        assert_eq!(app.selected, first);
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::ScrollDown, 2, panels[0].y + 2),
+            area,
+        );
+        assert_eq!(app.selected, first + 1);
+        assert_eq!(app.action_scroll, 0);
+        app.select_tab(Tab::Sessions);
+        app.scroll = 4;
+        handle_mouse(
+            &mut app,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                2,
+                main_area(area)[2].y + 3,
+            ),
+            area,
+        );
+        assert_eq!(app.tab, Tab::Live);
+        assert_eq!(app.selected, 5);
+    }
+}
+
+#[test]
+fn wheel_scrolls_store_and_insights() {
+    let store = tempfile::tempdir().unwrap();
+    let _build = build(store.path(), "build", 40);
+    let mut app = App::new(store.path(), 50);
+    app.tick(50);
+    let area = Rect::new(0, 0, 48, 22);
+    for tab in [Tab::Store, Tab::Insights] {
+        app.select_tab(tab);
+        handle_mouse(&mut app, mouse(MouseEventKind::ScrollDown, 2, 10), area);
+        assert!(
+            if tab == Tab::Store {
+                app.store_scroll
+            } else {
+                app.insight_scroll
+            } > 0
+        );
+        handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 2, 10), area);
+        assert_eq!(
+            if tab == Tab::Store {
+                app.store_scroll
+            } else {
+                app.insight_scroll
+            },
+            0
+        );
+    }
+}
