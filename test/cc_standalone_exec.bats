@@ -172,9 +172,9 @@ EOF
     assert_success
     "$second/hello"
 
-    # A successful fresh compiler run must reproduce the cached debug objects.
+    # A sampled fresh compiler run must reproduce the cached debug objects.
     rm "$second/hello.o" "$second/main.o"
-    (cd "$second" && MBX_VERIFY=1 MBX_STATS_REPORT="$report" "$MBX_BIN" exec make "CFLAGS=$flag -Iinclude" hello)
+    (cd "$second" && MBX_VERIFY=0 MBX_VERIFY_SAMPLE_RATE=100 MBX_STATS_REPORT="$report" "$MBX_BIN" exec make "CFLAGS=$flag -Iinclude" hello)
     run grep -E '"verifications"[[:space:]]*:[[:space:]]*2' "$report"
     assert_success
     run grep -E '"divergences"[[:space:]]*:[[:space:]]*0' "$report"

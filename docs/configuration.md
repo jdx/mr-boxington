@@ -222,6 +222,14 @@ permit until the pool has seen them once.
 results. It is expensive; use it to qualify correctness, not for everyday
 builds.
 
+For routine checks, set `MBX_VERIFY_SAMPLE_RATE=5` (or `verify_sample_rate = 5`)
+to verify approximately 5% of compilation identities. The range is 0–100;
+0 disables sampling. Selection is stable across wrapper processes and build
+order, so rerunning the same invocation selects the same sample. This samples
+units, not elapsed compiler time. `MBX_VERIFY=1` takes precedence and verifies
+all eligible units. Selected units rehash inputs and disable learned
+incremental compilation, just like full verification.
+
 The build reports what it found:
 
 ```text

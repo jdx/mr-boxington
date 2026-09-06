@@ -56,6 +56,7 @@ fn test_config(cache_dir: &Path) -> Config {
         cache_dir: cache_dir.to_path_buf(),
         stats_report: None,
         verify: false,
+        verify_sample_rate: 0,
         incremental: false,
         share_out_dir: false,
         build_script_execution: false,

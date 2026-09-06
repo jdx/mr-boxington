@@ -203,6 +203,10 @@ pub(crate) fn compile(
     if let Some(root) = incremental_root() {
         forget_private_artifacts(&root, &outputs);
     }
+    let _verification = session::verification::select(|| {
+        let context = base_action_context(rustc, &working_dir, &portable)?;
+        Ok(invocation.invocation_digest(&context)?)
+    })?;
     let verify = session::verify_requested();
     // A shadow compilation compares its result against a cached one, which an
     // incremental artifact would never match, so the two modes are exclusive.

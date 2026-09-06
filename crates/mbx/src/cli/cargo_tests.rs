@@ -356,6 +356,7 @@ pub(super) fn managed_target_config(root: &Path) -> Config {
         cache_dir: root.join("cache"),
         stats_report: None,
         verify: false,
+        verify_sample_rate: 0,
         incremental: false,
         share_out_dir: false,
         build_script_execution: false,

@@ -405,3 +405,11 @@ Let mbx place eligible target directories under the managed root.
 - **Set with:** `MBX_VERIFY`
 
 Compile and consult the cache, then compare outputs.
+
+### `verify_sample_rate`
+
+- **Type:** `int`
+- **Default:** `0`
+- **Set with:** `MBX_VERIFY_SAMPLE_RATE`
+
+Percentage of compilation identities to verify (0–100), selected deterministically.

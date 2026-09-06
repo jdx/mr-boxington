@@ -454,6 +454,8 @@ fn cargo_with(
         .env_remove("MBX_SHARE_OUT_DIR")
         .env_remove("MBX_BUILD_SCRIPT_EXECUTION")
         .env_remove("MBX_LEARNED_INCREMENTAL")
+        .env_remove("MBX_VERIFY")
+        .env_remove("MBX_VERIFY_SAMPLE_RATE")
         // Native links are cached by default and several counts here include
         // one, so an inherited answer would decide them.
         .env_remove("MBX_CACHE_LINKS")
@@ -2825,6 +2827,8 @@ fn build_into_target(
         .env_remove("MBX_INCREMENTAL")
         .env_remove("CARGO_INCREMENTAL")
         .env_remove("MBX_LEARNED_INCREMENTAL")
+        .env_remove("MBX_VERIFY")
+        .env_remove("MBX_VERIFY_SAMPLE_RATE")
         .env_remove("CI")
         .env_remove("MBX_SHARE_OUT_DIR")
         .env_remove("MBX_SOCKET")
@@ -3471,4 +3475,37 @@ fn wrapper_phase_reports_and_trace_cover_real_cold_and_warm_builds() {
         exported += 1;
     }
     assert!(exported >= 2);
+}
+
+#[test]
+fn sampled_verification_reaches_wrappers_and_full_verification_overrides_it() {
+    let project = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let settings = [("MBX_TARGET_VIEWS", "0"), ("MBX_INCREMENTAL", "0")];
+    build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+        &settings,
+    );
+    for (rate, full, should_verify) in [("100", "0", true), ("0", "0", false), ("0", "1", true)] {
+        std::fs::remove_dir_all(project.path().join("target")).unwrap();
+        let mut settings = settings.to_vec();
+        settings.extend([("MBX_VERIFY_SAMPLE_RATE", rate), ("MBX_VERIFY", full)]);
+        let (stats, stderr) = build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("warm.json"),
+            &settings,
+        );
+        if should_verify {
+            assert!(count(&stats, "verifications") > 0, "{stats}\n{stderr}");
+            assert_eq!(count(&stats, "divergences"), 0, "{stats}\n{stderr}");
+        } else {
+            assert!(count(&stats, "hits") > 0, "{stats}\n{stderr}");
+            assert_eq!(count(&stats, "verifications"), 0);
+        }
+    }
 }

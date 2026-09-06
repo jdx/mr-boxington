@@ -6,6 +6,7 @@ fn test_config(root: &Path, views: bool) -> Config {
         cache_dir: root.join("cache"),
         stats_report: None,
         verify: false,
+        verify_sample_rate: 0,
         incremental: false,
         share_out_dir: false,
         build_script_execution: false,

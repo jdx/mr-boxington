@@ -72,8 +72,9 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     };
 
     drop(setup);
-    let verify = session::verify_requested();
     let invocation_digest = invocation.invocation_digest(&context)?;
+    let _verification = session::verification::select(|| Ok(invocation_digest.clone()))?;
+    let verify = session::verify_requested();
     let task = prediction_task(&invocation_digest);
     let mut verification = None;
     // A prediction that no longer describes the tree -- a header it named has

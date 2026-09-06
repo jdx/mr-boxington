@@ -118,6 +118,9 @@ pub(crate) struct RawConfig {
     /// Compile and consult the cache, then compare outputs.
     #[usage(env = "MBX_VERIFY", default = false, scope = "env")]
     verify: bool,
+    /// Percentage of compilation identities to verify (0–100), selected deterministically.
+    #[usage(env = "MBX_VERIFY_SAMPLE_RATE", default = 0)]
+    verify_sample_rate: i64,
     /// Let local workspace members compile incrementally.
     #[usage(env = "MBX_INCREMENTAL", default = false)]
     incremental: bool,
@@ -331,6 +334,7 @@ pub struct Config {
     pub cache_dir: PathBuf,
     pub stats_report: Option<PathBuf>,
     pub verify: bool,
+    pub verify_sample_rate: u8,
     /// Let cargo compile workspace members incrementally, rather than forcing
     /// `CARGO_INCREMENTAL=0` for the whole build.
     pub incremental: bool,
@@ -396,6 +400,7 @@ impl Config {
             cache_dir: cache_dir.to_path_buf(),
             stats_report: None,
             verify: false,
+            verify_sample_rate: 0,
             incremental: false,
             share_out_dir: false,
             build_script_execution: false,
@@ -861,6 +866,10 @@ impl Config {
             },
             stats_report: raw.stats_report,
             verify: raw.verify,
+            verify_sample_rate: u8::try_from(raw.verify_sample_rate)
+                .ok()
+                .filter(|rate| *rate <= 100)
+                .ok_or_else(|| eyre::eyre!("invalid verify_sample_rate: expected 0–100"))?,
             incremental: raw.incremental,
             share_out_dir: raw.share_out_dir,
             build_script_execution: raw.build_script_execution,
@@ -1850,6 +1859,24 @@ default = "rust-lld"
     fn unknown_file_keys_are_rejected() {
         let error = configured(Some("not_a_setting = true"), &[]).unwrap_err();
         assert!(error.to_string().contains("not_a_setting"), "{error}");
+    }
+
+    #[test]
+    fn verification_sample_rate_is_a_percentage() {
+        assert_eq!(configured(None, &[]).unwrap().verify_sample_rate, 0);
+        for rate in ["0", "1", "25", "100"] {
+            let config = configured(None, &[("MBX_VERIFY_SAMPLE_RATE", rate)]).unwrap();
+            assert_eq!(config.verify_sample_rate.to_string(), rate);
+        }
+        assert_eq!(
+            configured(Some("verify_sample_rate = 5"), &[])
+                .unwrap()
+                .verify_sample_rate,
+            5
+        );
+        for rate in ["-1", "101", "256", "bad"] {
+            assert!(configured(None, &[("MBX_VERIFY_SAMPLE_RATE", rate)]).is_err());
+        }
     }
 
     #[test]

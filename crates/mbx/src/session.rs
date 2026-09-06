@@ -32,6 +32,7 @@ mod diagnostics;
 mod server;
 mod shims;
 mod stats;
+pub(crate) mod verification;
 
 #[cfg(test)]
 use client::validate_handshake_response;
@@ -104,6 +105,7 @@ pub struct CacheSession {
     cmake_shims_dir: PathBuf,
     staging: PathBuf,
     verify: bool,
+    verify_sample_rate: u8,
     incremental: bool,
     share_out_dir: bool,
     build_script_execution: bool,
@@ -211,6 +213,7 @@ impl CacheSession {
             cmake_shims_dir: config.cache_dir.join("shims"),
             staging,
             verify: config.verify,
+            verify_sample_rate: config.verify_sample_rate,
             incremental: config.incremental,
             share_out_dir: config.share_out_dir,
             build_script_execution: config.build_script_execution,
@@ -335,6 +338,10 @@ impl CacheSession {
         environment.insert(
             VERIFY_ENV.into(),
             if self.verify { "1" } else { "0" }.into(),
+        );
+        environment.insert(
+            verification::SAMPLE_RATE_ENV.into(),
+            self.verify_sample_rate.to_string(),
         );
         environment.insert(
             SHARE_OUT_DIR_ENV.into(),
@@ -526,6 +533,10 @@ impl CacheSession {
         environment.insert(
             VERIFY_ENV.into(),
             if self.verify { "1" } else { "0" }.into(),
+        );
+        environment.insert(
+            verification::SAMPLE_RATE_ENV.into(),
+            self.verify_sample_rate.to_string(),
         );
         for (name, value) in &self.scheduler_env {
             environment.insert(name.clone(), value.clone());
@@ -1596,7 +1607,7 @@ pub(crate) fn crate_name_argument(arguments: &[OsString]) -> Option<String> {
 /// An empty value or `0` is off, matching how the configuration reads it, so
 /// that an explicit disable cannot be mistaken for an enable.
 pub(crate) fn verify_requested() -> bool {
-    std::env::var_os(VERIFY_ENV).is_some_and(|value| !value.is_empty() && value != "0")
+    verification::requested()
 }
 
 /// The session file-digest ledger, answered by the cache agent.
