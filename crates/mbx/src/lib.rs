@@ -22,6 +22,8 @@
 //! whose documentation advertises `store` and `session` invites exactly the
 //! dependency the paragraph above rules out.
 
+#[cfg(target_os = "linux")]
+mod cgroup;
 #[doc(hidden)]
 pub mod cli;
 #[doc(hidden)]

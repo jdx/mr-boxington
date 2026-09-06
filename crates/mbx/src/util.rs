@@ -336,71 +336,15 @@ pub fn memory_total_bytes() -> Option<u64> {
     #[allow(clippy::useless_conversion)]
     let total = u64::try_from(info.totalram).ok()?;
     let physical = total.checked_mul(unit).filter(|total| *total > 0)?;
-    Some(match cgroup_memory_limit() {
+    Some(match crate::cgroup::memory().limit {
         Some(limit) => physical.min(limit),
         None => physical,
     })
 }
 
-/// The memory ceiling this process's cgroup imposes, if it imposes one.
-///
-/// Read at the root of the cgroup filesystem, which is what a container sees
-/// of its own limit through a cgroup namespace -- the ordinary Docker,
-/// Podman, and Kubernetes arrangement. A process placed in a nested cgroup
-/// *without* such a namespace reads the root's limit instead and is budgeted
-/// as though the nesting were not there; that is the same answer it had
-/// before any of this, so it loses nothing.
-#[cfg(target_os = "linux")]
-fn cgroup_memory_limit() -> Option<u64> {
-    // v2 states "max" for unlimited; v1 states a number so large it means the
-    // same thing, so anything at or above the host's addressable range is
-    // treated as no limit rather than as a budget.
-    read_cgroup_value("/sys/fs/cgroup/memory.max")
-        .or_else(|| read_cgroup_value("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
-}
-
-/// Memory the cgroup is holding that the kernel would not simply reclaim.
-///
-/// Not `memory.current`, which counts the page cache. A build fills that
-/// immediately -- every source it reads and every artifact it writes lands
-/// there -- and nearly all of it is evictable, so a container that had merely
-/// compiled something would look as though it were out of memory. Subtracting
-/// the inactive file pages leaves the working set, which is the same figure
-/// Kubernetes reports for a container and the one worth comparing a
-/// compilation's appetite against.
-#[cfg(target_os = "linux")]
-fn cgroup_memory_usage() -> Option<u64> {
-    let current = read_cgroup_amount("/sys/fs/cgroup/memory.current")
-        .or_else(|| read_cgroup_amount("/sys/fs/cgroup/memory/memory.usage_in_bytes"))?;
-    // Absent or unreadable stats leave the page cache counted, which errs
-    // toward deferring a compilation rather than toward an OOM kill.
-    let reclaimable = read_cgroup_stat("/sys/fs/cgroup/memory.stat", "inactive_file")
-        .or_else(|| read_cgroup_stat("/sys/fs/cgroup/memory/memory.stat", "total_inactive_file"))
-        .unwrap_or(0);
-    Some(current.saturating_sub(reclaimable))
-}
-
-/// One cgroup limit, or `None` for absent, unparseable, or "no limit".
-#[cfg(target_os = "linux")]
-fn read_cgroup_value(path: &str) -> Option<u64> {
-    read_cgroup_text(&std::fs::read_to_string(path).ok()?)
-}
-
-/// One plain cgroup number, where zero is a reading rather than an absence.
-#[cfg(target_os = "linux")]
-fn read_cgroup_amount(path: &str) -> Option<u64> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
-}
-
-/// One field of a cgroup `memory.stat`, which is `name value` per line.
-#[cfg(target_os = "linux")]
-fn read_cgroup_stat(path: &str, field: &str) -> Option<u64> {
-    parse_cgroup_stat(&std::fs::read_to_string(path).ok()?, field)
-}
-
 /// The parsing half, separated so it can be tested without a cgroup mount.
 #[cfg(any(target_os = "linux", test))]
-fn parse_cgroup_stat(contents: &str, field: &str) -> Option<u64> {
+pub(crate) fn parse_cgroup_stat(contents: &str, field: &str) -> Option<u64> {
     contents.lines().find_map(|line| {
         let (name, value) = line.split_once(' ')?;
         (name == field).then(|| value.trim().parse().ok())?
@@ -409,7 +353,7 @@ fn parse_cgroup_stat(contents: &str, field: &str) -> Option<u64> {
 
 /// The parsing half, separated so it can be tested without a cgroup mount.
 #[cfg(any(target_os = "linux", test))]
-fn read_cgroup_text(contents: &str) -> Option<u64> {
+pub(crate) fn read_cgroup_text(contents: &str) -> Option<u64> {
     let value = contents.trim();
     if value == "max" {
         return None;
@@ -471,11 +415,9 @@ pub fn memory_available_bytes() -> Option<u64> {
         .parse::<u64>()
         .ok()?;
     let host = kibibytes.checked_mul(1024)?;
-    let available = match (cgroup_memory_limit(), cgroup_memory_usage()) {
-        (Some(limit), Some(used)) => host.min(limit.saturating_sub(used)),
-        (Some(limit), None) => host.min(limit),
-        _ => host,
-    };
+    let available = crate::cgroup::memory()
+        .headroom
+        .map_or(host, |free| host.min(free));
     // Zero is a real answer here -- a cgroup at its limit has nothing left --
     // and the caller has to be able to tell it from "cannot measure".
     Some(available)
