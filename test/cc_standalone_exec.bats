@@ -190,3 +190,85 @@ EOF
     assert_failure
   done
 }
+
+@test "named preprocessor output restores exact text and tracks changed headers" {
+  local project="$BATS_TEST_TMPDIR/preprocess"
+  local report="$BATS_TEST_TMPDIR/preprocess.json"
+  mkdir -p "$project/include"
+  echo '#define VALUE 7' >"$project/include/value.h"
+  cat >"$project/main.c" <<'SOURCE'
+#include "value.h"
+const char *source = __FILE__;
+int value = VALUE;
+SOURCE
+  # Absolute input/header paths deliberately exercise line markers that must
+  # retain their exact spelling in the cached text.
+  local source="$project/main.c"
+  local include="$project/include"
+  (cd "$project" && cc -E "$source" -I"$include" -o reference.i)
+  (cd "$project" && "$MBX_BIN" exec cc -E "$source" -I"$include" -o result.i)
+  run cmp "$project/reference.i" "$project/result.i"
+  assert_success
+  rm "$project/result.i"
+  (cd "$project" && MBX_STATS_REPORT="$report" "$MBX_BIN" exec cc -E "$source" -I"$include" -o result.i)
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*1' "$report"
+  assert_success
+  run cmp "$project/reference.i" "$project/result.i"
+  assert_success
+
+  # Changing only a header must invalidate a warm prediction.
+  echo '#define VALUE 9' >"$project/include/value.h"
+  (cd "$project" && cc -E "$source" -I"$include" -o reference.i)
+  rm "$project/result.i"
+  (cd "$project" && MBX_STATS_REPORT="$report" "$MBX_BIN" exec cc -E "$source" -I"$include" -o result.i)
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*0' "$report"
+  assert_success
+  run cmp "$project/reference.i" "$project/result.i"
+  assert_success
+
+  # A caller's explicit dependency file is regenerated on a hit. Its target
+  # must match the real driver (GCC and Clang differ under -E).
+  (cd "$project" && cc -E "$source" -I"$include" -o deps.i -MD -MF reference.d)
+  local expected_target
+  expected_target=$(sed -n '1s/:.*//p' "$project/reference.d")
+  rm "$project/deps.i"
+  (cd "$project" && "$MBX_BIN" exec cc -E "$source" -I"$include" -o deps.i -MD -MF deps.d)
+  rm "$project/deps.i" "$project/deps.d"
+  (cd "$project" && MBX_STATS_REPORT="$report" "$MBX_BIN" exec cc -E "$source" -I"$include" -o deps.i -MD -MF deps.d)
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*1' "$report"
+  assert_success
+  run grep 'value.h' "$project/deps.d"
+  assert_success
+  run grep -F "$expected_target:" "$project/deps.d"
+  assert_success
+  run cmp "$project/reference.i" "$project/deps.i"
+  assert_success
+
+  # Stdout still goes through the real compiler transparently.
+  (cd "$project" && cc -E "$source" -I"$include" >stdout.reference)
+  (cd "$project" && "$MBX_BIN" exec cc -E "$source" -I"$include" >stdout.actual)
+  run cmp "$project/stdout.reference" "$project/stdout.actual"
+  assert_success
+}
+
+@test "C++ preprocessing without line markers restores from the cache" {
+  command -v c++ >/dev/null || skip "no C++ compiler is available"
+  local project="$BATS_TEST_TMPDIR/preprocess-cxx"
+  local report="$BATS_TEST_TMPDIR/preprocess-cxx.json"
+  mkdir -p "$project/src"
+  cat >"$project/src/main.cpp" <<'SOURCE'
+#ifdef __cplusplus
+template <typename T> T twice(T value) { return value + value; }
+#else
+#error expected C++ preprocessing
+#endif
+SOURCE
+  (cd "$project" && c++ -E -P src/main.cpp -o expected.ii)
+  (cd "$project" && "$MBX_BIN" exec c++ -E -P src/main.cpp -o result.ii)
+  rm "$project/result.ii"
+  (cd "$project" && MBX_STATS_REPORT="$report" "$MBX_BIN" exec c++ -E -P src/main.cpp -o result.ii)
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*1' "$report"
+  assert_success
+  run cmp "$project/expected.ii" "$project/result.ii"
+  assert_success
+}

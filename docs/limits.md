@@ -142,10 +142,10 @@ target implies lives in the `cc` crate's own tables, and a wrong guess would
 build the object with the wrong compiler. A value that is a command, such as
 `ccache gcc`, is left alone for the same reason.
 
-Only a plain single-source object compile through a gcc-, clang-, or MSVC-style
-driver is admitted, with preprocessed assembly (`.S`, or `-x
+Single-source object compiles through gcc-, clang-, or MSVC-style drivers
+are admitted, with preprocessed assembly (`.S`, or `-x
 assembler-with-cpp`) counting as C: its includes are what dependency discovery
-reads, and the assembler is part of a GCC identity. Linking, preprocessing,
+reads, and the assembler is part of a GCC identity. Linking, preprocessing to stdout,
 assembly that skips the preprocessor (`.s`), Objective-C, precompiled
 headers, coverage instrumentation, compiler plugins, options forwarded to a
 sub-tool with `-Wp,`/`-Wl,`/`-Xclang`, unmodeled `-Wa,` assembler options, and
@@ -153,6 +153,15 @@ assembler-time `.include`/`.sinclude`/`.incbin` inputs, and response files all
 bypass, as does any flag the adapter does not model. Known
 assembler options that add no inputs, such as `-Wa,--noexecstack`, are keyed
 and admitted. MSVC compiler PDBs, modules, and other extra outputs also bypass.
+GCC/Clang preprocessing with `-E ... -o file` is also cached. The file is
+restored byte-for-byte; line markers and `__FILE__` values are preserved. These
+entries include literal argument paths, the working directory, and mapped
+roots in their keys, so they are not shared across different checkout paths.
+Header discovery and include-directory invalidation still apply. `-E` with
+`-MD`/`-MMD` requires an explicit `-MF`; without it, GCC gives `-o` a different
+meaning, so mbx bypasses that invocation. `-o -` and dependency output to
+stdout with `-MF -` remain bypasses.
+
 A source or header that expands `__DATE__`, `__TIME__`, or `__TIMESTAMP__`
 bypasses too: its object is not a function of its inputs.
 

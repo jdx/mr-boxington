@@ -2,7 +2,7 @@
 //!
 //! Cargo build scripts using the `cc` crate compile C and C++ through a
 //! gcc-style driver. This adapter models the narrow shape those build scripts
-//! produce -- one source, one object, `-c` -- and rejects everything else. As
+//! produce -- one source, one object, `-c` -- plus named `-E` output. As
 //! in the rustc adapter, callers should treat [`CcBypassReason`] as a safe
 //! cache bypass: run the real compiler and publish nothing.
 //!
@@ -248,6 +248,7 @@ const SUPPORTED_G_FLAGS: &[&str] = &[
 ];
 
 const SUPPORTED_BARE_FLAGS: &[&str] = &[
+    "-P", // Suppress preprocessor line markers; keyed even without -E.
     "-ansi",
     "-nostdinc",
     "-nostdinc++",
@@ -682,6 +683,8 @@ struct CcActionDescriptor {
     adapter_version: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     assembly_input_model: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preprocessing: Option<PreprocessingContext>,
     compiler: CcCompilerDescriptor,
     arguments: Vec<String>,
     environment: BTreeMap<String, Option<String>>,
@@ -695,9 +698,20 @@ struct CcInvocationDescriptor {
     adapter_version: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     assembly_input_model: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preprocessing: Option<PreprocessingContext>,
     compiler: CcCompilerDescriptor,
     arguments: Vec<String>,
     required_inputs: Vec<String>,
+}
+
+/// Preprocessor text embeds literal paths in line markers and macros. Keep
+/// its invocation tied to those spellings instead of rewriting user output.
+#[derive(Debug, Serialize)]
+struct PreprocessingContext {
+    working_dir: PathBuf,
+    arguments: Vec<String>,
+    roots: BTreeMap<String, PathBuf>,
 }
 
 /// Normalized input names from the last successful execution of one modeled
@@ -751,6 +765,7 @@ pub struct CcInvocation {
     required_inputs: Vec<PathBuf>,
     language: CcLanguage,
     preprocessed_assembly: bool,
+    preprocessing_arguments: Option<Vec<String>>,
     sysroot: Option<PathBuf>,
     caller_depfile: Option<CallerDepfile>,
     /// Positions in the parsed command line of the dependency-list flags the
@@ -822,8 +837,8 @@ impl CcInvocation {
             .collect()
     }
 
-    /// Parse a driver command line, admitting only modeled single-object
-    /// compiles.
+    /// Parse a driver command line, admitting modeled single-source compiles
+    /// and preprocessing to a named output.
     pub fn parse(arguments: &[OsString]) -> Result<Self, CcBypassReason> {
         Parser::new(arguments).parse()
     }
@@ -836,7 +851,9 @@ impl CcInvocation {
         if family.is_msvc() {
             MsvcParser::new(arguments).parse()
         } else {
-            Self::parse(arguments)
+            let mut parser = Parser::new(arguments);
+            parser.family = family;
+            parser.parse()
         }
     }
 
@@ -850,7 +867,12 @@ impl CcInvocation {
         &self.source
     }
 
-    /// Object file this invocation produces.
+    /// Whether this invocation writes named preprocessor text.
+    pub fn is_preprocessing(&self) -> bool {
+        self.preprocessing_arguments.is_some()
+    }
+
+    /// Output file this invocation produces.
     pub fn output(&self) -> &Path {
         &self.output
     }
@@ -1176,6 +1198,7 @@ impl<'a> ActionBuilder<'a> {
             kind: "cc",
             adapter_version: ADAPTER_VERSION,
             assembly_input_model: invocation.assembly_input_model,
+            preprocessing: invocation.preprocessing,
             compiler: invocation.compiler,
             arguments: invocation.arguments,
             environment: self.context.environment.clone(),
@@ -1210,6 +1233,19 @@ impl<'a> ActionBuilder<'a> {
             // Version the assembly-only safety model independently so adding
             // support does not invalidate every existing C and C++ entry.
             assembly_input_model: self.invocation.preprocessed_assembly.then_some(1),
+            preprocessing: self
+                .invocation
+                .preprocessing_arguments
+                .as_ref()
+                .map(|arguments| PreprocessingContext {
+                    working_dir: self.context.working_dir.clone(),
+                    arguments: arguments.clone(),
+                    roots: self
+                        .mappings
+                        .iter()
+                        .map(|mapping| (mapping.placeholder.clone(), mapping.root.clone()))
+                        .collect(),
+                }),
             compiler: self.compiler_descriptor(),
             arguments,
             required_inputs,
@@ -1309,6 +1345,7 @@ fn absolute_path(path: &Path, working_dir: &Path) -> PathBuf {
 }
 
 struct Parser<'a> {
+    family: CcCompilerFamily,
     arguments: &'a [OsString],
     index: usize,
     parsed: Vec<Argument>,
@@ -1320,6 +1357,7 @@ struct Parser<'a> {
     explicit_language: Option<CcLanguage>,
     preprocessed_assembly: bool,
     compiling: bool,
+    preprocessing: bool,
     dependency: DependencyRequest,
 }
 
@@ -1340,6 +1378,7 @@ struct DependencyRequest {
 impl<'a> Parser<'a> {
     fn new(arguments: &'a [OsString]) -> Self {
         Self {
+            family: CcCompilerFamily::Gcc,
             arguments,
             index: 0,
             parsed: Vec::new(),
@@ -1351,6 +1390,7 @@ impl<'a> Parser<'a> {
             explicit_language: None,
             preprocessed_assembly: false,
             compiling: false,
+            preprocessing: false,
             dependency: DependencyRequest::default(),
         }
     }
@@ -1372,11 +1412,27 @@ impl<'a> Parser<'a> {
             }
         }
 
-        if !self.compiling {
+        if !self.compiling && !self.preprocessing {
             return Err(CcBypassReason::NotACompile);
         }
         let source = self.source.clone().ok_or(CcBypassReason::MissingInput)?;
         let output = self.output.clone().ok_or(CcBypassReason::MissingOutput)?;
+        if self.preprocessing && output == Path::new("-") {
+            return Err(CcBypassReason::NonObjectOutput("-E -o -".into()));
+        }
+        // GCC interprets -o as the dependency output with -E -MD unless -MF
+        // is explicit. Do not turn that command into a different operation.
+        if self.preprocessing
+            && self.dependency.user_headers_only.is_some()
+            && self.dependency.file.is_none()
+        {
+            return Err(CcBypassReason::CallerDependencyFlags(
+                "-E -MD/-MMD without -MF".into(),
+            ));
+        }
+        if self.preprocessing && self.dependency.file.as_deref() == Some(Path::new("-")) {
+            return Err(CcBypassReason::CallerDependencyFlags("-E -MF -".into()));
+        }
         let language = self.language(&source)?;
         let preprocessed_assembly = self.preprocessed_assembly
             || (self.explicit_language.is_none()
@@ -1390,7 +1446,16 @@ impl<'a> Parser<'a> {
                     .unwrap_or_else(|| output.with_extension("d")),
                 targets: if self.dependency.targets.is_empty() {
                     vec![DepfileTarget {
-                        name: output.to_string_lossy().into_owned(),
+                        // GCC -E ignores -o when choosing the dependency
+                        // target; Clang retains it. Neither uses the depfile.
+                        name: if self.preprocessing && self.family == CcCompilerFamily::Gcc {
+                            Path::new(source.file_name().ok_or(CcBypassReason::MissingInput)?)
+                                .with_extension("o")
+                                .to_string_lossy()
+                                .into_owned()
+                        } else {
+                            output.to_string_lossy().into_owned()
+                        },
                         quoted: true,
                     }]
                 } else {
@@ -1415,6 +1480,12 @@ impl<'a> Parser<'a> {
             required_inputs: self.required_inputs,
             language,
             preprocessed_assembly,
+            preprocessing_arguments: self.preprocessing.then(|| {
+                self.arguments
+                    .iter()
+                    .map(|arg| arg.to_str().expect("arguments were validated").to_owned())
+                    .collect()
+            }),
             sysroot: self.sysroot,
             caller_depfile,
             dependency_argument_indices: self.dependency.indices,
@@ -1525,7 +1596,12 @@ impl<'a> Parser<'a> {
         if COMPILER_QUERY_FLAGS.contains(&value) || value.starts_with("-print") {
             return Err(CcBypassReason::CompilerQuery);
         }
-        if matches!(value, "-E" | "-S") {
+        if value == "-E" {
+            self.preprocessing = true;
+            self.parsed.push(Argument::Plain(value.into()));
+            return Ok(());
+        }
+        if value == "-S" {
             return Err(CcBypassReason::NonObjectOutput(value.into()));
         }
         if let Some(option) = value.strip_prefix("-M") {
@@ -1825,6 +1901,7 @@ impl<'a> MsvcParser<'a> {
             required_inputs: self.required_inputs,
             language,
             preprocessed_assembly: false,
+            preprocessing_arguments: None,
             sysroot: None,
             caller_depfile: None,
             dependency_argument_indices: Vec::new(),

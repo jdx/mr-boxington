@@ -48,9 +48,19 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     let working_dir = std::env::current_dir()?;
     let mappings = path_mappings(&working_dir);
     let identity = compiler_identity(compiler, language)?;
-    // Appended before anything parses, so the flag is part of the key the same
-    // way the caller's own prefix maps are.
-    let portable = Portable::detect(&mappings, identity.family, &working_dir);
+    // Prefix maps enter the final parse so they are keyed like caller flags.
+    // Named preprocessor output retains its original path spellings instead.
+    let preprocessing = CcInvocation::parse_for(arguments, identity.family)?.is_preprocessing();
+    let portable = if preprocessing {
+        // Preprocessor output retains literal line markers and macro values;
+        // its action identity includes the working directory and path roots.
+        Portable {
+            arguments: Vec::new(),
+            values: Vec::new(),
+        }
+    } else {
+        Portable::detect(&mappings, identity.family, &working_dir)
+    };
     let arguments = portable.applied_to(arguments);
     let arguments = arguments.as_ref();
     let invocation = CcInvocation::parse_for(arguments, identity.family)?;
@@ -58,11 +68,16 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     // one it needs; the caller's is written by the shim once the files this
     // compilation read are known.
     let compiler_arguments = invocation.compiler_arguments(arguments);
-    let environment = environment_inputs_for(
+    let mut environment = environment_inputs_for(
         |name| std::env::var(name).ok(),
         invocation.sysroot(),
         identity.family,
     )?;
+    if preprocessing {
+        // With debug working-directory markers, GCC can honor a logical PWD
+        // alias. It is output text, so it must also be part of the action key.
+        environment.insert("PWD".into(), std::env::var("PWD").ok());
+    }
     let mut context = CcActionContext {
         compiler: identity,
         working_dir: working_dir.clone(),

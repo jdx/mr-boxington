@@ -251,14 +251,12 @@ fn linking_without_dash_c_is_not_a_compile() {
 }
 
 #[test]
-fn preprocess_and_assembly_modes_bypass_as_non_object_output() {
-    for mode in ["-E", "-S"] {
-        let arguments = argv(&[mode, "-o", "out", "main.c"]);
-        assert_eq!(
-            CcInvocation::parse(&arguments).unwrap_err().kind(),
-            "non-object-output"
-        );
-    }
+fn assembly_modes_bypass_as_non_object_output() {
+    let arguments = argv(&["-S", "-o", "out", "main.c"]);
+    assert_eq!(
+        CcInvocation::parse(&arguments).unwrap_err().kind(),
+        "non-object-output"
+    );
 }
 
 /// `-M` and `-MM` stop after preprocessing, `-MG` changes what a missing
@@ -1221,5 +1219,89 @@ fn debug_dialects_and_levels_have_distinct_action_keys() {
     }
     for flag in ["-ggdb4", "-gfull-extra", "-gmodules", "-gsplit-dwarf"] {
         assert!(CcInvocation::parse(&argv(&[flag, "-c", "-o", "out.o", "src/a.c"])).is_err());
+    }
+}
+
+#[test]
+fn preprocessing_requires_a_named_output_and_unambiguous_dependencies() {
+    for flags in [
+        vec!["-E", "main.c"],
+        vec!["-E", "main.c", "-o", "-"],
+        vec!["-E", "main.c", "-o", "main.i", "-MD"],
+        vec!["-E", "main.c", "-o", "main.i", "-MMD"],
+        vec!["-E", "main.c", "-o", "main.i", "-MD", "-MF", "-"],
+        vec!["-E", "-x", "c", "/", "-o", "main.i", "-MD", "-MF", "main.d"],
+    ] {
+        assert!(CcInvocation::parse(&argv(&flags)).is_err(), "{flags:?}");
+    }
+    let invocation = CcInvocation::parse(&argv(&[
+        "-E", "main.c", "-o", "main.i", "-MD", "-MF", "main.d",
+    ]))
+    .unwrap();
+    assert!(invocation.is_preprocessing());
+    assert_eq!(invocation.output(), Path::new("main.i"));
+    assert_eq!(
+        invocation.caller_depfile().unwrap().path,
+        Path::new("main.d")
+    );
+}
+
+#[test]
+fn preprocessor_keys_retain_checkout_and_argument_spellings() {
+    let (first, first_target) = checkout("first");
+    let (second, second_target) = checkout("second");
+    let invocation = CcInvocation::parse(&argv(&["-E", "main.c", "-o", "main.i"])).unwrap();
+    let digest = invocation
+        .invocation_digest(&context(&first, &first_target))
+        .unwrap();
+    assert_ne!(
+        digest,
+        invocation
+            .invocation_digest(&context(&second, &second_target))
+            .unwrap()
+    );
+    let spelled = CcInvocation::parse(&argv(&["-E", "./main.c", "-o", "main.i"])).unwrap();
+    assert_ne!(
+        digest,
+        spelled
+            .invocation_digest(&context(&first, &first_target))
+            .unwrap()
+    );
+    let compiled = CcInvocation::parse(&argv(&["-c", "main.c", "-o", "main.i"])).unwrap();
+    assert_ne!(
+        digest,
+        compiled
+            .invocation_digest(&context(&first, &first_target))
+            .unwrap()
+    );
+}
+
+#[test]
+fn preprocessing_dependency_targets_follow_the_driver_family() {
+    let arguments = argv(&[
+        "-E",
+        "src/main.c",
+        "-o",
+        "result.i",
+        "-MD",
+        "-MF",
+        "result.d",
+    ]);
+    for (family, expected) in [
+        (CcCompilerFamily::Gcc, "main.o"),
+        (CcCompilerFamily::Clang, "result.i"),
+    ] {
+        let invocation = CcInvocation::parse_for(&arguments, family).unwrap();
+        assert_eq!(
+            invocation.caller_depfile().unwrap().targets[0].name,
+            expected
+        );
+        let mut explicit = arguments.clone();
+        explicit.extend(argv(&["-MT", "custom"]));
+        let invocation = CcInvocation::parse_for(&explicit, family).unwrap();
+        assert_eq!(
+            invocation.caller_depfile().unwrap().targets[0].name,
+            "custom"
+        );
     }
 }
