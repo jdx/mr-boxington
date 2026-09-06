@@ -164,7 +164,7 @@ run = "tak run --record"
 [tools]
 # Perf jobs build the current source with the latest released mbx so the
 # appliance cache is usable without bootstrapping from the branch under test.
-mr-boxington = "1.4.1"
+mr-boxington = "1.8.3"
 "github:jdx/tak" = "0.0.9"
 aube = { version = "latest", lazy = true, lazy_bins = ["aube"] }
 communique = "latest"
