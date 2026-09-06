@@ -17,54 +17,44 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  docs:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  # Share one bootstrap build and tool setup for the host Linux checks.
+  linux:
+    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          submodules: recursive
           persist-credentials: false
-      - name: Test benchmark driver
-        run: python3 -m unittest discover -s benchmarks -p 'test_*.py'
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
-      - name: Build documentation
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          mise run check:docs
-          mise run check:links
-
-  lint:
-    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1.6.1
         with:
           cache: rust
-      - name: Bootstrap mbx
-        run: |
-          cargo build --package mbx --target-dir target/mbx-bootstrap-build
-          mkdir -p target/mbx-bootstrap
-          cp target/mbx-bootstrap-build/debug/mbx target/mbx-bootstrap/mbx
-      - run: ./target/mbx-bootstrap/mbx fmt --all --check
-      - run: ./target/mbx-bootstrap/mbx clippy --workspace --all-features --all-targets -- -D warnings
+      - run: rustup target add wasm32-unknown-unknown
+      - name: Test benchmark driver
+        run: python3 -m unittest discover -s benchmarks -p 'test_*.py'
+      - name: Check dependencies
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+      - name: Run lint, build, tests, and documentation checks
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: mise run ci
 
   test:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            runner: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
           - os: macos-latest
             runner: namespace-profile-endev-macos-arm64;overrides.cache-tag=cache
           - os: windows-latest
             runner: windows-latest
-          # Every Linux binary a release ships is musl, and every job above
-          # builds gnu, so without these the shipped configuration would reach
-          # users having only ever run `--version`. File locks, unix sockets,
+          # Every Linux binary a release ships is musl, while the Linux job
+          # above builds gnu. Without these, the shipped configuration would
+          # reach users having only ever run `--version`. File locks, unix sockets,
           # and the reflink ioctls are where a musl-only divergence would hide.
           # Both release architectures have a native runner, so a static musl
           # binary needs no emulation to build or run its own test suite.
@@ -161,42 +151,37 @@ jobs:
       - name: Check rustls with native roots
         run: cargo check --locked --workspace --all-targets --no-default-features --features rustls-native-roots
 
-  supply-chain:
-    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
-        with:
-          command: check
-
   fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-02
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install pinned nightly
-        run: rustup toolchain install nightly-2026-08-02 --profile minimal
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: fuzz -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned cargo-fuzz
-        run: cargo +nightly-2026-08-02 install cargo-fuzz --version 0.13.2 --locked
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Compile fuzz targets
-        run: cargo +nightly-2026-08-02 fuzz build
+        run: cargo fuzz build
       - name: Smoke-test fuzz targets
         run: |
-          cargo +nightly-2026-08-02 fuzz run blob_pack -- -runs=1000
-          cargo +nightly-2026-08-02 fuzz run cc_depfile -- -runs=1000
-          cargo +nightly-2026-08-02 fuzz run cc_invocation -- -runs=1000
-          cargo +nightly-2026-08-02 fuzz run dep_info -- -runs=1000
-          cargo +nightly-2026-08-02 fuzz run rustc_paths -- -runs=1000
+          cargo fuzz run blob_pack -- -runs=1000
+          cargo fuzz run cc_depfile -- -runs=1000
+          cargo fuzz run cc_invocation -- -runs=1000
+          cargo fuzz run dep_info -- -runs=1000
+          cargo fuzz run rustc_paths -- -runs=1000
 
   final:
     permissions: {}
     needs:
       - compatibility
-      - docs
       - fuzz
-      - lint
-      - supply-chain
+      - linux
       - test
     runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
     timeout-minutes: 1
@@ -206,11 +191,9 @@ jobs:
     steps:
       - name: Check job results
         if: |
-          needs.docs.result != 'success' ||
           needs.fuzz.result != 'success' ||
-          needs.lint.result != 'success' ||
+          needs.linux.result != 'success' ||
           needs.compatibility.result != 'success' ||
-          needs.supply-chain.result != 'success' ||
           needs.test.result != 'success'
         run: exit 1
       - run: echo "All CI jobs completed successfully"
