@@ -27,37 +27,31 @@ bump does not release — only merging a release PR does.
 
 ## Merging the release PR
 
-A release PR is not complete the moment it appears. `release-plz-pr` pushes a
-second commit regenerating `docs/cli`, and that push has nowhere to land once
-the PR is merged — the branch is gone and release-plz never revisits a merged
-PR. Merging early therefore ships a reference that names the previous version,
-and `check:docs` then fails on `main` and on every pull request opened against
-it until someone regenerates by hand.
+Before merging a release PR:
 
-That is not hypothetical: v0.5.4 was merged 37 seconds after its PR opened,
-while the render was still compiling, and `main` went red with a `0.5.3`
-reference. The job now warms the Rust cache and builds `mbx` *before* it asks
-release-plz to open the PR, so the docs commit follows within seconds rather
-than a minute. The window is small, not zero — wait for the second commit, and
-for the PR's own CI, rather than merging on sight.
+1. Wait for the `release-plz-pr` job to finish. It pushes a second commit that
+   regenerates `docs/cli` after release-plz updates versions.
+2. Confirm that the generated reference names the new mbx version.
+3. Wait for the pull request's CI, including the `docs` check, to pass.
 
-Requiring the `docs` check on `main` closes the rest of the gap, since the
-release PR's CI cannot be green until the regenerated reference is on the
-branch. That is a branch-protection setting, not something this repository can
-assert for itself.
+Merging before regeneration removes the branch the second push needs. The
+release then ships stale generated documentation and `check:docs` fails on
+`main`. The job bootstraps mbx before opening the PR to shorten this window,
+but the job must still complete. Requiring the `docs` check in branch protection
+helps enforce the sequence; that setting lives outside the repository.
 
 ## Versions
 
 The crates do not share a version. `mbx` and `mbx-cache-protocol` each have an
 independent one, because each carries a stability promise the other should not
 be able to break: the CLI's surface is its commands and JSON output, and the
-protocol crate's is the remote cache wire contract that `jdx/mbx-cache` depends
+protocol crate's is the remote cache wire contract that `jdx/mr-boxington-cache` depends
 on. `mbx-cache-core`, `mbx-cache-rustc`, and `mbx-cache-cc` are internals;
 they share the `mbx-internals` version group, move together, and stay on `0.x`
-so semver itself says a minor bump may break them. `mbx-cache-cargo` and
+so their APIs may change in a minor release. `mbx-cache-cargo` and
 `mbx-cache-store` release independently on `0.x`.
 
-Nobody edits a version in a feature pull request. release-plz owns every
+Do not edit versions in an ordinary pull request. release-plz owns every
 number, and one written by hand either collides with its calculation or is
 overwritten by it. If an API break is intended, the pull request should say so
 and leave the version alone.
@@ -67,7 +61,7 @@ CHANGE:` footer — so release-plz can choose the appropriate next version.
 
 release-plz computes each line from the commits that touched it and updates the
 path dependencies' version requirements, so a release can move one crate and
-leave the rest alone. When `mbx` reaches `1.0`, the internal crates stay on
+leave the rest alone. The `mbx` CLI is on `1.x`; the internal crates stay on
 `0.x`: the CLI depending on a `0.x` library is normal, and the library target
 inside `mbx` is `#[doc(hidden)]` so none of those types are part of the
 promise. See [protocol compatibility](docs/protocol-compatibility.md) for the

@@ -1,5 +1,9 @@
 # Security policy
 
+Report suspected vulnerabilities through [private vulnerability reporting][report].
+For setup questions or ordinary build failures, use
+[Discussions](https://github.com/jdx/mr-boxington/discussions).
+
 ## Supported versions
 
 Security fixes are made on the latest released version and on the `main`
@@ -29,7 +33,8 @@ someone who can contribute build artifacts:
 - Grant remote-cache write access only to trusted CI and maintainers. Pull
   requests, merge requests, local shells, and unprotected branches are forced
   read-only by the client, but the server must still enforce authentication and
-  authorization.
+  authorization. S3 deployments must enforce the same boundary through bucket
+  and credential permissions.
 - A remote namespace prevents accidental key collisions; it is not an access
   control boundary. Use HTTPS, narrowly scoped credentials, and separate
   server-side authorization where projects have different trust domains.

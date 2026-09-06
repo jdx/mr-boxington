@@ -1,3 +1,6 @@
+---
+description: Read lifetime compiler savings, pruning totals, and estimated workspace sharing with mbx stats.
+---
 # Savings and statistics
 
 `mbx stats` shows what sharing builds has saved on this machine, with the date

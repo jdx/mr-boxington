@@ -1,7 +1,44 @@
+---
+description: Read cache counters, measure reuse with fresh targets, and diagnose hits, misses, bypasses, and remote failures.
+---
 # Cache results
 
-The short summary separates work mbx handled from work it could not safely
-cache. Set `MBX_SUMMARY=full` for the detailed breakdown described below.
+Use the build summary to see what mbx restored, compiled, or left uncached.
+Counts describe compiler actions observed by mbx; they do not include work
+Cargo skipped because its outputs were already fresh.
+
+```sh
+mbx explain --last          # inspect the most recent recorded build
+MBX_SUMMARY=full mbx build  # print a detailed report for a new build
+```
+
+| Outcome | Cache lookup? | Result stored? |
+| --- | --- | --- |
+| [Hit](#hit) | Found a result | Already stored |
+| [Miss](#miss) | No matching result | After successful compilation |
+| [Not looked up](#could-not-look-up) | No usable input prediction yet | After successful compilation |
+| [Bypass](#bypass) | Skipped | No shared result |
+
+## Measure cache reuse
+
+Running the same command twice in the same target directory often measures
+Cargo's freshness check: no compiler work is needed. To observe mbx reuse,
+build equivalent source with the same toolchain, profile, and features into
+two fresh target directories:
+
+```sh
+mbx build --target-dir target/cache-demo-first
+mbx build --target-dir target/cache-demo-second
+```
+
+Use directory names that do not already contain build outputs. This keeps your
+normal target intact and avoids deleting the shared cache. The second build
+can restore work recorded by the first; unsupported actions still run.
+These explicit targets are not managed, so remove the two example directories
+when you finish. For repeatable timings, use the [benchmark harness](/benchmarks).
+
+Compiler time avoided is summed across actions. It is not elapsed time saved;
+always compare wall-clock build time as well as the counters.
 
 ## Hit
 
@@ -52,7 +89,7 @@ Expected for Cargo probes: source supplied on standard input cannot be rediscove
   - rustc invocation reads source from standard input
 ```
 
-Categories marked expected appear on every build and cost nothing; here the
+Categories marked expected are routine compiler probes, with no output to cache; here the
 `incremental` group is the one the build could act on. The command preserves
 Cargo's exit status after printing the explanation.
 
@@ -69,9 +106,11 @@ not bypass counts, because mbx never observed the compiler invocations.
 
 ## Remote failure
 
-A remote cache request failed and the build carried on without it: unreachable
-host, refused credentials, or a response this client would not accept. mbx never
-fails a build over a remote cache, so these only cost hit rate. The summary
+A remote cache request failed and the build continued without that result:
+an unreachable host, refused credentials, or an invalid response can all reduce
+reuse. Build-time transport failures fall back to local compilation. Invalid
+configuration can still stop startup, and explicit `mbx prefetch` and
+`mbx doctor` commands report connection failures as errors. The summary
 counts them because a remote that is failing every request reports the same
 hits, misses, and bytes as one that was empty. The short summary includes the
 count inline; the full summary explains it:
@@ -116,8 +155,8 @@ mbx explain build --workspace
 The usual causes, roughly in the order they show up:
 
 - The store is cold. A first build has no dep-info to derive keys from, so
-  "could not look up" dominates and everything is stored. Read the hit rate
-  off the second build.
+  "could not look up" can dominate. Compare equivalent builds with fresh
+  targets as described [above](#measure-cache-reuse).
 - Incremental builds are enabled. With `MBX_INCREMENTAL=1`, workspace
   members compile incrementally, those compilations bypass the cache, and the
   changed artifacts make crates above them miss too. See
@@ -139,8 +178,9 @@ The usual causes, roughly in the order they show up:
   `MBX_SHARE_OUT_DIR=0` disables that sharing. See
   [limits](/limits#out-dir-sharing-remaps-generated-source-paths).
 - A build chose its own C compiler, or is cross-compiling. Setting `CC`,
-  `HOST_CC`, or a target-specific variant leaves that build's C and C++
-  compilations uncached, and so does `--target`. Bypass kinds beginning `cc-`
+  `HOST_CC`, `CXX`, or `HOST_CXX` leaves host compilations outside mbx.
+  Cross-compilations are cached when the build explicitly names a supported
+  compiler through `CC_<target>`, `CXX_<target>`, `TARGET_CC`, or `TARGET_CXX`. Bypass kinds beginning `cc-`
   report anything the C adapter declined to model. See
   [limits](/limits#c-and-c-caching-covers-the-host-compiles-mbx-drives).
 - CI restored nothing. On GitHub Actions, check that the cache step restored
@@ -162,8 +202,8 @@ mbx[cache]: slowest uncached crates: syn 8.90s, regex-syntax 4.90s, serde_derive
 The estimate comes from the duration recorded with the successful compilation
 that populated the action prediction; older predictions without a timing hint
 contribute zero. The five crates with the largest cumulative uncached compiler
-time are listed so optimization work can target wall-clock cost instead of
-action count.
+time are listed so you can identify expensive uncached work. Parallel
+compilations overlap, so this ranking does not directly identify the critical path.
 
 The JSON statistics report exposes the same data in
 `estimated_compiler_duration_avoided_ns`, `compiler`, and

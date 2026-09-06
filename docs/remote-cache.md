@@ -1,6 +1,9 @@
+---
+description: Connect mbx to a cache server or S3-compatible bucket and understand authentication and write policy.
+---
 # Remote cache
 
-A remote cache lets ephemeral runners and teammates restore only the rustc
+A remote cache lets ephemeral runners and teammates restore the compiler
 actions a build needs. The local content-addressed store remains the working
 cache; remote objects are downloaded into it and newly completed actions may be
 uploaded from trusted CI.
@@ -8,7 +11,18 @@ uploaded from trusted CI.
 mbx reaches a remote in one of two ways. A **cache server** speaks the mbx
 protocol and answers with the extensions built on top of it. An
 **S3-compatible bucket** stores the same objects with nothing to run. The URL's
-scheme chooses; everything else on this page applies to both.
+scheme chooses the backend.
+
+| Backend | Use it when | Credentials |
+| --- | --- | --- |
+| [Cache server](#configure-a-server) | You want server-side grants and negotiated transfer extensions | Bearer token or GitHub OIDC |
+| [S3-compatible bucket](#configure-an-s3-compatible-bucket) | You already operate object storage | Exported AWS credentials |
+| [GitHub Actions cache](/github-action) | You want managed archive storage for GitHub jobs | Handled by the action |
+
+Put `[remote]` settings in your [global configuration](/configuration), or use
+`MBX_REMOTE_*` environment variables in CI. They are not accepted from a
+repository's `.mbx.toml`. A configured `read-write` mode is still subject to
+[the environment's write policy](#read-and-write-policy).
 
 ## Configure a server
 
@@ -49,7 +63,8 @@ one bucket between projects. Keys are laid out under
 `<prefix>/<namespace>/v1/`, so a bucket policy can scope a writer to its own
 prefix.
 
-An IAM policy needs `s3:GetObject` and `s3:PutObject` on that prefix. Add
+Readers need `s3:GetObject` on that prefix. Trusted writers also need
+`s3:PutObject`. Add
 `s3:ListBucket` on the bucket as well. mbx never lists anything, but without
 that permission AWS answers `403` instead of `404` for an absent object, so a
 miss cannot be told apart from a refusal.
@@ -100,8 +115,9 @@ each other's predictions, which costs prefetch coverage on later builds.
 
 ### Who may publish
 
-A cache server authenticates and authorizes every request. A bucket does not:
-whatever the credentials may write, mbx may write. The client-side [write
+A cache server enforces namespace grants; a bucket enforces its object-storage
+permissions. Whatever a bucket credential can write is within reach of code
+holding that credential. The client-side [write
 policy](#read-and-write-policy) still applies, so pull requests never publish,
 but with a bucket that policy is the only thing between an untrusted build and
 your cache unless IAM agrees.
@@ -164,6 +180,7 @@ The OIDC flow is GitHub-specific, so authenticate GitLab jobs with a bearer
 token in a masked, protected CI/CD variable:
 
 ```yaml
+# Install mbx and a Rust toolchain in the job image first.
 build:
   variables:
     MBX_REMOTE_URL: https://cache.example.com
@@ -235,7 +252,7 @@ the server offers batched lookups it asks for them together instead of once per
 action. `remote_action_lookups` counts requests, not actions, so the same build
 reports far fewer of them against a server with the extension.
 
-Both extensions are negotiated. A server without them, or one that advertises an
+Batch lookups and packed uploads are negotiated. A server without them, or one that advertises an
 endpoint it does not serve, gets the single-object requests every version of mbx
 has made. Nothing needs configuring either way.
 

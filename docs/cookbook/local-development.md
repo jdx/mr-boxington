@@ -1,8 +1,13 @@
+---
+description: Set up rust-analyzer, watch loops, laptop budgets, and debugging with mbx.
+---
 # Local development
 
 mbx can sit underneath the tools already in a Rust development loop. Editors,
 file watchers, terminals, and worktrees may all keep invoking ordinary Cargo;
-their compilations share the same cache and machine-wide scheduler.
+their compilations share the same cache and machine-wide scheduler. Start with
+[`mbx setup`](/setup), then use the recipes below for your editor, watch loop,
+and machine budget.
 
 ## Put editor checks through mbx
 
@@ -34,7 +39,7 @@ mbx doctor
 ```
 
 On Windows, use `(Get-Command cargo).Path` instead of `command -v cargo`.
-See [Install and run](/getting-started#verify-plain-cargo) for the shell and
+See [Cargo and editor setup](/setup#verify-plain-cargo) for the shell and
 non-interactive `PATH` setup.
 
 ## Run a watch loop
@@ -93,8 +98,9 @@ CPU setting limits concurrent real compiler work across every terminal and
 worktree; cache hits do not consume permits. The memory setting prevents known
 large compilations from filling all CPU permits at once.
 
-For a temporary low-power watch session, set the same values in its
-environment. Child Cargo processes inherit them:
+For a watch session with a smaller shared budget, set the same values in its
+environment. Child Cargo processes inherit them. These are scheduler settings,
+so consider the other builds sharing that pool:
 
 ```sh
 MBX_SCHEDULER_CPUS=2 MBX_SCHEDULER_MEMORY=4GiB \

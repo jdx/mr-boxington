@@ -1,51 +1,27 @@
 <p align="center">
-  <img src="docs/public/logo.svg" alt="Mr Boxington, a friendly cache box wearing a monocle and bow tie" width="220">
+  <img src="docs/public/logo.svg" alt="Mr Boxington, a cache box wearing a monocle and bow tie" width="180">
 </p>
 
 <h1 align="center">mr boxington</h1>
 
 <p align="center">
-  <strong>fix <code>target/</code></strong><br>
-  Keep using cargo. Every build on the machine shares one self-pruning cache, and you can run multiple Cargo builds in parallel.
+  <strong>A shared cache. A tidier <code>target/</code>.</strong><br>
+  Reuse Cargo builds across worktrees, keep disk use in check, and run builds together.
 </p>
 
 <p align="center">
-  <a href="https://mr-boxington.jdx.dev">Documentation</a>
-  ·
+  <a href="https://mr-boxington.jdx.dev/getting-started">Get started</a> ·
+  <a href="https://mr-boxington.jdx.dev/guide">Documentation</a> ·
+  <a href="https://mr-boxington.jdx.dev/benchmarks">Benchmarks</a> ·
   <a href="https://github.com/jdx/mr-boxington/releases">Releases</a>
 </p>
 
-`mbx` puts a content-addressed rustc cache behind ordinary Cargo commands.
-Cargo still resolves dependencies, plans builds, and links outputs. mbx
-restores the compilations it has seen before. Run `mbx setup` once and keep
-using the Cargo commands you already run.
+`mbx` is a build cache for Rust projects. Cargo still resolves dependencies,
+plans builds, and runs your tools. mbx restores matching compiler outputs from
+one shared store and compiles the rest. Each command starts its own cache
+agent and stops it when the build ends; there is no daemon to manage.
 
-```sh
-cargo build                # cached by mbx
-cargo test --all-features  # cached by mbx
-cargo clippy --workspace   # cached by mbx
-mbx tui                    # watch every build's cache activity live
-mbx stats                  # lifetime savings, pruning, and workspace sharing
-mbx gc --dry-run           # preview what cleanup would reclaim
-```
-
-## Why mbx?
-
-- Cache keys contain no checkout-specific paths, so building one worktree
-  warms its siblings, and no two checkouts wait on the same Cargo target lock.
-- Disk use is bounded without a chore. The cache prunes itself to a share of
-  the disk, and a managed `target/` directory is deleted when its checkout is
-  gone, unused for 30 days, or over budget.
-- Several Cargo builds can run at once. They share one machine-wide CPU and
-  memory budget, and a cold compilation already running in one build is
-  compiled once and restored into the others.
-- CI can be warmed safely. GitHub Actions cache can warm fork pull requests
-  from a cache built on `main`, and pull requests never publish remote objects.
-- The summary counts hits, misses, and the compilations mbx could not look up
-  or bypassed on purpose, so a high hit rate cannot hide work that never
-  entered the cache.
-
-## Install
+## Get started
 
 With [mise](https://mise.jdx.dev):
 
@@ -53,130 +29,111 @@ With [mise](https://mise.jdx.dev):
 mise use --global --postinstall "mbx setup --yes" mr-boxington
 ```
 
-> [!NOTE]
-> Automatic Cargo wrapping requires mise 2026.8.16 or newer.
-
-Open a new shell and check that `command -v cargo` resolves to mise's command
-wrapper. `mbx setup` writes a `[wrappers.cargo]` entry and runs `mise reshim`.
-Tools that skip mise activation, such as SSH commands and coding agents, need
-`~/.local/share/mbx/bin` on `PATH` instead. Prefixing a command with `mbx`
-always works.
-
-With Cargo:
+Or with Cargo:
 
 ```sh
 cargo install mbx --locked
 mbx setup
 ```
 
-Release archives for Linux, macOS, and Windows are on the
-[releases page](https://github.com/jdx/mr-boxington/releases), each with a
-`SHA256SUMS` file.
-
-[See all installation options →](https://mr-boxington.jdx.dev/getting-started)
-
-## Automatic pruning
-
-Collection runs after a build, at most once an hour, and needs no
-configuration. The first build prints the budgets it chose for this machine.
-mbx keeps a running total of what collection has reclaimed and prints one line
-about it after a build:
-
-```text
-mbx[savings]: 41.7 GiB of target/ had outlived its checkouts. it has been dealt with.
-```
-
-`savings = "plain"` drops the joke. Inspect or collect the store by hand with:
+Open a new shell and check activation with `mbx setup --status`. Then use Cargo
+normally:
 
 ```sh
-mbx cache stats
-mbx gc --dry-run
-mbx gc
-mbx clean        # this workspace's managed target/ only
+cargo build
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-For a checkout without an existing `target/`, the first build places the
-target directory under the cache root and leaves `target` as a symlink, so
-familiar paths still work and a deleted checkout's outputs get collected. An
-existing `target/` is only replaced if you say yes at the prompt.
+To try mbx without automatic wrapping, install it and run `mbx build` directly.
+Automatic mise wrapping requires mise 2026.8.16 or newer. Editors, SSH commands,
+and other tools may need the stable shim directory on their `PATH`; the
+[setup guide](https://mr-boxington.jdx.dev/setup) walks through verification.
 
-[Learn about managed targets →](https://mr-boxington.jdx.dev/managed-targets)
+Verified release archives are available for Linux, macOS, and Windows.
+[All installation options →](https://mr-boxington.jdx.dev/installation)
 
-## Managed linkers
+## What you get
 
-Choose a different linker for each Cargo profile and target. mbx can use the
-Rust toolchain's bundled LLD or automatically download pinned mold and Wild
-releases, verify their GitHub SHA-256 digest, and reuse the installation
-across builds:
+- **Reuse across worktrees.** Equivalent compilations share cache keys even
+  when checkout paths differ. Building one worktree warms the next.
+- **Automatic cleanup.** The store has a disk budget. Managed targets are
+  collected when their checkout disappears, they go unused, or they exceed
+  their budget. Preview collection with `mbx gc --dry-run`.
+- **Parallel builds with a shared budget.** Independent Cargo commands share
+  CPU and memory permits and deduplicate identical compilations in flight.
+  Give each command its own target directory to avoid Cargo's directory lock.
+- **Faster local edits.** mbx keeps private incremental state for crates you
+  are changing while sharing eligible work across the rest of the build.
+- **CI reuse.** Use GitHub Actions cache, a compatible cache server, or an
+  S3-compatible bucket. Pull request builds restore remote work without
+  publishing new objects through mbx.
+- **An explanation for each result.** Hits, misses, unavailable lookups, and
+  bypasses are counted separately. `mbx explain --last` helps diagnose a build.
 
-```toml
-[linker.profiles.dev]
-x86_64-unknown-linux-gnu = "mold@2.42.0"
-aarch64-unknown-linux-gnu = "wild@0.10.0"
+A cold store needs a build to fill it. Unsupported invocations run normally
+without caching, and restored debug information can retain the original
+checkout's paths. See [how it works](https://mr-boxington.jdx.dev/how-it-works)
+and the [caching limits](https://mr-boxington.jdx.dev/limits).
 
-[linker.profiles.release]
-default = "rust-lld"
+## Use it in GitHub Actions
+
+```yaml
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mr-boxington-action@v1
+      - run: mbx test --workspace
 ```
 
-Set `MBX_LINKER=system` or another selector for a one-command override.
+Install your chosen Rust toolchain before the cache action. The default backend
+restores a pruned Cargo target and registry archive; pull requests are
+restore-only. See the [GitHub Action guide](https://mr-boxington.jdx.dev/github-action)
+for complete workflows, parallel builds, remote servers, and release policy.
 
-[Configure managed linkers →](https://mr-boxington.jdx.dev/configuration#managed-linkers)
+## Inspect and maintain the cache
 
-## CI
+```sh
+mbx doctor          # check tools, setup, and cache access
+mbx tui             # watch builds across the machine
+mbx stats           # report lifetime savings and workspace sharing
+mbx explain --last  # explain the last recorded build
+mbx cache stats     # inspect storage
+mbx gc --dry-run    # preview collection
+mbx clean           # remove this workspace's managed target
+```
 
-For GitHub-hosted CI, [`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action)
-installs mbx and uses GitHub Actions cache. Trusted environments can point the
-same action at a compatible remote such as the self-hostable
-[cache server](https://mr-boxington.jdx.dev/cache-server).
+On a filesystem that supports reflinks, restored outputs share data blocks
+with the store until modified. Elsewhere, mbx copies bytes. An existing real
+`target/` is only replaced after you accept a prompt.
+[Understand managed targets →](https://mr-boxington.jdx.dev/managed-targets)
 
-Parallel steps that run Clippy and tests together can each get their own
-`CARGO_TARGET_DIR` and share one CPU and memory budget through mbx. mise's
-lint job finished up to 45% sooner this way.
+## Find your next step
 
-[Copy the parallel workflow →](https://mr-boxington.jdx.dev/github-action#parallel-cargo-steps)
+| Task | Guide |
+| --- | --- |
+| Set up editors, watchers, and worktrees | [Local development](https://mr-boxington.jdx.dev/cookbook/local-development) |
+| Change budgets or build policy | [Configuration](https://mr-boxington.jdx.dev/configuration) |
+| Choose mold, Wild, or toolchain LLD | [Managed linkers](https://mr-boxington.jdx.dev/linkers) |
+| Share work across CI runners | [Remote cache](https://mr-boxington.jdx.dev/remote-cache) |
+| Cache make or CMake builds | [Standalone C and C++](https://mr-boxington.jdx.dev/standalone-builds) |
+| Investigate an unexpected result | [Troubleshooting](https://mr-boxington.jdx.dev/troubleshooting) |
+| Look up a command | [CLI reference](https://mr-boxington.jdx.dev/cli/) |
 
-## How it works
+## Contribute
 
-An `mbx` Cargo command starts an in-process cache agent, points Cargo at rustc
-and rustdoc shims, and stops the agent when the build ends. There is no daemon.
-The shims derive action keys, restore cached outputs when they can, and
-otherwise run the real tool and publish a successful result.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, documentation
+checks, tests, and pull request conventions. Ask questions in
+[Discussions](https://github.com/jdx/mr-boxington/discussions); report suspected
+vulnerabilities through the private process in [SECURITY.md](SECURITY.md).
 
-Anything mbx cannot model exactly bypasses the cache. Native links are cached
-on Linux, macOS, and Windows when mbx can put the linker and its system inputs
-into the key, and the workspace crate you are editing is recompiled
-incrementally with state that never enters the shared cache.
-
-[Read the architecture and limits →](https://mr-boxington.jdx.dev/how-it-works)
-
-## Documentation
-
-- [Get started](https://mr-boxington.jdx.dev/getting-started)
-- [Configuration](https://mr-boxington.jdx.dev/configuration)
-- [GitHub Action](https://mr-boxington.jdx.dev/github-action)
-- [Benchmarks](https://mr-boxington.jdx.dev/benchmarks)
-- [Remote cache](https://mr-boxington.jdx.dev/remote-cache)
-- [Protocol compatibility](https://mr-boxington.jdx.dev/protocol-compatibility)
-- [Cache results](https://mr-boxington.jdx.dev/cache-results)
-- [Watching builds](https://mr-boxington.jdx.dev/tui)
-- [CLI reference](https://mr-boxington.jdx.dev/cli)
-- [Current limits](https://mr-boxington.jdx.dev/limits)
-
-### Documentation social previews
-
-The documentation build generates page-specific 1200×630 PNGs for Open Graph
-and Twitter previews. `.vitepress/social-images.mjs` uses the page title, the
-project logo, and a bundled OFL-licensed font; it requires no remote rendering
-service or system fonts. Content hashes in image URLs refresh previews when
-titles or artwork change. `aube run docs:build` from `docs/` tests the renderer
-and verifies that each built page references an emitted PNG.
-
-## Acknowledgements
-
-mbx relies on [Cargo](https://github.com/rust-lang/cargo) and follows earlier
-compiler-cache work in [sccache](https://github.com/mozilla/sccache) and
-[kache](https://github.com/kunobi-ninja/kache), which directly inspired its
-design. [Read the acknowledgements](https://mr-boxington.jdx.dev/acknowledgements).
+mbx builds on Cargo and was informed by sccache and kache, which directly
+inspired its design. [Acknowledgements](https://mr-boxington.jdx.dev/acknowledgements).
 
 ## License
 

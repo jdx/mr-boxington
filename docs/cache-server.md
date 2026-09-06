@@ -1,3 +1,6 @@
+---
+description: Run the reference mbx cache server with filesystem or S3 storage, namespace grants, and CI authentication.
+---
 # Cache server
 
 [`jdx/mr-boxington-cache`](https://github.com/jdx/mr-boxington-cache) is the
@@ -10,9 +13,12 @@ reference implementation.
 
 ## Run it
 
-The repository's development stack starts the service, PostgreSQL, and MinIO:
+Clone the server repository before starting its development stack. It runs
+the service, PostgreSQL, and MinIO:
 
 ```sh
+git clone https://github.com/jdx/mr-boxington-cache.git
+cd mr-boxington-cache
 docker compose up --build
 ```
 
@@ -26,7 +32,8 @@ mbx-cache \
   --listen 127.0.0.1:8080
 ```
 
-Anonymous access is intended only for a trusted local network. Production
+The standalone example binds to loopback and allows anonymous access for
+local evaluation. Production
 installations should terminate TLS at an ingress or proxy and configure
 tokens. The repository ships a Helm chart for horizontally scaled Kubernetes
 deployments and a Terraform-managed single-host example.
@@ -84,7 +91,10 @@ not through deployment configuration.
 ### OIDC
 
 OIDC lets CI use short-lived identity tokens instead of stored secrets.
-Configure trusted issuers, acceptable audiences, and claim-based grants:
+Configure trusted issuers, acceptable audiences, and claim-based grants.
+This example grants access only to pushes on `acme/backend`'s `main` branch.
+Replace the numeric owner ID and add separate read-only rules for any other
+identities that need access:
 
 ```json
 [
@@ -95,7 +105,9 @@ Configure trusted issuers, acceptable audiences, and claim-based grants:
       {
         "claims": {
           "repository": "acme/backend",
-          "repository_owner_id": "12345"
+          "repository_owner_id": "12345",
+          "ref": "refs/heads/main",
+          "event_name": "push"
         },
         "read": ["acme/backend"],
         "write": ["acme/backend"]
@@ -121,7 +133,7 @@ On the client side, mbx acquires the GitHub Actions job token itself: set
 
 ## Operations
 
-Blob storage is expired by the bucket's own lifecycle rule; the server removes
+For S3-backed storage, expire blobs with the bucket's lifecycle rule; the server removes
 the metadata those objects leave behind and exits without serving:
 
 ```sh

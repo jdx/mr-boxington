@@ -1,7 +1,17 @@
+---
+description: Follow a Cargo build through compiler shims, portable action keys, output restoration, and shared scheduling.
+---
 # How it works
 
-mbx is a Cargo wrapper. Run Cargo subcommands directly through it: `cargo
-build`, `cargo test`, `cargo clippy`, or any installed Cargo subcommand.
+mbx works at the compiler boundary. Cargo decides which tools need to run;
+mbx decides whether each eligible invocation can be restored from cached work.
+An **action** is one modeled invocation and its inputs. The **content-addressed
+store** (CAS) holds outputs under digests of their content.
+
+Run `mbx build` directly, or use ordinary `cargo build` after [`mbx setup`](/setup).
+Both follow the same build lifecycle.
+
+## From command to result
 
 1. mbx resolves the workspace and target roots through Cargo metadata.
 2. It starts an in-process cache agent and creates shims for the build.
@@ -21,10 +31,10 @@ in-flight-work registry, so those builds do not multiply the machine's CPU and
 memory budgets or repeat an identical cold compilation.
 [Machine-wide scheduling](#machine-wide-scheduling) below describes the
 mechanism, and the
-[mise task example](/getting-started#run-multiple-cargo-builds-at-the-same-time)
+[mise task example](/scheduling#run-independent-tasks)
 and
 [parallel GitHub Actions example](/github-action#parallel-cargo-steps) are
-copyable shapes.
+ready-to-use recipes.
 
 ## Build-script C and C++
 
@@ -33,9 +43,10 @@ themselves, resolved to the platform compilers when the session starts. They
 are set as `HOST_CC` and `HOST_CXX` rather than `CC` and `CXX`: the `cc` crate
 consults the host pair only when it is not cross-compiling, and these shims
 wrap the host compiler, so a `cargo build --target` keeps the cross compiler it
-would have found on its own. A build that already chose a compiler through any
-of those variables is left alone, and `MBX_CC=0` turns the shims off
-entirely.
+would have found on its own. An explicit host compiler in `CC`, `CXX`, `HOST_CC`, or `HOST_CXX` is left
+alone. Explicit target compilers can be wrapped; see the
+[C and C++ limits](/limits#c-and-c-caching-covers-the-host-compiles-mbx-drives).
+`MBX_CC=0` turns this caching off.
 
 Unlike rustc, a C compile leaves no dependency record behind for a later build
 to read, and publishing one would add a file the uncached build never produced.
@@ -86,10 +97,10 @@ Hashing those files is shared too. The agent keeps a ledger of every file a
 shim has hashed, keyed by the file's length, modification time, and change
 time, so a dependency's rlib is read once however many crates link it. The
 ledger is saved with the checkout's private state when the build finishes and
-loaded by its next build, so the crate being edited does not read its unchanged
-dependencies again before it can look anything up. An entry answers only while
-the file on disk still has the identity it was recorded with; anything else is
-hashed as if never seen.
+loaded by its next build, avoiding repeated reads of unchanged dependencies.
+Reuse depends on the file-identity checks supported by that filesystem; network
+filesystems receive additional content validation. If an entry cannot be
+validated, mbx hashes the file again.
 
 ## Rustdoc actions
 
@@ -152,13 +163,20 @@ history for the links in front of it. A compilation the Linux OOM killer stops
 is recorded heavier than it measured, so its retry runs with more room.
 
 The pool size, memory budget, and priority are settings; see
-[machine-wide compile scheduling](/configuration#machine-wide-compile-scheduling).
+[machine-wide compile scheduling](/scheduling#machine-wide-compile-scheduling).
+
+## What remains local
+
+Cargo's target state belongs to a workspace. Learned incremental state belongs
+to a checkout and never enters the shared cache. A configured remote receives
+eligible shared actions according to the [write policy](/remote-cache#read-and-write-policy).
+[Managed targets](/managed-targets) and garbage collection control local retention.
 
 ## Correctness first
 
 Unsupported crate types, unmodeled search paths, and incremental compilations
 bypass the shared action cache. That includes the private incremental state of
-[learned incremental reuse](/configuration#learned-incremental-reuse), which is
+[learned incremental reuse](/incremental#learned-incremental-reuse), which is
 never published. A compilation that links nothing is cached whatever its crate
 type: `cargo check` and clippy compile every binary and test target that way.
 A native link is admitted only when its linker can be described: host binaries,

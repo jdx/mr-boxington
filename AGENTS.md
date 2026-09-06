@@ -33,7 +33,7 @@ the commit and pull request, then let release-plz choose the version.
 ## Generated Documentation
 
 `docs/cli/` is generated from the usage declarations in
-`crates/mbx/src/config.rs` and `crates/mbx/src/cli.rs`. Run
+`crates/mbx/src/config.rs` and `crates/mbx/src/cli/`. Run
 `mise run render:docs` after changing a setting and commit the result. Do not
 hand-edit generated CLI documentation.
 

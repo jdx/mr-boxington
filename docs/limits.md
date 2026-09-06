@@ -1,7 +1,24 @@
-# Limits
+---
+description: Find out which Rust, native-link, build-script, and C/C++ invocations mbx can safely cache.
+---
+# Caching limits {#limits}
 
 When mbx cannot model a compilation exactly, it runs the compiler and does not
-cache the result. This page lists those cases.
+cache the result. A bypass preserves the build; it reduces reuse. Run
+`mbx explain --last` to identify the reason for a particular action.
+
+| Work | Cache behavior |
+| --- | --- |
+| Rust compilations without a link | Eligible when inputs can be modeled |
+| Native executables, tests, and proc macros | Eligible on described Linux, macOS, and Windows hosts |
+| Built-in self-contained WebAssembly links | Eligible for the targets listed below |
+| Build-script execution | Eligible using Cargo's declared freshness inputs |
+| C and C++ object compilation | Eligible through supported compiler wrappers |
+| Incremental state | Private to the checkout; never shared |
+| Unknown flags, inputs, or extra outputs | Runs without shared caching |
+
+The sections below spell out the boundaries. For an unexpected result, start
+with [Troubleshooting](/troubleshooting).
 
 ## Build-script execution follows Cargo's freshness inputs
 
@@ -39,9 +56,9 @@ build.
 
 By default mbx forces `CARGO_INCREMENTAL=0` and instead gives a crate whose
 sources keep changing its own private incremental state; see [learned
-incremental reuse](/configuration#learned-incremental-reuse). Those
+incremental reuse](/incremental#learned-incremental-reuse). Those
 compilations are never published to the shared cache. See [incremental
-builds](/configuration#incremental-builds) for the trade `MBX_INCREMENTAL=1`
+builds](/incremental) for the trade `MBX_INCREMENTAL=1`
 makes.
 
 ## Native linking is cached only where the linker can be described
@@ -95,7 +112,7 @@ without one links for the host, and that is the only linker mbx identifies.
 ## Restored artifacts are equivalent, not always identical
 
 A restore writes this checkout's spelling of the outputs that describe where a
-compilation ran, its dep-info and its diagnostics, so the files cargo reads
+compilation ran, its dep-info and its diagnostics, so the files Cargo reads
 name the directory it is building into.
 
 The compiled artifacts are reused as they were produced, and a few things can
@@ -125,11 +142,11 @@ can be told apart.
 
 ## C and C++ caching covers the host compiles mbx drives
 
-mbx caches the C and C++ a cargo build script compiles for the host through
+mbx caches the C and C++ a Cargo build script compiles for the host through
 the `cc` crate, and the C and C++ of a command run under
 [`mbx exec`](/standalone-builds), which puts shims for the plain driver names
 on `PATH` for that command alone. A compile outside both paths is not reached.
-Neither are cross compilations the build did not name a compiler for: a cargo
+Neither are cross compilations the build did not name a compiler for: a Cargo
 build installs the shims as `HOST_CC` and `HOST_CXX`, which the `cc` crate
 consults only when host and target agree, and `mbx exec` shims only `cc`,
 `c++`, `gcc`, `g++`, `clang`, and `clang++` on Unix, plus `cl.exe` on Windows,
@@ -223,6 +240,7 @@ Object eviction prefers abandoned checkout data and then older access times.
 Filesystems using `relatime` coarsen that order; `noatime` removes it. A poor
 choice costs a recompile, not correctness.
 
-The configured size budget covers action objects and results. Prediction data,
-checkout records, temporary downloads, and managed target directories make the
-whole cache directory somewhat larger.
+The action-store budget covers action objects and results. Prediction data,
+checkout records, and temporary downloads add overhead. Managed targets have
+their own budget and can account for substantial space; use the optional
+combined budget to bound both. See [Managed target directories](/managed-targets).

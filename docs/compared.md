@@ -1,147 +1,102 @@
+---
+description: Compare mbx with sccache, kache, archive-based CI caching, and Cargo incremental compilation.
+---
 # How mbx compares
+
+Choose a cache around the work you want to reuse: compiler invocations,
+whole CI directories, or edits within one checkout. mbx focuses on Cargo
+workflows, with shared compiler results, managed targets, and a scheduler for
+simultaneous builds.
+
+| Your main need | Start by evaluating |
+| --- | --- |
+| Cargo worktrees, bounded local storage, and concurrent builds | mbx |
+| A broader compiler set or distributed compilation | [sccache](#sccache) |
+| A persistent cache service and hardlinked local outputs | [kache](#kache) |
+| Restore Cargo state between GitHub Actions jobs | [Archive-based caching](#tarball-ci-caches) |
+| Recompile the crate you are editing within one checkout | [Incremental compilation](#cargos-incremental-compilation) |
+
+For measured performance, use [Benchmarks](/benchmarks). Feature comparisons
+do not predict speed on a particular project.
 
 ## sccache
 
-[sccache](https://github.com/mozilla/sccache) is the established compiler
-cache and predates mbx. It aims wider: it caches CUDA alongside Rust, C, and
-C++, and can distribute compilation across machines. mbx caches rustc, the C
-and C++ that cargo build scripts compile, the C and C++ of builds outside
-cargo through [`mbx exec`](/standalone-builds), and native links. mbx spends
-the narrower scope on what it costs to operate, what it does to your disk, and
-what it is safe to let CI write.
+[sccache](https://github.com/mozilla/sccache) is an established compiler cache
+with a broader compiler scope, including CUDA, and support for distributed
+compilation. It can store cached results locally or in remote storage.
 
-- Nothing to restart after a settings change. sccache builds talk to a
-  background server that outlives the build and keeps the configuration it
-  was started with, and a build that cannot reach it fails unless you have
-  opted into falling back. mbx starts an in-process agent for each command
-  and exits with it, so a changed setting applies to the next build.
-- `target/` stops growing. sccache caches compilations, but each checkout's
-  `target/` is still yours to hold and yours to clean. mbx stores outputs once
-  in a content-addressed store, reflinks them into each checkout's `target/`,
-  and collects the directories whose checkout is gone, so a dozen worktrees
-  cost roughly what one does.
-- Several Cargo builds fit on one machine. sccache hands a GNU make jobserver
-  down to the compilers it spawns, which keeps one build from oversubscribing
-  the machine. mbx budgets across builds: Cargo commands started
-  independently, such as clippy beside tests, draw their compilers from a
-  single machine-wide CPU and memory pool, and a compilation identical to one
-  already running anywhere on the machine waits for that one instead of
-  repeating it. See [machine-wide compile
-  scheduling](/configuration#machine-wide-compile-scheduling).
-- A new worktree is warm without configuration. sccache matches on absolute
-  paths until you set `SCCACHE_BASEDIRS` to the directories to strip, and a
-  path you forget to list is a cache miss you never hear about. mbx derives
-  the placeholders itself: workspace, target, registry, toolchain, and
-  sysroot.
-- A disappointing build points at its own cause. Every build reports hits,
-  misses, lookups it could not attempt, and bypasses, instead of moving a
-  global counter.
-- CI can be given a cache it cannot damage. sccache's backends are buckets and
-  services reached with a credential; what holds that credential can write,
-  and usually delete. mbx's remote is a [cache server](/cache-server) with
-  deny-by-default grants, separate read and write namespace patterns,
-  immutable blobs, and no deletion endpoint. A job that should never publish
-  cannot, and one that may publish cannot rewrite or remove what an earlier
-  build wrote.
+mbx's Cargo integration combines several responsibilities:
 
-If you need CUDA or distributed compilation, sccache is the right tool. Both
-wrap rustc through `RUSTC_WRAPPER`, so they cannot be combined for the same
-build.
+- An agent starts and stops with each command, so configuration changes apply
+  to the next build without restarting a persistent service.
+- Portable keys map workspace, target, registry, toolchain, and sysroot roots
+  automatically. Matching work can be restored across checkouts.
+- [Managed targets](/managed-targets) add cleanup policies for checkout outputs
+  as well as a budget for cached objects.
+- [Parallel builds](/scheduling) share compiler permits across independent
+  Cargo processes using the same cache root.
+- [Build reports](/cache-results) separate misses, unavailable lookups, and
+  intentional bypasses for each command.
+
+sccache and mbx both use `RUSTC_WRAPPER`. They cannot cache the same Rust
+invocation together; mbx defers to an existing wrapper. Follow the
+[migration guide](/cookbook/migrate#from-sccache) when switching.
 
 ## kache
 
-[kache](https://github.com/kunobi-ninja/kache) is the closest tool to mbx: it
-predates mbx and directly inspired its design, though the projects share no
-code. mbx began as the Rust cache inside the
-[mise](https://github.com/jdx/mise) task runner and was extracted into its
-own CLI for three things: less to operate, a better day-to-day experience,
-and tight limits on what CI can write to a shared cache, which matters most
-in a public repository that takes fork pull requests. The differences below
-follow from those three goals.
+[kache](https://github.com/kunobi-ninja/kache) directly inspired mbx. Both use
+content-addressed compiler results to share work across checkouts and support
+Rust plus C and C++ workflows. The projects do not share code.
 
-Like mbx, kache is a content-addressed `RUSTC_WRAPPER` cache built for sharing
-compilations across worktrees, with C and C++ compiler shims, S3-compatible
-and filesystem remotes, and executable caching on Linux, macOS, and Windows.
+kache uses hardlinks for local output sharing and offers a persistent service.
+mbx starts an agent per command and tries to reflink outputs into place.
+Reflinks share data blocks until a file is modified; writes to a restored
+output do not modify the cache object. On filesystems without clone support,
+mbx copies the bytes, so the disk savings depend on the filesystem.
 
-- Nothing to install or keep running. `kache init` installs an OS service by
-  default, with a `--no-service` opt-out. mbx starts an in-process agent with
-  each command and exits with it: nothing to bring back after a reboot,
-  nothing to restart, and no state on the machine that outlives the build.
-- Nobody has to remember to prune. kache hardlinks outputs into place, so a
-  checkout's `target/` shares disk with the store but stays where it is until
-  someone runs `kache gc`. mbx owns the directories it creates: outputs live
-  once in the store, appear in each checkout by reflink, and a `target/`
-  whose checkout is gone is collected without being asked. Reflinks are
-  copy-on-write clones that diverge the moment something writes to them, so a
-  build that scribbles into `target/` cannot damage the cache the way a
-  shared inode can. Where the filesystem cannot clone, mbx copies the bytes.
-- Several Cargo builds fit on one machine. Cargo plans one build at a time,
-  so two started together each size themselves to the whole machine and both
-  finish late. kache does not stop you running them, but it does not
-  coordinate them either: it starts each compiler as Cargo asks for it, with
-  no shared budget and nothing that notices two builds compiling the same
-  crate at the same moment. mbx's shims sit in front of every compiler on the
-  machine and hand out permits from one memory-aware pool, so a lint job and
-  a test job run side by side without overloading the box, and a compilation
-  identical to one already running anywhere waits for it. Either way, give
-  each command its own `CARGO_TARGET_DIR`: Cargo's target directory lock
-  serializes them otherwise. See [machine-wide compile
-  scheduling](/configuration#machine-wide-compile-scheduling).
-- A public repository can share one cache. This is the difference that shaped
-  mbx most. kache's remotes are S3-compatible buckets or a filesystem path,
-  and a bucket has one question to ask: does this credential write? Whatever
-  can publish can also overwrite or remove what an earlier build published,
-  and one leaked credential is the whole cache. mbx's remote is a protocol
-  server, which can express finer rules: grants are deny-by-default with
-  separate read and write namespace patterns; CI authenticates with a
-  short-lived OIDC token pinned to a repository and its immutable numeric
-  owner ID, narrowable to a `ref` or `environment`, instead of a stored
-  secret; blobs are immutable and results commit atomically; and there is no
-  deletion endpoint, so a writer adds results and can never rewrite or remove
-  one. Fork pull requests hold no credentials at all and fall back to a
-  read-only platform cache; see [fork PRs](/cookbook/fork-prs). mbx's client
-  also refuses to publish from pull requests, unprotected branches, and tag
-  builds, which catches a misconfigured grant early; the server is what makes
-  the guarantee.
-- A build is cached only when it asks to be. Both tools put C and C++ shims on
-  `PATH` so make, CMake, or anything else that resolves its compiler there
-  gets cached. kache installs them alongside its service, so every build on
-  the machine goes through the cache. mbx puts them on `PATH` for a single
-  [`mbx exec`](/standalone-builds) command and leaves other builds untouched.
-  Both cover Windows; mbx intercepts `cl.exe` there and the plain gcc/clang
-  driver names on Unix.
-- A restored binary matches the machine it runs on. Both tools cache linked
-  binaries on Linux, macOS, and Windows. mbx keys on the resolved linker,
-  startup objects, libc, and SDK as well as dep-info, because a binary linked
-  against a different libc or SDK is a different binary. On a host mbx cannot
-  describe that precisely, it links normally.
+mbx also manages the lifetime of target directories it creates and coordinates
+simultaneous builds through a shared compiler pool. These features address
+worktree cleanup and contention as well as compilation reuse. Explicit
+`CARGO_TARGET_DIR` values remain under your control.
 
-If you want the C and C++ shims installed once instead of wrapping the
-commands that should use them, kache is worth evaluating. Both tools wrap
-rustc through `RUSTC_WRAPPER`, so they cannot be combined for the same build.
+For remote sharing, mbx supports both [S3-compatible buckets](/remote-cache)
+and a [protocol server](/cache-server). The server can enforce separate read
+and write grants by namespace. Bucket deployments need equivalent restrictions
+in their storage permissions. Client-side write policy is an additional guard,
+not an authorization boundary.
+
+Evaluate both with the same source, toolchain, targets, and filesystem. The
+[published benchmark method](/benchmarks#keeping-it-fair) describes how this
+project keeps comparisons consistent.
 
 ## Tarball CI caches
 
-Actions such as `actions/cache` over `target/` (or `Swatinem/rust-cache`)
-save and restore the whole directory as one archive. That is simple and needs
-no extra tooling, but the archive is all-or-nothing: one changed crate still
-uploads and downloads everything, the entry grows until it hits the platform's
-size cap, and stale artifacts accumulate inside it.
+[`actions/cache`](https://github.com/actions/cache) saves selected paths as an
+archive. [`Swatinem/rust-cache`](https://github.com/Swatinem/rust-cache) adds
+Rust-specific keys and pruning. They preserve Cargo's target state so a job
+can reuse outputs without asking a compiler cache for every artifact.
 
-On GitHub-hosted runners,
-[`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action)
-restores the same pruned target tree those actions do, so its restore and
-build times match rust-cache on Linux and macOS, and it then runs the build
-through mbx: the
-compile scheduler, the toolchain guard, and per-action reuse inside the job.
-The per-action store is what the [cache server](/cache-server) transports,
-where one entry can serve every job and branch instead of one archive per
-job. See [GitHub Actions](/github-action).
+The default [`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action)
+backend also transports a pruned Cargo target and registry archive. The build
+then runs through mbx, gaining its compiler scheduling and per-action reuse
+within the job. This is an archive transport, so it still pays archive restore
+and save costs.
 
-## Cargo's incremental compilation
+The action's `objects` mode transports mbx's recorded action closure instead.
+A configured cache server or S3 bucket transfers individual objects, letting
+builds fetch the work they need across different target layouts. Choose one
+transport for the same cached data; stacking archive actions adds duplicate
+work. See [GitHub Action](/github-action) for the tradeoffs and examples.
 
-Incremental compilation speeds up recompiling the crate you are editing inside
-one checkout. It does nothing across checkouts, worktrees, or CI runners, and
-its artifacts are checkout-specific by design. mbx caches the dependency
-graph everywhere and leaves the inner loop to rustc. The two interact: see
-[incremental builds](/configuration#incremental-builds).
+<span id="cargo-s-incremental-compilation"></span>
+
+## Cargo's incremental compilation {#cargos-incremental-compilation}
+
+Incremental compilation reuses parts of a crate between edits in one checkout.
+A shared compiler cache reuses complete matching results across builds.
+
+mbx uses both: it shares eligible compilations and automatically keeps private
+incremental state for crates whose sources you are changing. That private state
+is never published to the shared cache. Setting `MBX_INCREMENTAL=1` gives Cargo
+control of workspace incremental compilation and can reduce cross-checkout
+reuse. See [Incremental builds](/incremental) before changing the default.

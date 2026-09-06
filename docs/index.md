@@ -1,28 +1,20 @@
 ---
 layout: home
-title: Shared, self-pruning Cargo build cache
+title: A shared cache for Cargo builds
+description: Reuse compiler work across Rust worktrees and CI, prune build storage automatically, and run Cargo builds with a shared CPU and memory budget.
 
 hero:
   name: "mr boxington"
-  text: "fix <code>target/</code>"
-  tagline: Put mbx in front of any cargo command. Every build on the machine shares one self-pruning cache, and you can run multiple Cargo builds in parallel.
+  text: "A shared cache.<br>A tidier <code>target/</code>."
+  tagline: Keep using Cargo. Reuse compiler work across worktrees, give parallel builds one shared budget, and let the cache clean up after itself.
   image:
     src: /logo.svg
-    alt: Mr Boxington, a friendly cache box
+    alt: Mr Boxington, a cardboard cache box wearing a monocle and bow tie
   actions:
     - theme: brand
-      text: Read the announcement
-      link: https://jdx.dev/posts/2026-09-05-introducing-mr-boxington/
-    - theme: alt
       text: Get started
       link: /getting-started
     - theme: alt
-      text: How it works
-      link: /how-it-works
-    - theme: alt
-      text: GitHub Action
-      link: /github-action
-    - theme: alt
-      text: Benchmarks
-      link: /benchmarks
+      text: Explore the docs
+      link: /guide
 ---

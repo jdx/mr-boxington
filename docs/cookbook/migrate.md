@@ -1,11 +1,17 @@
+---
+description: Replace rust-cache or sccache in a workflow and verify the resulting mbx cache behavior.
+---
 # Migrate from rust-cache or sccache
+
+Move one development or CI workflow at a time, verify activation, then compare
+a representative warm build. Keep production release jobs subject to the
+[release policy](/github-action#production-releases).
 
 ## From rust-cache or `actions/cache` over `target/`
 
-A tarball cache and mbx solve the same problem, so replace the step instead of
-stacking them. An archived `target/` restored over a managed one is the stale,
-ever-growing entry mbx replaces (see
-[tarball CI caches](/compared#tarball-ci-caches)).
+Replace the existing cache action with `jdx/mr-boxington-action`. Both actions
+can transport Cargo's target state, so using both for the same paths adds
+duplicate restore/save work. See [archive caching](/compared#tarball-ci-caches).
 
 Before:
 
@@ -26,14 +32,12 @@ steps:
 ```
 
 The action's default entry carries Cargo's target directory and its download
-caches under `~/.cargo`, so nothing rust-cache restored is lost in the swap.
-The `github-cache-mode: objects` payload omits the download caches; pair it
-with the [manual GitHub cache setup](/github-action#manual-github-cache-setup)
-to keep them.
+caches under `~/.cargo`, so the workflow can retain dependency artifacts and Cargo downloads.
+The `github-cache-mode: objects` payload omits the download caches; use a separate Cargo-download cache if you need those files too.
 
-Leave release jobs out of the migration: a production release should not
-restore any compiler cache, mbx's or the one being removed. See the
-[release warning](/github-action#s3-compatible-bucket).
+Production release jobs may use a trusted local cache, but should not restore
+compiler outputs from a remote or an Actions archive. See
+[Production releases](/github-action#production-releases).
 
 ## From sccache
 
@@ -53,10 +57,12 @@ Then check the result:
 mbx doctor
 ```
 
-## The first build measures nothing
+<span id="the-first-build-measures-nothing"></span>
 
-However you arrive, the first mbx build has an empty store: it restores
-nothing, stores everything, and the summary's
-[could not look up](/cache-results#could-not-look-up) count dominates. Compare
-the second build, and
-[`mbx explain`](/cache-results#bypass) says what any remaining gap is made of.
+## Verify the migration
+
+Run `mbx doctor`, then your usual build. A cold object store needs work to fill
+it; a restored Cargo target may already be fresh and require no compilations.
+Neither result proves cross-target cache reuse. Follow
+[Measure cache reuse](/cache-results#measure-cache-reuse) for a controlled
+comparison, and use `mbx explain --last` to understand any remaining bypasses.

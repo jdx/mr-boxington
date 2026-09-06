@@ -1,3 +1,6 @@
+---
+description: Route trusted CI builds to a private cache server and fork pull requests to GitHub Actions cache.
+---
 # CI with fork pull requests
 
 Open-source repositories take pull requests from forks, and forks change what
@@ -7,8 +10,12 @@ fork-triggered runs, so a fork's job cannot authenticate to a
 already keeps every pull request read-only. The remaining question is which
 backend each run should use.
 
-The recipe: trusted runs talk to the cache server, and fork pull requests fall
-back to GitHub Actions cache, which needs no credentials.
+If all jobs can use GitHub Actions cache, the [default action setup](/github-action)
+already supports fork pull requests. Use this recipe when trusted runs also
+need a private cache server: fork pull requests use the GitHub backend instead.
+
+Protect `main` before expecting remote writes. Configure the server's read and
+write grants separately; client-side policy does not authorize access.
 
 ```yaml
 name: ci
@@ -68,7 +75,7 @@ jobs:
   pushes saves the store after the build (action steps clean up in reverse
   order, so the mirror's save runs last), and fork PRs restore that entry.
 
-## Hardening
+## Separate trust levels {#hardening}
 
 The single-workflow recipe above trusts the platform to withhold fork
 credentials. To make the trust boundary structural, split it in two: a router
@@ -76,7 +83,7 @@ workflow whose `trusted` and `untrusted` jobs are mutually exclusive, each
 calling a shared `workflow_call` implementation with different permissions and
 inputs.
 [tak's ci.yml](https://github.com/jdx/tak/blob/main/.github/workflows/ci.yml)
-is a living example. What the split buys:
+is a living example. This structure lets you enforce the following boundaries:
 
 - An untrusted run never declares `id-token: write` at all, and its first step
   can assert `ACTIONS_ID_TOKEN_REQUEST_URL` is absent.

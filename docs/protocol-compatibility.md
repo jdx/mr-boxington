@@ -1,6 +1,18 @@
+---
+description: Compatibility rules for the local agent protocol, remote cache HTTP contract, and published Rust crates.
+---
 # Protocol compatibility
 
-mr-boxington has two versioned protocols with different compatibility rules.
+mbx has two wire protocols and a separately versioned Rust API surface.
+
+| Integration | Compatibility rule |
+| --- | --- |
+| Local compiler shim and agent | Exact protocol and application-version match |
+| Remote cache client and server | Versioned HTTP contract with negotiated extensions |
+| Published Rust subcrates | Independent crate versions; embedding APIs remain on `0.x` |
+
+For CLI and JSON output guarantees, see [Stability](/stability). Most mbx users
+do not need to interact with these protocols directly.
 
 ## Shim/agent protocol
 
@@ -116,7 +128,7 @@ does not currently enforce API compatibility. Wire format changes still require
 the protocol-version steps above.
 
 A breaking API change is declared, not numbered by hand: the commit carries
-`feat!:` or a `BREAKING CHANGE:` footer, and release-plz prices it into the
+`feat!:` or a `BREAKING CHANGE:` footer, and release-plz uses it to choose the
 version when it opens the release PR.
 [RELEASING.md](https://github.com/jdx/mr-boxington/blob/main/RELEASING.md)
 covers what that means for contributors.

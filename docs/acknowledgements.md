@@ -1,7 +1,10 @@
+---
+description: The Cargo, sccache, and kache projects that made mbx possible and informed its design.
+---
 # Acknowledgements
 
-mbx relies on Cargo and follows earlier compiler-cache work in sccache and
-kache.
+mbx depends on Cargo and builds on ideas established by earlier compiler
+caches. In particular, kache directly inspired the project's design.
 
 ## Cargo
 
@@ -25,6 +28,8 @@ different tradeoffs.
 inspired its design. It combines a content-addressed `RUSTC_WRAPPER` cache
 with C and C++ compiler shims, remote storage, and executable caching.
 
-The projects do not share code, and they make different tradeoffs. The
+The projects do not share code. Both aim to make compiled work reusable across
+checkouts; they differ in process lifecycle, storage management, and remote
+policy. The
 [comparison with kache](/compared#kache) explains where mbx took a different
 direction and where kache may be the better fit.

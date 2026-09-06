@@ -1,25 +1,33 @@
+---
+description: Answers to common questions about mbx storage, cache reuse, toolchains, and the project name.
+---
 # FAQ
 
-Short answers, with the page that owns each one.
+Common questions about reuse, storage, and compatibility. For a specific
+build problem, start with [Troubleshooting](/troubleshooting).
 
 ## Is deleting the cache safe?
 
-Always. The store is a cache of work mbx can redo: the worst case is a colder
-build, never a wrong one. See [stability](/stability#the-store-is-disposable).
+The shared compiler outputs can be rebuilt. Prefer `mbx gc --dry-run` and
+`mbx gc` to reclaim space under the configured policy. Deleting the whole cache
+root also removes managed targets and private incremental state; stop running
+builds first. See [stability](/stability#the-store-is-disposable).
 
 ## Why wasn't my first build faster?
 
-A first build has an empty store. There is nothing to hit, so it can only
-cost time, and the summary's "could not look up" line dominates. Time the
-second build instead. See
+A cold store has no results to restore. The first compilation records inputs
+and outputs for later reuse. A second command in the same target may simply
+be fresh according to Cargo; use [fresh targets](/cache-results#measure-cache-reuse)
+to measure the shared cache. See
 [cache results](/cache-results#troubleshooting-a-low-hit-rate), and the
-[warm scenario](/benchmarks#warm) for what that second build gets.
+[warm scenario](/benchmarks#warm-build) for what that second build gets.
 
 ## Why does a fully warm build still take time?
 
-Links mbx cannot describe always run, so a large binary re-links even when
-every compilation hit. Host binaries and tests are restored on Linux, macOS,
-and Windows, and self-contained WebAssembly targets everywhere. The rest is
+Cargo still plans the build, mbx validates inputs and materializes outputs,
+and any unsupported actions run normally. Eligible host binaries and tests
+can be restored on Linux, macOS, and Windows; links with unmodeled inputs still
+run. See the
 [limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
 
 ## The cache stopped hitting after a Rust update. Is it broken?
@@ -57,18 +65,18 @@ Every feature has its own switch:
 
 | Switch | Turns off |
 | --- | --- |
-| `MBX_SCHEDULER=0` | [machine-wide compile scheduling](/configuration#machine-wide-compile-scheduling) |
+| `MBX_SCHEDULER=0` | [machine-wide compile scheduling](/scheduling#machine-wide-compile-scheduling) |
 | `MBX_CC=0` | [build-script and `mbx exec` C and C++ caching](/configuration#build-script-c-and-c) |
 | `MBX_TARGET_VIEWS=0` | [managed target directories](/managed-targets#disable-managed-targets) |
 | `MBX_CACHE_LINKS=0` | [native link caching](/limits#native-linking-is-cached-only-where-the-linker-can-be-described) |
-| `MBX_LEARNED_INCREMENTAL=0` | [learned incremental reuse](/configuration#learned-incremental-reuse) |
+| `MBX_LEARNED_INCREMENTAL=0` | [learned incremental reuse](/incremental#learned-incremental-reuse) |
 | `MBX_EVENTS=0` | [per-compilation event streams](/tui#recording) |
 | `MBX_SAVINGS=off` | [the savings line](/configuration#the-savings-line) |
 
 ## Something looks wrong. What should a report include?
 
 `mbx doctor --json`, a run with `MBX_LOG=debug`, and `MBX_BYPASS_LOG`. See
-[reporting a problem](/getting-started#reporting-a-problem).
+[reporting a problem](/troubleshooting#reporting-a-problem).
 
 ## Why is it called Mr. Boxington?
 

@@ -22,7 +22,7 @@ const siteUrl = "https://mr-boxington.jdx.dev";
 export default defineConfig({
   title: "mr boxington",
   description:
-    "Put mbx in front of any cargo command. Every build on the machine shares one self-pruning cache, and you can run multiple Cargo builds in parallel.",
+    "Reuse Cargo compiler work across worktrees and CI, manage build storage, and run parallel builds with a shared CPU and memory budget.",
   lang: "en-US",
   lastUpdated: true,
   appearance: "force-dark",
@@ -44,10 +44,24 @@ export default defineConfig({
   themeConfig: {
     logo: "/logo.svg",
     nav: [
-      { text: "Get Started", link: "/getting-started" },
-      { text: "Configuration", link: "/configuration" },
-      { text: "GitHub Action", link: "/github-action" },
-      { text: "CLI", link: "/cli/" },
+      {
+        text: "Docs",
+        link: "/guide",
+        activeMatch:
+          "^/(guide|getting-started|installation|setup|cookbook/local-development|scheduling|incremental|linkers|managed-targets|standalone-builds|tui|stats|troubleshooting|cache-results|how-it-works|limits|compared|faq|acknowledgements)",
+      },
+      {
+        text: "CI & sharing",
+        link: "/github-action",
+        activeMatch:
+          "^/(github-action|remote-cache|cache-server|cookbook/(fork-prs|migrate))",
+      },
+      { text: "Benchmarks", link: "/benchmarks" },
+      {
+        text: "Reference",
+        link: "/cli/",
+        activeMatch: "^/(cli|configuration|protocol-compatibility|stability)",
+      },
       {
         text: `v${latestVersion}`,
         link: "https://github.com/jdx/mr-boxington/releases",
@@ -55,74 +69,89 @@ export default defineConfig({
     ],
     sidebar: [
       {
-        text: "Getting started",
+        text: "Start here",
         items: [
-          { text: "Introduction", link: "/" },
-          { text: "Install and run", link: "/getting-started" },
-          { text: "FAQ", link: "/faq" },
+          { text: "Documentation", link: "/guide" },
+          { text: "Get started", link: "/getting-started" },
+          { text: "Installation", link: "/installation" },
+          { text: "Cargo & editor setup", link: "/setup" },
         ],
       },
       {
-        text: "Use mbx",
-        items: [
-          { text: "Configuration", link: "/configuration" },
-          { text: "GitHub Action", link: "/github-action" },
-          { text: "Remote cache", link: "/remote-cache" },
-          { text: "Cache server", link: "/cache-server" },
-          { text: "Managed targets", link: "/managed-targets" },
-          { text: "Standalone C and C++", link: "/standalone-builds" },
-          { text: "Watching builds", link: "/tui" },
-          { text: "Savings and statistics", link: "/stats" },
-        ],
-      },
-      {
-        text: "Cookbook",
+        text: "Build locally",
         items: [
           { text: "Local development", link: "/cookbook/local-development" },
-          { text: "CI with fork pull requests", link: "/cookbook/fork-prs" },
-          {
-            text: "Migrate from rust-cache or sccache",
-            link: "/cookbook/migrate",
-          },
+          { text: "Managed targets", link: "/managed-targets" },
+          { text: "Parallel builds", link: "/scheduling" },
+          { text: "Incremental builds", link: "/incremental" },
+          { text: "Managed linkers", link: "/linkers" },
+          { text: "Watching builds", link: "/tui" },
+          { text: "Standalone C and C++", link: "/standalone-builds" },
         ],
       },
       {
-        text: "Understand mbx",
+        text: "CI & sharing",
         items: [
-          { text: "How it works", link: "/how-it-works" },
-          { text: "How mbx compares", link: "/compared" },
-          { text: "Acknowledgements", link: "/acknowledgements" },
-          { text: "Benchmarks", link: "/benchmarks" },
-          { text: "Stability", link: "/stability" },
-          { text: "Protocol compatibility", link: "/protocol-compatibility" },
+          { text: "GitHub Action", link: "/github-action" },
+          { text: "Migrate an existing cache", link: "/cookbook/migrate" },
+          { text: "Fork pull requests", link: "/cookbook/fork-prs" },
+          { text: "Remote cache", link: "/remote-cache" },
+          { text: "Cache server", link: "/cache-server" },
+        ],
+      },
+      {
+        text: "Understand & troubleshoot",
+        items: [
+          { text: "Troubleshooting", link: "/troubleshooting" },
           { text: "Cache results", link: "/cache-results" },
-          { text: "Limits", link: "/limits" },
+          { text: "Savings and statistics", link: "/stats" },
+          { text: "How it works", link: "/how-it-works" },
+          { text: "Caching limits", link: "/limits" },
+          { text: "How mbx compares", link: "/compared" },
+          { text: "Benchmarks", link: "/benchmarks" },
+          { text: "FAQ", link: "/faq" },
         ],
       },
       {
         text: "Reference",
         items: [
-          { text: "CLI overview", link: "/cli/" },
-          { text: "doctor", link: "/cli/doctor" },
-          { text: "explain", link: "/cli/explain" },
-          { text: "gc", link: "/cli/gc" },
+          { text: "Configuration", link: "/configuration" },
           {
-            text: "cache",
-            link: "/cli/cache",
+            text: "CLI commands",
+            link: "/cli/",
             collapsed: true,
             items: [
-              { text: "dir", link: "/cli/cache/dir" },
-              { text: "stats", link: "/cli/cache/stats" },
-              { text: "projects", link: "/cli/cache/projects" },
-              { text: "largest", link: "/cli/cache/largest" },
-              { text: "verify", link: "/cli/cache/verify" },
-              { text: "remove", link: "/cli/cache/remove" },
+              { text: "setup", link: "/cli/setup" },
+              { text: "completion", link: "/cli/completion" },
+              { text: "doctor", link: "/cli/doctor" },
+              { text: "explain", link: "/cli/explain" },
+              { text: "clean", link: "/cli/clean" },
+              { text: "gc", link: "/cli/gc" },
+              { text: "tui", link: "/cli/tui" },
+              { text: "stats", link: "/cli/stats" },
+              { text: "prefetch", link: "/cli/prefetch" },
+              { text: "exec", link: "/cli/exec" },
+              {
+                text: "cache",
+                link: "/cli/cache/",
+                collapsed: true,
+                items: [
+                  { text: "dir", link: "/cli/cache/dir" },
+                  { text: "stats", link: "/cli/cache/stats" },
+                  { text: "projects", link: "/cli/cache/projects" },
+                  { text: "largest", link: "/cli/cache/largest" },
+                  { text: "verify", link: "/cli/cache/verify" },
+                  { text: "trace", link: "/cli/cache/trace" },
+                  { text: "export", link: "/cli/cache/export" },
+                  { text: "import", link: "/cli/cache/import" },
+                  { text: "remove", link: "/cli/cache/remove" },
+                ],
+              },
             ],
           },
-          { text: "tui", link: "/cli/tui" },
-          { text: "stats", link: "/cli/stats" },
-          { text: "prefetch", link: "/cli/prefetch" },
-          { text: "Settings", link: "/configuration#settings" },
+          { text: "Stability", link: "/stability" },
+          { text: "Protocol compatibility", link: "/protocol-compatibility" },
+          { text: "Acknowledgements", link: "/acknowledgements" },
         ],
       },
     ],
@@ -132,8 +161,15 @@ export default defineConfig({
       { icon: "discord", link: "https://discord.gg/UBa7pJUN7Z" },
     ],
     editLink: {
-      pattern: ({ filePath }) =>
-        `https://github.com/jdx/mr-boxington/edit/main/docs/${filePath}`,
+      pattern: ({ filePath }) => {
+        const command = filePath.split("/")[1]?.replace(/\.md$/, "");
+        const module =
+          command === "index" || command === "completion" ? "mod" : command;
+        const source = filePath.startsWith("cli/")
+          ? `crates/mbx/src/cli/${module}.rs`
+          : `docs/${filePath}`;
+        return `https://github.com/jdx/mr-boxington/edit/main/${source}`;
+      },
       text: "Edit this page on GitHub",
     },
     search: { provider: "local" },
@@ -162,19 +198,7 @@ gtag('config', 'G-0MDX8ZJYFY');`,
     ],
     ["link", { rel: "apple-touch-icon", href: "/favicon.png" }],
     ["link", { rel: "manifest", href: "/site.webmanifest" }],
-    ["link", { rel: "preconnect", href: "https://fonts.googleapis.com" }],
-    [
-      "link",
-      { rel: "preconnect", href: "https://fonts.gstatic.com", crossorigin: "" },
-    ],
-    [
-      "link",
-      {
-        rel: "stylesheet",
-        href: "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;600&display=swap",
-      },
-    ],
-    ["meta", { name: "theme-color", content: "#d69b42" }],
+    ["meta", { name: "theme-color", content: "#191713" }],
     ["meta", { property: "og:type", content: "website" }],
     ["meta", { property: "og:site_name", content: "mr boxington" }],
     ["meta", { property: "og:locale", content: "en_US" }],

@@ -1,3 +1,6 @@
+---
+description: Understand target placement, disk budgets, automatic collection, and cleanup commands.
+---
 # Managed target directories
 
 Cargo normally writes build outputs to `<workspace>/target`. Deleting a
@@ -33,8 +36,8 @@ directory is removed when any of these is true:
 
 - Its checkout is gone. This happens regardless of the limits below.
 - It has gone unused for `target.max_age`, 30 days by default. The next build
-  in that checkout restores from the shared store, so this costs a re-link
-  rather than a rebuild.
+  in that checkout can restore matching cached outputs. Evicted or unsupported
+  work must compile again.
 - The managed directories together exceed `target.max_size`. The least
   recently used go first. The most recently used directory is never collected
   for being over budget; if the budget cannot be met without it, mbx says so
@@ -44,8 +47,9 @@ Cached compilations shared with a live checkout remain protected throughout.
 
 ### Budgets scale with the disk
 
-Both budgets default to a share of the disk holding the cache, so a laptop and
-a build server do not need the same configuration:
+Both budgets scale with the disk that holds the data. By default, targets and
+the action store share the cache disk. A custom `target.root` uses its own
+volume for the target budget:
 
 | Budget | Default | Bounds |
 | --- | --- | --- |
@@ -70,8 +74,7 @@ max_total_size = "50GiB"
 ```
 
 `"none"` turns off `target.max_size`, `target.max_age`, or
-`gc.max_total_size`. A value that is neither a size nor `"none"` is an error,
-so a typo cannot disable collection. `gc.max_size` has no `"none"`; the action
+`gc.max_total_size`. Invalid sizes and durations are errors, so a typo cannot disable collection. `gc.max_size` has no `"none"`; the action
 store is always bounded. `MBX_TARGET_VIEWS=0` opts out of managed target
 directories altogether. A directory that is still reached through an existing
 `target` symlink keeps counting as in use, so turning placement off does not
@@ -110,6 +113,19 @@ fails, mbx restores the original directory.
 
 mbx does not offer removal for an explicitly configured target directory or a
 symlink it does not own.
+
+## Inspect and clean up
+
+| Command | Effect |
+| --- | --- |
+| `mbx cache stats` | Inspect the shared store |
+| `mbx gc --dry-run` | Preview collection under the configured budgets |
+| `mbx gc` | Collect eligible targets and cached objects |
+| `mbx clean` | Remove this workspace's managed target and link |
+| `mbx cache remove /path/to/workspace` | Remove the target and forget that workspace's cache claims |
+
+`mbx clean` does not clear the shared cache. Cargo's `cargo clean` is a
+separate command and follows Cargo's own target-directory behavior.
 
 ## Disable managed targets
 

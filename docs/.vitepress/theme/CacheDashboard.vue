@@ -172,13 +172,14 @@ function revokeGrant() {
       <header class="topbar">
         <div class="breadcrumb"><span>Acme Engineering</span><i>/</i><b>{{ nav.find((item) => item.id === section)?.label }}</b></div>
         <div class="top-actions">
-          <span class="live"><i></i>Live</span>
+          <span class="live">Demo data</span>
           <button class="icon-button" aria-label="Settings"><Icon name="settings" /></button>
           <button class="avatar">JD</button>
         </div>
       </header>
 
       <div class="content">
+        <p class="demo-disclaimer">Interactive preview with sample data. Changes stay in this page; no cache server is connected. <a href="/cache-server">Read the server guide →</a></p>
         <template v-if="section === 'overview'">
           <div class="page-heading">
             <div><p class="eyebrow">Cache operations</p><h1>Good morning, Jordan.</h1><p>Here’s how your build cache is performing.</p></div>
@@ -310,6 +311,8 @@ export default defineComponent({
 </script>
 
 <style scoped>
+.demo-disclaimer { color: var(--muted); font-size: 12px; line-height: 1.7; margin: 0 0 24px; }
+.demo-disclaimer a { color: var(--amber); text-decoration: underline; }
 * { box-sizing: border-box; }
 button, input, select { font: inherit; }
 button { color: inherit; }

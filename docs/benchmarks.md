@@ -1,19 +1,20 @@
+---
+description: Compare Cargo, mbx, and kache on a pinned Rust project with documented trials and workload limitations.
+---
 # Benchmarks
 
 mbx is measured against plain Cargo and
 [kache](https://github.com/kunobi-ninja/kache) on [jdx/hk](https://github.com/jdx/hk),
 a mid-size Rust CLI with C dependencies, pinned to one commit and built with
-`cargo build --locked`. Each scenario is a shape CI or a developer actually
-hits. The numbers come from a GitHub Actions run, never a laptop, and the page
+`cargo build --locked`. The scenarios cover work a developer or CI runner may repeat. The numbers come from a GitHub Actions run, never a laptop, and the page
 will not name a fastest tool when the gap is inside run-to-run noise.
 
 <BenchmarkResults />
 
-## Reading the cards
+## Reading the results {#reading-the-cards}
 
 Every timed scenario runs three times per tool from a fresh clone and an
-empty store. The bar is the middle run and the whisker through it spans the
-fastest and slowest. A tool is marked fastest only when its lead over the next
+empty store. The bar shows the median; the whisker spans the fastest and slowest trial. A tool is marked fastest only when its lead over the next
 one is wider than either tool's own whisker; otherwise the card says so and
 names nobody.
 
@@ -44,12 +45,12 @@ A full build, then one line of hk's own source changed and rebuilt in the same
 cache's own bookkeeping is most of what shows up. Two details keep it honest:
 
 - `CI` is unset for every tool. mbx switches
-  [learned incremental reuse](/configuration#learned-incremental-reuse) off
+  [learned incremental reuse](/incremental#learned-incremental-reuse) off
   when it sees that variable, on the reasoning that a fresh runner never edits
   code. With it set, every edit recompiled the crate in full.
 - The first edit after a build is discarded and the second is timed. Cargo's
   own build already wrote its incremental state, while mbx builds an edited
-  crate's [private state](/configuration#learned-incremental-reuse) on the
+  crate's [private state](/incremental#learned-incremental-reuse) on the
   first edit and reuses it afterwards. The card shows what that first edit
   cost, since a developer waits for it once per fresh build.
 
@@ -60,7 +61,7 @@ all-targets/all-features variants of `cargo check`, Clippy, and test
 compilation. The sequential row runs them in turn in one `target/`. The two
 parallel rows give each job its own `target/`, as separate CI steps would,
 and differ only in whether the
-[machine-wide scheduler](/configuration#machine-wide-compile-scheduling) is
+[machine-wide scheduler](/scheduling#machine-wide-compile-scheduling) is
 on. Cargo bounds the compilers it starts itself and knows nothing about the
 Cargo process beside it; the scheduler gives every process one pool of permits
 and holds identical compilations until the first finishes. Peak compilers and
@@ -80,7 +81,7 @@ oversubscribed it.
   inherited `RUSTC_WRAPPER` is cleared, and the run fails if the Cargo
   baseline turns out to be an mbx shim.
 - Both caches run local-only. A remote would measure the network.
-- A run that measured nothing is discarded rather than rendered. That is any
+- Validity checks reject runs that do not exercise the intended cache behavior. That is any
   run where a warm build restored nothing or was no faster than the build that
   seeded it, where the edit rebuild compiled nothing, or where the scheduled
   contention batch went past its permits or the unscheduled one never did.
@@ -104,9 +105,11 @@ directly.
 
 ## What this does not measure
 
-Anything hk does not do. A project with a very different dependency shape,
+These results describe the pinned hk workload. A project with a very different dependency shape,
 such as heavy proc macros, a large C component, or many small leaf crates,
-will see different ratios. The benchmark is Linux-only, and
+will see different ratios. Three trials expose some variation; their ranges
+are not confidence intervals, and a “fastest” label is a display heuristic,
+not a statistical significance test. The benchmark is Linux-only, and
 [limits](/limits) covers what changes on macOS and Windows.
 
 Instruction-counted measurements of mbx's own startup path, and cold and warm

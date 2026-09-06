@@ -1,3 +1,6 @@
+---
+description: Watch live cache activity, inspect completed sessions, and read a plain-text build snapshot.
+---
 # Watching builds
 
 `mbx tui` shows what every build on this machine is doing to the cache, as it
@@ -11,20 +14,18 @@ mbx tui
 
 *Live, with example build data. Open any screenshot at full size to read the details.*
 
-The end-of-build summary tells you what a build did once it is over, and
-[cache results](/cache-results) explains how to read it. It cannot tell you what
-a build is doing right now, or which crate any of its numbers belonged to.
-`mbx tui` shows one row per compilation, named, with the outcome mbx chose for
-it.
+`mbx tui` shows one row per compilation, with its crate name and cache outcome.
+Open it in a second terminal while your normal build continues. For the
+end-of-build summary, see [Cache results](/cache-results).
 
-mbx has no daemon, so `mbx tui` is not talking to anything. Each build appends
+The TUI reads local session files; it does not need a daemon or cache server. Each build appends
 its decisions to a stream under the cache, and the dashboard reads those
 streams. It shows builds in other terminals, builds that started before you
 opened it, and any number of builds at once.
 
 ## Screens
 
-**Live** lists the builds it knows about and, for the selected one, the
+**Live** lists recorded builds and, for the selected one, the
 compilations as they are decided. Outcomes are colored: green for a hit, red for
 a miss, grey for a compilation no lookup was possible for, yellow for one mbx
 bypassed, cyan for a shadow verification that matched, and magenta for one that
@@ -194,8 +195,10 @@ adding rows after 16 MiB, though its totals are still recorded. A stream a build
 is still writing is never collected. `mbx gc --dry-run` reports what it would
 drop alongside everything else.
 
-Streams are history, not cache content. Nothing keys on them, they are never
-weighed against the store's size budget, and deleting them costs a row in a list.
+Session history does not affect cache keys or count against the action-store
+size budget. Deleting finished session files removes their rows from the TUI
+and the history available to `mbx explain --last`, without removing compiled
+artifacts.
 
 ::: warning Not a stable format
 The event files are an implementation detail of `mbx tui` and may change in any

@@ -1,3 +1,6 @@
+---
+description: Cache C and C++ compiler calls from make, CMake, and other build tools with mbx exec.
+---
 # Cache C and C++ builds outside Cargo
 
 Use `mbx exec` to cache compiler calls made by make, CMake, and other build
@@ -15,8 +18,9 @@ mbx exec cmake -S . -B build
 mbx exec cmake --build build
 ```
 
-Only the command after `mbx exec` is affected. There is no daemon to start and
-nothing is installed globally.
+Only the command after `mbx exec` uses these compiler wrappers. There is no
+daemon or global compiler setup. For C and C++ compiled by Cargo build scripts,
+use `mbx build`; that integration is [enabled by default](/configuration#build-script-c-and-c).
 
 ## What `mbx exec` does
 
@@ -44,7 +48,11 @@ CMake writes it to `CMakeCache.txt`; autoconf may write it into generated
 makefiles. If configuration happens outside `mbx exec`, the saved path points
 straight to the compiler and later `mbx exec` builds cannot intercept it.
 
-Configure once through `mbx exec` so the build system records mbx's wrapper.
+For an existing CMake build configured with a direct compiler path, configure
+a fresh build directory through `mbx exec`. Changing `PATH` during a later
+build does not replace the compiler saved in `CMakeCache.txt`.
+
+Configure through `mbx exec` so the build system records mbx's wrapper.
 That path remains valid across later commands. You should still use `mbx exec`
 for each build you want cached:
 
@@ -99,6 +107,5 @@ MBX_CC=0 mbx exec make
 ```
 
 C and C++ compilation is the only work `mbx exec` caches, so this runs the
-command as if it were invoked directly. Production release builds may use the
-local cache but should not use a remote cache, which keeps remote cache
-poisoning away from published artifacts.
+command without compiler caching. For published artifacts, follow the
+[production release policy](/github-action#production-releases).

@@ -1,13 +1,20 @@
+---
+description: Understand compatibility guarantees for upgrades, CLI JSON output, local storage, and Rust APIs.
+---
 # Stability
 
-What an mbx upgrade can and cannot break.
+The CLI, machine-readable reports, local cache, and embedding APIs have
+different compatibility rules. Use this page when planning an upgrade or
+building tooling around mbx.
 
 ## The store is disposable
 
 The local store is a cache of work mbx can redo. Correctness never depends on
 its format: an entry a new version cannot read is a miss, and the compilation
 runs again. The worst case for any upgrade is a colder build, not a wrong one,
-and deleting the cache directory is always safe.
+and cached compilations can be regenerated. Stop builds before manually
+deleting the whole root: it also contains managed targets and private state.
+Prefer [`mbx gc`](/managed-targets#inspect-and-clean-up) for routine cleanup.
 
 Managed target directories live under a versioned root (`targets/v1/…`), and
 the `target` symlink in each checkout keeps working across upgrades.
@@ -20,7 +27,7 @@ shape change bumps the version. Scripts should read the version field and
 parse the JSON. The `mbx[...]` stderr lines are written for people and may be
 reworded at any time.
 
-### Session event streams are not
+### Session event streams are not a public API {#session-event-streams-are-not}
 
 The per-compilation streams under `sessions/v1/` that back
 [`mbx tui`](/tui) are an implementation detail of that command. Their records
