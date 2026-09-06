@@ -132,12 +132,17 @@ fn replaces_an_outdated_managed_target_link() {
     let workspace = checkout(directory.path(), "project");
     let old = place(&first, &workspace, &workspace.join("target"), false).unwrap();
     std::fs::write(old.join("artifact"), b"outputs").unwrap();
+    // A finished build leaves its lock file behind. Nothing holds it, so the
+    // view moves -- and it only can if placement stopped holding it too.
+    std::fs::create_dir_all(old.join("release")).unwrap();
+    std::fs::write(old.join("release/.cargo-lock"), b"").unwrap();
 
     let new = place(&second, &workspace, &workspace.join("target"), false).unwrap();
 
     assert_ne!(old, new);
     assert_eq!(std::fs::read_link(workspace.join("target")).unwrap(), new);
     assert!(new.join("artifact").is_file(), "the old view should move");
+    assert!(new.join("release/.cargo-lock").is_file());
     assert!(!old.exists(), "the old root must not retain an orphan");
     assert_eq!(stats(&first.target.root).unwrap(), ViewStats::default());
     assert_eq!(stats(&second.target.root).unwrap().views, 1);

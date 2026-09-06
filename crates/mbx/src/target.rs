@@ -271,10 +271,10 @@ pub fn place(
         );
         return None;
     }
-    // Cargo keeps its build lock in the old view. Hold those locks through
-    // relocation, or leave the view alone if a build is still using it. Merely
+    // Cargo keeps its build lock in the old view. Hold those locks across the
+    // link swap, or leave the view alone if a build is still using it. Merely
     // changing the link can strand Cargo's resolved diagnostic-output paths.
-    let _build_locks = match lock_replaced_view(target_dir, &managed, workspace_root) {
+    let build_locks = match lock_replaced_view(target_dir, &managed, workspace_root) {
         Ok(locks) => locks,
         Err(error) => {
             log::debug!("leaving the managed target directory in place: {error:#}");
@@ -328,6 +328,13 @@ pub fn place(
         }
         return None;
     }
+    // The locks proved no build was using the old view and held that answer
+    // across the link swap, which is the step that could strand a build's
+    // resolved paths. They cannot be held any further: an open handle inside
+    // the old view makes Windows refuse to rename or remove it, and the
+    // relocation below would fail with the link already pointing at a view
+    // that has none of the outputs.
+    drop(build_locks);
     // Cargo would create this itself on the way to writing in it. Doing it here
     // keeps the link from dangling in the meantime, which is what someone
     // listing the workspace would see.
