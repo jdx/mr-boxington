@@ -1,0 +1,11 @@
+modify this pr, make the mouse work
+
+---
+
+it crashes anytime i try to open the "store" tab
+
+---
+
+<send_user_message_question_reply>
+[{"questionItemId":"[\"request_user_input_async\",\"REDACTED\",0]","question":"What error appears when it crashes, and does it happen with both clicking Store and pressing `3`?","answer":"it just freezes and yes"}]
+</send_user_message_question_reply>
