@@ -523,11 +523,8 @@ struct Portable {
 }
 
 impl Portable {
+    /// Normalize debug paths for the working directory and shared build outputs.
     fn detect(mappings: &[PathMapping], family: CcCompilerFamily, working_dir: &Path) -> Self {
-        let mut portable = Self {
-            arguments: Vec::new(),
-            values: Vec::new(),
-        };
         // Debug information records the compiler's working directory even
         // when every source argument is relative. Normalize it as well as
         // OUT_DIR so equivalent checkouts produce identical debug objects.
@@ -551,7 +548,27 @@ impl Portable {
                     .filter(|_| session::share_out_dir_requested())
                     .filter_map(|name| std::env::var(name).ok()),
             );
-        for value in values.filter(|value| Path::new(value).is_absolute()) {
+        Self::from_values(mappings, family, values)
+    }
+
+    /// Map each spelling once, retaining distinct aliases needed by the compiler.
+    fn from_values(
+        mappings: &[PathMapping],
+        family: CcCompilerFamily,
+        values: impl IntoIterator<Item = String>,
+    ) -> Self {
+        let mut portable = Self {
+            arguments: Vec::new(),
+            values: Vec::new(),
+        };
+        let mut seen = BTreeSet::new();
+        for value in values
+            .into_iter()
+            .filter(|value| Path::new(value).is_absolute())
+        {
+            if !seen.insert(value.clone()) {
+                continue;
+            }
             // Resolve aliases for mapping without changing the spelling the
             // compiler's debug information needs to replace.
             let canonical = std::fs::canonicalize(&value).unwrap_or_else(|_| PathBuf::from(&value));

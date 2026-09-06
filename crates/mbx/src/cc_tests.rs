@@ -241,3 +241,28 @@ fn a_portable_compilation_remaps_its_paths_and_refuses_an_output_that_kept_one()
     assert!(inert.outputs_are_clean(&dirty));
     assert!(matches!(inert.applied_to(&arguments), Cow::Borrowed(_)));
 }
+
+/// PWD and OUT_DIR can repeat the working directory without changing the key.
+#[test]
+fn duplicate_portable_paths_do_not_change_compiler_arguments() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().to_str().unwrap().to_owned();
+    let child = directory.path().join("out").to_str().unwrap().to_owned();
+    let mappings = [PathMapping::new(directory.path(), "workspace")];
+    for family in [
+        CcCompilerFamily::Gcc,
+        CcCompilerFamily::Clang,
+        #[cfg(windows)]
+        CcCompilerFamily::Msvc,
+    ] {
+        let unique = Portable::from_values(&mappings, family, [root.clone(), child.clone()]);
+        let repeated = Portable::from_values(
+            &mappings,
+            family,
+            [root.clone(), root.clone(), child.clone(), child.clone()],
+        );
+        assert_eq!(unique.arguments.len(), 2);
+        assert_eq!(repeated.arguments, unique.arguments);
+        assert_eq!(repeated.values, unique.values);
+    }
+}
