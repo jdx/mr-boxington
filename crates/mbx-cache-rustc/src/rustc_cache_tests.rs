@@ -1098,6 +1098,18 @@ fn models_embedded_metadata_selection_in_the_action_key() {
     let disabled = invocation(&["-Zembed-metadata=no"]);
     assert_eq!(disabled, invocation(&["-Z", "embed-metadata=no"]));
     assert_ne!(key(disabled), key(invocation(&["-Zembed-metadata=yes"])));
+
+    // Only the two documented spellings are admitted. Any other value keeps
+    // bypassing, so a selection this adapter cannot describe never reaches a
+    // key that claims to describe it.
+    for value in ["off", "true", ""] {
+        let flag = format!("-Zembed-metadata={value}");
+        assert_eq!(
+            RustcInvocation::parse(&args(&[&flag, "src/lib.rs"])),
+            Err(BypassReason::UnknownFlag(flag.clone())),
+            "{flag} should bypass"
+        );
+    }
 }
 
 #[test]
