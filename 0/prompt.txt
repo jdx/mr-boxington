@@ -1,0 +1,47 @@
+could we make setup easier? particularly with codex desktop
+
+---
+
+<send_user_message_question_reply>
+[{"questionItemId":"[\"request_user_input_async\",\"call_CVqnFLlW69pdVZDVoU5GLMaa\",0]","question":"Do you mean making mbx easier to install and use from Codex desktop, or making this repository easier to set up for development in Codex?","answer":"Install and use mbx in Codex"}]
+</send_user_message_question_reply>
+
+---
+
+but what would it do
+
+---
+
+i don't love it
+
+---
+
+what about something like modifying \~/.cargo/bin/cargo
+
+---
+
+if you run `cargo build` now is it mbw?
+
+---
+
+look at rustup's options, is there anything helpful? anything we could propose?
+
+---
+
+a different idea, maybe the rust backend in mise could have some native integration for mr boxington
+
+---
+
+i was thinking a tool option for rust
+
+---
+
+make a pr for that in mise
+
+---
+
+maybe in mise we could also have a `--tool-option` similar to `--postinstall` to set it
+
+---
+
+also make a pr for mr-boxington assuming this lands in the next release
