@@ -1,0 +1,31 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M1X0NYSCGQKH56BE22CG0WGW",
+  "strategy": "manual-commit",
+  "branch": "codex/mise-native-setup",
+  "checkpoints_count": 9,
+  "files_touched": [
+    "README.md",
+    "docs/cookbook/local-development.md",
+    "docs/getting-started.md",
+    "docs/installation.md",
+    "docs/setup.md",
+    "docs/troubleshooting.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 327420,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 20289280,
+    "output_tokens": 39351,
+    "api_call_count": 155
+  }
+}
