@@ -26,7 +26,7 @@ agent and stops it when the build ends; there is no daemon to manage.
 With [mise](https://mise.jdx.dev):
 
 ```sh
-mise use --global --postinstall "mbx setup --yes" mr-boxington
+mise use --global --tool-option mr_boxington=true rust mr-boxington
 ```
 
 Or with Cargo:
@@ -36,8 +36,10 @@ cargo install mbx --locked
 mbx setup
 ```
 
-Open a new shell and check activation with `mbx setup --status`. Then use Cargo
-normally:
+With mise 2026.9.2 or newer, the Rust option enables wrapping without an
+`mbx setup` hook. Open a shell with mise activation or shims on `PATH`,
+[check Cargo's path](https://mr-boxington.jdx.dev/setup#verify-plain-cargo),
+and use Cargo normally:
 
 ```sh
 cargo build
@@ -46,9 +48,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 To try mbx without automatic wrapping, install it and run `mbx build` directly.
-Automatic mise wrapping requires mise 2026.8.16 or newer. Editors, SSH commands,
-and other tools may need the stable shim directory on their `PATH`; the
-[setup guide](https://mr-boxington.jdx.dev/setup) walks through verification.
+For coding agents and other non-interactive tools, use `mise exec -- cargo build`
+or put mise's shims on their `PATH`. The
+[setup guide](https://mr-boxington.jdx.dev/setup) covers desktop applications,
+older mise versions, and standalone shims.
 
 Verified release archives are available for Linux, macOS, and Windows.
 [All installation options →](https://mr-boxington.jdx.dev/installation)

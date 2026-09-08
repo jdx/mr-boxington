@@ -8,7 +8,7 @@ cached work.
 
 | Symptom | First check |
 | --- | --- |
-| Plain Cargo does not use mbx | `mbx setup --status`, then [check Cargo's path](/setup#verify-plain-cargo) |
+| Plain Cargo does not use mbx | [Check Cargo's path](/setup#verify-plain-cargo); for standalone setup, also run `mbx setup --status` |
 | A build restores little or nothing | `mbx explain --last`, then [read the results](/cache-results#troubleshooting-a-low-hit-rate) |
 | Cargo waits for a target lock | Give simultaneous builds [separate targets](/scheduling) |
 | Remote requests fail | `mbx doctor`, then [check authentication](/remote-cache#authenticate) |
@@ -36,7 +36,13 @@ Example output (versions, paths, and budgets depend on your machine):
 0 failures, 0 warnings
 ```
 
-Doctor checks that mise's Cargo wrapper is active, or that the installed fallback
+Doctor's setup check currently recognizes explicit mise wrappers and the
+standalone shim installed by `mbx setup`, but not the native Rust tool option.
+Its setup warning alone does not mean native wrapping is inactive;
+[check Cargo's path](/setup#verify-plain-cargo).
+
+For standalone setup, doctor checks that mise's Cargo wrapper is active, or
+that the installed fallback
 shim matches the running mbx and is the first `cargo` on `PATH`. It also checks
 the Cargo and rustc executables, cache write access, the local build-session
 listener, filesystem reflink support, effective remote policy, and remote

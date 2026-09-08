@@ -15,8 +15,11 @@ configuration file is required.
 With [mise](https://mise.jdx.dev):
 
 ```sh
-mise use --global --postinstall "mbx setup --yes" mr-boxington
+mise use --global --tool-option mr_boxington=true rust mr-boxington
 ```
+
+This requires mise 2026.9.2 or newer. Drop `--global` for project-scoped
+wrapping. See [Installation](/installation#mise) for older mise versions.
 
 Or install from crates.io:
 
@@ -50,14 +53,19 @@ cached work.
 
 ## Keep using plain Cargo
 
+The mise command above enables wrapping without running `mbx setup`. Use
+`mise exec -- cargo build`, `mise run` tasks, or plain `cargo` with mise
+activation or shims on `PATH`.
+
+For standalone installations, run:
+
 ```sh
 mbx setup
+mbx setup --status
 ```
 
-If you installed with the mise command above, setup has already run. Open a new
-shell and run `mbx setup --status` to check activation, then use `cargo build`
-and `cargo test` normally. See [Cargo and editor setup](/setup) for project
-scope, rust-analyzer, and tools that do not inherit your interactive shell.
+See [Cargo and editor setup](/setup) to verify Cargo's path, share project
+configuration, configure rust-analyzer, and use mbx from desktop applications.
 
 ## The first build
 

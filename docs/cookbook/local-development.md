@@ -6,11 +6,12 @@ description: Set up rust-analyzer, watch loops, laptop budgets, and debugging wi
 mbx can sit underneath the tools already in a Rust development loop. Editors,
 file watchers, terminals, and worktrees may all keep invoking ordinary Cargo;
 their compilations share the same cache and machine-wide scheduler. Start with
-[`mbx setup`](/setup), then use the recipes below for your editor, watch loop,
+[Cargo and editor setup](/setup), then use the recipes below for your editor, watch loop,
 and machine budget.
 
 ## Put editor checks through mbx
 
+The native mise Rust option wraps Cargo but does not configure rust-analyzer.
 Run setup once in the same scope in which mbx is installed:
 
 ```sh

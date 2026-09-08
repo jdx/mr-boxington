@@ -9,13 +9,31 @@ build; `mbx doctor` checks which tools are active.
 ## mise
 
 ```sh
+mise use --global --tool-option mr_boxington=true rust mr-boxington
+```
+
+Requires mise 2026.9.2 or newer. This installs Rust and mbx and enables Cargo
+wrapping through mise; no `mbx setup` postinstall hook is needed.
+`--tool-option` applies to the following tool, so keep it before `rust`.
+Drop `--global` to enable it only in the current project. Keep an existing
+Rust version pin by [editing its tool entry](/setup#share-setup-with-a-project).
+
+Use `mise exec -- cargo build`, or open a shell with mise activation or shims
+on `PATH` and follow [Verify plain Cargo](/setup#verify-plain-cargo).
+The Rust option does not install a standalone mbx shim or configure
+rust-analyzer; see [editor setup](/setup#rust-analyzer) if you need that too.
+
+### Older mise versions
+
+With mise 2026.8.16 through 2026.9.1:
+
+```sh
 mise use --global --postinstall "mbx setup --yes" mr-boxington
 ```
 
-This installs mbx and sets up automatic Cargo wrapping. Open a new shell, then
-follow [Verify plain Cargo](/setup#verify-plain-cargo). Automatic wrapping
-requires mise 2026.8.16 or newer. Older versions install the standalone shim
-and print an upgrade warning.
+This runs standalone setup and writes an explicit `[wrappers.cargo]` entry.
+Versions older than 2026.8.16 install the standalone shim and print an upgrade
+warning instead of editing mise configuration.
 
 ## Cargo
 
@@ -151,8 +169,10 @@ Upgrade using the same installation method: update the mise version, rerun
 archive. The stable Cargo shim follows upgrades; setup does not need to run
 again.
 
-Before removing the executable, run `mbx setup --uninstall` in each scope you
-enabled. See [Remove automatic wrapping](/setup#remove-automatic-wrapping).
+Before removing the executable, disable `mr_boxington` in each Rust tool entry
+where you enabled it. If you also ran standalone setup, run
+`mbx setup --uninstall` in each scope you enabled. See
+[Remove automatic wrapping](/setup#remove-automatic-wrapping).
 Cached work is disposable; use [cache management](/managed-targets) to inspect
 and reclaim it.
 

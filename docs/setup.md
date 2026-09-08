@@ -3,16 +3,32 @@ description: Make Cargo and rust-analyzer use mbx, choose a setup scope, and ver
 ---
 # Set up Cargo and your editor
 
-Run this after [installing mbx](/installation) to make ordinary `cargo`
-commands use the cache:
+## Native mise integration
+
+With mise 2026.9.2 or newer:
+
+```sh
+mise use --global --tool-option mr_boxington=true rust mr-boxington
+```
+
+This enables ordinary Cargo commands through mise without running `mbx setup`.
+Use `mise exec -- cargo build`, `mise run` tasks, or a shell with mise
+activation or shims on `PATH`. Rust and mbx remain independently versioned.
+Drop `--global` for a project-scoped configuration.
+
+## Standalone setup
+
+After [installing mbx](/installation), run this to install a stable Cargo shim
+and configure rust-analyzer:
 
 ```sh
 mbx setup
 mbx setup --status
 ```
 
-Setup installs a stable Cargo shim and offers mise and rust-analyzer
-integration. To try mbx without changing your setup, run `mbx build` directly.
+Setup offers explicit mise wrapper and rust-analyzer integration. It is useful
+for older mise versions or applications that need an absolute Cargo shim path.
+To try mbx without changing your setup, run `mbx build` directly.
 
 ## Choose a scope
 
@@ -32,32 +48,34 @@ Without an active mise shell, setup prints the exact shell-specific `PATH`
 change and never edits a shell startup file. Setup runs `mise reshim` after
 adding or removing the wrapper.
 
-Automatic mise wrapping requires mise 2026.8.16 or newer.
+The explicit wrapper written by `mbx setup` requires mise 2026.8.16 or newer.
 
 ## Share setup with a project
 
-To keep the wrapper project-scoped and reviewable, commit it directly in the
-project's `mise.toml` instead:
+With mise 2026.9.2 or newer, commit the tool option in the project's `mise.toml`:
 
 ```toml
 [tools]
-mr-boxington = "1"
-
-[wrappers.cargo]
-command = "mbx"
-env = { MBX_CARGO_SHIM_MODE = "1" }
+rust = { version = "stable", mr_boxington = true }
+mr-boxington = "latest"
 ```
 
-Then run `mise install`. This installs mbx but does not activate the wrapper in
-the parent shell. Run project tasks with `mise run`, or activate mise in the
-shell before invoking plain `cargo` commands. This avoids changing the global
-mise configuration, and every contributor who activates the project gets the
-same Cargo wrapper.
+Keep the project's existing Rust version and other options when adding
+`mr_boxington = true`. Both tools must be configured. Run `mise install`, then
+use `mise exec -- cargo build`, project tasks with `mise run`, or plain `cargo`
+with mise activation or shims on `PATH`.
+
+Set `mr_boxington = false` on the project's Rust entry to disable native
+wrapping there. An explicit `[wrappers.cargo]` takes precedence over the Rust
+option, including `false`. When migrating from `mbx setup`, remove the old mbx
+`[wrappers.cargo]` entry and its `postinstall` hook from the applicable config
+so the Rust option controls wrapping. Run `mise reshim` after migrating.
 
 ## Verify plain Cargo
 
 Open a new shell after setup and verify that Cargo resolves to mise's command
-wrapper or the stable mbx shim, depending on how you activated it. On Unix:
+wrapper, a mise shim, or the stable mbx shim, depending on how you activated it.
+On Unix:
 
 ```sh
 command -v cargo
@@ -74,9 +92,23 @@ where.exe cargo
 mise activation supplies the command-wrapper path to shells where mise is active.
 The wrapper invokes `mbx` with Cargo shim mode enabled, then mise removes its
 dispatch directories before mbx delegates to the configured or system Cargo.
-SSH commands, coding agents, editors, and other non-interactive tools may use a
-startup path that does not activate mise. In that case, prepend the directory
-printed by `mbx setup` in a startup file those processes read. For zsh,
+Calling `~/.cargo/bin/cargo` directly bypasses mise's integration.
+
+### Desktop applications and non-interactive commands
+
+For coding agents, SSH commands, and other non-interactive tools, use
+`mise exec -- cargo build` or put mise's shims directory on their `PATH`.
+When using shims, `command -v cargo` resolves to the mise shim rather than the
+command-wrapper directory; both honor the Rust option.
+
+Desktop applications such as Codex may inherit a different `PATH` from an
+interactive terminal. Check `command -v cargo` from a command run by the
+application itself. Configure its command environment to include mise's shims,
+or use `mise exec -- cargo build` for build commands. Restart the application
+after changing its inherited environment.
+
+If you prefer mbx's standalone launcher, run `mbx setup` and prepend the
+directory it prints to the environment those processes use. For zsh,
 `~/.zshenv` applies to interactive and non-interactive shells. For example,
 the default Linux location is:
 
@@ -105,7 +137,8 @@ running setup again.
 
 ## rust-analyzer
 
-Setup also configures rust-analyzer's background check in the matching global
+The native mise option does not configure editor checks. Run `mbx setup` to
+configure rust-analyzer's background check in the matching global
 or project scope. The editor invokes the stable Cargo shim by its absolute path,
 so its build shares mbx's cache and machine-wide compiler pool even when the
 editor did not inherit mise's `PATH`. Its outputs go to
@@ -116,6 +149,13 @@ shared store warms both builds. Existing rust-analyzer check settings are left
 unchanged.
 
 ## Remove automatic wrapping
+
+For native mise integration, remove `mr_boxington` or set it to `false` in each
+Rust tool entry where you enabled it, then run `mise reshim`. Keep the Rust
+version and any unrelated tool options. Do this before removing mr-boxington
+from `[tools]`.
+
+If you ran standalone setup as well:
 
 ```sh
 mbx setup --uninstall
