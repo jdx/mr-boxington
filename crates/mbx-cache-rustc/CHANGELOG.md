@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.14.0...mbx-cache-rustc-v0.15.0) - 2026-09-08
+
+### Other
+
+- adopt native mise Rust integration for setup ([#400](https://github.com/jdx/mr-boxington/pull/400))
+
 ## [0.14.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.13.1...mbx-cache-rustc-v0.14.0) - 2026-09-06
 
 ### Added
