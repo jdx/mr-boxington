@@ -9,11 +9,11 @@ pub(crate) fn note(message: &str) {
 
 /// Whether this process's stderr belongs to the compiler it stands in for.
 ///
-/// Set once at cc-shim entry. Build scripts read an intercepted compiler's
-/// stderr as part of its answer -- cc-rs marks a probed flag unsupported the
-/// moment anything lands there -- so one printed warning changes the flags of
-/// every compilation the build script produces afterwards, and with them
-/// every action key, orphaning the whole build's predictions.
+/// Set once at cc- or rustc-shim entry. Build scripts read an intercepted
+/// compiler's stderr as part of its answer: cc-rs marks a probed flag unsupported
+/// the moment anything lands there. Cargo also saves rustc stderr in its
+/// fingerprints and replays it even when no compiler runs. Shim diagnostics
+/// must therefore travel through the live session instead.
 static STDERR_RESERVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Declare that this process replays compiler output on stderr and must not
@@ -30,6 +30,25 @@ pub(crate) fn reserve_stderr_for_compiler() {
 /// losing a diagnostic costs a little visibility, while poisoning a configure
 /// probe costs the build its cache keys.
 pub(crate) fn report_shim_warning(message: &str) {
+    report_shim_diagnostic(Severity::Warning, message);
+}
+
+/// Report a fatal shim diagnostic without losing it when transport fails.
+///
+/// The session retains the error's severity when it displays and emits it.
+/// The local fallback keeps the fatal reason visible when delivery fails,
+/// including when an older agent does not understand the error request.
+pub(crate) fn report_shim_error(message: &str) {
+    report_shim_diagnostic(Severity::Error, message);
+}
+
+#[derive(Clone, Copy)]
+enum Severity {
+    Warning,
+    Error,
+}
+
+fn report_shim_diagnostic(severity: Severity, message: &str) {
     let mut message = message.replace(['\n', '\r'], "; ");
     // Stay under the agent's acceptance limit rather than losing the whole
     // diagnostic to it; the start of an error chain names the failure.
@@ -38,14 +57,32 @@ pub(crate) fn report_shim_warning(message: &str) {
         message.truncate(end.unwrap_or_default());
         message.push_str("...");
     }
+    let (label, request) = match severity {
+        Severity::Warning => (
+            "warning",
+            AgentRequest::RecordWarning {
+                message: message.clone(),
+            },
+        ),
+        Severity::Error => (
+            "error",
+            AgentRequest::RecordError {
+                message: message.clone(),
+            },
+        ),
+    };
+    let response = request_agent(&[request])
+        .ok()
+        .and_then(|responses| responses.into_iter().next());
     let delivered = matches!(
-        request_agent(&[AgentRequest::RecordWarning {
-            message: message.clone(),
-        }])
-        .map(|responses| responses.into_iter().next()),
-        Ok(Some(AgentResponse::WarningRecorded))
+        (severity, response),
+        (Severity::Warning, Some(AgentResponse::WarningRecorded))
+            | (Severity::Error, Some(AgentResponse::ErrorRecorded))
     );
-    if !delivered && !STDERR_RESERVED.load(std::sync::atomic::Ordering::Relaxed) {
-        note(&format!("mbx[warning]: {message}"));
+    if !delivered
+        && (matches!(severity, Severity::Error)
+            || !STDERR_RESERVED.load(std::sync::atomic::Ordering::Relaxed))
+    {
+        note(&format!("mbx[{label}]: {message}"));
     }
 }

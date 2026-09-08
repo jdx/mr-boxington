@@ -253,7 +253,7 @@ pub enum AgentRequest {
     /// Appended rather than grouped with the other `Record*` requests it
     /// belongs beside: these variants carry no `repr`, so inserting one moves
     /// the discriminant of every variant after it, and a break nobody asked
-    /// for is worth less than the grouping. New variants go here.
+    /// for is worth less than the grouping.
     RecordWarning {
         /// Human-readable single-line diagnostic.
         message: String,
@@ -298,6 +298,15 @@ pub enum AgentRequest {
     RecordWrapperTiming {
         /// Completed invocation timings.
         timing: WrapperTiming,
+    },
+    /// Surface a fatal shim diagnostic through the session that owns the build.
+    ///
+    /// This is appended to preserve every existing request variant and wire
+    /// shape while allowing a caller to distinguish fatal acknowledgement from
+    /// [`Self::RecordWarning`] and fall back locally when it is not accepted.
+    RecordError {
+        /// Human-readable single-line diagnostic.
+        message: String,
     },
 }
 
@@ -410,6 +419,11 @@ pub enum AgentEvent {
         /// Human-readable single-line diagnostic.
         message: String,
     },
+    /// A shim reported a fatal diagnostic for the session to surface.
+    Error {
+        /// Human-readable single-line diagnostic.
+        message: String,
+    },
     /// Cache-key material for the action event immediately following it.
     ActionDiagnostic {
         /// Outcome of the action this describes.
@@ -514,9 +528,8 @@ pub enum AgentResponse {
     },
     /// A shim diagnostic was accepted for the session to surface.
     ///
-    /// Sits past `Error` for the reason [`AgentRequest::RecordWarning`] sits
-    /// last: anywhere earlier renumbers the variants below it. New variants go
-    /// here.
+    /// Kept after `Error` so this acknowledgement remains alongside the
+    /// existing diagnostic response without changing earlier variants.
     WarningRecorded,
     /// Digests recorded earlier for the requested file identities.
     FileDigests {
@@ -541,4 +554,9 @@ pub enum AgentResponse {
     },
     /// Wrapper phase timings were recorded.
     WrapperTimingRecorded,
+    /// A fatal shim diagnostic was accepted for the session to surface.
+    ///
+    /// This is appended to preserve every existing response variant and wire
+    /// shape while giving fatal diagnostics their own acknowledgement.
+    ErrorRecorded,
 }

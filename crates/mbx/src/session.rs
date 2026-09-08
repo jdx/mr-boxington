@@ -37,7 +37,9 @@ pub(crate) mod verification;
 #[cfg(test)]
 use client::validate_handshake_response;
 use client::{request_agent_at, request_standalone_agent};
-pub(crate) use diagnostics::{note, report_shim_warning, reserve_stderr_for_compiler};
+pub(crate) use diagnostics::{
+    note, report_shim_error, report_shim_warning, reserve_stderr_for_compiler,
+};
 #[cfg(unix)]
 pub(crate) use server::create_fifo;
 pub(crate) use server::listener_unavailable;
@@ -1324,9 +1326,12 @@ fn run_transparent_cc(compiler: OsString, arguments: Vec<OsString>) -> ExitCode 
 /// from or publish through the cache; anything else is a transparent compiler
 /// call.
 pub fn run_rustc_shim() -> ExitCode {
+    // Cargo captures the wrapper's stderr as compiler output. Keep mbx's own
+    // diagnostics out of that stream; the session agent owns their display.
+    reserve_stderr_for_compiler();
     let mut arguments = std::env::args_os().skip(1);
     let Some(rustc) = arguments.next() else {
-        eprintln!("mbx[error]: the rustc shim expected the rustc executable as its first argument");
+        report_shim_error("the rustc shim expected the rustc executable as its first argument");
         return ExitCode::from(1);
     };
     let mut arguments = arguments.collect::<Vec<_>>();
@@ -1356,7 +1361,7 @@ pub fn run_rustc_shim() -> ExitCode {
             Err(error) => {
                 record_bypass(&error);
                 #[cfg(debug_assertions)]
-                eprintln!("mbx[warning]: rustc cache bypassed: {error:#}");
+                report_shim_warning(&format!("rustc cache bypassed: {error:#}"));
             }
         }
     }
@@ -1463,7 +1468,7 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
 
         if permit.is_none() {
             let error = command.exec();
-            eprintln!("mbx[error]: the rustc shim failed to execute rustc: {error}");
+            report_shim_error(&format!("the rustc shim failed to execute rustc: {error}"));
             return ExitCode::from(1);
         }
         // A held permit must be released when the compiler finishes, and its
@@ -1483,7 +1488,7 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
                 crate::materialize::exit_code(status)
             }
             Err(error) => {
-                eprintln!("mbx[error]: the rustc shim failed to execute rustc: {error}");
+                report_shim_error(&format!("the rustc shim failed to execute rustc: {error}"));
                 ExitCode::from(1)
             }
         }
@@ -1521,7 +1526,7 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
                 unsafe { windows_sys::Win32::System::Threading::ExitProcess(exit_code) }
             }
             Err(error) => {
-                eprintln!("mbx[error]: the rustc shim failed to execute rustc: {error}");
+                report_shim_error(&format!("the rustc shim failed to execute rustc: {error}"));
                 ExitCode::from(1)
             }
         }

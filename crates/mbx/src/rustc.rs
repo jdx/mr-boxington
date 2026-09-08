@@ -85,7 +85,9 @@ impl LearnedPlan {
             return;
         };
         if let Err(error) = write_churn_state(path, sources, self.streak) {
-            eprintln!("mbx[warning]: churn was not recorded for this crate: {error:#}");
+            session::report_shim_warning(&format!(
+                "churn was not recorded for this crate: {error:#}"
+            ));
         }
     }
 
@@ -249,7 +251,9 @@ pub(crate) fn compile(
                         cached.restore.avoided_compiler_duration_ns = timing.duration_ns;
                     }
                     Err(error) => {
-                        eprintln!("mbx[warning]: compiler timing was not refreshed: {error:#}");
+                        session::report_shim_warning(&format!(
+                            "compiler timing was not refreshed: {error:#}"
+                        ));
                     }
                 }
                 if learned_enabled && source_is_in_workspace(&compilation) {
@@ -279,7 +283,7 @@ pub(crate) fn compile(
                 learned = plan_learned_reuse(&compilation, &discovered, learned_enabled);
             }
             Err(error) => {
-                eprintln!("mbx[warning]: result was not restored: {error:#}");
+                session::report_shim_warning(&format!("result was not restored: {error:#}"));
             }
         }
     }
@@ -307,7 +311,7 @@ pub(crate) fn compile(
                 prediction_missing = !action_lookup_attempted;
             }
             Err(error) => {
-                eprintln!("mbx[warning]: prediction was not restored: {error:#}");
+                session::report_shim_warning(&format!("prediction was not restored: {error:#}"));
             }
         }
     }
@@ -348,7 +352,9 @@ pub(crate) fn compile(
             }
             Ok(None) => {}
             Err(error) => {
-                eprintln!("mbx[warning]: a flight prediction was not restored: {error:#}");
+                session::report_shim_warning(&format!(
+                    "a flight prediction was not restored: {error:#}"
+                ));
             }
         }
     }
@@ -403,19 +409,23 @@ pub(crate) fn compile(
                             return Ok(ExitCode::SUCCESS);
                         }
                         Ok(None) => {}
-                        Err(error) => eprintln!(
-                            "mbx[warning]: a remote flight prediction was not restored: {error:#}"
-                        ),
+                        Err(error) => session::report_shim_warning(&format!(
+                            "a remote flight prediction was not restored: {error:#}"
+                        )),
                     }
                 }
                 Some(AgentResponse::ActionPromise { .. }) => {}
                 Some(AgentResponse::Error { message }) => {
-                    eprintln!("mbx[warning]: remote flight coordination failed: {message}")
+                    session::report_shim_warning(&format!(
+                        "remote flight coordination failed: {message}"
+                    ));
                 }
                 _ => {}
             },
             Err(error) => {
-                eprintln!("mbx[warning]: remote flight coordination failed: {error:#}")
+                session::report_shim_warning(&format!(
+                    "remote flight coordination failed: {error:#}"
+                ));
             }
         }
     }
@@ -456,7 +466,9 @@ pub(crate) fn compile(
         if let Some(root) = incremental_root()
             && let Err(error) = record_private_artifacts(&root, &outputs)
         {
-            eprintln!("mbx[warning]: private artifacts were not recorded: {error:#}");
+            session::report_shim_warning(&format!(
+                "private artifacts were not recorded: {error:#}"
+            ));
         }
     }
     let output = crate::phase_timing::measure("compiler", || command.output())
@@ -503,14 +515,16 @@ pub(crate) fn compile(
                 let _ = replay_bytes(&[], &output.stderr);
                 return Ok(ExitCode::FAILURE);
             }
-            eprintln!("mbx[warning]: verification inputs were not validated: {error:#}");
+            session::report_shim_warning(&format!(
+                "verification inputs were not validated: {error:#}"
+            ));
         }
         let divergence = verification_divergence(&cached, &output);
         record_verification(divergence.is_none(), cached.restore);
         if let Some(divergence) = divergence {
-            eprintln!(
-                "mbx[warning]: shadow verification diverged from cached output: {divergence}"
-            );
+            session::report_shim_warning(&format!(
+                "shadow verification diverged from cached output: {divergence}"
+            ));
         }
         let _ = replay_output(&output);
         return Ok(exit_code(output.status));
@@ -604,7 +618,9 @@ pub(crate) fn compile(
             Err(error) if discard_modified_compiler_result(&outputs, &input_snapshots, &error) => {
                 compiler_input_invalid = true;
             }
-            Err(error) => eprintln!("mbx[warning]: result was not stored: {error:#}"),
+            Err(error) => {
+                session::report_shim_warning(&format!("result was not stored: {error:#}"));
+            }
         }
     }
     session::record_compiler_invocation_with_diagnostic(
@@ -659,11 +675,11 @@ fn discard_modified_compiler_result(
         return false;
     }
     if let Err(discard_error) = discard_compiler_outputs(outputs) {
-        eprintln!(
-            "mbx[warning]: some invalid compiler outputs could not be removed: {discard_error:#}"
-        );
+        session::report_shim_warning(&format!(
+            "some invalid compiler outputs could not be removed: {discard_error:#}"
+        ));
     }
-    eprintln!("mbx[error]: compilation result was discarded: {error:#}");
+    session::report_shim_error(&format!("compilation result was discarded: {error:#}"));
     true
 }
 
@@ -754,7 +770,9 @@ fn compile_execution_only_build_script(
             let _ = replay_bytes(&[], &output.stderr);
             return Ok(ExitCode::FAILURE);
         }
-        eprintln!("mbx[warning]: build-script inputs were not validated: {error:#}");
+        session::report_shim_warning(&format!(
+            "build-script inputs were not validated: {error:#}"
+        ));
     }
     if output.status.success()
         && let Some(executable) = outputs.build_script_executable(invocation.crate_name())
@@ -892,15 +910,15 @@ fn incremental_directory(invocation: &CacheDigest, crate_name: &str) -> Option<P
                 // as incremental, and a crate whose state is discarded on
                 // every edit is indistinguishable from the outside from
                 // incremental compilation that simply does not help.
-                eprintln!(
-                    "mbx[warning]: discarded {} of incremental state for {crate_name}: it passed learned_incremental_max_size, which can be raised to keep it",
+                session::report_shim_warning(&format!(
+                    "discarded {} of incremental state for {crate_name}: it passed learned_incremental_max_size, which can be raised to keep it",
                     bytesize::ByteSize::b(bytes).display().iec()
-                );
+                ));
             }
             Some(directory)
         }
         Err(error) => {
-            eprintln!("mbx[warning]: incremental state was not prepared: {error:#}");
+            session::report_shim_warning(&format!("incremental state was not prepared: {error:#}"));
             None
         }
     }
@@ -992,7 +1010,9 @@ fn plan_learned_reuse(
     match planned {
         Ok(plan) => plan,
         Err(error) => {
-            eprintln!("mbx[warning]: churn was not tracked for this crate: {error:#}");
+            session::report_shim_warning(&format!(
+                "churn was not tracked for this crate: {error:#}"
+            ));
             LearnedPlan::default()
         }
     }
@@ -1063,7 +1083,7 @@ fn reuse_hot_workspace_plan(
     match planned {
         Ok(plan) => plan,
         Err(error) => {
-            eprintln!("mbx[warning]: incremental state was not reused: {error:#}");
+            session::report_shim_warning(&format!("incremental state was not reused: {error:#}"));
             LearnedPlan::default()
         }
     }
@@ -1155,7 +1175,7 @@ fn record_learned_baseline(compilation: &Compilation<'_>, discovered: &Discovere
         write_churn_state(&path, &sources, 0)
     })();
     if let Err(error) = recorded {
-        eprintln!("mbx[warning]: initial churn state was not recorded: {error:#}");
+        session::report_shim_warning(&format!("initial churn state was not recorded: {error:#}"));
     }
 }
 
@@ -1224,10 +1244,10 @@ fn forget_private_artifacts(root: &Path, outputs: &RustcOutputs) {
             && let Err(error) = std::fs::remove_file(&path)
             && error.kind() != std::io::ErrorKind::NotFound
         {
-            eprintln!(
-                "mbx[warning]: a private artifact marker was not removed for {}: {error}",
+            session::report_shim_warning(&format!(
+                "a private artifact marker was not removed for {}: {error}",
                 artifact.display()
-            );
+            ));
         }
     }
 }
@@ -2026,7 +2046,9 @@ fn record_prediction_value(
 /// that one compilation out of thousands failed to record, which is not enough
 /// to reproduce or to tell whether the same crate fails on every build.
 fn warn_prediction_not_recorded(crate_name: &str, error: &eyre::Report) {
-    eprintln!("mbx[warning]: action prediction for {crate_name} was not recorded: {error:#}");
+    session::report_shim_warning(&format!(
+        "action prediction for {crate_name} was not recorded: {error:#}"
+    ));
 }
 
 /// Select the session run, or a bounded persistent-manifest shard when this

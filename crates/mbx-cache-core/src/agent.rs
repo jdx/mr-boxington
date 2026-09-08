@@ -53,14 +53,30 @@ const MAX_EXECUTABLE_IDENTITY_BYTES: usize = 256 * 1024;
 const TASK_ACTION_MANIFEST_VERSION: u8 = 1;
 const MAX_TASK_ACTION_PREDICTIONS: usize = 16 * 1024;
 /// Longest shim diagnostic the agent accepts, in bytes.
-const MAX_WARNING_BYTES: usize = 4 * 1024;
+const MAX_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 /// Most distinct shim diagnostics one session surfaces before going quiet.
 ///
 /// A failure mode that repeats across a build tends to repeat with the same
 /// message, which deduplication already collapses; the cap only guards
 /// against a message that embeds something unique per compilation.
-const MAX_WARNINGS: usize = 128;
+const MAX_DIAGNOSTICS: usize = 128;
 const ACTION_DIAGNOSTIC_PREFIX: &str = "@mbx-action-diagnostic\t";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DiagnosticLevel {
+    Warning,
+    Error,
+}
+
+impl DiagnosticLevel {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+}
+
 /// Most file identities one digest lookup or record may carry.
 const MAX_FILE_DIGEST_BATCH: usize = 16 * 1024;
 /// Most recorded file digests one session retains across every scope.
@@ -313,9 +329,11 @@ pub struct CacheAgent {
     remote_transfers: Arc<tokio::sync::Semaphore>,
     prefetch_transfers: Arc<tokio::sync::Semaphore>,
     prefetch_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
-    /// Distinct shim diagnostics already surfaced, so a warning that fires
-    /// once per compilation is printed once per session.
-    warnings: Arc<Mutex<BTreeSet<String>>>,
+    /// Distinct shim diagnostics already surfaced, so a diagnostic that fires
+    /// once per compilation is printed once per session. The severity is part
+    /// of each key: a fatal reason must still be surfaced after the same text
+    /// appeared as a warning.
+    diagnostics: Arc<Mutex<BTreeSet<(DiagnosticLevel, String)>>>,
     /// Digests of files shims hashed or wrote this session, keyed by scope and
     /// path, each entry standing while its recorded identity matches the disk.
     file_digests: Arc<Mutex<BTreeMap<(FileDigestScope, PathBuf), RecordedFileDigest>>>,
@@ -598,7 +616,7 @@ impl CacheAgent {
             remote_transfers,
             prefetch_transfers: Arc::new(tokio::sync::Semaphore::new(MAX_PREFETCH_TRANSFERS)),
             prefetch_tasks: Arc::new(Mutex::new(Vec::new())),
-            warnings: Arc::new(Mutex::new(BTreeSet::new())),
+            diagnostics: Arc::new(Mutex::new(BTreeSet::new())),
             file_digests: Arc::new(Mutex::new(BTreeMap::new())),
             file_digest_locks: Arc::new(Mutex::new(BTreeMap::new())),
             file_digest_permits: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FILE_DIGESTS)),
@@ -1482,8 +1500,11 @@ impl CacheAgent {
                     Ok(AgentResponse::WarningRecorded)
                 }
                 Some(Err(error)) => Err(error),
-                None => self.record_warning(message),
+                None => self.record_diagnostic(DiagnosticLevel::Warning, message),
             },
+            AgentRequest::RecordError { message } => {
+                self.record_diagnostic(DiagnosticLevel::Error, message)
+            }
             AgentRequest::FindFileDigests { scope, files } => self.find_file_digests(scope, files),
             AgentRequest::JoinActionPromise {
                 adapter,
@@ -1979,23 +2000,40 @@ impl CacheAgent {
     /// compilation the shim stands in for -- which build scripts read as part
     /// of the compiler's answer. Deduplicated because one cause tends to fire
     /// once per compilation, and capped so a message unique per compilation
-    /// cannot scroll the build away.
-    fn record_warning(&self, message: String) -> Result<AgentResponse> {
+    /// cannot scroll the build away. The level is part of the deduplication
+    /// key, so a fatal reason is never hidden by an earlier warning with the
+    /// same text.
+    fn record_diagnostic(&self, level: DiagnosticLevel, message: String) -> Result<AgentResponse> {
         if message.is_empty()
-            || message.len() > MAX_WARNING_BYTES
+            || message.len() > MAX_DIAGNOSTIC_BYTES
             || message.contains(['\n', '\r', '\0'])
         {
-            bail!("invalid shim warning");
+            bail!("invalid shim {}", level.label());
         }
-        let mut warnings = self.warnings.lock().unwrap();
-        if !warnings.contains(&message) && warnings.len() < MAX_WARNINGS {
-            eprintln!("mbx[warning]: {message}");
-            self.emit(|| AgentEvent::Warning {
-                message: message.clone(),
+        let mut diagnostics = self.diagnostics.lock().unwrap();
+        let key = (level, message.clone());
+        if !diagnostics.contains(&key) {
+            // An acknowledgement promises the diagnostic was surfaced. A
+            // fatal shim error must be able to fall back locally when this
+            // channel can no longer display it.
+            if diagnostics.len() >= MAX_DIAGNOSTICS {
+                bail!("shim diagnostic limit reached");
+            }
+            eprintln!("mbx[{}]: {message}", level.label());
+            self.emit(|| match level {
+                DiagnosticLevel::Warning => AgentEvent::Warning {
+                    message: message.clone(),
+                },
+                DiagnosticLevel::Error => AgentEvent::Error {
+                    message: message.clone(),
+                },
             });
-            warnings.insert(message);
+            diagnostics.insert(key);
         }
-        Ok(AgentResponse::WarningRecorded)
+        Ok(match level {
+            DiagnosticLevel::Warning => AgentResponse::WarningRecorded,
+            DiagnosticLevel::Error => AgentResponse::ErrorRecorded,
+        })
     }
 
     /// Answer file-digest lookups from the session ledger.

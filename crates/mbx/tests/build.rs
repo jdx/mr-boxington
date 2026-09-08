@@ -125,6 +125,30 @@ fn generate_lockfile(directory: &Path) {
 
 #[cfg(unix)]
 #[test]
+fn a_fatal_rustc_shim_error_survives_an_unavailable_agent() {
+    let directory = tempfile::tempdir().unwrap();
+    let shim = mbx::session::install_shim(
+        Path::new(env!("CARGO_BIN_EXE_mbx")),
+        directory.path(),
+        mbx::session::ShimLink::Tracking,
+    )
+    .unwrap();
+    let output = Command::new(shim)
+        .arg(directory.path().join("missing-rustc"))
+        .env("MBX_SOCKET", directory.path().join("missing-agent.sock"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "a missing compiler must fail");
+    assert!(
+        stderr.contains("mbx[error]: the rustc shim failed to execute rustc:"),
+        "the fatal reason must survive a failed delivery: {stderr}"
+    );
+    assert!(!stderr.contains("mbx[warning]"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
 fn transparent_rustc_replaces_the_shim_process() {
     let directory = tempfile::tempdir().unwrap();
     let shim = mbx::session::install_shim(
@@ -290,12 +314,40 @@ fn a_mid_compilation_input_edit_discards_the_result() {
         "the invalid compilation must fail"
     );
     assert!(
-        stderr.contains("compilation result was discarded: compiler input was modified"),
-        "the mutation should be diagnosed: {stderr}"
+        stderr
+            .contains("mbx[error]: compilation result was discarded: compiler input was modified"),
+        "the mutation should be diagnosed as an error: {stderr}"
+    );
+    assert!(
+        !stderr.contains("mbx[warning]: compilation result was discarded"),
+        "a fatal rejection must retain its severity: {stderr}"
     );
     assert!(
         !stderr.contains("Checking above"),
         "Cargo must not compile a dependent against the stale metadata: {stderr}"
+    );
+
+    let mut fingerprint_replays = Vec::new();
+    let fingerprint_root = project.path().join("target/debug/.fingerprint");
+    for unit in std::fs::read_dir(&fingerprint_root).unwrap().flatten() {
+        let Ok(files) = std::fs::read_dir(unit.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            if path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("output-"))
+                && std::fs::read_to_string(&path)
+                    .is_ok_and(|output| output.contains("compilation result was discarded"))
+            {
+                fingerprint_replays.push(path);
+            }
+        }
+    }
+    assert!(
+        fingerprint_replays.is_empty(),
+        "the rejected-result diagnostic must not enter Cargo fingerprints: {fingerprint_replays:?}"
     );
 
     let deps = project.path().join("target/debug/deps");
@@ -311,6 +363,36 @@ fn a_mid_compilation_input_edit_discards_the_result() {
     assert!(
         stale_outputs.is_empty(),
         "the stale compiler outputs should be removed: {stale_outputs:?}"
+    );
+
+    // A shim diagnostic is delivered by the live session rather than through
+    // the compiler stream. Cargo must therefore have no rejected-result
+    // message to replay when the same source is compiled successfully.
+    let retry = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        .current_dir(project.path())
+        .args(["check", "--offline"])
+        .env("MBX_CACHE_DIR", store.path())
+        .env("MBX_TARGET_VIEWS", "0")
+        .env("MBX_LEARNED_INCREMENTAL", "0")
+        .env("CARGO_INCREMENTAL", "0")
+        .env("RUSTC", &wrapper)
+        .env("TEST_REAL_RUSTC", which::which("rustc").unwrap())
+        .env("TEST_COMPILER_FINISHED", &compiled)
+        .env("TEST_RELEASE_COMPILER", &release)
+        .env_remove("MBX_SOCKET")
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .output()
+        .unwrap();
+    let retry_stderr = String::from_utf8_lossy(&retry.stderr);
+    assert!(
+        retry.status.success(),
+        "the unchanged retry should succeed: {retry_stderr}"
+    );
+    assert!(
+        !retry_stderr.contains("compilation result was discarded"),
+        "Cargo must not replay the rejected-result diagnostic: {retry_stderr}"
     );
 }
 

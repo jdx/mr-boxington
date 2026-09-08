@@ -125,13 +125,16 @@ async fn records_compiler_time_by_outcome_and_crate() {
 }
 
 #[tokio::test]
-async fn surfaces_each_shim_warning_once() {
-    struct Collected(Mutex<Vec<String>>);
+async fn surfaces_each_shim_diagnostic_once_per_severity() {
+    struct Collected(Mutex<Vec<(DiagnosticLevel, String)>>);
     impl AgentEventObserver for Collected {
         fn event(&self, event: AgentEvent) {
-            if let AgentEvent::Warning { message } = event {
-                self.0.lock().unwrap().push(message);
-            }
+            let diagnostic = match event {
+                AgentEvent::Warning { message } => (DiagnosticLevel::Warning, message),
+                AgentEvent::Error { message } => (DiagnosticLevel::Error, message),
+                _ => return,
+            };
+            self.0.lock().unwrap().push(diagnostic);
         }
     }
     let directory = tempfile::tempdir().unwrap();
@@ -142,12 +145,20 @@ async fn surfaces_each_shim_warning_once() {
     for _ in 0..3 {
         let response = agent
             .respond(AgentRequest::RecordWarning {
-                message: "cc result was not restored: blob missing".into(),
+                message: "same diagnostic text".into(),
             })
             .await;
         assert!(matches!(response, AgentResponse::WarningRecorded));
     }
-    // A different message is its own diagnostic, not a repeat.
+    for _ in 0..3 {
+        let response = agent
+            .respond(AgentRequest::RecordError {
+                message: "same diagnostic text".into(),
+            })
+            .await;
+        assert!(matches!(response, AgentResponse::ErrorRecorded));
+    }
+    // A different message is its own warning diagnostic, not a repeat.
     agent
         .respond(AgentRequest::RecordWarning {
             message: "verification was not recorded".into(),
@@ -157,24 +168,80 @@ async fn surfaces_each_shim_warning_once() {
     assert_eq!(
         *observer.0.lock().unwrap(),
         vec![
-            "cc result was not restored: blob missing".to_string(),
-            "verification was not recorded".to_string(),
+            (DiagnosticLevel::Warning, "same diagnostic text".to_string()),
+            (DiagnosticLevel::Error, "same diagnostic text".to_string()),
+            (
+                DiagnosticLevel::Warning,
+                "verification was not recorded".to_string()
+            ),
         ]
     );
 }
 
 #[tokio::test]
-async fn rejects_malformed_shim_warnings() {
+async fn rejects_malformed_shim_diagnostics() {
     let directory = tempfile::tempdir().unwrap();
     let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
     for message in [
         String::new(),
         "two\nlines".into(),
-        "wide".repeat(MAX_WARNING_BYTES),
+        "wide".repeat(MAX_DIAGNOSTIC_BYTES),
     ] {
         let response = agent.respond(AgentRequest::RecordWarning { message }).await;
         assert!(matches!(response, AgentResponse::Error { .. }));
     }
+    for message in [
+        String::new(),
+        "two\nlines".into(),
+        "wide".repeat(MAX_DIAGNOSTIC_BYTES),
+    ] {
+        let response = agent.respond(AgentRequest::RecordError { message }).await;
+        assert!(matches!(response, AgentResponse::Error { .. }));
+    }
+}
+
+#[tokio::test]
+async fn a_fatal_diagnostic_over_the_shared_cap_is_rejected() {
+    struct Counter(AtomicU64);
+    impl AgentEventObserver for Counter {
+        fn event(&self, event: AgentEvent) {
+            if matches!(event, AgentEvent::Warning { .. } | AgentEvent::Error { .. }) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let observer = Arc::new(Counter(AtomicU64::new(0)));
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version")
+        .with_observer(observer.clone());
+
+    for index in 0..MAX_DIAGNOSTICS {
+        let response = agent
+            .respond(AgentRequest::RecordWarning {
+                message: format!("unique warning {index}"),
+            })
+            .await;
+        assert!(matches!(response, AgentResponse::WarningRecorded));
+    }
+    // A duplicate warning remains acknowledged after the cap, while a new
+    // fatal reason receives an error response so its caller can print it.
+    let response = agent
+        .respond(AgentRequest::RecordWarning {
+            message: "unique warning 0".into(),
+        })
+        .await;
+    assert!(matches!(response, AgentResponse::WarningRecorded));
+    let response = agent
+        .respond(AgentRequest::RecordError {
+            message: "fatal reason after cap".into(),
+        })
+        .await;
+    assert!(matches!(response, AgentResponse::Error { .. }));
+
+    assert_eq!(
+        observer.0.load(Ordering::Relaxed),
+        u64::try_from(MAX_DIAGNOSTICS).unwrap()
+    );
 }
 
 #[tokio::test]
@@ -192,17 +259,30 @@ async fn stops_surfacing_shim_warnings_at_the_cap() {
     let agent = CacheAgent::new(directory.path().join("cache"), "test-version")
         .with_observer(observer.clone());
 
-    for index in 0..MAX_WARNINGS + 10 {
-        agent
+    for index in 0..MAX_DIAGNOSTICS + 10 {
+        let response = agent
             .respond(AgentRequest::RecordWarning {
                 message: format!("unique failure {index}"),
             })
             .await;
+        if index < MAX_DIAGNOSTICS {
+            assert!(matches!(response, AgentResponse::WarningRecorded));
+        } else {
+            assert!(matches!(response, AgentResponse::Error { .. }));
+        }
     }
+
+    // A message already surfaced remains acknowledged even after the cap.
+    let response = agent
+        .respond(AgentRequest::RecordWarning {
+            message: "unique failure 0".into(),
+        })
+        .await;
+    assert!(matches!(response, AgentResponse::WarningRecorded));
 
     assert_eq!(
         observer.0.load(Ordering::Relaxed),
-        u64::try_from(MAX_WARNINGS).unwrap()
+        u64::try_from(MAX_DIAGNOSTICS).unwrap()
     );
 }
 

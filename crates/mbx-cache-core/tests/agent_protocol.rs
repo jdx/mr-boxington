@@ -181,6 +181,12 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
             },
         ),
         (
+            "request.record_error",
+            AgentRequest::RecordError {
+                message: "compilation result was discarded".into(),
+            },
+        ),
+        (
             "request.record_compiler_invocation",
             AgentRequest::RecordCompilerInvocation {
                 outcome: "miss".into(),
@@ -344,6 +350,7 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
             AgentResponse::UnconsultedRecorded,
         ),
         ("response.warning_recorded", AgentResponse::WarningRecorded),
+        ("response.error_recorded", AgentResponse::ErrorRecorded),
         (
             "response.compiler_invocation_recorded",
             AgentResponse::CompilerInvocationRecorded,
@@ -579,6 +586,7 @@ define_variant_coverage!(request_variant_name, EXPECTED_REQUEST_VARIANTS, AgentR
     AgentRequest::RecordBypass { .. } => "record_bypass",
     AgentRequest::RecordUnconsulted => "record_unconsulted",
     AgentRequest::RecordWarning { .. } => "record_warning",
+    AgentRequest::RecordError { .. } => "record_error",
     AgentRequest::RecordCompilerInvocation { .. } => "record_compiler_invocation",
     AgentRequest::RecordActionVerification { .. } => "record_action_verification",
     AgentRequest::StoreActionResult { .. } => "store_action_result",
@@ -607,6 +615,7 @@ define_variant_coverage!(response_variant_name, EXPECTED_RESPONSE_VARIANTS, Agen
     AgentResponse::BypassRecorded => "bypass_recorded",
     AgentResponse::UnconsultedRecorded => "unconsulted_recorded",
     AgentResponse::WarningRecorded => "warning_recorded",
+    AgentResponse::ErrorRecorded => "error_recorded",
     AgentResponse::CompilerInvocationRecorded => "compiler_invocation_recorded",
     AgentResponse::ActionStored { .. } => "action_stored",
     AgentResponse::ActionPrediction { .. } => "action_prediction",
