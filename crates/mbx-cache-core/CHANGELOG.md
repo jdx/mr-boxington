@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.14.0...mbx-cache-core-v0.15.0) - 2026-09-08
+
+### Fixed
+
+- keep rustc shim diagnostics out of Cargo fingerprints ([#405](https://github.com/jdx/mr-boxington/pull/405))
+
+### Other
+
+- adopt native mise Rust integration for setup ([#400](https://github.com/jdx/mr-boxington/pull/400))
+
 ## [0.14.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.13.1...mbx-cache-core-v0.14.0) - 2026-09-06
 
 ### Added

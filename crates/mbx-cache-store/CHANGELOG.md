@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.22](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.21...mbx-cache-store-v0.1.22) - 2026-09-08
+
+### Other
+
+- adopt native mise Rust integration for setup ([#400](https://github.com/jdx/mr-boxington/pull/400))
+
 ## [0.1.21](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.20...mbx-cache-store-v0.1.21) - 2026-09-06
 
 ### Added
