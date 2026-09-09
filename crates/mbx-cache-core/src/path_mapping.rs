@@ -112,7 +112,13 @@ pub struct PathAliases {
         std::cell::RefCell<std::collections::HashMap<PathBuf, std::rc::Rc<ResolvedDirectory>>>,
 }
 
-/// A directory as `realpath` would name it, and the names it holds, so a
+/// Maximum names remembered per directory. Large stores must not make a
+/// single path lookup proportional to their entire listing. Unlisted names
+/// fall back to `canonicalize`, preserving its case and symlink handling.
+#[cfg(unix)]
+const MAX_DIRECTORY_ENTRIES: usize = 256;
+
+/// A directory as `realpath` would name it, and some names it holds, so a
 /// child can be checked against the listing rather than resolved again.
 #[cfg(unix)]
 #[derive(Debug)]
@@ -203,17 +209,25 @@ impl PathAliases {
         if parent.as_os_str().is_empty() {
             return std::fs::canonicalize(path);
         }
-        // Looked up, then released: resolving the parent below borrows the
-        // memo again, and a `Ref` that lived through the match would panic.
+        // Release the lookup before inserting a newly resolved parent.
         let known = self.directories.borrow().get(parent).cloned();
         let resolved_parent = match known {
             Some(resolved) => resolved,
             None => {
-                let resolved = self.canonicalize(parent)?;
+                // Resolve ancestors with realpath, which looks up their names
+                // without enumerating them. Recursing through this memo would
+                // list /nix/store just to reach a header inside one package.
+                let resolved = std::fs::canonicalize(parent)?;
                 // A listing that cannot be read is an empty one: every child
                 // then takes the full call, which is where it started.
                 let entries = std::fs::read_dir(&resolved)
-                    .map(|listing| listing.flatten().map(|entry| entry.file_name()).collect())
+                    .map(|listing| {
+                        listing
+                            .take(MAX_DIRECTORY_ENTRIES)
+                            .filter_map(Result::ok)
+                            .map(|entry| entry.file_name())
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let resolved = std::rc::Rc::new(ResolvedDirectory {
                     path: resolved,
@@ -229,7 +243,8 @@ impl PathAliases {
         // The name has to be in the listing as written: on a volume that
         // folds case, `realpath` would answer with the name on disk, and a
         // spelling the listing does not contain takes the full call so that
-        // it still does. So does a link, and anything the listing predates.
+        // it still does. So does a link, anything beyond the listing budget,
+        // and anything the listing predates.
         if resolved_parent.entries.contains(name)
             && !std::fs::symlink_metadata(&candidate)?
                 .file_type()
@@ -372,6 +387,49 @@ mod unix_tests {
             )
             .unwrap(),
             "${workspace}/src/late.rs"
+        );
+    }
+
+    #[test]
+    fn large_directory_listings_are_bounded_without_losing_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let store = root.join("store");
+        std::fs::create_dir(&store).unwrap();
+        for index in 0..MAX_DIRECTORY_ENTRIES * 2 {
+            std::fs::write(store.join(format!("header-{index}.h")), "").unwrap();
+        }
+        std::os::unix::fs::symlink(store.join("header-0.h"), store.join("link.h")).unwrap();
+        let aliases = PathAliases::default();
+        let mappings = [PathMapping::new(&store, "store")];
+        for index in 0..MAX_DIRECTORY_ENTRIES * 2 {
+            let name = format!("header-{index}.h");
+            assert_eq!(
+                normalize_resolved_mapped_path_with(&aliases, &store.join(&name), &root, &mappings)
+                    .unwrap(),
+                format!("${{store}}/{name}")
+            );
+        }
+        // Only the immediate parent is listed, never its ancestors.
+        assert_eq!(aliases.directories.borrow().len(), 1);
+        assert_eq!(
+            aliases.directories.borrow()[&store].entries.len(),
+            MAX_DIRECTORY_ENTRIES
+        );
+        assert_eq!(
+            normalize_resolved_mapped_path_with(&aliases, &store.join("link.h"), &root, &mappings)
+                .unwrap(),
+            "${store}/header-0.h"
+        );
+        assert_eq!(
+            normalize_resolved_mapped_path_with(
+                &aliases,
+                &store.join("missing/subdir/header.h"),
+                &root,
+                &mappings
+            )
+            .unwrap(),
+            "${store}/missing/subdir/header.h"
         );
     }
 

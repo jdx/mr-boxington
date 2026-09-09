@@ -573,6 +573,35 @@ fn equivalent_worktrees_produce_the_same_portable_action_key() {
     assert_eq!(build("one"), build("two"));
 }
 
+#[cfg(unix)]
+#[test]
+fn action_path_aliases_are_equivalent_and_refreshed_between_actions() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    for name in ["one", "two"] {
+        std::fs::create_dir_all(root.join(name).join("src")).unwrap();
+        std::fs::write(root.join(name).join("src/a.c"), "int a;").unwrap();
+    }
+    let alias = root.join("alias");
+    std::os::unix::fs::symlink(root.join("one"), &alias).unwrap();
+    let build = |source: &str| {
+        let invocation = CcInvocation::parse(&argv(&["-c", "-o", "out.o", source])).unwrap();
+        let mut context = context(&root, &root.join("target"));
+        context.inputs.push(CcActionInput {
+            path: root.join(source),
+            digest: digest_of("int a;"),
+        });
+        invocation.action(context).unwrap().digest
+    };
+    let first = build("alias/src/a.c");
+    assert_eq!(first, build("one/src/a.c"));
+    std::fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink(root.join("two"), &alias).unwrap();
+    let second = build("alias/src/a.c");
+    assert_eq!(second, build("two/src/a.c"));
+    assert_ne!(first, second);
+}
+
 #[test]
 fn registry_sources_normalize_under_the_cargo_home_placeholder() {
     // Cargo runs a registry crate's build script with its cwd inside the

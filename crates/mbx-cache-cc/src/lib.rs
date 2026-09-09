@@ -18,8 +18,8 @@
 #![deny(missing_docs)]
 
 use mbx_cache_core::{
-    CacheDigest, FileDigestCache, PathMapping, PathNormalizationError, canonical_json,
-    normalize_mapped_path,
+    CacheDigest, FileDigestCache, PathAliases, PathMapping, PathNormalizationError, canonical_json,
+    normalize_resolved_mapped_path_with, resolve_path_mappings,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1150,16 +1150,19 @@ struct ActionBuilder<'a> {
     invocation: &'a CcInvocation,
     context: CcActionContext,
     mappings: Vec<PathMapping>,
+    /// Reuse parent resolution across the inputs of this action only.
+    aliases: PathAliases,
 }
 
 impl<'a> ActionBuilder<'a> {
     fn new(invocation: &'a CcInvocation, mut context: CcActionContext) -> Self {
         context.path_mappings = PathMapping::ordered(&context.path_mappings);
-        let mappings = context.path_mappings.clone();
+        let mappings = resolve_path_mappings(&context.path_mappings);
         Self {
             invocation,
             context,
             mappings,
+            aliases: PathAliases::default(),
         }
     }
 
@@ -1269,7 +1272,7 @@ impl<'a> ActionBuilder<'a> {
         }
         let mut roots = BTreeSet::new();
         let mut placeholders = BTreeSet::new();
-        for mapping in &self.mappings {
+        for mapping in &self.context.path_mappings {
             if !mapping.root.is_absolute() {
                 return Err(CcBypassReason::RelativePathMapping(mapping.root.clone()));
             }
@@ -1307,7 +1310,12 @@ impl<'a> ActionBuilder<'a> {
     /// location is a property of the machine, and its contents are digested
     /// like any other input.
     fn normalize_path(&self, path: &Path) -> Result<String, CcBypassReason> {
-        match normalize_mapped_path(path, &self.context.working_dir, &self.mappings) {
+        match normalize_resolved_mapped_path_with(
+            &self.aliases,
+            path,
+            &self.context.working_dir,
+            &self.mappings,
+        ) {
             Ok(normalized) => Ok(normalized),
             Err(reason) => {
                 let absolute = absolute_path(path, &self.context.working_dir);
