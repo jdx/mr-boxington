@@ -269,6 +269,9 @@ struct RawRemote {
         choices("auto", "required", "off")
     )]
     s3_conditional_writes: String,
+    /// GCS endpoint for a store that is an emulator or non-default host. Must use HTTPS, except for loopback development servers.
+    #[usage(env = "MBX_REMOTE_GCS_ENDPOINT", ty = "url")]
+    gcs_endpoint: Option<String>,
 }
 
 #[derive(Debug, usage::Config)]
@@ -508,6 +511,7 @@ pub struct RemoteSettings {
     pub s3_region: Option<String>,
     pub s3_force_path_style: Option<bool>,
     pub s3_conditional_writes: S3ConditionalWrites,
+    pub gcs_endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -886,6 +890,7 @@ impl Config {
                 s3_region: raw.remote.s3_region,
                 s3_force_path_style: raw.remote.s3_force_path_style,
                 s3_conditional_writes,
+                gcs_endpoint: raw.remote.gcs_endpoint,
             },
             http,
         };

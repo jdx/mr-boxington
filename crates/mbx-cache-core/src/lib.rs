@@ -40,6 +40,7 @@ mod agent;
 mod client;
 mod local;
 mod path_mapping;
+mod remote_gcs;
 mod remote_http;
 mod remote_s3;
 mod sigv4;
@@ -71,6 +72,8 @@ pub use path_mapping::{
     PathAliases, PathMapping, PathNormalizationError, normalize_mapped_path,
     normalize_resolved_mapped_path, normalize_resolved_mapped_path_with, resolve_path_mappings,
 };
+use remote_gcs::GcsRemoteCache;
+pub use remote_gcs::GcsRemoteCacheConfig;
 use remote_http::HttpRemoteCache;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
@@ -267,6 +270,7 @@ pub struct RemoteCacheClient {
 enum Backend {
     Http(HttpRemoteCache),
     S3(S3RemoteCache),
+    Gcs(GcsRemoteCache),
 }
 
 impl RemoteCacheClient {
@@ -304,6 +308,15 @@ impl RemoteCacheClient {
         })
     }
 
+    /// Construct a client backed directly by a Google Cloud Storage bucket.
+    ///
+    /// See [`GcsRemoteCacheConfig`].
+    pub fn new_gcs(config: GcsRemoteCacheConfig) -> Result<Self> {
+        Ok(Self {
+            backend: Backend::Gcs(GcsRemoteCache::new(config)?),
+        })
+    }
+
     /// Connect to the service, authenticate, and negotiate protocol capabilities.
     ///
     /// This performs no cache reads or writes. It is intended for diagnostics
@@ -313,6 +326,7 @@ impl RemoteCacheClient {
         match &self.backend {
             Backend::Http(client) => client.check_connection().await,
             Backend::S3(store) => store.check_connection().await,
+            Backend::Gcs(store) => store.check_connection().await,
         }
     }
 
@@ -329,6 +343,7 @@ impl RemoteCacheClient {
         match &self.backend {
             Backend::Http(client) => client.get_blob_pack(digests, staging_dir).await,
             Backend::S3(store) => store.get_blob_pack(digests, staging_dir).await,
+            Backend::Gcs(store) => store.get_blob_pack(digests, staging_dir).await,
         }
     }
 
@@ -349,6 +364,11 @@ impl RemoteCacheClient {
                     .get_blob_pack_with_limit(digests, staging_dir, max_bytes)
                     .await
             }
+            Backend::Gcs(store) => {
+                store
+                    .get_blob_pack_with_limit(digests, staging_dir, max_bytes)
+                    .await
+            }
         }
     }
 
@@ -356,7 +376,7 @@ impl RemoteCacheClient {
     pub(crate) async fn blob_pack_limits(&self) -> Result<Option<BlobPackLimits>> {
         match &self.backend {
             Backend::Http(client) => client.blob_pack_limits().await,
-            Backend::S3(_) => Ok(None),
+            Backend::S3(_) | Backend::Gcs(_) => Ok(None),
         }
     }
 
@@ -368,6 +388,7 @@ impl RemoteCacheClient {
         match &self.backend {
             Backend::Http(client) => client.get_action_result(action).await,
             Backend::S3(store) => store.get_action_result(action).await,
+            Backend::Gcs(store) => store.get_action_result(action).await,
         }
     }
 
@@ -378,6 +399,7 @@ impl RemoteCacheClient {
         match &self.backend {
             Backend::Http(client) => client.action_batch_limit().await,
             Backend::S3(store) => store.action_batch_limit().await,
+            Backend::Gcs(store) => store.action_batch_limit().await,
         }
     }
 
@@ -394,6 +416,7 @@ impl RemoteCacheClient {
         match &self.backend {
             Backend::Http(client) => client.get_action_results(actions).await,
             Backend::S3(store) => store.get_action_results(actions).await,
+            Backend::Gcs(store) => store.get_action_results(actions).await,
         }
     }
 
@@ -402,6 +425,7 @@ impl RemoteCacheClient {
         match &self.backend {
             Backend::Http(client) => client.put_action_result(result).await,
             Backend::S3(store) => store.put_action_result(result).await,
+            Backend::Gcs(store) => store.put_action_result(result).await,
         }
     }
 
@@ -415,7 +439,7 @@ impl RemoteCacheClient {
     ) -> Result<Option<ActionPromiseState>> {
         match &self.backend {
             Backend::Http(client) => client.join_action_promise(invocation, adapter).await,
-            Backend::S3(_) => Ok(None),
+            Backend::S3(_) | Backend::Gcs(_) => Ok(None),
         }
     }
 
@@ -429,7 +453,7 @@ impl RemoteCacheClient {
     ) -> Result<bool> {
         match &self.backend {
             Backend::Http(client) => client.complete_action_promise(invocation, completion).await,
-            Backend::S3(_) => Ok(false),
+            Backend::S3(_) | Backend::Gcs(_) => Ok(false),
         }
     }
 
@@ -441,6 +465,7 @@ impl RemoteCacheClient {
         match &self.backend {
             Backend::Http(client) => client.get_action_manifest(key).await,
             Backend::S3(store) => store.get_action_manifest(key).await,
+            Backend::Gcs(store) => store.get_action_manifest(key).await,
         }
     }
 
@@ -454,6 +479,7 @@ impl RemoteCacheClient {
         match &self.backend {
             Backend::Http(client) => client.put_action_manifest(key, bytes, expected_etag).await,
             Backend::S3(store) => store.put_action_manifest(key, bytes, expected_etag).await,
+            Backend::Gcs(store) => store.put_action_manifest(key, bytes, expected_etag).await,
         }
     }
 
@@ -466,6 +492,7 @@ impl RemoteCacheClient {
         match &self.backend {
             Backend::Http(client) => client.get_blob(digest, media_type).await,
             Backend::S3(store) => store.get_blob(digest, media_type).await,
+            Backend::Gcs(store) => store.get_blob(digest, media_type).await,
         }
     }
 
@@ -478,6 +505,7 @@ impl RemoteCacheClient {
         match &self.backend {
             Backend::Http(client) => client.get_blob_file(digest, staging_dir).await,
             Backend::S3(store) => store.get_blob_file(digest, staging_dir).await,
+            Backend::Gcs(store) => store.get_blob_file(digest, staging_dir).await,
         }
     }
 
@@ -488,6 +516,7 @@ impl RemoteCacheClient {
         match &self.backend {
             Backend::Http(client) => client.blob_pack_upload_limits().await,
             Backend::S3(store) => store.blob_pack_upload_limits().await,
+            Backend::Gcs(store) => store.blob_pack_upload_limits().await,
         }
     }
 
@@ -502,6 +531,7 @@ impl RemoteCacheClient {
         match &self.backend {
             Backend::Http(client) => client.put_blob_pack(uploads).await,
             Backend::S3(store) => store.put_blob_pack(uploads).await,
+            Backend::Gcs(store) => store.put_blob_pack(uploads).await,
         }
     }
 
@@ -510,6 +540,7 @@ impl RemoteCacheClient {
         match &self.backend {
             Backend::Http(client) => client.put_blob(upload).await,
             Backend::S3(store) => store.put_blob(upload).await,
+            Backend::Gcs(store) => store.put_blob(upload).await,
         }
     }
 }

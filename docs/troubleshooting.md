@@ -14,6 +14,7 @@ cached work.
 | Remote requests fail | `mbx doctor`, then [check authentication](/remote-cache#authenticate) |
 | Build storage is larger than expected | `mbx cache stats` and `mbx gc --dry-run`; review [budgets](/managed-targets#budgets-scale-with-the-disk) |
 | Breakpoints point at an old checkout | Use the [debugger recipe](/cookbook/local-development#debug-a-binary-restored-from-another-checkout) |
+| Restores are slow in CI | `mbx doctor`, then [align the cache and target filesystems](#restores-are-slow-in-containerized-ci) |
 
 ## Diagnose the installation
 
@@ -55,6 +56,36 @@ blocks Unix socket listeners but permits filesystem FIFOs, mbx automatically
 uses FIFO transport and keeps caching enabled. If neither transport is
 available, mbx warns and runs Cargo without caching instead of preventing the
 build from starting.
+
+## Restores are slow in containerized CI
+
+[Copy-on-write output restoration](/how-it-works#copy-on-write-output-restoration)
+needs the cache directory and the target directory on the same filesystem.
+Many containerized CI runners (GitLab's Docker and Kubernetes executors,
+Kubernetes-based GitHub Actions runners, and similar setups) mount the job
+workspace on an overlay filesystem while the default cache directory resolves
+to a different mount, such as an emptyDir volume or the image's own layer.
+Reflinking then fails with "different filesystems" on every restore, and mbx
+falls back to a full byte copy for every cached output:
+
+```text
+warn  reflink      /root/.cache/mbx -> /builds/acme/backend/target: different filesystems (CrossesDevices); restores to this location may require copying. Containerized CI runners often mount an overlay filesystem for the workspace while the cache directory defaults elsewhere; point MBX_CACHE_DIR at a path on the same filesystem as the target directory (for example, inside the job workspace) to restore cloning.
+```
+
+Point `MBX_CACHE_DIR` at a path on the same filesystem as the target directory,
+typically somewhere under the job's own workspace:
+
+```yaml
+# GitLab CI
+variables:
+  MBX_CACHE_DIR: $CI_PROJECT_DIR/.mbx-cache
+```
+
+Re-run `mbx doctor` after the change; the `reflink` check should report
+`cloning is supported` for that layout. Persist `MBX_CACHE_DIR` across jobs
+with your CI's own cache mechanism (for example, GitLab's `cache:` key) the
+same way you would persist `~/.cache/mbx` otherwise, or the cache starts cold
+on every job.
 
 ## Inspect a build
 

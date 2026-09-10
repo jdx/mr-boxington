@@ -353,16 +353,22 @@ fn reflink_check_with(
     match probe() {
         Ok(()) => Check::pass("reflink", format!("{layout}: cloning is supported")),
         Err(error) => {
-            let reason = match error.kind() {
-                std::io::ErrorKind::CrossesDevices => "different filesystems",
-                std::io::ErrorKind::PermissionDenied => "permission denied",
-                std::io::ErrorKind::Unsupported => "cloning unsupported",
-                _ => "clone probe failed",
+            let (reason, hint) = match error.kind() {
+                std::io::ErrorKind::CrossesDevices => (
+                    "different filesystems",
+                    " Containerized CI runners often mount an overlay filesystem for the \
+                     workspace while the cache directory defaults elsewhere; point \
+                     MBX_CACHE_DIR at a path on the same filesystem as the target \
+                     directory (for example, inside the job workspace) to restore cloning.",
+                ),
+                std::io::ErrorKind::PermissionDenied => ("permission denied", ""),
+                std::io::ErrorKind::Unsupported => ("cloning unsupported", ""),
+                _ => ("clone probe failed", ""),
             };
             Check::warn(
                 "reflink",
                 format!(
-                    "{layout}: {reason} ({error}); restores to this location may require copying"
+                    "{layout}: {reason} ({error}); restores to this location may require copying.{hint}"
                 ),
             )
         }
@@ -851,6 +857,21 @@ mod layout_tests {
             assert!(result.detail.contains(&target.path().display().to_string()));
         }
         assert_eq!(std::fs::read_dir(target.path()).unwrap().count(), 0);
+    }
+
+    /// Containerized CI runners commonly split an overlay-mounted workspace
+    /// from the cache directory's underlying filesystem, so every restore
+    /// falls back to a full copy. The warning should point directly at the
+    /// fix rather than leaving the reader to rediscover MBX_CACHE_DIR.
+    #[test]
+    fn cross_device_failure_suggests_aligning_cache_dir() {
+        let cache = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let result = reflink_check_with(cache.path(), target.path(), |_, _| {
+            Err(std::io::ErrorKind::CrossesDevices.into())
+        });
+        assert_eq!(result.severity, Severity::Warn);
+        assert!(result.detail.contains("MBX_CACHE_DIR"));
     }
 
     #[cfg(unix)]

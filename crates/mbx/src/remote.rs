@@ -8,7 +8,8 @@
 use crate::config::Config;
 use eyre::{Context as _, Result, bail};
 use mbx_cache_core::{
-    RemoteCacheClient, RemoteCacheConfig, S3ConditionalWrites, S3Credentials, S3RemoteCacheConfig,
+    GcsRemoteCacheConfig, RemoteCacheClient, RemoteCacheConfig, S3ConditionalWrites, S3Credentials,
+    S3RemoteCacheConfig,
 };
 use url::Url;
 
@@ -61,12 +62,18 @@ pub(crate) fn remote_client_with(
     if url.scheme() == "s3" {
         return s3_client(config, &url, namespace, aws).map(Some);
     }
+    if url.scheme() == "gs" {
+        return gcs_client(config, &url, namespace).map(Some);
+    }
     if config.remote.s3_endpoint.is_some()
         || config.remote.s3_region.is_some()
         || config.remote.s3_force_path_style.is_some()
         || config.remote.s3_conditional_writes != S3ConditionalWrites::default()
     {
         bail!("remote.s3_* settings apply to an s3:// remote cache URL, but remote.url is {url}");
+    }
+    if config.remote.gcs_endpoint.is_some() {
+        bail!("remote.gcs_endpoint applies to a gs:// remote cache URL, but remote.url is {url}");
     }
     Ok(Some(
         RemoteCacheClient::new(RemoteCacheConfig {
@@ -158,6 +165,65 @@ fn s3_client(
         download_timeout: config.http.download_timeout,
         retries: config.http.retries,
     })
+}
+
+/// Build a client for `gs://bucket[/prefix]`.
+fn gcs_client(config: &Config, url: &Url, namespace: String) -> Result<RemoteCacheClient> {
+    if config.remote.s3_endpoint.is_some()
+        || config.remote.s3_region.is_some()
+        || config.remote.s3_force_path_style.is_some()
+        || config.remote.s3_conditional_writes != S3ConditionalWrites::default()
+    {
+        bail!("remote.s3_* settings apply to an s3:// remote cache URL, but remote.url is {url}");
+    }
+    let bucket = url
+        .host_str()
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| eyre::eyre!("a gs:// remote cache URL must name a bucket"))?
+        .to_string();
+    let endpoint = config
+        .remote
+        .gcs_endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .map(|endpoint| {
+            endpoint
+                .parse::<Url>()
+                .wrap_err("invalid remote.gcs_endpoint")
+        })
+        .transpose()?;
+    if let Some(endpoint) = &endpoint {
+        validate_gcs_endpoint(endpoint)?;
+    }
+    RemoteCacheClient::new_gcs(GcsRemoteCacheConfig {
+        bucket,
+        prefix: url.path().to_string(),
+        namespace,
+        endpoint,
+        token: config.remote.token.clone(),
+        token_file: config.remote.token_file.clone(),
+        connect_timeout: config.http.timeout,
+        read_timeout: config.http.timeout,
+        download_timeout: config.http.download_timeout,
+        retries: config.http.retries,
+    })
+}
+
+fn validate_gcs_endpoint(endpoint: &Url) -> Result<()> {
+    if endpoint.scheme() == "https" {
+        return Ok(());
+    }
+    let loopback = endpoint.host().is_some_and(|host| match host {
+        url::Host::Domain(host) => host.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(address) => address.is_loopback(),
+        url::Host::Ipv6(address) => address.is_loopback(),
+    });
+    if endpoint.scheme() == "http" && loopback {
+        Ok(())
+    } else {
+        bail!("remote.gcs_endpoint must use HTTPS except for loopback development servers")
+    }
 }
 
 /// The region requests are signed for.
@@ -402,5 +468,39 @@ mod tests {
             )
             .contains("must use HTTPS")
         );
+    }
+
+    #[test]
+    fn a_gs_url_builds_a_gcs_client() {
+        let gcs_remote = RemoteSettings {
+            url: Some("gs://gcs-bucket/prefix".into()),
+            namespace: Some("acme".into()),
+            ..RemoteSettings::default()
+        };
+        assert!(client(gcs_remote, aws()).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_gs_url_refuses_s3_settings() {
+        let gcs_remote = RemoteSettings {
+            url: Some("gs://gcs-bucket".into()),
+            namespace: Some("acme".into()),
+            s3_region: Some("us-west-2".into()),
+            ..RemoteSettings::default()
+        };
+        let refusal = refusal(gcs_remote, aws());
+        assert!(refusal.contains("apply to an s3:// remote"), "{refusal}");
+    }
+
+    #[test]
+    fn a_gs_endpoint_applies_only_to_gs_url() {
+        let http_remote = RemoteSettings {
+            url: Some("https://cache.example.com".into()),
+            namespace: Some("acme".into()),
+            gcs_endpoint: Some("https://storage.example.com".into()),
+            ..RemoteSettings::default()
+        };
+        let refusal = refusal(http_remote, aws());
+        assert!(refusal.contains("applies to a gs:// remote"), "{refusal}");
     }
 }
