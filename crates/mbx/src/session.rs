@@ -1783,6 +1783,26 @@ fn record_cc_bypass(error: &eyre::Report) {
     let _ = request_agent(&[AgentRequest::RecordBypass { kind }, diagnostic]);
 }
 
+/// A compiler succeeded but its result could not be cached. Do not count a
+/// second outcome: this invocation already recorded its compilation outcome.
+pub(crate) fn report_cc_publication_failure(unit: &str, error: &eyre::Report) {
+    let reason = error.downcast_ref::<mbx_cache_cc::CcBypassReason>();
+    let kind = reason.map_or_else(
+        || "cc-other".to_string(),
+        |reason| format!("cc-{}", reason.kind()),
+    );
+    append_bypass_log(
+        &kind,
+        error,
+        reason.and_then(mbx_cache_cc::CcBypassReason::remediation),
+    );
+    let diagnostic = bypass_diagnostic(
+        expected_cc_bypass(reason),
+        &format!("cc result was not published for {unit}: {error:#}"),
+    );
+    let _ = request_agent(&[diagnostic]);
+}
+
 /// Only known routine decisions are downgraded: adapter errors also include
 /// failed reads and invalid state, which must retain warning severity.
 fn expected_rustc_bypass(reason: Option<&mbx_cache_rustc::BypassReason>) -> bool {

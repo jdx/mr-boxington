@@ -281,7 +281,8 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     // computed afterwards, and comparing the two is what stops a header that
     // appeared mid-compile from being recorded as one the compiler had seen.
     let searchable = searchable_directories(&invocation, &working_dir);
-    let before = manifest_snapshot(&searchable).ok();
+    let before =
+        crate::phase_timing::measure("include_scan", || manifest_snapshot(&searchable)).ok();
     // The machine-wide permit is taken after every chance to hit the cache,
     // and the timer starts afterwards: time spent waiting for the machine is
     // not time this compilation cost.
@@ -347,10 +348,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         remote_claim.as_deref(),
         &portable,
     ) {
-        #[cfg(debug_assertions)]
-        session::report_shim_warning(&format!("cc result was not published: {error:#}"));
-        #[cfg(not(debug_assertions))]
-        let _ = error;
+        session::report_cc_publication_failure(&compilation_name(&invocation), &error);
     }
     // Owed whether or not the object was published: the build that asked for
     // the list reads it next. Written after publication, because the list
@@ -389,6 +387,7 @@ fn publish(
     remote_claim: Option<&str>,
     portable: &Portable,
 ) -> Result<()> {
+    let _phase = crate::phase_timing::phase("store");
     let input_snapshots = input_snapshots
         .as_ref()
         .map_err(|error| eyre::eyre!(error.to_string()))?;
@@ -707,7 +706,7 @@ fn verify_search_path_unchanged(
     let Some(before) = before else {
         return Ok(());
     };
-    let after = manifest_snapshot(searchable)?;
+    let after = crate::phase_timing::measure("include_scan", || manifest_snapshot(searchable))?;
     for (directory, digest) in &before {
         if after.get(directory) != Some(digest) {
             return Err(

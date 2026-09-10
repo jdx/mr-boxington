@@ -3682,3 +3682,64 @@ fn routine_shim_logs_stay_off_compiler_stderr_when_delivery_fails() {
     assert_eq!(output.stdout, b"compiler stdout\n");
     assert_eq!(output.stderr, b"compiler stderr\n");
 }
+
+/// Publication can refuse a successful compile. The reason must remain
+/// available in release builds without contaminating the compiler's stderr.
+#[cfg(unix)]
+#[test]
+fn cc_publication_failures_are_visible_without_counting_a_second_outcome() {
+    if !has_c_compiler() {
+        return;
+    }
+    for (filter, visible) in [("off", false), ("debug", true)] {
+        let project = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_c_project(project.path());
+        std::fs::write(
+            project.path().join("src/hello.c"),
+            "const char *build_date(void) { return __DATE__; }\n",
+        )
+        .unwrap();
+        let script = project.path().join("build.rs");
+        let source = std::fs::read_to_string(&script).unwrap()
+            .replace(".status()", ".output()")
+            .replace("status.success()", "status.status.success()")
+            .replace("// The tests disable", "assert!(status.stderr.is_empty(), \"compiler stderr was polluted: {:?}\", status.stderr);\n    // The tests disable");
+        std::fs::write(script, source).unwrap();
+        let log = reports.path().join("bypass.log");
+        let (stats, stderr) = build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("stats.json"),
+            &[
+                ("MBX_LOG", filter),
+                ("MBX_BYPASS_LOG", log.to_str().unwrap()),
+            ],
+        );
+        let diagnostics: Vec<_> = stderr
+            .lines()
+            .filter(|line| line.contains("cc result was not published for cc:hello.c"))
+            .collect();
+        assert_eq!(!diagnostics.is_empty(), visible, "{stderr}");
+        assert!(
+            diagnostics.iter().all(|line| line.contains("DEBUG")),
+            "{stderr}"
+        );
+        let log = std::fs::read_to_string(log).unwrap();
+        assert!(log.contains("input expands a timestamp macro:"), "{log}");
+        assert!(
+            stats["bypasses"]
+                .get("cc-embedded-timestamp-macro")
+                .is_none(),
+            "publication must not double-count the compilation: {stats}"
+        );
+        assert!(
+            stats["wrapper_phases_ns"]["include_scan"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0,
+            "{stats}"
+        );
+    }
+}
