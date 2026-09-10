@@ -451,10 +451,17 @@ SCRIPT
   echo 'int value(void) { return 42; }' >"$project/portable.c"
   cd "$project"
   local report="$BATS_TEST_TMPDIR/policy.json" bypass="$BATS_TEST_TMPDIR/policy.tsv"
+  # Cover config-file policy through exec, without an inherited env override.
+  local config_dir="$XDG_CONFIG_HOME/mbx"
+  if [[ "$(uname -s)" == Darwin ]]; then
+    config_dir="$HOME/Library/Application Support/mbx"
+  fi
+  mkdir -p "$config_dir"
+  echo 'cc_store_path_specific = false' >"$config_dir/config.toml"
   local attempt
   for attempt in 1 2; do
     rm -f out/source.o
-    run env MBX_CC_STORE_PATH_SPECIFIC=0 MBX_STATS_REPORT="$report" MBX_BYPASS_LOG="$bypass" "$MBX_BIN" exec cc -g -c "$project/source.c" -o out/source.o
+    run env MBX_STATS_REPORT="$report" MBX_BYPASS_LOG="$bypass" "$MBX_BIN" exec cc -g -c "$project/source.c" -o out/source.o
     assert_success
     assert_file_exists out/source.o
     run grep -E '"stored_bytes"[[:space:]]*:[[:space:]]*0' "$report"
@@ -462,17 +469,17 @@ SCRIPT
     run grep 'cc-path-specific-storage-disabled' "$bypass"
     assert_success
   done
-  run env MBX_CC_STORE_PATH_SPECIFIC=0 "$MBX_BIN" exec cc -c portable.c -o out/portable.o
+  run env "$MBX_BIN" exec cc -c portable.c -o out/portable.o
   assert_success
   rm out/portable.o
-  run env MBX_CC_STORE_PATH_SPECIFIC=0 MBX_STATS_REPORT="$report" "$MBX_BIN" exec cc -c portable.c -o out/portable.o
+  run env MBX_STATS_REPORT="$report" "$MBX_BIN" exec cc -c portable.c -o out/portable.o
   assert_success
   run grep -E '"hits"[[:space:]]*:[[:space:]]*1' "$report"
   assert_success
   run env MBX_CC_STORE_PATH_SPECIFIC=1 "$MBX_BIN" exec cc -g -c "$project/source.c" -o out/source.o
   assert_success
   rm out/source.o
-  run env MBX_CC_STORE_PATH_SPECIFIC=0 MBX_STATS_REPORT="$report" "$MBX_BIN" exec cc -g -c "$project/source.c" -o out/source.o
+  run env MBX_STATS_REPORT="$report" "$MBX_BIN" exec cc -g -c "$project/source.c" -o out/source.o
   assert_success
   run grep -E '"hits"[[:space:]]*:[[:space:]]*1' "$report"
   assert_success

@@ -551,6 +551,15 @@ impl CacheSession {
             verification::SAMPLE_RATE_ENV.into(),
             self.verify_sample_rate.to_string(),
         );
+        environment.insert(
+            "MBX_CC_STORE_PATH_SPECIFIC".into(),
+            if self.cc_store_path_specific {
+                "1"
+            } else {
+                "0"
+            }
+            .into(),
+        );
         for (name, value) in &self.scheduler_env {
             environment.insert(name.clone(), value.clone());
         }
