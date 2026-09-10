@@ -1,0 +1,48 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M26KXNQ8G3ZMHTHYSTXKTDZY",
+  "session_id": "01a08d25-3fde-78b1-be15-e736733dd6e3",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-10T21:35:01.339755Z",
+  "branch": "codex/proc-macro-install-name",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "crates/mbx-cache-rustc/src/rustc_cache_tests.rs",
+    "test/native_link_cache.bats"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6-astra",
+  "turn_id": "6e00039865d9",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 120345,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 5397504,
+    "output_tokens": 15038,
+    "api_call_count": 69
+  },
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-10T21:35:01.289317Z",
+    "agent_lines": 165,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 165,
+    "total_lines_changed": 165,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
