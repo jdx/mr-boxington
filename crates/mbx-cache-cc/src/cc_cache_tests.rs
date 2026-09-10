@@ -573,6 +573,31 @@ fn equivalent_worktrees_produce_the_same_portable_action_key() {
     assert_eq!(build("one"), build("two"));
 }
 
+#[test]
+fn path_specific_actions_bind_checkout_target_and_source_spelling() {
+    let build = |checkout_name: &str, target_name: &str, source: &str, bound: bool| {
+        let (workspace, _) = checkout(checkout_name);
+        let invocation = CcInvocation::parse(&argv(&["-c", "-o", "out.o", source])).unwrap();
+        let mut context = context(&workspace, &workspace.join(target_name));
+        context.inputs.push(CcActionInput {
+            path: workspace.join("src/a.c"),
+            digest: digest_of("source"),
+        });
+        invocation
+            .action_with_path_binding(context, bound)
+            .unwrap()
+            .digest
+    };
+    let portable = build("one", "target", "src/a.c", false);
+    assert_eq!(portable, build("two", "other-target", "./src/a.c", false));
+    let bound = build("one", "target", "src/a.c", true);
+    assert_ne!(bound, portable);
+    assert_eq!(bound, build("one", "target", "src/a.c", true));
+    assert_ne!(bound, build("two", "target", "src/a.c", true));
+    assert_ne!(bound, build("one", "other-target", "src/a.c", true));
+    assert_ne!(bound, build("one", "target", "./src/a.c", true));
+}
+
 #[cfg(unix)]
 #[test]
 fn action_path_aliases_are_equivalent_and_refreshed_between_actions() {
@@ -892,6 +917,7 @@ fn predicted_system_paths_only_denormalize_under_admitted_roots() {
 #[test]
 fn a_prediction_from_a_future_schema_bypasses() {
     let prediction = CcInputPrediction {
+        path_specific: false,
         version: 2,
         inputs: Vec::new(),
         environment: Vec::new(),

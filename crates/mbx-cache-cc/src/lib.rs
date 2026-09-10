@@ -678,6 +678,8 @@ struct CcInputDescriptor {
 
 #[derive(Debug, Serialize)]
 struct CcActionDescriptor {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_binding: Option<CcPathBinding>,
     version: u8,
     kind: &'static str,
     adapter_version: u8,
@@ -714,11 +716,22 @@ struct PreprocessingContext {
     roots: BTreeMap<String, PathBuf>,
 }
 
+/// Literal path spellings retained by an object, unlike portable debug paths.
+#[derive(Debug, Serialize)]
+struct CcPathBinding {
+    working_dir: PathBuf,
+    arguments: Vec<Argument>,
+    roots: BTreeMap<String, PathBuf>,
+}
+
 /// Normalized input names from the last successful execution of one modeled
 /// compile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CcInputPrediction {
+    /// The output retained literal paths and requires a path-specific action key.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub path_specific: bool,
     /// Prediction schema version.
     pub version: u8,
     /// Normalized input paths, including include-manifest entries.
@@ -739,7 +752,7 @@ fn is_zero(value: &u64) -> bool {
 }
 
 /// One parsed and admitted argument.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 enum Argument {
     /// Keyed verbatim.
     Plain(String),
@@ -970,7 +983,17 @@ impl CcInvocation {
     /// Build the canonical action for this invocation and its discovered
     /// inputs.
     pub fn action(&self, context: CcActionContext) -> Result<CcAction, CcBypassReason> {
-        ActionBuilder::new(self, context).build()
+        self.action_with_path_binding(context, false)
+    }
+
+    /// Build an action tied to literal path spellings when the output retained them.
+    /// Portable actions keep their existing keys.
+    pub fn action_with_path_binding(
+        &self,
+        context: CcActionContext,
+        path_specific: bool,
+    ) -> Result<CcAction, CcBypassReason> {
+        ActionBuilder::new(self, context).build(path_specific)
     }
 
     /// Record the normalized inputs of a successful compile so the next cold
@@ -989,6 +1012,7 @@ impl CcInvocation {
         inputs.sort();
         inputs.dedup();
         Ok(CcInputPrediction {
+            path_specific: false,
             version: 1,
             inputs,
             environment: context.environment.keys().cloned().collect(),
@@ -1220,7 +1244,7 @@ impl<'a> ActionBuilder<'a> {
         }
     }
 
-    fn build(self) -> Result<CcAction, CcBypassReason> {
+    fn build(self, path_specific: bool) -> Result<CcAction, CcBypassReason> {
         self.validate_mappings()?;
         let invocation = self.invocation_descriptor()?;
 
@@ -1251,6 +1275,16 @@ impl<'a> ActionBuilder<'a> {
             .map(|(path, digest)| CcInputDescriptor { path, digest })
             .collect();
         let descriptor = CcActionDescriptor {
+            path_binding: path_specific.then(|| CcPathBinding {
+                working_dir: self.context.working_dir.clone(),
+                arguments: self.invocation.arguments.clone(),
+                roots: self
+                    .context
+                    .path_mappings
+                    .iter()
+                    .map(|mapping| (mapping.placeholder.clone(), mapping.root.clone()))
+                    .collect(),
+            }),
             version: ACTION_SCHEMA_VERSION,
             kind: "cc",
             adapter_version: ADAPTER_VERSION,

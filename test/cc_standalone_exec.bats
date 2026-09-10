@@ -314,3 +314,43 @@ SCRIPT
   refute_line 'verified'
   assert_file_exists hello.d
 }
+
+@test "objects retaining absolute source paths cache without leaking another checkout's FILE string" {
+  local first="$BATS_TEST_TMPDIR/first"
+  local second="$BATS_TEST_TMPDIR/second"
+  local project report
+  for project in "$first" "$second"; do
+    mkdir -p "$project/out"
+    echo 'version = 4' >"$project/Cargo.lock"
+    cat >"$project/source.c" <<'SOURCE'
+#include <stdio.h>
+int main(void) { puts(__FILE__); return 0; }
+SOURCE
+  done
+
+  for project in "$first" "$second"; do
+    report="$project-cold.json"
+    (cd "$project" && MBX_STATS_REPORT="$report" "$MBX_BIN" exec cc -g -c "$project/source.c" -o out/source.o)
+    # Identical source and normalized arguments must not reuse the other path.
+    run grep -E '"hits"[[:space:]]*:[[:space:]]*0' "$report"
+    assert_success
+    rm "$project/out/source.o"
+    report="$project-warm.json"
+    (cd "$project" && MBX_STATS_REPORT="$report" "$MBX_BIN" exec cc -g -c "$project/source.c" -o out/source.o)
+    run grep -E '"hits"[[:space:]]*:[[:space:]]*1' "$report"
+    assert_success
+    cc "$project/out/source.o" -o "$project-show-path"
+    run "$project-show-path"
+    assert_success
+    assert_output "$project/source.c"
+  done
+
+  # Returning to the first path still finds its action after the shared
+  # prediction has been refreshed by the second checkout.
+  rm "$first/out/source.o"
+  (cd "$first" && MBX_VERIFY=1 MBX_STATS_REPORT="$first-verify.json" "$MBX_BIN" exec cc -g -c "$first/source.c" -o out/source.o)
+  run grep -E '"verifications"[[:space:]]*:[[:space:]]*1' "$first-verify.json"
+  assert_success
+  run grep -E '"divergences"[[:space:]]*:[[:space:]]*0' "$first-verify.json"
+  assert_success
+}

@@ -116,7 +116,9 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     if let Some((prediction, discovered)) = usable {
         let mut candidate = context.clone();
         discovered.clone().apply_to(&mut candidate)?;
-        let action = crate::phase_timing::measure("key", || invocation.action(candidate))?;
+        let action = crate::phase_timing::measure("key", || {
+            invocation.action_with_path_binding(candidate, prediction.path_specific)
+        })?;
         looked_up = true;
         // A restore that fails is a miss, not a bypass. Bypassing would leave
         // the compilation uncached and publish nothing, so a partial or corrupt
@@ -403,20 +405,17 @@ fn publish(
     verify_search_path_unchanged(searchable, before)?;
     discovered.verify()?;
     discovered.apply_to(context)?;
-    // The key says this object does not depend on where the build script put
-    // its headers. Publishing one that names the directory anyway would make
-    // that claim false for every checkout that restored it, so a compilation
-    // whose output kept the value is left uncached rather than shared wrong.
+    // Debug remapping does not change runtime strings such as __FILE__. If
+    // an object retains a path, bind its action to the literal paths instead
+    // of discarding it or restoring another checkout's runtime strings.
     // Addressed absolutely from here on: `-o` may be relative to the compiler's
     // working directory, and the cache agent that stores the object does not
     // share it. OpenSSL's makefiles compile every object that way.
     let object = invocation.output_in(&context.working_dir);
-    if !portable.outputs_are_clean(&object) {
-        return Err(CcBypassReason::UnportableOutput(object).into());
-    }
-    let action = invocation.action(context.clone())?;
+    let mut prediction = invocation.prediction(context, duration_ns)?;
+    prediction.path_specific = !portable.outputs_are_clean(&object);
+    let action = invocation.action_with_path_binding(context.clone(), prediction.path_specific)?;
     publish_result(&action, &object, output, &context.path_mappings)?;
-    let prediction = invocation.prediction(context, duration_ns)?;
     record_prediction(
         task,
         invocation_digest,
@@ -453,7 +452,9 @@ fn restore_flight_prediction(
     )?;
     let mut candidate = context.clone();
     discovered.clone().apply_to(&mut candidate)?;
-    let action = crate::phase_timing::measure("key", || invocation.action(candidate))?;
+    let action = crate::phase_timing::measure("key", || {
+        invocation.action_with_path_binding(candidate, prediction.path_specific)
+    })?;
     if recorded_action.is_some_and(|recorded| recorded != &action.digest) {
         bail!("the action promise no longer matches its predicted inputs");
     }
