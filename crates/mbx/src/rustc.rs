@@ -1778,8 +1778,8 @@ fn selected_clippy_config(working_dir: &Path) -> Option<PathBuf> {
 ///
 /// On macOS a linked binary records the absolute path and timestamp of every
 /// object behind it, which is what makes a debug-info link unportable across
-/// checkouts. The output directory is where all of them live, and only the
-/// shim sees its managed, hashed spelling on every invocation -- so when
+/// checkouts. The target root covers both the executable's output directory
+/// and its dependencies, including sibling directories for examples. When
 /// native links are being cached on this platform, the shim appends the
 /// prefix itself rather than asking anyone to discover it. An invocation that
 /// already carries one keeps what its caller chose, and an invocation without
@@ -1816,8 +1816,48 @@ fn with_oso_prefix(arguments: &[OsString], cache_links: bool) -> Cow<'_, [OsStri
     let Some(out_dir) = out_dir.filter(|out_dir| out_dir.is_absolute()) else {
         return Cow::Borrowed(arguments);
     };
+    // Examples link rlibs from the sibling deps directory, and build scripts
+    // can live further below build/. Strip the shared target root rather than
+    // only the directory receiving this particular executable.
+    let prefix = std::env::var_os(session::TARGET_DIR_ENV)
+        .map(PathBuf::from)
+        .filter(|root| root.is_absolute() && out_dir.starts_with(root))
+        .unwrap_or_else(|| standalone_target_root(&out_dir, None));
+    // ld64 resolves archive paths through Cargo's target symlink before
+    // recording them, so the prefix must use the same physical spelling.
+    let prefix = std::fs::canonicalize(&prefix).unwrap_or(prefix);
     let mut extended = arguments.to_vec();
-    extended.push(format!("-Clink-arg=-Wl,-oso_prefix,{}/", out_dir.display()).into());
+    // Direct object paths use rustc's output spelling while archive paths are
+    // canonicalized by ld64. Give both the same spelling so one prefix covers
+    // them. This still writes through Cargo's target symlink to the same files.
+    let native_output = arguments.iter().enumerate().any(|(index, argument)| {
+        argument == "--test"
+            || matches!(
+                argument.to_str(),
+                Some("--crate-type=bin" | "--crate-type=proc-macro")
+            )
+            || (argument == "--crate-type"
+                && arguments
+                    .get(index + 1)
+                    .is_some_and(|value| matches!(value.to_str(), Some("bin" | "proc-macro"))))
+    });
+    if native_output && let Ok(output) = std::fs::canonicalize(&out_dir) {
+        for index in 0..extended.len() {
+            if extended[index] == "--out-dir" {
+                if let Some(value) = extended.get_mut(index + 1) {
+                    *value = output.as_os_str().to_owned();
+                }
+            } else if extended[index]
+                .to_str()
+                .is_some_and(|arg| arg.starts_with("--out-dir="))
+            {
+                let mut value = OsString::from("--out-dir=");
+                value.push(&output);
+                extended[index] = value;
+            }
+        }
+    }
+    extended.push(format!("-Clink-arg=-Wl,-oso_prefix,{}/", prefix.display()).into());
     Cow::Owned(extended)
 }
 
@@ -2737,7 +2777,19 @@ fn path_mappings_with_env(
     // working directory -- the session passes both in.
     let configured_target = environment(session::TARGET_DIR_ENV)
         .map(PathBuf::from)
-        .filter(|root| root.is_absolute());
+        .filter(|root| root.is_absolute())
+        .map(|root| {
+            // Match the spelling emitted by rustc when a macOS link uses the
+            // physical target directory to share ld64's single OSO prefix.
+            let physical = std::fs::canonicalize(&root).ok();
+            physical
+                .filter(|physical| {
+                    target_output.is_some_and(|output| {
+                        output.starts_with(physical) && !output.starts_with(&root)
+                    })
+                })
+                .unwrap_or(root)
+        });
     if let Some(root) = configured_target.or_else(|| {
         target_output
             .filter(|root| root.is_absolute())
@@ -2814,8 +2866,10 @@ fn path_mappings_with_env(
 /// same shape below a target-triple directory). Mapping the profile parent,
 /// rather than only `deps`, also covers generated inputs below `build/`.
 fn standalone_target_root(output: &Path, target: Option<&str>) -> PathBuf {
-    if output.file_name() == Some(OsStr::new("deps"))
-        && let Some(profile_root) = output.parent().and_then(Path::parent)
+    if matches!(
+        output.file_name().and_then(OsStr::to_str),
+        Some("deps" | "examples")
+    ) && let Some(profile_root) = output.parent().and_then(Path::parent)
     {
         let target_component = target.and_then(|target| Path::new(target).file_stem());
         if target_component.is_some_and(|target| profile_root.file_name() == Some(target))

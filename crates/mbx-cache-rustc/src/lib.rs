@@ -1827,7 +1827,12 @@ impl Parser<'_> {
             let Argument::OsoPrefix { path, .. } = argument else {
                 return false;
             };
-            path.is_absolute() && directory.starts_with(normalize_components(path))
+            path.is_absolute()
+                && (directory.starts_with(normalize_components(path))
+                    || std::fs::canonicalize(&directory)
+                        .ok()
+                        .zip(std::fs::canonicalize(path).ok())
+                        .is_some_and(|(directory, prefix)| directory.starts_with(prefix)))
         })
     }
 

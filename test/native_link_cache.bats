@@ -241,3 +241,49 @@ RUST
   assert_success
   assert_output 'macro works'
 }
+
+@test "macOS examples verify debug maps for sibling dependency directories" {
+  [[ "$(uname -s)" == Darwin ]] || skip "Mach-O debug maps are macOS-specific"
+  local views
+  for views in true false; do
+    export MBX_TARGET_VIEWS="$views"
+    export MBX_CACHE_DIR="$BATS_TEST_TMPDIR/store-$views"
+    local first="$BATS_TEST_TMPDIR/$views/example-a" second="$BATS_TEST_TMPDIR/$views/example-b"
+    mkdir -p "$first/src" "$first/examples"
+    cat >"$first/Cargo.toml" <<'TOML'
+[package]
+name = "example-debug-map"
+version = "0.1.0"
+edition = "2021"
+[profile.dev]
+debug = 2
+split-debuginfo = "unpacked"
+TOML
+    echo '#[inline(never)] pub fn answer() -> u32 { 42 }' >"$first/src/lib.rs"
+    echo 'fn main() { println!("{}", example_debug_map::answer()); }' >"$first/examples/answer.rs"
+    cp -R "$first" "$second"
+    first="$(cd "$first" && pwd -P)"
+    second="$(cd "$second" && pwd -P)"
+    cd "$first"
+    run env MBX_CACHE_LINKS=1 RUSTFLAGS="--remap-path-prefix=$first=/workspace" "$MBX_BIN" build --examples --offline
+    assert_success
+    cd "$second"
+    local report="$BATS_TEST_TMPDIR/example-verify.json"
+    run env MBX_CACHE_LINKS=1 MBX_VERIFY=1 MBX_STATS_REPORT="$report" RUSTFLAGS="--remap-path-prefix=$second=/workspace" "$MBX_BIN" build --examples --offline
+    assert_success
+    refute_output --partial 'shadow verification diverged'
+    run grep -E '"verifications"[[:space:]]*:[[:space:]]*2' "$report"
+    assert_success
+    run grep -E '"divergences"[[:space:]]*:[[:space:]]*0' "$report"
+    assert_success
+    run grep -E '"misses"[[:space:]]*:[[:space:]]*0' "$report"
+    assert_success
+    run cmp "$first/target/debug/examples/answer" "$second/target/debug/examples/answer"
+    assert_success
+    run codesign --verify "$second/target/debug/examples/answer"
+    assert_success
+    run "$second/target/debug/examples/answer"
+    assert_success
+    assert_output '42'
+  done
+}
