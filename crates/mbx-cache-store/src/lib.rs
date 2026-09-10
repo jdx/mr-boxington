@@ -409,19 +409,27 @@ fn export_receipts(
                 .iter()
                 .map(|prediction| prediction.action.clone()),
         );
-        // One task manifest can carry only one action per invocation. The
-        // newest run of the same task is the useful prediction set to import;
-        // every older action remains in `actions` and therefore in the bundle.
-        tasks.insert(
-            receipt.identity.clone(),
-            TaskActionManifest {
-                version: 1,
-                task: receipt.identity,
-                predictions: receipt.predictions,
-            },
+        // Keep predictions from every command in the job. When commands
+        // share an invocation, the most recently completed command wins.
+        let predictions = tasks.entry(receipt.identity).or_insert_with(BTreeMap::new);
+        predictions.extend(
+            receipt
+                .predictions
+                .into_iter()
+                .map(|prediction| (prediction.invocation.clone(), prediction)),
         );
     }
-    let tasks = tasks.into_values().collect::<Vec<_>>();
+    let tasks = tasks
+        .into_iter()
+        .map(|(task, predictions)| TaskActionManifest {
+            version: 1,
+            task,
+            predictions: predictions.into_values().collect(),
+        })
+        .collect::<Vec<_>>();
+    if tasks.iter().any(|task| !task.validate()) {
+        eyre::bail!("combined export predictions exceed task manifest limits");
+    }
     validate_export_additions(&additions)?;
     let (mut objects, result_paths) = strict_closure(store, &actions)?;
     let cas = LocalCas::new(store);
