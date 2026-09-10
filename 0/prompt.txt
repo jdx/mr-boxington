@@ -1,0 +1,25 @@
+investigate
+
+---
+
+[https://github.com/jdx/mr-boxington/discussions/419#discussioncomment-18391765](https://github.com/jdx/mr-boxington/discussions/419#discussioncomment-18391765)
+
+---
+
+make a pr, post a reply
+
+---
+
+address pr feedback and failing checsk until it settles
+
+---
+
+look at all of his discussions, what should we do
+
+---
+
+ok do all of it
+
+---
+
+i don't want a periodic regression benchmark though
