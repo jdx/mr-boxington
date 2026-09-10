@@ -137,18 +137,18 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
             }
         };
         if let Some(cached) = restored {
+            record_prediction(
+                &task,
+                &invocation_digest,
+                &action.digest,
+                &prediction,
+                None,
+                None,
+            );
             if !verify {
                 write_caller_depfile(
                     &invocation,
                     discovered.files().map(|input| input.path.as_path()),
-                );
-                record_prediction(
-                    &task,
-                    &invocation_digest,
-                    &action.digest,
-                    &prediction,
-                    None,
-                    None,
                 );
                 replay_bytes(&cached.stdout, &cached.stderr)?;
                 record_action_hit(
@@ -316,6 +316,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         duration_ns,
     );
 
+    let verified = verification.is_some();
     if let Some(cached) = verification {
         let divergence = verification_divergence(&cached, &output);
         record_verification(divergence.is_none(), cached.restore);
@@ -333,23 +334,27 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     if !output.status.success() {
         return Ok(exit_code(output.status));
     }
+    // Shadow verification audits an existing result; it must not try to
+    // replace it with the fresh result, especially when they differ.
     // A failure to publish must not fail a compilation that already succeeded.
-    if let Err(error) = publish(
-        &invocation,
-        &mut context,
-        &depfile,
-        &output,
-        compilation_started,
-        &input_snapshots,
-        &task,
-        &invocation_digest,
-        duration_ns,
-        &searchable,
-        before,
-        flight.as_ref(),
-        remote_claim.as_deref(),
-        &portable,
-    ) {
+    if !verified
+        && let Err(error) = publish(
+            &invocation,
+            &mut context,
+            &depfile,
+            &output,
+            compilation_started,
+            &input_snapshots,
+            &task,
+            &invocation_digest,
+            duration_ns,
+            &searchable,
+            before,
+            flight.as_ref(),
+            remote_claim.as_deref(),
+            &portable,
+        )
+    {
         session::report_cc_publication_failure(&compilation_name(&invocation), &error);
     }
     // Owed whether or not the object was published: the build that asked for
