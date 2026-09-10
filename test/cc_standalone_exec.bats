@@ -323,7 +323,7 @@ SCRIPT
     mkdir -p "$project/out"
     echo 'version = 4' >"$project/Cargo.lock"
     cat >"$project/source.c" <<'SOURCE'
-#include <stdio.h>
+extern int puts(const char *);
 int main(void) { puts(__FILE__); return 0; }
 SOURCE
   done
