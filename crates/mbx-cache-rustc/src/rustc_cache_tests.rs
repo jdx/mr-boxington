@@ -2081,3 +2081,66 @@ fn linker_plugin_lto_is_keyed_and_a_plugin_path_bypasses() {
         ))
     );
 }
+
+#[test]
+fn install_names_are_only_modeled_for_macos_proc_macros() {
+    for kind in ["bin", "rlib", "proc-macro"] {
+        let parsed = RustcInvocation::parse_with(
+            &args(&[
+                "--crate-name=widget",
+                &format!("--crate-type={kind}"),
+                "--emit=dep-info,link",
+                "--out-dir=target/debug/deps",
+                "-Clink-arg=-Wl,-install_name,@rpath/libwidget.dylib",
+                "src/lib.rs",
+            ]),
+            ParseOptions::caching_native_links(true),
+        );
+        assert_eq!(
+            parsed.is_ok(),
+            cfg!(target_os = "macos") && kind == "proc-macro"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn portable_proc_macro_install_name_is_keyed_and_preserves_explicit_names() {
+    let mut arguments = args(&[
+        "--crate-name=widget",
+        "--crate-type=proc-macro",
+        "--emit=dep-info,link",
+        "--out-dir=target/debug/deps",
+        "-Cextra-filename=-abc123",
+        "src/lib.rs",
+    ]);
+    let options = ParseOptions::caching_native_links(true);
+    let original = RustcInvocation::parse_with(&arguments, options).unwrap();
+    let context = context(&[("src/lib.rs", "source")]);
+    let outputs = original.outputs(&context.working_dir).unwrap();
+    let flag = original.portable_install_name(&outputs).unwrap();
+    assert_eq!(
+        flag,
+        "-Clink-arg=-Wl,-install_name,@rpath/libwidget-abc123.dylib"
+    );
+    arguments.push(flag.into());
+    let portable = RustcInvocation::parse_with(&arguments, options).unwrap();
+    assert_ne!(
+        original.invocation_digest(&context).unwrap(),
+        portable.invocation_digest(&context).unwrap()
+    );
+    assert_eq!(portable.portable_install_name(&outputs), None);
+    arguments.pop();
+    arguments.push("-Clink-arg=-Wl,-install_name,@rpath/custom.dylib".into());
+    let explicit = RustcInvocation::parse_with(&arguments, options).unwrap();
+    assert_eq!(explicit.portable_install_name(&outputs), None);
+    for value in [
+        "/absolute/custom.dylib",
+        "@rpath/libwidget.dylib,-dead_strip",
+        "@rpath/../custom.dylib",
+    ] {
+        arguments.pop();
+        arguments.push(format!("-Clink-arg=-Wl,-install_name,{value}").into());
+        assert!(RustcInvocation::parse_with(&arguments, options).is_err());
+    }
+}

@@ -181,7 +181,12 @@ pub(crate) fn compile(
         Some(&initial_outputs.directory),
         initial_invocation.target(),
     );
-    let arguments = portable.applied_to(arguments);
+    let mut arguments = portable.applied_to(arguments);
+    // Include the flag in both parsing/key construction and execution. This
+    // separates old path-bearing artifacts without changing content hashing.
+    if let Some(argument) = initial_invocation.portable_install_name(&initial_outputs) {
+        arguments.push(argument.into());
+    }
     let invocation = RustcInvocation::parse_with(&arguments, options)?;
     let outputs = invocation.outputs(&working_dir)?;
 

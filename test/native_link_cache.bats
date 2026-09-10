@@ -179,3 +179,63 @@ test_binary() {
   run grep -E '^unsupported-crate-type' "$bypasses"
   assert_success
 }
+
+@test "macOS proc macros and their consumers verify across checkouts" {
+  [[ "$(uname -s)" == Darwin ]] || skip "Mach-O install names are macOS-specific"
+  local first="$BATS_TEST_TMPDIR/macro-a" second="$BATS_TEST_TMPDIR/macro-b"
+  mkdir -p "$first/macros/src" "$first/src"
+  cat >"$first/Cargo.toml" <<'TOML'
+[package]
+name = "macro-consumer"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+audit-macro = { path = "macros" }
+[profile.dev]
+debug = false
+TOML
+  cat >"$first/macros/Cargo.toml" <<'TOML'
+[package]
+name = "audit-macro"
+version = "0.1.0"
+edition = "2021"
+[lib]
+proc-macro = true
+TOML
+  cat >"$first/macros/src/lib.rs" <<'RUST'
+extern crate proc_macro;
+use proc_macro::TokenStream;
+#[proc_macro]
+pub fn identity(input: TokenStream) -> TokenStream { input }
+RUST
+  echo 'audit_macro::identity! { fn main() { println!("macro works"); } }' >"$first/src/main.rs"
+  cp -R "$first" "$second"
+  # pwd -P avoids macOS /var versus /private/var aliases in rustc remapping.
+  first="$(cd "$first" && pwd -P)"
+  second="$(cd "$second" && pwd -P)"
+  cd "$first"
+  run env MBX_CACHE_LINKS=1 RUSTFLAGS="--remap-path-prefix=$first=/workspace" "$MBX_BIN" build --offline
+  assert_success
+  cd "$second"
+  local report="$BATS_TEST_TMPDIR/macro-verify.json"
+  run env MBX_CACHE_LINKS=1 MBX_VERIFY=1 MBX_STATS_REPORT="$report" RUSTFLAGS="--remap-path-prefix=$second=/workspace" "$MBX_BIN" build --offline
+  assert_success
+  refute_output --partial 'has different contents'
+  run grep -E '"verifications"[[:space:]]*:[[:space:]]*2' "$report"
+  assert_success
+  run grep -E '"divergences"[[:space:]]*:[[:space:]]*0' "$report"
+  assert_success
+  local dylib_a dylib_b
+  dylib_a="$(find -L "$first/target" -name 'libaudit_macro-*.dylib' | head -1)"
+  dylib_b="$(find -L "$second/target" -name 'libaudit_macro-*.dylib' | head -1)"
+  run cmp "$dylib_a" "$dylib_b"
+  assert_success
+  run codesign --verify "$dylib_b"
+  assert_success
+  run otool -D "$dylib_b"
+  assert_success
+  assert_output --partial "@rpath/$(basename "$dylib_b")"
+  run "$second/target/debug/macro-consumer"
+  assert_success
+  assert_output 'macro works'
+}

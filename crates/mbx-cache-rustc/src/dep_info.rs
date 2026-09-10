@@ -607,6 +607,9 @@ fn render_argument(argument: &Argument) -> Result<OsString, BypassReason> {
         ),
         // Nothing links while emitting dep-info either; replayed verbatim for
         // the same reason as the prefix above.
+        Argument::InstallName(name) => {
+            format!("--codegen=link-arg=-Wl,-install_name,@rpath/{name}")
+        }
         Argument::FuseLd(selection) => format!("--codegen=link-arg=-fuse-ld={selection}"),
     };
     Ok(rendered.into())

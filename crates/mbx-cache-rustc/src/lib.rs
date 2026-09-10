@@ -334,6 +334,8 @@ enum Argument {
         from: PathBuf,
         to: String,
     },
+    /// A single @rpath filename used as a macOS proc macro install name.
+    InstallName(String),
     /// An `-oso_prefix` handed to ld64, whose path strips checkout-specific
     /// prefixes from the debug map the linker records.
     OsoPrefix {
@@ -438,6 +440,30 @@ impl RustcInvocation {
             self.link_output,
             LinkOutput::NativeExecutable | LinkOutput::NativeProcMacro
         )
+    }
+
+    /// Stable Mach-O identity for a cached macOS proc macro. The compiler loads
+    /// these by filename; embedding the checkout's output path only makes the
+    /// bytes (and dependent action keys) vary between otherwise identical builds.
+    pub fn portable_install_name(&self, outputs: &RustcOutputs) -> Option<String> {
+        if !cfg!(target_os = "macos")
+            || self.link_output != LinkOutput::NativeProcMacro
+            || self
+                .arguments
+                .iter()
+                .any(|arg| matches!(arg, Argument::InstallName(_)))
+        {
+            return None;
+        }
+        let file = outputs
+            .files
+            .iter()
+            .find(|path| path.extension().is_some_and(|ext| ext == "dylib"))?;
+        let name = file.file_name()?.to_str()?;
+        if !safe_install_name(name) {
+            return None;
+        }
+        Some(format!("-Clink-arg=-Wl,-install_name,@rpath/{name}"))
     }
 
     /// Linker selected with `-C linker`, if the invocation overrides rustc's
@@ -1558,6 +1584,15 @@ impl<'a> Parser<'a> {
             }
             return Ok(());
         }
+        // Only a single filename under @rpath is modeled. Other spellings,
+        // combined linker options, and explicit absolute names still bypass.
+        if name == "link-arg"
+            && let Some(option) = value.strip_prefix("link-arg=-Wl,-install_name,@rpath/")
+            && safe_install_name(option)
+        {
+            self.parsed.push(Argument::InstallName(option.to_owned()));
+            return Ok(());
+        }
         // `-oso_prefix` names a checkout-specific path, so it is parsed
         // rather than keyed as text: the path normalizes like every other
         // path in the key, which is what lets two checkouts passing their own
@@ -1677,6 +1712,16 @@ impl<'a> Parser<'a> {
             && let Some(option) = self.first_link_argument()
         {
             return Err(BypassReason::UnmodeledLinkArgument(option.to_owned()));
+        }
+        if self
+            .parsed
+            .iter()
+            .any(|arg| matches!(arg, Argument::InstallName(_)))
+            && !(cfg!(target_os = "macos") && link_output == LinkOutput::NativeProcMacro)
+        {
+            return Err(BypassReason::UnmodeledLinkArgument(
+                "link-arg=-Wl,-install_name".into(),
+            ));
         }
         // `-fuse-ld` is modeled only for native links, where the linker
         // identity probe resolves and pins the linker it names. A wasm or
@@ -1879,6 +1924,13 @@ impl Parser<'_> {
         }
         Ok(())
     }
+}
+
+fn safe_install_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
 /// Whether a boolean codegen option is asking for its enabled form. Absent a
@@ -2096,6 +2148,9 @@ impl<'a> ActionBuilder<'a> {
                 "--remap-path-prefix={}={}",
                 self.normalize_path(from)?,
                 to
+            )),
+            Argument::InstallName(name) => Ok(format!(
+                "--codegen=link-arg=-Wl,-install_name,@rpath/{name}"
             )),
             Argument::OsoPrefix {
                 path,
