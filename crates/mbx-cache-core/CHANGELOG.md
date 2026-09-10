@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.15.0...mbx-cache-core-v0.16.0) - 2026-09-10
+
+### Fixed
+
+- forward routine shim diagnostics as debug logs ([#417](https://github.com/jdx/mr-boxington/pull/417))
+- avoid repeated Nix store scans during C builds ([#414](https://github.com/jdx/mr-boxington/pull/414))
+
 ## [0.15.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.14.0...mbx-cache-core-v0.15.0) - 2026-09-08
 
 ### Fixed

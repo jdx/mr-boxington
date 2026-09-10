@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.1](https://github.com/jdx/mr-boxington/compare/v1.10.0...v1.10.1) - 2026-09-10
+
+### Fixed
+
+- *(cc)* report publication failures and require valid snapshots ([#421](https://github.com/jdx/mr-boxington/pull/421))
+- *(verify)* identify divergent compilation outputs ([#420](https://github.com/jdx/mr-boxington/pull/420))
+- forward routine shim diagnostics as debug logs ([#417](https://github.com/jdx/mr-boxington/pull/417))
+
 ## [1.10.0](https://github.com/jdx/mr-boxington/compare/v1.9.0...v1.10.0) - 2026-09-08
 
 ### Added

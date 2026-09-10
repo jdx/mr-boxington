@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.15.0...mbx-cache-cc-v0.16.0) - 2026-09-10
+
+### Fixed
+
+- *(cc)* recognize the active Xcode developer directory ([#425](https://github.com/jdx/mr-boxington/pull/425))
+- avoid repeated Nix store scans during C builds ([#414](https://github.com/jdx/mr-boxington/pull/414))
+
 ## [0.15.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.14.0...mbx-cache-cc-v0.15.0) - 2026-09-08
 
 ### Other
