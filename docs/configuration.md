@@ -196,10 +196,38 @@ The build reports what it found:
 mbx[cache]: qualification: 24 verified, 0 diverged
 ```
 
-Run it in the checkout that filled the cache. Artifacts restored from another
-checkout embed that checkout's paths and would be reported as divergences. Any
-divergence in the same checkout is a modeling bug; please report it.
+The verified count includes divergent compilations. Each compilation contributes
+at most one divergence, reporting its first mismatch. Warnings identify the
+adapter, unit and action; stdout/stderr differences include the first differing
+byte offset, line number and bounded, escaped excerpts of both results. Cached
+diagnostics are rewritten into this checkout's paths before comparison.
+
+Cargo must actually invoke the compiler to verify anything. Run in the checkout
+that filled the cache with a fresh target directory; an unchanged build in an
+existing target can be a Cargo no-op. Keep the original target and shared store.
 `MBX_BYPASS_LOG` and `mbx explain` show what was left out.
+
+For audits across worktrees, populate and verify using the same virtual source
+root. For example, run this from each checkout's workspace root, first with
+`MBX_VERIFY=0` to populate, then with `MBX_VERIFY=1` in the other checkout:
+
+```sh
+RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$PWD=/workspace" \
+  CARGO_TARGET_DIR="$PWD/target-audit" MBX_VERIFY=1 mbx build --all-targets --locked
+```
+
+Use a fresh `target-audit` directory each time and the same toolchain, profile,
+and other compiler flags. The source side of `--remap-path-prefix` is keyed
+portably; its virtual destination must agree between checkouts. If using
+`CARGO_ENCODED_RUSTFLAGS`, add the remap there instead: Cargo gives it precedence
+over `RUSTFLAGS`.
+
+Remapping reduces embedded-source-path differences; it does not guarantee
+byte-identical outputs, especially for native links or paths outside the mapped
+root. See [artifact equivalence](/limits#restored-artifacts-are-equivalent-not-always-identical).
+Investigate remaining divergences rather than treating every cross-worktree
+mismatch as harmless. Please report unexplained differences, including the
+identified unit and action.
 
 This is how to qualify a setting whose tier you want to check against your
 own workload, such as

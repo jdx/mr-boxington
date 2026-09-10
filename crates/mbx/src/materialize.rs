@@ -270,6 +270,49 @@ pub(crate) fn record_action_hit_with_diagnostic(
     }
 }
 
+/// Identify the action before the details, so the session's warning deduplication
+/// cannot merge different compilations that disagree in the same way.
+pub(crate) fn verification_warning(
+    adapter: &str,
+    unit: &str,
+    action: &CacheDigest,
+    divergence: &str,
+) -> String {
+    format!(
+        "shadow verification diverged from cached output: {adapter} action {} ({unit}): {divergence}",
+        action.hash
+    )
+}
+
+/// Describe the first differing byte without emitting terminal controls or an
+/// unbounded compiler diagnostic. Offsets are zero-based; lines are one-based.
+pub(crate) fn stream_divergence(name: &str, cached: &[u8], compiled: &[u8]) -> Option<String> {
+    if cached == compiled {
+        return None;
+    }
+    let offset = cached
+        .iter()
+        .zip(compiled)
+        .position(|(a, b)| a != b)
+        .unwrap_or(cached.len().min(compiled.len()));
+    let line = cached[..offset].iter().filter(|&&b| b == b'\n').count() + 1;
+    let excerpt = |bytes: &[u8]| {
+        let start = offset.saturating_sub(24);
+        let end = bytes.len().min(offset.saturating_add(48));
+        format!(
+            "{}{}{}",
+            if start > 0 { "..." } else { "" },
+            bytes[start..end].escape_ascii(),
+            if end < bytes.len() { "..." } else { "" }
+        )
+    };
+    Some(format!(
+        "{name} differs at byte {offset} (line {line}): cached=\"{}\", compiled=\"{}\"",
+        excerpt(cached),
+        excerpt(compiled)
+    ))
+}
+
 /// Tell the session whether a shadow compilation agreed with the cache.
 pub(crate) fn record_verification(matched: bool, restore: RestoreStats) {
     let responses =
@@ -496,4 +539,58 @@ pub(crate) fn exit_code(status: ExitStatus) -> ExitCode {
     // SAFETY: this process is only a compiler wrapper and must preserve the
     // compiler's full Windows status code, which stable ExitCode cannot hold.
     unsafe { windows_sys::Win32::System::Threading::ExitProcess(status.code().unwrap_or(1) as u32) }
+}
+
+#[cfg(test)]
+mod verification_tests {
+    use super::*;
+
+    #[test]
+    fn stream_comparison_handles_eof_and_reports_the_first_differing_line() {
+        assert_eq!(stream_divergence("stderr", b"same", b"same"), None);
+        let difference = stream_divergence("stderr", b"same\nold", b"same\nnew").unwrap();
+        assert!(difference.contains("byte 5 (line 2)"), "{difference}");
+        assert!(difference.contains(r"same\nold"), "{difference}");
+        for (cached, compiled) in [
+            (b"".as_slice(), b"extra".as_slice()),
+            (b"extra".as_slice(), b"".as_slice()),
+        ] {
+            let difference = stream_divergence("stdout", cached, compiled).unwrap();
+            assert!(difference.contains("byte 0 (line 1)"), "{difference}");
+        }
+    }
+
+    #[test]
+    fn excerpts_are_bounded_and_escape_binary_and_terminal_bytes() {
+        let cached = vec![b'a'; 10_000];
+        let mut compiled = cached.clone();
+        compiled.extend_from_slice(b"\x1b\0\xff\n");
+        let difference = stream_divergence("stderr", &cached, &compiled).unwrap();
+        assert!(difference.contains("byte 10000"), "{difference}");
+        assert!(difference.contains(r"\x1b\x00\xff\n"), "{difference}");
+        assert!(!difference.contains(['\n', '\0', '\x1b']));
+        assert!(difference.len() < 512, "{difference}");
+    }
+
+    #[test]
+    fn different_actions_of_one_unit_keep_distinct_warning_identities() {
+        let first = verification_warning(
+            "rustc",
+            "example",
+            &CacheDigest::blake3(b"lib"),
+            "standard error differs",
+        );
+        let second = verification_warning(
+            "rustc",
+            "example",
+            &CacheDigest::blake3(b"test"),
+            "standard error differs",
+        );
+        assert_ne!(
+            first, second,
+            "session deduplication must preserve both units"
+        );
+        assert!(first.contains("rustc action"));
+        assert!(first.contains("(example)"));
+    }
 }
