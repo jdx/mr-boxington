@@ -322,3 +322,28 @@ fn output_scan_covers_roots_without_debug_remaps() {
     assert!(portable.outputs_are_clean(&object, &[]));
     assert!(!portable.outputs_are_clean(&object, &[PathMapping::new(&target, "target")]));
 }
+
+/// Canonical Windows roots must match the non-verbatim strings compilers emit.
+#[test]
+fn output_scan_matches_plain_windows_drive_and_unc_paths() {
+    let directory = tempfile::tempdir().unwrap();
+    let object = directory.path().join("object.o");
+    for (root, ordinary) in [
+        (r"\\?\C:\resolved\source", r"C:\resolved\source"),
+        (r"\\?\UNC\server\share\source", r"\\server\share\source"),
+    ] {
+        let portable = Portable {
+            arguments: Vec::new(),
+            values: vec![root.into()],
+        };
+        for spelling in [ordinary.to_owned(), ordinary.replace('\\', "/")] {
+            std::fs::write(&object, format!("{spelling}/generated.c")).unwrap();
+            assert!(
+                !portable.outputs_are_clean(&object, &[]),
+                "{root}: {spelling}"
+            );
+        }
+        std::fs::write(&object, b"no retained path").unwrap();
+        assert!(portable.outputs_are_clean(&object, &[]));
+    }
+}

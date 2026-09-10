@@ -662,10 +662,17 @@ impl Portable {
             return false;
         };
         !values.iter().any(|value| {
-            memchr::memmem::find(&contents, value.as_bytes()).is_some()
-                || (value.contains('\\')
-                    && memchr::memmem::find(&contents, value.replace('\\', "/").as_bytes())
-                        .is_some())
+            let slashes = value.replace('\\', "/");
+            // Windows canonicalization returns verbatim paths, while compiler
+            // strings usually use ordinary drive or UNC spellings.
+            let plain = if let Some(unc) = slashes.strip_prefix("//?/UNC/") {
+                format!("//{unc}")
+            } else {
+                slashes.strip_prefix("//?/").unwrap_or(&slashes).to_owned()
+            };
+            [value.as_str(), &slashes, &plain, &plain.replace('/', "\\")]
+                .iter()
+                .any(|spelling| memchr::memmem::find(&contents, spelling.as_bytes()).is_some())
         })
     }
 }
