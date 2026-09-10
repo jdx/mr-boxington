@@ -107,6 +107,76 @@ fn a_parent_manifest_does_not_claim_a_directory_reached_through_a_symlink() {
     );
 }
 
+/// Amalgamated sources name one tree through many parent-directory spellings.
+#[test]
+fn equivalent_parent_paths_share_one_manifest_budget_and_track_new_headers() {
+    let workspace = tempfile::tempdir().unwrap();
+    let root = workspace.path().join("include");
+    let source = write(&root, "source.c", "int value;\n");
+    for index in 0..1024 {
+        write(&root, &format!("header-{index}.h"), "");
+    }
+    let mut directories = BTreeSet::from([root.clone()]);
+    for index in 0..20 {
+        let child = root.join(format!("part-{index}"));
+        std::fs::create_dir(&child).unwrap();
+        directories.insert(child.join(".."));
+    }
+    assert_eq!(
+        minimal_manifest_directories(directories.clone()).as_slice(),
+        std::slice::from_ref(&root)
+    );
+    let collect = || {
+        CcDiscoveredInputs::collect(
+            workspace.path(),
+            BTreeSet::from([source.clone()]),
+            directories.clone(),
+            &NoFileDigestCache,
+        )
+        .unwrap()
+    };
+    let before = collect();
+    assert_eq!(before.inputs.len(), 2);
+    write(&root, "new-shadow.h", "");
+    let after = collect();
+    assert_ne!(before.inputs, after.inputs);
+}
+
+/// Failed path resolution must not be mistaken for an equivalent root.
+#[test]
+fn nonexistent_parent_traversals_keep_their_own_manifest() {
+    let workspace = tempfile::tempdir().unwrap();
+    let root = workspace.path().join("include");
+    std::fs::create_dir(&root).unwrap();
+    let missing = root.join("missing/..");
+    let minimal = minimal_manifest_directories(BTreeSet::from([root.clone(), missing.clone()]));
+    assert_eq!(minimal.len(), 2);
+    assert!(minimal.contains(&root) && minimal.contains(&missing));
+}
+
+/// A lexical `..` may escape through a link, including after an earlier scan.
+#[cfg(unix)]
+#[test]
+fn replacing_a_parent_traversal_with_a_symlink_stops_deduplication() {
+    let workspace = tempfile::tempdir().unwrap();
+    let root = workspace.path().join("include");
+    let child = root.join("child");
+    let external = workspace.path().join("external/nested");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::create_dir_all(&external).unwrap();
+    let alias = child.join("..");
+    let directories = BTreeSet::from([root.clone(), alias.clone()]);
+    assert_eq!(
+        minimal_manifest_directories(directories.clone()).as_slice(),
+        std::slice::from_ref(&root)
+    );
+    std::fs::remove_dir(&child).unwrap();
+    std::os::unix::fs::symlink(&external, &child).unwrap();
+    let minimal = minimal_manifest_directories(directories);
+    assert_eq!(minimal.len(), 2);
+    assert!(minimal.contains(&root) && minimal.contains(&alias));
+}
+
 #[test]
 fn timestamp_macro_tokens_in_any_read_file_bypass() {
     let directory = tempfile::tempdir().expect("tempdir");

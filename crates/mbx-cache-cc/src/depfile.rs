@@ -514,24 +514,35 @@ fn minimal_manifest_directories(directories: BTreeSet<PathBuf>) -> Vec<PathBuf> 
     let mut directories = directories
         .into_iter()
         .map(|directory| {
-            let normalized = normalize_components(&directory);
+            let normalized = manifest_directory_identity(&directory);
             (directory, normalized)
         })
         .collect::<Vec<_>>();
     directories.sort_by(|(left, left_normalized), (right, right_normalized)| {
         left_normalized
+            .as_deref()
+            .unwrap_or(left)
             .components()
             .count()
-            .cmp(&right_normalized.components().count())
+            .cmp(
+                &right_normalized
+                    .as_deref()
+                    .unwrap_or(right)
+                    .components()
+                    .count(),
+            )
             .then_with(|| left_normalized.cmp(right_normalized))
             .then_with(|| left.cmp(right))
     });
 
-    let mut minimal = Vec::<(PathBuf, PathBuf)>::new();
+    let mut minimal = Vec::<(PathBuf, Option<PathBuf>)>::new();
     for (directory, normalized) in directories {
         if !minimal
             .iter()
-            .any(|(_, ancestor)| manifest_covers(ancestor, &normalized))
+            .any(|(_, ancestor)| match (ancestor, &normalized) {
+                (Some(ancestor), Some(normalized)) => manifest_covers(ancestor, normalized),
+                _ => false,
+            })
         {
             minimal.push((directory, normalized));
         }
@@ -540,6 +551,27 @@ fn minimal_manifest_directories(directories: BTreeSet<PathBuf>) -> Vec<PathBuf> 
         .into_iter()
         .map(|(directory, _)| directory)
         .collect()
+}
+
+/// Lexical parent removal is safe only when the removed directory exists and
+/// is not a symlink: `link/..` can name a completely different physical tree.
+/// An unprovable path keeps its own manifest instead of joining another root.
+fn manifest_directory_identity(directory: &Path) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in directory.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                let metadata = std::fs::symlink_metadata(&normalized).ok()?;
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    return None;
+                }
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    Some(normalized)
 }
 
 /// Whether walking `ancestor` recursively is guaranteed to visit `descendant`.
@@ -553,7 +585,7 @@ fn manifest_covers(ancestor: &Path, descendant: &Path) -> bool {
         return false;
     };
     if relative.as_os_str().is_empty() {
-        return false;
+        return true;
     }
     let mut current = ancestor.to_path_buf();
     for component in relative.components() {
