@@ -1,0 +1,25 @@
+investigate this user's 2 discussions investigate this user's 2 discussions [https://github.com/jdx/mr-boxington/discussions/419](https://github.com/jdx/mr-boxington/discussions/419)
+
+---
+
+macos issue may have been fixed in a recent release, make prs, and post reply if you can fx these
+
+---
+
+address pr feedback
+
+---
+
+user made more replies/discussions
+
+---
+
+btw, `ssh dev.coder` if you want to test on linux
+
+---
+
+if you need to temporarily install xcode beta to test that's fine, just remove it after
+
+---
+
+you working?
