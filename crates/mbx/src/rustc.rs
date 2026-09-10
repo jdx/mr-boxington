@@ -522,8 +522,11 @@ pub(crate) fn compile(
         let divergence = verification_divergence(&cached, &output);
         record_verification(divergence.is_none(), cached.restore);
         if let Some(divergence) = divergence {
-            session::report_shim_warning(&format!(
-                "shadow verification diverged from cached output: {divergence}"
+            session::report_shim_warning(&crate::materialize::verification_warning(
+                "rustc",
+                invocation.crate_name(),
+                &cached.action,
+                &divergence,
             ));
         }
         let _ = replay_output(&output);
@@ -2340,11 +2343,17 @@ fn verification_divergence(cached: &CachedCompilation, output: &Output) -> Optio
     if !output.status.success() {
         return Some("the shadow compilation failed".into());
     }
-    if cached.stdout != output.stdout {
-        return Some("standard output differs".into());
-    }
-    if cached.stderr != output.stderr {
-        return Some("standard error differs".into());
+    if let Some(difference) =
+        crate::materialize::stream_divergence("standard output", &cached.stdout, &output.stdout)
+            .or_else(|| {
+                crate::materialize::stream_divergence(
+                    "standard error",
+                    &cached.stderr,
+                    &output.stderr,
+                )
+            })
+    {
+        return Some(difference);
     }
     for expected in &cached.outputs {
         let name = expected.path.display();

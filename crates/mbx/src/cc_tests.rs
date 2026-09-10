@@ -158,11 +158,11 @@ fn a_divergence_says_which_of_the_things_it_compares_differed() {
     );
     assert_eq!(
         verification_divergence(&cached(b"out", b"", matching.clone()), &compiled(b"", b"")),
-        Some("standard output differs".into())
+        Some("standard output differs at byte 0 (line 1): cached=\"out\", compiled=\"\"".into())
     );
     assert_eq!(
         verification_divergence(&cached(b"", b"warn", matching), &compiled(b"", b"")),
-        Some("standard error differs".into())
+        Some("standard error differs at byte 0 (line 1): cached=\"warn\", compiled=\"\"".into())
     );
 
     // The one that matters: the object itself. This is what every divergence
