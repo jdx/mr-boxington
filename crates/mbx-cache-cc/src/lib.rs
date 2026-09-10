@@ -1074,6 +1074,60 @@ pub fn is_system_path(path: &Path) -> bool {
     SYSTEM_ROOTS
         .iter()
         .any(|root| path.starts_with(Path::new(root)))
+        || developer_roots().iter().any(|root| path.starts_with(root))
+}
+
+// Xcode may be renamed or installed outside /Applications. Match the active
+// developer directory rather than assuming the application bundle's name.
+// Keep both spellings because compiler depfiles may resolve SDK symlinks.
+#[cfg(target_os = "macos")]
+fn developer_roots() -> &'static [PathBuf] {
+    static ROOTS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    ROOTS.get_or_init(|| {
+        let selected = std::env::var_os("DEVELOPER_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                let output = std::process::Command::new("/usr/bin/xcode-select")
+                    .arg("--print-path")
+                    .output()
+                    .ok()?;
+                if !output.status.success() {
+                    return None;
+                }
+                Some(PathBuf::from(
+                    std::str::from_utf8(&output.stdout).ok()?.trim(),
+                ))
+            });
+        selected.map(developer_directory_roots).unwrap_or_default()
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn developer_roots() -> &'static [PathBuf] {
+    &[]
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn developer_directory_roots(mut root: PathBuf) -> Vec<PathBuf> {
+    if !root.is_absolute() || root == Path::new("/") {
+        return Vec::new();
+    }
+    // xcrun also accepts DEVELOPER_DIR pointing at the application bundle.
+    if root.extension().is_some_and(|extension| extension == "app") {
+        root = root.join("Contents/Developer");
+    }
+    root = normalize_components(&root);
+    if root == Path::new("/") {
+        return Vec::new();
+    }
+    let mut roots = vec![root.clone()];
+    if let Ok(canonical) = std::fs::canonicalize(&root)
+        && canonical != root
+    {
+        roots.push(canonical);
+    }
+    roots
 }
 
 fn normalize_components(path: &Path) -> PathBuf {

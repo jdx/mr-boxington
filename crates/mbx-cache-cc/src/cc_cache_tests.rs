@@ -1334,3 +1334,42 @@ fn preprocessing_dependency_targets_follow_the_driver_family() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn active_developer_roots_cover_beta_and_renamed_xcode() {
+    for selected in [
+        "/Applications/Xcode-beta.app",
+        "/Applications/Xcode-beta.app/Contents/Developer",
+        "/opt/toolchains/Xcode-custom.app",
+    ] {
+        let roots = developer_directory_roots(PathBuf::from(selected));
+        let root = if selected.ends_with(".app") {
+            PathBuf::from(selected).join("Contents/Developer")
+        } else {
+            PathBuf::from(selected)
+        };
+        let sdk = root.join("Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/SDKSettings.json");
+        assert!(roots.iter().any(|root| sdk.starts_with(root)));
+        assert!(
+            !roots
+                .iter()
+                .any(|root| Path::new("/Applications/Other.app/private.h").starts_with(root))
+        );
+    }
+    assert!(developer_directory_roots(PathBuf::from("relative")).is_empty());
+    assert!(developer_directory_roots(PathBuf::from("/")).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn active_developer_roots_include_resolved_symlinks() {
+    let directory = tempfile::tempdir().unwrap();
+    let real = directory.path().join("developer");
+    std::fs::create_dir(&real).unwrap();
+    let alias = directory.path().join("selected");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let roots = developer_directory_roots(alias.clone());
+    assert!(roots.contains(&alias));
+    assert!(roots.contains(&std::fs::canonicalize(real).unwrap()));
+}
