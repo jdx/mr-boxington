@@ -354,3 +354,35 @@ SOURCE
   run grep -E '"divergences"[[:space:]]*:[[:space:]]*0' "$first-verify.json"
   assert_success
 }
+
+@test "literal paths under mapped roots outside the working directory stay isolated" {
+  local project="$BATS_TEST_TMPDIR/project"
+  local cargo_home report
+  mkdir -p "$project/out"
+  echo 'version = 4' >"$project/Cargo.lock"
+  # CARGO_HOME roots are modeled independently of the working directory and
+  # are not necessarily included in the injected debug-prefix maps.
+  for cargo_home in "$BATS_TEST_TMPDIR/home-one" "$BATS_TEST_TMPDIR/home-two"; do
+    mkdir -p "$cargo_home/registry"
+    cat >"$cargo_home/registry/generated.c" <<'SOURCE'
+extern int puts(const char *);
+int main(void) { puts(__FILE__); return 0; }
+SOURCE
+  done
+  for cargo_home in "$BATS_TEST_TMPDIR/home-one" "$BATS_TEST_TMPDIR/home-two"; do
+    rm -f "$project/out/source.o"
+    report="$cargo_home-cold.json"
+    (cd "$project" && CARGO_HOME="$cargo_home" MBX_STATS_REPORT="$report" "$MBX_BIN" exec cc -g -c "$cargo_home/registry/generated.c" -o out/source.o)
+    run grep -E '"hits"[[:space:]]*:[[:space:]]*0' "$report"
+    assert_success
+    rm "$project/out/source.o"
+    report="$cargo_home-warm.json"
+    (cd "$project" && CARGO_HOME="$cargo_home" MBX_STATS_REPORT="$report" "$MBX_BIN" exec cc -g -c "$cargo_home/registry/generated.c" -o out/source.o)
+    run grep -E '"hits"[[:space:]]*:[[:space:]]*1' "$report"
+    assert_success
+    cc "$project/out/source.o" -o "$BATS_TEST_TMPDIR/show-path"
+    run "$BATS_TEST_TMPDIR/show-path"
+    assert_success
+    assert_output "$cargo_home/registry/generated.c"
+  done
+}

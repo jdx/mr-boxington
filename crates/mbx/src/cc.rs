@@ -36,6 +36,9 @@ use std::process::{Command, ExitCode, Output};
 use std::time::{Instant, SystemTime};
 
 const ADAPTER: &str = "cc";
+// Keep the extended prediction payload out of older shims' manifests and
+// flights. They reject unknown fields before checking the payload version.
+const PREDICTION_ADAPTER: &str = "cc-path-binding-v1";
 
 /// Compile one C or C++ translation unit, consulting the cache around it.
 ///
@@ -87,7 +90,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     };
 
     drop(setup);
-    let invocation_digest = invocation.invocation_digest(&context)?;
+    let invocation_digest = prediction_invocation(&invocation.invocation_digest(&context)?);
     let _verification = session::verification::select(|| Ok(invocation_digest.clone()))?;
     let verify = session::verify_requested();
     let task = prediction_task(&invocation_digest);
@@ -173,7 +176,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     let flight = if verify {
         None
     } else {
-        crate::scheduler::flight(ADAPTER, &invocation_digest.hash)
+        crate::scheduler::flight(PREDICTION_ADAPTER, &invocation_digest.hash)
     };
     if let Some(flight) = &flight
         // Only when the payload can say something this session's own lookup
@@ -212,7 +215,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     let mut remote_claim = None;
     if flight.is_some() {
         match session::request_agent(&[AgentRequest::JoinActionPromise {
-            adapter: ADAPTER.into(),
+            adapter: PREDICTION_ADAPTER.into(),
             invocation: invocation_digest.clone(),
         }]) {
             Ok(responses) => match responses.into_iter().next() {
@@ -223,7 +226,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
                 Some(AgentResponse::ActionPromise {
                     claim: None,
                     prediction: Some(prediction),
-                }) if prediction.adapter == ADAPTER
+                }) if prediction.adapter == PREDICTION_ADAPTER
                     && prediction.invocation == invocation_digest =>
                 {
                     match restore_flight_prediction(
@@ -413,7 +416,7 @@ fn publish(
     // share it. OpenSSL's makefiles compile every object that way.
     let object = invocation.output_in(&context.working_dir);
     let mut prediction = invocation.prediction(context, duration_ns)?;
-    prediction.path_specific = !portable.outputs_are_clean(&object);
+    prediction.path_specific = !portable.outputs_are_clean(&object, &context.path_mappings);
     let action = invocation.action_with_path_binding(context.clone(), prediction.path_specific)?;
     publish_result(&action, &object, output, &context.path_mappings)?;
     record_prediction(
@@ -633,15 +636,32 @@ impl Portable {
     }
 
     /// Whether an output is free of every value the flags normalized away.
-    fn outputs_are_clean(&self, path: &Path) -> bool {
-        if self.values.is_empty() {
+    fn outputs_are_clean(&self, path: &Path, mappings: &[PathMapping]) -> bool {
+        // Keys normalize every mapped root, even when no debug-prefix flag
+        // was injected for it (for example a generated source under target).
+        // Check both logical and canonical spellings, as the key builder does.
+        let values = self
+            .values
+            .iter()
+            .cloned()
+            .chain(mappings.iter().flat_map(|mapping| {
+                [
+                    Some(mapping.root.clone()),
+                    std::fs::canonicalize(&mapping.root).ok(),
+                ]
+                .into_iter()
+                .flatten()
+                .filter_map(|path| path.to_str().map(str::to_owned))
+            }))
+            .collect::<BTreeSet<_>>();
+        if values.is_empty() {
             return true;
         }
         let Ok(contents) = std::fs::read(path) else {
             // Unreadable is not evidence of cleanliness.
             return false;
         };
-        !self.values.iter().any(|value| {
+        !values.iter().any(|value| {
             memchr::memmem::find(&contents, value.as_bytes()).is_some()
                 || (value.contains('\\')
                     && memchr::memmem::find(&contents, value.replace('\\', "/").as_bytes())
@@ -993,6 +1013,11 @@ fn probe_executable(executable: &Path, arguments: &[&str], memo: &Path) -> Resul
     Ok(text)
 }
 
+/// Separate extended predictions from legacy manifests and flight identities.
+fn prediction_invocation(invocation: &CacheDigest) -> CacheDigest {
+    CacheDigest::blake3(format!("{PREDICTION_ADAPTER}\0{}", invocation.hash).as_bytes())
+}
+
 fn find_prediction(task: &str, invocation: &CacheDigest) -> Result<Option<CcInputPrediction>> {
     let responses = session::request_agent(&[AgentRequest::FindActionPrediction {
         task: task.to_string(),
@@ -1004,7 +1029,7 @@ fn find_prediction(task: &str, invocation: &CacheDigest) -> Result<Option<CcInpu
     let Some(prediction) = prediction else {
         return Ok(None);
     };
-    if prediction.adapter != ADAPTER {
+    if prediction.adapter != PREDICTION_ADAPTER {
         return Ok(None);
     }
     let payload: CcInputPrediction = serde_json::from_str(&prediction.payload)?;
@@ -1030,7 +1055,7 @@ fn record_prediction(
     let wire_prediction = ActionPrediction {
         invocation: invocation.clone(),
         action: action.clone(),
-        adapter: ADAPTER.into(),
+        adapter: PREDICTION_ADAPTER.into(),
         payload,
     };
     // Best-effort like the rest of publication, but not silent in a debug
