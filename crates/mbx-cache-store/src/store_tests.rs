@@ -708,6 +708,39 @@ fn grouped_export_keeps_each_commands_predictions_and_newest_conflicts() {
 }
 
 #[test]
+fn equal_timestamp_exports_ignore_receipt_enumeration_order() {
+    let source = tempfile::tempdir().unwrap();
+    let identity = "e".repeat(64);
+    let receipts = ["first", "second"].map(|name| BuildReceipt {
+        version: 1,
+        workspace_root: source.path().to_path_buf(),
+        identity: identity.clone(),
+        completed_nanos: 1,
+        group: Some("job".into()),
+        predictions: vec![ActionPrediction {
+            invocation: CacheDigest::blake3(b"shared invocation"),
+            action: store_result(source.path(), name, &[]),
+            adapter: "rustc".into(),
+            payload: "{}".into(),
+        }],
+    });
+    let mut predictions = Vec::new();
+    for order in [receipts.to_vec(), receipts.into_iter().rev().collect()] {
+        let destination = tempfile::tempdir().unwrap();
+        let archive = destination.path().join("job.tar");
+        export_receipts(source.path(), order, &archive, ExportAdditions::default()).unwrap();
+        import_archive(destination.path(), &archive).unwrap();
+        let manifest: TaskActionManifest = serde_json::from_slice(
+            &std::fs::read(task_manifest_path(destination.path(), &identity)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.predictions.len(), 1);
+        predictions.push(manifest.predictions);
+    }
+    assert_eq!(predictions[0], predictions[1]);
+}
+
+#[test]
 fn collection_preserves_grouped_receipts_replaced_in_the_task_manifest() {
     let source = tempfile::tempdir().unwrap();
     let destination = tempfile::tempdir().unwrap();

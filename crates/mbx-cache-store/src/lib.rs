@@ -399,7 +399,26 @@ fn export_receipts(
     archive: &Path,
     additions: ExportAdditions,
 ) -> Result<TransferOutcome> {
-    receipts.sort_by_key(|receipt| receipt.completed_nanos);
+    receipts.sort_by(|left, right| {
+        left.completed_nanos
+            .cmp(&right.completed_nanos)
+            .then_with(|| {
+                // Concurrent commands may complete on the same clock tick. Use
+                // their persisted predictions to break ties, not directory order.
+                fn key(prediction: &ActionPrediction) -> (&CacheDigest, &CacheDigest, &str, &str) {
+                    (
+                        &prediction.invocation,
+                        &prediction.action,
+                        &prediction.adapter,
+                        &prediction.payload,
+                    )
+                }
+                left.predictions
+                    .iter()
+                    .map(key)
+                    .cmp(right.predictions.iter().map(key))
+            })
+    });
     let mut actions = BTreeSet::new();
     let mut tasks = BTreeMap::new();
     for receipt in receipts {
