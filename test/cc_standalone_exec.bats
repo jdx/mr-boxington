@@ -386,3 +386,52 @@ SOURCE
     assert_output "$cargo_home/registry/generated.c"
   done
 }
+
+@test "a stderr-only C publication conflict records a reusable prediction" {
+  local project="$BATS_TEST_TMPDIR/verify-stream"
+  local compiler="$BATS_TEST_TMPDIR/compiler"
+  local real_cc
+  real_cc="$(command -v cc)"
+  write_project "$project"
+  mkdir -p "$compiler"
+  cat >"$compiler/cc" <<'SCRIPT'
+#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = -c ]; then
+    echo "$MBX_TEST_CC_MESSAGE" >&2
+    break
+  fi
+done
+exec "$MBX_TEST_REAL_CC" "$@"
+SCRIPT
+  chmod +x "$compiler/cc"
+  export MBX_TEST_REAL_CC="$real_cc"
+  export PATH="$compiler:$PATH"
+  cd "$project"
+  run env MBX_TEST_CC_MESSAGE=cached "$MBX_BIN" exec make 'CFLAGS=-O2 -Iinclude -MMD -MF hello.d' hello.o
+  assert_success
+  rm hello.o hello.d
+  # Keep the existing result and blobs but omit prediction indexes, as in a
+  # store whose result was published before its prediction could be recorded.
+  local previous_store="$MBX_CACHE_DIR"
+  export MBX_CACHE_DIR="$BATS_TEST_TMPDIR/result-only-store"
+  mkdir -p "$MBX_CACHE_DIR/actions"
+  cp -R "$previous_store/actions/cas" "$previous_store/actions/action-results" "$MBX_CACHE_DIR/actions/"
+  run env MBX_CACHE_EXPORT_GROUP=verify-audit MBX_TEST_CC_MESSAGE=verified "$MBX_BIN" exec make 'CFLAGS=-O2 -Iinclude -MMD -MF hello.d' hello.o
+  assert_success
+  assert_line 'verified'
+  refute_output --partial 'shadow verification diverged'
+  refute_output --partial 'result was not published'
+  run "$MBX_BIN" cache export --group verify-audit "$BATS_TEST_TMPDIR/audit.tar"
+  assert_success
+  assert_output --partial "exported 1 actions"
+  assert_file_exists "$BATS_TEST_TMPDIR/audit.tar"
+  assert_file_exists hello.d
+  rm hello.o hello.d
+  run env MBX_TEST_CC_MESSAGE=unused "$MBX_BIN" exec make 'CFLAGS=-O2 -Iinclude -MMD -MF hello.d' hello.o
+  assert_success
+  assert_line 'cached'
+  refute_line 'unused'
+  refute_line 'verified'
+  assert_file_exists hello.d
+}

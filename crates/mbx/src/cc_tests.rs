@@ -150,6 +150,18 @@ fn a_divergence_says_which_of_the_things_it_compares_differed() {
         stderr: stderr.to_vec(),
     };
     let matching = CacheDigest::blake3(b"compiled");
+    assert!(publication_outputs_match(
+        &cached(b"", b"old", matching.clone()),
+        &compiled(b"", b"new")
+    ));
+    assert!(!publication_outputs_match(
+        &cached(b"old", b"", matching.clone()),
+        &compiled(b"new", b"")
+    ));
+    assert!(!publication_outputs_match(
+        &cached(b"", b"", CacheDigest::blake3(b"different object")),
+        &compiled(b"", b"")
+    ));
 
     assert_eq!(
         verification_divergence(&cached(b"", b"", matching.clone()), &compiled(b"", b"")),

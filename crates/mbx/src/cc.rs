@@ -407,7 +407,7 @@ fn publish(
     discovered.verify_not_modified_since_with_snapshots(compilation_started, input_snapshots)?;
     verify_search_path_unchanged(searchable, before)?;
     discovered.verify()?;
-    discovered.apply_to(context)?;
+    discovered.clone().apply_to(context)?;
     // Debug remapping does not change runtime strings such as __FILE__. If
     // an object retains a path, bind its action to the literal paths instead
     // of discarding it or restoring another checkout's runtime strings.
@@ -418,7 +418,23 @@ fn publish(
     let mut prediction = invocation.prediction(context, duration_ns)?;
     prediction.path_specific = !portable.outputs_are_clean(&object, &context.path_mappings);
     let action = invocation.action_with_path_binding(context.clone(), prediction.path_specific)?;
-    publish_result(&action, &object, output, &context.path_mappings)?;
+    if let Err(error) = publish_result(&action, &object, output, &context.path_mappings) {
+        // GCC can name a random assembler tempfile in stderr. An immutable
+        // result may already exist even though this task has no prediction.
+        // Validate it without replacing this compile's output, and only reuse
+        // its prediction when stdout and the object (including mode) agree.
+        let existing = restore_result(
+            &action,
+            invocation,
+            &discovered,
+            false,
+            &context.path_mappings,
+            &context.working_dir,
+        );
+        if !matches!(existing, Ok(Some(ref cached)) if publication_outputs_match(cached, output)) {
+            return Err(error);
+        }
+    }
     record_prediction(
         task,
         invocation_digest,
@@ -1424,6 +1440,16 @@ fn verification_divergence(cached: &CachedCompilation, output: &Output) -> Optio
     {
         return Some(difference);
     }
+    output_divergence(cached)
+}
+
+/// A stderr-only publication conflict may retain the validated first result.
+/// Verification still compares both streams and reports every byte difference.
+fn publication_outputs_match(cached: &CachedCompilation, output: &Output) -> bool {
+    output.status.success() && cached.stdout == output.stdout && output_divergence(cached).is_none()
+}
+
+fn output_divergence(cached: &CachedCompilation) -> Option<String> {
     for expected in &cached.outputs {
         let name = expected.path.display();
         let Ok(metadata) = std::fs::metadata(&expected.path) else {
