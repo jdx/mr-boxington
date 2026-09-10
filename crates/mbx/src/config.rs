@@ -153,6 +153,11 @@ pub(crate) struct RawConfig {
     /// Cache C and C++ compilations run by build scripts.
     #[usage(env = "MBX_CC", default = true)]
     cc: bool,
+    /// Store C objects that embed absolute paths under checkout-specific keys.
+    /// Disable for disposable worktrees to avoid storing objects that cannot be
+    /// reused at another path. Existing entries may still be restored.
+    #[usage(env = "MBX_CC_STORE_PATH_SPECIFIC", default = true)]
+    cc_store_path_specific: bool,
     /// How the savings line after a build reads.
     #[usage(
         env = "MBX_SAVINGS",
@@ -357,6 +362,8 @@ pub struct Config {
     /// On by default: the shim never changes the compilation, and anything it
     /// cannot model exactly bypasses to the real compiler.
     pub cc: bool,
+    /// Store path-specific C outputs for reuse at the same checkout path.
+    pub cc_store_path_specific: bool,
     pub remote: RemoteSettings,
     pub http: HttpSettings,
     pub gc: GcSettings,
@@ -408,6 +415,7 @@ impl Config {
             // Off like the rest: a test that says nothing about C compilation
             // should not have compiler shims installed underneath it.
             cc: false,
+            cc_store_path_specific: true,
             remote: Default::default(),
             http: Default::default(),
             gc: Default::default(),
@@ -875,6 +883,7 @@ impl Config {
             build_script_execution: raw.build_script_execution,
             events: raw.events,
             cc: raw.cc,
+            cc_store_path_specific: raw.cc_store_path_specific,
             remote: RemoteSettings {
                 url: raw.remote.url,
                 namespace: raw.remote.namespace,
@@ -1313,6 +1322,21 @@ mod tests {
             retention.max_total_bytes, None,
             "a combined budget stays opt-in"
         );
+    }
+
+    #[test]
+    fn path_specific_storage_defaults_on_and_environment_overrides_file() {
+        let (config, _) = configured_retention(None, &[]).unwrap();
+        assert!(config.cc_store_path_specific);
+        let (config, _) =
+            configured_retention(Some("cc_store_path_specific = false"), &[]).unwrap();
+        assert!(!config.cc_store_path_specific);
+        let (config, _) = configured_retention(
+            Some("cc_store_path_specific = false"),
+            &[("MBX_CC_STORE_PATH_SPECIFIC", "1")],
+        )
+        .unwrap();
+        assert!(config.cc_store_path_specific);
     }
 
     #[test]

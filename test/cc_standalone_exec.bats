@@ -6,7 +6,7 @@ setup() {
 
   # An inherited compiler choice or policy would make the fixture prove the
   # environment rather than the shims.
-  unset MBX_CC CC CXX HOST_CC HOST_CXX TARGET_CC TARGET_CXX
+  unset MBX_CC MBX_CC_STORE_PATH_SPECIFIC CC CXX HOST_CC HOST_CXX TARGET_CC TARGET_CXX
   unset MBX_REAL_CC MBX_REAL_CXX MBX_CC_SHIM_COMPILERS CI
   export MBX_CACHE_DIR="$BATS_TEST_TMPDIR/store"
 
@@ -331,6 +331,13 @@ SOURCE
   for project in "$first" "$second"; do
     report="$project-cold.json"
     (cd "$project" && MBX_STATS_REPORT="$report" "$MBX_BIN" exec cc -g -c "$project/source.c" -o out/source.o)
+    if [[ "$project" == "$second" ]]; then
+      cd "$project"
+      run "$MBX_BIN" explain --last
+      assert_success
+      assert_output --partial 'this C object embeds absolute paths'
+      refute_output --partial 'no cache misses were recorded'
+    fi
     # Identical source and normalized arguments must not reuse the other path.
     run grep -E '"hits"[[:space:]]*:[[:space:]]*0' "$report"
     assert_success
@@ -434,4 +441,39 @@ SCRIPT
   refute_line 'unused'
   refute_line 'verified'
   assert_file_exists hello.d
+}
+
+@test "path-specific C storage can be disabled without disabling portable objects or existing hits" {
+  local project="$BATS_TEST_TMPDIR/path-policy"
+  mkdir -p "$project/out"
+  echo 'version = 4' >"$project/Cargo.lock"
+  echo 'const char *source(void) { return __FILE__; }' >"$project/source.c"
+  echo 'int value(void) { return 42; }' >"$project/portable.c"
+  cd "$project"
+  local report="$BATS_TEST_TMPDIR/policy.json" bypass="$BATS_TEST_TMPDIR/policy.tsv"
+  local attempt
+  for attempt in 1 2; do
+    rm -f out/source.o
+    run env MBX_CC_STORE_PATH_SPECIFIC=0 MBX_STATS_REPORT="$report" MBX_BYPASS_LOG="$bypass" "$MBX_BIN" exec cc -g -c "$project/source.c" -o out/source.o
+    assert_success
+    assert_file_exists out/source.o
+    run grep -E '"stored_bytes"[[:space:]]*:[[:space:]]*0' "$report"
+    assert_success
+    run grep 'cc-path-specific-storage-disabled' "$bypass"
+    assert_success
+  done
+  run env MBX_CC_STORE_PATH_SPECIFIC=0 "$MBX_BIN" exec cc -c portable.c -o out/portable.o
+  assert_success
+  rm out/portable.o
+  run env MBX_CC_STORE_PATH_SPECIFIC=0 MBX_STATS_REPORT="$report" "$MBX_BIN" exec cc -c portable.c -o out/portable.o
+  assert_success
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*1' "$report"
+  assert_success
+  run env MBX_CC_STORE_PATH_SPECIFIC=1 "$MBX_BIN" exec cc -g -c "$project/source.c" -o out/source.o
+  assert_success
+  rm out/source.o
+  run env MBX_CC_STORE_PATH_SPECIFIC=0 MBX_STATS_REPORT="$report" "$MBX_BIN" exec cc -g -c "$project/source.c" -o out/source.o
+  assert_success
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*1' "$report"
+  assert_success
 }

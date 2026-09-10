@@ -419,6 +419,9 @@ pub enum CcBypassReason {
     /// matter.
     #[error("compilation output records a path its key normalized away: {0}")]
     UnportableOutput(PathBuf),
+    /// The caller chose not to store objects bound to this checkout's paths.
+    #[error("storing path-specific C objects is disabled by MBX_CC_STORE_PATH_SPECIFIC")]
+    PathSpecificStorageDisabled,
     /// The object depends on the machine's own CPU rather than on named inputs.
     #[error("compiler flag tunes for the local CPU: {0}")]
     LocalCpuTarget(String),

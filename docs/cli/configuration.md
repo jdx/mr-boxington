@@ -49,6 +49,14 @@ Cache natively linked test binaries, executables, and proc macros. On macOS this
 
 Cache C and C++ compilations run by build scripts.
 
+### `cc_store_path_specific`
+
+- **Type:** `bool`
+- **Default:** `true`
+- **Set with:** `MBX_CC_STORE_PATH_SPECIFIC`
+
+Store C objects that embed absolute paths under checkout-specific keys. Disable for disposable worktrees to avoid storing objects that cannot be reused at another path. Existing entries may still be restored.
+
 ### `events`
 
 - **Type:** `bool`

@@ -140,6 +140,15 @@ fn display_last(session: &RecordedSession, previous_hits: &PreviousHits) {
             found = true;
         }
         crate::session::note(&format!("\n{crate_name}"));
+        if diagnostic.is_some_and(|value| value.components.contains_key("path-specific C object")) {
+            crate::session::note(
+                "  this C object embeds absolute paths and is cached only for the same paths; a new checkout cannot reuse another checkout's entry",
+            );
+            crate::session::note(
+                "  set MBX_CC_STORE_PATH_SPECIFIC=0 to skip storing these objects in disposable worktrees; existing entries remain readable",
+            );
+            continue;
+        }
         let previous = previous_hit(previous_hits, crate_name, diagnostic);
         match (previous, diagnostic) {
             (Some(previous), Some(current)) => display_diff(previous, current),

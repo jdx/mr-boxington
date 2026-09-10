@@ -115,14 +115,14 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     // Whether an action lookup actually ran. A cold compilation has no
     // prediction to build a key from, so nothing was ever asked of the cache --
     // which the summary and the TUI report separately from a lookup that missed.
-    let mut looked_up = false;
+    let mut lookup = LookupState::default();
     if let Some((prediction, discovered)) = usable {
         let mut candidate = context.clone();
         discovered.clone().apply_to(&mut candidate)?;
         let action = crate::phase_timing::measure("key", || {
             invocation.action_with_path_binding(candidate, prediction.path_specific)
         })?;
-        looked_up = true;
+        lookup.record(&action, &invocation_digest, prediction.path_specific);
         // A restore that fails is a miss, not a bypass. Bypassing would leave
         // the compilation uncached and publish nothing, so a partial or corrupt
         // entry would fail the same way on every later build; compiling and
@@ -183,7 +183,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         // has not already said: either we waited and it is freshly
         // published, or nothing was ever looked up and it is the first
         // prediction we have.
-        && (flight.waited() || !looked_up)
+        && (flight.waited() || !lookup.attempted)
         && let Some(payload) = flight.inherited()
     {
         match restore_flight_prediction(
@@ -192,7 +192,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
             &context,
             &task,
             &invocation_digest,
-            &mut looked_up,
+            &mut lookup,
             None,
         ) {
             Ok(Some((action, cached, discovered))) => {
@@ -235,7 +235,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
                         &context,
                         &task,
                         &invocation_digest,
-                        &mut looked_up,
+                        &mut lookup,
                         Some(&prediction.action),
                     ) {
                         Ok(Some((action, cached, discovered))) => {
@@ -276,7 +276,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     }
     // Recorded here rather than where the prediction came up empty, because
     // a flight can still turn such a compilation into a real lookup.
-    if !looked_up {
+    if !lookup.attempted {
         session::record_unconsulted();
     }
 
@@ -309,16 +309,17 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     drop(permit);
     crate::scheduler::record_compiler_memory(&demand, &output.status);
     let duration_ns = duration_ns(started.elapsed());
-    session::record_compiler_invocation(
+    session::record_compiler_invocation_with_diagnostic(
         if verification.is_some() {
             "verification"
-        } else if looked_up {
+        } else if lookup.attempted {
             "miss"
         } else {
             "unconsulted"
         },
         Some(&compilation_name(&invocation)),
         duration_ns,
+        lookup.diagnostic,
     );
 
     let verified = verification.is_some();
@@ -417,6 +418,12 @@ fn publish(
     let object = invocation.output_in(&context.working_dir);
     let mut prediction = invocation.prediction(context, duration_ns)?;
     prediction.path_specific = !portable.outputs_are_clean(&object, &context.path_mappings);
+    if prediction.path_specific
+        && std::env::var_os("MBX_CC_STORE_PATH_SPECIFIC")
+            .is_some_and(|value| value == "0" || value.is_empty())
+    {
+        return Err(CcBypassReason::PathSpecificStorageDisabled.into());
+    }
     let action = invocation.action_with_path_binding(context.clone(), prediction.path_specific)?;
     if let Err(error) = publish_result(&action, &object, output, &context.path_mappings) {
         // GCC can name a random assembler tempfile in stderr. An immutable
@@ -446,6 +453,30 @@ fn publish(
     Ok(())
 }
 
+/// The last actual lookup, including one supplied by a local or remote flight.
+#[derive(Default)]
+struct LookupState {
+    attempted: bool,
+    diagnostic: Option<mbx_cache_core::ActionDiagnostic>,
+}
+
+impl LookupState {
+    fn record(&mut self, action: &CcAction, invocation: &CacheDigest, path_specific: bool) {
+        self.attempted = true;
+        self.diagnostic = path_specific.then(|| mbx_cache_core::ActionDiagnostic {
+            action: action.digest.clone(),
+            components: BTreeMap::from([
+                ("compilation unit".into(), invocation.clone()),
+                (
+                    "path-specific C object".into(),
+                    CacheDigest::blake3(b"path-specific"),
+                ),
+            ]),
+            inputs: Default::default(),
+        });
+    }
+}
+
 /// Restore through the prediction a flight left behind.
 ///
 /// The payload gets exactly the treatment a manifest prediction does -- its
@@ -459,7 +490,7 @@ fn restore_flight_prediction(
     context: &CcActionContext,
     task: &str,
     invocation_digest: &CacheDigest,
-    looked_up: &mut bool,
+    lookup: &mut LookupState,
     recorded_action: Option<&CacheDigest>,
 ) -> Result<Option<(CacheDigest, CachedCompilation, CcDiscoveredInputs)>> {
     let _phase = crate::phase_timing::phase("key");
@@ -477,7 +508,7 @@ fn restore_flight_prediction(
     if recorded_action.is_some_and(|recorded| recorded != &action.digest) {
         bail!("the action promise no longer matches its predicted inputs");
     }
-    *looked_up = true;
+    lookup.record(&action, invocation_digest, prediction.path_specific);
     let restored = restore_result(
         &action,
         invocation,

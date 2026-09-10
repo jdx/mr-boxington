@@ -110,6 +110,7 @@ pub struct CacheSession {
     verify_sample_rate: u8,
     incremental: bool,
     share_out_dir: bool,
+    cc_store_path_specific: bool,
     build_script_execution: bool,
     agent: CacheAgent,
     /// The stream `mbx tui` watches, when event recording is on.
@@ -218,6 +219,7 @@ impl CacheSession {
             verify_sample_rate: config.verify_sample_rate,
             incremental: config.incremental,
             share_out_dir: config.share_out_dir,
+            cc_store_path_specific: config.cc_store_path_specific,
             build_script_execution: config.build_script_execution,
             agent,
             events,
@@ -344,6 +346,15 @@ impl CacheSession {
         environment.insert(
             verification::SAMPLE_RATE_ENV.into(),
             self.verify_sample_rate.to_string(),
+        );
+        environment.insert(
+            "MBX_CC_STORE_PATH_SPECIFIC".into(),
+            if self.cc_store_path_specific {
+                "1"
+            } else {
+                "0"
+            }
+            .into(),
         );
         environment.insert(
             SHARE_OUT_DIR_ENV.into(),
@@ -1859,6 +1870,7 @@ fn expected_cc_bypass(reason: Option<&mbx_cache_cc::CcBypassReason>) -> bool {
                 | ToolPassthrough(_)
                 | Plugin(_)
                 | UnportableOutput(_)
+                | PathSpecificStorageDisabled
                 | SearchPathModifiedDuringCompilation(_)
                 | LocalCpuTarget(_)
                 | UnsupportedCompilerDriver(_)
