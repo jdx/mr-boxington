@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v8.jsonl");
+const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v9.jsonl");
 
 fn digest() -> CacheDigest {
     CacheDigest {
@@ -119,7 +119,7 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
         (
             "request.hello",
             AgentRequest::Hello {
-                protocol: 8,
+                protocol: 9,
                 client_version: "0.3.0".into(),
             },
         ),
@@ -178,6 +178,13 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
             "request.record_warning",
             AgentRequest::RecordWarning {
                 message: "cc result was not restored: blob missing".into(),
+            },
+        ),
+        (
+            "request.record_debug",
+            AgentRequest::RecordDebug {
+                target: "mbx::session".into(),
+                message: "rustc cache bypassed: compiler query".into(),
             },
         ),
         (
@@ -296,7 +303,7 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
         (
             "response.hello",
             AgentResponse::Hello {
-                protocol: 8,
+                protocol: 9,
                 agent_version: "0.3.0".into(),
             },
         ),
@@ -351,6 +358,7 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
         ),
         ("response.warning_recorded", AgentResponse::WarningRecorded),
         ("response.error_recorded", AgentResponse::ErrorRecorded),
+        ("response.debug_recorded", AgentResponse::DebugRecorded),
         (
             "response.compiler_invocation_recorded",
             AgentResponse::CompilerInvocationRecorded,
@@ -459,7 +467,7 @@ fn assert_fixture<T: Serialize>(expected: &mut BTreeMap<&str, &str>, name: &str,
 }
 
 #[test]
-fn agent_protocol_v8_shapes_match_the_conformance_fixture() {
+fn agent_protocol_v9_shapes_match_the_conformance_fixture() {
     let mut expected = fixture();
     for line in AGENT_FIXTURE.lines() {
         let (name, json) = line
@@ -537,7 +545,7 @@ fn agent_protocol_v8_shapes_match_the_conformance_fixture() {
 
 #[test]
 fn protocol_constants_match_the_contract() {
-    assert_eq!(AGENT_PROTOCOL_VERSION, 8);
+    assert_eq!(AGENT_PROTOCOL_VERSION, 9);
     assert_eq!(PROTOCOL_VERSION, 1);
     assert_eq!(
         ACTION_RESULT_MEDIA_TYPE,
@@ -587,6 +595,7 @@ define_variant_coverage!(request_variant_name, EXPECTED_REQUEST_VARIANTS, AgentR
     AgentRequest::RecordUnconsulted => "record_unconsulted",
     AgentRequest::RecordWarning { .. } => "record_warning",
     AgentRequest::RecordError { .. } => "record_error",
+    AgentRequest::RecordDebug { .. } => "record_debug",
     AgentRequest::RecordCompilerInvocation { .. } => "record_compiler_invocation",
     AgentRequest::RecordActionVerification { .. } => "record_action_verification",
     AgentRequest::StoreActionResult { .. } => "store_action_result",
@@ -616,6 +625,7 @@ define_variant_coverage!(response_variant_name, EXPECTED_RESPONSE_VARIANTS, Agen
     AgentResponse::UnconsultedRecorded => "unconsulted_recorded",
     AgentResponse::WarningRecorded => "warning_recorded",
     AgentResponse::ErrorRecorded => "error_recorded",
+    AgentResponse::DebugRecorded => "debug_recorded",
     AgentResponse::CompilerInvocationRecorded => "compiler_invocation_recorded",
     AgentResponse::ActionStored { .. } => "action_stored",
     AgentResponse::ActionPrediction { .. } => "action_prediction",

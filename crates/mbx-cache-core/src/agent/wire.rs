@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Wire protocol version used between an in-process cache agent and its shims.
-pub const AGENT_PROTOCOL_VERSION: u8 = 8;
+pub const AGENT_PROTOCOL_VERSION: u8 = 9;
 /// Largest single protocol request the agent will read.
 ///
 /// Requests are small JSON objects; the largest legitimate ones carry an output
@@ -308,6 +308,15 @@ pub enum AgentRequest {
         /// Human-readable single-line diagnostic.
         message: String,
     },
+    /// Emit a routine shim log through the owning session's logger.
+    /// Filtering uses the original target; these records never consume the
+    /// warning/error allowance or enter compiler output.
+    RecordDebug {
+        /// Original logging module target.
+        target: String,
+        /// Human-readable single-line message.
+        message: String,
+    },
 }
 
 /// One wrapper invocation, independent of its cache hit/miss accounting.
@@ -559,4 +568,6 @@ pub enum AgentResponse {
     /// This is appended to preserve every existing response variant and wire
     /// shape while giving fatal diagnostics their own acknowledgement.
     ErrorRecorded,
+    /// A debug record was accepted, including when filtered out.
+    DebugRecorded,
 }

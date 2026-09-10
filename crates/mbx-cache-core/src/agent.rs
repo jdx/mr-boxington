@@ -7,7 +7,7 @@ use crate::{
 };
 use eyre::{Context, Result, bail};
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream};
-use log::{debug, info, warn};
+use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -973,7 +973,7 @@ impl CacheAgent {
             {
                 continue;
             }
-            info!(
+            debug!(
                 "no predictions were recorded for {task}; inheriting {} from {identity}",
                 manifest.predictions.len()
             );
@@ -1502,6 +1502,19 @@ impl CacheAgent {
                 Some(Err(error)) => Err(error),
                 None => self.record_diagnostic(DiagnosticLevel::Warning, message),
             },
+            AgentRequest::RecordDebug { target, message } => (|| {
+                if target.is_empty()
+                    || target.len() > 256
+                    || target.contains(['\n', '\r', '\0'])
+                    || message.is_empty()
+                    || message.len() > MAX_DIAGNOSTIC_BYTES
+                    || message.contains(['\n', '\r', '\0'])
+                {
+                    bail!("invalid shim debug record");
+                }
+                debug!(target: &target, "{message}");
+                Ok(AgentResponse::DebugRecorded)
+            })(),
             AgentRequest::RecordError { message } => {
                 self.record_diagnostic(DiagnosticLevel::Error, message)
             }

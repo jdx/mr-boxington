@@ -5102,3 +5102,59 @@ async fn wrapper_timing_aggregates_without_changing_action_counters() {
     ));
     assert_eq!(agent.stats(), stats);
 }
+
+#[tokio::test]
+async fn debug_records_do_not_consume_warning_or_error_capacity() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    for index in 0..MAX_DIAGNOSTICS + 1 {
+        assert!(matches!(
+            agent
+                .respond(AgentRequest::RecordDebug {
+                    target: "mbx::session".into(),
+                    message: format!("routine bypass {index}"),
+                })
+                .await,
+            AgentResponse::DebugRecorded
+        ));
+    }
+    assert!(agent.diagnostics.lock().unwrap().is_empty());
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::RecordWarning {
+                message: "storage failure".into(),
+            })
+            .await,
+        AgentResponse::WarningRecorded
+    ));
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::RecordError {
+                message: "fatal failure".into(),
+            })
+            .await,
+        AgentResponse::ErrorRecorded
+    ));
+}
+
+#[tokio::test]
+async fn malformed_debug_records_are_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    for (target, message) in [
+        (String::new(), "message".into()),
+        ("x".repeat(257), "message".into()),
+        ("mbx\nforged".into(), "message".into()),
+        ("mbx".into(), String::new()),
+        ("mbx".into(), "x".repeat(MAX_DIAGNOSTIC_BYTES + 1)),
+        ("mbx".into(), "line\nline".into()),
+        ("mbx".into(), "nul\0byte".into()),
+    ] {
+        assert!(matches!(
+            agent
+                .respond(AgentRequest::RecordDebug { target, message })
+                .await,
+            AgentResponse::Error { .. }
+        ));
+    }
+}

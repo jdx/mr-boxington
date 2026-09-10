@@ -1214,8 +1214,6 @@ pub fn run_cc_shim(language: CcLanguage) -> ExitCode {
         Ok(exit_code) => return exit_code,
         Err(error) => {
             record_cc_bypass(&error);
-            #[cfg(debug_assertions)]
-            report_shim_warning(&format!("cc cache bypassed: {error:#}"));
         }
     }
     run_transparent_cc(compiler, arguments)
@@ -1360,8 +1358,6 @@ pub fn run_rustc_shim() -> ExitCode {
             Ok(exit_code) => return exit_code,
             Err(error) => {
                 record_bypass(&error);
-                #[cfg(debug_assertions)]
-                report_shim_warning(&format!("rustc cache bypassed: {error:#}"));
             }
         }
     }
@@ -1757,7 +1753,11 @@ fn record_bypass(error: &eyre::Report) {
         reason.and_then(mbx_cache_rustc::BypassReason::remediation),
     );
     // A shim running outside a session has nowhere to report, which is fine.
-    let _ = request_agent(&[AgentRequest::RecordBypass { kind: kind.into() }]);
+    let diagnostic = bypass_diagnostic(
+        expected_rustc_bypass(reason),
+        &format!("rustc cache bypassed: {error:#}"),
+    );
+    let _ = request_agent(&[AgentRequest::RecordBypass { kind: kind.into() }, diagnostic]);
 }
 
 /// Tell the session that a C or C++ compilation was not cacheable.
@@ -1776,7 +1776,88 @@ fn record_cc_bypass(error: &eyre::Report) {
         reason.and_then(mbx_cache_cc::CcBypassReason::remediation),
     );
     // A shim running outside a session has nowhere to report, which is fine.
-    let _ = request_agent(&[AgentRequest::RecordBypass { kind }]);
+    let diagnostic = bypass_diagnostic(
+        expected_cc_bypass(reason),
+        &format!("cc cache bypassed: {error:#}"),
+    );
+    let _ = request_agent(&[AgentRequest::RecordBypass { kind }, diagnostic]);
+}
+
+/// Only known routine decisions are downgraded: adapter errors also include
+/// failed reads and invalid state, which must retain warning severity.
+fn expected_rustc_bypass(reason: Option<&mbx_cache_rustc::BypassReason>) -> bool {
+    use mbx_cache_rustc::BypassReason::*;
+    matches!(
+        reason,
+        Some(
+            CompilerQuery
+                | UnknownFlag(_)
+                | UnknownCodegenOption(_)
+                | StandardInput
+                | Incremental
+                | UnsupportedCrateType(_)
+                | UnsupportedEmit(_)
+                | NoCacheableOutput
+                | NoDepInfo
+                | NativeLibrary
+                | UnportableNativeLink(_)
+                | UnmodeledLinkArgument(_)
+                | UnsupportedSearchPath(_)
+                | UnmappedAbsolutePath(_)
+                | NonUtf8Argument { .. }
+                | NonUtf8Path(_)
+                | SplitOutputDirectories
+                | ImplicitEmitWithOutputFile(_)
+                | AmbiguousOutputName(_)
+        )
+    )
+}
+
+fn expected_cc_bypass(reason: Option<&mbx_cache_cc::CcBypassReason>) -> bool {
+    use mbx_cache_cc::CcBypassReason::*;
+    matches!(
+        reason,
+        Some(
+            CompilerQuery
+                | NotACompile
+                | UnknownFlag(_)
+                | ResponseFile(_)
+                | NonObjectOutput(_)
+                | StandardInput
+                | UnsupportedLanguage(_)
+                | CallerDependencyFlags(_)
+                | PrecompiledHeader(_)
+                | CoverageInstrumentation(_)
+                | SplitDebugOutput(_)
+                | SaveTemps(_)
+                | ToolPassthrough(_)
+                | Plugin(_)
+                | UnportableOutput(_)
+                | LocalCpuTarget(_)
+                | UnsupportedCompilerDriver(_)
+                | UnsupportedEnvironment(_)
+                | EmbeddedTimestampMacro(_)
+                | AssemblerInputDirective(_)
+                | TooManyInputs
+                | UnmappedAbsolutePath(_)
+                | NonUtf8Argument { .. }
+                | NonUtf8Path(_)
+        )
+    )
+}
+
+/// Known routine bypass reasons describe conservative decisions. Other
+/// errors represent failed cache paths even when the compiler can recover.
+fn bypass_diagnostic(expected: bool, message: &str) -> AgentRequest {
+    let message = diagnostics::diagnostic_message(message);
+    if expected {
+        AgentRequest::RecordDebug {
+            target: module_path!().into(),
+            message,
+        }
+    } else {
+        AgentRequest::RecordWarning { message }
+    }
 }
 
 /// Record a compilation the cache had no key to look up with.

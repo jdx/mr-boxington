@@ -3594,3 +3594,91 @@ fn sampled_verification_reaches_wrappers_and_full_verification_overrides_it() {
         }
     }
 }
+
+#[test]
+fn routine_shim_logs_obey_session_filters_without_fingerprint_pollution() {
+    for (filter, visible) in [
+        ("info", false),
+        ("off,mbx::session=debug", true),
+        ("debug,mbx::session=off", false),
+        ("off,mbx::session=debug/never-match-this-message", false),
+    ] {
+        let project = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        write_project(project.path());
+        let report = project.path().join("report.json");
+        // rustc queries made by Cargo take the routine bypass path.
+        let (_, stderr) = build_with(
+            project.path(),
+            store.path(),
+            &report,
+            &[("MBX_LOG", filter)],
+        );
+        let lines: Vec<_> = stderr
+            .lines()
+            .filter(|line| line.contains("rustc cache bypassed:"))
+            .collect();
+        assert_eq!(!lines.is_empty(), visible, "filter {filter}: {stderr}");
+        for line in lines {
+            assert!(line.contains("DEBUG"), "wrong severity: {line}");
+        }
+        let mut pending = vec![project.path().join("target")];
+        while let Some(path) = pending.pop() {
+            if path.is_dir() {
+                pending.extend(
+                    std::fs::read_dir(path)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path()),
+                );
+            } else if path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("output-"))
+            {
+                let bytes = std::fs::read(&path).unwrap();
+                assert!(
+                    !String::from_utf8_lossy(&bytes).contains("cache bypassed:"),
+                    "polluted fingerprint: {}",
+                    path.display()
+                );
+            }
+        }
+        let (_, fresh_stderr) =
+            build_with(project.path(), store.path(), &report, &[("MBX_LOG", "off")]);
+        assert!(
+            !fresh_stderr.contains("cache bypassed:"),
+            "replayed diagnostic: {fresh_stderr}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn routine_shim_logs_stay_off_compiler_stderr_when_delivery_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let shim = mbx::session::install_shim(
+        Path::new(env!("CARGO_BIN_EXE_mbx")),
+        directory.path(),
+        mbx::session::ShimLink::Tracking,
+    )
+    .unwrap();
+    // A query bypasses compilation before running this stand-in compiler.
+    let compiler = directory.path().join("compiler");
+    std::fs::write(
+        &compiler,
+        "#!/bin/sh\nprintf 'compiler stdout\\n'\nprintf 'compiler stderr\\n' >&2\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&compiler, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new(shim)
+        .arg(compiler)
+        .arg("--version")
+        .env("MBX_SOCKET", directory.path().join("missing-agent.sock"))
+        .env("MBX_LOG", "debug")
+        .env_remove("MBX_PREVIOUS_RUSTC_WRAPPER")
+        .env_remove("MBX_PREVIOUS_RUSTC_WORKSPACE_WRAPPER")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"compiler stdout\n");
+    assert_eq!(output.stderr, b"compiler stderr\n");
+}

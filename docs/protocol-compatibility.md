@@ -25,7 +25,7 @@ the handshake and do not exchange cache requests. Adding, removing, or changing
 a request or response therefore requires incrementing `AGENT_PROTOCOL_VERSION`.
 
 `crates/mbx-cache-core/tests/agent_protocol.rs` exercises every request and
-response variant against `tests/fixtures/agent-protocol-v8.jsonl`. Its exhaustive
+response variant against `tests/fixtures/agent-protocol-v9.jsonl`. Its exhaustive
 matches make a newly added variant fail to compile until the fixture and the
 protocol-version decision are reviewed together.
 
@@ -48,6 +48,10 @@ and modification time let the agent keep a compiler or linker identity across
 sessions instead of probing it in every build. The client and agent still require exact
 protocol and application-version equality, including when different
 applications ship them.
+
+Agent protocol v9 adds `record_debug` and `debug_recorded`. Routine shim logs
+carry their original module target and are filtered by the session logger.
+They do not consume the warning/error diagnostic allowance.
 
 ## Remote cache protocol
 

@@ -49,14 +49,7 @@ enum Severity {
 }
 
 fn report_shim_diagnostic(severity: Severity, message: &str) {
-    let mut message = message.replace(['\n', '\r'], "; ");
-    // Stay under the agent's acceptance limit rather than losing the whole
-    // diagnostic to it; the start of an error chain names the failure.
-    if message.len() > 2048 {
-        let end = (0..=2048).rfind(|&index| message.is_char_boundary(index));
-        message.truncate(end.unwrap_or_default());
-        message.push_str("...");
-    }
+    let message = diagnostic_message(message);
     let (label, request) = match severity {
         Severity::Warning => (
             "warning",
@@ -85,4 +78,15 @@ fn report_shim_diagnostic(severity: Severity, message: &str) {
     {
         note(&format!("mbx[{label}]: {message}"));
     }
+}
+
+/// Keep forwarded diagnostics single-line and below the agent's byte limit.
+pub(super) fn diagnostic_message(message: &str) -> String {
+    let mut message = message.replace(['\n', '\r', '\0'], "; ");
+    if message.len() > 2048 {
+        let end = (0..=2048).rfind(|&index| message.is_char_boundary(index));
+        message.truncate(end.unwrap_or_default());
+        message.push_str("...");
+    }
+    message
 }

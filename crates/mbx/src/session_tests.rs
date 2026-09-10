@@ -1322,3 +1322,31 @@ fn json_target_linkers_match_equivalent_paths() {
         );
     }
 }
+
+#[test]
+fn routine_bypasses_are_debug_but_failed_cache_paths_are_warnings() {
+    assert!(super::expected_rustc_bypass(Some(
+        &mbx_cache_rustc::BypassReason::CompilerQuery
+    )));
+    assert!(super::expected_cc_bypass(Some(
+        &mbx_cache_cc::CcBypassReason::NotACompile
+    )));
+    assert!(!super::expected_rustc_bypass(Some(
+        &mbx_cache_rustc::BypassReason::InputRead {
+            path: "input.rs".into(),
+            message: "permission denied".into(),
+        }
+    )));
+    assert!(!super::expected_cc_bypass(Some(
+        &mbx_cache_cc::CcBypassReason::CompilerIdentityUnavailable("probe failed".into())
+    )));
+    assert!(!super::expected_rustc_bypass(None));
+    assert!(!super::expected_cc_bypass(None));
+    assert!(
+        matches!(super::bypass_diagnostic(true, "routine"), AgentRequest::RecordDebug { target, .. } if target == "mbx::session")
+    );
+    assert!(matches!(
+        super::bypass_diagnostic(false, "failed"),
+        AgentRequest::RecordWarning { .. }
+    ));
+}
