@@ -3,7 +3,7 @@
   "checkpoint_id": "01M26D7V7HDJVVN3Z1MF1XGZDA",
   "strategy": "manual-commit",
   "branch": "codex/investigate-native-cache",
-  "checkpoints_count": 2,
+  "checkpoints_count": 3,
   "files_touched": [
     "test/cc_standalone_exec.bats"
   ],
@@ -14,13 +14,20 @@
       "compact_transcript": "/0/transcript.jsonl",
       "content_hash": "/0/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/1/metadata.json",
+      "transcript": "/1/full.jsonl",
+      "compact_transcript": "/1/transcript.jsonl",
+      "content_hash": "/1/content_hash.txt",
+      "prompt": ""
     }
   ],
   "token_usage": {
-    "input_tokens": 12678,
+    "input_tokens": 17859,
     "cache_creation_tokens": 0,
-    "cache_read_tokens": 1086720,
-    "output_tokens": 3683,
-    "api_call_count": 14
+    "cache_read_tokens": 1401984,
+    "output_tokens": 4210,
+    "api_call_count": 17
   }
 }
