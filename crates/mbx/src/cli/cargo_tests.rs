@@ -362,6 +362,7 @@ pub(super) fn managed_target_config(root: &Path) -> Config {
         build_script_execution: false,
         events: false,
         cc: false,
+        cc_store_path_specific: true,
         remote: Default::default(),
         http: Default::default(),
         gc: Default::default(),
