@@ -2866,11 +2866,17 @@ fn path_mappings_with_env(
 /// same shape below a target-triple directory). Mapping the profile parent,
 /// rather than only `deps`, also covers generated inputs below `build/`.
 fn standalone_target_root(output: &Path, target: Option<&str>) -> PathBuf {
-    if matches!(
+    let profile = if matches!(
         output.file_name().and_then(OsStr::to_str),
         Some("deps" | "examples")
-    ) && let Some(profile_root) = output.parent().and_then(Path::parent)
-    {
+    ) {
+        output.parent()
+    } else if output.parent().and_then(Path::file_name) == Some(OsStr::new("build")) {
+        output.parent().and_then(Path::parent)
+    } else {
+        None
+    };
+    if let Some(profile_root) = profile.and_then(Path::parent) {
         let target_component = target.and_then(|target| Path::new(target).file_stem());
         if target_component.is_some_and(|target| profile_root.file_name() == Some(target))
             && let Some(root) = profile_root.parent()
