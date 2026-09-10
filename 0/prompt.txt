@@ -1,0 +1,37 @@
+how does [https://github.com/jdx/mr-boxington/pull/408](https://github.com/jdx/mr-boxington/pull/408) look
+
+---
+
+ok maybe rerun it and see if we have similar results
+
+---
+
+ok merge the bench pr for honesty and investigate what is going on and how we can improve perf
+
+---
+
+ok fix it
+
+---
+
+why did ci fail?
+
+---
+
+address feedback until it settles
+
+---
+
+rebase
+
+---
+
+wait for the release then run the perf job and tell me the results
+
+---
+
+is there a pr?
+
+---
+
+oh don't use dry run next time, can you commit the benchmark numbers directly to origin/main from the dry run? then investigate how we can improve perf more
