@@ -2134,6 +2134,10 @@ fn portable_proc_macro_install_name_is_keyed_and_preserves_explicit_names() {
     arguments.push("-Clink-arg=-Wl,-install_name,@rpath/custom.dylib".into());
     let explicit = RustcInvocation::parse_with(&arguments, options).unwrap();
     assert_eq!(explicit.portable_install_name(&outputs), None);
+    let command = explicit.dep_info_command(&outputs.dep_info).unwrap();
+    assert!(command.arguments().contains(&OsString::from(
+        "--codegen=link-arg=-Wl,-install_name,@rpath/custom.dylib"
+    )));
     for value in [
         "/absolute/custom.dylib",
         "@rpath/libwidget.dylib,-dead_strip",

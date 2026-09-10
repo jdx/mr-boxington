@@ -225,6 +225,8 @@ RUST
   assert_success
   run grep -E '"divergences"[[:space:]]*:[[:space:]]*0' "$report"
   assert_success
+  run grep -E '"misses"[[:space:]]*:[[:space:]]*0' "$report"
+  assert_success
   local dylib_a dylib_b
   dylib_a="$(find -L "$first/target" -name 'libaudit_macro-*.dylib' | head -1)"
   dylib_b="$(find -L "$second/target" -name 'libaudit_macro-*.dylib' | head -1)"
