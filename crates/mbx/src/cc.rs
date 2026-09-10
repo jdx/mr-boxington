@@ -651,7 +651,7 @@ impl Portable {
                 ]
                 .into_iter()
                 .flatten()
-                .filter_map(|path| path.to_str().map(str::to_owned))
+                .flat_map(mapping_root_spellings)
             }))
             .collect::<BTreeSet<_>>();
         if values.is_empty() {
@@ -675,6 +675,28 @@ impl Portable {
                 .any(|spelling| memchr::memmem::find(&contents, spelling.as_bytes()).is_some())
         })
     }
+}
+
+/// Include the logical spellings of macOS's system directory aliases only
+/// when they resolve to the same root. Canonicalization alone loses them.
+fn mapping_root_spellings(path: PathBuf) -> Vec<String> {
+    let mut spellings = Vec::new();
+    if let Some(value) = path.to_str() {
+        spellings.push(value.to_owned());
+    }
+    #[cfg(target_os = "macos")]
+    if let Ok(relative) = path.strip_prefix("/private") {
+        let logical = Path::new("/").join(relative);
+        if let (Ok(physical), Ok(alias)) = (
+            std::fs::canonicalize(&path),
+            std::fs::canonicalize(&logical),
+        ) && physical == alias
+            && let Some(value) = logical.to_str()
+        {
+            spellings.push(value.to_owned());
+        }
+    }
+    spellings
 }
 
 /// The environment values a C or C++ compilation may be made independent of.

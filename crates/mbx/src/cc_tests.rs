@@ -347,3 +347,22 @@ fn output_scan_matches_plain_windows_drive_and_unc_paths() {
         assert!(portable.outputs_are_clean(&object, &[]));
     }
 }
+
+/// Non-working-directory mappings can use macOS aliases omitted by canonicalization.
+#[cfg(target_os = "macos")]
+#[test]
+fn output_scan_matches_logical_macos_mapping_roots() {
+    for parent in ["/private/tmp", "/private/var/tmp"] {
+        let directory = tempfile::tempdir_in(parent).unwrap();
+        let physical = std::fs::canonicalize(directory.path()).unwrap();
+        let logical = Path::new("/").join(physical.strip_prefix("/private").unwrap());
+        assert_eq!(std::fs::canonicalize(&logical).unwrap(), physical);
+        let object = directory.path().join("object.o");
+        std::fs::write(&object, logical.join("generated.c").to_str().unwrap()).unwrap();
+        let portable = Portable {
+            arguments: Vec::new(),
+            values: Vec::new(),
+        };
+        assert!(!portable.outputs_are_clean(&object, &[PathMapping::new(&physical, "target")]));
+    }
+}
