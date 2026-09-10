@@ -266,3 +266,33 @@ fn duplicate_portable_paths_do_not_change_compiler_arguments() {
         assert_eq!(repeated.values, unique.values);
     }
 }
+
+#[test]
+fn a_failed_before_snapshot_cannot_be_replaced_by_a_successful_later_walk() {
+    let root = tempfile::tempdir().unwrap();
+    let include = root.path().join("include");
+    // A file where an include directory should be makes the first walk fail.
+    std::fs::write(&include, b"not a directory").unwrap();
+    let searchable = BTreeSet::from([include.clone()]);
+    let before = manifest_snapshot(&searchable);
+    assert!(before.is_err());
+    std::fs::remove_file(&include).unwrap();
+    std::fs::create_dir(&include).unwrap();
+    assert!(manifest_snapshot(&searchable).is_ok());
+    assert!(verify_search_path_unchanged(&searchable, before).is_err());
+}
+
+#[test]
+fn successful_before_snapshots_still_detect_new_headers() {
+    let root = tempfile::tempdir().unwrap();
+    let searchable = BTreeSet::from([root.path().to_path_buf()]);
+    let before = manifest_snapshot(&searchable);
+    verify_search_path_unchanged(&searchable, before).unwrap();
+    let before = manifest_snapshot(&searchable);
+    std::fs::write(root.path().join("new.h"), b"header").unwrap();
+    let error = verify_search_path_unchanged(&searchable, before).unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<CcBypassReason>(),
+        Some(CcBypassReason::SearchPathModifiedDuringCompilation(_))
+    ));
+}

@@ -3728,6 +3728,7 @@ fn cc_publication_failures_are_visible_without_counting_a_second_outcome() {
         );
         let log = std::fs::read_to_string(log).unwrap();
         assert!(log.contains("input expands a timestamp macro:"), "{log}");
+        assert!(log.contains("unit=cc:hello.c"), "{log}");
         assert!(
             stats["bypasses"]
                 .get("cc-embedded-timestamp-macro")

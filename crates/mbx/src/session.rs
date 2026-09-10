@@ -1748,6 +1748,7 @@ fn record_bypass(error: &eyre::Report) {
     let reason = error.downcast_ref::<mbx_cache_rustc::BypassReason>();
     let kind = reason.map_or("other", mbx_cache_rustc::BypassReason::kind);
     append_bypass_log(
+        None,
         kind,
         error,
         reason.and_then(mbx_cache_rustc::BypassReason::remediation),
@@ -1771,6 +1772,7 @@ fn record_cc_bypass(error: &eyre::Report) {
         |reason| format!("cc-{}", reason.kind()),
     );
     append_bypass_log(
+        None,
         &kind,
         error,
         reason.and_then(mbx_cache_cc::CcBypassReason::remediation),
@@ -1792,13 +1794,17 @@ pub(crate) fn report_cc_publication_failure(unit: &str, error: &eyre::Report) {
         |reason| format!("cc-{}", reason.kind()),
     );
     append_bypass_log(
+        Some(unit),
         &kind,
         error,
         reason.and_then(mbx_cache_cc::CcBypassReason::remediation),
     );
     let diagnostic = bypass_diagnostic(
         expected_cc_bypass(reason),
-        &format!("cc result was not published for {unit}: {error:#}"),
+        &format!(
+            "cc result was not published for {}: {error:#}",
+            unit.escape_default()
+        ),
     );
     let _ = request_agent(&[diagnostic]);
 }
@@ -1853,6 +1859,7 @@ fn expected_cc_bypass(reason: Option<&mbx_cache_cc::CcBypassReason>) -> bool {
                 | ToolPassthrough(_)
                 | Plugin(_)
                 | UnportableOutput(_)
+                | SearchPathModifiedDuringCompilation(_)
                 | LocalCpuTarget(_)
                 | UnsupportedCompilerDriver(_)
                 | UnsupportedEnvironment(_)
@@ -1948,7 +1955,12 @@ pub(crate) fn action_diagnostic_request(
 /// or path caused each one. It exists because stderr cannot be relied on:
 /// cargo swallows the output of its own probe invocations, so some bypasses are
 /// invisible there.
-fn append_bypass_log(kind: &str, error: &eyre::Report, remediation: Option<&str>) {
+fn append_bypass_log(
+    unit: Option<&str>,
+    kind: &str,
+    error: &eyre::Report,
+    remediation: Option<&str>,
+) {
     let Some(path) = std::env::var_os(BYPASS_LOG_ENV).filter(|path| !path.is_empty()) else {
         return;
     };
@@ -1957,7 +1969,10 @@ fn append_bypass_log(kind: &str, error: &eyre::Report, remediation: Option<&str>
     // Records are a single short line for that reason: a write the kernel had
     // to break up could still interleave, and nothing here can prevent it.
     let suffix = remediation.map_or_else(String::new, |text| format!("\t{text}"));
-    let line = format!("{kind}\t{error:#}{suffix}\n");
+    let unit = unit.map_or_else(String::new, |unit| {
+        format!("\tunit={}", unit.escape_default())
+    });
+    let line = format!("{kind}\t{error:#}{suffix}{unit}\n");
     if let Err(problem) = append_line(&path, &line) {
         // Say so once. This runs per compilation and a destination that cannot
         // be written now will fail for every later record too, so warning each

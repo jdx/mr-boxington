@@ -1342,6 +1342,9 @@ fn routine_bypasses_are_debug_but_failed_cache_paths_are_warnings() {
     )));
     assert!(!super::expected_rustc_bypass(None));
     assert!(!super::expected_cc_bypass(None));
+    assert!(super::expected_cc_bypass(Some(
+        &mbx_cache_cc::CcBypassReason::SearchPathModifiedDuringCompilation("include".into())
+    )));
     assert!(
         matches!(super::bypass_diagnostic(true, "routine"), AgentRequest::RecordDebug { target, .. } if target == "mbx::session")
     );

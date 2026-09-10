@@ -23,13 +23,17 @@ run_windows = "./target/mbx-bootstrap/mbx.exe build --workspace --all-targets"
 [tasks.test]
 alias = "t"
 description = "Run Rust and behavioral tests"
-depends = ["test:cargo", "test:e2e"]
+depends = ["test:cargo", "test:e2e", "test:release-diagnostics"]
 
 [tasks."test:cargo"]
 description = "Run Rust tests"
 depends = ["bootstrap"]
 run = "./target/mbx-bootstrap/mbx test --workspace"
 run_windows = "./target/mbx-bootstrap/mbx.exe test --workspace"
+
+[tasks."test:release-diagnostics"]
+description = "Check publication diagnostics in the release-built wrapper"
+run = "cargo test --release -p mbx --test build cc_publication_failures_are_visible_without_counting_a_second_outcome"
 
 [tasks."test:e2e"]
 description = "Run platform behavioral tests"

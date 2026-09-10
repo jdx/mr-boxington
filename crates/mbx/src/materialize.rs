@@ -279,8 +279,9 @@ pub(crate) fn verification_warning(
     divergence: &str,
 ) -> String {
     format!(
-        "shadow verification diverged from cached output: {adapter} action {} ({unit}): {divergence}",
-        action.hash
+        "shadow verification diverged from cached output: {adapter} action {} ({}): {divergence}",
+        action.hash,
+        unit.escape_default()
     )
 }
 
@@ -570,6 +571,19 @@ mod verification_tests {
         assert!(difference.contains(r"\x1b\x00\xff\n"), "{difference}");
         assert!(!difference.contains(['\n', '\0', '\x1b']));
         assert!(difference.len() < 512, "{difference}");
+    }
+
+    #[test]
+    fn verification_unit_names_escape_terminal_controls() {
+        let warning = verification_warning(
+            "cc",
+            "cc:bad\x1b[2J\n\0.c",
+            &CacheDigest::blake3(b"action"),
+            "standard error differs",
+        );
+        assert!(!warning.chars().any(char::is_control), "{warning:?}");
+        assert!(warning.contains(r"cc:bad\u{1b}[2J\n\u{0}.c"), "{warning}");
+        assert!(warning.ends_with("standard error differs"));
     }
 
     #[test]

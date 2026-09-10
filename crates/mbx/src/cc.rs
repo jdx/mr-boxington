@@ -281,8 +281,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     // computed afterwards, and comparing the two is what stops a header that
     // appeared mid-compile from being recorded as one the compiler had seen.
     let searchable = searchable_directories(&invocation, &working_dir);
-    let before =
-        crate::phase_timing::measure("include_scan", || manifest_snapshot(&searchable)).ok();
+    let before = crate::phase_timing::measure("include_scan", || manifest_snapshot(&searchable));
     // The machine-wide permit is taken after every chance to hit the cache,
     // and the timer starts afterwards: time spent waiting for the machine is
     // not time this compilation cost.
@@ -385,7 +384,7 @@ fn publish(
     invocation_digest: &CacheDigest,
     duration_ns: u64,
     searchable: &BTreeSet<PathBuf>,
-    before: Option<BTreeMap<PathBuf, CacheDigest>>,
+    before: Result<BTreeMap<PathBuf, CacheDigest>, CcBypassReason>,
     flight: Option<&crate::scheduler::Flight>,
     remote_claim: Option<&str>,
     portable: &Portable,
@@ -702,13 +701,11 @@ fn searchable_directories(invocation: &CcInvocation, working_dir: &Path) -> BTre
 /// Reject a compilation whose include search path shifted underneath it.
 fn verify_search_path_unchanged(
     searchable: &BTreeSet<PathBuf>,
-    before: Option<BTreeMap<PathBuf, CacheDigest>>,
+    before: Result<BTreeMap<PathBuf, CacheDigest>, CcBypassReason>,
 ) -> Result<()> {
-    // A snapshot that could not be taken is not evidence of a change; the
-    // directory walk failing is already reported when discovery repeats it.
-    let Some(before) = before else {
-        return Ok(());
-    };
+    // A later successful walk cannot establish what the compiler saw when
+    // the pre-compilation snapshot failed. Compile normally, but do not cache.
+    let before = before?;
     let after = crate::phase_timing::measure("include_scan", || manifest_snapshot(searchable))?;
     for (directory, digest) in &before {
         if after.get(directory) != Some(digest) {
