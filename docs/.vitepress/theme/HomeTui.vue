@@ -28,14 +28,8 @@ const selected = ref(screens[0]);
 <template>
   <section class="MbxTui" aria-labelledby="mbx-tui-title">
     <div class="heading">
-      <div>
-        <p class="eyebrow">Your cache, in plain sight</p>
-        <h2 id="mbx-tui-title">Watch the work you don’t have to do.</h2>
-      </div>
-      <p class="intro">
-        Run <code>mbx tui</code> to follow builds across your machine, keep an
-        eye on store pressure, and see the compiler time you’ve saved.
-      </p>
+      <p class="eyebrow">Your cache, in plain sight</p>
+      <h2 id="mbx-tui-title">Watch the work you don’t have to do.</h2>
     </div>
     <div class="screen-picker" role="group" aria-label="Choose a dashboard screenshot">
       <button
@@ -75,7 +69,6 @@ const selected = ref(screens[0]);
     </figure>
     <div class="links">
       <a :href="withBase('/tui')">Explore the dashboard <span aria-hidden="true">→</span></a>
-      <a :href="withBase('/stats')">Prefer a quick report? <code>mbx stats</code> <span aria-hidden="true">→</span></a>
     </div>
   </section>
 </template>
@@ -92,11 +85,7 @@ const selected = ref(screens[0]);
   padding: 40px;
 }
 
-.heading {
-  display: grid;
-  gap: 20px;
-  margin-bottom: 28px;
-}
+.heading { margin-bottom: 28px; }
 
 .eyebrow {
   color: var(--mbx-teal-light);
@@ -116,20 +105,6 @@ h2 {
   line-height: 1.08;
   margin: 0;
   max-width: 18ch;
-}
-
-.intro {
-  align-self: end;
-  color: var(--vp-c-text-2);
-  font-size: 17px;
-  line-height: 1.65;
-  margin: 0;
-}
-
-code {
-  color: var(--vp-c-text-1);
-  font-family: var(--vp-font-family-mono);
-  font-size: 0.9em;
 }
 
 .screen-picker,
@@ -215,13 +190,6 @@ figcaption a {
 .links a {
   color: var(--vp-c-brand-1);
   font-weight: 600;
-}
-
-@media (min-width: 960px) {
-  .heading {
-    gap: 48px;
-    grid-template-columns: 1fr 1fr;
-  }
 }
 
 @media (max-width: 639px) {

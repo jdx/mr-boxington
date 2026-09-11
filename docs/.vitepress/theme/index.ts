@@ -7,9 +7,8 @@ import BenchmarkResults from "./BenchmarkResults.vue";
 import CacheDashboard from "./CacheDashboard.vue";
 import EndevFooter from "./EndevFooter.vue";
 import EndevSponsors from "./EndevSponsors.vue";
-import HomeQuickStart from "./HomeQuickStart.vue";
 import HomeBuild from "./HomeBuild.vue";
-import HomeShowcase from "./HomeShowcase.vue";
+import HomeQuickStart from "./HomeQuickStart.vue";
 import HomeTerminal from "./HomeTerminal.vue";
 import HomeTui from "./HomeTui.vue";
 import { initBanner } from "./banner";
@@ -21,7 +20,7 @@ export default {
     return h(DefaultTheme.Layout, null, {
       "home-hero-actions-after": () => h(HomeQuickStart),
       "home-hero-after": () => h(HomeTerminal),
-      "home-features-after": () => [h(HomeBuild), h(HomeTui), h(HomeShowcase)],
+      "home-features-after": () => [h(HomeBuild), h(HomeTui)],
       "layout-bottom": () => [h(EndevSponsors), h(EndevFooter)],
     });
   },

@@ -10,11 +10,6 @@ const paused = ref(false);
     <div class="heading">
       <p class="eyebrow">While Cargo does its work</p>
       <h2 id="mbx-build-title">A little company for the compile.</h2>
-      <p>
-        Watch live crates and completed work in cargo-pretty’s display, with mbx
-        cache information alongside. The progress bar shows hits in green,
-        misses in amber, and bypasses in gray.
-      </p>
     </div>
     <figure>
       <picture>
@@ -24,7 +19,7 @@ const paused = ref(false);
         />
         <img
           :src="withBase(`/screenshots/cargo-pretty.${paused ? 'png' : 'gif'}`)"
-          alt="Animated Boxington mascot beside the cargo-pretty-based mbx display with live and completed crates, timers, and green cache hits alongside amber misses"
+          alt="Animated Boxington mascot beside mbx build output showing live and completed crates"
           width="1080"
           height="550"
           loading="lazy"
@@ -32,9 +27,7 @@ const paused = ref(false);
         />
       </picture>
       <figcaption>
-        A real rebuild after a shared-source edit, with fresh crates, cache hits, and misses. Adapted from
-        <a href="https://github.com/romancitodev/cargo-pretty">cargo-pretty</a>
-        by romancitodev.
+        Build output during a rebuild.
         <button type="button" :aria-pressed="paused" @click="paused = !paused">
           {{ paused ? 'Play animation' : 'Pause animation' }}
         </button>
@@ -66,11 +59,6 @@ h2 {
   line-height: 1.15;
   margin: 12px 0;
 }
-p {
-  color: var(--vp-c-text-2);
-  font-size: 17px;
-  line-height: 1.65;
-}
 figure { margin: 0; }
 img {
   display: block;
@@ -83,7 +71,6 @@ figcaption {
   color: var(--vp-c-text-2);
   font-size: 13px;
 }
-a { color: var(--vp-c-brand-1); }
 button {
   margin-left: 12px;
   color: var(--vp-c-brand-1);
