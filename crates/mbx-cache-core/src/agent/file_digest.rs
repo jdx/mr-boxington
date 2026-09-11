@@ -68,9 +68,9 @@ const _: () = assert!(std::mem::size_of::<LinuxStatx>() == 256);
 /// truncation changes the length, so a digest recorded against both stands
 /// until either does. Where the platform reports a metadata-change time the
 /// identity carries that too, and it is the part a writer cannot restore: a
-/// rewrite that puts the modification time back still moves the change time,
-/// so only filesystems without one fall back to the freshness model the
-/// surrounding build tool already lives on.
+/// rewrite that puts the modification time back still moves the change time.
+/// Unix object identity also distinguishes an atomic replacement when both
+/// files happen to share one filesystem timestamp tick.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileIdentity {
@@ -82,7 +82,8 @@ pub struct FileIdentity {
     pub modified: SystemTime,
     /// Platform metadata-change token, where one exists.
     pub changed: Option<(i64, i64)>,
-    /// Stable object identity used when an NFS client's change time is not.
+    /// Stable object identity used to detect replacement independently of
+    /// timestamp resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object: Option<FileObjectIdentity>,
 }
@@ -91,11 +92,13 @@ pub struct FileIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileObjectIdentity {
-    /// Device major number reported by `statx`.
+    /// Device identity component. Linux NFS uses the major number reported by
+    /// `statx`; other Unix filesystems store the high half of `st_dev`.
     pub device_major: u32,
-    /// Device minor number reported by `statx`.
+    /// Device identity component. Linux NFS uses the minor number reported by
+    /// `statx`; other Unix filesystems store the low half of `st_dev`.
     pub device_minor: u32,
-    /// Mount identifier in this mount namespace.
+    /// Mount identifier in this mount namespace, or zero when unavailable.
     pub mount_id: u64,
     /// Inode number within the mounted filesystem.
     pub inode: u64,
@@ -110,7 +113,7 @@ impl FileIdentity {
             len: metadata.len(),
             modified: metadata.modified().ok()?,
             changed: change_token(metadata),
-            object: None,
+            object: metadata_object_identity(metadata),
         })
     }
 
@@ -281,7 +284,7 @@ fn capture_file_snapshot(
     else {
         return Ok(None);
     };
-    let content = if content_identity {
+    let (identity, content) = if content_identity {
         let resolved = cache_identity
             .as_ref()
             .and_then(|identity| {
@@ -290,32 +293,42 @@ fn capture_file_snapshot(
                     .pop()
             })
             .unwrap_or(FileDigestResolution::Unresolved);
-        let (digest, fresh) = match resolved {
-            FileDigestResolution::Digest(digest) => (digest, false),
-            FileDigestResolution::EmbeddedTimestampMacro | FileDigestResolution::Unresolved => {
-                let digest = digest_file(FileDigestScope::Content, path)?
-                    .into_digest()
-                    .ok_or_else(|| {
-                        io::Error::other("content digest resolution returned no digest")
-                    })?;
-                (digest, true)
+        let cached = match resolved {
+            FileDigestResolution::Digest(digest)
+                if cache_identity.as_ref().is_some_and(|identity| {
+                    identity.len == digest.size && identity.still_describes().unwrap_or(false)
+                }) =>
+            {
+                Some(digest)
             }
+            FileDigestResolution::Digest(_)
+            | FileDigestResolution::EmbeddedTimestampMacro
+            | FileDigestResolution::Unresolved => None,
         };
-        if fresh
-            && let Some(file) = cache_identity
-            && file.len == digest.size
-        {
-            digests.record(
-                FileDigestScope::Content,
-                vec![RecordedFileDigest {
-                    file,
-                    digest: digest.clone(),
-                }],
-            );
+        if let Some(digest) = cached {
+            (identity, Some(digest))
+        } else {
+            let observed = digest_file_validated(FileDigestScope::Content, path)?
+                .ok_or_else(|| io::Error::other("could not establish a file digest identity"))?;
+            let digest = observed
+                .resolution
+                .into_digest()
+                .ok_or_else(|| io::Error::other("content digest resolution returned no digest"))?;
+            if let Some(file) = observed.cache_identity
+                && file.len == digest.size
+            {
+                digests.record(
+                    FileDigestScope::Content,
+                    vec![RecordedFileDigest {
+                        file,
+                        digest: digest.clone(),
+                    }],
+                );
+            }
+            (observed.identity, Some(digest))
         }
-        Some(digest)
     } else {
-        None
+        (identity, None)
     };
     Ok(Some(FileSnapshot { identity, content }))
 }
@@ -422,6 +435,24 @@ fn change_token(_metadata: &std::fs::Metadata) -> Option<(i64, i64)> {
     None
 }
 
+#[cfg(unix)]
+fn metadata_object_identity(metadata: &std::fs::Metadata) -> Option<FileObjectIdentity> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let device = metadata.dev();
+    Some(FileObjectIdentity {
+        device_major: (device >> 32) as u32,
+        device_minor: device as u32,
+        mount_id: 0,
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(not(unix))]
+fn metadata_object_identity(_metadata: &std::fs::Metadata) -> Option<FileObjectIdentity> {
+    None
+}
+
 /// A file digest recorded against the identity it was read under.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -461,6 +492,17 @@ pub enum FileDigestResolution {
     Unresolved,
 }
 
+/// A file digest tied to the file object and pathname observed while reading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedFileDigest {
+    /// Scope-specific outcome of reading the file.
+    pub resolution: FileDigestResolution,
+    /// Identity of the pathname after the validated read.
+    pub identity: FileIdentity,
+    /// Identity suitable for reuse in the digest ledger, when available.
+    pub cache_identity: Option<FileIdentity>,
+}
+
 impl FileDigestResolution {
     /// Extract the digest when resolution succeeded.
     pub fn into_digest(self) -> Option<CacheDigest> {
@@ -475,6 +517,57 @@ impl FileDigestResolution {
 /// same pass.
 pub fn digest_file(scope: FileDigestScope, path: &Path) -> io::Result<FileDigestResolution> {
     let file = std::fs::File::open(path)?;
+    digest_reader(scope, &file).map(|(resolution, _)| resolution)
+}
+
+/// Read and hash a regular file only when the open handle remains stable and
+/// the pathname still names that same file after the read.
+pub fn digest_file_validated(
+    scope: FileDigestScope,
+    path: &Path,
+) -> io::Result<Option<ValidatedFileDigest>> {
+    let file = std::fs::File::open(path)?;
+    let before = file.metadata()?;
+    if !before.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("digest path is not a regular file: {}", path.display()),
+        ));
+    }
+    let (resolution, size) = digest_reader(scope, &file)?;
+    let after = file.metadata()?;
+    let current_metadata = std::fs::metadata(path)?;
+    let unreliable = metadata_identity_is_unreliable(path, &current_metadata)?;
+    let cache_identity = digest_cache_identity(path, &current_metadata, unreliable)?;
+    let identity = cache_identity
+        .clone()
+        .or_else(|| FileIdentity::describe(path, &current_metadata));
+    let Some(identity) = identity else {
+        return Ok(None);
+    };
+    if !metadata_names_same_file(&after, &current_metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "file was replaced while its contents were being read",
+        ));
+    }
+    if !handle_and_path_are_stable(path, &before, &after, &identity, unreliable, size)? {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "file changed while its contents were being read",
+        ));
+    }
+    Ok(Some(ValidatedFileDigest {
+        resolution,
+        identity,
+        cache_identity,
+    }))
+}
+
+fn digest_reader(
+    scope: FileDigestScope,
+    file: &std::fs::File,
+) -> io::Result<(FileDigestResolution, u64)> {
     let mut reader = std::io::BufReader::new(file);
     let mut hasher = blake3::Hasher::new();
     let mut size = 0_u64;
@@ -505,14 +598,78 @@ pub fn digest_file(scope: FileDigestScope, path: &Path) -> io::Result<FileDigest
         }
     }
     if found_timestamp_macro {
-        Ok(FileDigestResolution::EmbeddedTimestampMacro)
+        Ok((FileDigestResolution::EmbeddedTimestampMacro, size))
     } else {
-        Ok(FileDigestResolution::Digest(CacheDigest {
-            algorithm: "blake3".into(),
-            hash: hasher.finalize().to_hex().to_string(),
+        Ok((
+            FileDigestResolution::Digest(CacheDigest {
+                algorithm: "blake3".into(),
+                hash: hasher.finalize().to_hex().to_string(),
+                size,
+            }),
             size,
-        }))
+        ))
     }
+}
+
+fn handle_and_path_are_stable(
+    path: &Path,
+    before: &std::fs::Metadata,
+    after: &std::fs::Metadata,
+    current: &FileIdentity,
+    unreliable: bool,
+    digest_size: u64,
+) -> io::Result<bool> {
+    if before.len() != after.len() || after.len() != digest_size || current.len != digest_size {
+        return Ok(false);
+    }
+    if !metadata_names_same_file(before, after) {
+        return Ok(false);
+    }
+    if unreliable {
+        #[cfg(target_os = "linux")]
+        {
+            let before_modified = before.modified()?;
+            let after_modified = after.modified()?;
+            let object_matches = current.object.as_ref().is_none_or(|object| {
+                metadata_matches_object(before, object) && metadata_matches_object(after, object)
+            });
+            return Ok(before_modified == after_modified
+                && after_modified == current.modified
+                && object_matches);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (path, before, after, current);
+            return Ok(false);
+        }
+    }
+    let before = FileIdentity::describe(path, before);
+    let after = FileIdentity::describe(path, after);
+    Ok(before.is_some() && before == after && after.as_ref() == Some(current))
+}
+
+#[cfg(unix)]
+fn metadata_names_same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn metadata_names_same_file(_left: &std::fs::Metadata, _right: &std::fs::Metadata) -> bool {
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn metadata_matches_object(metadata: &std::fs::Metadata, object: &FileObjectIdentity) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let device = metadata.dev();
+    let major = ((device >> 8) & 0x0fff) | ((device >> 32) & 0xfffff000);
+    let minor = (device & 0x00ff) | ((device >> 12) & 0xffffff00);
+    u32::try_from(major).ok() == Some(object.device_major)
+        && u32::try_from(minor).ok() == Some(object.device_minor)
+        && metadata.ino() == object.inode
 }
 
 fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
@@ -569,6 +726,139 @@ impl FileDigestCache for NoFileDigestCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    struct RecordingDigestCache {
+        answer: Option<CacheDigest>,
+        recorded: std::sync::Mutex<Vec<RecordedFileDigest>>,
+    }
+
+    #[cfg(unix)]
+    impl FileDigestCache for RecordingDigestCache {
+        fn find(
+            &self,
+            _scope: FileDigestScope,
+            files: &[FileIdentity],
+        ) -> Vec<Option<CacheDigest>> {
+            assert_eq!(files.len(), 1);
+            vec![self.answer.clone()]
+        }
+
+        fn record(&self, _scope: FileDigestScope, entries: Vec<RecordedFileDigest>) {
+            self.recorded.lock().unwrap().extend(entries);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn content_snapshot_records_a_replacement_under_its_own_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("input.rlib");
+        let replacement = directory.path().join("replacement.rlib");
+        std::fs::write(&path, b"original....").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+            .unwrap();
+        std::fs::write(&replacement, b"replacement!").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+            .unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        let old_identity = FileIdentity::describe(&path, &before).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        let cache = RecordingDigestCache {
+            answer: None,
+            recorded: std::sync::Mutex::new(Vec::new()),
+        };
+
+        let snapshot = capture_file_snapshot(&path, &cache, true, before)
+            .unwrap()
+            .unwrap();
+        let current = FileIdentity::for_digest_cache(&path, &std::fs::metadata(&path).unwrap())
+            .unwrap()
+            .unwrap();
+        let digest = CacheDigest::blake3_file(&path).unwrap();
+
+        assert_eq!(current.modified, old_identity.modified);
+        assert_ne!(current.object, old_identity.object);
+        assert_ne!(current, old_identity);
+        assert!(snapshot.matches(Some(&current), &digest));
+        let recorded = cache.recorded.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].file, current);
+        assert_eq!(recorded[0].digest, digest);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn content_snapshot_rejects_a_stale_digest_cache_hit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("input.rlib");
+        let replacement = directory.path().join("replacement.rlib");
+        std::fs::write(&path, b"original....").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+            .unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        std::fs::write(&replacement, b"replacement!").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        let cache = RecordingDigestCache {
+            answer: Some(CacheDigest::blake3(b"original....")),
+            recorded: std::sync::Mutex::new(Vec::new()),
+        };
+
+        let snapshot = capture_file_snapshot(&path, &cache, true, before)
+            .unwrap()
+            .unwrap();
+        let current = FileIdentity::for_digest_cache(&path, &std::fs::metadata(&path).unwrap())
+            .unwrap()
+            .unwrap();
+        let digest = CacheDigest::blake3_file(&path).unwrap();
+
+        assert!(snapshot.matches(Some(&current), &digest));
+        assert_ne!(snapshot.content, Some(CacheDigest::blake3(b"original....")));
+        assert_eq!(cache.recorded.lock().unwrap()[0].digest, digest);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_path_does_not_validate_the_open_handle() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("input.rlib");
+        let replacement = directory.path().join("replacement.rlib");
+        std::fs::write(&path, b"old bytes").unwrap();
+        std::fs::write(&replacement, b"new bytes").unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let before = file.metadata().unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        let (_, size) = digest_reader(FileDigestScope::Content, &file).unwrap();
+        let after = file.metadata().unwrap();
+        let current_metadata = std::fs::metadata(&path).unwrap();
+        let current = FileIdentity::describe(&path, &current_metadata).unwrap();
+
+        assert!(!metadata_names_same_file(&after, &current_metadata));
+        assert!(
+            !handle_and_path_are_stable(&path, &before, &after, &current, false, size).unwrap()
+        );
+    }
 
     #[test]
     fn an_identity_describes_the_file_until_it_is_written_or_removed() {
@@ -657,7 +947,7 @@ mod tests {
 
         assert_eq!(identity.path, path);
         assert_eq!(identity.len, 12);
-        assert!(identity.object.is_none());
+        assert_eq!(identity.object.is_some(), cfg!(unix));
     }
 
     #[test]

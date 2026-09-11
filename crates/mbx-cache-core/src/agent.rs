@@ -33,7 +33,8 @@ pub(crate) use prefetch::select_prefetch_actions;
 
 pub use file_digest::{
     FileDigestCache, FileDigestResolution, FileDigestScope, FileIdentity, FileObjectIdentity,
-    FileSnapshot, NoFileDigestCache, RecordedFileDigest, digest_file,
+    FileSnapshot, NoFileDigestCache, RecordedFileDigest, ValidatedFileDigest, digest_file,
+    digest_file_validated,
 };
 pub use manifest::{is_task_identity, task_manifest_actions};
 use manifest::{
@@ -2158,6 +2159,7 @@ impl CacheAgent {
             .get(&(scope, file.path.clone()))
             .filter(|recorded| recorded.file == file)
             .map(|recorded| recorded.digest.clone())
+            .filter(|digest| digest.size == file.len && file.still_describes().unwrap_or(false))
         {
             return FileDigestResolution::Digest(digest);
         }
@@ -2167,20 +2169,16 @@ impl CacheAgent {
         #[cfg(test)]
         self.file_digest_reads.fetch_add(1, Ordering::Relaxed);
         let path = file.path.clone();
-        let resolved = tokio::task::spawn_blocking(move || {
-            let resolution = digest_file(scope, &path)?;
-            let current = std::fs::metadata(&path)
-                .and_then(|metadata| FileIdentity::for_digest_cache(&path, &metadata));
-            Ok::<_, std::io::Error>((resolution, current?))
-        })
-        .await;
-        let Ok(Ok((resolution, current))) = resolved else {
+        let resolved =
+            tokio::task::spawn_blocking(move || digest_file_validated(scope, &path)).await;
+        let Ok(Ok(Some(observed))) = resolved else {
             return FileDigestResolution::Unresolved;
         };
-        let resolution = match resolution {
-            FileDigestResolution::Digest(digest)
-                if current.as_ref() == Some(&file) && digest.size == file.len =>
-            {
+        if observed.cache_identity.as_ref() != Some(&file) {
+            return FileDigestResolution::Unresolved;
+        }
+        let resolution = match observed.resolution {
+            FileDigestResolution::Digest(digest) if digest.size == file.len => {
                 let _ = self.record_file_digests(
                     scope,
                     vec![RecordedFileDigest {
@@ -2190,12 +2188,12 @@ impl CacheAgent {
                 );
                 FileDigestResolution::Digest(digest)
             }
-            FileDigestResolution::EmbeddedTimestampMacro if current.as_ref() == Some(&file) => {
+            FileDigestResolution::EmbeddedTimestampMacro => {
                 FileDigestResolution::EmbeddedTimestampMacro
             }
-            FileDigestResolution::Digest(_)
-            | FileDigestResolution::EmbeddedTimestampMacro
-            | FileDigestResolution::Unresolved => FileDigestResolution::Unresolved,
+            FileDigestResolution::Digest(_) | FileDigestResolution::Unresolved => {
+                FileDigestResolution::Unresolved
+            }
         };
         *lock.resolution.lock().unwrap() = Some(resolution.clone());
         resolution

@@ -6,7 +6,7 @@ use super::{
 use mbx_cache_core::CacheDigest;
 use mbx_cache_core::{
     FileDigestCache, FileDigestResolution, FileDigestScope, FileIdentity, FileSnapshot,
-    RecordedFileDigest, digest_file,
+    RecordedFileDigest, digest_file, digest_file_validated,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -195,22 +195,50 @@ impl DiscoveredInputs {
         let mut identities = Vec::with_capacity(identified.len());
         let mut fresh = Vec::new();
         for (path, identity) in identified {
-            identities.push(identity.clone());
             let resolution = identity
                 .as_ref()
                 .and_then(|_| recorded.next())
                 .unwrap_or(FileDigestResolution::Unresolved);
-            let digest = match resolution {
+            let cached = match resolution {
                 FileDigestResolution::Digest(digest)
-                    if identity
-                        .as_ref()
-                        .is_some_and(|identity| identity.len == digest.size) =>
+                    if identity.as_ref().is_some_and(|identity| {
+                        identity.len == digest.size && identity.still_describes().unwrap_or(false)
+                    }) =>
                 {
-                    digest
+                    Some(digest)
                 }
                 FileDigestResolution::Digest(_)
                 | FileDigestResolution::EmbeddedTimestampMacro
-                | FileDigestResolution::Unresolved => {
+                | FileDigestResolution::Unresolved => None,
+            };
+            let digest = if let Some(digest) = cached {
+                identities.push(identity);
+                digest
+            } else {
+                let observed =
+                    digest_file_validated(FileDigestScope::Content, &path).map_err(|error| {
+                        BypassReason::InputRead {
+                            path: path.clone(),
+                            message: error.to_string(),
+                        }
+                    })?;
+                let (digest, observed_identity) = if let Some(observed) = observed {
+                    let digest = observed.resolution.into_digest().ok_or_else(|| {
+                        BypassReason::InputRead {
+                            path: path.clone(),
+                            message: "content digest resolution returned no digest".into(),
+                        }
+                    })?;
+                    if let Some(file) = observed.cache_identity.clone()
+                        && file.len == digest.size
+                    {
+                        fresh.push(RecordedFileDigest {
+                            file,
+                            digest: digest.clone(),
+                        });
+                    }
+                    (digest, observed.cache_identity)
+                } else {
                     let digest = digest_file(FileDigestScope::Content, &path)
                         .and_then(|resolution| {
                             resolution.into_digest().ok_or_else(|| {
@@ -223,16 +251,10 @@ impl DiscoveredInputs {
                             path: path.clone(),
                             message: error.to_string(),
                         })?;
-                    if let Some(identity) = identity
-                        && identity.len == digest.size
-                    {
-                        fresh.push(RecordedFileDigest {
-                            file: identity,
-                            digest: digest.clone(),
-                        });
-                    }
-                    digest
-                }
+                    (digest, None)
+                };
+                identities.push(observed_identity);
+                digest
             };
             inputs.push(ActionInput { path, digest });
         }
@@ -1082,6 +1104,80 @@ mod tests {
             assert_eq!(scope, FileDigestScope::Content);
             self.recorded.lock().unwrap().extend(entries);
         }
+    }
+
+    #[cfg(unix)]
+    struct ReplacingLedger {
+        path: PathBuf,
+        replacement: PathBuf,
+        recorded: std::sync::Mutex<Vec<RecordedFileDigest>>,
+    }
+
+    #[cfg(unix)]
+    impl FileDigestCache for ReplacingLedger {
+        fn find(&self, scope: FileDigestScope, files: &[FileIdentity]) -> Vec<Option<CacheDigest>> {
+            assert_eq!(scope, FileDigestScope::Content);
+            assert_eq!(files.len(), 1);
+            std::fs::remove_file(&self.path).unwrap();
+            std::fs::rename(&self.replacement, &self.path).unwrap();
+            vec![None]
+        }
+
+        fn record(&self, scope: FileDigestScope, entries: Vec<RecordedFileDigest>) {
+            assert_eq!(scope, FileDigestScope::Content);
+            self.recorded.lock().unwrap().extend(entries);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_binds_a_replacement_digest_to_the_replacement_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let path = root.join("libdep.rlib");
+        let replacement = root.join("replacement.rlib");
+        std::fs::write(&path, b"original....").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+            .unwrap();
+        std::fs::write(&replacement, b"replacement!").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+            .unwrap();
+        let ledger = ReplacingLedger {
+            path: path.clone(),
+            replacement,
+            recorded: std::sync::Mutex::new(Vec::new()),
+        };
+
+        let discovered = DiscoveredInputs::from_paths(
+            root,
+            BTreeSet::from([path.clone()]),
+            BTreeMap::new(),
+            &ledger,
+        )
+        .unwrap();
+        let current = FileIdentity::for_digest_cache(&path, &std::fs::metadata(&path).unwrap())
+            .unwrap()
+            .unwrap();
+        let digest = CacheDigest::blake3_file(&path).unwrap();
+
+        assert_eq!(discovered.inputs[0].digest, digest);
+        assert_eq!(discovered.identities[0].as_ref(), Some(&current));
+        assert_eq!(
+            ledger.recorded.lock().unwrap().as_slice(),
+            &[RecordedFileDigest {
+                file: current,
+                digest,
+            }]
+        );
+        discovered.verify().unwrap();
     }
 
     #[test]

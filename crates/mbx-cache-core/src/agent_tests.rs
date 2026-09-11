@@ -4851,6 +4851,53 @@ async fn concurrent_file_digest_misses_share_one_large_read() {
     assert_eq!(agent.file_digest_reads.load(Ordering::Relaxed), 1);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn agent_does_not_answer_an_obsolete_file_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("input.rlib");
+    let replacement = directory.path().join("replacement.rlib");
+    std::fs::write(&path, b"original....").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+        .unwrap();
+    let identity = FileIdentity::for_digest_cache(&path, &std::fs::metadata(&path).unwrap())
+        .unwrap()
+        .unwrap();
+    let stale = CacheDigest::blake3(b"original....");
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    agent
+        .record_file_digests(
+            FileDigestScope::Content,
+            vec![RecordedFileDigest {
+                file: identity.clone(),
+                digest: stale,
+            }],
+        )
+        .unwrap();
+
+    std::fs::write(&replacement, b"replacement!").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&replacement)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+        .unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::rename(&replacement, &path).unwrap();
+
+    assert_eq!(
+        agent
+            .resolve_file_digest(FileDigestScope::Content, identity)
+            .await,
+        FileDigestResolution::Unresolved
+    );
+    assert_eq!(agent.file_digest_reads.load(Ordering::Relaxed), 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_timestamp_macro_resolutions_share_one_read() {
     let directory = tempfile::tempdir().unwrap();

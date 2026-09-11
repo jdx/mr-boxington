@@ -604,6 +604,78 @@ impl FileDigestCache for SentinelLedger {
     fn record(&self, _scope: FileDigestScope, _entries: Vec<RecordedFileDigest>) {}
 }
 
+#[cfg(unix)]
+struct ReplacingLedger {
+    path: PathBuf,
+    replacement: PathBuf,
+    recorded: std::sync::Mutex<Vec<RecordedFileDigest>>,
+}
+
+#[cfg(unix)]
+impl FileDigestCache for ReplacingLedger {
+    fn find(&self, scope: FileDigestScope, files: &[FileIdentity]) -> Vec<Option<CacheDigest>> {
+        assert_eq!(scope, FileDigestScope::CcInput);
+        assert_eq!(files.len(), 1);
+        std::fs::remove_file(&self.path).expect("remove old input");
+        std::fs::rename(&self.replacement, &self.path).expect("replace input");
+        vec![None]
+    }
+
+    fn record(&self, scope: FileDigestScope, entries: Vec<RecordedFileDigest>) {
+        assert_eq!(scope, FileDigestScope::CcInput);
+        self.recorded.lock().unwrap().extend(entries);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cc_discovery_binds_a_replacement_digest_to_the_replacement_identity() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let root = directory.path();
+    let header = write(root, "a.h", "int a(void);\n");
+    std::fs::File::options()
+        .write(true)
+        .open(&header)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+        .unwrap();
+    let replacement = write(root, "replacement.h", "int b(void);\n");
+    std::fs::File::options()
+        .write(true)
+        .open(&replacement)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+        .unwrap();
+    let ledger = ReplacingLedger {
+        path: header.clone(),
+        replacement,
+        recorded: std::sync::Mutex::new(Vec::new()),
+    };
+
+    let discovered = CcDiscoveredInputs::collect(
+        root,
+        BTreeSet::from([header.clone()]),
+        BTreeSet::new(),
+        &ledger,
+    )
+    .expect("discovery");
+    let current = FileIdentity::for_digest_cache(&header, &std::fs::metadata(&header).unwrap())
+        .unwrap()
+        .unwrap();
+    let digest = CacheDigest::blake3_file(&header).unwrap();
+
+    assert_eq!(discovered.inputs[0].digest, digest);
+    assert_eq!(discovered.identities[0].as_ref(), Some(&current));
+    assert_eq!(
+        ledger.recorded.lock().unwrap().as_slice(),
+        &[RecordedFileDigest {
+            file: current,
+            digest,
+        }]
+    );
+    discovered.verify().expect("unchanged replacement verifies");
+}
+
 /// Verification confirms an input by the identity `collect` recorded rather
 /// than by reading it again, and reads it again once that identity has moved.
 /// Only where the identity carries a change time.

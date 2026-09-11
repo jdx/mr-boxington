@@ -6,7 +6,7 @@ use crate::{
 };
 use mbx_cache_core::{
     CacheDigest, FileDigestCache, FileDigestResolution, FileDigestScope, FileIdentity,
-    FileSnapshot, RecordedFileDigest, digest_file,
+    FileSnapshot, RecordedFileDigest, digest_file, digest_file_validated,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -318,23 +318,53 @@ impl CcDiscoveredInputs {
         let mut identities = Vec::with_capacity(inputs.capacity());
         let mut fresh = Vec::new();
         for (path, identity) in identified {
-            identities.push(identity.clone());
             let resolution = identity
                 .as_ref()
                 .and_then(|_| recorded.next())
                 .unwrap_or(FileDigestResolution::Unresolved);
-            let digest = match resolution {
+            let cached = match resolution {
                 FileDigestResolution::Digest(digest)
+                    if identity.as_ref().is_some_and(|identity| {
+                        identity.len == digest.size && identity.still_describes().unwrap_or(false)
+                    }) =>
+                {
+                    Some(Ok(digest))
+                }
+                FileDigestResolution::EmbeddedTimestampMacro
                     if identity
                         .as_ref()
-                        .is_some_and(|identity| identity.len == digest.size) =>
+                        .is_some_and(|identity| identity.still_describes().unwrap_or(false)) =>
                 {
-                    digest
+                    Some(Err(CcBypassReason::EmbeddedTimestampMacro(path.clone())))
                 }
-                FileDigestResolution::EmbeddedTimestampMacro => {
-                    return Err(CcBypassReason::EmbeddedTimestampMacro(path));
-                }
-                FileDigestResolution::Digest(_) | FileDigestResolution::Unresolved => {
+                FileDigestResolution::Digest(_)
+                | FileDigestResolution::EmbeddedTimestampMacro
+                | FileDigestResolution::Unresolved => None,
+            };
+            let digest = if let Some(cached) = cached {
+                identities.push(identity);
+                cached?
+            } else {
+                let observed =
+                    digest_file_validated(FileDigestScope::CcInput, &path).map_err(|error| {
+                        CcBypassReason::InputRead {
+                            path: path.clone(),
+                            message: error.to_string(),
+                        }
+                    })?;
+                let (resolution, observed_identity) = if let Some(observed) = observed {
+                    let identity = observed.cache_identity.clone();
+                    if let FileDigestResolution::Digest(digest) = &observed.resolution
+                        && let Some(file) = observed.cache_identity
+                        && file.len == digest.size
+                    {
+                        fresh.push(RecordedFileDigest {
+                            file,
+                            digest: digest.clone(),
+                        });
+                    }
+                    (observed.resolution, identity)
+                } else {
                     let resolution =
                         digest_file(FileDigestScope::CcInput, &path).map_err(|error| {
                             CcBypassReason::InputRead {
@@ -342,19 +372,13 @@ impl CcDiscoveredInputs {
                                 message: error.to_string(),
                             }
                         })?;
-                    let FileDigestResolution::Digest(digest) = resolution else {
-                        return Err(CcBypassReason::EmbeddedTimestampMacro(path));
-                    };
-                    if let Some(identity) = identity
-                        && identity.len == digest.size
-                    {
-                        fresh.push(RecordedFileDigest {
-                            file: identity,
-                            digest: digest.clone(),
-                        });
-                    }
-                    digest
-                }
+                    (resolution, None)
+                };
+                let FileDigestResolution::Digest(digest) = resolution else {
+                    return Err(CcBypassReason::EmbeddedTimestampMacro(path));
+                };
+                identities.push(observed_identity);
+                digest
             };
             inputs.push(CcActionInput { path, digest });
         }

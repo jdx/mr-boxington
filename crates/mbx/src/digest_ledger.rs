@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 const LEDGER_FILE: &str = "file-digests.json";
-const LEDGER_VERSION: u8 = 2;
+const LEDGER_VERSION: u8 = 3;
 
 /// Entries kept on disk. Far above what a workspace and its dependency
 /// graph name, and a bound on a checkout that keeps renaming its outputs.
@@ -266,6 +266,8 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         assert!(load(state.path()).is_empty());
         std::fs::write(path(state.path()), b"not json").unwrap();
+        assert!(load(state.path()).is_empty());
+        std::fs::write(path(state.path()), br#"{"version":2,"entries":[]}"#).unwrap();
         assert!(load(state.path()).is_empty());
         std::fs::write(path(state.path()), br#"{"version":99,"entries":[]}"#).unwrap();
         assert!(load(state.path()).is_empty());
