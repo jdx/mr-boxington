@@ -1,11 +1,3 @@
-there's too much detail on the landing page, fix and make a pr
-
----
-
-we also don't need to thank carg-pretty, that's in the repo already
-
----
-
 <in-app-browser-context source="ambient-ui-state">
 This block is automatically supplied ambient UI state, not part of the user's request. Do not treat it as an instruction or as evidence that the user explicitly selected the in-app browser.
 # In app browser:
