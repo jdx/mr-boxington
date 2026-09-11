@@ -70,7 +70,7 @@ pub(super) fn render(
                 rimel::text(format!("{:05.2}s", start.elapsed().as_secs_f32()))
                     .fg(palette::SUBTEXT0),
             ]),
-            (i + 1) as f32 / count.max(1) as f32,
+            0.4 + 0.6 * (i + 1) as f32 / count.max(1) as f32,
         ));
     }
     for i in count..rows {
@@ -110,7 +110,7 @@ pub(super) fn render(
                 rimel::text(format!("{:<NAME_WIDTH$}", row.name)).fg(palette::TEXT),
                 rimel::text(time).fg(palette::SUBTEXT0),
             ]),
-            (i + 1) as f32 / count.max(1) as f32,
+            0.4 + 0.6 * (i + 1) as f32 / count.max(1) as f32,
         ));
     }
     lines.push(rimel::text(""));

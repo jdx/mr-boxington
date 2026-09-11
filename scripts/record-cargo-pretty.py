@@ -14,7 +14,6 @@ import fcntl
 import os
 from pathlib import Path
 import pty
-import shutil
 import re
 import json
 import select
@@ -28,7 +27,7 @@ import pyte
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parents[1]
-WIDTH, HEIGHT, COLS, ROWS = 1120, 800, 100, 30
+WIDTH, HEIGHT, COLS, ROWS = 820, 550, 78, 27
 COLORS = {"default": "#d9e4e6", "cyan": "#70d7cb", "green": "#9fce88", "yellow": "#e9c778", "red": "#ef8b86"}
 
 
@@ -38,13 +37,13 @@ def render(screen, font, title_font):
     draw.rounded_rectangle((1, 1, WIDTH - 2, HEIGHT - 2), radius=15, outline="#35434a", width=2)
     for x, color in [(28, "#ed807a"), (50, "#e6bf6c"), (72, "#82c39a")]:
         draw.ellipse((x, 22, x + 10, 32), fill=color)
-    draw.text((WIDTH // 2, 19), "mbx build · mr boxington", font=title_font, fill="#91a3aa", anchor="mt")
+    draw.text((WIDTH // 2, 19), "mr boxington  /  mixed-cache build", font=title_font, fill="#91a3aa", anchor="mt")
     draw.line((1, 52, WIDTH - 2, 52), fill="#29363e")
     cell = font.getlength("M")
     for y in range(ROWS):
         for x in range(COLS):
             char = screen.buffer[y][x]
-            draw.text((25 + x * cell, 70 + y * 23), char.data, font=font, fill=COLORS.get(char.fg, "#" + char.fg if re.fullmatch(r"[0-9a-fA-F]{6}", char.fg) else COLORS["default"]))
+            draw.text((25 + x * cell, 65 + y * 19), char.data, font=font, fill=COLORS.get(char.fg, "#" + char.fg if re.fullmatch(r"[0-9a-fA-F]{6}", char.fg) else COLORS["default"]))
     return image
 
 
@@ -53,25 +52,25 @@ def main():
     parser.add_argument("--font", required=True)
     parser.add_argument("--binary", type=Path, default=ROOT / "target/debug/mbx")
     args = parser.parse_args()
-    font = ImageFont.truetype(args.font, 17)
+    font = ImageFont.truetype(args.font, 16)
     title_font = ImageFont.truetype(args.font, 14)
     screen = pyte.Screen(COLS, ROWS)
     stream = pyte.ByteStream(screen)
-    stream.feed(b"$ mbx build\r\n")
+    stream.feed(b"$ mbx build -j 4\r\n")
     frames = [render(screen, font, title_font)]
     durations = [700]
     with tempfile.TemporaryDirectory(prefix="mbx-pretty-demo-") as tmp:
         root = Path(tmp)
         (root / "src").mkdir()
-        crates = ["boxer-core", "boxer-config", "boxer-store", "boxer-format", "boxer-protocol", "boxer-ui"]
+        crates = ["boxer-core", "boxer-config", "boxer-store", "boxer-format", "boxer-protocol", "boxer-ui", "boxer-parser", "boxer-codegen", "boxer-network", "boxer-index", "boxer-query", "boxer-runtime", "boxer-scheduler", "boxer-archive", "boxer-checksum", "boxer-diagnostics", "boxer-transport", "boxer-render"]
         dependencies = "\n".join(f'{name} = {{ path = "{name}" }}' for name in crates)
         (root / "Cargo.toml").write_text('[package]\nname="hello-boxington"\nversion="0.1.0"\nedition="2024"\n[dependencies]\n' + dependencies + "\n")
         (root / "src/main.rs").write_text('fn main() { println!("Hello, Boxington!"); }\n')
-        for name in crates:
+        for index, name in enumerate(crates):
             folder = root / name
             (folder / "src").mkdir(parents=True)
             (folder / "Cargo.toml").write_text(f'[package]\nname="{name}"\nversion="0.1.0"\nedition="2024"\n')
-            (folder / "src/lib.rs").write_text('pub fn value() -> u32 { 42 }\n' + "\n".join(f"pub fn f{i}() -> u32 {{ {i} }}" for i in range(3000)))
+            (folder / "src/lib.rs").write_text('pub fn value() -> u32 { 42 }\n' + "\n".join(f"pub fn f{i}(value: u64) -> u64 {{ value.rotate_left({i % 64}) ^ {i} }}" for i in range(30000 + index * 1000)))
         stamp = root / "cache/actions/notice/v1/explained"
         stamp.parent.mkdir(parents=True)
         stamp.touch()
@@ -85,7 +84,7 @@ def main():
             os.setsid()
             fcntl.ioctl(warm_slave, termios.TIOCSCTTY, 0)
 
-        warm = subprocess.Popen([str(args.binary.resolve()), "build"], cwd=root, env=env, stdin=warm_slave, stdout=warm_slave, stderr=warm_slave, preexec_fn=attach_warm_terminal)
+        warm = subprocess.Popen([str(args.binary.resolve()), "build", "-j", "4"], cwd=root, env=env, stdin=warm_slave, stdout=warm_slave, stderr=warm_slave, preexec_fn=attach_warm_terminal)
         os.close(warm_slave)
         warm_output = bytearray()
         warm_deadline = time.monotonic() + 120
@@ -105,20 +104,25 @@ def main():
         finally:
             if warm.poll() is None: warm.kill(); warm.wait()
             os.close(warm_master)
-        shutil.rmtree(root / "target")
-        # Evict two results in this disposable fixture's cache. Unchanged inputs
+        # Retain two Cargo-fresh crates; clean the others so mbx can restore
+        # matching results and compile the entries removed from this demo cache.
+        cargo = subprocess.check_output(["rustup", "which", "cargo"], text=True).strip()
+        packages = ["hello-boxington", *crates[2:]]
+        subprocess.run([cargo, "clean", *[arg for name in packages for arg in ("-p", name)]], cwd=root, env=env, check=True, capture_output=True)
+        # Evict a portion of this disposable fixture's cache. Unchanged inputs
         # now produce real cache hits and misses in the same recorded command.
         results = sorted((root / "cache/actions/action-results").rglob("*.json"))
         assert len(results) >= 6, results
-        for result in results[:2]: result.unlink()
+        for result in results[::2]: result.unlink()
         poster = None
+        poster_score = -1
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
         def attach_terminal():
             os.setsid()
             fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
 
-        child = subprocess.Popen([str(args.binary.resolve()), "build"], cwd=root, env=env, stdin=slave, stdout=slave, stderr=slave, preexec_fn=attach_terminal)
+        child = subprocess.Popen([str(args.binary.resolve()), "build", "-j", "4"], cwd=root, env=env, stdin=slave, stdout=slave, stderr=slave, preexec_fn=attach_terminal)
         os.close(slave)
         transcript = bytearray()
         last_frame = time.monotonic()
@@ -142,7 +146,10 @@ def main():
                     frame = render(screen, font, title_font)
                     visible = "\n".join(screen.display)
                     if "Compiled (" in visible and re.search(r"[1-9][0-9]* hits", visible) and re.search(r"[1-9][0-9]* misses", visible):
-                        poster = frame.copy()
+                        score = visible.count("●") * 10 + visible.count("✓")
+                        if score >= poster_score:
+                            poster = frame.copy()
+                            poster_score = score
                     frames.append(frame)
                     durations.append(round((now - last_frame) * 1000))
                     last_frame = now
@@ -158,15 +165,16 @@ def main():
         assert stats["hits"] > 0 and stats["misses"] > 0, stats
         assert b"Compiled (" in transcript and b"Build / cache" in transcript, transcript
         assert poster is not None, "No mixed-cache live frame was captured"
+        assert re.search(rb"[1-9][0-9]* fresh", transcript), "missing Cargo-fresh artifacts"
         assert b"\x1b[J" in transcript, "missing terminal redraw"
     stream.feed(b"$ ")
     frames.append(render(screen, font, title_font))
-    durations.append(2200)
+    durations.append(2500)
     output = ROOT / "docs/public/screenshots"
     output.mkdir(parents=True, exist_ok=True)
     poster.save(output / "cargo-pretty.png")
     frames[0].save(output / "cargo-pretty.gif", save_all=True, append_images=frames[1:], duration=durations, loop=0, optimize=True)
-    print(f"Recorded {len(frames)} frames to {output / 'cargo-pretty.gif'}")
+    print(f"Recorded {len(frames)} frames ({sum(durations) / 1000:.1f}s; {stats['hits']} hits, {stats['misses']} misses) to {output / 'cargo-pretty.gif'}")
 
 
 if __name__ == "__main__":

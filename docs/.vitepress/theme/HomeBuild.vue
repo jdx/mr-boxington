@@ -25,14 +25,14 @@ const paused = ref(false);
         <img
           :src="withBase(`/screenshots/cargo-pretty.${paused ? 'png' : 'gif'}`)"
           alt="cargo-pretty-based mbx display with live and completed crates, timers, and green cache hits alongside amber misses"
-          width="1120"
-          height="800"
+          width="820"
+          height="550"
           loading="lazy"
           decoding="async"
         />
       </picture>
       <figcaption>
-        Recorded from a small demo build. Adapted from
+        A real build with fresh crates, cache hits, and misses. Adapted from
         <a href="https://github.com/romancitodev/cargo-pretty">cargo-pretty</a>
         by romancitodev.
         <button type="button" :aria-pressed="paused" @click="paused = !paused">
