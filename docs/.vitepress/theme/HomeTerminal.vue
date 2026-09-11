@@ -9,7 +9,7 @@ const crates = ["libc", "serde", "your-app"];
 <template>
   <section class="MbxDemo home-section" aria-labelledby="demo-title">
     <div class="demo-copy">
-      <p class="home-eyebrow">01 / Build here. Reuse there.</p>
+      <p class="home-eyebrow">Build here. Reuse there.</p>
       <h2 id="demo-title">A new worktree.<br />A head start.</h2>
       <p>
         Build once, then restore matching work from another checkout or CI.
@@ -58,13 +58,6 @@ const crates = ["libc", "serde", "your-app"];
           }}
         </p>
       </div>
-      <p class="terminal-note">
-        {{
-          warm
-            ? "Matching inputs can reuse outputs. Changed or unsupported work still compiles."
-            : "A cold cache fills as you build. Cargo still skips any work it already considers fresh."
-        }}
-      </p>
     </div>
   </section>
 </template>
@@ -172,14 +165,6 @@ const crates = ["libc", "serde", "your-app"];
   color: var(--mbx-paper);
   margin-top: 22px;
   padding-top: 16px;
-}
-.terminal-note {
-  border-top: 1px solid var(--vp-c-divider);
-  color: var(--vp-c-text-2);
-  font-size: 12px;
-  line-height: 1.7;
-  min-height: 68px;
-  padding: 14px 24px;
 }
 @media (max-width: 800px) {
   .MbxDemo {
