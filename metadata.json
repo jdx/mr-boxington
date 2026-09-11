@@ -1,0 +1,24 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M28J28H2C2RY08F28FRZSDHM",
+  "strategy": "manual-commit",
+  "branch": "codex/cargo-pretty-output",
+  "checkpoints_count": 3,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 124617,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 9809024,
+    "output_tokens": 26981,
+    "api_call_count": 56
+  }
+}
