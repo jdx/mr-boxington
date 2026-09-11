@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import shutil
 import struct
@@ -142,9 +143,11 @@ pub fn answer() -> u32 { dep::value() }
         (root/'src/lib.rs').write_text('pub fn bad() { let unused = 1; }\n')
         code, output = terminal_run(root, env, ['check'])
         assert code == 0 and b'Build completed with warnings' in output and b'unused' in output, output[-3000:]
+        assert not re.search(rb'(?<!\r)\n', output), 'warning diagnostics need CRLF in raw mode'
         (root/'src/lib.rs').write_text('this does not compile\n')
         code, output = terminal_run(root, env, ['run'])
         assert code == 101 and b'error' in output, output[-3000:]
+        assert not re.search(rb'(?<!\r)\n', output), 'error diagnostics need CRLF in raw mode'
         print('Passed: build/check/clippy, fresh/warm cache counts, interactive run, tests/doctests, custom harness, runner, failure diagnostics, cancellation, JSON passthrough, warning browser, terminal restoration.')
 
 

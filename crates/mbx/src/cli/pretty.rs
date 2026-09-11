@@ -191,7 +191,7 @@ pub(super) fn run(
         // the optional browser, and the child's failure status stays authoritative.
         screen.commit();
         for error in &model.errors {
-            screen.write(error.as_bytes())?;
+            screen.diagnostic(error)?;
             screen.write(b"\r\n")?;
         }
         let count = model.warnings.len() + model.failures.len();
@@ -204,7 +204,9 @@ pub(super) fn run(
                     screen.width(),
                     screen.height(),
                 ))?;
-                if let Event::Key(key) = event::read()? {
+                if let Event::Key(key) = event::read()?
+                    && key.kind != event::KeyEventKind::Release
+                {
                     match key.code {
                         KeyCode::Esc | KeyCode::Char('q') => break,
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -236,7 +238,7 @@ pub(super) fn run(
             }
             screen.clear()?;
             for warning in &model.warnings {
-                screen.write(warning.rendered.as_bytes())?;
+                screen.diagnostic(&warning.rendered)?;
                 screen.write(b"\r\n")?;
             }
         }
@@ -397,7 +399,7 @@ impl Decoder {
                     screen.draw(view::summary(model))?;
                     screen.commit();
                     for warning in &model.warnings {
-                        screen.write(warning.rendered.as_bytes())?;
+                        screen.diagnostic(&warning.rendered)?;
                         screen.write(b"\r\n")?;
                     }
                     *proxy = true;
@@ -476,6 +478,11 @@ impl Screen {
         self.clear()?;
         io::stderr().write_all(bytes)?;
         io::stderr().flush()
+    }
+    // Cargo JSON contains LF-delimited diagnostic text, unlike bytes read
+    // from the child PTY. Raw mode requires explicit carriage returns here.
+    fn diagnostic(&mut self, text: &str) -> io::Result<()> {
+        self.write(text.replace("\r\n", "\n").replace('\n', "\r\n").as_bytes())
     }
     fn commit(&mut self) {
         self.drawn = 0;
