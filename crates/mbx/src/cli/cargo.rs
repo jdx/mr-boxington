@@ -285,14 +285,19 @@ fn cargo_with_settings_bypass_log_and_roots(
         };
         Ok((status, stats))
     });
-    let status = account_session(config, settings, session_outcome, removed_target_bytes)?;
-    if status == ExitCode::SUCCESS
-        && let Some(launch) = launch.filter(|launch| launch.was_captured())
-    {
-        launch.run()
-    } else {
-        Ok(status)
-    }
+    // Finish the build session before the application takes over stderr, but
+    // keep the automatic target sweep after it exits: collection must not
+    // remove the executable Cargo just selected before we have started it.
+    let session_outcome = match session_outcome {
+        Ok((Ok(status), stats))
+            if status == ExitCode::SUCCESS
+                && launch.as_ref().is_some_and(|launch| launch.was_captured()) =>
+        {
+            Ok((launch.unwrap().run(), stats))
+        }
+        other => other,
+    };
+    account_session(config, settings, session_outcome, removed_target_bytes)
 }
 
 pub(super) struct TargetViewPlacement {

@@ -13,14 +13,22 @@ const LEASE: &str = "MBX_SESSION_LEASE";
 
 type Environment = BTreeMap<OsString, OsString>;
 
+fn current_environment() -> Environment {
+    let variables = std::env::vars_os();
+    // Windows names are case-insensitive: an inherited `Path` must match the
+    // `PATH` override instead of being mistaken for absent.
+    #[cfg(windows)]
+    let variables = variables.map(|(name, value)| (name.to_ascii_uppercase(), value));
+    variables.collect()
+}
+
 /// Snapshot before CLI dispatch changes PATH or CARGO.
 static CALLER: std::sync::OnceLock<Environment> = std::sync::OnceLock::new();
 
 /// Remember the environment to restore when a build later launches an application.
 pub fn remember_caller() {
     CALLER.get_or_init(|| {
-        let mut environment =
-            restored_environment().unwrap_or_else(|_| std::env::vars_os().collect());
+        let mut environment = restored_environment().unwrap_or_else(|_| current_environment());
         environment.remove(OsStr::new("MBX_CARGO_SHIM_MODE"));
         environment.remove(OsStr::new("MBX_CARGO_SHIM_PATH"));
         environment
@@ -100,7 +108,7 @@ pub(super) fn lease(
 struct Restore(Vec<(OsString, Option<OsString>)>);
 
 pub(super) fn record_overlay(environment: &mut BTreeMap<String, String>) -> Result<()> {
-    let current: Environment = std::env::vars_os().collect();
+    let current = current_environment();
     let caller = CALLER.get().unwrap_or(&current);
     let mut restore = BTreeMap::new();
     // A nested explicit mbx command may replace only part of its parent's
@@ -128,7 +136,7 @@ pub(super) fn record_overlay(environment: &mut BTreeMap<String, String>) -> Resu
 }
 
 fn restored_environment() -> Result<Environment> {
-    let mut environment: Environment = std::env::vars_os().collect();
+    let mut environment = current_environment();
     if let Some(encoded) = environment.remove(OsStr::new(RESTORE)) {
         let restore: Restore = serde_json::from_str(&encoded.to_string_lossy())?;
         for (name, value) in restore.0 {

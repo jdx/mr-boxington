@@ -14,6 +14,25 @@ fn project(path: &Path, source: &str) {
 fn mbx(root: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_mbx"));
     command.env_clear();
+    // rustc's MSVC discovery needs the Visual Studio/SDK environment as well
+    // as PATH. Without it Git's unrelated link.exe can win resolution.
+    #[cfg(windows)]
+    for (name, value) in std::env::vars_os() {
+        let key = name.to_string_lossy().to_ascii_uppercase();
+        if !key.starts_with("MBX_")
+            && !matches!(
+                key.as_str(),
+                "RUSTC_WRAPPER"
+                    | "RUSTC_WORKSPACE_WRAPPER"
+                    | "RUSTDOC"
+                    | "CARGO_TARGET_DIR"
+                    | "CARGO_INCREMENTAL"
+                    | "CARGO"
+            )
+        {
+            command.env(name, value);
+        }
+    }
     for name in [
         "PATH",
         "HOME",
@@ -26,7 +45,12 @@ fn mbx(root: &Path) -> Command {
         "TMPDIR",
     ] {
         if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
+            let key = if cfg!(windows) && name == "PATH" {
+                "Path"
+            } else {
+                name
+            };
+            command.env(key, value);
         }
     }
     command
