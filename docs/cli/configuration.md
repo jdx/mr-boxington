@@ -186,6 +186,14 @@ Override the configured linker for this invocation.
 
 Log filter for mbx's own diagnostics, such as `debug` or `mbx=trace`.
 
+### `pretty_inspect`
+
+- **Type:** `bool`
+- **Default:** `false`
+- **Set with:** `MBX_PRETTY_INSPECT`
+
+Open the terminal warning browser after a successful Cargo build.
+
 ### `remote.mode`
 
 - **Type:** `string`

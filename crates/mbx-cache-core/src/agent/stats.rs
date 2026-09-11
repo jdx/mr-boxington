@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Aggregate cache activity for one task session.
 ///
@@ -67,6 +67,8 @@ pub struct AgentStats {
     pub avoided_compiler_duration_ns: u64,
     /// Real compiler work performed in this session, grouped by outcome.
     pub compiler: BTreeMap<String, CompilerStats>,
+    /// Observed outcomes grouped by compiler crate name; multiple outcomes remain explicit.
+    pub crate_outcomes: BTreeMap<String, BTreeSet<String>>,
     /// Cumulative real compiler time by crate name.
     pub slow_compilations: BTreeMap<String, u64>,
     /// Remote cache operations that failed and were degraded to a local result.

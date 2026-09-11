@@ -14,6 +14,7 @@ pub(super) struct Warning {
 #[derive(Clone, Debug)]
 pub(super) struct Row {
     pub name: String,
+    pub cache_target: Option<String>,
     pub duration: Option<Duration>,
     pub fresh: bool,
     pub failed: bool,
@@ -60,6 +61,8 @@ pub(super) struct Model {
     pub command: String,
     pub started: Instant,
     pub live: BTreeMap<String, Instant>,
+    pub slots: Vec<Option<String>>,
+    pub outcomes: BTreeMap<String, std::collections::BTreeSet<String>>,
     pub done: VecDeque<Row>,
     pub units_total: Option<usize>,
     pub units_done: usize,
@@ -89,6 +92,8 @@ impl Model {
             command: format!("cargo {}", arguments.join(" ")),
             started: Instant::now(),
             live: BTreeMap::new(),
+            slots: vec![None; 6],
+            outcomes: BTreeMap::new(),
             done: VecDeque::new(),
             units_total: None,
             units_done: 0,
@@ -111,6 +116,11 @@ impl Model {
             failure_section: false,
             suite_before: [0; 3],
         }
+    }
+
+    pub fn update_stats(&mut self, stats: AgentStats) {
+        self.outcomes = stats.crate_outcomes.clone();
+        self.mix = stats.into();
     }
 
     fn row(&mut self, row: Row) {
@@ -140,6 +150,23 @@ impl Model {
                     .cloned()
                     .unwrap_or_else(|| format!("{name} v{version}"));
                 let start = self.live.remove(&key);
+                for slot in &mut self.slots {
+                    if slot.as_ref() == Some(&key) {
+                        *slot = None;
+                    }
+                }
+                let mut waiting: Vec<_> = self
+                    .live
+                    .iter()
+                    .filter(|(name, _)| !self.slots.iter().any(|slot| slot.as_ref() == Some(*name)))
+                    .collect();
+                waiting.sort_by_key(|(_, start)| **start);
+                for ((name, _), slot) in waiting
+                    .into_iter()
+                    .zip(self.slots.iter_mut().filter(|slot| slot.is_none()))
+                {
+                    *slot = Some(name.clone());
+                }
                 let fresh = message["fresh"].as_bool().unwrap_or(false);
                 if fresh {
                     self.fresh += 1;
@@ -148,6 +175,7 @@ impl Model {
                 }
                 self.row(Row {
                     name: key,
+                    cache_target: Some(target.replace('-', "_")),
                     duration: start.map(|start| start.elapsed()),
                     fresh,
                     failed: false,
@@ -205,10 +233,14 @@ impl Model {
                     || !name
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-                    || version.split('.').take(3).count() != 3
-                    || !version.starts_with(|c: char| c.is_ascii_digit())
+                    || semver::Version::parse(version).is_err()
                 {
                     return false;
+                }
+                if !self.live.contains_key(package)
+                    && let Some(slot) = self.slots.iter_mut().find(|slot| slot.is_none())
+                {
+                    *slot = Some(package.to_string());
                 }
                 self.live
                     .entry(package.to_string())
@@ -268,6 +300,7 @@ impl Model {
             self.suite_done += 1;
             self.row(Row {
                 name: name.into(),
+                cache_target: None,
                 duration: None,
                 fresh: false,
                 failed,

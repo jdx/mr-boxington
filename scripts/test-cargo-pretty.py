@@ -139,7 +139,7 @@ pub fn answer() -> u32 { dep::value() }
         (root/'tests/custom.rs').write_text('''fn main() {
  let child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
  std::fs::write("background.pid", child.id().to_string()).unwrap();
- for _ in 0..2000 { println!("TRAILING_HARNESS_OUTPUT"); }
+ for _ in 0..100000 { println!("TRAILING_HARNESS_OUTPUT"); }
  println!("HARNESS_TAIL_COMPLETE");
 }''')
         try:
@@ -167,8 +167,13 @@ pub fn answer() -> u32 { dep::value() }
         assert result.returncode == 0 and b'compiler-artifact' in result.stdout and b'Build / cache' not in result.stderr
         (root/'src/lib.rs').write_text('pub fn bad() { let unused = 1; }\n')
         code, output = terminal_run(root, env, ['check'])
-        assert code == 0 and b'Build completed with warnings' in output and b'unused' in output, output[-3000:]
+        assert code == 0 and b'Esc dismiss' not in output and b'unused' in output, output[-3000:]
         assert not re.search(rb'(?<!\r)\n', output), 'warning diagnostics need CRLF in raw mode'
+        code, output = terminal_run(root, dict(env, MBX_PRETTY_INSPECT='1'), ['check'])
+        assert code == 0 and b'Build completed with warnings' in output
+        for level in ['debug', 'mbx_cache_core=trace']:
+            code, output = terminal_run(root, dict(env, MBX_LOG=level), ['check'])
+            assert code == 0 and b'\x1b[?2026h' not in output and b'Build / cache' not in output
         (root/'src/lib.rs').write_text('this does not compile\n')
         code, output = terminal_run(root, env, ['run'])
         assert code == 101 and b'error' in output, output[-3000:]

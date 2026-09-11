@@ -1484,6 +1484,7 @@ dependencies = [
  "ratatui",
  "reflink-copy",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

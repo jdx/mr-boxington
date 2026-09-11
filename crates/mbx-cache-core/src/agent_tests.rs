@@ -116,6 +116,8 @@ async fn records_compiler_time_by_outcome_and_crate() {
     }
 
     let stats = agent.stats();
+    assert_eq!(stats.crate_outcomes["slow_crate"], ["miss".into()].into());
+    assert_eq!(stats.crate_outcomes["linked_bin"], ["bypass".into()].into());
     assert_eq!(stats.compiler["miss"].invocations, 2);
     assert_eq!(stats.compiler["miss"].duration_ns, 22);
     assert_eq!(stats.compiler["bypass"].duration_ns, 11);

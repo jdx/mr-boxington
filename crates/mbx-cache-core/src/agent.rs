@@ -191,6 +191,7 @@ struct AtomicAgentStats {
     bypasses: Mutex<BTreeMap<String, u64>>,
     avoided_compiler_duration_ns: AtomicU64,
     compiler: Mutex<BTreeMap<String, CompilerStats>>,
+    crate_outcomes: Mutex<BTreeMap<String, BTreeSet<String>>>,
     slow_compilations: Mutex<BTreeMap<String, u64>>,
     restored_output_files: AtomicU64,
     restored_output_bytes: AtomicU64,
@@ -1345,6 +1346,7 @@ impl CacheAgent {
             wrapper_phases_ns: self.stats.wrapper_phases_ns.lock().unwrap().clone(),
             compiler: self.stats.compiler.lock().unwrap().clone(),
             slow_compilations: self.stats.slow_compilations.lock().unwrap().clone(),
+            crate_outcomes: self.stats.crate_outcomes.lock().unwrap().clone(),
             remote_failures: self.stats.remote_failures.load(Ordering::Relaxed),
             remote_manifest_lookups: self.stats.remote_manifest_lookups.load(Ordering::Relaxed),
             remote_manifest_lookup_duration_ns: self
@@ -1931,6 +1933,15 @@ impl CacheAgent {
                 bail!("cannot record a hit for a missing action result");
             }
         }
+        if let Some(name) = crate_name.as_ref().filter(|name| !name.is_empty()) {
+            self.stats
+                .crate_outcomes
+                .lock()
+                .unwrap()
+                .entry(name.clone())
+                .or_default()
+                .insert("hit".into());
+        }
         self.record_restore(restore);
         self.stats.hits.fetch_add(1, Ordering::Relaxed);
         self.emit_action(
@@ -1979,6 +1990,15 @@ impl CacheAgent {
             bail!("invalid compiler invocation outcome");
         }
         validate_crate_name(crate_name)?;
+        if let Some(name) = crate_name.filter(|name| !name.is_empty()) {
+            self.stats
+                .crate_outcomes
+                .lock()
+                .unwrap()
+                .entry(name.into())
+                .or_default()
+                .insert(outcome.into());
+        }
         let mut compiler = self.stats.compiler.lock().unwrap();
         let stats = compiler.entry(outcome.to_string()).or_default();
         stats.invocations = stats.invocations.saturating_add(1);

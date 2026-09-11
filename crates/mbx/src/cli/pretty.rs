@@ -29,6 +29,7 @@ use std::{
 
 pub(super) fn enabled(arguments: &[String]) -> bool {
     eligible(arguments)
+        && log::max_level() < log::LevelFilter::Debug
         && io::stdin().is_terminal()
         && io::stdout().is_terminal()
         && io::stderr().is_terminal()
@@ -91,6 +92,33 @@ pub(super) fn run(
     cargo: &OsStr,
     arguments: &[String],
     environment: &BTreeMap<String, String>,
+    inspect_warnings: bool,
+    stats: impl Fn() -> AgentStats,
+) -> Result<Option<ExitCode>> {
+    let mut started = false;
+    match run_inner(
+        cargo,
+        arguments,
+        environment,
+        inspect_warnings,
+        &mut started,
+        stats,
+    ) {
+        Ok(status) => Ok(Some(status)),
+        Err(error) if !started => {
+            log::debug!("pretty terminal unavailable; using plain Cargo: {error}");
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn run_inner(
+    cargo: &OsStr,
+    arguments: &[String],
+    environment: &BTreeMap<String, String>,
+    inspect_warnings: bool,
+    started: &mut bool,
     stats: impl Fn() -> AgentStats,
 ) -> Result<ExitCode> {
     let (cols, rows) = terminal::size()?;
@@ -117,6 +145,7 @@ pub(super) fn run(
         .slave
         .spawn_command(command)
         .map_err(|e| eyre::eyre!(e))?;
+    *started = true;
     drop(pair.slave);
     let (send, receive) = mpsc::sync_channel(32);
     std::thread::spawn(move || {
@@ -147,38 +176,26 @@ pub(super) fn run(
     let mut proxy = false;
     let mut last_frame = Instant::now() - Duration::from_secs(1);
     let result = (|| -> Result<portable_pty::ExitStatus> {
-        let mut exited_at = None;
+        let mut exit_seen = false;
+        let mut last_output = Instant::now();
         loop {
-            if exited_at.is_none() && child.try_wait().map_err(|e| eyre::eyre!(e))?.is_some() {
-                exited_at = Some(Instant::now());
-            }
-            // Allow the reader to deliver trailing records after Cargo exits,
-            // but do not wait forever for descendants retaining the slave.
-            if exited_at.is_some_and(|time| time.elapsed() >= Duration::from_secs(1)) {
-                // Drain the bounded queue as well as the grace-period output.
-                for _ in 0..32 {
-                    match receive.try_recv() {
-                        Ok(bytes) => decoder.feed(
-                            &bytes?,
-                            &mut model,
-                            &mut screen,
-                            mode,
-                            &mut proxy,
-                            &stats,
-                        )?,
-                        Err(_) => break,
-                    }
-                }
-                break;
+            if !exit_seen && child.try_wait().map_err(|e| eyre::eyre!(e))?.is_some() {
+                exit_seen = true;
+                last_output = Instant::now();
             }
             match receive.recv_timeout(Duration::from_millis(20)) {
                 Ok(Ok(bytes)) => {
+                    last_output = Instant::now();
                     decoder.feed(&bytes, &mut model, &mut screen, mode, &mut proxy, &stats)?
                 }
                 Ok(Err(error)) => return Err(error.into()),
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // A quiet interval alone does not imply output completion.
+                    // Drain every available chunk, regardless of burst size. Only
+                    // an idle reader after Cargo exits ends a retained-slave stream.
+                    if exit_seen && last_output.elapsed() >= Duration::from_secs(1) {
+                        break;
+                    }
                     decoder.flush_partial(&mut screen, model.build_finished)?;
                 }
             }
@@ -195,7 +212,7 @@ pub(super) fn run(
                 && !decoder.partial
                 && last_frame.elapsed() >= Duration::from_millis(80)
             {
-                model.mix = stats().into();
+                model.update_stats(stats());
                 screen.draw(view::render(&model, None, screen.width(), screen.height()))?;
                 last_frame = Instant::now();
             }
@@ -208,7 +225,7 @@ pub(super) fn run(
         let _ = child.wait();
     }
     let status = result.wrap_err("running Cargo with the pretty display")?;
-    model.mix = stats().into();
+    model.update_stats(stats());
     model.finished = Some((status.success(), model.started.elapsed()));
     if !proxy {
         screen.draw(view::render(&model, None, screen.width(), screen.height()))?;
@@ -220,7 +237,7 @@ pub(super) fn run(
             screen.write(b"\r\n")?;
         }
         let count = model.warnings.len() + model.failures.len();
-        if count > 0 {
+        if count > 0 && (!status.success() || inspect_warnings) {
             let mut browser = view::Browser::default();
             loop {
                 screen.draw(view::render(
@@ -262,10 +279,10 @@ pub(super) fn run(
                 }
             }
             screen.clear()?;
-            for warning in &model.warnings {
-                screen.diagnostic(&warning.rendered)?;
-                screen.write(b"\r\n")?;
-            }
+        }
+        for warning in &model.warnings {
+            screen.diagnostic(&warning.rendered)?;
+            screen.write(b"\r\n")?;
         }
         screen.commit();
     }
@@ -294,7 +311,7 @@ fn status_code(status: &portable_pty::ExitStatus) -> u8 {
             }
         }
     }
-    status.exit_code() as u8
+    u8::try_from(status.exit_code()).unwrap_or(1)
 }
 
 // Unix input remains byte-for-byte terminal input, including function keys,
@@ -428,7 +445,7 @@ impl Decoder {
                 self.partial = false;
                 if matches!(mode, Mode::Run) && model.build_finished && model.build_ok == Some(true)
                 {
-                    model.mix = stats().into();
+                    model.update_stats(stats());
                     model.finished = Some((true, model.started.elapsed()));
                     screen.draw(view::summary(model))?;
                     screen.commit();

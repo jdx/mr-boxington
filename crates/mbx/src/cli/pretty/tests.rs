@@ -252,3 +252,36 @@ fn passing_test_stdout_does_not_open_failure_browser() {
     assert_eq!(model.failures.len(), 1);
     assert!(model.failures[0].1.contains("panic detail"));
 }
+
+#[test]
+fn active_rows_keep_slots_and_cache_outcomes_remain_explicit() {
+    let mut model = Model::new(&["build".into()]);
+    model.status("   Compiling zeta v1.0.0");
+    model.status("   Compiling alpha v1.0.0");
+    let original = model.slots.clone();
+    assert!(model.cargo(r#"{"reason":"compiler-artifact","package_id":"path+file:///zeta#zeta@1.0.0","target":{"name":"zeta"},"fresh":false}"#));
+    assert_eq!(model.slots[1], original[1]);
+    let mut stats = AgentStats::default();
+    stats
+        .crate_outcomes
+        .insert("zeta".into(), ["hit".into()].into());
+    model.update_stats(stats.clone());
+    assert!(strip_ansi(&view::render(&model, None, 110, 27).to_string()).contains("hit"));
+    stats
+        .crate_outcomes
+        .get_mut("zeta")
+        .unwrap()
+        .insert("miss".into());
+    model.update_stats(stats);
+    assert!(strip_ansi(&view::render(&model, None, 110, 27).to_string()).contains("mixed"));
+}
+
+#[test]
+fn malformed_versions_and_large_exit_codes_stay_failures_or_passthrough() {
+    let mut model = Model::new(&["build".into()]);
+    assert!(!model.status("   Compiling assets v1.2.not-a-version"));
+    assert_eq!(
+        status_code(&portable_pty::ExitStatus::with_exit_code(256)),
+        1
+    );
+}

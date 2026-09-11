@@ -61,22 +61,19 @@ pub(super) fn render(
         .dim(),
     ];
     let rows = ROWS.min(usize::from(height.saturating_sub(12)) / 2).max(1);
-    let count = model.live.len().min(rows);
-    let mut live: Vec<_> = model.live.iter().collect();
-    live.sort_by_key(|(_, start)| *start);
-    for (i, (name, start)) in live.into_iter().take(rows).enumerate() {
-        lines.push(fade(
-            rimel::row([
+    for slot in model.slots.iter().take(rows) {
+        if let Some(name) = slot
+            && let Some(start) = model.live.get(name)
+        {
+            lines.push(rimel::row([
                 rimel::text("● ").fg(palette::YELLOW),
-                rimel::text(format!("{name:<NAME_WIDTH$}")).fg(palette::TEXT),
+                rimel::text(format!("{:<NAME_WIDTH$}", short_name(name))).fg(palette::TEXT),
                 rimel::text(format!("{:05.2}s", start.elapsed().as_secs_f32()))
                     .fg(palette::SUBTEXT0),
-            ]),
-            0.4 + 0.6 * (i + 1) as f32 / count.max(1) as f32,
-        ));
-    }
-    for i in count..rows {
-        lines.push(rimel::text(if i == 0 { "  …" } else { "" }).dim());
+            ]));
+        } else {
+            lines.push(rimel::text(""));
+        }
     }
     lines.push(rimel::separator(48).dim());
     lines.push(
@@ -97,7 +94,7 @@ pub(super) fn render(
     let count = recent.len();
     for (i, row) in recent.into_iter().rev().enumerate() {
         let time = if row.fresh {
-            "fresh".into()
+            "—".into()
         } else {
             row.duration
                 .map_or("—".into(), |d| format!("{:05.2}s", d.as_secs_f32()))
@@ -109,8 +106,9 @@ pub(super) fn render(
                 } else {
                     palette::GREEN
                 }),
-                rimel::text(format!("{:<NAME_WIDTH$}", row.name)).fg(palette::TEXT),
+                rimel::text(format!("{:<NAME_WIDTH$}", short_name(&row.name))).fg(palette::TEXT),
                 rimel::text(time).fg(palette::SUBTEXT0),
+                rimel::text(format!("  {}", outcome(model, row))).fg(palette::SUBTEXT0),
             ]),
             0.4 + 0.6 * (i + 1) as f32 / count.max(1) as f32,
         ));
@@ -133,7 +131,7 @@ pub(super) fn render(
     if !model.warnings.is_empty() || !model.failures.is_empty() {
         lines.push(
             rimel::text(format!(
-                "{} warnings · {} failed tests",
+                "{} warnings · {} failed tests · MBX_PRETTY_INSPECT=1 to browse",
                 model.warnings.len(),
                 model.tests_failed
             ))
@@ -186,20 +184,34 @@ fn cache(model: &Model) -> Vec<Block> {
 
 pub(super) fn summary(model: &Model) -> Block {
     let (ok, elapsed) = model.finished.unwrap_or((true, model.started.elapsed()));
+    let verb = if !ok {
+        "Failed"
+    } else if model.testing {
+        "Tested"
+    } else if model.command.contains("check") || model.command.contains("clippy") {
+        "Checked"
+    } else {
+        "Built"
+    };
     let mut lines = vec![
         rimel::text(format!(
-            "{} {} in {:.2}s",
+            "{} {verb} in {:.2}s · saved ~{:.2}s compiler work",
             if ok { "✓" } else { "✗" },
-            model.command,
-            elapsed.as_secs_f32()
+            elapsed.as_secs_f32(),
+            model.mix.saved_ns as f64 / 1e9
         ))
         .fg(if ok { palette::GREEN } else { palette::RED })
         .bold(),
         rimel::text(format!(
-            "  {} artifacts compiled · {} fresh",
-            model.artifacts, model.fresh
+            "{} hits · {} misses · {} bypassed · {} fresh · {} not looked up",
+            model.mix.hits,
+            model.mix.misses,
+            model.mix.bypasses,
+            model.fresh,
+            model.mix.unconsulted
         ))
         .dim(),
+        rimel::text("Savings estimate sums compiler work, not wall-clock time.").dim(),
     ];
     if model.testing {
         lines.push(rimel::text(format!(
@@ -207,7 +219,15 @@ pub(super) fn summary(model: &Model) -> Block {
             model.tests_passed, model.tests_failed, model.tests_ignored
         )));
     }
-    lines.extend(cache(model));
+    if !model.warnings.is_empty() {
+        lines.push(
+            rimel::text(format!(
+                "{} warnings · MBX_PRETTY_INSPECT=1 to browse",
+                model.warnings.len()
+            ))
+            .fg(palette::YELLOW),
+        );
+    }
     rimel::col(lines)
 }
 
@@ -234,4 +254,25 @@ fn crop(block: Block, scroll: usize, width: u16, height: u16) -> Block {
             rimel::row(line)
         }
     }))
+}
+
+fn short_name(name: &str) -> &str {
+    name.rsplit_once(" v").map_or(name, |(name, _)| name)
+}
+
+fn outcome<'a>(model: &'a Model, row: &super::model::Row) -> &'a str {
+    if row.fresh {
+        return "fresh";
+    }
+    let Some(target) = &row.cache_target else {
+        return "";
+    };
+    let Some(outcomes) = model.outcomes.get(target) else {
+        return "unknown";
+    };
+    if outcomes.len() == 1 {
+        outcomes.first().map(String::as_str).unwrap_or("unknown")
+    } else {
+        "mixed"
+    }
 }

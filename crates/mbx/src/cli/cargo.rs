@@ -263,7 +263,11 @@ fn cargo_with_settings_bypass_log_and_roots(
         }
         super::launch::record_overlay(&mut environment)?;
         let status = if super::pretty::enabled(arguments) {
-            super::pretty::run(&cargo, arguments, &environment, || session.progress_stats())
+            match super::pretty::run(&cargo, arguments, &environment, settings.pretty_inspect, || session.progress_stats()) {
+                Ok(Some(status)) => Ok(status),
+                Ok(None) => run_cargo(&cargo, arguments, environment),
+                Err(error) => Err(error),
+            }
         } else {
             run_cargo(&cargo, arguments, environment)
         };
