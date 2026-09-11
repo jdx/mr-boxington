@@ -193,6 +193,11 @@ build:
 Set `MBX_REMOTE_TOKEN` in the project's CI/CD variables, masked and limited to
 protected branches, not in the YAML.
 
+GitLab's Docker and Kubernetes executors commonly mount the job workspace on
+an overlay filesystem separate from the default cache directory, which
+disables local reflink restores regardless of the remote backend. See
+[restores are slow in containerized CI](/troubleshooting#restores-are-slow-in-containerized-ci).
+
 ## Prefetch
 
 After a command has published its action manifest, another machine can warm
