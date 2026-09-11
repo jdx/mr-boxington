@@ -8,6 +8,15 @@ subjects should use the same format. Start descriptions with a lowercase
 character and keep them concise and imperative. Use `!` for a breaking change and explain it with a
 `BREAKING CHANGE:` footer.
 
+Breaking markers are commit-wide; a Conventional Commit scope does not limit
+them to one crate. Because pull requests are squash-merged, do not use `!` or a
+`BREAKING CHANGE:` footer on a pull request that touches `mbx` unless the CLI
+itself requires a major release. A breaking CLI change requires exceptional
+justification and explicit maintainer agreement before using either marker. A
+breaking API change confined to a pre-1.0 subcrate should be isolated from
+`mbx` changes so release-plz can give that subcrate its permitted 0.x minor
+bump without triggering an `mbx` major bump.
+
 Allowed types are `bench`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`,
 `refactor`, `revert`, `security`, `style`, and `test`.
 
