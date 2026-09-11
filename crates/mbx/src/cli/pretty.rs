@@ -1,42 +1,59 @@
-//! Inline Cargo progress, inspired by romancitodev's cargo-pretty.
+//! Cargo-pretty's inline view, with session-local mbx cache information.
 //!
-//! Keep Cargo's diagnostics intact and use only its human status messages for
-//! the transient line. No unit-graph probe, nightly flags, or guessed totals.
-use std::io::{self, IsTerminal, Read, Write};
-use std::process::{Command, ExitStatus, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::{Duration, Instant};
+//! Cargo remains the only orchestrator: the original command runs once in a
+//! terminal, including runners and doctests. Only its presentation is adapted.
+mod model;
+#[cfg(test)]
+mod tests;
+mod upstream;
+mod view;
 
-use ratatui::crossterm::terminal;
+use eyre::{Context, Result};
+use mbx_cache_core::AgentStats;
+use model::{Model, strip_ansi};
+use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+use ratatui::crossterm::{
+    cursor,
+    event::{self, Event, KeyCode, KeyModifiers},
+    execute, terminal,
+};
+use std::{
+    collections::BTreeMap,
+    ffi::OsStr,
+    io::{self, IsTerminal, Read, Write},
+    process::ExitCode,
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 
 pub(super) fn enabled(arguments: &[String]) -> bool {
     eligible(arguments)
-        && io::stderr().is_terminal()
+        && io::stdin().is_terminal()
         && io::stdout().is_terminal()
+        && io::stderr().is_terminal()
         && !crate::policy::is_ci()
         && std::env::var("TERM").as_deref() != Ok("dumb")
         && std::env::var_os("NO_COLOR").is_none()
         && std::env::var("CARGO_TERM_COLOR").as_deref() != Ok("never")
         && std::env::var("CARGO_TERM_PROGRESS_WHEN").as_deref() != Ok("never")
-        && supports_ansi()
+        && terminal::size().is_ok_and(|(cols, rows)| cols >= 50 && rows >= 16)
 }
 
-fn supports_ansi() -> bool {
-    #[cfg(windows)]
-    return ratatui::crossterm::ansi_support::supports_ansi();
-    #[cfg(not(windows))]
-    true
+fn cargo_verb(arguments: &[String]) -> Option<&str> {
+    arguments
+        .get(usize::from(
+            arguments.first().is_some_and(|arg| arg.starts_with('+')),
+        ))
+        .map(String::as_str)
 }
 
 fn eligible(arguments: &[String]) -> bool {
-    // Run and test must inherit their terminal handles, including stderr.
-    // Unknown/global options are passed through rather than reinterpreted.
     matches!(
-        arguments.first().map(String::as_str),
-        Some("build" | "b" | "check" | "c" | "clippy")
+        cargo_verb(arguments),
+        Some("build" | "b" | "check" | "c" | "clippy" | "run" | "r" | "test" | "t")
     ) && !arguments
         .iter()
-        .take_while(|arg| arg.as_str() != "--")
+        .take_while(|a| a.as_str() != "--")
         .any(|arg| {
             matches!(
                 arg.as_str(),
@@ -56,294 +73,418 @@ fn eligible(arguments: &[String]) -> bool {
         })
 }
 
-pub(super) fn run(command: &mut Command) -> io::Result<ExitStatus> {
-    run_with_output(command, &mut io::stderr())
+fn cargo_arguments(arguments: &[String]) -> Vec<String> {
+    let mut result = arguments.to_vec();
+    let index = result
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(result.len());
+    result.insert(
+        index,
+        "--message-format=json,json-diagnostic-rendered-ansi".into(),
+    );
+    result
 }
 
-fn run_with_output(command: &mut Command, output: &mut impl Write) -> io::Result<ExitStatus> {
-    command
-        .stderr(Stdio::piped())
-        .env("CARGO_TERM_PROGRESS_WHEN", "never");
-    let mut child = command.spawn()?;
-    let mut stderr = child.stderr.take().expect("piped Cargo stderr");
-    let (send, receive) = mpsc::sync_channel(16);
-    std::thread::scope(|scope| {
-        scope.spawn(move || {
-            let mut bytes = [0; 4096];
-            loop {
-                match stderr.read(&mut bytes) {
-                    Ok(0) => break,
-                    Ok(size) => {
-                        if send.send(Ok(bytes[..size].to_vec())).is_err() {
-                            break;
-                        }
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(error) => {
-                        let _ = send.send(Err(error));
+pub(super) fn run(
+    cargo: &OsStr,
+    arguments: &[String],
+    environment: &BTreeMap<String, String>,
+    stats: impl Fn() -> AgentStats,
+) -> Result<ExitCode> {
+    let (cols, rows) = terminal::size()?;
+    let pair = NativePtySystem::default()
+        .openpty(pty_size(cols, rows))
+        .map_err(|e| eyre::eyre!(e))?;
+    let mut command = CommandBuilder::new(cargo);
+    command.args(cargo_arguments(arguments));
+    for (key, value) in environment {
+        command.env(key, value);
+    }
+    command.cwd(std::env::current_dir()?);
+    // Cargo supplies the build-unit denominator itself; no unstable unit-graph
+    // probe, altered compiler settings or metadata guess is involved.
+    command.env("CARGO_TERM_PROGRESS_WHEN", "always");
+    command.env("CARGO_TERM_PROGRESS_WIDTH", cols.to_string());
+    let mut reader = pair.master.try_clone_reader().map_err(|e| eyre::eyre!(e))?;
+    let mut input = pair.master.take_writer().map_err(|e| eyre::eyre!(e))?;
+    let mut screen = Screen::new()?;
+    let mut child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|e| eyre::eyre!(e))?;
+    drop(pair.slave);
+    let (send, receive) = mpsc::sync_channel(32);
+    std::thread::spawn(move || {
+        let mut bytes = [0; 8192];
+        loop {
+            match reader.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if send.send(Ok(bytes[..n].to_vec())).is_err() {
                         break;
                     }
                 }
-            }
-        });
-        let mut display = Display::default();
-        let mut read_error = None;
-        loop {
-            match receive.recv_timeout(Duration::from_millis(80)) {
-                Ok(Ok(bytes)) => display.feed(&bytes, output),
-                Ok(Err(error)) => {
-                    read_error = Some(error);
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    let _ = send.send(Err(error));
                     break;
                 }
-                Err(RecvTimeoutError::Disconnected) => break,
-                Err(RecvTimeoutError::Timeout) => {
-                    // Partial diagnostics must not wait for a newline or exit.
-                    display.flush_partial(output);
-                    let width = terminal::size()
-                        .ok()
-                        .map(|(width, _)| width)
-                        .filter(|width| *width > 0)
-                        .unwrap_or(80);
-                    display.draw(output, width);
-                }
             }
         }
-        display.finish(output);
-        // Always reap Cargo, including when its stderr could not be read.
-        let status = child.wait()?;
-        read_error.map_or(Ok(status), Err)
-    })
+    });
+    let mut model = Model::new(arguments);
+    let is_run = matches!(cargo_verb(arguments), Some("run" | "r"));
+    let is_test = matches!(cargo_verb(arguments), Some("test" | "t"));
+    let mut decoder = Decoder::default();
+    let mut proxy = false;
+    let mut last_frame = Instant::now() - Duration::from_secs(1);
+    let result = (|| -> Result<portable_pty::ExitStatus> {
+        loop {
+            match receive.recv_timeout(Duration::from_millis(20)) {
+                Ok(Ok(bytes)) => {
+                    model.mix = stats().into();
+                    decoder.feed(&bytes, &mut model, &mut screen, is_run, is_test, &mut proxy)?
+                }
+                Ok(Err(error)) => return Err(error.into()),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // Do not wait on a descendant that outlives Cargo while
+                    // retaining a copy of its output handle.
+                    if child.try_wait().map_err(|e| eyre::eyre!(e))?.is_some() {
+                        break;
+                    }
+                    decoder.flush_partial(&mut screen, model.build_finished)?;
+                }
+            }
+            forward_input(&mut input)?;
+            if let Ok((cols, rows)) = terminal::size() {
+                let size = pty_size(cols, rows);
+                if pair.master.get_size().map_err(|e| eyre::eyre!(e))? != size {
+                    pair.master.resize(size).map_err(|e| eyre::eyre!(e))?;
+                    screen.clear()?;
+                }
+            }
+            if !proxy
+                && decoder.pending.is_empty()
+                && !decoder.partial
+                && last_frame.elapsed() >= Duration::from_millis(80)
+            {
+                model.mix = stats().into();
+                screen.draw(view::render(&model, None, screen.width(), screen.height()))?;
+                last_frame = Instant::now();
+            }
+        }
+        decoder.finish(&mut screen)?;
+        child.wait().map_err(|e| eyre::eyre!(e))
+    })();
+    if result.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let status = result.wrap_err("running Cargo with the pretty display")?;
+    model.mix = stats().into();
+    model.finished = Some((status.success(), model.started.elapsed()));
+    if !proxy {
+        screen.draw(view::render(&model, None, screen.width(), screen.height()))?;
+        // Full diagnostic text remains in scrollback even if the user dismisses
+        // the optional browser, and the child's failure status stays authoritative.
+        screen.commit();
+        for error in &model.errors {
+            screen.write(error.as_bytes())?;
+            screen.write(b"\r\n")?;
+        }
+        let count = model.warnings.len() + model.failures.len();
+        if count > 0 {
+            let mut browser = view::Browser::default();
+            loop {
+                screen.draw(view::render(
+                    &model,
+                    Some(&mut browser),
+                    screen.width(),
+                    screen.height(),
+                ))?;
+                if let Event::Key(key) = event::read()? {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => break,
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            break;
+                        }
+                        KeyCode::Up if browser.inspecting => {
+                            browser.scroll = browser.scroll.saturating_sub(1)
+                        }
+                        KeyCode::Down if browser.inspecting => {
+                            browser.scroll = browser.scroll.saturating_add(1)
+                        }
+                        KeyCode::Up => {
+                            browser.selected = browser.selected.saturating_sub(1);
+                            browser.scroll = 0;
+                        }
+                        KeyCode::Down => {
+                            browser.selected = (browser.selected + 1).min(count - 1);
+                            browser.scroll = 0;
+                        }
+                        KeyCode::Enter => {
+                            browser.inspecting = !browser.inspecting;
+                            browser.scroll = 0;
+                        }
+                        KeyCode::PageUp => browser.scroll = browser.scroll.saturating_sub(10),
+                        KeyCode::PageDown => browser.scroll = browser.scroll.saturating_add(10),
+                        _ => {}
+                    }
+                }
+            }
+            screen.clear()?;
+            for warning in &model.warnings {
+                screen.write(warning.rendered.as_bytes())?;
+                screen.write(b"\r\n")?;
+            }
+        }
+        screen.commit();
+    }
+    Ok(ExitCode::from(status_code(&status)))
 }
 
-struct Display {
+fn pty_size(cols: u16, rows: u16) -> PtySize {
+    PtySize {
+        rows: rows.max(1),
+        cols: cols.max(1),
+        pixel_width: 0,
+        pixel_height: 0,
+    }
+}
+
+fn status_code(status: &portable_pty::ExitStatus) -> u8 {
+    #[cfg(unix)]
+    if let Some(name) = status.signal() {
+        // portable-pty retains the signal's platform name rather than number.
+        for signal in 1..=127 {
+            let description = unsafe { libc::strsignal(signal) };
+            if !description.is_null()
+                && unsafe { std::ffi::CStr::from_ptr(description) }.to_string_lossy() == name
+            {
+                return 128 + signal as u8;
+            }
+        }
+    }
+    status.exit_code() as u8
+}
+
+// Unix input remains byte-for-byte terminal input, including function keys,
+// paste sequences, control characters and application-specific escape codes.
+#[cfg(unix)]
+fn forward_input(input: &mut impl Write) -> io::Result<()> {
+    let mut poll = libc::pollfd {
+        fd: libc::STDIN_FILENO,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    if unsafe { libc::poll(&mut poll, 1, 0) } > 0 && poll.revents & libc::POLLIN != 0 {
+        let mut bytes = [0u8; 8192];
+        let size =
+            unsafe { libc::read(libc::STDIN_FILENO, bytes.as_mut_ptr().cast(), bytes.len()) };
+        if size > 0 {
+            input.write_all(&bytes[..size as usize])?;
+            input.flush()?;
+        } else if size < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn forward_input(input: &mut impl Write) -> io::Result<()> {
+    while event::poll(Duration::ZERO)? {
+        match event::read()? {
+            Event::Key(key) if key.kind != event::KeyEventKind::Release => {
+                input.write_all(&key_bytes(key))?
+            }
+            Event::Paste(text) => input.write_all(text.as_bytes())?,
+            _ => {}
+        }
+    }
+    input.flush()
+}
+
+#[cfg(windows)]
+fn key_bytes(key: event::KeyEvent) -> Vec<u8> {
+    let mut bytes = match key.code {
+        KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && c.is_ascii() => {
+            vec![(c as u8) & 0x1f]
+        }
+        KeyCode::Char(c) => c.to_string().into_bytes(),
+        KeyCode::Enter => vec![b'\r'],
+        KeyCode::Backspace => vec![127],
+        KeyCode::Tab => vec![b'\t'],
+        KeyCode::BackTab => b"\x1b[Z".to_vec(),
+        KeyCode::Esc => vec![27],
+        KeyCode::Up => b"\x1b[A".to_vec(),
+        KeyCode::Down => b"\x1b[B".to_vec(),
+        KeyCode::Right => b"\x1b[C".to_vec(),
+        KeyCode::Left => b"\x1b[D".to_vec(),
+        KeyCode::Home => b"\x1b[H".to_vec(),
+        KeyCode::End => b"\x1b[F".to_vec(),
+        KeyCode::Delete => b"\x1b[3~".to_vec(),
+        KeyCode::Insert => b"\x1b[2~".to_vec(),
+        KeyCode::PageUp => b"\x1b[5~".to_vec(),
+        KeyCode::PageDown => b"\x1b[6~".to_vec(),
+        KeyCode::F(n @ 1..=4) => vec![27, b'O', b'P' + n - 1],
+        KeyCode::F(n @ 5..=12) => format!(
+            "\x1b[{}~",
+            [15, 17, 18, 19, 20, 21, 23, 24][usize::from(n - 5)]
+        )
+        .into_bytes(),
+        _ => Vec::new(),
+    };
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        bytes.insert(0, 27);
+    }
+    bytes
+}
+
+#[derive(Default)]
+struct Decoder {
     pending: Vec<u8>,
-    passthrough_line: bool,
-    action: Option<String>,
-    started: Instant,
-    frame: usize,
-    drawn: bool,
+    partial: bool,
+    swallow_lf: bool,
 }
 
-impl Default for Display {
-    fn default() -> Self {
-        Self {
-            pending: Vec::new(),
-            passthrough_line: false,
-            action: None,
-            started: Instant::now(),
-            frame: 0,
-            drawn: false,
+impl Decoder {
+    fn feed(
+        &mut self,
+        bytes: &[u8],
+        model: &mut Model,
+        screen: &mut Screen,
+        is_run: bool,
+        is_test: bool,
+        proxy: &mut bool,
+    ) -> io::Result<()> {
+        if *proxy {
+            return screen.write(bytes);
         }
-    }
-}
-
-impl Display {
-    fn clear(&mut self, output: &mut impl Write) {
-        if self.drawn {
-            let _ = output.write_all(b"\r\x1b[2K");
-            self.drawn = false;
-        }
-    }
-
-    fn feed(&mut self, bytes: &[u8], output: &mut impl Write) {
-        for chunk in bytes.split_inclusive(|byte| *byte == b'\n') {
+        for chunk in bytes.split_inclusive(|byte| matches!(byte, b'\n' | b'\r')) {
+            if *proxy {
+                screen.write(chunk)?;
+                continue;
+            }
+            if self.swallow_lf && chunk == b"\n" {
+                self.swallow_lf = false;
+                continue;
+            }
+            self.swallow_lf = false;
             self.pending.extend_from_slice(chunk);
-            if chunk.ends_with(b"\n") {
-                let action = if self.passthrough_line {
-                    None
-                } else {
-                    cargo_action(&self.pending)
-                };
-                self.clear(output);
-                if let Some(action) = action {
-                    self.action = Some(action);
-                } else {
-                    self.action = None;
-                    let _ = output.write_all(&self.pending);
+            if chunk.ends_with(b"\n") || chunk.ends_with(b"\r") {
+                let clean = std::str::from_utf8(&self.pending).ok().map(strip_ansi);
+                let line = clean
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim_end_matches(['\n', '\r']);
+                let handled = !self.partial
+                    && ((!model.build_finished && (model.cargo(line) || model.status(line)))
+                        || (is_test && model.test_line(line)));
+                self.swallow_lf = handled && chunk.ends_with(b"\r");
+                if !handled {
+                    screen.write(&self.pending)?;
                 }
                 self.pending.clear();
-                self.passthrough_line = false;
-            } else if self.pending.len() >= 8192 {
-                self.flush_partial(output);
+                self.partial = false;
+                if is_run && model.build_finished && model.build_ok == Some(true) {
+                    model.finished = Some((true, model.started.elapsed()));
+                    screen.draw(view::summary(model))?;
+                    screen.commit();
+                    for warning in &model.warnings {
+                        screen.write(warning.rendered.as_bytes())?;
+                        screen.write(b"\r\n")?;
+                    }
+                    *proxy = true;
+                    execute!(io::stderr(), cursor::Show)?;
+                }
+            } else if self.pending.len() >= 1024 * 1024 {
+                self.partial = true;
+                self.flush_partial(screen, true)?;
             }
         }
-        let _ = output.flush();
+        Ok(())
     }
 
-    fn flush_partial(&mut self, output: &mut impl Write) {
-        if !self.pending.is_empty() {
-            self.clear(output);
-            self.action = None;
-            let _ = output.write_all(&self.pending);
+    fn flush_partial(&mut self, screen: &mut Screen, native_output: bool) -> io::Result<()> {
+        // Compiler JSON may be emitted in many writes; retain a bounded record.
+        // Ordinary partial output (prompts, custom harnesses) is forwarded now.
+        if !self.pending.is_empty()
+            && (native_output || self.partial || !self.pending.starts_with(b"{"))
+        {
+            screen.write(&self.pending)?;
             self.pending.clear();
-            self.passthrough_line = true;
-            let _ = output.flush();
+            self.partial = true;
         }
+        Ok(())
     }
 
-    fn draw(&mut self, output: &mut impl Write, width: u16) {
-        let Some(action) = &self.action else {
-            return;
-        };
-        // ASCII output gives a predictable cell width even on narrow terminals.
-        let spinner = ['|', '/', '-', '\\'][self.frame % 4];
-        let text = format!(
-            "{spinner} [{:.1}s] {action}",
-            self.started.elapsed().as_secs_f32()
-        );
-        let text: String = text
-            .chars()
-            .map(|c| {
-                if c.is_ascii() && !c.is_control() {
-                    c
-                } else {
-                    '?'
-                }
-            })
-            .take(usize::from(width.saturating_sub(1)))
-            .collect();
-        self.clear(output);
-        let _ = write!(output, "\r\x1b[36m{text}\x1b[0m");
-        let _ = output.flush();
-        self.frame += 1;
-        self.drawn = true;
-    }
-
-    fn finish(&mut self, output: &mut impl Write) {
-        self.clear(output);
-        self.flush_partial(output);
-        let _ = output.flush();
+    fn finish(&mut self, screen: &mut Screen) -> io::Result<()> {
+        if !self.pending.is_empty() {
+            screen.write(&self.pending)?;
+            self.pending.clear();
+        }
+        Ok(())
     }
 }
 
-fn cargo_action(bytes: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    // Only strip SGR color sequences. Other control sequences are not status
-    // messages and must retain their original bytes on the passthrough path.
-    let mut plain = String::new();
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            if chars.next()? != '[' {
-                return None;
-            }
-            loop {
-                match chars.next()? {
-                    'm' => break,
-                    '0'..='9' | ';' => {}
-                    _ => return None,
-                }
-            }
-        } else {
-            plain.push(c);
-        }
-    }
-    // Cargo right-aligns status verbs to twelve columns. Requiring this
-    // prefix avoids swallowing similarly named build-script warnings.
-    ["   Compiling ", "    Checking ", "    Building "]
-        .iter()
-        .find_map(|prefix| {
-            plain.strip_prefix(prefix).map(|name| {
-                let name = name.trim_end();
-                let name = name.split_once(" (").map_or(name, |(package, _)| package);
-                format!("{} {name}", prefix.trim())
-            })
-        })
+struct Screen {
+    drawn: u16,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(unix)]
-    #[test]
-    fn drains_child_output_and_preserves_failure_status() {
-        let mut command = Command::new("sh");
-        command.args([
-            "-c",
-            "printf '   Compiling demo v1.0\\n' >&2; printf 'warning: keep me\\n' >&2; exit 23",
-        ]);
-        let mut output = Vec::new();
-        let status = run_with_output(&mut command, &mut output).unwrap();
-        assert_eq!(status.code(), Some(23));
-        assert_eq!(output, b"warning: keep me\n");
-    }
-
-    #[test]
-    fn narrow_terminal_does_not_wrap_the_status_line() {
-        let mut display = Display::default();
-        let mut output = Vec::new();
-        display.feed(b"   Compiling demo v1.0\n", &mut output);
-        display.draw(&mut output, 2);
-        assert_eq!(output, b"\r\x1b[36m|\x1b[0m");
-        display.finish(&mut output);
-        assert!(output.ends_with(b"\r\x1b[2K"));
-    }
-
-    #[test]
-    fn preserves_diagnostics_and_non_utf8_bytes() {
-        let mut display = Display::default();
-        let mut output = Vec::new();
-        display.feed(b"   Compiling demo v1.0\n", &mut output);
-        display.draw(&mut output, 40);
-        display.feed(b"warning: hello\n\xff\n    Finished dev\n", &mut output);
-        display.finish(&mut output);
-        assert!(output.ends_with(b"warning: hello\n\xff\n    Finished dev\n"));
-        assert!(display.action.is_none());
-    }
-
-    #[test]
-    fn partial_lines_are_prompt_and_never_misclassified() {
-        let mut display = Display::default();
-        let mut output = Vec::new();
-        display.feed(b"warning: ", &mut output);
-        display.flush_partial(&mut output);
-        assert_eq!(output, b"warning: ");
-        display.feed(b"   Compiling something\n", &mut output);
-        assert_eq!(output, b"warning:    Compiling something\n");
-        display.feed(&vec![b'x'; 20000], &mut output);
-        display.finish(&mut output);
-        assert_eq!(
-            output.len(),
-            b"warning:    Compiling something\n".len() + 20000
-        );
-    }
-
-    #[test]
-    fn recognizes_only_cargo_status_lines() {
-        assert_eq!(
-            cargo_action(b"   Compiling demo v1.0 (/a/long/workspace/path)\n").as_deref(),
-            Some("Compiling demo v1.0")
-        );
-        assert_eq!(
-            cargo_action(b"\x1b[1m\x1b[32m   Compiling\x1b[0m demo v1.0\n").as_deref(),
-            Some("Compiling demo v1.0")
-        );
-        assert_eq!(cargo_action(b"   Compiling demo\x1b[2K\n"), None);
-        assert_eq!(cargo_action(b"warning: Compiling demo\n"), None);
-        assert_eq!(cargo_action(b"Compiling demo\n"), None);
-    }
-
-    #[test]
-    fn respects_machine_output_and_passthrough_commands() {
-        for args in [
-            vec!["test"],
-            vec!["run"],
-            vec!["build", "--message-format=json"],
-            vec!["build", "-vv"],
-            vec!["check", "-q"],
-            vec!["build", "--config", "term.quiet=true"],
-            vec!["build", "--color=never"],
-        ] {
-            assert!(!eligible(
-                &args.iter().map(|arg| (*arg).into()).collect::<Vec<_>>()
-            ));
+impl Screen {
+    fn new() -> io::Result<Self> {
+        terminal::enable_raw_mode()?;
+        let mut screen = Self { drawn: 0 };
+        if let Err(error) = execute!(io::stderr(), cursor::Hide) {
+            let _ = terminal::disable_raw_mode();
+            return Err(error);
         }
-        assert!(eligible(&["build".into(), "--release".into()]));
-        assert!(eligible(&[
-            "clippy".into(),
-            "--".into(),
-            "-Dwarnings".into()
-        ]));
+        screen.clear()?;
+        Ok(screen)
+    }
+    fn width(&self) -> u16 {
+        terminal::size()
+            .map_or(80, |s| s.0.max(2))
+            .saturating_sub(1)
+    }
+    fn height(&self) -> u16 {
+        terminal::size()
+            .map_or(24, |s| s.1.max(3))
+            .saturating_sub(2)
+            .min(27)
+    }
+    fn clear(&mut self) -> io::Result<()> {
+        if self.drawn > 0 {
+            write!(io::stderr(), "\r\x1b[{}A\x1b[J", self.drawn)?;
+            self.drawn = 0;
+        }
+        Ok(())
+    }
+    fn draw(&mut self, block: norimel::Block) -> io::Result<()> {
+        self.clear()?;
+        let text = block.to_string().replace('\n', "\r\n");
+        write!(io::stderr(), "{text}\r\n")?;
+        self.drawn = block.size().1;
+        io::stderr().flush()
+    }
+    fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.clear()?;
+        io::stderr().write_all(bytes)?;
+        io::stderr().flush()
+    }
+    fn commit(&mut self) {
+        self.drawn = 0;
+    }
+}
+impl Drop for Screen {
+    fn drop(&mut self) {
+        let _ = self.clear();
+        let _ = execute!(io::stderr(), cursor::Show);
+        let _ = terminal::disable_raw_mode();
     }
 }

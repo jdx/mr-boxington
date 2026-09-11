@@ -11,8 +11,9 @@ const paused = ref(false);
       <p class="eyebrow">While Cargo does its work</p>
       <h2 id="mbx-build-title">A little company for the compile.</h2>
       <p>
-        Follow Cargo’s latest build action and elapsed time in one animated line.
-        Warnings, errors, and the final summary stay in your terminal.
+        Watch live crates and completed work in cargo-pretty’s display, with mbx
+        cache information alongside. The progress bar shows hits in green,
+        misses in amber, and bypasses in gray.
       </p>
     </div>
     <figure>
@@ -23,15 +24,15 @@ const paused = ref(false);
         />
         <img
           :src="withBase(`/screenshots/cargo-pretty.${paused ? 'png' : 'gif'}`)"
-          alt="mbx build showing an animated timer while compiling hello-boxington, then Cargo’s successful build summary"
+          alt="cargo-pretty-based mbx display with live and completed crates, timers, and green cache hits alongside amber misses"
           width="1120"
-          height="240"
+          height="800"
           loading="lazy"
           decoding="async"
         />
       </picture>
       <figcaption>
-        Recorded from a small demo build. Inspired by
+        Recorded from a small demo build. Adapted from
         <a href="https://github.com/romancitodev/cargo-pretty">cargo-pretty</a>
         by romancitodev.
         <button type="button" :aria-pressed="paused" @click="paused = !paused">
@@ -90,5 +91,8 @@ button {
 }
 @media (max-width: 640px) {
   .MbxBuild { padding: 0 24px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  button { display: none; }
 }
 </style>

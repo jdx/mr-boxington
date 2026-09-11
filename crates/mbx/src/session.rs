@@ -32,6 +32,7 @@ mod diagnostics;
 mod server;
 mod shims;
 mod stats;
+pub(crate) use stats::{cache_misses, unexpected_bypasses};
 pub(crate) mod verification;
 
 #[cfg(test)]
@@ -61,7 +62,7 @@ pub(crate) use stats::display_stats;
 pub(crate) use stats::session_was_active;
 #[cfg(test)]
 use stats::{
-    cache_misses, ci_summary, short_summary, should_display_short_stats, should_display_stats,
+    ci_summary, short_summary, should_display_short_stats, should_display_stats,
     stale_manifest_note,
 };
 
@@ -140,6 +141,11 @@ pub(super) struct SessionTask {
 }
 
 impl CacheSession {
+    /// Live counters for the inline Cargo display, scoped to this session.
+    pub(crate) fn progress_stats(&self) -> AgentStats {
+        self.agent.stats()
+    }
+
     /// Install the shim, start the agent, and begin serving the shim's requests.
     ///
     /// `session_dir` holds the shim, socket, and staging directory, and is

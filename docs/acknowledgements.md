@@ -37,6 +37,10 @@ direction and where kache may be the better fit.
 ## cargo-pretty
 
 [cargo-pretty](https://github.com/romancitodev/cargo-pretty) by
-[romancitodev](https://github.com/romancitodev) inspired mbx's animated Cargo
-build output. The implementation is original to mbx; the projects do not
-share source code.
+[romancitodev](https://github.com/romancitodev) provides the base for mbx's Cargo display: live and completed crate rows,
+per-crate timers, fading, and browsable warnings. mbx adds cache statistics
+and a progress bar colored by hits, misses, and bypasses while retaining
+Cargo's native run and test execution.
+
+The adapted source retains romancitodev's MIT license and records the upstream
+revision in the repository's `NOTICE` file.

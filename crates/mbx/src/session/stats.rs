@@ -410,7 +410,7 @@ fn routine_probe(kind: &str) -> bool {
 }
 
 /// Count bypasses worth reporting, excluding routine compiler probes.
-fn unexpected_bypasses(stats: &AgentStats) -> u64 {
+pub(crate) fn unexpected_bypasses(stats: &AgentStats) -> u64 {
     stats
         .bypasses
         .iter()
@@ -507,7 +507,7 @@ fn slow_compilations(stats: &AgentStats) -> Vec<(&String, &u64)> {
     slow
 }
 
-pub(super) fn cache_misses(stats: &AgentStats) -> u64 {
+pub(crate) fn cache_misses(stats: &AgentStats) -> u64 {
     stats
         .lookups
         .saturating_sub(stats.hits)

@@ -1,10 +1,3 @@
-The Cargo build display includes code adapted from cargo-pretty by romancitodev.
-https://github.com/romancitodev/cargo-pretty
-Upstream revision: 73777522ccf8e4a485d026b3b60a275af2f8b381
-
-Adapted portions: src/ui.rs and the live/completed row layout in src/main.rs.
-mbx adds cache statistics and uses Cargo's native execution for runs and tests.
-
 MIT License
 
 Copyright (c) 2026 romancitodev

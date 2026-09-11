@@ -4,7 +4,7 @@
 Requires Pillow and pyte. Run after `cargo build -p mbx`:
   python3 scripts/record-cargo-pretty.py --font /path/to/monospace.ttf
 
-A small local fixture sleeps in its build script to make the animation visible.
+A local multi-crate fixture uses non-incremental builds for repeatable cache results.
 This is a UI demonstration, not a benchmark. Output is captured from a real PTY
 and rendered without inventing build messages or changing playback speed.
 """
@@ -14,6 +14,9 @@ import fcntl
 import os
 from pathlib import Path
 import pty
+import shutil
+import re
+import json
 import select
 import struct
 import subprocess
@@ -25,7 +28,7 @@ import pyte
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parents[1]
-WIDTH, HEIGHT, COLS, ROWS = 1120, 240, 80, 5
+WIDTH, HEIGHT, COLS, ROWS = 1120, 800, 100, 30
 COLORS = {"default": "#d9e4e6", "cyan": "#70d7cb", "green": "#9fce88", "yellow": "#e9c778", "red": "#ef8b86"}
 
 
@@ -41,7 +44,7 @@ def render(screen, font, title_font):
     for y in range(ROWS):
         for x in range(COLS):
             char = screen.buffer[y][x]
-            draw.text((25 + x * cell, 76 + y * 25), char.data, font=font, fill=COLORS.get(char.fg, COLORS["default"]))
+            draw.text((25 + x * cell, 70 + y * 23), char.data, font=font, fill=COLORS.get(char.fg, "#" + char.fg if re.fullmatch(r"[0-9a-fA-F]{6}", char.fg) else COLORS["default"]))
     return image
 
 
@@ -50,7 +53,7 @@ def main():
     parser.add_argument("--font", required=True)
     parser.add_argument("--binary", type=Path, default=ROOT / "target/debug/mbx")
     args = parser.parse_args()
-    font = ImageFont.truetype(args.font, 21)
+    font = ImageFont.truetype(args.font, 17)
     title_font = ImageFont.truetype(args.font, 14)
     screen = pyte.Screen(COLS, ROWS)
     stream = pyte.ByteStream(screen)
@@ -60,18 +63,62 @@ def main():
     with tempfile.TemporaryDirectory(prefix="mbx-pretty-demo-") as tmp:
         root = Path(tmp)
         (root / "src").mkdir()
-        (root / "Cargo.toml").write_text('[package]\nname = "hello-boxington"\nversion = "0.1.0"\nedition = "2024"\n')
+        crates = ["boxer-core", "boxer-config", "boxer-store", "boxer-format", "boxer-protocol", "boxer-ui"]
+        dependencies = "\n".join(f'{name} = {{ path = "{name}" }}' for name in crates)
+        (root / "Cargo.toml").write_text('[package]\nname="hello-boxington"\nversion="0.1.0"\nedition="2024"\n[dependencies]\n' + dependencies + "\n")
         (root / "src/main.rs").write_text('fn main() { println!("Hello, Boxington!"); }\n')
-        (root / "build.rs").write_text('fn main() { std::thread::sleep(std::time::Duration::from_secs(2)); }\n')
+        for name in crates:
+            folder = root / name
+            (folder / "src").mkdir(parents=True)
+            (folder / "Cargo.toml").write_text(f'[package]\nname="{name}"\nversion="0.1.0"\nedition="2024"\n')
+            (folder / "src/lib.rs").write_text('pub fn value() -> u32 { 42 }\n' + "\n".join(f"pub fn f{i}() -> u32 {{ {i} }}" for i in range(3000)))
         stamp = root / "cache/actions/notice/v1/explained"
         stamp.parent.mkdir(parents=True)
         stamp.touch()
-        env = dict(os.environ, TERM="xterm-256color", MBX_CACHE_DIR=str(root / "cache"), MBX_TARGET_VIEWS="false", MBX_GC_AUTO="false", MBX_SUMMARY="off", MBX_SAVINGS="off")
-        for key in ["CI", "NO_COLOR", "CARGO_TERM_COLOR", "CARGO_TERM_PROGRESS_WHEN", "MBX_DISABLE", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"]:
+        env = dict(os.environ, TERM="xterm-256color", CARGO_HOME=str(root / "cargo-home"), MBX_CACHE_DIR=str(root / "cache"), MBX_TARGET_VIEWS="false", MBX_GC_AUTO="false", MBX_SUMMARY="off", MBX_INCREMENTAL="false", MBX_SAVINGS="off", MBX_STATS_REPORT=str(root / "stats.json"))
+        for key in ["CI", "GITHUB_ACTIONS", "NO_COLOR", "CARGO_TERM_COLOR", "CARGO_TERM_PROGRESS_WHEN", "MBX_DISABLE", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"]:
             env.pop(key, None)
+        # Seed actual cache entries, then force a mixed rebuild in a clean target.
+        warm_master, warm_slave = pty.openpty()
+        fcntl.ioctl(warm_slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
+        def attach_warm_terminal():
+            os.setsid()
+            fcntl.ioctl(warm_slave, termios.TIOCSCTTY, 0)
+
+        warm = subprocess.Popen([str(args.binary.resolve()), "build"], cwd=root, env=env, stdin=warm_slave, stdout=warm_slave, stderr=warm_slave, preexec_fn=attach_warm_terminal)
+        os.close(warm_slave)
+        warm_output = bytearray()
+        warm_deadline = time.monotonic() + 120
+        try:
+            while time.monotonic() < warm_deadline:
+                ready, _, _ = select.select([warm_master], [], [], .1)
+                if ready:
+                    try:
+                        chunk = os.read(warm_master, 65536)
+                    except OSError as error:
+                        if error.errno == errno.EIO: break
+                        raise
+                    if not chunk: break
+                    warm_output.extend(chunk)
+                if warm.poll() is not None and not ready: break
+            assert warm.wait(timeout=5) == 0, warm_output
+        finally:
+            if warm.poll() is None: warm.kill(); warm.wait()
+            os.close(warm_master)
+        shutil.rmtree(root / "target")
+        # Evict two results in this disposable fixture's cache. Unchanged inputs
+        # now produce real cache hits and misses in the same recorded command.
+        results = sorted((root / "cache/actions/action-results").rglob("*.json"))
+        assert len(results) >= 6, results
+        for result in results[:2]: result.unlink()
+        poster = None
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
-        child = subprocess.Popen([str(args.binary.resolve()), "build"], cwd=root, env=env, stdin=slave, stdout=slave, stderr=slave)
+        def attach_terminal():
+            os.setsid()
+            fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+
+        child = subprocess.Popen([str(args.binary.resolve()), "build"], cwd=root, env=env, stdin=slave, stdout=slave, stderr=slave, preexec_fn=attach_terminal)
         os.close(slave)
         transcript = bytearray()
         last_frame = time.monotonic()
@@ -92,7 +139,11 @@ def main():
                     stream.feed(data)
                 now = time.monotonic()
                 if now - last_frame >= 0.08:
-                    frames.append(render(screen, font, title_font))
+                    frame = render(screen, font, title_font)
+                    visible = "\n".join(screen.display)
+                    if "Compiled (" in visible and re.search(r"[1-9][0-9]* hits", visible) and re.search(r"[1-9][0-9]* misses", visible):
+                        poster = frame.copy()
+                    frames.append(frame)
                     durations.append(round((now - last_frame) * 1000))
                     last_frame = now
             else:
@@ -103,15 +154,17 @@ def main():
             if child.poll() is None:
                 child.kill()
                 child.wait()
-        assert b"Compiling hello-boxington" in transcript, transcript
-        assert b"Finished" in transcript, transcript
-        assert b"\x1b[2K" in transcript, transcript
+        stats = json.loads((root / "stats.json").read_text())
+        assert stats["hits"] > 0 and stats["misses"] > 0, stats
+        assert b"Compiled (" in transcript and b"Build / cache" in transcript, transcript
+        assert poster is not None, "No mixed-cache live frame was captured"
+        assert b"\x1b[J" in transcript, "missing terminal redraw"
     stream.feed(b"$ ")
     frames.append(render(screen, font, title_font))
     durations.append(2200)
     output = ROOT / "docs/public/screenshots"
     output.mkdir(parents=True, exist_ok=True)
-    frames[-1].save(output / "cargo-pretty.png")
+    poster.save(output / "cargo-pretty.png")
     frames[0].save(output / "cargo-pretty.gif", save_all=True, append_images=frames[1:], duration=durations, loop=0, optimize=True)
     print(f"Recorded {len(frames)} frames to {output / 'cargo-pretty.gif'}")
 

@@ -262,7 +262,11 @@ fn cargo_with_settings_bypass_log_and_roots(
             launch.environment(&mut environment)?;
         }
         super::launch::record_overlay(&mut environment)?;
-        let status = run_cargo(&cargo, arguments, environment);
+        let status = if super::pretty::enabled(arguments) {
+            super::pretty::run(&cargo, arguments, &environment, || session.progress_stats())
+        } else {
+            run_cargo(&cargo, arguments, environment)
+        };
         // The shim records a prediction only after a compilation has either
         // been restored or published successfully. Preserve that completed
         // portion even when a later compilation makes cargo fail: it is still
@@ -538,12 +542,9 @@ pub(super) fn run_cargo(
     let mut command = Command::new(cargo);
     command.args(arguments);
     command.envs(environment);
-    let status = if super::pretty::enabled(arguments) {
-        super::pretty::run(&mut command)
-    } else {
-        command.status()
-    }
-    .wrap_err_with(|| format!("failed to run {}", cargo.to_string_lossy()))?;
+    let status = command
+        .status()
+        .wrap_err_with(|| format!("failed to run {}", cargo.to_string_lossy()))?;
     Ok(exit_code(status))
 }
 
