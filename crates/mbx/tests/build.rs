@@ -12,6 +12,7 @@ use std::process::Stdio;
 
 #[path = "build/semantic_oracle.rs"]
 mod semantic_oracle;
+mod support;
 
 fn write_project(directory: &Path) {
     write_named_project(directory, "fixture");
@@ -109,6 +110,19 @@ fn cargo() -> std::ffi::OsString {
     std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into())
 }
 
+/// Start mbx with the developer's own configuration hidden.
+fn mbx_command() -> Command {
+    isolated_command(env!("CARGO_BIN_EXE_mbx"))
+}
+
+/// Start `program`, such as an installed shim, with the developer's own
+/// configuration hidden.
+fn isolated_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    support::isolate_host(&mut command);
+    command
+}
+
 /// Generate a fixture lockfile without contending on the developer or CI
 /// runner's package cache. The integration tests run concurrently and these
 /// registry-free fixtures do not need anything from the shared Cargo home.
@@ -133,7 +147,7 @@ fn a_fatal_rustc_shim_error_survives_an_unavailable_agent() {
         mbx::session::ShimLink::Tracking,
     )
     .unwrap();
-    let output = Command::new(shim)
+    let output = isolated_command(shim)
         .arg(directory.path().join("missing-rustc"))
         .env("MBX_SOCKET", directory.path().join("missing-agent.sock"))
         .output()
@@ -167,7 +181,7 @@ fn transparent_rustc_replaces_the_shim_process() {
     let mut child = {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let attempt = Command::new(&shim)
+            let attempt = isolated_command(&shim)
                 .arg("/bin/sh")
                 .args(["-c", "printf '%s' \"$$\" > \"$1\"", "sh"])
                 .arg(&pid_file)
@@ -262,7 +276,7 @@ fn a_mid_compilation_input_edit_discards_the_result() {
     permissions.set_mode(0o755);
     std::fs::set_permissions(&wrapper, permissions).unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_mbx"));
+    let mut child = mbx_command();
     child
         .current_dir(project.path())
         .args(["check", "--offline", "--verbose"])
@@ -368,7 +382,7 @@ fn a_mid_compilation_input_edit_discards_the_result() {
     // A shim diagnostic is delivered by the live session rather than through
     // the compiler stream. Cargo must therefore have no rejected-result
     // message to replay when the same source is compiled successfully.
-    let retry = Command::new(env!("CARGO_BIN_EXE_mbx"))
+    let retry = mbx_command()
         .current_dir(project.path())
         .args(["check", "--offline"])
         .env("MBX_CACHE_DIR", store.path())
@@ -417,7 +431,7 @@ fn a_mid_compilation_build_script_edit_discards_the_execution_only_result() {
     permissions.set_mode(0o755);
     std::fs::set_permissions(&wrapper, permissions).unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_mbx"));
+    let mut child = mbx_command();
     child
         .current_dir(project.path())
         .args(["build", "--offline", "--verbose"])
@@ -474,7 +488,7 @@ fn build(project: &Path, store: &Path, report: &Path) -> serde_json::Value {
 }
 
 fn document(project: &Path, store: &Path, report: &Path) -> serde_json::Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+    let output = mbx_command()
         .current_dir(project)
         .args(["doc", "--offline", "--no-deps"])
         .env("MBX_CACHE_DIR", store)
@@ -516,7 +530,7 @@ fn cargo_with(
     arguments: &[&str],
     settings: &[(&str, &str)],
 ) -> (serde_json::Value, String) {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_mbx"));
+    let mut command = mbx_command();
     command
         .current_dir(project)
         .args(arguments)
@@ -584,7 +598,7 @@ fn cargo_with(
 
 /// Run `mbx` against `store` and return its stdout.
 fn mbx(store: &Path, arguments: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+    let output = mbx_command()
         .args(arguments)
         .env("MBX_CACHE_DIR", store)
         .output()
@@ -828,7 +842,7 @@ fn a_failed_mergeable_render_is_not_run_again_transparently() {
     std::fs::set_permissions(&wrapper, permissions).unwrap();
     let rustdoc = which::which("rustdoc").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+    let output = mbx_command()
         .current_dir(project.path())
         .args(["doc", "--offline", "--no-deps"])
         .env("MBX_CACHE_DIR", store.path())
@@ -934,7 +948,7 @@ fn a_ci_export_group_collects_every_build_in_the_job() {
     assert!(count(&second_warm, "hits") > 0);
     let archive = reports.path().join("job.tar");
 
-    let export = Command::new(env!("CARGO_BIN_EXE_mbx"))
+    let export = mbx_command()
         .current_dir(first.path())
         .args(["cache", "export", "--group", warm_group])
         .arg(&archive)
@@ -946,7 +960,7 @@ fn a_ci_export_group_collects_every_build_in_the_job() {
         "group export failed: {}",
         String::from_utf8_lossy(&export.stderr)
     );
-    let import = Command::new(env!("CARGO_BIN_EXE_mbx"))
+    let import = mbx_command()
         .args(["cache", "import"])
         .arg(&archive)
         .env("MBX_CACHE_DIR", destination_store.path())
@@ -990,7 +1004,7 @@ fn a_cache_bundle_restores_cargo_workspace_state() {
     );
     std::fs::write(project.path().join("target/scheduler-marker"), b"warm").unwrap();
     let archive = reports.path().join("workspace-state.tar");
-    let export = Command::new(env!("CARGO_BIN_EXE_mbx"))
+    let export = mbx_command()
         .current_dir(project.path())
         .args(["cache", "export", "--group", group])
         .arg(&archive)
@@ -1004,7 +1018,7 @@ fn a_cache_bundle_restores_cargo_workspace_state() {
     );
     wipe_target(project.path());
 
-    let import = Command::new(env!("CARGO_BIN_EXE_mbx"))
+    let import = mbx_command()
         .current_dir(project.path())
         .args(["cache", "import"])
         .arg(&archive)
@@ -1028,7 +1042,7 @@ fn a_cache_bundle_restores_cargo_workspace_state() {
         b"warm"
     );
     std::fs::write(project.path().join("target/scheduler-marker"), b"local").unwrap();
-    let repeated_import = Command::new(env!("CARGO_BIN_EXE_mbx"))
+    let repeated_import = mbx_command()
         .current_dir(project.path())
         .args(["cache", "import"])
         .arg(&archive)
@@ -1064,7 +1078,7 @@ fn a_cache_bundle_restores_cargo_workspace_state() {
     let equivalent_project = tempfile::tempdir().unwrap();
     let equivalent_targets = tempfile::tempdir().unwrap();
     write_project(equivalent_project.path());
-    let equivalent_import = Command::new(env!("CARGO_BIN_EXE_mbx"))
+    let equivalent_import = mbx_command()
         .current_dir(equivalent_project.path())
         .args(["cache", "import"])
         .arg(&archive)
@@ -1216,7 +1230,7 @@ fn a_workspace_crate_is_incremental_on_its_first_edit() {
         "an incremental artifact must never be published: {stats}"
     );
 
-    let cleaned = Command::new(env!("CARGO_BIN_EXE_mbx"))
+    let cleaned = mbx_command()
         .current_dir(project.path())
         .arg("clean")
         .env("MBX_CACHE_DIR", store.path())
@@ -1322,7 +1336,7 @@ fn a_failed_build_does_not_cost_the_streak() {
     // Break it, then retry the same broken source twice over.
     std::fs::write(project.path().join("src/lib.rs"), "fn broken( {\n").unwrap();
     for attempt in 0..2 {
-        let failed = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        let failed = mbx_command()
             .current_dir(project.path())
             .args(["build", "--offline"])
             .env("MBX_CACHE_DIR", store.path())
@@ -1429,7 +1443,7 @@ fn editing_one_crate_takes_its_dependents_private_too() {
     // Unchanged sources after a wiped target are not churn, above or below:
     // the edited crate republishes, and the crate above it, now linking a
     // published artifact, publishes again too.
-    let cleaned = Command::new(env!("CARGO_BIN_EXE_mbx"))
+    let cleaned = mbx_command()
         .current_dir(project.path())
         .arg("clean")
         .env("MBX_CACHE_DIR", store.path())
@@ -2252,7 +2266,7 @@ fn two_checkouts_share(generated: Generated, settings: &[(&str, &str)]) -> bool 
 #[test]
 fn an_empty_store_reports_nothing() {
     let store = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+    let output = mbx_command()
         .args(["cache", "stats"])
         .env("MBX_CACHE_DIR", store.path())
         .output()
@@ -2268,7 +2282,7 @@ fn forwards_non_build_cargo_subcommands() {
     let root = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+    let output = mbx_command()
         .current_dir(root.path())
         .args(["new", "--vcs", "none", "new-project"])
         .env("MBX_CACHE_DIR", store.path())
@@ -2285,7 +2299,7 @@ fn forwards_non_build_cargo_subcommands() {
 
     let initialized = root.path().join("initialized-project");
     std::fs::create_dir(&initialized).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+    let output = mbx_command()
         .current_dir(&initialized)
         .args(["init", "--vcs", "none"])
         .env("MBX_CACHE_DIR", store.path())
@@ -2330,7 +2344,7 @@ fn a_failed_build_records_the_compilations_it_completed() {
     let project = tempfile::tempdir().unwrap();
     write_partially_failing_project(project.path());
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+    let output = mbx_command()
         .current_dir(project.path())
         .args(["build", "--workspace", "--offline"])
         .env("MBX_CACHE_DIR", store.path())
@@ -2654,7 +2668,7 @@ mod target_views {
         let project = tempfile::tempdir().unwrap();
         write_project(project.path());
 
-        let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        let output = mbx_command()
             .current_dir(project.path())
             .args(["build", "--offline", "--message-format=json"])
             .env("MBX_CACHE_DIR", store.path())
@@ -2700,7 +2714,7 @@ mod target_views {
         );
         let managed = managed(project.path());
 
-        let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        let output = mbx_command()
             .current_dir(project.path().join("src"))
             .arg("clean")
             .env("MBX_CACHE_DIR", store.path())
@@ -2840,7 +2854,7 @@ mod target_views {
         std::fs::remove_dir_all(&cas).unwrap();
         std::fs::write(&cas, b"not a directory").unwrap();
 
-        let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        let output = mbx_command()
             .args(["gc", "--max-size", "20GiB"])
             .env("MBX_CACHE_DIR", store.path())
             .output()
@@ -2903,7 +2917,7 @@ fn build_into_target(
     target: &Path,
     settings: &[(&str, &str)],
 ) -> String {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_mbx"));
+    let mut command = mbx_command();
     command
         .current_dir(project)
         .args(["build", "--offline"])
@@ -3531,7 +3545,7 @@ fn wrapper_phase_reports_and_trace_cover_real_cold_and_warm_builds() {
         if path.extension().is_none_or(|ext| ext != "jsonl") {
             continue;
         }
-        let output = Command::new(env!("CARGO_BIN_EXE_mbx"))
+        let output = mbx_command()
             .args(["cache", "trace"])
             .arg(&path)
             .output()
@@ -3669,7 +3683,7 @@ fn routine_shim_logs_stay_off_compiler_stderr_when_delivery_fails() {
     )
     .unwrap();
     std::fs::set_permissions(&compiler, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let output = Command::new(shim)
+    let output = isolated_command(shim)
         .arg(compiler)
         .arg("--version")
         .env("MBX_SOCKET", directory.path().join("missing-agent.sock"))

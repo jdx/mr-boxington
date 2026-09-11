@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::process::Command;
 
+mod support;
+
 fn project(path: &Path, source: &str) {
     std::fs::create_dir_all(path.join("src")).unwrap();
     std::fs::write(
@@ -53,6 +55,7 @@ fn mbx(root: &Path) -> Command {
             command.env(key, value);
         }
     }
+    support::isolate_host(&mut command);
     command
         .current_dir(root)
         .env("MBX_CACHE_DIR", root.join("cache"))
