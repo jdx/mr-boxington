@@ -27,12 +27,12 @@ import pyte
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parents[1]
-WIDTH, HEIGHT, COLS, ROWS = 820, 550, 78, 27
+WIDTH, HEIGHT, COLS, ROWS = 1080, 550, 104, 27
 COLORS = {"default": "#d9e4e6", "cyan": "#70d7cb", "green": "#9fce88", "yellow": "#e9c778", "red": "#ef8b86"}
 
 
 def render(screen, font, title_font, stage="mixed rebuild"):
-    image = Image.new("RGB", (WIDTH, HEIGHT), "#111a20")
+    image = Image.new("RGB", (WIDTH, HEIGHT), "#171717")
     draw = ImageDraw.Draw(image)
     draw.rounded_rectangle((1, 1, WIDTH - 2, HEIGHT - 2), radius=15, outline="#35434a", width=2)
     for x, color in [(28, "#ed807a"), (50, "#e6bf6c"), (72, "#82c39a")]:

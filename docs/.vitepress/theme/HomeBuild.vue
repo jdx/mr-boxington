@@ -24,8 +24,8 @@ const paused = ref(false);
         />
         <img
           :src="withBase(`/screenshots/cargo-pretty.${paused ? 'png' : 'gif'}`)"
-          alt="cargo-pretty-based mbx display with live and completed crates, timers, and green cache hits alongside amber misses"
-          width="820"
+          alt="Animated Boxington mascot beside the cargo-pretty-based mbx display with live and completed crates, timers, and green cache hits alongside amber misses"
+          width="1080"
           height="550"
           loading="lazy"
           decoding="async"

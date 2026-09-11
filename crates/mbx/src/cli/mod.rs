@@ -20,6 +20,7 @@ mod exec;
 mod explain;
 mod gc;
 pub mod launch;
+mod mascot;
 mod plain_progress;
 mod prefetch;
 mod pretty;
