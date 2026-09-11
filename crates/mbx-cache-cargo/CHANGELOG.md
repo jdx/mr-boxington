@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.25](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.1.24...mbx-cache-cargo-v0.1.25) - 2026-09-11
+
+### Added
+
+- *(cli)* adapt cargo-pretty with live cache statistics ([#435](https://github.com/jdx/mr-boxington/pull/435))
+
 ## [0.1.24](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.1.23...mbx-cache-cargo-v0.1.24) - 2026-09-10
 
 ### Other

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0](https://github.com/jdx/mr-boxington/compare/v1.10.1...v1.11.0) - 2026-09-11
+
+### Added
+
+- animate Boxington in build output ([#441](https://github.com/jdx/mr-boxington/pull/441))
+- *(cli)* add append-only progress for agent builds ([#437](https://github.com/jdx/mr-boxington/pull/437))
+- *(cli)* adapt cargo-pretty with live cache statistics ([#435](https://github.com/jdx/mr-boxington/pull/435))
+- *(cache)* control storage of path-specific C objects ([#432](https://github.com/jdx/mr-boxington/pull/432))
+
+### Fixed
+
+- end build sessions before launching cargo applications ([#436](https://github.com/jdx/mr-boxington/pull/436))
+- *(cache)* recover C predictions after stderr-only conflicts ([#431](https://github.com/jdx/mr-boxington/pull/431))
+- *(cache)* cover dependency debug paths in macOS links ([#430](https://github.com/jdx/mr-boxington/pull/430))
+- *(cache)* stabilize macOS proc macro install names ([#427](https://github.com/jdx/mr-boxington/pull/427))
+
 ## [1.10.1](https://github.com/jdx/mr-boxington/compare/v1.10.0...v1.10.1) - 2026-09-10
 
 ### Fixed
