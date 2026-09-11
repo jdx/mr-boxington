@@ -86,6 +86,7 @@ fn reads_the_roots_cargo_reports() {
         Roots {
             workspace_root: PathBuf::from("/elsewhere/project"),
             target_dir: PathBuf::from("/var/cache/shared-target"),
+            build_dir: None,
             target_dir_requested: false,
         }
     );
@@ -384,6 +385,7 @@ fn rust_analyzer_target_is_a_child_of_the_managed_view() {
     let roots = Roots {
         workspace_root: workspace.clone(),
         target_dir: workspace.join(RUST_ANALYZER_TARGET_DIR),
+        build_dir: None,
         target_dir_requested: true,
     };
 
@@ -410,6 +412,7 @@ fn accepting_the_target_prompt_requests_migration_without_removing_outputs() {
     let roots = Roots {
         workspace_root: workspace,
         target_dir: target_dir.clone(),
+        build_dir: None,
         target_dir_requested: false,
     };
 
@@ -430,6 +433,7 @@ fn declining_the_target_prompt_preserves_outputs() {
     let roots = Roots {
         workspace_root: workspace,
         target_dir: target_dir.clone(),
+        build_dir: None,
         target_dir_requested: false,
     };
 

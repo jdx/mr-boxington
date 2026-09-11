@@ -40,6 +40,7 @@ pub(super) fn run(config: &Config, settings: &CliSettings, args: &ExecArgs) -> R
         return run_cargo(&program, arguments, BTreeMap::new());
     }
 
+    crate::storage::check_cache(config)?;
     let session_dir = tempfile::Builder::new().prefix("mbx-session-").tempdir()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

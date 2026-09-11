@@ -82,6 +82,16 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
     let Ok(string_arguments) = super::strings(&arguments) else {
         return run_real_cargo(&real_cargo, &arguments);
     };
+    // The roots probe can persist metadata under the cache root. Reject its
+    // placement before probing, but only after passthrough decisions above.
+    if let Some(root) = mbx_cache_cargo::cache_root() {
+        crate::storage::require_local(&root, "mbx cache directory", "MBX_CACHE_DIR")?;
+        crate::storage::require_local(
+            &root.join("cargo-roots"),
+            "mbx cache directory",
+            "MBX_CACHE_DIR",
+        )?;
+    }
     let Some(roots) = cargo_roots(
         &real_cargo,
         &string_arguments,

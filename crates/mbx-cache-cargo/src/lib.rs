@@ -23,6 +23,8 @@ pub struct CargoInvocation {
     pub workspace_root: PathBuf,
     /// Cargo's resolved output directory.
     pub target_dir: PathBuf,
+    /// Cargo's intermediate build directory, when reported by this Cargo version.
+    pub build_dir: Option<PathBuf>,
     /// Whether a flag, environment value, or Cargo configuration explicitly selected the target.
     pub target_dir_requested: bool,
     /// Cross-checkout identity used to select the action-prediction manifest.
@@ -138,7 +140,7 @@ fn resolve_with_reported(
     arguments: &[String],
     working_dir: &Path,
     target_dir_env: Option<OsString>,
-    reported: Option<(PathBuf, PathBuf)>,
+    reported: Option<(PathBuf, PathBuf, Option<PathBuf>)>,
 ) -> CargoInvocation {
     let cargo_args = cargo_arguments(arguments);
     let invocation_dir = invocation_dir(cargo_args, working_dir);
@@ -152,6 +154,7 @@ fn resolve_with_reported(
             .as_ref()
             .is_some_and(|value| !value.is_empty())
         || cargo_config_may_set_target_dir(cargo_args, &invocation_dir);
+    let build_dir = reported.as_ref().and_then(|roots| roots.2.clone());
     let target_dir = flagged
         .map(|value| absolute(&invocation_dir, value))
         .or_else(|| reported.map(|roots| roots.1))
@@ -167,6 +170,7 @@ fn resolve_with_reported(
         workspace_root,
         target_dir,
         target_dir_requested,
+        build_dir,
         build_identity,
     }
 }
@@ -378,7 +382,7 @@ fn recalled_cargo_roots(
     arguments: &[String],
     working_dir: &Path,
     target_dir_env: Option<&OsStr>,
-) -> Option<(PathBuf, PathBuf)> {
+) -> Option<(PathBuf, PathBuf, Option<PathBuf>)> {
     let probe = cache.and_then(|cache| {
         ProbeRecord::describe(
             cache,
@@ -399,7 +403,7 @@ fn recalled_cargo_roots(
     Some(roots)
 }
 
-const PROBE_RECORD_VERSION: u8 = 1;
+const PROBE_RECORD_VERSION: u8 = 2;
 
 /// Everything a probe's answer was a function of, and the answer.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -413,6 +417,7 @@ struct ProbeRecord {
     path: PathBuf,
     workspace_root: PathBuf,
     target_dir: PathBuf,
+    build_dir: Option<PathBuf>,
 }
 
 /// The inputs that select a record: an identical key with intact pins is
@@ -424,6 +429,8 @@ struct ProbeKey {
     working_dir: PathBuf,
     target_dir_env: Option<String>,
     build_target_dir_env: Option<String>,
+    build_dir_env: Option<String>,
+    target_dir_argument: Option<String>,
     cargo_home: Option<String>,
 }
 
@@ -479,6 +486,8 @@ impl ProbeRecord {
             working_dir: working_dir.to_path_buf(),
             target_dir_env: target_dir_env.map(|value| value.to_string_lossy().into_owned()),
             build_target_dir_env: env("CARGO_BUILD_TARGET_DIR"),
+            build_dir_env: env("CARGO_BUILD_BUILD_DIR"),
+            target_dir_argument: target_dir_argument(arguments).map(str::to_owned),
             // The directory itself rather than the variable: with the
             // variable unset it follows the home directory, and a record
             // made under one home must not answer under another.
@@ -545,11 +554,12 @@ impl ProbeRecord {
             path,
             workspace_root: PathBuf::new(),
             target_dir: PathBuf::new(),
+            build_dir: None,
         })
     }
 
     /// The answer an earlier probe left for this key, if its pins all hold.
-    fn recall(&self) -> Option<(PathBuf, PathBuf)> {
+    fn recall(&self) -> Option<(PathBuf, PathBuf, Option<PathBuf>)> {
         let bytes = std::fs::read(&self.path).ok()?;
         let recorded: ProbeRecord = serde_json::from_slice(&bytes).ok()?;
         if recorded.version != PROBE_RECORD_VERSION
@@ -558,12 +568,16 @@ impl ProbeRecord {
         {
             return None;
         }
-        Some((recorded.workspace_root, recorded.target_dir))
+        Some((
+            recorded.workspace_root,
+            recorded.target_dir,
+            recorded.build_dir,
+        ))
     }
 
     /// Leave the answer behind for the next invocation. Best-effort: a
     /// record that cannot be written costs the next build a probe.
-    fn remember(mut self, roots: &(PathBuf, PathBuf)) {
+    fn remember(mut self, roots: &(PathBuf, PathBuf, Option<PathBuf>)) {
         let root_manifest = roots.0.join("Cargo.toml");
         if !self.pins.iter().any(|pin| pin.path == root_manifest) {
             let Some(pin) = Pin::describe(root_manifest) else {
@@ -573,6 +587,7 @@ impl ProbeRecord {
         }
         self.workspace_root = roots.0.clone();
         self.target_dir = roots.1.clone();
+        self.build_dir = roots.2.clone();
         let Ok(bytes) = serde_json::to_vec(&self) else {
             return;
         };
@@ -654,9 +669,12 @@ fn cargo_roots(
     cargo: &OsStr,
     arguments: &[String],
     target_dir_env: Option<&OsStr>,
-) -> Option<(PathBuf, PathBuf)> {
+) -> Option<(PathBuf, PathBuf, Option<PathBuf>)> {
     let mut command = Command::new(cargo);
-    match target_dir_env {
+    match target_dir_argument(arguments)
+        .map(OsStr::new)
+        .or(target_dir_env)
+    {
         Some(value) => command.env(CARGO_TARGET_DIR_ENV, value),
         None => command.env_remove(CARGO_TARGET_DIR_ENV),
     };
@@ -669,6 +687,10 @@ fn cargo_roots(
     Some((
         PathBuf::from(metadata.get("workspace_root")?.as_str()?),
         PathBuf::from(metadata.get("target_directory")?.as_str()?),
+        metadata
+            .get("build_directory")
+            .and_then(|value| value.as_str())
+            .map(PathBuf::from),
     ))
 }
 

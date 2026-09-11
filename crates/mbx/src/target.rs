@@ -219,6 +219,26 @@ fn migrate_existing_with(
     Ok(MigrationOutcome::default())
 }
 
+/// Whether placement could use the managed root, without changing any paths.
+/// Locks or a later filesystem error can still make placement decline.
+pub(crate) fn placement_candidate(
+    config: &Config,
+    workspace_root: &Path,
+    target_dir: &Path,
+    requested: bool,
+) -> bool {
+    if !config.target.views || requested || target_dir != workspace_root.join("target") {
+        return false;
+    }
+    let managed = view_dir(&config.target.root, workspace_root);
+    match std::fs::read_link(target_dir) {
+        Ok(existing) => {
+            existing == managed || replaceable_managed_link(&existing, &managed, workspace_root)
+        }
+        Err(_) => !target_dir.exists(),
+    }
+}
+
 /// Where this checkout's outputs should be written, if mbx is placing them.
 ///
 /// `None` leaves cargo's own answer alone, and every reason for that is a
@@ -944,7 +964,7 @@ fn views_root(root: &Path) -> PathBuf {
     std::path::absolute(&views).unwrap_or(views)
 }
 
-fn view_dir(root: &Path, workspace_root: &Path) -> PathBuf {
+pub(crate) fn view_dir(root: &Path, workspace_root: &Path) -> PathBuf {
     views_root(root).join(view_key(workspace_root))
 }
 

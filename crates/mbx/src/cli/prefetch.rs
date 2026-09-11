@@ -15,6 +15,7 @@ pub(super) struct PrefetchArgs {
 
 pub(super) fn run(config: &Config, arguments: &[String]) -> Result<ExitCode> {
     validate_prefetch_config(config)?;
+    crate::storage::check_cache(config)?;
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let working_dir = std::env::current_dir()?;
     let roots = resolve_roots(&cargo, arguments, &working_dir);

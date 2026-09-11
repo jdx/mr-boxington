@@ -101,7 +101,7 @@ const SCHEDULER_MEMORY_FALLBACK: u64 = 16 * GIB;
     format = "toml"
 ))]
 pub(crate) struct RawConfig {
-    /// Cache root.
+    /// Cache root. NFS is unsupported for local build storage.
     #[usage(env = "MBX_CACHE_DIR", default_note = "platform cache directory")]
     cache_dir: Option<PathBuf>,
     /// Write a JSON build report to this path.
@@ -288,7 +288,7 @@ struct RawTarget {
     /// Let mbx place eligible target directories under the managed root.
     #[usage(env = "MBX_TARGET_VIEWS", default = true)]
     views: bool,
-    /// Managed target root.
+    /// Managed target root. NFS is unsupported for build outputs.
     #[usage(env = "MBX_TARGET_ROOT", default_note = "<cache_dir>/targets")]
     root: Option<PathBuf>,
     /// Managed-target budget, or "none". Live views are collected oldest-first.

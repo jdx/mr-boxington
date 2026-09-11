@@ -32,6 +32,27 @@ Use TOML section headers for dotted settings, as shown in the example below.
 Shell examples that set `NAME=value command` use POSIX syntax; PowerShell users
 can set `$env:NAME` before the command and remove it afterward.
 
+## Local build storage
+
+On Linux and macOS, mbx rejects NFS-backed working caches and Cargo output
+storage before starting a build. Set `cache_dir` (`MBX_CACHE_DIR`) and, when
+configured separately, `target.root` (`MBX_TARGET_ROOT`) to local storage.
+User-selected Cargo target directories and separate intermediate build
+directories must also be local: check `CARGO_TARGET_DIR` / `build.target-dir`
+and `CARGO_BUILD_BUILD_DIR` / `build.build-dir`.
+
+The check follows symlinks and checks the destination filesystem even when
+the directory has not been created yet. An NFS source checkout is supported
+when its build outputs are local, including a `target` link into a local
+managed target directory. Remote cache URLs are unaffected; use a
+[remote cache server](/remote-cache) to share results across machines.
+Other platforms do not currently enforce this filesystem check.
+
+Help, cache inspection, and cleanup commands remain available with the old
+configuration so you can inspect or remove previous NFS storage. Changing the
+configuration does not copy the cache to the new disk; expect a cold cache.
+Existing managed targets follow the normal [target relocation rules](/managed-targets).
+
 ## Disk-scaled defaults
 
 The two size budgets default to a share of the disk holding the cache: 5% for

@@ -30,7 +30,7 @@ Append the full reason for every bypassed compilation to this path.
 - **Default:** platform cache directory
 - **Set with:** `MBX_CACHE_DIR`
 
-Cache root.
+Cache root. NFS is unsupported for local build storage.
 
 ### `cache_links`
 
@@ -416,7 +416,7 @@ Managed-target budget, or "none". Live views are collected oldest-first.
 - **Default:** <cache_dir>/targets
 - **Set with:** `MBX_TARGET_ROOT`
 
-Managed target root.
+Managed target root. NFS is unsupported for build outputs.
 
 ### `target.views`
 
