@@ -1,0 +1,43 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M28JYBK7EM3XHJSTY9QQPBYF",
+  "session_id": "01a0907f-5b56-7c42-8f22-758f1bb2c63e",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-11T15:56:24.591073Z",
+  "branch": "codex/cargo-pretty-output",
+  "checkpoints_count": 3,
+  "save_step_count": 1,
+  "files_touched": [],
+  "agent": "Codex",
+  "model": "gpt-6-astra",
+  "turn_id": "64029b6be826",
+  "checkpoint_transcript_start": 3653,
+  "transcript_lines_at_start": 3653,
+  "compact_transcript_start": 499,
+  "token_usage": {
+    "input_tokens": 4776,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 326400,
+    "output_tokens": 1251,
+    "api_call_count": 5
+  },
+  "session_metrics": {
+    "turn_count": 8
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
