@@ -1940,9 +1940,7 @@ pub(crate) fn record_compiler_invocation_with_diagnostic(
     {
         requests.push(request);
     }
-    if let Some(request) = unit_outcome_request(outcome, crate_name) {
-        requests.push(request);
-    }
+    requests.extend(unit_outcome_requests(outcome, crate_name));
     requests.push(AgentRequest::RecordCompilerInvocation {
         outcome: outcome.into(),
         crate_name: crate_name.map(str::to_string),
@@ -1953,18 +1951,92 @@ pub(crate) fn record_compiler_invocation_with_diagnostic(
 
 /// Use Cargo's output fingerprint, not a crate name shared by package versions.
 /// The reserved debug envelope keeps the public v6 request enum unchanged.
-pub(crate) fn unit_outcome_request(
-    outcome: &str,
-    crate_name: Option<&str>,
-) -> Option<AgentRequest> {
-    let unit = compiler_unit_key(
-        crate_name?,
-        std::env::args_os().filter_map(|arg| arg.into_string().ok()),
-    )?;
-    Some(AgentRequest::RecordDebug {
-        target: "mbx::unit-outcome".into(),
-        message: serde_json::to_string(&(unit, outcome)).ok()?,
-    })
+pub(crate) fn unit_outcome_requests(outcome: &str, crate_name: Option<&str>) -> Vec<AgentRequest> {
+    let Some(crate_name) = crate_name else {
+        return Vec::new();
+    };
+    let arguments: Vec<_> = std::env::args_os()
+        .filter_map(|arg| arg.into_string().ok())
+        .collect();
+    let fingerprint = compiler_unit_key(crate_name, arguments.iter().cloned());
+    let uplifted = std::env::var_os("CARGO_MANIFEST_PATH").and_then(|manifest| {
+        compiler_uplifted_unit_key(crate_name, Path::new(&manifest), &arguments)
+    });
+    fingerprint
+        .into_iter()
+        .chain(uplifted)
+        .filter_map(|unit| {
+            Some(AgentRequest::RecordDebug {
+                target: "mbx::unit-outcome".into(),
+                message: serde_json::to_string(&(unit, outcome)).ok()?,
+            })
+        })
+        .collect()
+}
+
+/// Cargo can report only an uplifted executable/library, without its hash.
+/// Scope this fallback to the package manifest, target and output directory;
+/// never infer an outcome from a crate name alone. If Cargo reuses an uplifted
+/// path for multiple configurations, the collected outcomes remain mixed.
+pub(crate) fn uplifted_unit_key(
+    manifest: &Path,
+    directory: &Path,
+    crate_name: &str,
+    mut crate_types: Vec<String>,
+) -> Option<String> {
+    let directory = if directory.file_name()? == "deps" {
+        directory.parent()?
+    } else {
+        directory
+    };
+    crate_types.sort();
+    crate_types.dedup();
+    if crate_types.is_empty() {
+        return None;
+    }
+    let identity = serde_json::to_vec(&(
+        manifest
+            .canonicalize()
+            .unwrap_or_else(|_| manifest.to_path_buf()),
+        directory
+            .canonicalize()
+            .unwrap_or_else(|_| directory.to_path_buf()),
+        crate_name.replace('-', "_"),
+        crate_types,
+    ))
+    .ok()?;
+    Some(format!("uplifted:{}", CacheDigest::blake3(&identity).hash))
+}
+
+pub(crate) fn compiler_uplifted_unit_key(
+    crate_name: &str,
+    manifest: &Path,
+    arguments: &[String],
+) -> Option<String> {
+    // Test artifacts retain hashes and can share a target name with a normal
+    // build. Do not add them to the normal target's uplifted alias.
+    if arguments.iter().any(|argument| argument == "--test") {
+        return None;
+    }
+    let mut directory = None;
+    let mut crate_types = Vec::new();
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        let (flag, inline) = argument
+            .split_once('=')
+            .map_or((argument.as_str(), None), |(flag, value)| {
+                (flag, Some(value))
+            });
+        if matches!(flag, "--out-dir" | "--crate-type") {
+            let value = inline.or_else(|| arguments.next().map(String::as_str))?;
+            if flag == "--out-dir" {
+                directory = Some(PathBuf::from(value));
+            } else {
+                crate_types.extend(value.split(',').map(str::to_string));
+            }
+        }
+    }
+    uplifted_unit_key(manifest, &directory?, crate_name, crate_types)
 }
 
 pub(crate) fn compiler_unit_key(

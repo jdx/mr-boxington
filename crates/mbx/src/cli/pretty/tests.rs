@@ -343,3 +343,52 @@ fn cargo_fingerprints_isolate_versions_and_match_compiler_arguments() {
             .is_none()
     );
 }
+
+#[test]
+fn uplifted_artifacts_match_shim_outcomes_without_merging_packages_or_tests() {
+    use std::path::Path;
+    for (name, kind, filename) in [
+        ("my-app", "bin", "/tmp/target/debug/my-app"),
+        ("foo", "lib", "/tmp/target/debug/libfoo.rlib"),
+        ("foo", "cdylib", "/tmp/target/debug/libfoo.dylib"),
+    ] {
+        let mut model = Model::new(&["build".into()]);
+        let manifest = "/tmp/project/Cargo.toml";
+        let message = serde_json::json!({
+            "reason":"compiler-artifact", "package_id":"project@1.0.0",
+            "manifest_path":manifest, "target":{"name":name,"crate_types":[kind]},
+            "profile":{"test":false}, "filenames":[filename], "fresh":false
+        });
+        model.cargo(&message.to_string());
+        let arguments = vec![
+            "--crate-type".into(),
+            kind.into(),
+            "--out-dir=/tmp/target/debug/deps".into(),
+            "-Cextra-filename=-1111111111111111".into(),
+        ];
+        let shim = crate::session::compiler_uplifted_unit_key(
+            &name.replace('-', "_"),
+            Path::new(manifest),
+            &arguments,
+        )
+        .unwrap();
+        assert_eq!(model.done[0].cache_target.as_deref(), Some(shim.as_str()));
+        assert_ne!(
+            Some(shim.clone()),
+            crate::session::compiler_uplifted_unit_key(
+                name,
+                Path::new("/tmp/other-version/Cargo.toml"),
+                &arguments,
+            )
+        );
+        let mut test_arguments = arguments.clone();
+        test_arguments.push("--test".into());
+        assert!(
+            crate::session::compiler_uplifted_unit_key(name, Path::new(manifest), &test_arguments,)
+                .is_none()
+        );
+        model.outcomes.insert(shim, ["hit".into()].into());
+        let text = strip_ansi(&view::render(&mut model, None, 80, 24).to_string());
+        assert!(text.contains("hit"), "{text}");
+    }
+}

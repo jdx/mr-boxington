@@ -402,5 +402,17 @@ fn artifact_unit_key(message: &Value, target: &str) -> Option<String> {
             return Some(format!("{target}:{hash}"));
         }
     }
-    None
+    if build_script || message["profile"]["test"].as_bool().unwrap_or(false) {
+        return None;
+    }
+    crate::session::uplifted_unit_key(
+        std::path::Path::new(message["manifest_path"].as_str()?),
+        std::path::Path::new(message["filenames"].as_array()?.first()?.as_str()?).parent()?,
+        &target,
+        message["target"]["crate_types"]
+            .as_array()?
+            .iter()
+            .map(|kind| kind.as_str().map(str::to_string))
+            .collect::<Option<Vec<_>>>()?,
+    )
 }
