@@ -291,19 +291,22 @@ jobs:
         if: ${{ matrix.cross && !matrix.pgo }}
         run: cross run --release --locked --package mbx --target ${{ matrix.target }} -- --help
 
-      # The archive is flat and holds only the binary, so extracting it
-      # straight into a directory on PATH is the whole install. Names carry no
+      # Keep the archive flat, with the binary and its license notices, so
+      # extraction into a directory on PATH still installs it. Names carry no
       # version, which is what makes `releases/latest/download/…` a stable URL.
       - name: Archive
         if: runner.os != 'Windows'
-        run: tar -czf "mbx-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" ${{ matrix.bin }}
+        run: |
+          cp LICENSE NOTICE "target/${{ matrix.target }}/release/"
+          tar -czf "mbx-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" ${{ matrix.bin }} LICENSE NOTICE
 
       - name: Archive
         if: runner.os == 'Windows'
         shell: bash
         run: |
+          cp LICENSE NOTICE "target/${{ matrix.target }}/release/"
           cd "target/${{ matrix.target }}/release"
-          7z a "$GITHUB_WORKSPACE/mbx-${{ matrix.target }}.zip" ${{ matrix.bin }}
+          7z a "$GITHUB_WORKSPACE/mbx-${{ matrix.target }}.zip" ${{ matrix.bin }} LICENSE NOTICE
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
