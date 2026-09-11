@@ -76,7 +76,7 @@ def main():
             stream.feed(bytes(pending_frame[:finish]))
             del pending_frame[:finish]
     stream.feed(b"$ mbx build -j 4\r\n")
-    frames = [render(screen, font, title_font, "1 / cold build")]
+    frames = [render(screen, font, title_font)]
     durations = [700]
     with tempfile.TemporaryDirectory(prefix="mbx-pretty-demo-") as tmp:
         root = Path(tmp)
@@ -123,32 +123,20 @@ def main():
                         raise
                     if not chunk: break
                     warm_output.extend(chunk)
-                    feed_frame(chunk)
-                now = time.monotonic()
-                if now - last_warm_frame >= .08:
-                    frames.append(render(screen, font, title_font, "1 / cold build"))
-                    durations.append(round((now - last_warm_frame) * 1000))
-                    last_warm_frame = now
                 if warm.poll() is not None and not ready: break
             assert warm.wait(timeout=5) == 0, warm_output
         finally:
             if warm.poll() is None: warm.kill(); warm.wait()
             os.close(warm_master)
         # Retain two Cargo-fresh crates; clean the others so mbx can restore
-        # matching results and compile the entries removed from this demo cache.
+        # unchanged results and compile the crates affected by the source edit.
         cargo = subprocess.check_output(["rustup", "which", "cargo"], text=True).strip()
         packages = ["hello-boxington", *crates[2:]]
         subprocess.run([cargo, "clean", *[arg for name in packages for arg in ("-p", name)]], cwd=root, env=env, check=True, capture_output=True)
         cold_stats = json.loads((root / "stats.json").read_text())
         assert cold_stats["hits"] == 0 and cold_stats["misses"] + cold_stats.get("unconsulted", 0) > 0
-        frames.append(render(screen, font, title_font, "1 / cold build"))
-        durations.append(1800)
         # One actual shared-source edit invalidates its eight consumers.
         (root / "shared.rs").write_text("pub fn revision() -> u32 { 2 }\n")
-        stream.feed(b"\x1b[2J\x1b[HShared source edit: revision 1 -> 2\r\n\r\nEight crates include shared.rs.\r\nRebuild outputs; keep the cache and two Cargo-fresh crates.\r\n")
-        frames.append(render(screen, font, title_font, "2 / one source edit"))
-        durations.append(2400)
-        stream.feed(b"\x1b[2J\x1b[H$ mbx build -j 4\r\n")
         poster = None
         poster_score = -1
         master, slave = pty.openpty()

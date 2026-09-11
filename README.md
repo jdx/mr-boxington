@@ -59,7 +59,7 @@ Set `CARGO_TERM_PROGRESS_WHEN=never` to disable the display.
 
 <picture>
   <source media="(prefers-reduced-motion: reduce)" srcset="docs/public/screenshots/cargo-pretty.png">
-  <img src="docs/public/screenshots/cargo-pretty.gif" alt="A real cold build, shared-source edit, and mixed-cache rebuild with per-crate outcomes">
+  <img src="docs/public/screenshots/cargo-pretty.gif" alt="A real mixed-cache rebuild after a shared-source edit, with per-crate outcomes">
 </picture>
 
 [View the still image](docs/public/screenshots/cargo-pretty.png).

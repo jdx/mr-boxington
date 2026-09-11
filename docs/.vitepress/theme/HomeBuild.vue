@@ -32,7 +32,7 @@ const paused = ref(false);
         />
       </picture>
       <figcaption>
-        A real cold build, one shared-source edit, then a rebuild with fresh crates, cache hits, and misses. Adapted from
+        A real rebuild after a shared-source edit, with fresh crates, cache hits, and misses. Adapted from
         <a href="https://github.com/romancitodev/cargo-pretty">cargo-pretty</a>
         by romancitodev.
         <button type="button" :aria-pressed="paused" @click="paused = !paused">
