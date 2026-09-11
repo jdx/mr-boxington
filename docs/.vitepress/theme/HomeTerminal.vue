@@ -12,9 +12,7 @@ const crates = ["libc", "serde", "your-app"];
       <p class="home-eyebrow">01 / Build here. Reuse there.</p>
       <h2 id="demo-title">A new worktree.<br />A head start.</h2>
       <p>
-        One checkout compiles a dependency. The next can restore it, even from a
-        different path. Each keeps its own Cargo target directory while sharing
-        cached work.
+        Build once, then restore matching work from another checkout or CI.
       </p>
       <a class="home-text-link" href="/how-it-works#portable-keys"
         >How the cache travels <span aria-hidden="true">→</span></a
