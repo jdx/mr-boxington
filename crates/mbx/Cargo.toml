@@ -1,6 +1,6 @@
 [package]
 name = "mbx"
-version = "1.10.1"
+version = "1.11.0"
 description = "A build cache for Rust projects"
 edition.workspace = true
 rust-version.workspace = true
@@ -31,11 +31,11 @@ memchr = "2"
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.2"
 portable-pty = "0.9"
-mbx-cache-core = { path = "../mbx-cache-core", version = "0.16.0", default-features = false }
-mbx-cache-cargo = { path = "../mbx-cache-cargo", version = "0.1.24", default-features = false }
-mbx-cache-cc = { path = "../mbx-cache-cc", version = "0.16.0", default-features = false }
-mbx-cache-rustc = { path = "../mbx-cache-rustc", version = "0.16.0", default-features = false }
-mbx-cache-store = { path = "../mbx-cache-store", version = "0.1.23", default-features = false }
+mbx-cache-core = { path = "../mbx-cache-core", version = "0.16.1", default-features = false }
+mbx-cache-cargo = { path = "../mbx-cache-cargo", version = "0.1.25", default-features = false }
+mbx-cache-cc = { path = "../mbx-cache-cc", version = "0.16.1", default-features = false }
+mbx-cache-rustc = { path = "../mbx-cache-rustc", version = "0.16.1", default-features = false }
+mbx-cache-store = { path = "../mbx-cache-store", version = "0.1.24", default-features = false }
 rand = "0.10"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 reflink-copy = "0.1"

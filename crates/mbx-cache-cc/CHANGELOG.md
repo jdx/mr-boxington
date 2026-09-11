@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.16.0...mbx-cache-cc-v0.16.1) - 2026-09-11
+
+### Added
+
+- *(cli)* adapt cargo-pretty with live cache statistics ([#435](https://github.com/jdx/mr-boxington/pull/435))
+- *(cache)* control storage of path-specific C objects ([#432](https://github.com/jdx/mr-boxington/pull/432))
+
+### Other
+
+- *(cc)* deduplicate equivalent include manifest roots ([#429](https://github.com/jdx/mr-boxington/pull/429))
+
 ## [0.16.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.15.0...mbx-cache-cc-v0.16.0) - 2026-09-10
 
 ### Fixed
