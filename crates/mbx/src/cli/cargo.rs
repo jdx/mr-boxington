@@ -271,7 +271,7 @@ fn cargo_with_settings_bypass_log_and_roots(
                 Ok(None) => run_cargo(&cargo, arguments, environment),
                 Err(error) => Err(error),
             }
-        } else if super::pretty::eligible(arguments)
+        } else if super::plain_progress::eligible(arguments, std::env::var("CARGO_TERM_PROGRESS_WHEN").ok().as_deref())
             && !matches!(settings.summary, SummaryStyle::Off)
             && log::max_level() < log::LevelFilter::Debug
             && (settings.plain_output || !std::io::stderr().is_terminal())

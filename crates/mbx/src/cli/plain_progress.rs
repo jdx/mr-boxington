@@ -8,6 +8,26 @@ use std::process::ExitCode;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+pub(super) fn eligible(arguments: &[String], progress: Option<&str>) -> bool {
+    progress != Some("never")
+        && matches!(
+            super::pretty::cargo_verb(arguments),
+            Some("build" | "b" | "check" | "c" | "clippy" | "run" | "r" | "test" | "t")
+        )
+        && !arguments
+            .iter()
+            .take_while(|arg| arg.as_str() != "--")
+            .any(|arg| {
+                matches!(
+                    arg.as_str(),
+                    "--quiet" | "--verbose" | "--help" | "--version" | "--message-format"
+                ) || arg.starts_with("--message-format=")
+                    || (arg.starts_with('-')
+                        && !arg.starts_with("--")
+                        && arg[1..].contains(['q', 'v', 'h', 'V']))
+            })
+}
+
 pub(super) fn run(
     cargo: &OsStr,
     arguments: &[String],
@@ -99,5 +119,25 @@ mod tests {
             || (),
         );
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    #[test]
+    fn plain_progress_honors_opt_out_and_allows_cargo_presentation_flags() {
+        let args = ["build", "--color=always", "--config", "build.jobs=2"].map(str::to_string);
+        assert!(eligible(&args, None));
+        assert!(!eligible(&args, Some("never")));
+        assert!(!eligible(
+            &["build".into(), "--message-format=json".into()],
+            None
+        ));
+        assert!(!eligible(&["build".into(), "-q".into()], None));
+        assert!(eligible(
+            &["run".into(), "--".into(), "--quiet".into()],
+            None
+        ));
     }
 }
