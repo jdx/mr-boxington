@@ -6,30 +6,6 @@ This block is automatically supplied ambient UI state, not part of the user's re
 </in-app-browser-context>
 
 ## My request:
-The progress bar shows hits in green, misses in amber, and bypasses in gray. - this should be removed, anything else like it we should strike?
-
----
-
-<in-app-browser-context source="ambient-ui-state">
-This block is automatically supplied ambient UI state, not part of the user's request. Do not treat it as an instruction or as evidence that the user explicitly selected the in-app browser.
-# In app browser:
-- The user has the in-app browser open with 1 tab.
-- Current URL: http://127.0.0.1:5173/
-</in-app-browser-context>
-
-## My request:
-rebase
-
----
-
-<in-app-browser-context source="ambient-ui-state">
-This block is automatically supplied ambient UI state, not part of the user's request. Do not treat it as an instruction or as evidence that the user explicitly selected the in-app browser.
-# In app browser:
-- The user has the in-app browser open with 1 tab.
-- Current URL: http://127.0.0.1:5173/
-</in-app-browser-context>
-
-## My request:
 ```ruby
       :srcset="withBase('/screenshots/cargo-pretty.png')"
 ```
