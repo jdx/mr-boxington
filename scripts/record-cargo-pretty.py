@@ -31,13 +31,13 @@ WIDTH, HEIGHT, COLS, ROWS = 820, 550, 78, 27
 COLORS = {"default": "#d9e4e6", "cyan": "#70d7cb", "green": "#9fce88", "yellow": "#e9c778", "red": "#ef8b86"}
 
 
-def render(screen, font, title_font):
+def render(screen, font, title_font, stage="mixed rebuild"):
     image = Image.new("RGB", (WIDTH, HEIGHT), "#111a20")
     draw = ImageDraw.Draw(image)
     draw.rounded_rectangle((1, 1, WIDTH - 2, HEIGHT - 2), radius=15, outline="#35434a", width=2)
     for x, color in [(28, "#ed807a"), (50, "#e6bf6c"), (72, "#82c39a")]:
         draw.ellipse((x, 22, x + 10, 32), fill=color)
-    draw.text((WIDTH // 2, 19), "mr boxington  /  mixed-cache build", font=title_font, fill="#91a3aa", anchor="mt")
+    draw.text((WIDTH // 2, 19), f"mr boxington  /  {stage}", font=title_font, fill="#91a3aa", anchor="mt")
     draw.line((1, 52, WIDTH - 2, 52), fill="#29363e")
     cell = font.getlength("M")
     for y in range(ROWS):
@@ -56,8 +56,27 @@ def main():
     title_font = ImageFont.truetype(args.font, 14)
     screen = pyte.Screen(COLS, ROWS)
     stream = pyte.ByteStream(screen)
+    pending_frame = bytearray()
+    def feed_frame(data):
+        pending_frame.extend(data)
+        begin, end = b"\x1b[?2026h", b"\x1b[?2026l"
+        while pending_frame:
+            start = pending_frame.find(begin)
+            if start >= 0:
+                finish = pending_frame.find(end, start + len(begin))
+                if finish < 0:
+                    stream.feed(bytes(pending_frame[:start]))
+                    del pending_frame[:start]
+                    break
+                finish += len(end)
+            else:
+                keep = next((n for n in range(len(begin) - 1, 0, -1) if pending_frame.endswith(begin[:n])), 0)
+                finish = len(pending_frame) - keep
+                if not finish: break
+            stream.feed(bytes(pending_frame[:finish]))
+            del pending_frame[:finish]
     stream.feed(b"$ mbx build -j 4\r\n")
-    frames = [render(screen, font, title_font)]
+    frames = [render(screen, font, title_font, "1 / cold build")]
     durations = [700]
     with tempfile.TemporaryDirectory(prefix="mbx-pretty-demo-") as tmp:
         root = Path(tmp)
@@ -71,10 +90,14 @@ def main():
             (folder / "src").mkdir(parents=True)
             (folder / "Cargo.toml").write_text(f'[package]\nname="{name}"\nversion="0.1.0"\nedition="2024"\n')
             (folder / "src/lib.rs").write_text('pub fn value() -> u32 { 42 }\n' + "\n".join(f"pub fn f{i}(value: u64) -> u64 {{ value.rotate_left({i % 64}) ^ {i} }}" for i in range(30000 + index * 1000)))
+        (root / "shared.rs").write_text("pub fn revision() -> u32 { 1 }\n")
+        for name in crates[-8:]:
+            with (root / name / "src/lib.rs").open("a") as source:
+                source.write('\ninclude!("../../shared.rs");\n')
         stamp = root / "cache/actions/notice/v1/explained"
         stamp.parent.mkdir(parents=True)
         stamp.touch()
-        env = dict(os.environ, TERM="xterm-256color", CARGO_HOME=str(root / "cargo-home"), MBX_CACHE_DIR=str(root / "cache"), MBX_TARGET_VIEWS="false", MBX_GC_AUTO="false", MBX_SUMMARY="off", MBX_INCREMENTAL="false", MBX_SAVINGS="off", MBX_STATS_REPORT=str(root / "stats.json"))
+        env = dict(os.environ, TERM="xterm-256color", CARGO_HOME=str(root / "cargo-home"), MBX_CACHE_DIR=str(root / "cache"), MBX_TARGET_VIEWS="false", MBX_GC_AUTO="false", MBX_SUMMARY="off", MBX_INCREMENTAL="false", MBX_LEARNED_INCREMENTAL="false", MBX_SAVINGS="off", MBX_STATS_REPORT=str(root / "stats.json"))
         for key in ["CI", "GITHUB_ACTIONS", "NO_COLOR", "CARGO_TERM_COLOR", "CARGO_TERM_PROGRESS_WHEN", "MBX_DISABLE", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"]:
             env.pop(key, None)
         # Seed actual cache entries, then force a mixed rebuild in a clean target.
@@ -87,7 +110,8 @@ def main():
         warm = subprocess.Popen([str(args.binary.resolve()), "build", "-j", "4"], cwd=root, env=env, stdin=warm_slave, stdout=warm_slave, stderr=warm_slave, preexec_fn=attach_warm_terminal)
         os.close(warm_slave)
         warm_output = bytearray()
-        warm_deadline = time.monotonic() + 120
+        last_warm_frame = time.monotonic()
+        warm_deadline = last_warm_frame + 120
         try:
             while time.monotonic() < warm_deadline:
                 ready, _, _ = select.select([warm_master], [], [], .1)
@@ -99,6 +123,12 @@ def main():
                         raise
                     if not chunk: break
                     warm_output.extend(chunk)
+                    feed_frame(chunk)
+                now = time.monotonic()
+                if now - last_warm_frame >= .08:
+                    frames.append(render(screen, font, title_font, "1 / cold build"))
+                    durations.append(round((now - last_warm_frame) * 1000))
+                    last_warm_frame = now
                 if warm.poll() is not None and not ready: break
             assert warm.wait(timeout=5) == 0, warm_output
         finally:
@@ -109,11 +139,16 @@ def main():
         cargo = subprocess.check_output(["rustup", "which", "cargo"], text=True).strip()
         packages = ["hello-boxington", *crates[2:]]
         subprocess.run([cargo, "clean", *[arg for name in packages for arg in ("-p", name)]], cwd=root, env=env, check=True, capture_output=True)
-        # Evict a portion of this disposable fixture's cache. Unchanged inputs
-        # now produce real cache hits and misses in the same recorded command.
-        results = sorted((root / "cache/actions/action-results").rglob("*.json"))
-        assert len(results) >= 6, results
-        for result in results[::2]: result.unlink()
+        cold_stats = json.loads((root / "stats.json").read_text())
+        assert cold_stats["hits"] == 0 and cold_stats["misses"] + cold_stats.get("unconsulted", 0) > 0
+        frames.append(render(screen, font, title_font, "1 / cold build"))
+        durations.append(1800)
+        # One actual shared-source edit invalidates its eight consumers.
+        (root / "shared.rs").write_text("pub fn revision() -> u32 { 2 }\n")
+        stream.feed(b"\x1b[2J\x1b[HShared source edit: revision 1 -> 2\r\n\r\nEight crates include shared.rs.\r\nRebuild outputs; keep the cache and two Cargo-fresh crates.\r\n")
+        frames.append(render(screen, font, title_font, "2 / one source edit"))
+        durations.append(2400)
+        stream.feed(b"\x1b[2J\x1b[H$ mbx build -j 4\r\n")
         poster = None
         poster_score = -1
         master, slave = pty.openpty()
@@ -141,26 +176,7 @@ def main():
                     if not data:
                         break
                     transcript.extend(data)
-                    # Present complete DEC 2026 transactions, like a terminal.
-                    # Retain a possible split escape prefix between PTY reads.
-                    pending_frame.extend(data)
-                    begin, end = b"\x1b[?2026h", b"\x1b[?2026l"
-                    while pending_frame:
-                        start = pending_frame.find(begin)
-                        if start >= 0:
-                            finish = pending_frame.find(end, start + len(begin))
-                            if finish < 0:
-                                stream.feed(bytes(pending_frame[:start]))
-                                del pending_frame[:start]
-                                break
-                            finish += len(end)
-                        else:
-                            keep = next((n for n in range(len(begin) - 1, 0, -1) if pending_frame.endswith(begin[:n])), 0)
-                            finish = len(pending_frame) - keep
-                            if not finish:
-                                break
-                        stream.feed(bytes(pending_frame[:finish]))
-                        del pending_frame[:finish]
+                    feed_frame(data)
                 now = time.monotonic()
                 if now - last_frame >= 0.08:
                     frame = render(screen, font, title_font)
