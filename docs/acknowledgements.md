@@ -33,3 +33,10 @@ checkouts; they differ in process lifecycle, storage management, and remote
 policy. The
 [comparison with kache](/compared#kache) explains where mbx took a different
 direction and where kache may be the better fit.
+
+## cargo-pretty
+
+[cargo-pretty](https://github.com/romancitodev/cargo-pretty) by
+[romancitodev](https://github.com/romancitodev) inspired mbx's animated Cargo
+build output. The implementation is original to mbx; the projects do not
+share source code.

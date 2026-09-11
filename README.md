@@ -47,6 +47,14 @@ cargo test --workspace --all-features
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+Interactive `build`, `check`, and `clippy` commands show an animated line with
+Cargo's latest build action and elapsed time. Diagnostics and the final Cargo
+summary remain visible. CI, redirected output, `run`, `test`, and explicit
+output options retain Cargo's normal output. Set
+`CARGO_TERM_PROGRESS_WHEN=never` to disable the animation.
+
+![mbx compiling a demo project with an animated build timer](docs/public/screenshots/cargo-pretty.gif)
+
 To try mbx without automatic wrapping, install it and run `mbx build` directly.
 For coding agents and other non-interactive tools, use `mise exec -- cargo build`
 or put mise's shims on their `PATH`. The

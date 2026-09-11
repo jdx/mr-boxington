@@ -1,0 +1,6 @@
+The animated Cargo build output in mr-boxington is inspired by cargo-pretty
+by romancitodev:
+https://github.com/romancitodev/cargo-pretty
+
+The implementation is original to mr-boxington; no cargo-pretty source code
+is included.

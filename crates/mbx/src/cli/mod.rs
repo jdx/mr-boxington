@@ -21,6 +21,7 @@ mod explain;
 mod gc;
 pub mod launch;
 mod prefetch;
+mod pretty;
 mod setup;
 mod shim;
 mod stats;

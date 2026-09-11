@@ -538,9 +538,12 @@ pub(super) fn run_cargo(
     let mut command = Command::new(cargo);
     command.args(arguments);
     command.envs(environment);
-    let status = command
-        .status()
-        .wrap_err_with(|| format!("failed to run {}", cargo.to_string_lossy()))?;
+    let status = if super::pretty::enabled(arguments) {
+        super::pretty::run(&mut command)
+    } else {
+        command.status()
+    }
+    .wrap_err_with(|| format!("failed to run {}", cargo.to_string_lossy()))?;
     Ok(exit_code(status))
 }
 
