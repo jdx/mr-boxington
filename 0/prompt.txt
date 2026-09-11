@@ -1,0 +1,61 @@
+could we have a colorful ascii version of the mr-boxington logo for the pretty output?
+
+---
+
+not the live dashboard, though it could go there too, pull latest, first show me what your ascii thing will look like, we'll want to update the gif/png in the docs too. i also want this for agent output i think, but only if you think it's a good idea
+
+---
+
+i want the box to animate as the progress goes
+
+---
+
+or maybe open or close too?
+
+---
+
+show me a demo first
+
+---
+
+idk if we have to stick to ascii, we could use more characters maybe
+
+---
+
+maybe we could have it close then have a tape gun tape it shut? i don't think i like the background here
+
+---
+
+um is it supposed to look like that?
+
+---
+
+ok try that
+
+---
+
+idk what do you think?
+
+---
+
+yes try again
+
+---
+
+i think it's ok, but the face isn't aligned
+
+---
+
+i liked the tape gun too
+
+---
+
+do it
+
+---
+
+make a pr, put the asset into the pr desc, we should have a static version for agent mode
+
+---
+
+make the tape gun smaller

@@ -1,0 +1,56 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M28P1J7839ZZZCYK0VNSDMEG",
+  "session_id": "01a09150-5635-7401-bdbb-d87bd55af2ae",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-11T16:50:34.819265Z",
+  "branch": "codex/boxington-mascot",
+  "checkpoints_count": 11,
+  "files_touched": [
+    "crates/mbx/src/cli/mascot.rs",
+    "crates/mbx/src/cli/mod.rs",
+    "crates/mbx/src/cli/plain_progress.rs",
+    "crates/mbx/src/cli/pretty/tests.rs",
+    "crates/mbx/src/cli/pretty/view.rs",
+    "docs/.vitepress/theme/HomeBuild.vue",
+    "docs/public/screenshots/cargo-pretty.gif",
+    "docs/public/screenshots/cargo-pretty.png",
+    "scripts/record-cargo-pretty.py",
+    "scripts/test-cargo-pretty.py"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6-astra",
+  "turn_id": "d49d80a737b9",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 124248,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 4208384,
+    "output_tokens": 20456,
+    "api_call_count": 59
+  },
+  "session_metrics": {
+    "turn_count": 11
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-11T16:50:34.779725Z",
+    "agent_lines": 1575,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1575,
+    "total_lines_changed": 1575,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
