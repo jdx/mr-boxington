@@ -191,16 +191,30 @@ impl Model {
     }
 
     pub fn status(&mut self, line: &str) -> bool {
-        for verb in ["Compiling ", "Checking "] {
-            if let Some(package) = line.trim_start().strip_prefix(verb) {
+        // Cargo right-aligns these labels in twelve columns and follows them
+        // with a package name and version. Leave ordinary child output alone.
+        for verb in ["   Compiling ", "    Checking "] {
+            if let Some(package) = line.strip_prefix(verb) {
                 let package = package.split(" (").next().unwrap_or(package).trim();
+                let Some((name, version)) = package.split_once(" v") else {
+                    return false;
+                };
+                if name.is_empty()
+                    || !name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    || version.split('.').take(3).count() != 3
+                    || !version.starts_with(|c: char| c.is_ascii_digit())
+                {
+                    return false;
+                }
                 self.live
                     .entry(package.to_string())
                     .or_insert_with(Instant::now);
                 return true;
             }
         }
-        if line.trim_start().starts_with("Building ")
+        if line.starts_with("    Building [")
             && let Some((_, tail)) = line.split_once(']')
             && let Some(count) = tail.split_whitespace().next()
             && let Some((done, total)) = count.trim_end_matches(':').split_once('/')
@@ -212,7 +226,7 @@ impl Model {
             self.units_total = Some(total);
             return true;
         }
-        if line.trim_start().starts_with("Finished ") {
+        if line.starts_with("    Finished `") && line.contains(" target(s) in ") {
             return true;
         }
         // Cargo's native progress supplies a reliable unit total when emitted.

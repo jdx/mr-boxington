@@ -196,3 +196,22 @@ fn failed_build_does_not_fill_unfinished_units() {
     let text = strip_ansi(&view::render(&model, None, 110, 30).to_string());
     assert!(text.contains("total unknown"));
 }
+
+#[test]
+fn status_words_in_child_output_are_preserved() {
+    let mut model = Model::new(&["build".into()]);
+    for line in [
+        "Compiling assets",
+        "Checking configuration",
+        "   Compiling assets",
+        "    Checking configuration",
+        "Finished generating assets",
+        "Building [assets] 1/2: images",
+    ] {
+        assert!(!model.status(line), "consumed child output: {line}");
+    }
+    assert!(model.live.is_empty());
+    assert!(model.status("   Compiling demo v1.2.3 (/tmp/demo)"));
+    assert!(model.status("    Checking demo v1.2.3"));
+    assert!(model.status("    Finished `dev` profile [unoptimized] target(s) in 0.2s"));
+}
