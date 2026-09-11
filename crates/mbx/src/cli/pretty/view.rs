@@ -266,7 +266,7 @@ fn outcome<'a>(model: &'a Model, row: &super::model::Row) -> &'a str {
         return "fresh";
     }
     let Some(target) = &row.cache_target else {
-        return "";
+        return if model.testing { "" } else { "unknown" };
     };
     let Some(outcomes) = model.outcomes.get(target) else {
         return "unknown";

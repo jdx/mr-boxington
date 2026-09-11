@@ -1940,12 +1940,54 @@ pub(crate) fn record_compiler_invocation_with_diagnostic(
     {
         requests.push(request);
     }
+    if let Some(request) = unit_outcome_request(outcome, crate_name) {
+        requests.push(request);
+    }
     requests.push(AgentRequest::RecordCompilerInvocation {
         outcome: outcome.into(),
         crate_name: crate_name.map(str::to_string),
         duration_ns,
     });
     let _ = request_agent(&requests);
+}
+
+/// Use Cargo's output fingerprint, not a crate name shared by package versions.
+/// The reserved debug envelope keeps the public v6 request enum unchanged.
+pub(crate) fn unit_outcome_request(
+    outcome: &str,
+    crate_name: Option<&str>,
+) -> Option<AgentRequest> {
+    let unit = compiler_unit_key(
+        crate_name?,
+        std::env::args_os().filter_map(|arg| arg.into_string().ok()),
+    )?;
+    Some(AgentRequest::RecordDebug {
+        target: "mbx::unit-outcome".into(),
+        message: serde_json::to_string(&(unit, outcome)).ok()?,
+    })
+}
+
+pub(crate) fn compiler_unit_key(
+    crate_name: &str,
+    arguments: impl IntoIterator<Item = String>,
+) -> Option<String> {
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        let option = if argument == "-C" {
+            arguments.next()?
+        } else if let Some(option) = argument.strip_prefix("-C") {
+            option.to_string()
+        } else {
+            continue;
+        };
+        if let Some(hash) = option.strip_prefix("extra-filename=-")
+            && (8..=64).contains(&hash.len())
+            && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Some(format!("{crate_name}:{hash}"));
+        }
+    }
+    None
 }
 
 const ACTION_DIAGNOSTIC_PREFIX: &str = "@mbx-action-diagnostic\t";

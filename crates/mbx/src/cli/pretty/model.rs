@@ -137,7 +137,7 @@ impl Model {
     }
 
     pub fn update_stats(&mut self, stats: AgentStats) {
-        self.outcomes = stats.crate_outcomes.clone();
+        self.outcomes = stats.unit_outcomes.clone();
         self.mix = stats.into();
     }
 
@@ -182,7 +182,7 @@ impl Model {
                 }
                 self.row(Row {
                     name: key,
-                    cache_target: Some(target.replace('-', "_")),
+                    cache_target: artifact_unit_key(&message, target),
                     duration: start.map(|start| start.elapsed()),
                     fresh,
                     failed: false,
@@ -374,4 +374,33 @@ pub(super) fn strip_ansi(text: &str) -> String {
         }
     }
     output
+}
+
+fn artifact_unit_key(message: &Value, target: &str) -> Option<String> {
+    let target = target.replace('-', "_");
+    let build_script = message["target"]["kind"]
+        .as_array()
+        .is_some_and(|kinds| kinds.iter().any(|kind| kind == "custom-build"));
+    for filename in message["filenames"].as_array()? {
+        let path = std::path::Path::new(filename.as_str()?);
+        let stem = path.file_stem()?.to_str()?.replace('-', "_");
+        let hash = if build_script {
+            path.parent()?
+                .file_name()?
+                .to_str()?
+                .rsplit_once('-')
+                .map(|(_, hash)| hash.to_string())
+        } else {
+            stem.strip_prefix(&format!("lib{target}_"))
+                .or_else(|| stem.strip_prefix(&format!("{target}_")))
+                .map(str::to_string)
+        };
+        if let Some(hash) = hash
+            && (8..=64).contains(&hash.len())
+            && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Some(format!("{target}:{hash}"));
+        }
+    }
+    None
 }

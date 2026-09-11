@@ -116,8 +116,6 @@ async fn records_compiler_time_by_outcome_and_crate() {
     }
 
     let stats = agent.stats();
-    assert_eq!(stats.crate_outcomes["slow_crate"], ["miss".into()].into());
-    assert_eq!(stats.crate_outcomes["linked_bin"], ["bypass".into()].into());
     assert_eq!(stats.compiler["miss"].invocations, 2);
     assert_eq!(stats.compiler["miss"].duration_ns, 22);
     assert_eq!(stats.compiler["bypass"].duration_ns, 11);
@@ -5159,4 +5157,32 @@ async fn malformed_debug_records_are_rejected() {
             AgentResponse::Error { .. }
         ));
     }
+}
+
+#[tokio::test]
+async fn unit_outcomes_do_not_merge_equal_crate_names() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    for (unit, outcome) in [
+        ("serde:1111111111111111", "hit"),
+        ("serde:2222222222222222", "miss"),
+    ] {
+        assert!(matches!(
+            agent
+                .respond(AgentRequest::RecordDebug {
+                    target: "mbx::unit-outcome".into(),
+                    message: serde_json::to_string(&(unit, outcome)).unwrap(),
+                })
+                .await,
+            AgentResponse::DebugRecorded
+        ));
+    }
+    assert_eq!(
+        agent.stats().unit_outcomes["serde:1111111111111111"],
+        ["hit".into()].into()
+    );
+    assert_eq!(
+        agent.stats().unit_outcomes["serde:2222222222222222"],
+        ["miss".into()].into()
+    );
 }

@@ -252,6 +252,9 @@ pub(crate) fn record_action_hit_with_diagnostic(
     {
         requests.push(request);
     }
+    if let Some(request) = session::unit_outcome_request("hit", Some(crate_name)) {
+        requests.push(request);
+    }
     requests.push(AgentRequest::RecordActionHit {
         action: action.clone(),
         restore,

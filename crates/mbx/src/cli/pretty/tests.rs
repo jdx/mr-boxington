@@ -259,17 +259,17 @@ fn active_rows_keep_slots_and_cache_outcomes_remain_explicit() {
     model.status("   Compiling zeta v1.0.0");
     model.status("   Compiling alpha v1.0.0");
     let original = model.slots.clone();
-    assert!(model.cargo(r#"{"reason":"compiler-artifact","package_id":"path+file:///zeta#zeta@1.0.0","target":{"name":"zeta"},"fresh":false}"#));
+    assert!(model.cargo(r#"{"reason":"compiler-artifact","package_id":"path+file:///zeta#zeta@1.0.0","target":{"name":"zeta"},"filenames":["/tmp/libzeta-1111111111111111.rmeta"],"fresh":false}"#));
     assert_eq!(model.slots[1], original[1]);
     let mut stats = AgentStats::default();
     stats
-        .crate_outcomes
-        .insert("zeta".into(), ["hit".into()].into());
+        .unit_outcomes
+        .insert("zeta:1111111111111111".into(), ["hit".into()].into());
     model.update_stats(stats.clone());
     assert!(strip_ansi(&view::render(&mut model, None, 110, 27).to_string()).contains("hit"));
     stats
-        .crate_outcomes
-        .get_mut("zeta")
+        .unit_outcomes
+        .get_mut("zeta:1111111111111111")
         .unwrap()
         .insert("miss".into());
     model.update_stats(stats);
@@ -317,9 +317,29 @@ fn summary_uses_the_cargo_verb_and_build_scripts_normalize_like_rustc() {
         assert!(strip_ansi(&view::summary(&model).to_string()).contains(expected));
     }
     let mut model = Model::new(&["build".into()]);
-    model.cargo(r#"{"reason":"compiler-artifact","package_id":"path+file:///demo#demo@1.0.0","target":{"name":"build-script-build","kind":["custom-build"]},"fresh":false}"#);
+    model.cargo(r#"{"reason":"compiler-artifact","package_id":"path+file:///demo#demo@1.0.0","target":{"name":"build-script-build","kind":["custom-build"]},"filenames":["/tmp/demo-1111111111111111/build-script-build"],"fresh":false}"#);
     assert_eq!(
         model.done[0].cache_target.as_deref(),
-        Some("build_script_build")
+        Some("build_script_build:1111111111111111")
+    );
+}
+
+#[test]
+fn cargo_fingerprints_isolate_versions_and_match_compiler_arguments() {
+    let mut model = Model::new(&["build".into()]);
+    for (version, hash) in [("1.0.0", "1111111111111111"), ("2.0.0", "2222222222222222")] {
+        model.cargo(&serde_json::json!({"reason":"compiler-artifact", "package_id":format!("serde@{version}"), "target":{"name":"serde"}, "filenames":[format!("/tmp/libserde-{hash}.rmeta")], "fresh":false}).to_string());
+    }
+    assert_ne!(model.done[0].cache_target, model.done[1].cache_target);
+    assert_eq!(
+        model.done[0].cache_target,
+        crate::session::compiler_unit_key(
+            "serde",
+            ["-C".into(), "extra-filename=-1111111111111111".into()]
+        )
+    );
+    assert!(
+        crate::session::compiler_unit_key("serde", ["--crate-name".into(), "serde".into()])
+            .is_none()
     );
 }
