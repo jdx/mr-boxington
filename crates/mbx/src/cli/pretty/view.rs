@@ -16,7 +16,46 @@ pub(super) struct Browser {
     pub scroll: usize,
 }
 
+/// Put the mascot beside the content only when both remain readable.
 pub(super) fn render(
+    model: &mut Model,
+    browser: Option<&mut Browser>,
+    width: u16,
+    height: u16,
+) -> Block {
+    use super::norimel::Color;
+    use crate::cli::mascot::{HEIGHT, Ink, Mascot, Pose, WIDTH};
+    if browser.is_some() || width < 96 || height < HEIGHT as u16 {
+        return render_content(model, browser, width, height);
+    }
+    let ok = model.finished.map(|(ok, _)| ok).or_else(|| {
+        if model.build_ok == Some(false) || model.tests_failed > 0 {
+            Some(false)
+        } else {
+            None
+        }
+    });
+    let (done, total) = if model.testing {
+        (model.suite_done, Some(model.suite_total))
+    } else {
+        (model.units_done, model.units_total)
+    };
+    let mascot = Mascot::new(Pose::for_progress(done, total, ok));
+    let art = rimel::col(mascot.0.into_iter().map(|row| {
+        rimel::row(row.into_iter().map(|(ch, ink)| {
+            rimel::text(ch.to_string()).fg(match ink {
+                Ink::Box => Color::Rgb(226, 171, 81),
+                Ink::Face => Color::Rgb(112, 215, 203),
+                Ink::Tape => Color::Rgb(246, 214, 147),
+            })
+        }))
+    }))
+    .w(WIDTH as u16 + 2);
+    let content = render_content(model, None, width - WIDTH as u16 - 2, height);
+    rimel::row([art, content])
+}
+
+fn render_content(
     model: &mut Model,
     browser: Option<&mut Browser>,
     width: u16,

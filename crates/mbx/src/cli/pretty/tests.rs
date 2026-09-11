@@ -392,3 +392,30 @@ fn uplifted_artifacts_match_shim_outcomes_without_merging_packages_or_tests() {
         assert!(text.contains("hit"), "{text}");
     }
 }
+
+#[test]
+fn mascot_keeps_progress_readable_and_stays_out_of_narrow_views() {
+    let mut model = Model::new(&["build".into()]);
+    model.units_total = Some(100);
+    model.units_done = 91;
+    for width in [50, 80, 95, 96, 110] {
+        let block = view::render(&mut model, None, width, 27);
+        assert!(block.size().0 <= width);
+        assert_eq!(block.size().1, 27);
+        let text = strip_ansi(&block.to_string());
+        assert_eq!(text.contains('▼'), width >= 96, "{text}");
+        if width >= 80 {
+            assert!(text.contains("91/100 units"), "{text}");
+        }
+    }
+    model.finished = Some((false, Duration::from_secs(1)));
+    let failed = strip_ansi(&view::render(&mut model, None, 110, 27).to_string());
+    assert!(failed.contains("Failed"));
+    assert!(!failed.contains('═'));
+    model.finished = Some((true, Duration::from_secs(1)));
+    let done = view::render(&mut model, None, 110, 27);
+    assert_eq!(done.size().1, 9);
+    let done = strip_ansi(&done.to_string());
+    assert!(done.contains("═══════"));
+    assert!(!done.contains('▼'));
+}
