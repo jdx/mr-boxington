@@ -76,7 +76,7 @@ def terminal_run(root, env, args, *, respond=None, limit=90):
 
 def environment(root):
     env = dict(os.environ, TERM='xterm-256color', MBX_CACHE_DIR=str(root/'cache'), MBX_TARGET_VIEWS='false', MBX_GC_AUTO='false', MBX_SUMMARY='off', MBX_SAVINGS='off', MBX_STATS_REPORT=str(root/'stats.json'))
-    for key in ['CI', 'GITHUB_ACTIONS', 'NO_COLOR', 'CARGO_TERM_COLOR', 'CARGO_TERM_PROGRESS_WHEN', 'CARGO_TERM_PROGRESS_WIDTH', 'MBX_DISABLE', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER']:
+    for key in ['CI', 'GITHUB_ACTIONS', 'MBX_DISPLAY', 'NO_COLOR', 'CARGO_TERM_COLOR', 'CARGO_TERM_PROGRESS_WHEN', 'CARGO_TERM_PROGRESS_WIDTH', 'MBX_DISABLE', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER']:
         env.pop(key, None)
     stamp = root/'cache/actions/notice/v1/explained'
     stamp.parent.mkdir(parents=True)
