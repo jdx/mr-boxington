@@ -16,6 +16,7 @@ mod cache;
 mod cargo;
 mod clean;
 mod doctor;
+mod edit;
 mod exec;
 mod explain;
 mod gc;
@@ -88,6 +89,8 @@ enum Commands {
     Doctor(doctor::DoctorArgs),
     /// Explain cache bypasses, or replay the last build and diagnose its misses.
     Explain(explain::ExplainArgs),
+    /// Open the global configuration in $VISUAL, $EDITOR, or the platform's default editor.
+    Edit,
     /// Make plain Cargo commands run through mbx.
     Setup(setup::SetupArgs),
     /// Collect stale managed targets and evict cached objects until the store fits a size budget.
@@ -136,6 +139,7 @@ fn with_toolchain(toolchain: Option<&str>, arguments: Vec<String>) -> Vec<String
 fn compiles_nothing(command: &Commands) -> Option<&'static str> {
     match command {
         Commands::Completion { .. } => Some("completion"),
+        Commands::Edit => Some("edit"),
         Commands::Setup(_) => Some("setup"),
         Commands::Gc(_) => Some("gc"),
         Commands::Cache(_) => Some("cache"),
@@ -187,12 +191,16 @@ pub fn run() -> Result<ExitCode> {
         print!("{}", Cli::completion_script(shell));
         return Ok(ExitCode::SUCCESS);
     }
+    if let Commands::Edit = cli.command {
+        return edit::run();
+    }
     let (config, settings) = Config::load_for_cli()?;
     match cli.command {
         Commands::Completion { .. } => {
             unreachable!("completion was handled before configuration loading")
         }
         Commands::Doctor(_) => unreachable!("doctor was handled before configuration loading"),
+        Commands::Edit => unreachable!("edit was handled before configuration loading"),
         Commands::Explain(args) => {
             shim::prepare_explicit_cargo()?;
             explain::run(&config, &settings, args, toolchain)
