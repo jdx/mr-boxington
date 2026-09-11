@@ -118,6 +118,9 @@ pub(crate) struct RawConfig {
     /// Open the terminal warning browser after a successful Cargo build.
     #[usage(env = "MBX_PRETTY_INSPECT", default = false)]
     pretty_inspect: bool,
+    /// Cargo display mode. Plain disables animated output even in a terminal.
+    #[usage(env = "MBX_DISPLAY", default = "auto", choices("auto", "plain"))]
+    display: String,
     /// Compile and consult the cache, then compare outputs.
     #[usage(env = "MBX_VERIFY", default = false, scope = "env")]
     verify: bool,
@@ -572,6 +575,7 @@ pub(crate) struct CliSettings {
     pub savings: SavingsStyle,
     pub summary: SummaryStyle,
     pub pretty_inspect: bool,
+    pub plain_output: bool,
     /// Whether a churning crate may compile with its own incremental state.
     pub learned_incremental: bool,
     /// How much of that state one crate may keep, in bytes; `None` is no limit.
@@ -589,6 +593,7 @@ impl Default for CliSettings {
             savings: SavingsStyle::default(),
             summary: SummaryStyle::default(),
             pretty_inspect: false,
+            plain_output: false,
             learned_incremental: true,
             learned_incremental_max_size: Some(DEFAULT_LEARNED_INCREMENTAL_MAX_SIZE),
             cache_links: true,
@@ -910,6 +915,7 @@ impl Config {
                 savings: raw.savings.parse().wrap_err("invalid savings")?,
                 summary: raw.summary.parse().wrap_err("invalid summary")?,
                 pretty_inspect: raw.pretty_inspect,
+                plain_output: raw.display == "plain",
                 learned_incremental: raw._learned_incremental,
                 learned_incremental_max_size: parse_optional_byte_size(
                     &raw.learned_incremental_max_size,

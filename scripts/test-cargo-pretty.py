@@ -174,10 +174,27 @@ pub fn answer() -> u32 { dep::value() }
         for level in ['debug', 'mbx_cache_core=trace']:
             code, output = terminal_run(root, dict(env, MBX_LOG=level), ['check'])
             assert code == 0 and b'\x1b[?2026h' not in output and b'Build / cache' not in output
+        code, output = terminal_run(root, dict(env, MBX_DISPLAY='plain'), ['run', '--', 'plain mode'], respond=(b'INPUT_READY', b'hello\n'))
+        assert code == 0 and b'ARG:plain mode' in output
+        code, output = terminal_run(root, dict(env, MBX_DISPLAY='plain'), ['check'])
+        assert code == 0 and b'\x1b[?2026h' not in output and b'Build / cache' not in output
         (root/'src/lib.rs').write_text('this does not compile\n')
         code, output = terminal_run(root, env, ['run'])
         assert code == 101 and b'error' in output, output[-3000:]
         assert not re.search(rb'(?<!\r)\n', output), 'error diagnostics need CRLF in raw mode'
+        agent = root/'agent'
+        (agent/'src').mkdir(parents=True)
+        (agent/'Cargo.toml').write_text('[package]\nname="agent-output"\nversion="0.1.0"\nedition="2024"\n')
+        (agent/'src/lib.rs').write_text('pub fn value() {}\n')
+        (agent/'build.rs').write_text('fn main() { std::thread::sleep(std::time::Duration::from_secs(16)); }\n')
+        agent_env = dict(environment(agent), MBX_SUMMARY='short')
+        result = subprocess.run([str(BINARY), 'check'], cwd=agent, env=agent_env, capture_output=True, timeout=60)
+        assert result.returncode == 0 and b'mbx[progress]:' in result.stderr, result.stderr
+        assert b'\x1b' not in result.stderr and b'\r' not in result.stderr
+        assert not result.stdout
+        result = subprocess.run([str(BINARY), 'check', '--message-format=json'], cwd=agent, env=agent_env, capture_output=True, timeout=60)
+        assert result.returncode == 0 and b'mbx[progress]:' not in result.stderr
+        assert all(isinstance(json.loads(line), dict) for line in result.stdout.splitlines())
         print('Passed: build/check/clippy, fresh/warm cache counts, interactive run, tests/doctests, custom harness, runner, failure diagnostics, cancellation, JSON passthrough, warning browser, terminal restoration.')
 
 

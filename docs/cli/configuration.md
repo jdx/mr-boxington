@@ -57,6 +57,19 @@ Cache C and C++ compilations run by build scripts.
 
 Store C objects that embed absolute paths under checkout-specific keys. Disable for disposable worktrees to avoid storing objects that cannot be reused at another path. Existing entries may still be restored.
 
+### `display`
+
+- **Type:** `string`
+- **Default:** `auto`
+- **Set with:** `MBX_DISPLAY`
+
+Cargo display mode. Plain disables animated output even in a terminal.
+
+**Choices:**
+- `auto`
+- `plain`
+
+
 ### `events`
 
 - **Type:** `bool`

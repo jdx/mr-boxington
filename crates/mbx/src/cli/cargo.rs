@@ -261,13 +261,22 @@ fn cargo_with_settings_bypass_log_and_roots(
         if let Some(launch) = &launch {
             launch.environment(&mut environment)?;
         }
+        if settings.plain_output {
+            environment.insert("CARGO_TERM_PROGRESS_WHEN".into(), "never".into());
+        }
         super::launch::record_overlay(&mut environment)?;
-        let status = if super::pretty::enabled(arguments) {
+        let status = if !settings.plain_output && super::pretty::enabled(arguments) {
             match super::pretty::run(&cargo, arguments, &environment, settings.pretty_inspect, || session.progress_stats()) {
                 Ok(Some(status)) => Ok(status),
                 Ok(None) => run_cargo(&cargo, arguments, environment),
                 Err(error) => Err(error),
             }
+        } else if super::pretty::eligible(arguments)
+            && !matches!(settings.summary, SummaryStyle::Off)
+            && log::max_level() < log::LevelFilter::Debug
+            && (settings.plain_output || !std::io::stderr().is_terminal())
+        {
+            super::plain_progress::run(&cargo, arguments, environment, || session.progress_stats())
         } else {
             run_cargo(&cargo, arguments, environment)
         };

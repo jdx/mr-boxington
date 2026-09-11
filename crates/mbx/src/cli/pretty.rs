@@ -49,7 +49,7 @@ fn cargo_verb(arguments: &[String]) -> Option<&str> {
         .map(String::as_str)
 }
 
-fn eligible(arguments: &[String]) -> bool {
+pub(super) fn eligible(arguments: &[String]) -> bool {
     matches!(
         cargo_verb(arguments),
         Some("build" | "b" | "check" | "c" | "clippy" | "run" | "r" | "test" | "t")
