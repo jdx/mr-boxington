@@ -98,14 +98,17 @@ pub(super) fn run(
         .map_err(|e| eyre::eyre!(e))?;
     let mut command = CommandBuilder::new(cargo);
     command.args(cargo_arguments(arguments));
-    for (key, value) in environment {
+    // Cargo supplies the denominator itself, without an unstable unit-graph
+    // probe. Include presentation overrides in the launch overlay so native
+    // applications receive the caller's environment after the build ends.
+    let mut environment = environment.clone();
+    environment.insert("CARGO_TERM_PROGRESS_WHEN".into(), "always".into());
+    environment.insert("CARGO_TERM_PROGRESS_WIDTH".into(), cols.to_string());
+    super::launch::record_overlay(&mut environment)?;
+    for (key, value) in &environment {
         command.env(key, value);
     }
     command.cwd(std::env::current_dir()?);
-    // Cargo supplies the build-unit denominator itself; no unstable unit-graph
-    // probe, altered compiler settings or metadata guess is involved.
-    command.env("CARGO_TERM_PROGRESS_WHEN", "always");
-    command.env("CARGO_TERM_PROGRESS_WIDTH", cols.to_string());
     let mut reader = pair.master.try_clone_reader().map_err(|e| eyre::eyre!(e))?;
     let mut input = pair.master.take_writer().map_err(|e| eyre::eyre!(e))?;
     let mut screen = Screen::new()?;

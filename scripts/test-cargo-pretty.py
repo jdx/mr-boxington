@@ -10,6 +10,7 @@ from pathlib import Path
 import pty
 import re
 import select
+import signal
 import shutil
 import struct
 import subprocess
@@ -73,7 +74,7 @@ def terminal_run(root, env, args, *, respond=None, limit=90):
 
 def environment(root):
     env = dict(os.environ, TERM='xterm-256color', MBX_CACHE_DIR=str(root/'cache'), MBX_TARGET_VIEWS='false', MBX_GC_AUTO='false', MBX_SUMMARY='off', MBX_SAVINGS='off', MBX_STATS_REPORT=str(root/'stats.json'))
-    for key in ['CI', 'GITHUB_ACTIONS', 'NO_COLOR', 'CARGO_TERM_COLOR', 'CARGO_TERM_PROGRESS_WHEN', 'MBX_DISABLE', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER']:
+    for key in ['CI', 'GITHUB_ACTIONS', 'NO_COLOR', 'CARGO_TERM_COLOR', 'CARGO_TERM_PROGRESS_WHEN', 'CARGO_TERM_PROGRESS_WIDTH', 'MBX_DISABLE', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER']:
         env.pop(key, None)
     stamp = root/'cache/actions/notice/v1/explained'
     stamp.parent.mkdir(parents=True)
@@ -95,6 +96,8 @@ fn main() {
  assert!(std::io::stdin().is_terminal());
  assert!(std::io::stdout().is_terminal());
  assert!(std::io::stderr().is_terminal());
+ assert!(std::env::var_os("CARGO_TERM_PROGRESS_WHEN").is_none());
+ assert!(std::env::var_os("CARGO_TERM_PROGRESS_WIDTH").is_none());
  println!("ARG:{}", std::env::args().nth(1).unwrap_or_default());
  println!("INPUT_READY"); std::io::stdout().flush().unwrap();
  let mut line = String::new(); std::io::stdin().read_line(&mut line).unwrap();
@@ -137,7 +140,8 @@ pub fn answer() -> u32 { dep::value() }
         code, output = terminal_run(root, runner_env, ['test', '--lib', 'works'])
         assert code == 0 and b'RUNNER_USED' in output, output[-3000:]
         code, output = terminal_run(root, env, ['run'], respond=(b'INPUT_READY', b'\x03'))
-        assert code == 130, (code, output[-3000:])
+        # Native application handoff may terminate mbx with SIGINT directly.
+        assert code in (130, -signal.SIGINT), (code, output[-3000:])
         result = subprocess.run([str(BINARY), 'build', '--message-format=json'], cwd=root, env=env, capture_output=True)
         assert result.returncode == 0 and b'compiler-artifact' in result.stdout and b'Build / cache' not in result.stderr
         (root/'src/lib.rs').write_text('pub fn bad() { let unused = 1; }\n')
