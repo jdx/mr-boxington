@@ -79,6 +79,7 @@ pub(super) struct Model {
     pub mix: CacheMix,
     pub finished: Option<(bool, Duration)>,
     failure_capture: Option<usize>,
+    failure_section: bool,
     suite_before: [usize; 3],
 }
 
@@ -107,6 +108,7 @@ impl Model {
             mix: CacheMix::default(),
             finished: None,
             failure_capture: None,
+            failure_section: false,
             suite_before: [0; 3],
         }
     }
@@ -244,6 +246,8 @@ impl Model {
             .and_then(|s| s.parse().ok())
         {
             self.testing = true;
+            self.failure_section = false;
+            self.failure_capture = None;
             self.suite_before = [self.tests_passed, self.tests_failed, self.tests_ignored];
             self.suite_total = total;
             self.suite_done = 0;
@@ -286,9 +290,17 @@ impl Model {
                 + (self.tests_failed - self.suite_before[1])
                 + (self.tests_ignored - self.suite_before[2]);
         }
-        if let Some(name) = line
-            .strip_prefix("---- ")
-            .and_then(|s| s.strip_suffix(" stdout ----"))
+        if line == "failures:" {
+            self.failure_section = true;
+            self.failure_capture = None;
+        } else if line == "successes:" || line.starts_with("test result:") {
+            self.failure_section = false;
+            self.failure_capture = None;
+        }
+        if self.failure_section
+            && let Some(name) = line
+                .strip_prefix("---- ")
+                .and_then(|s| s.strip_suffix(" stdout ----"))
         {
             self.failures.push((name.to_string(), String::new()));
             self.failure_capture = Some(self.failures.len() - 1);

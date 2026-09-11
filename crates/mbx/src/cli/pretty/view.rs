@@ -2,8 +2,8 @@
 // Copyright (c) 2026 romancitodev (MIT); see LICENSE.cargo-pretty.
 // Upstream revision: 73777522ccf8e4a485d026b3b60a275af2f8b381.
 use super::model::{Model, segments};
+use super::norimel::{self as rimel, Block, palette};
 use super::upstream::{fade, warning_panel};
-use norimel::{self as rimel, Block, palette};
 
 const BAR_WIDTH: usize = 28;
 const NAME_WIDTH: usize = 32;
@@ -46,7 +46,9 @@ pub(super) fn render(
         return crop(block, browser.scroll, width, height);
     }
     if model.finished.is_some() {
-        return crop(summary(model), 0, width, height);
+        let summary = summary(model);
+        let height = height.min(summary.size().1);
+        return crop(summary, 0, width, height);
     }
     let mut lines = vec![
         rimel::text(&model.command).dim(),

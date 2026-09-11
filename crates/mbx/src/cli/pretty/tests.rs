@@ -72,6 +72,7 @@ fn native_test_output_tracks_suites_and_failures_without_fabricated_times() {
     assert!(model.test_line("running 2 tests"));
     assert!(model.test_line("test good ... ok"));
     assert!(model.test_line("test bad ... FAILED"));
+    model.test_line("failures:");
     assert!(!model.test_line("---- bad stdout ----"));
     model.test_line("panic at src/lib.rs:3:4");
     model.test_line("failures:");
@@ -214,4 +215,40 @@ fn status_words_in_child_output_are_preserved() {
     assert!(model.status("   Compiling demo v1.2.3 (/tmp/demo)"));
     assert!(model.status("    Checking demo v1.2.3"));
     assert!(model.status("    Finished `dev` profile [unoptimized] target(s) in 0.2s"));
+}
+
+#[test]
+fn final_summary_keeps_only_its_content_rows() {
+    let mut model = Model::new(&["build".into()]);
+    model.finished = Some((true, Duration::from_secs(2)));
+    let block = view::render(&model, None, 80, 27);
+    assert_eq!(block.size().1, view::summary(&model).size().1);
+    assert!(block.size().1 < 10);
+}
+
+#[test]
+fn passing_test_stdout_does_not_open_failure_browser() {
+    let mut model = Model::new(&["test".into()]);
+    for line in [
+        "running 1 test",
+        "test works ... ok",
+        "successes:",
+        "---- works stdout ----",
+        "hello",
+        "test result: ok. 1 passed; 0 failed; 0 ignored;",
+    ] {
+        model.test_line(line);
+    }
+    assert!(model.failures.is_empty());
+    for line in [
+        "running 1 test",
+        "test fails ... FAILED",
+        "failures:",
+        "---- fails stdout ----",
+        "panic detail",
+    ] {
+        model.test_line(line);
+    }
+    assert_eq!(model.failures.len(), 1);
+    assert!(model.failures[0].1.contains("panic detail"));
 }

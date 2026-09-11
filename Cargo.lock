@@ -1479,7 +1479,6 @@ dependencies = [
  "mbx-cache-rustc",
  "mbx-cache-store",
  "memchr",
- "norimel",
  "portable-pty",
  "rand 0.10.2",
  "ratatui",
@@ -1493,6 +1492,8 @@ dependencies = [
  "tokio",
  "toml",
  "toml_edit",
+ "unicode-segmentation",
+ "unicode-width",
  "url",
  "usage-config",
  "usage-rs",
@@ -1676,18 +1677,6 @@ dependencies = [
  "cfg-if",
  "cfg_aliases 0.1.1",
  "libc",
-]
-
-[[package]]
-name = "norimel"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7d8b322f404eea16e474b2ed1e1f2c344db702ed0e892fefe0ff5b296ebf2b0"
-dependencies = [
- "crossterm",
- "ratatui",
- "unicode-segmentation",
- "unicode-width",
 ]
 
 [[package]]

@@ -33,6 +33,8 @@ pub mod doctor;
 pub(crate) mod events;
 #[doc(hidden)]
 pub mod explain;
+#[doc(hidden)]
+pub mod logging;
 pub mod phase_timing;
 #[doc(hidden)]
 pub mod policy;

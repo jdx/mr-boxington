@@ -3,8 +3,7 @@ use mbx_cache_core::{AgentRequest, AgentResponse};
 
 /// Write to stderr without failing the build when the pipe is closed.
 pub(crate) fn note(message: &str) {
-    use std::io::Write as _;
-    let _ = writeln!(std::io::stderr(), "{message}");
+    crate::logging::note(message);
 }
 
 /// Whether this process's stderr belongs to the compiler it stands in for.

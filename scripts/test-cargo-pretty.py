@@ -58,8 +58,10 @@ def terminal_run(root, env, args, *, respond=None, limit=90):
             if child.poll() is not None and not ready:
                 break
         else:
-            Path('/tmp/mbx-pretty-timeout.log').write_bytes(data)
-            raise AssertionError(f'Timed out: {args}; transcript: /tmp/mbx-pretty-timeout.log')
+            with tempfile.NamedTemporaryFile(prefix='mbx-pretty-timeout-', suffix='.log', delete=False) as log:
+                log.write(data)
+                log_path = log.name
+            raise AssertionError(f'Timed out: {args}; transcript: {log_path}')
         code = child.wait(timeout=5)
         after = termios.tcgetattr(master)
         assert before == after, f'terminal mode was not restored: {args}: {before!r} != {after!r}'
@@ -119,6 +121,8 @@ pub fn answer() -> u32 { dep::value() }
             code, output = terminal_run(root, env, args)
             assert code == 0, output[-3000:]
             assert b'Build / cache' in output, output[-3000:]
+            assert b'\x1b[?2026h' in output
+            assert output.count(b'\x1b[?2026l') >= output.count(b'\x1b[?2026h')
         code, output = terminal_run(root, env, ['build'])
         assert code == 0 and b'fresh' in output
         shutil.rmtree(root/'target')

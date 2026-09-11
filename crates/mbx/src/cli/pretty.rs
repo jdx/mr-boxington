@@ -3,6 +3,7 @@
 //! Cargo remains the only orchestrator: the original command runs once in a
 //! terminal, including runners and doctests. Only its presentation is adapted.
 mod model;
+mod norimel;
 #[cfg(test)]
 mod tests;
 mod upstream;
@@ -13,7 +14,7 @@ use mbx_cache_core::AgentStats;
 use model::{Model, strip_ansi};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use ratatui::crossterm::{
-    cursor,
+    SynchronizedUpdate, cursor,
     event::{self, Event, KeyCode, KeyModifiers},
     execute, terminal,
 };
@@ -137,8 +138,11 @@ pub(super) fn run(
         }
     });
     let mut model = Model::new(arguments);
-    let is_run = matches!(cargo_verb(arguments), Some("run" | "r"));
-    let is_test = matches!(cargo_verb(arguments), Some("test" | "t"));
+    let mode = match cargo_verb(arguments) {
+        Some("run" | "r") => Mode::Run,
+        Some("test" | "t") => Mode::Test,
+        _ => Mode::Build,
+    };
     let mut decoder = Decoder::default();
     let mut proxy = false;
     let mut last_frame = Instant::now() - Duration::from_secs(1);
@@ -146,17 +150,13 @@ pub(super) fn run(
         loop {
             match receive.recv_timeout(Duration::from_millis(20)) {
                 Ok(Ok(bytes)) => {
-                    model.mix = stats().into();
-                    decoder.feed(&bytes, &mut model, &mut screen, is_run, is_test, &mut proxy)?
+                    decoder.feed(&bytes, &mut model, &mut screen, mode, &mut proxy, &stats)?
                 }
                 Ok(Err(error)) => return Err(error.into()),
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // Do not wait on a descendant that outlives Cargo while
-                    // retaining a copy of its output handle.
-                    if child.try_wait().map_err(|e| eyre::eyre!(e))?.is_some() {
-                        break;
-                    }
+                    // Child exit does not imply the PTY reader has delivered its
+                    // final records. Drain through EOF before finalizing the model.
                     decoder.flush_partial(&mut screen, model.build_finished)?;
                 }
             }
@@ -351,6 +351,13 @@ fn key_bytes(key: event::KeyEvent) -> Vec<u8> {
     bytes
 }
 
+#[derive(Clone, Copy)]
+enum Mode {
+    Build,
+    Run,
+    Test,
+}
+
 #[derive(Default)]
 struct Decoder {
     pending: Vec<u8>,
@@ -364,9 +371,9 @@ impl Decoder {
         bytes: &[u8],
         model: &mut Model,
         screen: &mut Screen,
-        is_run: bool,
-        is_test: bool,
+        mode: Mode,
         proxy: &mut bool,
+        stats: &impl Fn() -> AgentStats,
     ) -> io::Result<()> {
         if *proxy {
             return screen.write(bytes);
@@ -390,14 +397,16 @@ impl Decoder {
                     .trim_end_matches(['\n', '\r']);
                 let handled = !self.partial
                     && ((!model.build_finished && (model.cargo(line) || model.status(line)))
-                        || (is_test && model.test_line(line)));
+                        || (matches!(mode, Mode::Test) && model.test_line(line)));
                 self.swallow_lf = handled && chunk.ends_with(b"\r");
                 if !handled {
                     screen.write(&self.pending)?;
                 }
                 self.pending.clear();
                 self.partial = false;
-                if is_run && model.build_finished && model.build_ok == Some(true) {
+                if matches!(mode, Mode::Run) && model.build_finished && model.build_ok == Some(true)
+                {
+                    model.mix = stats().into();
                     model.finished = Some((true, model.started.elapsed()));
                     screen.draw(view::summary(model))?;
                     screen.commit();
@@ -440,11 +449,16 @@ impl Decoder {
 
 struct Screen {
     drawn: u16,
+    diagnostics: crate::logging::Capture,
 }
 impl Screen {
     fn new() -> io::Result<Self> {
+        let diagnostics = crate::logging::Capture::start();
         terminal::enable_raw_mode()?;
-        let mut screen = Self { drawn: 0 };
+        let mut screen = Self {
+            drawn: 0,
+            diagnostics,
+        };
         if let Err(error) = execute!(io::stderr(), cursor::Hide) {
             let _ = terminal::disable_raw_mode();
             return Err(error);
@@ -471,12 +485,27 @@ impl Screen {
         Ok(())
     }
     fn draw(&mut self, block: norimel::Block) -> io::Result<()> {
-        self.clear()?;
-        let text = block.to_string().replace('\n', "\r\n");
-        write!(io::stderr(), "{text}\r\n")?;
+        // Compose before touching the terminal, then present clear + diagnostics +
+        // replacement together. DEC 2026 is ignored by unsupported terminals.
+        let mut frame = String::new();
+        if self.drawn > 0 {
+            frame.push_str(&format!("\r\x1b[{}A\x1b[J", self.drawn));
+        }
+        let diagnostics = self.diagnostics.drain();
+        frame.push_str(
+            &String::from_utf8_lossy(&diagnostics)
+                .replace("\r\n", "\n")
+                .replace('\n', "\r\n"),
+        );
+        frame.push_str(&block.to_string().replace('\n', "\r\n"));
+        frame.push_str("\r\n");
+        io::stderr()
+            .lock()
+            .sync_update(|output| output.write_all(frame.as_bytes()))??;
         self.drawn = block.size().1;
-        io::stderr().flush()
+        Ok(())
     }
+
     fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.clear()?;
         io::stderr().write_all(bytes)?;
@@ -494,7 +523,7 @@ impl Screen {
 impl Drop for Screen {
     fn drop(&mut self) {
         let _ = self.clear();
-        let _ = execute!(io::stderr(), cursor::Show);
+        let _ = execute!(io::stderr(), terminal::EndSynchronizedUpdate, cursor::Show);
         let _ = terminal::disable_raw_mode();
     }
 }

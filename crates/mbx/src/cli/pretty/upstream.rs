@@ -2,7 +2,7 @@
 // Upstream: 73777522ccf8e4a485d026b3b60a275af2f8b381, src/ui.rs.
 // See LICENSE.cargo-pretty for the complete upstream license.
 use super::model::Warning;
-use norimel::{self as rimel, Border, palette};
+use super::norimel::{self as rimel, Border, palette};
 
 /// Fades a whole block toward the background by `alpha` (`0.0` invisible, `1.0` full color),
 /// for a list where older rows recede and the newest stands out.

@@ -43,10 +43,7 @@ fn main() -> ExitCode {
             Some(arg) if arg == "--help" || arg == "-h" || arg == "--version" || arg == "-V"
         )
     {
-        env_logger::Builder::from_env(env_logger::Env::default().filter_or("MBX_LOG", "info"))
-            .format_target(false)
-            .format_timestamp(None)
-            .init();
+        mbx::logging::init();
     }
 
     if cargo_shim {

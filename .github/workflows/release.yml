@@ -297,16 +297,22 @@ jobs:
       - name: Archive
         if: runner.os != 'Windows'
         run: |
-          cp LICENSE NOTICE "target/${{ matrix.target }}/release/"
-          tar -czf "mbx-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" ${{ matrix.bin }} LICENSE NOTICE
+          notices=(LICENSE)
+          # Recovery builds may target releases predating third-party UI code.
+          if [[ -f NOTICE ]]; then notices+=(NOTICE); fi
+          cp "${notices[@]}" "target/${{ matrix.target }}/release/"
+          tar -czf "mbx-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" ${{ matrix.bin }} "${notices[@]}"
 
       - name: Archive
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          cp LICENSE NOTICE "target/${{ matrix.target }}/release/"
+          notices=(LICENSE)
+          # Recovery builds may target releases predating third-party UI code.
+          if [[ -f NOTICE ]]; then notices+=(NOTICE); fi
+          cp "${notices[@]}" "target/${{ matrix.target }}/release/"
           cd "target/${{ matrix.target }}/release"
-          7z a "$GITHUB_WORKSPACE/mbx-${{ matrix.target }}.zip" ${{ matrix.bin }} LICENSE NOTICE
+          7z a "$GITHUB_WORKSPACE/mbx-${{ matrix.target }}.zip" ${{ matrix.bin }} "${notices[@]}"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

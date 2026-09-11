@@ -125,6 +125,7 @@ def main():
         child = subprocess.Popen([str(args.binary.resolve()), "build", "-j", "4"], cwd=root, env=env, stdin=slave, stdout=slave, stderr=slave, preexec_fn=attach_terminal)
         os.close(slave)
         transcript = bytearray()
+        pending_frame = bytearray()
         last_frame = time.monotonic()
         deadline = last_frame + 120
         try:
@@ -140,7 +141,26 @@ def main():
                     if not data:
                         break
                     transcript.extend(data)
-                    stream.feed(data)
+                    # Present complete DEC 2026 transactions, like a terminal.
+                    # Retain a possible split escape prefix between PTY reads.
+                    pending_frame.extend(data)
+                    begin, end = b"\x1b[?2026h", b"\x1b[?2026l"
+                    while pending_frame:
+                        start = pending_frame.find(begin)
+                        if start >= 0:
+                            finish = pending_frame.find(end, start + len(begin))
+                            if finish < 0:
+                                stream.feed(bytes(pending_frame[:start]))
+                                del pending_frame[:start]
+                                break
+                            finish += len(end)
+                        else:
+                            keep = next((n for n in range(len(begin) - 1, 0, -1) if pending_frame.endswith(begin[:n])), 0)
+                            finish = len(pending_frame) - keep
+                            if not finish:
+                                break
+                        stream.feed(bytes(pending_frame[:finish]))
+                        del pending_frame[:finish]
                 now = time.monotonic()
                 if now - last_frame >= 0.08:
                     frame = render(screen, font, title_font)
