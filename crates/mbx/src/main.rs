@@ -1,6 +1,9 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    if let Some(code) = mbx::cli::launch::dispatch() {
+        return code;
+    }
     mbx::phase_timing::initialize();
     if mbx::session::is_build_script_shim() {
         return mbx::session::run_build_script_shim();
@@ -20,6 +23,15 @@ fn main() -> ExitCode {
         return mbx::session::run_cc_shim(language);
     }
 
+    match mbx::cli::launch::recover_cli() {
+        Ok(Some(code)) => return code,
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("mbx[error]: failed to recover build environment: {error:#}");
+            return ExitCode::FAILURE;
+        }
+    }
+    mbx::cli::launch::remember_caller();
     let cargo_shim = mbx::cli::is_cargo_shim();
 
     // Top-level help and version terminate during argument parsing. Avoid

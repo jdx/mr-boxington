@@ -17,6 +17,7 @@ all-features = true
 
 [dependencies]
 bytesize = "2"
+cargo-config2 = "0.1.45"
 demand = "2"
 env_logger = "0.11"
 dirs = "6"

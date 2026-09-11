@@ -19,6 +19,7 @@ mod doctor;
 mod exec;
 mod explain;
 mod gc;
+pub mod launch;
 mod prefetch;
 mod setup;
 mod shim;

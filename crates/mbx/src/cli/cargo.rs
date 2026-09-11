@@ -78,6 +78,9 @@ fn cargo_with_settings_bypass_log_and_roots(
         settings.summary
     };
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    if super::launch::needs_plain_launch(arguments) {
+        return super::launch::plain_launch(&cargo, arguments);
+    }
     // Only where mbx can identify the linker precisely enough to key what it
     // produced. Said out loud only to somebody who asked for it: this is on
     // by default now, and a platform that cannot do it would otherwise warn
@@ -166,6 +169,7 @@ fn cargo_with_settings_bypass_log_and_roots(
     }
 
     let session_dir = tempfile::Builder::new().prefix("mbx-session-").tempdir()?;
+    let launch = super::launch::Launch::prepare(arguments, session_dir.path())?;
     let cargo_jobs = cargo_job_limit(arguments);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -193,6 +197,7 @@ fn cargo_with_settings_bypass_log_and_roots(
             Err(error) => return Err(error),
         };
         let mut environment = inherited_environment(|name| std::env::var(name).ok(), &working_dir);
+        let _lease = super::launch::lease(session_dir.path(), &mut environment)?;
         if let Some(path) = bypass_log {
             let path = if path.is_absolute() {
                 path.to_path_buf()
@@ -253,6 +258,10 @@ fn cargo_with_settings_bypass_log_and_roots(
             if cache_links { "1" } else { "0" }.into(),
         );
 
+        if let Some(launch) = &launch {
+            launch.environment(&mut environment)?;
+        }
+        super::launch::record_overlay(&mut environment)?;
         let status = run_cargo(&cargo, arguments, environment);
         // The shim records a prediction only after a compilation has either
         // been restored or published successfully. Preserve that completed
@@ -276,7 +285,14 @@ fn cargo_with_settings_bypass_log_and_roots(
         };
         Ok((status, stats))
     });
-    account_session(config, settings, session_outcome, removed_target_bytes)
+    let status = account_session(config, settings, session_outcome, removed_target_bytes)?;
+    if status == ExitCode::SUCCESS
+        && let Some(launch) = launch.filter(|launch| launch.was_captured())
+    {
+        launch.run()
+    } else {
+        Ok(status)
+    }
 }
 
 pub(super) struct TargetViewPlacement {
