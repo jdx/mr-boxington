@@ -1,0 +1,52 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M294D7CDN9K84XQZZMRMTJC9",
+  "session_id": "01a0923c-2ad7-7e71-80f1-04b718d86d89",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-11T21:01:37.215921Z",
+  "branch": "codex/simplify-landing-page",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/.vitepress/theme/HomeBuild.vue",
+    "docs/.vitepress/theme/HomeShowcase.vue",
+    "docs/.vitepress/theme/HomeTerminal.vue",
+    "docs/.vitepress/theme/HomeTui.vue"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.6-sol",
+  "turn_id": "c0347f77183a",
+  "checkpoint_transcript_start": 408,
+  "transcript_lines_at_start": 408,
+  "compact_transcript_start": 61,
+  "token_usage": {
+    "input_tokens": 5157,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 471168,
+    "output_tokens": 1808,
+    "api_call_count": 4
+  },
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-11T21:01:37.148237Z",
+    "agent_lines": 1,
+    "agent_removed": 620,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1,
+    "total_lines_changed": 621,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
