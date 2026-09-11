@@ -74,7 +74,10 @@ fn main() {
     }
     assert_eq!(std::env::var("CARGO_INCREMENTAL").unwrap(), "1");
     assert_eq!(std::env::var("MBX_VERIFY").unwrap(), "0");
-    assert_eq!(std::env::var_os("PATH"), std::env::var_os("EXPECTED_PATH"));
+    let path: Vec<_> = std::env::split_paths(&std::env::var_os("PATH").unwrap()).collect();
+    let expected: Vec<_> = std::env::split_paths(&std::env::var_os("EXPECTED_PATH").unwrap()).collect();
+    assert!(path.ends_with(&expected));
+    assert!(!std::env::var("CARGO").unwrap().is_empty());
     assert_eq!(std::env::args().nth(1).unwrap(), "argument with spaces");
     println!("application started");
     std::process::exit(23);
@@ -85,7 +88,16 @@ fn main() {
         .env("CARGO_INCREMENTAL", "1")
         .env("MBX_VERIFY", "0")
         .env("EXPECTED_PATH", std::env::var_os("PATH").unwrap())
-        .args(["run", "--offline", "--", "argument with spaces"])
+        .env("MBX_CARGO_SHIM_MODE", "1")
+        .env("RUSTFLAGS", "-C prefer-dynamic")
+        .args([
+            "--color",
+            "never",
+            "run",
+            "--offline",
+            "--",
+            "argument with spaces",
+        ])
         .output()
         .unwrap();
     assert_eq!(
@@ -190,16 +202,15 @@ fn main() {
         String::from_utf8_lossy(&output.stderr)
     );
     std::fs::write(&gate, "go").unwrap();
+    let mut contents = String::new();
     for _ in 0..200 {
-        if result.exists() {
+        contents = std::fs::read_to_string(&result).unwrap_or_default();
+        if contents == "independent build captured" {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    assert_eq!(
-        std::fs::read_to_string(result).unwrap(),
-        "independent build captured"
-    );
+    assert_eq!(contents, "independent build captured");
     assert!(!String::from_utf8_lossy(&output.stderr).contains("Checking scope-fixture"));
 }
 

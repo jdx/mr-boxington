@@ -10,6 +10,7 @@ const SHIM: &str = "mbx-launch";
 const CAPTURE: &str = "MBX_LAUNCH_CAPTURE";
 const RESTORE: &str = "MBX_SESSION_RESTORE";
 const LEASE: &str = "MBX_SESSION_LEASE";
+const BUILD_PATH: &str = "MBX_SESSION_PATH";
 
 type Environment = BTreeMap<OsString, OsString>;
 
@@ -51,11 +52,8 @@ pub fn recover_cli() -> Result<Option<ExitCode>> {
     if std::env::var_os(RESTORE).is_none() {
         return Ok(None);
     }
-    let arguments: Vec<_> = std::env::args().skip(1).collect();
-    let launching = arguments
-        .iter()
-        .find(|arg| !arg.starts_with('-') && !arg.starts_with('+'))
-        .is_some_and(|arg| matches!(arg.as_str(), "run" | "r"));
+    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    let launching = matches!(cargo_subcommand(&arguments), Some("run" | "r"));
     let live = std::env::var_os(LEASE)
         .and_then(|path| std::fs::File::open(path).ok())
         .is_some_and(|file| matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
@@ -82,13 +80,31 @@ pub(super) fn needs_plain_launch(arguments: &[String]) -> bool {
         .iter()
         .take_while(|arg| arg.as_str() != "--")
         .collect();
-    args.iter().any(|arg| matches!(arg.as_str(), "run" | "r"))
+    matches!(cargo_subcommand(arguments), Some("run" | "r"))
         && args.iter().any(|arg| {
             arg.starts_with('+')
                 || arg.as_str() == "--config"
                 || arg.starts_with("--config=")
                 || arg.as_str() == "-C"
         })
+}
+
+/// Locate the command without interpreting option values or program arguments
+/// as subcommands. Cargo globals may precede a command through the Cargo shim.
+pub(super) fn cargo_subcommand<T: AsRef<OsStr>>(arguments: &[T]) -> Option<&str> {
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        let argument = argument.as_ref().to_str()?;
+        match argument {
+            "--" => return None,
+            "--color" | "--config" | "-Z" | "-C" | "--directory" => {
+                arguments.next()?;
+            }
+            value if !value.starts_with('-') && !value.starts_with('+') => return Some(value),
+            _ => {}
+        }
+    }
+    None
 }
 
 pub(super) fn lease(
@@ -110,6 +126,11 @@ struct Restore(Vec<(OsString, Option<OsString>)>);
 pub(super) fn record_overlay(environment: &mut BTreeMap<String, String>) -> Result<()> {
     let current = current_environment();
     let caller = CALLER.get().unwrap_or(&current);
+    let build_path = environment
+        .get("PATH")
+        .map(OsString::from)
+        .or_else(|| current.get(OsStr::new("PATH")).cloned());
+    environment.insert(BUILD_PATH.into(), serde_json::to_string(&build_path)?);
     let mut restore = BTreeMap::new();
     // A nested explicit mbx command may replace only part of its parent's
     // overlay. Carry the other keys too, so recovery cannot strand an outer
@@ -173,10 +194,7 @@ impl Launch {
         {
             return Ok(None);
         }
-        let command = args
-            .iter()
-            .find(|arg| !arg.starts_with('+') && !arg.starts_with('-'));
-        if !command.is_some_and(|arg| matches!(arg.as_str(), "run" | "r")) {
+        if !matches!(cargo_subcommand(arguments), Some("run" | "r")) {
             return Ok(None);
         }
         let config = cargo_config2::Config::load()?;
@@ -268,6 +286,43 @@ struct Captured {
     directory: PathBuf,
 }
 
+fn application_environment() -> Result<Environment> {
+    let mut restored = restored_environment()?;
+    // Cargo supplies its own executable path to the application, independently
+    // of the CARGO value mbx changed during compiler dispatch.
+    if let Some(cargo) = std::env::var_os("CARGO") {
+        restored.insert("CARGO".into(), cargo);
+    }
+    let build_path: Option<OsString> = std::env::var(BUILD_PATH)
+        .ok()
+        .map(|value| serde_json::from_str(&value))
+        .transpose()?
+        .flatten();
+    if let (Some(build), Some(launch)) = (build_path, std::env::var_os("PATH")) {
+        let original = restored
+            .get(OsStr::new("PATH"))
+            .cloned()
+            .unwrap_or_default();
+        restored.insert(
+            "PATH".into(),
+            restore_launch_path(&build, &launch, &original)?,
+        );
+    }
+    Ok(restored)
+}
+
+fn restore_launch_path(build: &OsStr, launch: &OsStr, original: &OsStr) -> Result<OsString> {
+    let build: Vec<_> = std::env::split_paths(build).collect();
+    let mut launch: Vec<_> = std::env::split_paths(launch).collect();
+    // On Windows Cargo adds native DLL search paths ahead of the build PATH.
+    // Replace only the inherited suffix, retaining those runtime additions.
+    if launch.ends_with(&build) {
+        launch.truncate(launch.len() - build.len());
+        launch.extend(std::env::split_paths(original));
+    }
+    Ok(std::env::join_paths(launch)?)
+}
+
 /// Capture Cargo's selected executable before normal mbx CLI dispatch.
 pub fn dispatch() -> Option<ExitCode> {
     if !std::env::args_os()
@@ -281,7 +336,7 @@ pub fn dispatch() -> Option<ExitCode> {
             .ok_or_else(|| eyre::eyre!("missing Cargo launch destination"))?;
         let captured = Captured {
             arguments: std::env::args_os().skip(1).collect(),
-            environment: restored_environment()?.into_iter().collect(),
+            environment: application_environment()?.into_iter().collect(),
             directory: std::env::current_dir()?,
         };
         let mut options = std::fs::OpenOptions::new();
@@ -301,4 +356,56 @@ pub fn dispatch() -> Option<ExitCode> {
             ExitCode::FAILURE
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_values_do_not_disable_caching_for_other_commands() {
+        for args in [
+            vec!["+nightly", "test", "run"],
+            vec!["+stable", "build", "--bin", "run"],
+            vec!["+nightly", "build", "--features", "run"],
+            vec!["--config", "run", "check"],
+        ] {
+            assert!(!needs_plain_launch(
+                &args.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+            ));
+        }
+        assert_eq!(cargo_subcommand(&["--color", "always", "run"]), Some("run"));
+        assert_eq!(
+            cargo_subcommand(&["-Z", "unstable-options", "--directory", "run", "check"]),
+            Some("check")
+        );
+        assert!(needs_plain_launch(&[
+            "--config".into(),
+            "a.toml".into(),
+            "run".into()
+        ]));
+    }
+
+    #[test]
+    fn runtime_search_paths_survive_restoring_the_caller_path() {
+        let path = |parts: &[&str]| std::env::join_paths(parts).unwrap();
+        assert_eq!(
+            restore_launch_path(
+                &path(&["shim", "tools"]),
+                &path(&["deps", "sysroot", "shim", "tools"]),
+                &path(&["cargo-proxy", "tools"])
+            )
+            .unwrap(),
+            path(&["deps", "sysroot", "cargo-proxy", "tools"])
+        );
+        assert_eq!(
+            restore_launch_path(
+                &path(&["shim", "tools"]),
+                &path(&["custom"]),
+                &path(&["tools"])
+            )
+            .unwrap(),
+            path(&["custom"])
+        );
+    }
 }

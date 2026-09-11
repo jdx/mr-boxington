@@ -172,19 +172,7 @@ fn cargo_proxy_passthrough(arguments: &[OsString]) -> bool {
     }) {
         return true;
     }
-    let mut skip_value = false;
-    let command = cargo_arguments.into_iter().find_map(|argument| {
-        if skip_value {
-            skip_value = false;
-            return None;
-        }
-        let argument = argument.to_str()?;
-        if matches!(argument, "--color" | "--config" | "-Z" | "-C") {
-            skip_value = true;
-            return None;
-        }
-        (!argument.starts_with('-') && !argument.starts_with('+')).then_some(argument)
-    });
+    let command = super::launch::cargo_subcommand(arguments);
     command.is_none()
         || matches!(
             command,
