@@ -17,7 +17,7 @@ pub(super) struct Browser {
 }
 
 pub(super) fn render(
-    model: &Model,
+    model: &mut Model,
     browser: Option<&mut Browser>,
     width: u16,
     height: u16,
@@ -61,7 +61,8 @@ pub(super) fn render(
         .dim(),
     ];
     let rows = ROWS.min(usize::from(height.saturating_sub(12)) / 2).max(1);
-    for slot in model.slots.iter().take(rows) {
+    model.resize_slots(rows);
+    for slot in &model.slots {
         if let Some(name) = slot
             && let Some(start) = model.live.get(name)
         {
@@ -188,7 +189,7 @@ pub(super) fn summary(model: &Model) -> Block {
         "Failed"
     } else if model.testing {
         "Tested"
-    } else if model.command.contains("check") || model.command.contains("clippy") {
+    } else if matches!(model.verb.as_str(), "check" | "c" | "clippy") {
         "Checked"
     } else {
         "Built"

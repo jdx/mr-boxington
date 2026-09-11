@@ -139,14 +139,14 @@ fn preserves_signalled_exit_status() {
 #[test]
 fn presentation_keeps_reserved_rows_and_clips_diagnostics() {
     let mut model = Model::new(&["build".into()]);
-    let empty = view::render(&model, None, 80, 27);
+    let empty = view::render(&mut model, None, 80, 27);
     assert_eq!(empty.size().1, 27);
     assert!(strip_ansi(&empty.to_string()).contains("total unknown"));
     assert!(model.status("   Compiling a-crate v0.1.0 (/tmp/a-crate)"));
     assert!(model.cargo(r##"{"reason":"compiler-artifact","package_id":"path+file:///tmp/a-crate#0.1.0","target":{"name":"a_crate"},"fresh":false}"##));
     assert!(model.live.is_empty());
     assert!(model.done[0].duration.is_some());
-    let populated = view::render(&model, None, 80, 27);
+    let populated = view::render(&mut model, None, 80, 27);
     assert_eq!(populated.size().1, 27);
     model.warnings.push(model::Warning {
         message: "warning".into(),
@@ -159,7 +159,7 @@ fn presentation_keeps_reserved_rows_and_clips_diagnostics() {
         scroll: usize::MAX,
         selected: 0,
     };
-    let block = view::render(&model, Some(&mut browser), 20, 12);
+    let block = view::render(&mut model, Some(&mut browser), 20, 12);
     assert!(block.size().0 <= 20);
     assert_eq!(block.size().1, 12);
     assert!(browser.scroll < 200);
@@ -189,12 +189,12 @@ fn failed_build_does_not_fill_unfinished_units() {
     model.units_done = 3;
     model.build_finished = true;
     model.build_ok = Some(false);
-    let text = strip_ansi(&view::render(&model, None, 110, 30).to_string());
+    let text = strip_ansi(&view::render(&mut model, None, 110, 30).to_string());
     assert!(text.contains("3/10 units"));
     assert!(text.contains(&"░".repeat(20)));
     model.units_total = None;
     model.build_ok = Some(true);
-    let text = strip_ansi(&view::render(&model, None, 110, 30).to_string());
+    let text = strip_ansi(&view::render(&mut model, None, 110, 30).to_string());
     assert!(text.contains("total unknown"));
 }
 
@@ -221,7 +221,7 @@ fn status_words_in_child_output_are_preserved() {
 fn final_summary_keeps_only_its_content_rows() {
     let mut model = Model::new(&["build".into()]);
     model.finished = Some((true, Duration::from_secs(2)));
-    let block = view::render(&model, None, 80, 27);
+    let block = view::render(&mut model, None, 80, 27);
     assert_eq!(block.size().1, view::summary(&model).size().1);
     assert!(block.size().1 < 10);
 }
@@ -266,14 +266,14 @@ fn active_rows_keep_slots_and_cache_outcomes_remain_explicit() {
         .crate_outcomes
         .insert("zeta".into(), ["hit".into()].into());
     model.update_stats(stats.clone());
-    assert!(strip_ansi(&view::render(&model, None, 110, 27).to_string()).contains("hit"));
+    assert!(strip_ansi(&view::render(&mut model, None, 110, 27).to_string()).contains("hit"));
     stats
         .crate_outcomes
         .get_mut("zeta")
         .unwrap()
         .insert("miss".into());
     model.update_stats(stats);
-    assert!(strip_ansi(&view::render(&model, None, 110, 27).to_string()).contains("mixed"));
+    assert!(strip_ansi(&view::render(&mut model, None, 110, 27).to_string()).contains("mixed"));
 }
 
 #[test]
@@ -283,5 +283,43 @@ fn malformed_versions_and_large_exit_codes_stay_failures_or_passthrough() {
     assert_eq!(
         status_code(&portable_pty::ExitStatus::with_exit_code(256)),
         1
+    );
+}
+
+#[test]
+fn small_viewports_promote_waiting_crates_without_moving_visible_crates() {
+    let mut model = Model::new(&["build".into()]);
+    for name in ["first", "second", "third", "fourth", "fifth", "sixth"] {
+        model.status(&format!("   Compiling {name} v1.0.0"));
+    }
+    view::render(&mut model, None, 80, 14);
+    assert_eq!(model.slots.len(), 1);
+    assert!(model.cargo(r#"{"reason":"compiler-artifact","package_id":"path+file:///first#first@1.0.0","target":{"name":"first"},"fresh":false}"#));
+    assert_eq!(model.slots[0].as_deref(), Some("second v1.0.0"));
+    let text = strip_ansi(&view::render(&mut model, None, 80, 14).to_string());
+    assert!(text.contains("second"));
+    view::render(&mut model, None, 80, 24);
+    assert_eq!(model.slots[0].as_deref(), Some("second v1.0.0"));
+    assert_eq!(model.slots.len(), 6);
+}
+
+#[test]
+fn summary_uses_the_cargo_verb_and_build_scripts_normalize_like_rustc() {
+    for (arguments, expected) in [
+        (vec!["c".into()], "Checked"),
+        (vec!["+stable".into(), "check".into()], "Checked"),
+        (
+            vec!["build".into(), "--features".into(), "unchecked".into()],
+            "Built",
+        ),
+    ] {
+        let model = Model::new(&arguments);
+        assert!(strip_ansi(&view::summary(&model).to_string()).contains(expected));
+    }
+    let mut model = Model::new(&["build".into()]);
+    model.cargo(r#"{"reason":"compiler-artifact","package_id":"path+file:///demo#demo@1.0.0","target":{"name":"build-script-build","kind":["custom-build"]},"fresh":false}"#);
+    assert_eq!(
+        model.done[0].cache_target.as_deref(),
+        Some("build_script_build")
     );
 }

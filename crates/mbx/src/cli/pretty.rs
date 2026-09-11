@@ -213,7 +213,12 @@ fn run_inner(
                 && last_frame.elapsed() >= Duration::from_millis(80)
             {
                 model.update_stats(stats());
-                screen.draw(view::render(&model, None, screen.width(), screen.height()))?;
+                screen.draw(view::render(
+                    &mut model,
+                    None,
+                    screen.width(),
+                    screen.height(),
+                ))?;
                 last_frame = Instant::now();
             }
         }
@@ -228,7 +233,12 @@ fn run_inner(
     model.update_stats(stats());
     model.finished = Some((status.success(), model.started.elapsed()));
     if !proxy {
-        screen.draw(view::render(&model, None, screen.width(), screen.height()))?;
+        screen.draw(view::render(
+            &mut model,
+            None,
+            screen.width(),
+            screen.height(),
+        ))?;
         // Full diagnostic text remains in scrollback even if the user dismisses
         // the optional browser, and the child's failure status stays authoritative.
         screen.commit();
@@ -241,7 +251,7 @@ fn run_inner(
             let mut browser = view::Browser::default();
             loop {
                 screen.draw(view::render(
-                    &model,
+                    &mut model,
                     Some(&mut browser),
                     screen.width(),
                     screen.height(),

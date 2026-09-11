@@ -59,6 +59,7 @@ pub(super) fn segments(mix: &CacheMix, width: usize) -> [usize; 3] {
 
 pub(super) struct Model {
     pub command: String,
+    pub verb: String,
     pub started: Instant,
     pub live: BTreeMap<String, Instant>,
     pub slots: Vec<Option<String>>,
@@ -90,6 +91,7 @@ impl Model {
     pub fn new(arguments: &[String]) -> Self {
         Self {
             command: format!("cargo {}", arguments.join(" ")),
+            verb: super::cargo_verb(arguments).unwrap_or("build").into(),
             started: Instant::now(),
             live: BTreeMap::new(),
             slots: vec![None; 6],
@@ -115,6 +117,22 @@ impl Model {
             failure_capture: None,
             failure_section: false,
             suite_before: [0; 3],
+        }
+    }
+
+    pub fn resize_slots(&mut self, rows: usize) {
+        self.slots.resize(rows, None);
+        let mut waiting: Vec<_> = self
+            .live
+            .iter()
+            .filter(|(name, _)| !self.slots.iter().any(|slot| slot.as_ref() == Some(*name)))
+            .collect();
+        waiting.sort_by_key(|(_, start)| **start);
+        for ((name, _), slot) in waiting
+            .into_iter()
+            .zip(self.slots.iter_mut().filter(|slot| slot.is_none()))
+        {
+            *slot = Some(name.clone());
         }
     }
 
@@ -155,18 +173,7 @@ impl Model {
                         *slot = None;
                     }
                 }
-                let mut waiting: Vec<_> = self
-                    .live
-                    .iter()
-                    .filter(|(name, _)| !self.slots.iter().any(|slot| slot.as_ref() == Some(*name)))
-                    .collect();
-                waiting.sort_by_key(|(_, start)| **start);
-                for ((name, _), slot) in waiting
-                    .into_iter()
-                    .zip(self.slots.iter_mut().filter(|slot| slot.is_none()))
-                {
-                    *slot = Some(name.clone());
-                }
+                self.resize_slots(self.slots.len());
                 let fresh = message["fresh"].as_bool().unwrap_or(false);
                 if fresh {
                     self.fresh += 1;
