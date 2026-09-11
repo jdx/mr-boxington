@@ -188,10 +188,13 @@ fn cargo_with_settings_bypass_log_and_roots(
                 // compiler wrappers cannot inherit an enclosing session that
                 // this build did not start. An empty socket is deliberately
                 // equivalent to an absent one to every mbx shim.
-                let environment = BTreeMap::from([
+                let mut environment = BTreeMap::from([
                     ("MBX_DISABLE".into(), "1".into()),
                     (session::SOCKET_ENV.into(), String::new()),
                 ]);
+                if settings.plain_output {
+                    environment.insert("CARGO_TERM_PROGRESS_WHEN".into(), "never".into());
+                }
                 return Ok((run_cargo(&cargo, arguments, environment), None));
             }
             Err(error) => return Err(error),

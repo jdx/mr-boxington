@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 pub(super) fn eligible(arguments: &[String], progress: Option<&str>) -> bool {
     progress != Some("never")
         && matches!(
-            super::pretty::cargo_verb(arguments),
+            super::launch::cargo_subcommand(arguments),
             Some("build" | "b" | "check" | "c" | "clippy" | "run" | "r" | "test" | "t")
         )
         && !arguments
@@ -22,10 +22,20 @@ pub(super) fn eligible(arguments: &[String], progress: Option<&str>) -> bool {
                     arg.as_str(),
                     "--quiet" | "--verbose" | "--help" | "--version" | "--message-format"
                 ) || arg.starts_with("--message-format=")
-                    || (arg.starts_with('-')
-                        && !arg.starts_with("--")
-                        && arg[1..].contains(['q', 'v', 'h', 'V']))
+                    || (arg.starts_with('-') && !arg.starts_with("--") && short_opt_out(&arg[1..]))
             })
+}
+
+fn short_opt_out(flags: &str) -> bool {
+    for flag in flags.chars() {
+        match flag {
+            'q' | 'v' | 'h' | 'V' => return true,
+            // Everything after a value-taking flag is its attached value.
+            'j' | 'p' | 'F' | 'Z' | 'C' => return false,
+            _ => {}
+        }
+    }
+    false
 }
 
 pub(super) fn run(
@@ -139,5 +149,27 @@ mod policy_tests {
             &["run".into(), "--".into(), "--quiet".into()],
             None
         ));
+    }
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::*;
+    #[test]
+    fn global_options_and_attached_values_keep_progress() {
+        for arguments in [
+            vec!["--color", "always", "build"],
+            vec!["+nightly", "--config", "build.jobs=2", "check"],
+            vec!["--config=build.jobs=2", "build", "-Zunstable-options"],
+            vec!["build", "-Fchrono", "-pwhatever"],
+        ] {
+            assert!(eligible(
+                &arguments.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                None
+            ));
+        }
+        for flag in ["-q", "-vv", "-vq", "-vFchrono", "--verbose"] {
+            assert!(!eligible(&["build".into(), flag.into()], None));
+        }
     }
 }

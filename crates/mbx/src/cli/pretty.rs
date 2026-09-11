@@ -41,7 +41,7 @@ pub(super) fn enabled(arguments: &[String]) -> bool {
         && terminal::size().is_ok_and(|(cols, rows)| cols >= 50 && rows >= 16)
 }
 
-pub(super) fn cargo_verb(arguments: &[String]) -> Option<&str> {
+fn cargo_verb(arguments: &[String]) -> Option<&str> {
     arguments
         .get(usize::from(
             arguments.first().is_some_and(|arg| arg.starts_with('+')),
