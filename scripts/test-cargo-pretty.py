@@ -134,6 +134,23 @@ pub fn answer() -> u32 { dep::value() }
         assert code == 0 and b'ARG:argument with spaces' in output and b'INPUT:hello' in output, output[-3000:]
         code, output = terminal_run(root, env, ['test'])
         assert code == 0 and b'CUSTOM_HARNESS_OUTPUT' in output and b'Doc-tests' in output, output[-3000:]
+        # A custom harness may leave a descendant holding Cargo's PTY open.
+        # It must not hold mbx in raw mode, and the harness tail must survive.
+        (root/'tests/custom.rs').write_text('''fn main() {
+ let child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+ std::fs::write("background.pid", child.id().to_string()).unwrap();
+ for _ in 0..2000 { println!("TRAILING_HARNESS_OUTPUT"); }
+ println!("HARNESS_TAIL_COMPLETE");
+}''')
+        try:
+            code, output = terminal_run(root, env, ['test', '--test', 'custom'], limit=20)
+            assert code == 0 and b'HARNESS_TAIL_COMPLETE' in output, output[-3000:]
+        finally:
+            if (root/'background.pid').exists():
+                try:
+                    os.kill(int((root/'background.pid').read_text()), signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
         code, output = terminal_run(root, dict(env, PRETTY_FAIL='1'), ['test', '--lib'])
         assert code == 101 and b'visible failure detail' in output, output[-3000:]
         host = subprocess.check_output(['rustc', '-vV'], text=True).split('host: ')[1].splitlines()[0]

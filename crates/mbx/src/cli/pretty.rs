@@ -147,7 +147,30 @@ pub(super) fn run(
     let mut proxy = false;
     let mut last_frame = Instant::now() - Duration::from_secs(1);
     let result = (|| -> Result<portable_pty::ExitStatus> {
+        let mut exited_at = None;
         loop {
+            if exited_at.is_none() && child.try_wait().map_err(|e| eyre::eyre!(e))?.is_some() {
+                exited_at = Some(Instant::now());
+            }
+            // Allow the reader to deliver trailing records after Cargo exits,
+            // but do not wait forever for descendants retaining the slave.
+            if exited_at.is_some_and(|time| time.elapsed() >= Duration::from_secs(1)) {
+                // Drain the bounded queue as well as the grace-period output.
+                for _ in 0..32 {
+                    match receive.try_recv() {
+                        Ok(bytes) => decoder.feed(
+                            &bytes?,
+                            &mut model,
+                            &mut screen,
+                            mode,
+                            &mut proxy,
+                            &stats,
+                        )?,
+                        Err(_) => break,
+                    }
+                }
+                break;
+            }
             match receive.recv_timeout(Duration::from_millis(20)) {
                 Ok(Ok(bytes)) => {
                     decoder.feed(&bytes, &mut model, &mut screen, mode, &mut proxy, &stats)?
@@ -155,8 +178,7 @@ pub(super) fn run(
                 Ok(Err(error)) => return Err(error.into()),
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // Child exit does not imply the PTY reader has delivered its
-                    // final records. Drain through EOF before finalizing the model.
+                    // A quiet interval alone does not imply output completion.
                     decoder.flush_partial(&mut screen, model.build_finished)?;
                 }
             }
