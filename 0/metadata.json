@@ -3,7 +3,7 @@
   "checkpoint_id": "01M28M8JJFQXRPFRZC88X3JSN8",
   "session_id": "01a09140-8593-7191-972d-768161695ac8",
   "strategy": "manual-commit",
-  "created_at": "2026-09-11T16:19:27.255605Z",
+  "created_at": "2026-09-11T16:19:47.79938Z",
   "branch": "codex/clarify-breaking-change-policy",
   "checkpoints_count": 3,
   "files_touched": [
@@ -11,27 +11,29 @@
   ],
   "agent": "Codex",
   "model": "gpt-5.6-sol",
-  "turn_id": "08de35e9a99e",
-  "compact_transcript_start": 0,
+  "turn_id": "99a35e8f8bda",
+  "checkpoint_transcript_start": 169,
+  "transcript_lines_at_start": 169,
+  "compact_transcript_start": 24,
   "token_usage": {
-    "input_tokens": 67908,
+    "input_tokens": 1107,
     "cache_creation_tokens": 0,
-    "cache_read_tokens": 846464,
-    "output_tokens": 6052,
-    "api_call_count": 18
+    "cache_read_tokens": 129664,
+    "output_tokens": 615,
+    "api_call_count": 2
   },
   "session_metrics": {
     "turn_count": 3
   },
   "initial_attribution": {
-    "calculated_at": "2026-09-11T16:19:27.230708Z",
-    "agent_lines": 7,
-    "agent_removed": 0,
+    "calculated_at": "2026-09-11T16:19:47.769999Z",
+    "agent_lines": 5,
+    "agent_removed": 3,
     "human_added": 0,
     "human_modified": 0,
     "human_removed": 0,
-    "total_committed": 7,
-    "total_lines_changed": 7,
+    "total_committed": 5,
+    "total_lines_changed": 8,
     "agent_percentage": 100,
     "metric_version": 2
   },

@@ -1,13 +1,1 @@
-why does this have a breaking change? [https://github.com/jdx/mr-boxington/pull/428](https://github.com/jdx/mr-boxington/pull/428)
-
----
-
-i agree, tell them i do not want a v2 of the cli the pre-1.0 crates are not a big deal
-
----
-
-does the agents.md describe the breaking change policy accurately?
-
----
-
-ok make a pr to clarify this
+also make it clear that a cli breaking change is going to need an extremely good justification
