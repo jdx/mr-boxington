@@ -1,0 +1,1 @@
+we forgot to update the mise install instrucitons on the lading page: [https://mr-boxington.jdx.dev/](https://mr-boxington.jdx.dev/) do that, commit directly to origin/amin
