@@ -30,23 +30,28 @@ pub(super) fn run(config: &Config, args: &CleanArgs) -> Result<ExitCode> {
     let mut config = config.clone();
     config.apply_workspace_policy(&workspace)?;
 
-    let incremental_bytes =
-        crate::incremental::remove_workspace(&config.cache_dir.join("incremental"), &workspace)?;
-    if let Some(bytes) = incremental_bytes {
-        if bytes > 0 {
-            crate::savings::record_quietly(
-                &config.store_dir(),
-                &crate::savings::Delta {
-                    freed_requested_bytes: bytes,
-                    ..crate::savings::Delta::default()
-                },
+    match crate::incremental::remove_workspace(&config.cache_dir.join("incremental"), &workspace)? {
+        crate::incremental::RemoveOutcome::Removed(bytes) => {
+            if bytes > 0 {
+                crate::savings::record_quietly(
+                    &config.store_dir(),
+                    &crate::savings::Delta {
+                        freed_requested_bytes: bytes,
+                        ..crate::savings::Delta::default()
+                    },
+                );
+            }
+            println!(
+                "removed learned incremental state for {} ({})",
+                workspace.display(),
+                ByteSize::b(bytes).display().iec()
             );
         }
-        println!(
-            "removed learned incremental state for {} ({})",
-            workspace.display(),
-            ByteSize::b(bytes).display().iec()
-        );
+        crate::incremental::RemoveOutcome::Active => log::warn!(
+            "{} is being built, so its learned incremental state was kept",
+            workspace.display()
+        ),
+        crate::incremental::RemoveOutcome::Missing => {}
     }
 
     match target::remove_workspace(&config.target.root, &workspace)? {

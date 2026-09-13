@@ -417,8 +417,20 @@ pub(super) fn cache_remove(config: &Config, workspace: &Path) -> Result<()> {
     let requested = absolute(&working_dir, &workspace.to_string_lossy());
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let workspace = cache_workspace_root(&cargo, &requested);
-    let incremental_bytes =
-        crate::incremental::remove_workspace(&config.cache_dir.join("incremental"), &workspace)?;
+    let incremental_bytes = match crate::incremental::remove_workspace(
+        &config.cache_dir.join("incremental"),
+        &workspace,
+    )? {
+        crate::incremental::RemoveOutcome::Removed(bytes) => Some(bytes),
+        crate::incremental::RemoveOutcome::Missing => None,
+        crate::incremental::RemoveOutcome::Active => {
+            log::warn!(
+                "{} is being built, so its learned incremental state was kept",
+                workspace.display()
+            );
+            None
+        }
+    };
     let target_bytes = target::remove_workspace(&config.target.root, &workspace)?;
     let removed = store::remove_project(&config.store_dir(), &workspace)?;
     println!(

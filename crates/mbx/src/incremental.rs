@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const RECORD_FILE: &str = "checkout.json";
 const RECORD_VERSION: u8 = 1;
 const LOCKS_DIR: &str = ".locks";
+const REGISTRAR_FILE: &str = "registrar.lock";
 static LEASE_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -44,20 +45,20 @@ pub(crate) struct PruneOutcome {
 pub(crate) struct ActiveLease {
     lock: Option<fslock::LockFile>,
     path: PathBuf,
+    registrar_path: PathBuf,
 }
 
 impl Drop for ActiveLease {
     fn drop(&mut self) {
-        let registrar = self
-            .path
-            .parent()
-            .map(|parent| parent.join("registrar.lock"));
-        let mut registrar = registrar.and_then(|path| fslock::LockFile::open(&path).ok());
+        let mut registrar = fslock::LockFile::open(&self.registrar_path).ok();
         if let Some(registrar) = &mut registrar {
             let _ = registrar.lock();
         }
         drop(self.lock.take());
         let _ = std::fs::remove_file(&self.path);
+        if let Some(locks) = self.path.parent() {
+            cleanup_lock_dir(locks);
+        }
     }
 }
 
@@ -152,7 +153,7 @@ pub(crate) fn collect(
         {
             break;
         }
-        let guard = deletion_guard(root, &entry.key)?;
+        let guard = deletion_guard(root, &entry.key, !dry_run)?;
         if guard.active {
             outcome.skipped_active_directories += 1;
             continue;
@@ -169,6 +170,7 @@ pub(crate) fn collect(
                     continue;
                 }
             }
+            guard.cleanup();
         }
         outcome.removed_directories += 1;
         outcome.removed_bytes = outcome.removed_bytes.saturating_add(entry.bytes);
@@ -190,27 +192,37 @@ pub(crate) fn collect(
     Ok(outcome)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RemoveOutcome {
+    Missing,
+    Removed(u64),
+    Active,
+}
+
 /// Remove learned incremental state for exactly one workspace.
-pub(crate) fn remove_workspace(root: &Path, workspace_root: &Path) -> Result<Option<u64>> {
+pub(crate) fn remove_workspace(root: &Path, workspace_root: &Path) -> Result<RemoveOutcome> {
     let key = checkout_key(workspace_root);
     let directory = root.join(&key);
     let Some(record) = read_record(&directory.join(RECORD_FILE)) else {
-        return Ok(None);
+        return Ok(RemoveOutcome::Missing);
     };
     if record.workspace_root != workspace_root {
-        return Ok(None);
+        return Ok(RemoveOutcome::Missing);
     }
-    let guard = deletion_guard(root, &key)?;
+    let guard = deletion_guard(root, &key, true)?;
     if guard.active {
-        eyre::bail!(
-            "{} is being built, so its incremental state was kept",
-            workspace_root.display()
-        );
+        return Ok(RemoveOutcome::Active);
     }
     let bytes = tree_bytes(&directory);
     match std::fs::remove_dir_all(&directory) {
-        Ok(()) => Ok(Some(bytes)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Some(0)),
+        Ok(()) => {
+            guard.cleanup();
+            Ok(RemoveOutcome::Removed(bytes))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            guard.cleanup();
+            Ok(RemoveOutcome::Removed(0))
+        }
         Err(error) => Err(error.into()),
     }
 }
@@ -258,11 +270,17 @@ fn lock_dir(root: &Path, key: &str) -> PathBuf {
     root.join(LOCKS_DIR).join(key)
 }
 
+fn registrar_path(root: &Path) -> PathBuf {
+    root.join(LOCKS_DIR).join(REGISTRAR_FILE)
+}
+
 fn acquire_lease(root: &Path, key: &str) -> Result<ActiveLease> {
     let locks = lock_dir(root, key);
-    std::fs::create_dir_all(&locks)?;
-    let mut registrar = fslock::LockFile::open(&locks.join("registrar.lock"))?;
+    let registrar_path = registrar_path(root);
+    std::fs::create_dir_all(registrar_path.parent().expect("registrar has a parent"))?;
+    let mut registrar = fslock::LockFile::open(&registrar_path)?;
     registrar.lock()?;
+    std::fs::create_dir_all(&locks)?;
     let nonce = LEASE_NONCE.fetch_add(1, Ordering::Relaxed);
     let path = locks.join(format!("{}-{nonce}.lease", std::process::id()));
     let mut lock = fslock::LockFile::open(&path)?;
@@ -271,21 +289,53 @@ fn acquire_lease(root: &Path, key: &str) -> Result<ActiveLease> {
     Ok(ActiveLease {
         lock: Some(lock),
         path,
+        registrar_path,
     })
 }
 
 struct DeletionGuard {
-    _registrar: fslock::LockFile,
+    _registrar: Option<fslock::LockFile>,
+    locks: PathBuf,
     active: bool,
+    cleanup: bool,
 }
 
-fn deletion_guard(root: &Path, key: &str) -> Result<DeletionGuard> {
+impl DeletionGuard {
+    fn cleanup(&self) {
+        if self.cleanup {
+            cleanup_lock_dir(&self.locks);
+        }
+    }
+}
+
+fn deletion_guard(root: &Path, key: &str, cleanup: bool) -> Result<DeletionGuard> {
     let locks = lock_dir(root, key);
-    std::fs::create_dir_all(&locks)?;
-    let mut registrar = fslock::LockFile::open(&locks.join("registrar.lock"))?;
+    let registrar_path = registrar_path(root);
+    if !cleanup && !registrar_path.exists() {
+        return Ok(DeletionGuard {
+            _registrar: None,
+            locks,
+            active: false,
+            cleanup,
+        });
+    }
+    std::fs::create_dir_all(registrar_path.parent().expect("registrar has a parent"))?;
+    let mut registrar = fslock::LockFile::open(&registrar_path)?;
     registrar.lock()?;
     let mut active = false;
-    for entry in std::fs::read_dir(&locks)? {
+    let listing = match std::fs::read_dir(&locks) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DeletionGuard {
+                _registrar: Some(registrar),
+                locks,
+                active,
+                cleanup,
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
+    for entry in listing {
         let entry = entry?;
         if entry.path().extension().and_then(|ext| ext.to_str()) != Some("lease") {
             continue;
@@ -293,15 +343,26 @@ fn deletion_guard(root: &Path, key: &str) -> Result<DeletionGuard> {
         let mut lease = fslock::LockFile::open(&entry.path())?;
         if lease.try_lock()? {
             drop(lease);
-            let _ = std::fs::remove_file(entry.path());
+            if cleanup {
+                let _ = std::fs::remove_file(entry.path());
+            }
         } else {
             active = true;
         }
     }
     Ok(DeletionGuard {
-        _registrar: registrar,
+        _registrar: Some(registrar),
+        locks,
         active,
+        cleanup,
     })
+}
+
+fn cleanup_lock_dir(locks: &Path) {
+    // Older development builds placed the registrar in each checkout's lock
+    // directory. It is safe to remove while the global registrar is held.
+    let _ = std::fs::remove_file(locks.join(REGISTRAR_FILE));
+    let _ = std::fs::remove_dir(locks);
 }
 
 fn read_record(path: &Path) -> Option<CheckoutRecord> {
@@ -347,6 +408,7 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let parent = tempfile::tempdir().unwrap();
         let checkout = parent.path().join("checkout");
+        let key = checkout_key(&checkout);
         std::fs::create_dir(&checkout).unwrap();
         let state = touch(cache.path(), &checkout).unwrap();
         let directory = state.directory.clone();
@@ -361,6 +423,25 @@ mod tests {
         assert_eq!(outcome.removed_directories, 1);
         assert!(outcome.removed_bytes > 0);
         assert!(!directory.exists());
+        assert!(!lock_dir(cache.path(), &key).exists());
+    }
+
+    #[test]
+    fn dry_run_does_not_create_checkout_lock_bookkeeping() {
+        let cache = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let checkout = parent.path().join("checkout");
+        let key = checkout_key(&checkout);
+        std::fs::create_dir(&checkout).unwrap();
+        let state = touch(cache.path(), &checkout).unwrap();
+        drop(state);
+        assert!(!lock_dir(cache.path(), &key).exists());
+
+        std::fs::remove_dir(&checkout).unwrap();
+        let outcome = collect(cache.path(), None, None, true).unwrap();
+
+        assert_eq!(outcome.removed_directories, 1);
+        assert!(!lock_dir(cache.path(), &key).exists());
     }
 
     #[test]
@@ -375,7 +456,10 @@ mod tests {
         let outcome = collect(cache.path(), Some(0), Some(Duration::ZERO), false).unwrap();
         assert_eq!(outcome.removed_directories, 0);
         assert_eq!(outcome.skipped_active_directories, 1);
-        assert!(remove_workspace(cache.path(), &checkout).is_err());
+        assert_eq!(
+            remove_workspace(cache.path(), &checkout).unwrap(),
+            RemoveOutcome::Active
+        );
         assert!(state.directory.exists());
     }
 
@@ -455,11 +539,10 @@ mod tests {
         drop(selected_state);
         drop(kept_state.lease);
 
-        assert!(
-            remove_workspace(cache.path(), selected.path())
-                .unwrap()
-                .is_some()
-        );
+        assert!(matches!(
+            remove_workspace(cache.path(), selected.path()).unwrap(),
+            RemoveOutcome::Removed(_)
+        ));
         assert!(!selected_directory.exists());
         assert!(kept_state.directory.exists());
     }
