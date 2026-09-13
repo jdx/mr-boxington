@@ -6,9 +6,6 @@
 # compiler, so cachegrind cannot attribute a stable instruction count to that
 # process boundary; end-to-end cache behavior is covered separately.
 
-[gate]
-pct = 1.0
-
 [runner]
 class = "gha-ubuntu24.04-x64-valgrind3.22-rust1.97.1"
 

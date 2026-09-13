@@ -3,7 +3,7 @@
 
 - **Usage:** `mbx gc [FLAGS]`
 
-Prune incremental state, targets, and cached objects to fit budgets.
+Collect learned incremental state and managed targets, then evict cached objects to fit budgets.
 
 A missing cached object is rebuilt when it is needed again.
 

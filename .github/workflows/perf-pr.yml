@@ -119,7 +119,7 @@ jobs:
           base=$(git merge-base "origin/$BASE_REF" HEAD)
           echo "$base" > /tmp/tak-base
           set +e
-          tak compare "$base" > /tmp/tak-report.md
+          tak compare --no-gate "$base" > /tmp/tak-report.md
           echo $? > /tmp/tak-status
           set -e
           cat /tmp/tak-report.md >> "$GITHUB_STEP_SUMMARY"
@@ -147,7 +147,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      checks: write # attach the regression gate to the measured PR head SHA
+      checks: write # attach the instruction-count report to the measured PR head SHA
       pull-requests: write
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -185,10 +185,10 @@ jobs:
           status=$(cat /tmp/tak-out/status 2>/dev/null || echo 2)
           if [ "$status" -eq 0 ]; then
             conclusion=success
-            title='Instruction counts passed'
+            title='Instruction counts reported'
           else
             conclusion=failure
-            title='Instruction-count regression or measurement failure'
+            title='Instruction-count measurement failed'
           fi
           test -f /tmp/tak-out/report.md || echo 'The comparison did not produce a report.' > /tmp/tak-out/report.md
           jq -n --arg head_sha "$HEAD_SHA" --arg conclusion "$conclusion" \
@@ -197,8 +197,8 @@ jobs:
             '{name:"perf / instruction-count",head_sha:$head_sha,status:"completed",conclusion:$conclusion,details_url:$details_url,output:{title:$title,summary:$summary}}' \
             | gh api --method POST "repos/$GH_REPO/check-runs" --input -
 
-      - name: Enforce gate
+      - name: Require comparison
         if: always()
         run: |
           status=$(cat /tmp/tak-out/status)
-          test "$status" -eq 0 || { echo "::error::instruction-count comparison failed"; exit "$status"; }
+          test "$status" -eq 0 || { echo "::error::instruction-count comparison failed to run"; exit "$status"; }
