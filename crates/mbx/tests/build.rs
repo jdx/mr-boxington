@@ -1161,6 +1161,7 @@ fn learned_sessions(cache: &Path) -> usize {
         .into_iter()
         .flatten()
         .flatten()
+        .filter(|checkout| checkout.file_name() != ".locks")
         .flat_map(|checkout| std::fs::read_dir(checkout.path()).into_iter().flatten())
         .flatten()
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
@@ -1178,7 +1179,7 @@ fn compiled_incrementally(stats: &serde_json::Value) -> u64 {
 /// state -- which never reaches the store, because it describes one checkout's
 /// edit history rather than its source.
 #[test]
-fn a_workspace_crate_is_incremental_on_its_first_edit() {
+fn a_workspace_crate_is_incremental_on_its_first_edit_and_mbx_clean_resets_it() {
     let store = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();
@@ -1236,9 +1237,10 @@ fn a_workspace_crate_is_incremental_on_its_first_edit() {
         store.path(),
         &reports.path().join("edit-after-clean.json"),
     );
-    assert!(
-        compiled_incrementally(&after_clean) > 0,
-        "cargo clean should preserve learned incremental state: {after_clean}"
+    assert_eq!(
+        compiled_incrementally(&after_clean),
+        0,
+        "mbx clean should remove learned incremental state: {after_clean}"
     );
 }
 

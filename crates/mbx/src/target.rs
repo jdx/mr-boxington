@@ -62,6 +62,7 @@ pub(crate) struct CollectionOutcome {
     pub removed_stale_views: u64,
     pub removed_live_views: u64,
     pub remaining_bytes: u64,
+    pub remaining_views: u64,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -752,8 +753,10 @@ pub(crate) fn collect(
         .map(|duration| duration.as_secs())
         .unwrap_or_default();
     let mut entries = Vec::new();
+    let mut total_views = 0_u64;
     let mut uncollectable_bytes = 0_u64;
     for (record_path, directory) in views(root)? {
+        total_views += 1;
         let Some(record) = read_view_record(&record_path) else {
             // A record this build cannot read names no checkout, and a target
             // directory nobody can trace is not one to delete on a guess.
@@ -867,6 +870,7 @@ pub(crate) fn collect(
         }
     }
     outcome.remaining_bytes = remaining;
+    outcome.remaining_views = total_views.saturating_sub(outcome.removed_views);
     Ok(outcome)
 }
 

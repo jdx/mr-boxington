@@ -107,7 +107,7 @@ of appearing to run forever.
 The header shows store bytes against the configured `gc.max_size` budget with
 an inline usage bar. It turns yellow at 90% and red at or above 100%; a store
 can temporarily exceed its budget between sweeps. This is the action-store
-budget, not free disk space. A configured combined target/store budget can
+budget, not free disk space. A configured combined target/store/incremental budget can
 reduce the actual allowance further. Automatic collection being off is shown
 explicitly.
 

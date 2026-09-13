@@ -37,7 +37,8 @@ pub(super) enum CacheCommands {
     /// empty target directory, restore that state as well. A non-empty target
     /// directory is never replaced.
     Import(ImportArgs),
-    /// Remove managed targets and cache claims for one workspace or selected workspaces.
+    /// Remove managed targets, learned incremental state, and cache claims for
+    /// one workspace or selected workspaces.
     ///
     /// Provide exactly one of `<WORKSPACE>` or `--interactive`.
     Remove(RemoveCacheArgs),
@@ -217,10 +218,16 @@ pub(super) fn cache_import(config: &Config, archive: &Path) -> Result<()> {
 pub(super) fn cache_stats(config: &Config, json: bool) -> Result<()> {
     let store = config.store_dir();
     let stats = store::stats(&store)?;
+    let views = target::stats(&config.target.root)?;
+    let incremental = crate::incremental::stats(&config.cache_dir.join("incremental"))?;
+    let combined_total_bytes = stats
+        .total_bytes()
+        .saturating_add(views.bytes)
+        .saturating_add(incremental.bytes);
     if json {
-        let views = target::stats(&config.target.root)?;
         return print_json(&CacheStatsReport {
             version: 1,
+            byte_accounting: "logical",
             store: store.display().to_string(),
             objects: stats.objects,
             object_bytes: stats.object_bytes,
@@ -231,6 +238,12 @@ pub(super) fn cache_stats(config: &Config, json: bool) -> Result<()> {
             stale_checkouts: stats.stale_checkouts,
             target_directories: views.views,
             target_bytes: views.bytes,
+            incremental_directories: incremental.directories,
+            incremental_bytes: incremental.bytes,
+            incremental_live_checkouts: incremental.live_checkouts,
+            incremental_stale_checkouts: incremental.stale_checkouts,
+            incremental_untracked_directories: incremental.untracked_directories,
+            combined_total_bytes,
         });
     }
     println!("store: {}", store.display());
@@ -245,18 +258,29 @@ pub(super) fn cache_stats(config: &Config, json: bool) -> Result<()> {
         ByteSize::b(stats.action_result_bytes).display().iec()
     );
     println!(
-        "total: {}",
+        "action store total: {}",
         ByteSize::b(stats.total_bytes()).display().iec()
     );
     println!(
         "checkouts: {} live, {} stale",
         stats.live_checkouts, stats.stale_checkouts
     );
-    let views = target::stats(&config.target.root)?;
     println!(
         "target directories: {} ({})",
         views.views,
         ByteSize::b(views.bytes).display().iec()
+    );
+    println!(
+        "learned incremental: {} directories ({}, {} live, {} stale, and {} untracked)",
+        incremental.directories,
+        ByteSize::b(incremental.bytes).display().iec(),
+        incremental.live_checkouts,
+        incremental.stale_checkouts,
+        incremental.untracked_directories,
+    );
+    println!(
+        "combined logical total: {}",
+        ByteSize::b(combined_total_bytes).display().iec()
     );
     Ok(())
 }
@@ -270,6 +294,7 @@ pub(super) struct CacheDirReport {
 #[derive(serde::Serialize)]
 pub(super) struct CacheStatsReport {
     version: u8,
+    byte_accounting: &'static str,
     store: String,
     objects: u64,
     object_bytes: u64,
@@ -280,6 +305,12 @@ pub(super) struct CacheStatsReport {
     stale_checkouts: u64,
     target_directories: u64,
     target_bytes: u64,
+    incremental_directories: u64,
+    incremental_bytes: u64,
+    incremental_live_checkouts: u64,
+    incremental_stale_checkouts: u64,
+    incremental_untracked_directories: u64,
+    combined_total_bytes: u64,
 }
 
 #[derive(serde::Serialize)]
@@ -288,9 +319,13 @@ pub(super) struct GcReport {
     /// Byte counts sum file lengths, not physical blocks released.
     pub(super) byte_accounting: &'static str,
     pub(super) max_bytes: u64,
+    pub(super) max_total_bytes: Option<u64>,
+    pub(super) target_max_bytes: Option<u64>,
+    pub(super) incremental_max_bytes: Option<u64>,
     pub(super) dry_run: bool,
     pub(super) action_store: GcActionStoreReport,
     pub(super) targets: GcTargetReport,
+    pub(super) incremental: GcIncrementalReport,
 }
 
 #[derive(serde::Serialize)]
@@ -307,6 +342,18 @@ pub(super) struct GcActionStoreReport {
 pub(super) struct GcTargetReport {
     pub(super) removed_directories: u64,
     pub(super) removed_bytes: u64,
+    pub(super) remaining_directories: u64,
+    pub(super) remaining_bytes: u64,
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct GcIncrementalReport {
+    pub(super) removed_directories: u64,
+    pub(super) removed_bytes: u64,
+    pub(super) remaining_directories: u64,
+    pub(super) remaining_bytes: u64,
+    pub(super) skipped_active_directories: u64,
+    pub(super) untracked_directories: u64,
 }
 
 pub(super) fn print_json(value: &impl serde::Serialize) -> Result<()> {
@@ -370,6 +417,8 @@ pub(super) fn cache_remove(config: &Config, workspace: &Path) -> Result<()> {
     let requested = absolute(&working_dir, &workspace.to_string_lossy());
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let workspace = cache_workspace_root(&cargo, &requested);
+    let incremental_bytes =
+        crate::incremental::remove_workspace(&config.cache_dir.join("incremental"), &workspace)?;
     let target_bytes = target::remove_workspace(&config.target.root, &workspace)?;
     let removed = store::remove_project(&config.store_dir(), &workspace)?;
     println!(
@@ -377,16 +426,27 @@ pub(super) fn cache_remove(config: &Config, workspace: &Path) -> Result<()> {
         removed.removed_checkout_records,
         workspace.display()
     );
-    if let Some(bytes) = target_bytes {
+    let requested_bytes = target_bytes
+        .unwrap_or_default()
+        .saturating_add(incremental_bytes.unwrap_or_default());
+    if requested_bytes > 0 {
         crate::savings::record_quietly(
             &config.store_dir(),
             &crate::savings::Delta {
-                freed_requested_bytes: bytes,
+                freed_requested_bytes: requested_bytes,
                 ..crate::savings::Delta::default()
             },
         );
+    }
+    if let Some(bytes) = target_bytes {
         println!(
             "removed managed target directory ({} logical)",
+            ByteSize::b(bytes).display().iec()
+        );
+    }
+    if let Some(bytes) = incremental_bytes {
+        println!(
+            "removed learned incremental state ({} logical)",
             ByteSize::b(bytes).display().iec()
         );
     }

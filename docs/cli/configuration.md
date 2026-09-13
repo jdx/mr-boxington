@@ -86,6 +86,23 @@ Record a per-compilation event stream for `mbx tui` to watch.
 
 Sweep after a build when collection is due.
 
+### `gc.incremental_max_age`
+
+- **Type:** `duration`
+- **Default:** `30d`
+- **Set with:** `MBX_GC_INCREMENTAL_MAX_AGE`
+
+Collect learned incremental state unused this long, or "none".
+
+### `gc.incremental_max_size`
+
+- **Type:** `option<string>`
+- **Optional:** true
+- **Default:** 5% of the cache disk, from 10GiB to 100GiB
+- **Set with:** `MBX_GC_INCREMENTAL_MAX_SIZE`
+
+Aggregate learned-incremental budget, or "none". Inactive checkouts are collected oldest-first while the most recently used checkout is kept.
+
 ### `gc.interval`
 
 - **Type:** `duration`
@@ -109,7 +126,7 @@ Action-store and per-session remote-download budget.
 - **Optional:** true
 - **Set with:** `MBX_GC_MAX_TOTAL_SIZE`
 
-Combined action-store and managed-target budget, or "none".
+Combined action-store, managed-target, and learned-incremental budget, or "none".
 
 ### `http.download_timeout`
 

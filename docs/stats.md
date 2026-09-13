@@ -14,7 +14,7 @@ mbx stats --json
 The report combines lifetime savings with a snapshot of the cache and its
 recorded workspaces. The **Store** screen in [`mbx tui`](/tui) shows the same
 savings and sharing figures. `mbx cache stats` remains the smaller report about
-what the store currently holds.
+the action store, managed targets, and learned incremental state currently held.
 
 ## What the numbers mean
 

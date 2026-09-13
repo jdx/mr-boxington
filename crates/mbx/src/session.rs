@@ -120,6 +120,9 @@ pub struct CacheSession {
     scheduler_env: Vec<(String, String)>,
     store: PathBuf,
     incremental_root: PathBuf,
+    /// Active leases keep collection from deleting checkout-private state
+    /// while this session's compiler processes may still be using it.
+    incremental_leases: Mutex<Vec<crate::incremental::ActiveLease>>,
     /// The checkout's private state directory once `begin` has claimed it,
     /// where the file-digest ledger is saved when the session finishes.
     ledger_dir: Mutex<Option<PathBuf>>,
@@ -232,6 +235,7 @@ impl CacheSession {
             scheduler_env: crate::scheduler::session_environment_with_jobs(config, cargo_jobs),
             store,
             incremental_root: config.cache_dir.join("incremental"),
+            incremental_leases: Mutex::new(Vec::new()),
             ledger_dir: Mutex::new(None),
             ledger_stamp: Arc::new(Mutex::new(None)),
             started: Instant::now(),
@@ -314,7 +318,9 @@ impl CacheSession {
                 .into_owned(),
         );
         match crate::incremental::touch(&self.incremental_root, workspace_root) {
-            Ok(root) => {
+            Ok(checkout) => {
+                let root = checkout.directory;
+                self.incremental_leases.lock().unwrap().push(checkout.lease);
                 environment.insert(
                     INCREMENTAL_ROOT_ENV.into(),
                     root.to_string_lossy().into_owned(),
@@ -632,6 +638,7 @@ impl CacheSession {
                 Err(error) => warn!("the file-digest ledger was not saved: {error:#}"),
             }
         }
+        self.incremental_leases.lock().unwrap().clear();
         let mut stats = self.agent.stats();
         stats.session_duration_ns = duration_ns(self.started.elapsed());
         // The same totals the summary reports, so a reader of a finished stream

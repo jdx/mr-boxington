@@ -266,6 +266,8 @@ fn the_first_run_notice_states_the_resolved_caps() {
     let retention = RetentionSettings {
         target_max_bytes: Some(25 * 1024 * 1024 * 1024),
         target_max_age: Some(std::time::Duration::from_secs(30 * 86_400)),
+        incremental_max_bytes: Some(20 * 1024 * 1024 * 1024),
+        incremental_max_age: Some(std::time::Duration::from_secs(30 * 86_400)),
         max_total_bytes: None,
     };
 
@@ -288,6 +290,8 @@ fn the_first_run_notice_omits_limits_that_are_off() {
     let retention = RetentionSettings {
         target_max_bytes: None,
         target_max_age: None,
+        incremental_max_bytes: None,
+        incremental_max_age: None,
         max_total_bytes: None,
     };
 

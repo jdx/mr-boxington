@@ -10,7 +10,8 @@ use std::process::ExitCode;
 
 #[derive(usage::Args)]
 pub(super) struct CleanArgs {
-    /// Workspace root to clean. Defaults to the current workspace.
+    /// Workspace root whose managed target and learned incremental state are
+    /// removed. Defaults to the current workspace.
     workspace: Option<PathBuf>,
 }
 
@@ -28,6 +29,25 @@ pub(super) fn run(config: &Config, args: &CleanArgs) -> Result<ExitCode> {
     };
     let mut config = config.clone();
     config.apply_workspace_policy(&workspace)?;
+
+    let incremental_bytes =
+        crate::incremental::remove_workspace(&config.cache_dir.join("incremental"), &workspace)?;
+    if let Some(bytes) = incremental_bytes {
+        if bytes > 0 {
+            crate::savings::record_quietly(
+                &config.store_dir(),
+                &crate::savings::Delta {
+                    freed_requested_bytes: bytes,
+                    ..crate::savings::Delta::default()
+                },
+            );
+        }
+        println!(
+            "removed learned incremental state for {} ({})",
+            workspace.display(),
+            ByteSize::b(bytes).display().iec()
+        );
+    }
 
     match target::remove_workspace(&config.target.root, &workspace)? {
         Some(bytes) => {

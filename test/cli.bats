@@ -121,12 +121,17 @@ setup() {
   assert_success
   assert_output --partial '"objects": 0'
   assert_output --partial '"target_directories": 0'
+  assert_output --partial '"incremental_directories": 0'
+  assert_output --partial '"combined_total_bytes": 0'
+  assert_output --partial '"byte_accounting": "logical"'
 
   run "$MBX_BIN" gc --json
   assert_success
   assert_output --partial '"action_store"'
   assert_output --partial '"byte_accounting": "logical"'
   assert_output --partial '"targets"'
+  assert_output --partial '"incremental"'
+  assert_output --partial '"remaining_bytes"'
 
   run "$MBX_BIN" doctor --json
   assert_success

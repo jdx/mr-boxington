@@ -27,6 +27,8 @@ const MAX_STORE_BUDGET: u64 = 500 * GIB;
 
 /// The largest the managed-target budget nobody configured will grow to.
 const MAX_TARGET_BUDGET: u64 = 100 * GIB;
+/// The largest learned-incremental budget nobody configured will grow to.
+const MAX_INCREMENTAL_BUDGET: u64 = 100 * GIB;
 
 /// Scaled budgets are rounded down to a multiple of this.
 ///
@@ -67,6 +69,15 @@ const TARGET_BUDGET: ScaledBudget = ScaledBudget {
     floor: 10 * GIB,
     ceiling: MAX_TARGET_BUDGET,
     fallback: 30 * GIB,
+};
+
+/// Private incremental state is valuable to active edit loops but is not
+/// shared, so it gets the action store's disk share with a larger floor.
+const INCREMENTAL_BUDGET: ScaledBudget = ScaledBudget {
+    percent: 5,
+    floor: 10 * GIB,
+    ceiling: MAX_INCREMENTAL_BUDGET,
+    fallback: 20 * GIB,
 };
 
 impl ScaledBudget {
@@ -314,9 +325,20 @@ struct RawGc {
         default_note = "5% of the cache disk, from 5GiB to 500GiB"
     )]
     max_size: Option<String>,
-    /// Combined action-store and managed-target budget, or "none".
+    /// Combined action-store, managed-target, and learned-incremental budget,
+    /// or "none".
     #[usage(env = "MBX_GC_MAX_TOTAL_SIZE")]
     max_total_size: Option<String>,
+    /// Aggregate learned-incremental budget, or "none". Inactive checkouts are
+    /// collected oldest-first while the most recently used checkout is kept.
+    #[usage(
+        env = "MBX_GC_INCREMENTAL_MAX_SIZE",
+        default_note = "5% of the cache disk, from 10GiB to 100GiB"
+    )]
+    incremental_max_size: Option<String>,
+    /// Collect learned incremental state unused this long, or "none".
+    #[usage(env = "MBX_GC_INCREMENTAL_MAX_AGE", default = "30d", ty = "duration")]
+    incremental_max_age: String,
     /// Minimum interval between automatic sweeps.
     #[usage(env = "MBX_GC_INTERVAL", default = "1h", ty = "duration")]
     interval: String,
@@ -551,6 +573,8 @@ pub struct GcSettings {
 pub(crate) struct RetentionSettings {
     pub target_max_bytes: Option<u64>,
     pub target_max_age: Option<Duration>,
+    pub incremental_max_bytes: Option<u64>,
+    pub incremental_max_age: Option<Duration>,
     pub max_total_bytes: Option<u64>,
 }
 
@@ -680,6 +704,8 @@ impl Default for RetentionSettings {
         Self {
             target_max_bytes: Some(TARGET_BUDGET.fallback),
             target_max_age: Some(DEFAULT_TARGET_MAX_AGE),
+            incremental_max_bytes: Some(INCREMENTAL_BUDGET.fallback),
+            incremental_max_age: Some(DEFAULT_TARGET_MAX_AGE),
             max_total_bytes: None,
         }
     }
@@ -788,13 +814,19 @@ impl Config {
             .map(parse_optional_byte_size)
             .transpose()
             .wrap_err("invalid target.max_size")?;
+        let incremental_budget = raw
+            .gc
+            .incremental_max_size
+            .as_deref()
+            .map(parse_optional_byte_size)
+            .transpose()
+            .wrap_err("invalid gc.incremental_max_size")?;
         // Measured only where a budget actually needs scaling, so a fully
         // configured machine pays for no syscall at all. The two budgets are
         // measured separately because `target.root` can be on another volume,
         // and sizing a 4TB scratch disk from a 128GB home directory would prune
         // it to the floor.
-        let store_disk = store_budget
-            .is_none()
+        let store_disk = (store_budget.is_none() || incremental_budget.is_none())
             .then(|| measure_disk(&cache_dir))
             .flatten();
         let target_disk = target_budget
@@ -806,6 +838,10 @@ impl Config {
                 .unwrap_or_else(|| Some(TARGET_BUDGET.resolve(target_disk))),
             target_max_age: parse_optional_duration(&raw.target.max_age)
                 .wrap_err("invalid target.max_age")?,
+            incremental_max_bytes: incremental_budget
+                .unwrap_or_else(|| Some(INCREMENTAL_BUDGET.resolve(store_disk))),
+            incremental_max_age: parse_optional_duration(&raw.gc.incremental_max_age)
+                .wrap_err("invalid gc.incremental_max_age")?,
             max_total_bytes: raw
                 .gc
                 .max_total_size
@@ -1330,6 +1366,8 @@ mod tests {
             "10% of a 400GiB disk"
         );
         assert_eq!(retention.target_max_age, Some(DEFAULT_TARGET_MAX_AGE));
+        assert_eq!(retention.incremental_max_bytes, Some(20 * GIB));
+        assert_eq!(retention.incremental_max_age, Some(DEFAULT_TARGET_MAX_AGE));
         assert_eq!(
             retention.max_total_bytes, None,
             "a combined budget stays opt-in"
@@ -1386,7 +1424,7 @@ mod tests {
         // Awkward disk sizes are the point: 5% of 333GiB is 16.65GiB, which
         // should be reported as a number somebody could have chosen.
         for disk_gib in [17_u64, 63, 333, 500, 999, 1_500, 4_000] {
-            for budget in [STORE_BUDGET, TARGET_BUDGET] {
+            for budget in [STORE_BUDGET, TARGET_BUDGET, INCREMENTAL_BUDGET] {
                 let resolved = budget.resolve(Some(disk_gib * GIB));
                 assert_eq!(
                     resolved % BUDGET_INCREMENT,
@@ -1426,6 +1464,10 @@ mod tests {
 
         assert_eq!(config.gc.max_bytes, 3 * GIB);
         assert_eq!(retention.target_max_bytes, Some(7 * GIB));
+        assert_eq!(
+            retention.incremental_max_bytes,
+            Some(MAX_INCREMENTAL_BUDGET)
+        );
     }
 
     #[test]
@@ -1447,6 +1489,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.gc.max_bytes, STORE_BUDGET.floor, "5% of 64GiB");
+        assert_eq!(
+            settings.retention.incremental_max_bytes,
+            Some(INCREMENTAL_BUDGET.floor),
+            "5% of 64GiB, at the floor"
+        );
         assert_eq!(
             settings.retention.target_max_bytes,
             Some(MAX_TARGET_BUDGET),
@@ -1472,6 +1519,8 @@ mod tests {
             &[
                 ("MBX_TARGET_MAX_SIZE", "none"),
                 ("MBX_TARGET_MAX_AGE", "NONE"),
+                ("MBX_GC_INCREMENTAL_MAX_SIZE", "none"),
+                ("MBX_GC_INCREMENTAL_MAX_AGE", "none"),
                 ("MBX_GC_MAX_TOTAL_SIZE", "None"),
             ],
         )
@@ -1479,6 +1528,8 @@ mod tests {
 
         assert_eq!(retention.target_max_bytes, None);
         assert_eq!(retention.target_max_age, None);
+        assert_eq!(retention.incremental_max_bytes, None);
+        assert_eq!(retention.incremental_max_age, None);
         assert_eq!(retention.max_total_bytes, None);
     }
 
@@ -1488,6 +1539,11 @@ mod tests {
         let retention = RetentionSettings::default();
         assert_eq!(retention.target_max_bytes, Some(TARGET_BUDGET.fallback));
         assert_eq!(retention.target_max_age, Some(DEFAULT_TARGET_MAX_AGE));
+        assert_eq!(
+            retention.incremental_max_bytes,
+            Some(INCREMENTAL_BUDGET.fallback)
+        );
+        assert_eq!(retention.incremental_max_age, Some(DEFAULT_TARGET_MAX_AGE));
     }
 
     #[test]
@@ -1497,6 +1553,8 @@ mod tests {
             &[
                 ("MBX_TARGET_MAX_SIZE", "8GiB"),
                 ("MBX_TARGET_MAX_AGE", "14d"),
+                ("MBX_GC_INCREMENTAL_MAX_SIZE", "9GiB"),
+                ("MBX_GC_INCREMENTAL_MAX_AGE", "21d"),
                 ("MBX_GC_MAX_TOTAL_SIZE", "12GiB"),
             ],
         )
@@ -1506,6 +1564,11 @@ mod tests {
         assert_eq!(
             retention.target_max_age,
             Some(Duration::from_secs(14 * 86_400))
+        );
+        assert_eq!(retention.incremental_max_bytes, Some(9 * GIB));
+        assert_eq!(
+            retention.incremental_max_age,
+            Some(Duration::from_secs(21 * 86_400))
         );
         assert_eq!(retention.max_total_bytes, Some(12 * 1024 * 1024 * 1024));
     }

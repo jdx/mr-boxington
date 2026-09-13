@@ -3,7 +3,7 @@
 
 - **Usage:** `mbx cache remove [--interactive] [WORKSPACE]`
 
-Remove managed targets and cache claims for one workspace or selected workspaces.
+Remove managed targets, learned incremental state, and cache claims for one workspace or selected workspaces.
 
 Provide exactly one of `<WORKSPACE>` or `--interactive`.
 

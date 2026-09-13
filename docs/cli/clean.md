@@ -3,10 +3,10 @@
 
 - **Usage:** `mbx clean [WORKSPACE]`
 
-Remove this workspace's managed target directory and link.
+Remove this workspace's managed target, link, and learned incremental state.
 
 ## Arguments
-- **`[WORKSPACE]`** — Workspace root to clean. Defaults to the current workspace.
+- **`[WORKSPACE]`** — Workspace root whose managed target and learned incremental state are removed. Defaults to the current workspace.
 
 ## Flags
 - **`-h --help`** — Print help

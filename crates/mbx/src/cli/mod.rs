@@ -94,13 +94,13 @@ enum Commands {
     Explain(explain::ExplainArgs),
     /// Make plain Cargo commands run through mbx.
     Setup(setup::SetupArgs),
-    /// Collect stale managed targets and evict cached objects until the store fits a size budget.
+    /// Collect learned incremental state and managed targets, then evict cached objects to fit budgets.
     ///
     /// A missing cached object is rebuilt when it is needed again.
     Gc(gc::GcArgs),
     /// Inspect the local store.
     Cache(cache::CacheArgs),
-    /// Remove this workspace's managed target directory and link.
+    /// Remove this workspace's managed target, link, and learned incremental state.
     Clean(clean::CleanArgs),
     /// Watch cache activity across every build on this machine.
     Tui(tui::TuiArgs),

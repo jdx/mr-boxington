@@ -55,9 +55,10 @@ volume for the target budget:
 | --- | --- | --- |
 | `gc.max_size` (action store) | 5% of the disk | 5 GiB to 500 GiB |
 | `target.max_size` (managed targets) | 10% of the disk | 10 GiB to 100 GiB |
+| `gc.incremental_max_size` (learned incremental) | 5% of the disk | 10 GiB to 100 GiB |
 
 Scaled budgets are rounded down to a whole 5 GiB. When the disk cannot be
-measured, mbx uses 20 GiB and 30 GiB respectively. Any value you set outright
+measured, mbx uses 20 GiB, 30 GiB, and 20 GiB respectively. Any value you set outright
 wins, and `mbx gc --dry-run` previews the effect of a policy without deleting
 anything.
 
@@ -69,12 +70,15 @@ max_size = "60GiB"
 max_age = "none"   # keep live checkouts' outputs indefinitely
 
 [gc]
-# Optional: one budget covering managed targets and the action store together.
+# Optional: one budget covering targets, learned incremental, and the action store.
 max_total_size = "50GiB"
+incremental_max_size = "20GiB"
+incremental_max_age = "30d"
 ```
 
-`"none"` turns off `target.max_size`, `target.max_age`, or
-`gc.max_total_size`. Invalid sizes and durations are errors, so a typo cannot disable collection. `gc.max_size` has no `"none"`; the action
+`"none"` turns off `target.max_size`, `target.max_age`,
+`gc.incremental_max_size`, `gc.incremental_max_age`, or `gc.max_total_size`.
+Invalid sizes and durations are errors, so a typo cannot disable collection. `gc.max_size` has no `"none"`; the action
 store is always bounded. `MBX_TARGET_VIEWS=0` opts out of managed target
 directories altogether. A directory that is still reached through an existing
 `target` symlink keeps counting as in use, so turning placement off does not
@@ -118,11 +122,11 @@ symlink it does not own.
 
 | Command | Effect |
 | --- | --- |
-| `mbx cache stats` | Inspect the shared store |
+| `mbx cache stats` | Inspect the action store, managed targets, and learned incremental state |
 | `mbx gc --dry-run` | Preview collection under the configured budgets |
 | `mbx gc` | Collect eligible targets and cached objects |
-| `mbx clean` | Remove this workspace's managed target and link |
-| `mbx cache remove /path/to/workspace` | Remove the target and forget that workspace's cache claims |
+| `mbx clean` | Remove this workspace's managed target, link, and learned incremental state |
+| `mbx cache remove /path/to/workspace` | Remove the target and incremental state, then forget that workspace's cache claims |
 
 `mbx clean` does not clear the shared cache. Cargo's `cargo clean` is a
 separate command and follows Cargo's own target-directory behavior.
@@ -140,12 +144,12 @@ Turning placement off does not delete a target directory mbx already manages.
 The existing `target` link continues to work, and collection can still reclaim
 the directory after its checkout disappears.
 
-Run `mbx clean` inside a workspace to remove its managed target and the link
-immediately. An optional workspace path cleans another checkout. Shared cached
+Run `mbx clean` inside a workspace to remove its managed target, link, and
+learned incremental state immediately. An optional workspace path cleans another checkout. Shared cached
 objects and checkout claims remain available, so the next build can restore
 outputs normally.
 
-To remove the target and forget the workspace's cache claims together, run
+To remove the target and learned incremental state, then forget the workspace's cache claims, run
 `mbx cache remove /path/to/workspace`. Shared objects stay available to other
 workspaces and are reclaimed by normal garbage collection.
 

@@ -31,8 +31,10 @@ active crate go directly to its private state.
 ### Where state lives
 
 State and its records live under `incremental/` in the mbx cache directory,
-separately for each checkout. `cargo clean` does not remove this state.
-Garbage collection removes it for deleted or expired checkouts.
+separately for each checkout. `cargo clean` does not remove this state. `mbx
+clean` and `mbx cache remove` remove it for the selected workspace. Garbage
+collection removes it for deleted, expired, or least-recently-used checkouts;
+state used by a running build is never removed.
 
 ### Bound the storage
 
@@ -49,6 +51,21 @@ disables the limit. rustc normally removes superseded sessions, so the budget
 is a backstop. A large debug build can need several GiB. If the warning appears
 on every edit, the limit may be too small to retain useful state: raising it
 can prevent repeated full recompilations.
+
+The per-crate limit is a backstop. GC also bounds all checkout-private state
+together with `gc.incremental_max_size`, which defaults to 5% of the cache disk
+between 10 GiB and 100 GiB. `gc.incremental_max_age` defaults to 30 days. The
+least-recently-used checkouts are collected first, while mbx keeps the most
+recent one even when it alone exceeds the aggregate budget:
+
+```toml
+[gc]
+incremental_max_size = "30GiB" # or "none"
+incremental_max_age = "14d"    # or "none"
+```
+
+`gc.max_total_size`, when set, covers the action store, managed targets, and
+learned incremental state together.
 
 ## Cargo incremental mode
 

@@ -243,4 +243,5 @@ choice costs a recompile, not correctness.
 The action-store budget covers action objects and results. Prediction data,
 checkout records, and temporary downloads add overhead. Managed targets have
 their own budget and can account for substantial space; use the optional
-combined budget to bound both. See [Managed target directories](/managed-targets).
+combined budget to bound them together with learned incremental state. See
+[Managed target directories](/managed-targets).
