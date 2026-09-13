@@ -34,7 +34,7 @@ pub(super) fn run(
     // the action store is damaged.
     let incremental = match crate::incremental::collect(
         &config.cache_dir.join("incremental"),
-        retention.incremental_max_bytes,
+        incremental_budget(retention, max_bytes),
         retention.incremental_max_age,
         dry_run,
     ) {
@@ -314,7 +314,7 @@ pub(super) fn prune_targets(
     // slowest, so callers keep this inside the store sweep's throttle.
     let incremental = crate::incremental::collect(
         &config.cache_dir.join("incremental"),
-        retention.incremental_max_bytes,
+        incremental_budget(retention, store_reserve),
         retention.incremental_max_age,
         false,
     );
@@ -366,6 +366,21 @@ pub(super) fn target_budget(
                 retention
                     .target_max_bytes
                     .map_or(combined, |target| target.min(combined)),
+            )
+        })
+}
+
+/// Bound incremental state independently and inside the space left after the
+/// action-store reserve in a combined budget.
+pub(super) fn incremental_budget(retention: &RetentionSettings, store_reserve: u64) -> Option<u64> {
+    retention
+        .max_total_bytes
+        .map_or(retention.incremental_max_bytes, |total| {
+            let combined = total.saturating_sub(store_reserve);
+            Some(
+                retention
+                    .incremental_max_bytes
+                    .map_or(combined, |incremental| incremental.min(combined)),
             )
         })
 }

@@ -47,9 +47,9 @@ Cached compilations shared with a live checkout remain protected throughout.
 
 ### Budgets scale with the disk
 
-Both budgets scale with the disk that holds the data. By default, targets and
-the action store share the cache disk. A custom `target.root` uses its own
-volume for the target budget:
+All three budgets scale with the disk that holds the data. By default, targets,
+learned incremental state, and the action store share the cache disk. A custom
+`target.root` uses its own volume for the target budget:
 
 | Budget | Default | Bounds |
 | --- | --- | --- |
@@ -124,7 +124,7 @@ symlink it does not own.
 | --- | --- |
 | `mbx cache stats` | Inspect the action store, managed targets, and learned incremental state |
 | `mbx gc --dry-run` | Preview collection under the configured budgets |
-| `mbx gc` | Collect eligible targets and cached objects |
+| `mbx gc` | Collect eligible targets, cached objects, and learned incremental state |
 | `mbx clean` | Remove this workspace's managed target, link, and learned incremental state |
 | `mbx cache remove /path/to/workspace` | Remove the target and incremental state, then forget that workspace's cache claims |
 

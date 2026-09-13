@@ -523,7 +523,7 @@ fn confirm_project_removal(selected: &[PathBuf]) -> Result<bool> {
     for workspace in selected {
         println!("  {}", workspace.display());
     }
-    let description = "Removal deletes managed build targets and forgets the selected workspaces' cache claims. Source files remain untouched. Shared cache objects remain available to other workspaces and normal garbage collection. Displayed sizes are logical and may not equal physical disk space reclaimed.";
+    let description = "Removal deletes managed build targets and learned incremental state, and forgets the selected workspaces' cache claims. Source files remain untouched. Shared cache objects remain available to other workspaces and normal garbage collection. Displayed sizes are logical and may not equal physical disk space reclaimed.";
     match demand::Confirm::new("Remove the selected workspaces?")
         .description(description)
         .affirmative("Remove")

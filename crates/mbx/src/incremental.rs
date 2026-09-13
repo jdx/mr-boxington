@@ -112,7 +112,7 @@ pub(crate) fn collect(
     let mut entries = entries(root)?;
     let initial_directories = entries.len() as u64;
     let untracked_directories = entries.iter().filter(|entry| entry.live.is_none()).count() as u64;
-    let mut selected = HashSet::new();
+    let mut required = HashSet::new();
     let mut remaining_bytes = entries
         .iter()
         .map(|entry| entry.bytes)
@@ -123,39 +123,34 @@ pub(crate) fn collect(
         };
         let expired = max_age.is_some_and(|age| now.saturating_sub(updated_secs) > age.as_secs());
         if entry.live == Some(false) || expired {
-            selected.insert(entry.key.clone());
+            required.insert(entry.key.clone());
         }
     }
-    if let Some(max_bytes) = max_bytes {
-        let selected_bytes = entries
-            .iter()
-            .filter(|entry| selected.contains(&entry.key))
-            .map(|entry| entry.bytes)
-            .fold(0_u64, u64::saturating_add);
-        let mut projected = remaining_bytes.saturating_sub(selected_bytes);
-        if projected > max_bytes {
-            entries.sort_by_key(|entry| entry.updated_secs.unwrap_or(u64::MAX));
-            let mut candidates = entries
-                .iter()
-                .filter(|entry| entry.updated_secs.is_some() && !selected.contains(&entry.key))
-                .collect::<Vec<_>>();
-            // Keep one recently used checkout. A budget smaller than the active
-            // edit loop cannot be met sustainably by deleting it after every build.
-            candidates.pop();
-            for entry in candidates {
-                if projected <= max_bytes {
-                    break;
-                }
-                selected.insert(entry.key.clone());
-                projected = projected.saturating_sub(entry.bytes);
-            }
-        }
-    }
+    entries.sort_by_key(|entry| entry.updated_secs.unwrap_or(u64::MAX));
+    let mut candidates = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.updated_secs.is_some() && !required.contains(&entry.key))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    // Keep one recently used checkout. A budget smaller than the active edit
+    // loop cannot be met sustainably by deleting it after every build.
+    candidates.pop();
+    let mut planned = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| required.contains(&entry.key))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    planned.extend(candidates);
 
     let mut outcome = PruneOutcome::default();
-    for entry in entries {
-        if !selected.contains(&entry.key) {
-            continue;
+    for index in planned {
+        let entry = &entries[index];
+        if !required.contains(&entry.key)
+            && max_bytes.is_none_or(|max_bytes| remaining_bytes <= max_bytes)
+        {
+            break;
         }
         let guard = deletion_guard(root, &entry.key)?;
         if guard.active {
@@ -401,6 +396,35 @@ mod tests {
         assert_eq!(outcome.removed_directories, 1);
         assert!(!first_state.directory.exists());
         assert!(second_state.directory.exists());
+    }
+
+    #[test]
+    fn an_active_old_checkout_does_not_hide_an_inactive_candidate() {
+        let cache = tempfile::tempdir().unwrap();
+        let active = tempfile::tempdir().unwrap();
+        let inactive = tempfile::tempdir().unwrap();
+        let newest = tempfile::tempdir().unwrap();
+        let active_state = touch(cache.path(), active.path()).unwrap();
+        std::fs::write(active_state.directory.join("state"), vec![0; 32]).unwrap();
+        std::thread::sleep(Duration::from_secs(1));
+        let inactive_state = touch(cache.path(), inactive.path()).unwrap();
+        std::fs::write(inactive_state.directory.join("state"), vec![0; 32]).unwrap();
+        drop(inactive_state.lease);
+        std::thread::sleep(Duration::from_secs(1));
+        let newest_state = touch(cache.path(), newest.path()).unwrap();
+        std::fs::write(newest_state.directory.join("state"), vec![0; 32]).unwrap();
+        drop(newest_state.lease);
+
+        let budget =
+            tree_bytes(&active_state.directory).saturating_add(tree_bytes(&newest_state.directory));
+        let outcome = collect(cache.path(), Some(budget), None, false).unwrap();
+
+        assert_eq!(outcome.removed_directories, 1);
+        assert_eq!(outcome.skipped_active_directories, 1);
+        assert!(active_state.directory.exists());
+        assert!(!inactive_state.directory.exists());
+        assert!(newest_state.directory.exists());
+        assert!(outcome.remaining_bytes <= budget);
     }
 
     #[test]
