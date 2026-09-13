@@ -1,0 +1,19 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M2C47ZVP6VYEF9DNMX23EJFW",
+  "strategy": "manual-commit",
+  "branch": "codex/tui-dashboard-stats",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "NOTICE"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ]
+}
