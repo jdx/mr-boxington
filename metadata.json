@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M2DHWQ5V8K8ZS2HQDD2HXNF6",
+  "strategy": "manual-commit",
+  "branch": "codex/incremental-storage-budget",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "crates/mbx/src/cli/cache.rs",
+    "crates/mbx/src/cli/gc.rs",
+    "crates/mbx/src/cli/gc_tests.rs",
+    "crates/mbx/src/incremental.rs",
+    "docs/configuration.md",
+    "docs/limits.md",
+    "docs/managed-targets.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 64642,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 3140224,
+    "output_tokens": 7142,
+    "api_call_count": 25
+  }
+}
