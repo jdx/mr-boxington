@@ -1,0 +1,51 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M2DMTV4FEDS3DTAA7SE7NPNT",
+  "session_id": "01a09aee-81e0-7c50-8fe4-cb9d1c276cbd",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-13T15:05:38.787078Z",
+  "branch": "codex/help-perf-gate",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/perf-pr.yml",
+    "crates/mbx/src/cli/mod.rs",
+    "tak.toml"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.6-sol",
+  "turn_id": "20a67ee9432b",
+  "checkpoint_transcript_start": 2042,
+  "transcript_lines_at_start": 2042,
+  "compact_transcript_start": 296,
+  "token_usage": {
+    "input_tokens": 22742,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 3004928,
+    "output_tokens": 4384,
+    "api_call_count": 17
+  },
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-13T15:05:38.491143Z",
+    "agent_lines": 8,
+    "agent_removed": 11,
+    "human_added": 2,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 10,
+    "total_lines_changed": 23,
+    "agent_percentage": 82.6086956521739,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}

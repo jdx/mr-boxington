@@ -1,0 +1,28 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M2DMTV4FEDS3DTAA7SE7NPNT",
+  "strategy": "manual-commit",
+  "branch": "codex/help-perf-gate",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/perf-pr.yml",
+    "crates/mbx/src/cli/mod.rs",
+    "tak.toml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 22742,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 3004928,
+    "output_tokens": 4384,
+    "api_call_count": 17
+  }
+}
