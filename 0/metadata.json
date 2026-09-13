@@ -1,0 +1,40 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M2DMJH735732AJ9XCVQ5DZW9",
+  "session_id": "01a09aee-81e0-7c50-8fe4-cb9d1c276cbd",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-13T15:01:06.341358Z",
+  "branch": "codex/incremental-storage-budget",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "crates/mbx/src/cli/mod.rs"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.6-sol",
+  "turn_id": "09dcd2dbf82c",
+  "checkpoint_transcript_start": 1642,
+  "transcript_lines_at_start": 1642,
+  "compact_transcript_start": 234,
+  "token_usage": {
+    "input_tokens": 80583,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 8745600,
+    "output_tokens": 7327,
+    "api_call_count": 63
+  },
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-13T15:01:06.092604Z",
+    "agent_lines": 1,
+    "agent_removed": 1,
+    "human_added": 1,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 2,
+    "total_lines_changed": 4,
+    "agent_percentage": 50,
+    "metric_version": 2
+  }
+}
