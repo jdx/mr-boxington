@@ -3,7 +3,7 @@
 
 - **Usage:** `mbx clean [WORKSPACE]`
 
-Remove this workspace's target, link, and incremental state.
+Remove a workspace's target, link, and incremental state.
 
 ## Arguments
 - **`[WORKSPACE]`** — Workspace root whose managed target and learned incremental state are removed. Defaults to the current workspace.

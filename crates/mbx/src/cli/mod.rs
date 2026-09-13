@@ -100,7 +100,7 @@ enum Commands {
     Gc(gc::GcArgs),
     /// Inspect the local store.
     Cache(cache::CacheArgs),
-    /// Remove this workspace's target, link, and incremental state.
+    /// Remove a workspace's target, link, and incremental state.
     Clean(clean::CleanArgs),
     /// Watch cache activity across every build on this machine.
     Tui(tui::TuiArgs),
