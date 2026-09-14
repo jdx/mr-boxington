@@ -388,6 +388,37 @@ fn path_install_dir(arguments: &[String], working_dir: &Path) -> Option<PathBuf>
     None
 }
 
+// Inline includes use cwd, unlike includes inside a config file. Rewrite the
+// override itself: appending another include would concatenate array entries.
+fn rebase_cli_include(value: &str, caller: &Path) -> String {
+    fn rebase(value: &mut toml::Value, caller: &Path) {
+        match value {
+            toml::Value::String(path) => {
+                *path = absolute(caller, path).to_string_lossy().into_owned();
+            }
+            toml::Value::Array(entries) => {
+                for entry in entries {
+                    rebase(entry, caller);
+                }
+            }
+            toml::Value::Table(entry) => {
+                if let Some(toml::Value::String(path)) = entry.get_mut("path") {
+                    *path = absolute(caller, path).to_string_lossy().into_owned();
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Ok(mut config) = toml::from_str::<toml::Value>(value)
+        && config.as_table().is_some_and(|table| table.len() == 1)
+        && let Some(include) = config.get_mut("include")
+    {
+        rebase(include, caller);
+        return format!("include = {include}");
+    }
+    value.to_owned()
+}
+
 /// The roots a `cargo metadata` probe reports, remembered under `cache`.
 ///
 /// The probe is a Cargo process per build, and it costs more than the shim
@@ -431,7 +462,7 @@ fn recalled_cargo_roots(
         }
         for value in config_arguments(arguments) {
             let value = if value.contains('=') {
-                value.to_owned()
+                rebase_cli_include(value, &caller)
             } else {
                 absolute(&caller, value).to_string_lossy().into_owned()
             };
@@ -867,6 +898,15 @@ mod tests {
         directory
     }
 
+    fn fixture_root(path: &Path) -> PathBuf {
+        // Cargo omits Windows verbatim prefixes; Unix may have aliases (/var).
+        if cfg!(windows) {
+            path.to_path_buf()
+        } else {
+            path.canonicalize().unwrap()
+        }
+    }
+
     #[test]
     fn lockfile_makes_identity_independent_of_checkout_path() {
         let left = tempfile::tempdir().unwrap();
@@ -1010,15 +1050,6 @@ mod tests {
     fn path_install_probes_source_config_and_preserves_caller_relative_targets() {
         let source = cargo_fixture();
         let caller = cargo_fixture();
-        // Cargo reports ordinary Windows paths, without canonicalize's
-        // verbatim prefix. On Unix, resolve aliases such as macOS's /var.
-        let fixture_root = |path: &Path| {
-            if cfg!(windows) {
-                path.to_path_buf()
-            } else {
-                path.canonicalize().unwrap()
-            }
-        };
         let source_root = fixture_root(source.path());
         let caller_root = fixture_root(caller.path());
         for (root, target) in [
@@ -1083,6 +1114,64 @@ mod tests {
             resolve(&arguments, None).target_dir,
             source_root.as_path().join("changed-source-target")
         );
+    }
+
+    #[test]
+    fn path_install_cli_includes_keep_caller_paths_and_override_order() {
+        let source = cargo_fixture();
+        let caller = cargo_fixture();
+        let source_root = fixture_root(source.path());
+        let caller_root = fixture_root(caller.path());
+        for (root, target) in [
+            (&caller_root, "caller-target"),
+            (&source_root, "wrong-target"),
+        ] {
+            std::fs::create_dir_all(root.join(".config")).unwrap();
+            std::fs::write(
+                root.join(".config/extra.toml"),
+                format!("[build]\ntarget-dir = '{target}'\n"),
+            )
+            .unwrap();
+        }
+        let resolve = |overrides: &[&str]| {
+            let mut args = vec![
+                "install".into(),
+                "--path".into(),
+                source_root.display().to_string(),
+                "--offline".into(),
+            ];
+            for value in overrides {
+                args.extend(["--config".into(), (*value).into()]);
+            }
+            resolve_reported_in(None, OsStr::new("cargo"), &args, &caller_root, None)
+        };
+        for include in [
+            "include=['.config/extra.toml']",
+            "include=[{path='.config/extra.toml'}, {path='.config/missing.toml', optional=true}]",
+        ] {
+            assert_eq!(
+                resolve(&[include]).unwrap().target_dir,
+                caller_root.join("caller-target")
+            );
+            assert_eq!(
+                resolve(&[include, "build.target-dir='override'"])
+                    .unwrap()
+                    .target_dir,
+                caller_root.join("override")
+            );
+        }
+        let absolute_include = format!(
+            "include=[{}]",
+            toml::Value::String(caller_root.join(".config/extra.toml").display().to_string())
+        );
+        assert_eq!(
+            resolve(&[&absolute_include]).unwrap().target_dir,
+            caller_root.join("caller-target")
+        );
+        assert!(resolve(&["include=['.config/missing.toml']"]).is_none());
+
+        // Keep unsupported Cargo values invalid instead of repairing them.
+        assert!(resolve(&["include=42"]).is_none());
     }
 
     /// A stand-in Cargo that answers `metadata` and logs every call.
