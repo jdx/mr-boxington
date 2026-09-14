@@ -1010,8 +1010,17 @@ mod tests {
     fn path_install_probes_source_config_and_preserves_caller_relative_targets() {
         let source = cargo_fixture();
         let caller = cargo_fixture();
-        let source_root = source.path().canonicalize().unwrap();
-        let caller_root = caller.path().canonicalize().unwrap();
+        // Cargo reports ordinary Windows paths, without canonicalize's
+        // verbatim prefix. On Unix, resolve aliases such as macOS's /var.
+        let fixture_root = |path: &Path| {
+            if cfg!(windows) {
+                path.to_path_buf()
+            } else {
+                path.canonicalize().unwrap()
+            }
+        };
+        let source_root = fixture_root(source.path());
+        let caller_root = fixture_root(caller.path());
         for (root, target) in [
             (source_root.as_path(), "source-target"),
             (caller_root.as_path(), "caller-target"),
