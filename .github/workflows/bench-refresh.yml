@@ -389,14 +389,14 @@ jobs:
           cache-all-crates: "true"
           cache-workspace-crates: "true"
       - if: matrix.tool == 'mbx'
-        uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.2.0
         with:
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
           save-on-workflow-dispatch: "true"
           toolchain: 1.97.1
       - if: matrix.tool == 'mbx-registry'
-        uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.2.0
         with:
           backend: local
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
@@ -471,13 +471,13 @@ jobs:
           save-if: "false"
       - if: matrix.tool == 'mbx'
         id: mbx_restore
-        uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.2.0
         with:
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
           toolchain: 1.97.1
       - if: matrix.tool == 'mbx-registry'
-        uses: jdx/mr-boxington-action@f9de1362243ccf1c4f11a56c240725d0371ef4fa # v1.2.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.2.0
         with:
           backend: local
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}

@@ -123,7 +123,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: rustup target add "$TARGET"
 
-      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2
+      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2
         if: matrix.cross
         with:
           tool: cross
@@ -432,7 +432,7 @@ jobs:
           POWERSHELL
           pwsh -NoProfile -NonInteractive -File completion-syntax-check.ps1
           gh release upload "$TAG" mbx.usage.kdl mbx.bash mbx.zsh mbx.fish mbx.powershell --repo "$REPO" --clobber
-      - uses: jdx/packslip@a0d434ad57571c62dbd0ab5095b4eff607a71fd3 # v1.1.1
+      - uses: jdx/packslip@74c75db7d611b36dd5a157999ec16cf823ccf80c # v1.2.0
         with:
           tag: ${{ inputs.tag }}
           artifacts: release-assets/mbx-*.tar.gz release-assets/mbx-*.zip
