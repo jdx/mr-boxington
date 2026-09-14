@@ -46,6 +46,16 @@ fn store_result(store: &Path, name: &str, outputs: &[CacheDigest]) -> CacheDiges
     action
 }
 
+fn prediction(label: impl AsRef<[u8]>) -> ActionPrediction {
+    let invocation = CacheDigest::blake3(label.as_ref());
+    ActionPrediction {
+        action: CacheDigest::blake3(invocation.hash.as_bytes()),
+        invocation,
+        adapter: "rustc".into(),
+        payload: "{}".into(),
+    }
+}
+
 /// Record a checkout of `identity` and the manifest that roots `actions`.
 ///
 /// The agent only accepts predictions over its socket, so the manifest is
@@ -689,6 +699,10 @@ fn grouped_export_keeps_each_commands_predictions_and_newest_conflicts() {
         &std::fs::read(task_manifest_path(destination.path(), &identity)).unwrap(),
     )
     .unwrap();
+    assert_eq!(
+        manifest.predictions,
+        vec![clippy.clone(), test.clone(), new_shared.clone()]
+    );
     assert_eq!(manifest.predictions.len(), 3);
     for expected in [clippy, test, new_shared] {
         let actual = manifest
@@ -705,6 +719,137 @@ fn grouped_export_keeps_each_commands_predictions_and_newest_conflicts() {
             .unwrap()
             .is_some()
     );
+}
+
+#[test]
+fn import_prunes_the_oldest_entry_from_a_full_manifest() {
+    const TASK_MANIFEST_LIMIT: usize = 16 * 1024;
+
+    let destination = tempfile::tempdir().unwrap();
+    let identity = "3".repeat(64);
+    let existing = (0..TASK_MANIFEST_LIMIT)
+        .map(|index| prediction(index.to_le_bytes()))
+        .collect::<Vec<_>>();
+    let oldest = existing[0].clone();
+    write_atomic(
+        &task_manifest_path(destination.path(), &identity),
+        &serde_json::to_vec(&TaskActionManifest {
+            version: 1,
+            task: identity.clone(),
+            predictions: existing,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let imported = prediction(b"imported invocation");
+
+    merge_imported_manifest(
+        destination.path(),
+        TaskActionManifest {
+            version: 1,
+            task: identity.clone(),
+            predictions: vec![imported.clone()],
+        },
+    )
+    .unwrap();
+
+    let manifest: TaskActionManifest = serde_json::from_slice(
+        &std::fs::read(task_manifest_path(destination.path(), &identity)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest.predictions.len(), TASK_MANIFEST_LIMIT);
+    assert_eq!(manifest.predictions.last(), Some(&imported));
+    assert!(!manifest.predictions.contains(&oldest));
+}
+
+#[test]
+fn import_preserves_lru_order_and_existing_values() {
+    let destination = tempfile::tempdir().unwrap();
+    let identity = "4".repeat(64);
+    let oldest = prediction(b"oldest");
+    let untouched = prediction(b"untouched");
+    let existing_overlap = prediction(b"overlap");
+    let imported_oldest = prediction(b"imported oldest");
+    let mut imported_overlap = existing_overlap.clone();
+    imported_overlap.action = CacheDigest::blake3(b"bundle overlap action");
+    let imported_newest = prediction(b"imported newest");
+    write_atomic(
+        &task_manifest_path(destination.path(), &identity),
+        &serde_json::to_vec(&TaskActionManifest {
+            version: 1,
+            task: identity.clone(),
+            predictions: vec![oldest.clone(), untouched.clone(), existing_overlap.clone()],
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    merge_imported_manifest(
+        destination.path(),
+        TaskActionManifest {
+            version: 1,
+            task: identity.clone(),
+            predictions: vec![
+                imported_oldest.clone(),
+                imported_overlap,
+                imported_newest.clone(),
+            ],
+        },
+    )
+    .unwrap();
+
+    let manifest: TaskActionManifest = serde_json::from_slice(
+        &std::fs::read(task_manifest_path(destination.path(), &identity)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest.predictions,
+        vec![
+            oldest,
+            untouched,
+            imported_oldest,
+            existing_overlap,
+            imported_newest,
+        ]
+    );
+}
+
+#[test]
+fn import_waits_for_the_task_manifest_lock() {
+    let destination = tempfile::tempdir().unwrap();
+    let identity = "5".repeat(64);
+    let lock_path = task_manifest_lock_path(destination.path(), &identity);
+    std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    let mut held_lock = fslock::LockFile::open(&lock_path).unwrap();
+    held_lock.lock().unwrap();
+    let destination_path = destination.path().to_path_buf();
+    let imported_identity = identity.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let importer = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let result = merge_imported_manifest(
+            &destination_path,
+            TaskActionManifest {
+                version: 1,
+                task: imported_identity,
+                predictions: vec![prediction(b"blocked import")],
+            },
+        );
+        done_tx.send(result).unwrap();
+    });
+    started_rx.recv().unwrap();
+
+    assert!(matches!(
+        done_rx.recv_timeout(Duration::from_millis(100)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    held_lock.unlock().unwrap();
+    done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    importer.join().unwrap();
 }
 
 #[test]

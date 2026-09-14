@@ -35,7 +35,10 @@ pub use file_digest::{
     FileDigestCache, FileDigestResolution, FileDigestScope, FileIdentity, FileObjectIdentity,
     FileSnapshot, NoFileDigestCache, RecordedFileDigest, digest_file,
 };
-pub use manifest::{is_task_identity, task_manifest_actions};
+pub use manifest::{
+    is_task_identity, task_manifest_actions,
+    update_task_predictions_in_order as merge_task_action_predictions,
+};
 use manifest::{
     merge_task_manifests, task_manifest_dir, update_task_predictions, validate_task_identity,
     validate_task_manifest,

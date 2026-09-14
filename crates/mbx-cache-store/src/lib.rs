@@ -14,7 +14,7 @@ mod events;
 use eyre::{Context, Result};
 use mbx_cache_core::{
     ActionPrediction, CacheDigest, CacheDirectory, LocalCas, RemoteActionResult, RustcMetadata,
-    TaskActionManifest, is_task_identity, task_manifest_actions,
+    TaskActionManifest, is_task_identity, merge_task_action_predictions, task_manifest_actions,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -428,22 +428,28 @@ fn export_receipts(
                 .iter()
                 .map(|prediction| prediction.action.clone()),
         );
-        // Keep predictions from every command in the job. When commands
-        // share an invocation, the most recently completed command wins.
-        let predictions = tasks.entry(receipt.identity).or_insert_with(BTreeMap::new);
-        predictions.extend(
-            receipt
-                .predictions
-                .into_iter()
-                .map(|prediction| (prediction.invocation.clone(), prediction)),
-        );
+        // Keep predictions from every command in receipt order. Deduplication
+        // below makes the most recently completed command win an overlap.
+        tasks
+            .entry(receipt.identity)
+            .or_insert_with(Vec::new)
+            .extend(receipt.predictions);
     }
     let tasks = tasks
         .into_iter()
-        .map(|(task, predictions)| TaskActionManifest {
-            version: 1,
-            task,
-            predictions: predictions.into_values().collect(),
+        .map(|(task, predictions)| {
+            let mut invocations = BTreeSet::new();
+            let mut predictions = predictions
+                .into_iter()
+                .rev()
+                .filter(|prediction| invocations.insert(prediction.invocation.clone()))
+                .collect::<Vec<_>>();
+            predictions.reverse();
+            TaskActionManifest {
+                version: 1,
+                task,
+                predictions,
+            }
         })
         .collect::<Vec<_>>();
     if tasks.iter().any(|task| !task.validate()) {
@@ -686,27 +692,35 @@ struct CapturedOutput {
 fn merge_imported_manifest(destination: &Path, mut imported: TaskActionManifest) -> Result<()> {
     let identity = imported.task.clone();
     let destination_path = task_manifest_path(destination, &identity);
+    let lock_path = task_manifest_lock_path(destination, &identity);
+    std::fs::create_dir_all(lock_path.parent().expect("task manifest lock has a parent"))?;
+    let mut lock = fslock::LockFile::open(&lock_path)?;
+    lock.lock()?;
     if let Ok(bytes) = std::fs::read(&destination_path)
         && let Ok(existing) = serde_json::from_slice::<TaskActionManifest>(&bytes)
         && existing.task == identity
         && existing.validate()
     {
-        let mut predictions = imported
+        let existing_predictions: BTreeMap<_, _> = existing
+            .predictions
+            .iter()
+            .cloned()
+            .map(|prediction| (prediction.invocation.clone(), prediction))
+            .collect();
+        // The bundle determines recency, but a checkout's current value wins
+        // when both manifests predict the same invocation.
+        let updates = imported
             .predictions
             .into_iter()
-            .map(|prediction| (prediction.invocation.clone(), prediction))
-            .collect::<BTreeMap<_, _>>();
-        predictions.extend(
-            existing
-                .predictions
-                .iter()
-                .cloned()
-                .map(|prediction| (prediction.invocation.clone(), prediction)),
-        );
-        imported.predictions = predictions.into_values().collect();
-        if !imported.validate() {
-            return Ok(());
-        }
+            .map(|prediction| {
+                existing_predictions
+                    .get(&prediction.invocation)
+                    .cloned()
+                    .unwrap_or(prediction)
+            })
+            .collect();
+        imported.predictions =
+            merge_task_action_predictions(existing.predictions, updates, &BTreeSet::new())?;
     }
     write_atomic(&destination_path, &serde_json::to_vec(&imported)?)
 }
@@ -731,6 +745,12 @@ fn task_manifest_path(store: &Path, identity: &str) -> PathBuf {
     store
         .join("task-manifests/v1")
         .join(format!("{identity}.json"))
+}
+
+fn task_manifest_lock_path(store: &Path, identity: &str) -> PathBuf {
+    store
+        .join("task-manifests/v1/locks")
+        .join(format!("{identity}.lock"))
 }
 
 fn append_file(builder: &mut tar::Builder<std::fs::File>, root: &Path, path: &Path) -> Result<()> {

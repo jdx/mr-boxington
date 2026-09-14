@@ -50,7 +50,8 @@ pub use agent::{
     AgentRequest, AgentResponse, AgentStats, CacheAgent, CompilerStats, FileDigestCache,
     FileDigestResolution, FileDigestScope, FileIdentity, FileObjectIdentity, FileSnapshot,
     NoFileDigestCache, PinnedFile, PinnedState, RecordedFileDigest, RestoreStats, WrapperSpan,
-    WrapperTiming, digest_file, is_task_identity, task_manifest_actions,
+    WrapperTiming, digest_file, is_task_identity, merge_task_action_predictions,
+    task_manifest_actions,
 };
 pub use client::BlockingAgentClient;
 pub use local::{LocalActionCache, LocalCas};

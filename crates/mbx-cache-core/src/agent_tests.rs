@@ -5709,6 +5709,25 @@ fn local_pruning_keeps_the_newest_concurrent_prediction() {
 }
 
 #[test]
+fn task_prediction_merge_keeps_the_last_value_and_position_for_duplicate_updates() {
+    let mut first = seeded_predictions(&["first update"]).remove(0);
+    let untouched = seeded_predictions(&["untouched baseline"]).remove(0);
+    let middle = seeded_predictions(&["middle update"]).remove(0);
+    let mut last = first.clone();
+    first.action = CacheDigest::blake3(b"first value");
+    last.action = CacheDigest::blake3(b"last value");
+
+    let merged = merge_task_action_predictions(
+        vec![first.clone(), untouched.clone()],
+        vec![first, middle.clone(), last.clone()],
+        &BTreeSet::new(),
+    )
+    .unwrap();
+
+    assert_eq!(merged, vec![untouched, middle, last]);
+}
+
+#[test]
 fn remote_manifest_merge_prunes_to_the_prediction_limit() {
     let task = "7".repeat(64);
     let prediction = |index: usize| {

@@ -77,18 +77,28 @@ pub(super) fn update_task_predictions(
     update_task_predictions_in_order(predictions, updates.values().cloned().collect(), protected)
 }
 
-fn update_task_predictions_in_order(
+/// Append ordered task prediction updates and keep the manifest bounded.
+///
+/// `predictions` and `updates` are ordered from oldest to newest. An update
+/// replaces any existing prediction for the same invocation and keeps the
+/// update's position in the supplied order. If `updates` repeats an invocation,
+/// its last value and position win. Invocations in `protected` are not retired;
+/// protecting more entries than the manifest limit returns an error.
+pub fn update_task_predictions_in_order(
     predictions: Vec<ActionPrediction>,
-    updates: Vec<ActionPrediction>,
+    mut updates: Vec<ActionPrediction>,
     protected: &BTreeSet<CacheDigest>,
 ) -> Result<Vec<ActionPrediction>> {
     if protected.len() > MAX_TASK_ACTION_PREDICTIONS {
         bail!("this task run contains too many action predictions");
     }
-    let update_invocations: BTreeSet<_> = updates
-        .iter()
-        .map(|prediction| prediction.invocation.clone())
+    let mut update_invocations = BTreeSet::new();
+    updates = updates
+        .into_iter()
+        .rev()
+        .filter(|prediction| update_invocations.insert(prediction.invocation.clone()))
         .collect();
+    updates.reverse();
     let mut predictions: Vec<_> = predictions
         .into_iter()
         .filter(|prediction| !update_invocations.contains(&prediction.invocation))
