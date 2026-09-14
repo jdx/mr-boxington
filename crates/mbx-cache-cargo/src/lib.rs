@@ -13,7 +13,7 @@ use std::process::Command;
 use std::time::SystemTime;
 
 const CARGO_TARGET_DIR_ENV: &str = "CARGO_TARGET_DIR";
-const PROBE_GLOBAL_FLAGS: [&str; 4] = ["-C", "--directory", "--config", "-Z"];
+const PROBE_GLOBAL_FLAGS: [&str; 3] = ["-C", "--config", "-Z"];
 const PROBE_MANIFEST_TOGGLES: [&str; 3] = ["--offline", "--frozen", "--locked"];
 
 /// Cargo-resolved roots and the stable prediction-manifest identity for one invocation.
@@ -141,7 +141,12 @@ fn resolve_with_reported(
     reported: Option<(PathBuf, PathBuf)>,
 ) -> CargoInvocation {
     let cargo_args = cargo_arguments(arguments);
-    let invocation_dir = invocation_dir(cargo_args, working_dir);
+    let install_source = path_install_dir(cargo_args, working_dir);
+    let invocation_dir = if install_source.is_some() {
+        path_install_invocation_dir(cargo_args, working_dir)
+    } else {
+        invocation_dir(cargo_args, working_dir)
+    };
     let workspace_root = reported
         .as_ref()
         .map(|roots| roots.0.clone())
@@ -153,7 +158,7 @@ fn resolve_with_reported(
             .is_some_and(|value| !value.is_empty())
         || cargo_config_may_set_target_dir(
             cargo_args,
-            &path_install_dir(cargo_args, working_dir).unwrap_or_else(|| invocation_dir.clone()),
+            install_source.as_deref().unwrap_or(&invocation_dir),
         );
     let target_dir = flagged
         .map(|value| absolute(&invocation_dir, value))
@@ -360,6 +365,14 @@ fn forwarded_flags(arguments: &[String], flags: &[&str]) -> Vec<String> {
 
 fn invocation_dir(arguments: &[String], working_dir: &Path) -> PathBuf {
     flag_value(arguments, "-C")
+        .map(|value| absolute(working_dir, value))
+        .unwrap_or_else(|| working_dir.to_path_buf())
+}
+
+// Path installs change the probe's cwd, so resolve all directory-option
+// spellings before constructing their source-directory probe.
+fn path_install_invocation_dir(arguments: &[String], working_dir: &Path) -> PathBuf {
+    flag_value(arguments, "-C")
         .or_else(|| flag_value(arguments, "--directory"))
         .or_else(|| {
             arguments
@@ -383,8 +396,9 @@ fn path_install_dir(arguments: &[String], working_dir: &Path) -> Option<PathBuf>
             value if !value.starts_with('-') && !value.starts_with('+') => {
                 return (value == "install")
                     .then(|| {
-                        flag_value(arguments, "--path")
-                            .map(|path| absolute(&invocation_dir(arguments, working_dir), path))
+                        flag_value(arguments, "--path").map(|path| {
+                            absolute(&path_install_invocation_dir(arguments, working_dir), path)
+                        })
                     })
                     .flatten();
             }
@@ -447,7 +461,7 @@ fn recalled_cargo_roots(
         // `install --path` reads configuration from the source directory,
         // whereas metadata normally reads it from the caller's directory.
         // Probe there, retaining caller-relative CLI paths and target overrides.
-        let caller = invocation_dir(arguments, working_dir);
+        let caller = path_install_invocation_dir(arguments, working_dir);
         let mut probe_args = Vec::new();
         if let Some(target) =
             std::env::var_os("CARGO_BUILD_TARGET_DIR").filter(|value| !value.is_empty())
