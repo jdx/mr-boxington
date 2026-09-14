@@ -522,3 +522,55 @@ EOF
   assert_success
   assert_file_exists "$BATS_TEST_TMPDIR/second-doc-target/doc/fixture/index.html"
 }
+
+@test "path installs preserve build fingerprints with shared target directories" {
+  unset CC CXX HOST_CC HOST_CXX RUSTC_WRAPPER CARGO_TARGET_DIR
+  export MBX_CC=true
+  local project="$BATS_TEST_TMPDIR/install-project"
+  write_project "$project"
+  cat >"$project/src/main.rs" <<'RS'
+fn main() {}
+RS
+  cat >"$project/build.rs" <<'RS'
+use std::io::Write;
+fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=HOST_CC");
+    assert!(!std::env::var("HOST_CC").unwrap().is_empty());
+    let path = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
+        .join("build-runs");
+    writeln!(std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap(), "run").unwrap();
+}
+RS
+  "$MBX_BIN" setup >/dev/null
+  export PATH="$MBX_SHIM_DIR:$PATH"
+  export CARGO_LOG=cargo::core::compiler::fingerprint=info
+  cd "$project"
+  run cargo build --release --offline
+  assert_success
+
+  run cargo install --offline --locked --path . --target-dir target --root "$BATS_TEST_TMPDIR/installed"
+  assert_success
+  refute_output --partial 'EnvVarChanged'
+  refute_output --partial 'Compiling fixture'
+
+  # Source discovery must also work when there is no Cargo.toml in cwd.
+  cd "$BATS_TEST_TMPDIR"
+  run env CARGO_TARGET_DIR=install-project/target cargo install --offline --locked --path=install-project --root "$BATS_TEST_TMPDIR/installed"
+  assert_success
+  refute_output --partial 'Compiling fixture'
+  run env CARGO_BUILD_TARGET_DIR=install-project/target cargo install --offline --locked --path install-project --root "$BATS_TEST_TMPDIR/installed"
+  assert_success
+  refute_output --partial 'Compiling fixture'
+  run cargo install --offline --locked --path install-project --root "$BATS_TEST_TMPDIR/installed"
+  assert_success
+  refute_output --partial 'Compiling fixture'
+
+  cd "$project"
+  run cargo build --release --offline
+  assert_success
+  refute_output --partial 'Compiling fixture'
+  run cat "$project/build-runs"
+  assert_output 'run'
+  assert_file_executable "$BATS_TEST_TMPDIR/installed/bin/fixture"
+}

@@ -151,7 +151,10 @@ fn resolve_with_reported(
         || target_dir_env
             .as_ref()
             .is_some_and(|value| !value.is_empty())
-        || cargo_config_may_set_target_dir(cargo_args, &invocation_dir);
+        || cargo_config_may_set_target_dir(
+            cargo_args,
+            &path_install_dir(cargo_args, working_dir).unwrap_or_else(|| invocation_dir.clone()),
+        );
     let target_dir = flagged
         .map(|value| absolute(&invocation_dir, value))
         .or_else(|| reported.map(|roots| roots.1))
@@ -361,6 +364,30 @@ fn invocation_dir(arguments: &[String], working_dir: &Path) -> PathBuf {
         .unwrap_or_else(|| working_dir.to_path_buf())
 }
 
+// Only a real install subcommand gives --path this meaning; option values
+// and arguments after -- must not make an unrelated command look like one.
+fn path_install_dir(arguments: &[String], working_dir: &Path) -> Option<PathBuf> {
+    let arguments = cargo_arguments(arguments);
+    let mut remaining = arguments.iter();
+    while let Some(argument) = remaining.next() {
+        match argument.as_str() {
+            "--color" | "--config" | "-Z" | "-C" | "--directory" => {
+                remaining.next()?;
+            }
+            value if !value.starts_with('-') && !value.starts_with('+') => {
+                return (value == "install")
+                    .then(|| {
+                        flag_value(arguments, "--path")
+                            .map(|path| absolute(&invocation_dir(arguments, working_dir), path))
+                    })
+                    .flatten();
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// The roots a `cargo metadata` probe reports, remembered under `cache`.
 ///
 /// The probe is a Cargo process per build, and it costs more than the shim
@@ -379,6 +406,75 @@ fn recalled_cargo_roots(
     working_dir: &Path,
     target_dir_env: Option<&OsStr>,
 ) -> Option<(PathBuf, PathBuf)> {
+    if let Some(source) = path_install_dir(arguments, working_dir) {
+        // `install --path` reads configuration from the source directory,
+        // whereas metadata normally reads it from the caller's directory.
+        // Probe there, retaining caller-relative CLI paths and target overrides.
+        let caller = invocation_dir(arguments, working_dir);
+        let mut probe_args = Vec::new();
+        if let Some(target) =
+            std::env::var_os("CARGO_BUILD_TARGET_DIR").filter(|value| !value.is_empty())
+        {
+            // This environment setting outranks files but is itself overridden
+            // by --config; insert it before the caller's explicit overrides.
+            probe_args.extend([
+                "--config".into(),
+                format!(
+                    "build.target-dir = {}",
+                    toml::Value::String(
+                        absolute(&caller, &target.to_string_lossy())
+                            .to_string_lossy()
+                            .into_owned()
+                    )
+                ),
+            ]);
+        }
+        for value in config_arguments(arguments) {
+            let value = if value.contains('=') {
+                value.to_owned()
+            } else {
+                absolute(&caller, value).to_string_lossy().into_owned()
+            };
+            probe_args.extend(["--config".into(), value.clone()]);
+            // Inline target paths also stay relative to the caller. Preserve
+            // any other settings in this override and the order of overrides.
+            if let Ok(config) = toml::from_str::<toml::Value>(&value)
+                && let Some(target) = config
+                    .get("build")
+                    .and_then(|build| build.get("target-dir"))
+                    .and_then(toml::Value::as_str)
+            {
+                probe_args.extend([
+                    "--config".into(),
+                    format!(
+                        "build.target-dir = {}",
+                        toml::Value::String(
+                            absolute(&caller, target).to_string_lossy().into_owned()
+                        )
+                    ),
+                ]);
+            }
+        }
+        probe_args.extend(forwarded_flags(arguments, &["-Z"]));
+        probe_args.push("build".into());
+        probe_args.extend(
+            arguments
+                .iter()
+                .filter(|arg| PROBE_MANIFEST_TOGGLES.contains(&arg.as_str()))
+                .cloned(),
+        );
+        let target = target_dir_env
+            .filter(|value| !value.is_empty())
+            .map(|value| absolute(&caller, &value.to_string_lossy()).into_os_string());
+        return recalled_cargo_roots(
+            cache,
+            cargo_home,
+            cargo,
+            &probe_args,
+            &source,
+            target.as_deref(),
+        );
+    }
     let probe = cache.and_then(|cache| {
         ProbeRecord::describe(
             cache,
@@ -392,7 +488,7 @@ fn recalled_cargo_roots(
     if let Some(recalled) = probe.as_ref().and_then(ProbeRecord::recall) {
         return Some(recalled);
     }
-    let roots = cargo_roots(cargo, arguments, target_dir_env)?;
+    let roots = cargo_roots(cargo, arguments, working_dir, target_dir_env)?;
     if let Some(probe) = probe {
         probe.remember(&roots);
     }
@@ -653,6 +749,7 @@ fn resolve_program(program: &OsStr) -> Option<PathBuf> {
 fn cargo_roots(
     cargo: &OsStr,
     arguments: &[String],
+    working_dir: &Path,
     target_dir_env: Option<&OsStr>,
 ) -> Option<(PathBuf, PathBuf)> {
     let mut command = Command::new(cargo);
@@ -660,7 +757,9 @@ fn cargo_roots(
         Some(value) => command.env(CARGO_TARGET_DIR_ENV, value),
         None => command.env_remove(CARGO_TARGET_DIR_ENV),
     };
-    command.args(probe_arguments(arguments));
+    command
+        .current_dir(working_dir)
+        .args(probe_arguments(arguments));
     let output = command.output().ok()?;
     if !output.status.success() {
         return None;
@@ -905,6 +1004,76 @@ mod tests {
 
         assert_eq!(resolved.target_dir, configured);
         assert!(resolved.target_dir_requested);
+    }
+
+    #[test]
+    fn path_install_probes_source_config_and_preserves_caller_relative_targets() {
+        let source = cargo_fixture();
+        let caller = cargo_fixture();
+        let source_root = source.path().canonicalize().unwrap();
+        let caller_root = caller.path().canonicalize().unwrap();
+        for (root, target) in [
+            (source_root.as_path(), "source-target"),
+            (caller_root.as_path(), "caller-target"),
+        ] {
+            std::fs::create_dir_all(root.join(".cargo")).unwrap();
+            std::fs::write(
+                root.join(".cargo/config.toml"),
+                format!("[build]\ntarget-dir = '{target}'\n"),
+            )
+            .unwrap();
+        }
+        let arguments = vec![
+            "install".into(),
+            format!("--path={}", source_root.as_path().display()),
+            "--offline".into(),
+        ];
+        let cache = tempfile::tempdir().unwrap();
+        let resolve = |args: &[String], target| {
+            resolve_reported_in(
+                Some(cache.path()),
+                OsStr::new("cargo"),
+                args,
+                caller_root.as_path(),
+                target,
+            )
+            .unwrap()
+        };
+        let roots = resolve(&arguments, None);
+        assert_eq!(roots.workspace_root, source_root.as_path());
+        assert_eq!(
+            roots.target_dir,
+            source_root.as_path().join("source-target")
+        );
+        assert!(roots.target_dir_requested);
+
+        let mut flagged = arguments.clone();
+        flagged.extend(["--target-dir".into(), "flag-target".into()]);
+        assert_eq!(
+            resolve(&flagged, None).target_dir,
+            caller_root.as_path().join("flag-target")
+        );
+        assert_eq!(
+            resolve(&arguments, Some("env-target".into())).target_dir,
+            caller_root.as_path().join("env-target")
+        );
+        let mut configured = arguments.clone();
+        configured.extend(["--config".into(), "build.target-dir='cli-target'".into()]);
+        assert_eq!(
+            resolve(&configured, None).target_dir,
+            caller_root.as_path().join("cli-target")
+        );
+
+        // A warm metadata cache must watch the installed source's config.
+        std::fs::write(
+            source_root.as_path().join(".cargo/config.toml"),
+            "[build]\ntarget-dir = 'changed-source-target'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve(&arguments, None).target_dir,
+            source_root.as_path().join("changed-source-target")
+        );
     }
 
     /// A stand-in Cargo that answers `metadata` and logs every call.

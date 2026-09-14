@@ -164,15 +164,27 @@ fn cargo_proxy_passthrough(arguments: &[OsString]) -> bool {
         .iter()
         .take_while(|argument| argument.as_os_str() != OsStr::new("--"))
         .collect::<Vec<_>>();
+    let command = super::launch::cargo_subcommand(arguments);
     if cargo_arguments.iter().any(|argument| {
-        matches!(
-            argument.to_str(),
-            Some("--version" | "-V" | "--help" | "-h")
-        )
+        matches!(argument.to_str(), Some("-V" | "--help" | "-h"))
+            // For install, --version selects a package version.
+            || (argument.as_os_str() == "--version" && command != Some("install"))
     }) {
         return true;
     }
-    let command = super::launch::cargo_subcommand(arguments);
+    if command == Some("install") {
+        // Registry/git sources need their own root discovery. Path installs
+        // compile the local workspace and must share its wrapper environment.
+        return cargo_arguments
+            .iter()
+            .any(|argument| argument.as_os_str() == "--list")
+            || !cargo_arguments.iter().any(|argument| {
+                argument.as_os_str() == "--path"
+                    || argument
+                        .to_str()
+                        .is_some_and(|value| value.starts_with("--path="))
+            });
+    }
     command.is_none()
         || matches!(
             command,
@@ -195,7 +207,6 @@ fn cargo_proxy_passthrough(arguments: &[OsString]) -> bool {
                     | "owner"
                     | "package"
                     | "publish"
-                    | "install"
                     | "uninstall"
                     | "yank"
                     | "locate-project"
@@ -479,6 +490,36 @@ mod tests {
                 !cargo_proxy_passthrough(&[command.into()]),
                 "{command} should start an mbx session"
             );
+        }
+    }
+
+    #[test]
+    fn cargo_shim_wraps_path_installs_but_not_queries_or_remote_sources() {
+        for args in [
+            vec!["install", "--path", "."],
+            vec!["install", "--path", ".", "--version", "0.1.0"],
+            vec![
+                "install",
+                "--locked",
+                "--path=foo",
+                "--target-dir",
+                "target",
+            ],
+            vec!["+stable", "--color", "always", "install", "--path", "foo"],
+        ] {
+            let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+            assert!(!cargo_proxy_passthrough(&args), "{args:?}");
+        }
+        for args in [
+            vec!["install", "ripgrep"],
+            vec!["install", "--git", "https://example.com/repo"],
+            vec!["install", "--list"],
+            vec!["install", "--path", ".", "--help"],
+            vec!["install", "--list", "--path", "."],
+            vec!["install", "--", "--path", "."],
+        ] {
+            let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+            assert!(cargo_proxy_passthrough(&args), "{args:?}");
         }
     }
 
