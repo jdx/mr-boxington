@@ -13,7 +13,7 @@ use std::process::Command;
 use std::time::SystemTime;
 
 const CARGO_TARGET_DIR_ENV: &str = "CARGO_TARGET_DIR";
-const PROBE_GLOBAL_FLAGS: [&str; 3] = ["-C", "--config", "-Z"];
+const PROBE_GLOBAL_FLAGS: [&str; 4] = ["-C", "--directory", "--config", "-Z"];
 const PROBE_MANIFEST_TOGGLES: [&str; 3] = ["--offline", "--frozen", "--locked"];
 
 /// Cargo-resolved roots and the stable prediction-manifest identity for one invocation.
@@ -360,6 +360,12 @@ fn forwarded_flags(arguments: &[String], flags: &[&str]) -> Vec<String> {
 
 fn invocation_dir(arguments: &[String], working_dir: &Path) -> PathBuf {
     flag_value(arguments, "-C")
+        .or_else(|| flag_value(arguments, "--directory"))
+        .or_else(|| {
+            arguments
+                .iter()
+                .find_map(|arg| arg.strip_prefix("-C").filter(|value| !value.is_empty()))
+        })
         .map(|value| absolute(working_dir, value))
         .unwrap_or_else(|| working_dir.to_path_buf())
 }
@@ -1114,6 +1120,38 @@ mod tests {
             resolve(&arguments, None).target_dir,
             source_root.as_path().join("changed-source-target")
         );
+    }
+
+    #[test]
+    fn path_install_directory_flags_rebase_the_source_and_target() {
+        let source = cargo_fixture();
+        let source_root = fixture_root(source.path());
+        let caller = source_root.parent().unwrap();
+        let directory = source_root.file_name().unwrap().to_str().unwrap();
+        for flags in [
+            vec!["--directory".into(), directory.into()],
+            vec![format!("--directory={directory}")],
+            vec!["-C".into(), directory.into()],
+            vec![format!("-C{directory}")],
+        ] {
+            let mut arguments = flags;
+            arguments.extend(
+                [
+                    "install",
+                    "--path",
+                    ".",
+                    "--target-dir",
+                    "shared",
+                    "--offline",
+                ]
+                .map(str::to_owned),
+            );
+            let roots =
+                resolve_reported_in(None, OsStr::new("cargo"), &arguments, caller, None).unwrap();
+            assert_eq!(roots.workspace_root, source_root);
+            assert_eq!(roots.target_dir, source_root.join("shared"));
+            assert!(roots.target_dir_requested);
+        }
     }
 
     #[test]
