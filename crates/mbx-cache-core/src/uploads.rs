@@ -334,6 +334,16 @@ impl UploadQueue {
     /// this queue never held is not reported: it was published by an earlier
     /// session, which is what a manifest baseline is made of.
     pub(crate) async fn wait_for_actions(&self, actions: &[CacheDigest]) -> BTreeSet<CacheDigest> {
+        self.wait_for_action_outcomes(actions).await.1
+    }
+
+    /// Wait for action results while preserving which ones this queue actually
+    /// held. A successful queued upload is proof that a locally observed value
+    /// may be advertised even when it was not in the remote manifest baseline.
+    pub(crate) async fn wait_for_action_outcomes(
+        &self,
+        actions: &[CacheDigest],
+    ) -> (BTreeSet<CacheDigest>, BTreeSet<CacheDigest>) {
         let tickets: Vec<(CacheDigest, UploadTicket)> = {
             let queued = self.inner.action_tickets.lock().unwrap();
             actions
@@ -345,13 +355,14 @@ impl UploadQueue {
                 })
                 .collect()
         };
+        let held = tickets.iter().map(|(action, _)| action.clone()).collect();
         let mut unpublished = BTreeSet::new();
         for (action, ticket) in tickets {
             if !ticket.await.published() {
                 unpublished.insert(action);
             }
         }
-        unpublished
+        (held, unpublished)
     }
 
     /// Publish everything queued, then stop the worker.

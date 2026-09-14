@@ -1,8 +1,7 @@
-use super::TASK_ACTION_MANIFEST_VERSION;
-use crate::{CacheDigest, TaskActionManifest};
+use super::{MAX_TASK_ACTION_PREDICTIONS, TASK_ACTION_MANIFEST_VERSION};
+use crate::{ActionPrediction, CacheDigest, TaskActionManifest};
 use eyre::{Context, Result, bail};
-use log::warn;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -68,46 +67,100 @@ pub(super) fn validate_task_manifest(manifest: &TaskActionManifest, task: &str) 
     }
 }
 
+/// Refresh preferred values at the back of the durable LRU, then retire the
+/// oldest unprotected history needed to keep the manifest bounded.
+pub(super) fn update_task_predictions(
+    predictions: Vec<ActionPrediction>,
+    updates: &BTreeMap<CacheDigest, ActionPrediction>,
+    protected: &BTreeSet<CacheDigest>,
+) -> Result<Vec<ActionPrediction>> {
+    update_task_predictions_in_order(predictions, updates.values().cloned().collect(), protected)
+}
+
+fn update_task_predictions_in_order(
+    predictions: Vec<ActionPrediction>,
+    updates: Vec<ActionPrediction>,
+    protected: &BTreeSet<CacheDigest>,
+) -> Result<Vec<ActionPrediction>> {
+    if protected.len() > MAX_TASK_ACTION_PREDICTIONS {
+        bail!("this task run contains too many action predictions");
+    }
+    let update_invocations: BTreeSet<_> = updates
+        .iter()
+        .map(|prediction| prediction.invocation.clone())
+        .collect();
+    let mut predictions: Vec<_> = predictions
+        .into_iter()
+        .filter(|prediction| !update_invocations.contains(&prediction.invocation))
+        .collect();
+    predictions.extend(updates);
+    let mut excess = predictions
+        .len()
+        .saturating_sub(MAX_TASK_ACTION_PREDICTIONS);
+    let mut kept = Vec::with_capacity(predictions.len() - excess);
+    for prediction in predictions {
+        if excess > 0 && !protected.contains(&prediction.invocation) {
+            excess -= 1;
+        } else {
+            kept.push(prediction);
+        }
+    }
+    Ok(kept)
+}
+
+/// Merge two manifest snapshots through the same bounded durable-LRU rule.
+///
+/// `required` values from the update side win over the base. `fallbacks` win
+/// only when the base has no newer value for the invocation. Other overlap is
+/// inherited from the base, while update-only history remains eligible for
+/// pruning before either kind of preferred value.
 pub(super) fn merge_task_manifests(
     task: &str,
-    base: Option<TaskActionManifest>,
+    base: TaskActionManifest,
     update: TaskActionManifest,
+    required: &BTreeSet<CacheDigest>,
+    fallbacks: &BTreeSet<CacheDigest>,
 ) -> Result<TaskActionManifest> {
+    validate_task_manifest(&base, task)?;
     validate_task_manifest(&update, task)?;
-    let mut predictions = BTreeMap::new();
-    if let Some(base) = base {
-        validate_task_manifest(&base, task)?;
-        predictions.extend(
-            base.predictions
-                .into_iter()
-                .map(|prediction| (prediction.invocation.clone(), prediction)),
-        );
-    }
-    predictions.extend(
-        update
-            .predictions
-            .into_iter()
-            .map(|prediction| (prediction.invocation.clone(), prediction)),
-    );
+    let base_predictions: BTreeMap<_, _> = base
+        .predictions
+        .iter()
+        .map(|prediction| (prediction.invocation.clone(), prediction.clone()))
+        .collect();
+    let updates: Vec<_> = update
+        .predictions
+        .iter()
+        .filter(|prediction| {
+            required.contains(&prediction.invocation)
+                || (fallbacks.contains(&prediction.invocation)
+                    && base_predictions
+                        .get(&prediction.invocation)
+                        .is_none_or(|base| base == *prediction))
+        })
+        .cloned()
+        .collect();
+    let protected = required
+        .iter()
+        .cloned()
+        .chain(
+            updates
+                .iter()
+                .map(|prediction| prediction.invocation.clone()),
+        )
+        .collect();
+    let predictions = update
+        .predictions
+        .into_iter()
+        .filter(|prediction| !base_predictions.contains_key(&prediction.invocation))
+        .chain(base.predictions)
+        .collect();
+    let predictions = update_task_predictions_in_order(predictions, updates, &protected)?;
     let manifest = TaskActionManifest {
         version: TASK_ACTION_MANIFEST_VERSION,
         task: task.to_owned(),
-        predictions: predictions.into_values().collect(),
+        predictions,
     };
     validate_task_manifest(&manifest, task)?;
     Ok(manifest)
-}
-
-pub(super) fn merge_remote_task_manifest(
-    task: &str,
-    remote: TaskActionManifest,
-    local: TaskActionManifest,
-) -> (TaskActionManifest, bool) {
-    match merge_task_manifests(task, Some(remote), local.clone()) {
-        Ok(manifest) => (manifest, true),
-        Err(error) => {
-            warn!("remote task action manifest merge failed for {task}: {error}");
-            (local, false)
-        }
-    }
 }

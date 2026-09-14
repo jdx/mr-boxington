@@ -37,7 +37,7 @@ pub use file_digest::{
 };
 pub use manifest::{is_task_identity, task_manifest_actions};
 use manifest::{
-    merge_remote_task_manifest, merge_task_manifests, task_manifest_dir, validate_task_identity,
+    merge_task_manifests, task_manifest_dir, update_task_predictions, validate_task_identity,
     validate_task_manifest,
 };
 pub use stats::{AgentStats, CompilerStats};
@@ -52,6 +52,7 @@ const MAX_EXECUTABLE_IDENTITY_SIZE: usize = 64 * 1024;
 const MAX_EXECUTABLE_IDENTITY_BYTES: usize = 256 * 1024;
 const TASK_ACTION_MANIFEST_VERSION: u8 = 1;
 const MAX_TASK_ACTION_PREDICTIONS: usize = 16 * 1024;
+const TASK_ACTION_LRU_REFRESH_MARGIN: usize = MAX_TASK_ACTION_PREDICTIONS / 16;
 /// Longest shim diagnostic the agent accepts, in bytes.
 const MAX_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 /// Most distinct shim diagnostics one session surfaces before going quiet.
@@ -444,6 +445,19 @@ struct TaskActionState {
     /// rewrite the manifest; nor is a prediction that moved and then moved
     /// back, which is why the baseline value is kept rather than a flag.
     changed_predictions: BTreeMap<CacheDigest, Option<ActionPrediction>>,
+    /// Values observed in the remote manifest when this run began. `None`
+    /// means provenance is unknown because the lookup failed or the baseline
+    /// was inherited locally; it must not make every inherited value look
+    /// unpublished.
+    remote_predictions: Option<BTreeMap<CacheDigest, ActionPrediction>>,
+    /// The ordered remote snapshot associated with `remote_etag`. A
+    /// read-write publisher merges this back immediately before its PUT so a
+    /// bounded begin-time view cannot retract remote-only history.
+    remote_manifest: Option<TaskActionManifest>,
+    /// The task identity has a useful local baseline but no known remote copy.
+    /// Even an otherwise hit-only run must publish an inherited or missing
+    /// remote manifest once.
+    remote_publication_needed: bool,
     prefetched_adapters: BTreeSet<String>,
     remote_etag: Option<String>,
 }
@@ -468,6 +482,219 @@ fn activate_prediction_adapter(
         )
     });
     (prediction, prefetch)
+}
+
+/// Protect this run's complete working set and then as many of the newest
+/// concurrent changes as the bounded manifest can carry.
+fn required_local_predictions(
+    predictions: &[ActionPrediction],
+    updates: &BTreeMap<CacheDigest, ActionPrediction>,
+    concurrent_updates: &BTreeMap<CacheDigest, ActionPrediction>,
+) -> BTreeSet<CacheDigest> {
+    let mut required: BTreeSet<_> = updates.keys().cloned().collect();
+    for prediction in predictions.iter().rev() {
+        if required.len() == MAX_TASK_ACTION_PREDICTIONS {
+            break;
+        }
+        if concurrent_updates.contains_key(&prediction.invocation) {
+            required.insert(prediction.invocation.clone());
+        }
+    }
+    required
+}
+
+/// Find disk values written after this run began, using the saved pre-recording
+/// value for invocations this run also changed.
+fn concurrent_task_predictions(
+    predictions: &[ActionPrediction],
+    state: &TaskActionState,
+) -> BTreeMap<CacheDigest, ActionPrediction> {
+    predictions
+        .iter()
+        .filter(|prediction| {
+            let baseline = match state.changed_predictions.get(&prediction.invocation) {
+                Some(baseline) => baseline.as_ref(),
+                None => state.predictions.get(&prediction.invocation),
+            };
+            baseline != Some(*prediction)
+        })
+        .map(|prediction| (prediction.invocation.clone(), prediction.clone()))
+        .collect()
+}
+
+/// Turn hit re-recordings into LRU refreshes of the value current at commit
+/// time. A run that actually introduced or changed a prediction remains
+/// authoritative; a hit on its unchanged baseline must not clobber a newer
+/// concurrent value for the same invocation.
+fn effective_task_updates(
+    predictions: &[ActionPrediction],
+    state: &TaskActionState,
+) -> BTreeMap<CacheDigest, ActionPrediction> {
+    let current: BTreeMap<_, _> = predictions
+        .iter()
+        .map(|prediction| (prediction.invocation.clone(), prediction))
+        .collect();
+    state
+        .pending_predictions
+        .iter()
+        .map(|(invocation, update)| {
+            let unchanged_hit = !state.changed_predictions.contains_key(invocation);
+            let effective = if unchanged_hit {
+                current.get(invocation).copied().unwrap_or(update).clone()
+            } else {
+                update.clone()
+            };
+            (invocation.clone(), effective)
+        })
+        .collect()
+}
+
+fn should_refresh_task_prediction_order(prediction_count: usize, has_recorded: bool) -> bool {
+    has_recorded && prediction_count >= MAX_TASK_ACTION_PREDICTIONS - TASK_ACTION_LRU_REFRESH_MARGIN
+}
+
+/// Choose the last remotely observed value for every prediction this run
+/// replaces. A local-only value is not proof that its action was published.
+fn replaced_task_predictions(
+    remote: &BTreeMap<CacheDigest, ActionPrediction>,
+    candidates: &BTreeSet<CacheDigest>,
+) -> Vec<ActionPrediction> {
+    candidates
+        .iter()
+        .filter_map(|invocation| remote.get(invocation).cloned())
+        .collect()
+}
+
+/// Decide which local values may outrank a remote manifest during publication.
+///
+/// Values changed by this run and concurrent local writers are authoritative
+/// once their actions are publishable. An unchanged hit is only an LRU hint:
+/// it must not replace a newer value learned remotely after this run began.
+fn remote_publication_precedence(
+    state: &TaskActionState,
+    completed: &[ActionPrediction],
+    concurrent_updates: &BTreeMap<CacheDigest, ActionPrediction>,
+    proven_uploads: &BTreeSet<CacheDigest>,
+    published: &BTreeMap<CacheDigest, &ActionPrediction>,
+    withheld: &BTreeSet<CacheDigest>,
+) -> (BTreeSet<CacheDigest>, BTreeSet<CacheDigest>) {
+    let publication_base_invocations: BTreeSet<_> = state
+        .remote_manifest
+        .iter()
+        .flat_map(|manifest| manifest.predictions.iter())
+        .map(|prediction| prediction.invocation.clone())
+        .collect();
+    let unchanged_hits: BTreeSet<_> = completed
+        .iter()
+        .filter(|prediction| {
+            !state
+                .changed_predictions
+                .contains_key(&prediction.invocation)
+        })
+        .map(|prediction| prediction.invocation.clone())
+        .collect();
+    let required = completed
+        .iter()
+        .filter(|prediction| !unchanged_hits.contains(&prediction.invocation))
+        .chain(concurrent_updates.values().filter(|prediction| {
+            state.remote_predictions.is_some() || proven_uploads.contains(&prediction.action)
+        }))
+        .filter(|prediction| {
+            !withheld.contains(&prediction.invocation)
+                && published.get(&prediction.invocation).copied() == Some(*prediction)
+        })
+        .map(|prediction| prediction.invocation.clone())
+        .collect();
+    let fallbacks = withheld
+        .iter()
+        .filter(|invocation| published.contains_key(*invocation))
+        .cloned()
+        .chain(
+            unchanged_hits
+                .into_iter()
+                .filter(|invocation| published.contains_key(invocation)),
+        )
+        .chain(
+            concurrent_updates
+                .iter()
+                .filter(|(invocation, prediction)| {
+                    state.remote_predictions.is_none()
+                        && !proven_uploads.contains(&prediction.action)
+                        && published.contains_key(*invocation)
+                })
+                .map(|(invocation, _)| invocation.clone()),
+        )
+        .chain(
+            published
+                .keys()
+                .filter(|invocation| {
+                    state.remote_predictions.is_none()
+                        && state.remote_manifest.is_some()
+                        && !publication_base_invocations.contains(*invocation)
+                })
+                .cloned(),
+        )
+        .collect();
+    (required, fallbacks)
+}
+
+/// Combine baseline provenance with this queue's observed upload outcomes.
+/// A held action is proven only when it is absent from the failed set.
+fn unpublished_task_actions(
+    mut unproven: BTreeSet<CacheDigest>,
+    held: &BTreeSet<CacheDigest>,
+    failed: BTreeSet<CacheDigest>,
+) -> BTreeSet<CacheDigest> {
+    unproven.retain(|action| !held.contains(action));
+    unproven.extend(failed);
+    unproven
+}
+
+/// Find final values the task's remote baseline does not prove were published.
+fn unproven_task_predictions<'a>(
+    predictions: impl IntoIterator<Item = &'a ActionPrediction>,
+    remote: &BTreeMap<CacheDigest, ActionPrediction>,
+) -> BTreeMap<CacheDigest, CacheDigest> {
+    predictions
+        .into_iter()
+        .filter(|prediction| remote.get(&prediction.invocation) != Some(*prediction))
+        .map(|prediction| (prediction.invocation.clone(), prediction.action.clone()))
+        .collect()
+}
+
+/// Remove new or replacement predictions whose actions did not publish,
+/// restoring only the last value observed in the remote manifest.
+fn withhold_unpublished_updates(
+    manifest: &mut TaskActionManifest,
+    candidates: &BTreeSet<CacheDigest>,
+    replaced: &[ActionPrediction],
+    unpublished: &BTreeSet<CacheDigest>,
+) -> BTreeSet<CacheDigest> {
+    let withheld: BTreeSet<_> = manifest
+        .predictions
+        .iter()
+        .filter(|prediction| {
+            candidates.contains(&prediction.invocation) && unpublished.contains(&prediction.action)
+        })
+        .map(|prediction| prediction.invocation.clone())
+        .collect();
+    manifest
+        .predictions
+        .retain(|prediction| !withheld.contains(&prediction.invocation));
+    let mut retained: BTreeSet<_> = manifest
+        .predictions
+        .iter()
+        .map(|prediction| prediction.invocation.clone())
+        .collect();
+    for previous in replaced.iter().rev() {
+        if withheld.contains(&previous.invocation) && retained.insert(previous.invocation.clone()) {
+            // This invocation was used by the current run. Keep its last
+            // published value at the newest end of the durable LRU even though
+            // the replacement could not be advertised.
+            manifest.predictions.push(previous.clone());
+        }
+    }
+    withheld
 }
 
 struct PrefetchedAction {
@@ -816,24 +1043,33 @@ impl CacheAgent {
                     .unwrap_or_default(),
             );
         }
-        let (remote_manifest, mut remote_etag) = if self.remote_mode.reads() {
-            match self.get_remote_task_manifest(task).await {
-                Ok(Some((manifest, etag))) => (Some(manifest), Some(etag)),
-                Ok(None) => (None, None),
-                Err(error) => {
-                    if strict {
-                        return Err(error).wrap_err_with(|| {
-                            format!("remote task action manifest lookup failed for {task}")
-                        });
+        let (remote_manifest, mut remote_etag, mut remote_predictions, remote_missing) =
+            if self.remote.is_some() && self.remote_mode.reads() {
+                match self.get_remote_task_manifest(task).await {
+                    Ok(Some((manifest, etag))) => {
+                        let predictions = manifest
+                            .predictions
+                            .iter()
+                            .map(|prediction| (prediction.invocation.clone(), prediction.clone()))
+                            .collect();
+                        (Some(manifest), Some(etag), Some(predictions), false)
                     }
-                    self.note_remote_failure();
-                    warn!("remote task action manifest lookup failed for {task}: {error}");
-                    (None, None)
+                    Ok(None) => (None, None, Some(BTreeMap::new()), true),
+                    Err(error) => {
+                        if strict {
+                            return Err(error).wrap_err_with(|| {
+                                format!("remote task action manifest lookup failed for {task}")
+                            });
+                        }
+                        self.note_remote_failure();
+                        warn!("remote task action manifest lookup failed for {task}: {error}");
+                        (None, None, None, false)
+                    }
                 }
-            }
-        } else {
-            (None, None)
-        };
+            } else {
+                (None, None, None, false)
+            };
+        let remote_publication_base = remote_manifest.clone();
         // Without a remote there is nothing to reconcile: the manifest just
         // read is the whole truth, and writing it back byte for byte would
         // serialize every prediction for nothing.
@@ -841,31 +1077,58 @@ impl CacheAgent {
             let _write_guard = self.manifest_write_lock.lock().unwrap();
             let _file_guard = self.lock_task_manifest(task)?;
             let local_manifest = self.load_task_manifest(task)?;
+            let local_baseline = local_manifest.clone();
             let manifest = match (remote_manifest, local_manifest) {
                 (Some(remote), Some(local)) => {
-                    let (manifest, merged) = merge_remote_task_manifest(task, remote, local);
-                    if !merged {
-                        remote_etag = None;
+                    let required = local
+                        .predictions
+                        .iter()
+                        .map(|prediction| prediction.invocation.clone())
+                        .collect();
+                    match merge_task_manifests(
+                        task,
+                        remote,
+                        local.clone(),
+                        &required,
+                        &BTreeSet::new(),
+                    ) {
+                        Ok(manifest) => Some(manifest),
+                        Err(error) => {
+                            warn!("remote task action manifest merge failed for {task}: {error}");
+                            remote_etag = None;
+                            Some(local)
+                        }
                     }
-                    Some(manifest)
                 }
                 (Some(remote), None) => Some(remote),
                 (None, local) => local,
             };
-            if let Some(manifest) = &manifest {
+            if manifest != local_baseline
+                && let Some(manifest) = &manifest
+            {
                 self.persist_task_manifest(manifest)?;
             }
             manifest
         } else {
             early_manifest
         };
-        let (manifest, remote_etag) = match manifest {
-            Some(manifest) => (Some(manifest), remote_etag),
+        let (manifest, remote_etag, inherited) = match manifest {
+            Some(manifest) => (Some(manifest), remote_etag, false),
             // Inherited from another identity, so the remote's copy of that
             // one is no precondition for publishing under this one.
-            None => (self.inherit_task_manifest(task, strict).await?, None),
+            None => {
+                let (manifest, inherited_provenance, inherited) =
+                    self.inherit_task_manifest(task, strict).await?;
+                if inherited {
+                    remote_predictions = inherited_provenance;
+                }
+                (manifest, None, inherited)
+            }
         };
         let mut state = if let Some(manifest) = manifest {
+            let write_only_baseline = self.remote_mode.writes()
+                && !self.remote_mode.reads()
+                && !manifest.predictions.is_empty();
             TaskActionState {
                 manifest: task.to_string(),
                 baseline_loaded: true,
@@ -876,6 +1139,11 @@ impl CacheAgent {
                     .collect(),
                 pending_predictions: BTreeMap::new(),
                 changed_predictions: BTreeMap::new(),
+                remote_predictions,
+                remote_manifest: remote_publication_base,
+                remote_publication_needed: self.remote.is_some()
+                    && self.remote_mode.writes()
+                    && (remote_missing || inherited || write_only_baseline),
                 prefetched_adapters: BTreeSet::new(),
                 remote_etag,
             }
@@ -883,6 +1151,8 @@ impl CacheAgent {
             TaskActionState {
                 manifest: task.to_string(),
                 baseline_loaded: true,
+                remote_predictions,
+                remote_manifest: remote_publication_base,
                 remote_etag,
                 ..TaskActionState::default()
             }
@@ -934,10 +1204,14 @@ impl CacheAgent {
         &self,
         task: &str,
         strict: bool,
-    ) -> Result<Option<TaskActionManifest>> {
+    ) -> Result<(
+        Option<TaskActionManifest>,
+        Option<BTreeMap<CacheDigest, ActionPrediction>>,
+        bool,
+    )> {
         let fallbacks = self.task_fallbacks.lock().unwrap().get(task).cloned();
         let Some(fallbacks) = fallbacks else {
-            return Ok(None);
+            return Ok((None, None, false));
         };
         let named = tokio::task::spawn_blocking(move || fallbacks()).await?;
         let mut tried = BTreeSet::from([task.to_string()]);
@@ -951,20 +1225,38 @@ impl CacheAgent {
                 continue;
             }
             let mut found = self.load_task_manifest(&identity)?;
-            if found.is_none() && named && self.remote_mode.reads() {
-                found = match self.get_remote_task_manifest(&identity).await {
-                    Ok(manifest) => manifest.map(|(manifest, _)| manifest),
+            let mut provenance = None;
+            if self.remote_mode.reads() && (found.is_some() || named) {
+                match self.get_remote_task_manifest(&identity).await {
+                    Ok(Some((remote, _))) => {
+                        provenance = Some(
+                            remote
+                                .predictions
+                                .iter()
+                                .map(|prediction| {
+                                    (prediction.invocation.clone(), prediction.clone())
+                                })
+                                .collect(),
+                        );
+                        if found.is_none() {
+                            found = Some(remote);
+                        }
+                    }
+                    Ok(None) => provenance = Some(BTreeMap::new()),
                     Err(error) => {
-                        if strict {
+                        // A local fallback is already useful without remote
+                        // provenance. Keep that baseline with unknown
+                        // provenance rather than making strict prefetch fail
+                        // because its optional proof lookup was unavailable.
+                        if strict && found.is_none() {
                             return Err(error).wrap_err_with(|| {
                                 format!("remote task action manifest lookup failed for {identity}")
                             });
                         }
                         self.note_remote_failure();
                         warn!("remote task action manifest lookup failed for {identity}: {error}");
-                        None
                     }
-                };
+                }
             }
             let Some(mut manifest) = found else {
                 continue;
@@ -986,12 +1278,12 @@ impl CacheAgent {
             // fallbacks were being found. What it wrote describes this
             // lockfile and wins over an inheritance.
             if let Some(recorded) = self.load_task_manifest(task)? {
-                return Ok(Some(recorded));
+                return Ok((Some(recorded), None, false));
             }
             self.persist_task_manifest(&manifest)?;
-            return Ok(Some(manifest));
+            return Ok((Some(manifest), provenance, true));
         }
-        Ok(None)
+        Ok((None, None, false))
     }
 
     /// The identities of the store's most recently written manifests.
@@ -1067,7 +1359,7 @@ impl CacheAgent {
     /// mistake that cumulative manifest for the work the run completed.
     pub async fn commit_task_actions(&self, run: &str) -> Result<Vec<ActionPrediction>> {
         validate_task_identity(run)?;
-        let state = {
+        let mut state = {
             let mut runs = self.task_actions.lock().unwrap();
             let state = runs
                 .get(run)
@@ -1075,19 +1367,23 @@ impl CacheAgent {
             if !state.baseline_loaded {
                 bail!("task action manifest baseline was not loaded");
             }
-            // A run that predicted nothing new leaves the manifest as it found
-            // it. Rewriting it would serialize every inherited prediction to
-            // say so, and a remote that is only read has nothing to learn
-            // either. Decided before the baseline is cloned: the baseline is
-            // every prediction the manifest holds.
+            // A hit-only run leaves a comfortably bounded manifest as it found
+            // it. Refresh durable LRU order only near the cap, where it can
+            // affect the next pruning decision, or when this task identity
+            // still needs its first remote publication.
             debug!(
                 "committing {} changed of {} recorded predictions for {}",
                 state.changed_predictions.len(),
                 state.pending_predictions.len(),
                 state.manifest
             );
+            let refresh_hit_order = should_refresh_task_prediction_order(
+                state.predictions.len(),
+                !state.pending_predictions.is_empty(),
+            );
             if state.changed_predictions.is_empty()
-                && (self.remote.is_none() || !self.remote_mode.writes())
+                && !refresh_hit_order
+                && !state.remote_publication_needed
             {
                 let completed = state.pending_predictions.values().cloned().collect();
                 runs.remove(run);
@@ -1095,49 +1391,99 @@ impl CacheAgent {
             }
             state.clone()
         };
-        let task = state.manifest;
+        let task = state.manifest.clone();
         validate_task_identity(&task)?;
+        let write_only = self.remote_mode.writes() && !self.remote_mode.reads();
+        // Write-only mode does not use remote predictions for cache hits, but
+        // it still needs the current manifest as a publication precondition
+        // and provenance baseline. The conditional update path may read the
+        // same metadata after a conflict, so doing it up front does not weaken
+        // the mode's promise not to satisfy build lookups from the remote.
+        let write_only_remote = if write_only {
+            match self.get_remote_task_manifest(&task).await {
+                Ok(Some((manifest, etag))) => {
+                    let remote_predictions: BTreeMap<_, _> = manifest
+                        .predictions
+                        .iter()
+                        .map(|prediction| (prediction.invocation.clone(), prediction.clone()))
+                        .collect();
+                    let has_missing_fallback = state
+                        .predictions
+                        .keys()
+                        .any(|invocation| !remote_predictions.contains_key(invocation));
+                    state.remote_predictions = if has_missing_fallback {
+                        None
+                    } else {
+                        Some(remote_predictions)
+                    };
+                    state.remote_etag = Some(etag);
+                    state.remote_manifest = Some(manifest.clone());
+                    // Same-valued or conflicting remote entries already cover
+                    // this unknown-provenance baseline. Missing invocations do
+                    // not: publish those as fallbacks without letting a stale
+                    // local value overwrite a value the remote already knows.
+                    state.remote_publication_needed = has_missing_fallback;
+                    Some(manifest)
+                }
+                Ok(None) => {
+                    state.remote_predictions = if state.predictions.is_empty() {
+                        Some(BTreeMap::new())
+                    } else {
+                        None
+                    };
+                    state.remote_publication_needed = !state.predictions.is_empty();
+                    None
+                }
+                Err(error) => {
+                    state.remote_predictions = None;
+                    state.remote_publication_needed = false;
+                    self.note_remote_failure();
+                    warn!("remote task action manifest lookup failed for {task}: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let completed = state
             .pending_predictions
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        let (manifest, introduced) = {
+        if write_only
+            && state.changed_predictions.is_empty()
+            && !should_refresh_task_prediction_order(
+                state.predictions.len(),
+                !state.pending_predictions.is_empty(),
+            )
+            && !state.remote_publication_needed
+        {
+            self.task_actions.lock().unwrap().remove(run);
+            return Ok(completed);
+        }
+        let (manifest, concurrent_updates) = {
             let _write_guard = self.manifest_write_lock.lock().unwrap();
             let _file_guard = self.lock_task_manifest(&task)?;
-            let mut predictions = self
-                .load_task_manifest(&task)?
-                .map(|manifest| {
-                    manifest
-                        .predictions
-                        .into_iter()
-                        .map(|prediction| (prediction.invocation.clone(), prediction))
-                        .collect::<BTreeMap<_, _>>()
-                })
+            let current_manifest = self.load_task_manifest(&task)?;
+            let predictions = current_manifest
+                .as_ref()
+                .map(|manifest| manifest.predictions.clone())
                 .unwrap_or_default();
-            // Which predictions this run adds, as opposed to inherits. Only a
-            // new one may be withheld for a failed upload: retracting an
-            // inherited one would un-advertise a result that is plausibly still
-            // on the server from whichever session put it there.
-            let introduced: BTreeSet<CacheDigest> = state
-                .pending_predictions
-                .keys()
-                .filter(|invocation| !predictions.contains_key(*invocation))
-                .cloned()
-                .collect();
-            // Only publish predictions recorded by this run. `predictions`
-            // also contains the baseline loaded by `begin_task`; extending
-            // with that snapshot would overwrite newer entries committed by
-            // another agent process after this run began.
-            predictions.extend(state.pending_predictions);
+            let concurrent_updates = concurrent_task_predictions(&predictions, &state);
+            let effective_updates = effective_task_updates(&predictions, &state);
+            let required =
+                required_local_predictions(&predictions, &effective_updates, &concurrent_updates);
+            let predictions = update_task_predictions(predictions, &effective_updates, &required)?;
             let manifest = TaskActionManifest {
                 version: TASK_ACTION_MANIFEST_VERSION,
                 task: task.clone(),
-                predictions: predictions.into_values().collect(),
+                predictions,
             };
             validate_task_manifest(&manifest, &task)?;
-            self.persist_task_manifest(&manifest)?;
-            (manifest, introduced)
+            if current_manifest.as_ref() != Some(&manifest) {
+                self.persist_task_manifest(&manifest)?;
+            }
+            (manifest, concurrent_updates)
         };
         self.task_actions.lock().unwrap().remove(run);
         if self.remote_mode.writes() {
@@ -1145,36 +1491,88 @@ impl CacheAgent {
             // reach the remote cache before the results a reader would then go
             // looking for -- nor name a result that never got there at all.
             let mut manifest = manifest;
-            if let Some(uploads) = &self.uploads {
+            let (held, failed) = if let Some(uploads) = &self.uploads {
                 let actions: Vec<CacheDigest> = manifest
                     .predictions
                     .iter()
                     .map(|prediction| prediction.action.clone())
                     .collect();
-                let unpublished = uploads.wait_for_actions(&actions).await;
-                let withheld = manifest
-                    .predictions
-                    .iter()
-                    .filter(|prediction| {
-                        introduced.contains(&prediction.invocation)
-                            && unpublished.contains(&prediction.action)
-                    })
-                    .count();
-                if withheld > 0 {
-                    // The local manifest keeps them: this checkout can still use
-                    // what it built, and a later session can publish it.
-                    warn!(
-                        "{withheld} of {} predicted actions were not published, so the remote task action manifest omits them",
-                        manifest.predictions.len()
-                    );
-                    manifest.predictions.retain(|prediction| {
-                        !(introduced.contains(&prediction.invocation)
-                            && unpublished.contains(&prediction.action))
-                    });
-                }
+                uploads.wait_for_action_outcomes(&actions).await
+            } else {
+                (BTreeSet::new(), BTreeSet::new())
+            };
+            let proven_uploads = held.difference(&failed).cloned().collect();
+            let (withhold_candidates, replaced, unpublished) =
+                if let Some(remote_predictions) = &state.remote_predictions {
+                    let unproven_predictions =
+                        unproven_task_predictions(&manifest.predictions, remote_predictions);
+                    let unproven = unproven_predictions.values().cloned().collect();
+                    let candidates = unproven_predictions.keys().cloned().collect();
+                    let replaced = replaced_task_predictions(remote_predictions, &candidates);
+                    // A successful upload by this queue proves an otherwise
+                    // local-only value is now safe to advertise.
+                    let unpublished = unpublished_task_actions(unproven, &held, failed);
+                    (candidates, replaced, unpublished)
+                } else {
+                    // Unknown provenance must not turn an inherited baseline
+                    // into thousands of false negatives. Still withhold values
+                    // this run actually changed unless its own upload proves
+                    // them publishable.
+                    let candidates: BTreeSet<_> = state
+                        .changed_predictions
+                        .keys()
+                        .filter(|invocation| {
+                            manifest
+                                .predictions
+                                .iter()
+                                .any(|prediction| &prediction.invocation == *invocation)
+                        })
+                        .cloned()
+                        .collect();
+                    let unproven = manifest
+                        .predictions
+                        .iter()
+                        .filter(|prediction| candidates.contains(&prediction.invocation))
+                        .map(|prediction| prediction.action.clone())
+                        .collect();
+                    let unpublished = unpublished_task_actions(unproven, &held, failed);
+                    (candidates, Vec::new(), unpublished)
+                };
+            let prediction_count = manifest.predictions.len();
+            let withheld = withhold_unpublished_updates(
+                &mut manifest,
+                &withhold_candidates,
+                &replaced,
+                &unpublished,
+            );
+            if !withheld.is_empty() {
+                // The local manifest keeps them: this checkout can still use
+                // what it built, and a later session can publish it.
+                warn!(
+                    "{} of {} predicted actions were not published, so the remote task action manifest omits them",
+                    withheld.len(),
+                    prediction_count
+                );
+            }
+            let published: BTreeMap<_, _> = manifest
+                .predictions
+                .iter()
+                .map(|prediction| (prediction.invocation.clone(), prediction))
+                .collect();
+            let (required, fallbacks) = remote_publication_precedence(
+                &state,
+                &completed,
+                &concurrent_updates,
+                &proven_uploads,
+                &published,
+                &withheld,
+            );
+            let publication_base = write_only_remote.or(state.remote_manifest);
+            if let Some(remote) = publication_base {
+                manifest = merge_task_manifests(&task, remote, manifest, &required, &fallbacks)?;
             }
             match self
-                .put_remote_task_manifest(&task, manifest, state.remote_etag)
+                .put_remote_task_manifest(&task, manifest, state.remote_etag, &required, &fallbacks)
                 .await
             {
                 Ok(remote_manifest) => {
@@ -1183,7 +1581,26 @@ impl CacheAgent {
                         let _file_guard = self.lock_task_manifest(&task)?;
                         let manifest = match self.load_task_manifest(&task)? {
                             Some(local) => {
-                                merge_remote_task_manifest(&task, remote_manifest, local).0
+                                let required = local
+                                    .predictions
+                                    .iter()
+                                    .map(|prediction| prediction.invocation.clone())
+                                    .collect();
+                                match merge_task_manifests(
+                                    &task,
+                                    remote_manifest,
+                                    local.clone(),
+                                    &required,
+                                    &BTreeSet::new(),
+                                ) {
+                                    Ok(manifest) => manifest,
+                                    Err(error) => {
+                                        warn!(
+                                            "remote task action manifest merge failed for {task}: {error}"
+                                        );
+                                        local
+                                    }
+                                }
                             }
                             None => remote_manifest,
                         };
@@ -1283,6 +1700,8 @@ impl CacheAgent {
         task: &str,
         mut manifest: TaskActionManifest,
         mut expected_etag: Option<String>,
+        required: &BTreeSet<CacheDigest>,
+        fallbacks: &BTreeSet<CacheDigest>,
     ) -> Result<TaskActionManifest> {
         let Some(remote) = &self.remote else {
             return Ok(manifest);
@@ -1304,7 +1723,8 @@ impl CacheAgent {
                         expected_etag = None;
                         continue;
                     };
-                    manifest = merge_task_manifests(task, Some(remote_manifest), manifest)?;
+                    manifest =
+                        merge_task_manifests(task, remote_manifest, manifest, required, fallbacks)?;
                     expected_etag = Some(etag);
                 }
             }
@@ -2310,10 +2730,12 @@ impl CacheAgent {
         prediction.validate()?;
         let mut tasks = self.task_actions.lock().unwrap();
         let state = tasks.entry(task.to_string()).or_default();
-        if !state.predictions.contains_key(&prediction.invocation)
-            && state.predictions.len() >= MAX_TASK_ACTION_PREDICTIONS
+        if !state
+            .pending_predictions
+            .contains_key(&prediction.invocation)
+            && state.pending_predictions.len() >= MAX_TASK_ACTION_PREDICTIONS
         {
-            bail!("task action manifest contains too many predictions");
+            bail!("this task run contains too many action predictions");
         }
         let current = state.predictions.get(&prediction.invocation);
         if current != Some(&prediction) {

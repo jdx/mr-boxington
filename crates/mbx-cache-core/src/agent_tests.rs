@@ -976,6 +976,608 @@ async fn a_task_without_a_manifest_inherits_the_first_fallback_that_has_one() {
 }
 
 #[tokio::test]
+async fn an_unpublished_locally_inherited_fallback_is_withheld_from_its_new_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let mut server = mockito::Server::new_async().await;
+    let previous = "a".repeat(64);
+    let current = "b".repeat(64);
+    let prediction = seeded_predictions(&["locally inherited"]).remove(0);
+    CacheAgent::new(&cache, "test-version")
+        .persist_task_manifest(&TaskActionManifest {
+            version: TASK_ACTION_MANIFEST_VERSION,
+            task: previous.clone(),
+            predictions: vec![prediction.clone()],
+        })
+        .unwrap();
+    let (_, selector) = CacheAgent::task_manifest_selector(&current).unwrap();
+    let missing = server
+        .mock("GET", action_manifest_path(&selector).as_str())
+        .with_status(404)
+        .expect(1)
+        .create_async()
+        .await;
+    let (_, fallback_selector) = CacheAgent::task_manifest_selector(&previous).unwrap();
+    let fallback_missing = server
+        .mock("GET", action_manifest_path(&fallback_selector).as_str())
+        .with_status(404)
+        .expect(1)
+        .create_async()
+        .await;
+    let expected = canonical_json(&TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: current.clone(),
+        predictions: vec![],
+    })
+    .unwrap();
+    let published = server
+        .mock("PUT", action_manifest_path(&selector).as_str())
+        .match_header("if-none-match", "*")
+        .match_body(expected)
+        .with_status(201)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(&server, cache, RemoteCacheMode::ReadWrite);
+    let fallback = previous.clone();
+    agent
+        .register_task_fallbacks(&current, move || vec![fallback.clone()])
+        .unwrap();
+
+    let run = agent.begin_task_on_prediction(&current).await.unwrap();
+    assert!(
+        agent
+            .task_actions
+            .lock()
+            .unwrap()
+            .get(&run)
+            .unwrap()
+            .remote_predictions
+            .as_ref()
+            .is_some_and(BTreeMap::is_empty)
+    );
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::RecordActionPrediction {
+                task: run.clone(),
+                prediction,
+            })
+            .await,
+        AgentResponse::ActionPredictionRecorded
+    ));
+    agent.commit_task(&run).await.unwrap();
+
+    missing.assert_async().await;
+    fallback_missing.assert_async().await;
+    published.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_proven_locally_inherited_fallback_is_published_under_its_new_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let mut server = mockito::Server::new_async().await;
+    let previous = "a".repeat(64);
+    let current = "b".repeat(64);
+    let prediction = seeded_predictions(&["remotely proven fallback"]).remove(0);
+    let fallback_manifest = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: previous.clone(),
+        predictions: vec![prediction.clone()],
+    };
+    CacheAgent::new(&cache, "test-version")
+        .persist_task_manifest(&fallback_manifest)
+        .unwrap();
+    let (_, selector) = CacheAgent::task_manifest_selector(&current).unwrap();
+    let missing = server
+        .mock("GET", action_manifest_path(&selector).as_str())
+        .with_status(404)
+        .expect(1)
+        .create_async()
+        .await;
+    let (_, fallback_selector) = CacheAgent::task_manifest_selector(&previous).unwrap();
+    let fallback_bytes = canonical_json(&fallback_manifest).unwrap();
+    let fallback_etag = blake3::hash(&fallback_bytes).to_hex().to_string();
+    let fallback_found = server
+        .mock("GET", action_manifest_path(&fallback_selector).as_str())
+        .with_status(200)
+        .with_header("etag", &format!("\"{fallback_etag}\""))
+        .with_body(fallback_bytes)
+        .expect(1)
+        .create_async()
+        .await;
+    let expected = canonical_json(&TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: current.clone(),
+        predictions: vec![prediction.clone()],
+    })
+    .unwrap();
+    let published = server
+        .mock("PUT", action_manifest_path(&selector).as_str())
+        .match_header("if-none-match", "*")
+        .match_body(expected)
+        .with_status(201)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(&server, cache, RemoteCacheMode::ReadWrite);
+    let fallback = previous.clone();
+    agent
+        .register_task_fallbacks(&current, move || vec![fallback.clone()])
+        .unwrap();
+
+    let run = agent.begin_task_on_prediction(&current).await.unwrap();
+    let remote_predictions = agent
+        .task_actions
+        .lock()
+        .unwrap()
+        .get(&run)
+        .unwrap()
+        .remote_predictions
+        .clone()
+        .unwrap();
+    assert_eq!(
+        remote_predictions.get(&prediction.invocation),
+        Some(&prediction)
+    );
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::RecordActionPrediction {
+                task: run.clone(),
+                prediction,
+            })
+            .await,
+        AgentResponse::ActionPredictionRecorded
+    ));
+    agent.commit_task(&run).await.unwrap();
+
+    missing.assert_async().await;
+    fallback_found.assert_async().await;
+    published.assert_async().await;
+}
+
+#[tokio::test]
+async fn strict_prefetch_inherits_a_local_fallback_when_its_provenance_lookup_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let mut server = mockito::Server::new_async().await;
+    let previous = "a".repeat(64);
+    let current = "b".repeat(64);
+    CacheAgent::new(&cache, "test-version")
+        .persist_task_manifest(&TaskActionManifest {
+            version: TASK_ACTION_MANIFEST_VERSION,
+            task: previous.clone(),
+            predictions: seeded_predictions(&["local fallback"]),
+        })
+        .unwrap();
+    let (_, current_selector) = CacheAgent::task_manifest_selector(&current).unwrap();
+    let current_missing = server
+        .mock("GET", action_manifest_path(&current_selector).as_str())
+        .with_status(404)
+        .expect(1)
+        .create_async()
+        .await;
+    let (_, fallback_selector) = CacheAgent::task_manifest_selector(&previous).unwrap();
+    let provenance_failure = server
+        .mock("GET", action_manifest_path(&fallback_selector).as_str())
+        .with_status(500)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(&server, cache, RemoteCacheMode::ReadOnly);
+    let fallback = previous.clone();
+    agent
+        .register_task_fallbacks(&current, move || vec![fallback.clone()])
+        .unwrap();
+
+    let run = agent.prefetch_task(&current).await.unwrap();
+
+    let state = agent
+        .task_actions
+        .lock()
+        .unwrap()
+        .get(&run)
+        .unwrap()
+        .clone();
+    assert_eq!(state.predictions.len(), 1);
+    assert!(state.remote_predictions.is_none());
+    current_missing.assert_async().await;
+    provenance_failure.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_concurrent_current_identity_write_keeps_its_known_empty_provenance() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let mut server = mockito::Server::new_async().await;
+    let previous = "a".repeat(64);
+    let current = "b".repeat(64);
+    let fallback_prediction = seeded_predictions(&["fallback candidate"]).remove(0);
+    let current_prediction = seeded_predictions(&["concurrent current value"]).remove(0);
+    CacheAgent::new(&cache, "test-version")
+        .persist_task_manifest(&TaskActionManifest {
+            version: TASK_ACTION_MANIFEST_VERSION,
+            task: previous.clone(),
+            predictions: vec![fallback_prediction],
+        })
+        .unwrap();
+    let (_, selector) = CacheAgent::task_manifest_selector(&current).unwrap();
+    let missing = server
+        .mock("GET", action_manifest_path(&selector).as_str())
+        .with_status(404)
+        .expect(1)
+        .create_async()
+        .await;
+    let (_, fallback_selector) = CacheAgent::task_manifest_selector(&previous).unwrap();
+    let fallback_missing = server
+        .mock("GET", action_manifest_path(&fallback_selector).as_str())
+        .with_status(404)
+        .expect(1)
+        .create_async()
+        .await;
+    let published = server
+        .mock("PUT", action_manifest_path(&selector).as_str())
+        .match_header("if-none-match", "*")
+        .match_body(
+            canonical_json(&TaskActionManifest {
+                version: TASK_ACTION_MANIFEST_VERSION,
+                task: current.clone(),
+                predictions: vec![],
+            })
+            .unwrap(),
+        )
+        .with_status(201)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(&server, cache.clone(), RemoteCacheMode::ReadWrite);
+    let fallback = previous.clone();
+    let concurrent_cache = cache.clone();
+    let concurrent_task = current.clone();
+    let concurrent_prediction = current_prediction.clone();
+    agent
+        .register_task_fallbacks(&current, move || {
+            CacheAgent::new(&concurrent_cache, "test-version")
+                .persist_task_manifest(&TaskActionManifest {
+                    version: TASK_ACTION_MANIFEST_VERSION,
+                    task: concurrent_task.clone(),
+                    predictions: vec![concurrent_prediction.clone()],
+                })
+                .unwrap();
+            vec![fallback.clone()]
+        })
+        .unwrap();
+
+    let run = agent.begin_task_on_prediction(&current).await.unwrap();
+    let state = agent
+        .task_actions
+        .lock()
+        .unwrap()
+        .get(&run)
+        .unwrap()
+        .clone();
+    assert_eq!(state.predictions.len(), 1);
+    assert!(
+        state
+            .remote_predictions
+            .as_ref()
+            .is_some_and(BTreeMap::is_empty)
+    );
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::RecordActionPrediction {
+                task: run.clone(),
+                prediction: current_prediction,
+            })
+            .await,
+        AgentResponse::ActionPredictionRecorded
+    ));
+    agent.commit_task(&run).await.unwrap();
+
+    missing.assert_async().await;
+    fallback_missing.assert_async().await;
+    published.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_failed_begin_lookup_does_not_withhold_or_rewrite_the_local_baseline() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let mut server = mockito::Server::new_async().await;
+    let task = "c".repeat(64);
+    let prediction = seeded_predictions(&["local baseline"]).remove(0);
+    let seed = CacheAgent::new(&cache, "test-version");
+    seed.persist_task_manifest(&TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: vec![prediction.clone()],
+    })
+    .unwrap();
+    let manifest_path = seed.task_manifest_path(&task);
+    let written = std::fs::metadata(&manifest_path).unwrap();
+    let (_, selector) = CacheAgent::task_manifest_selector(&task).unwrap();
+    let failed = server
+        .mock("GET", action_manifest_path(&selector).as_str())
+        .with_status(500)
+        .expect(1)
+        .create_async()
+        .await;
+    let skipped = server
+        .mock("PUT", action_manifest_path(&selector).as_str())
+        .expect(0)
+        .create_async()
+        .await;
+    let agent = remote_agent(&server, cache, RemoteCacheMode::ReadWrite);
+
+    let run = agent.begin_task_on_prediction(&task).await.unwrap();
+    assert!(
+        agent
+            .task_actions
+            .lock()
+            .unwrap()
+            .get(&run)
+            .unwrap()
+            .remote_predictions
+            .is_none()
+    );
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::RecordActionPrediction {
+                task: run.clone(),
+                prediction,
+            })
+            .await,
+        AgentResponse::ActionPredictionRecorded
+    ));
+    agent.commit_task(&run).await.unwrap();
+
+    failed.assert_async().await;
+    skipped.assert_async().await;
+    let unchanged = std::fs::metadata(manifest_path).unwrap();
+    assert_eq!(unchanged.modified().unwrap(), written.modified().unwrap());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        assert_eq!(unchanged.ino(), written.ino(), "the manifest was replaced");
+    }
+}
+
+#[tokio::test]
+async fn a_missing_read_write_manifest_withholds_an_unproven_local_baseline() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let mut server = mockito::Server::new_async().await;
+    let task = "d".repeat(64);
+    let prediction = seeded_predictions(&["unproven local baseline"]).remove(0);
+    CacheAgent::new(&cache, "test-version")
+        .persist_task_manifest(&TaskActionManifest {
+            version: TASK_ACTION_MANIFEST_VERSION,
+            task: task.clone(),
+            predictions: vec![prediction.clone()],
+        })
+        .unwrap();
+    let (_, selector) = CacheAgent::task_manifest_selector(&task).unwrap();
+    let missing = server
+        .mock("GET", action_manifest_path(&selector).as_str())
+        .with_status(404)
+        .expect(1)
+        .create_async()
+        .await;
+    let published = server
+        .mock("PUT", action_manifest_path(&selector).as_str())
+        .match_header("if-none-match", "*")
+        .match_body(
+            canonical_json(&TaskActionManifest {
+                version: TASK_ACTION_MANIFEST_VERSION,
+                task: task.clone(),
+                predictions: vec![],
+            })
+            .unwrap(),
+        )
+        .with_status(201)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(&server, cache, RemoteCacheMode::ReadWrite);
+
+    let run = agent.begin_task_on_prediction(&task).await.unwrap();
+    assert!(
+        agent
+            .task_actions
+            .lock()
+            .unwrap()
+            .get(&run)
+            .unwrap()
+            .remote_predictions
+            .as_ref()
+            .is_some_and(BTreeMap::is_empty)
+    );
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::RecordActionPrediction {
+                task: run.clone(),
+                prediction,
+            })
+            .await,
+        AgentResponse::ActionPredictionRecorded
+    ));
+    agent.commit_task(&run).await.unwrap();
+
+    missing.assert_async().await;
+    published.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_write_only_hit_seeds_a_missing_remote_manifest() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let mut server = mockito::Server::new_async().await;
+    let task = "d".repeat(64);
+    let prediction = seeded_predictions(&["warm local baseline"]).remove(0);
+    let manifest = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: vec![prediction.clone()],
+    };
+    CacheAgent::new(&cache, "test-version")
+        .persist_task_manifest(&manifest)
+        .unwrap();
+    let (_, selector) = CacheAgent::task_manifest_selector(&task).unwrap();
+    let missing = server
+        .mock("GET", action_manifest_path(&selector).as_str())
+        .with_status(404)
+        .expect(1)
+        .create_async()
+        .await;
+    let published = server
+        .mock("PUT", action_manifest_path(&selector).as_str())
+        .match_header("if-none-match", "*")
+        .match_body(canonical_json(&manifest).unwrap())
+        .with_status(201)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(&server, cache, RemoteCacheMode::WriteOnly);
+
+    let run = agent.begin_task_on_prediction(&task).await.unwrap();
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::RecordActionPrediction {
+                task: run.clone(),
+                prediction,
+            })
+            .await,
+        AgentResponse::ActionPredictionRecorded
+    ));
+    agent.commit_task(&run).await.unwrap();
+
+    missing.assert_async().await;
+    published.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_write_only_hit_does_not_republish_an_existing_remote_manifest() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let mut server = mockito::Server::new_async().await;
+    let task = "e".repeat(64);
+    let prediction = seeded_predictions(&["warm local baseline"]).remove(0);
+    let manifest = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: vec![prediction.clone()],
+    };
+    let bytes = canonical_json(&manifest).unwrap();
+    let etag = blake3::hash(&bytes).to_hex().to_string();
+    let seed = CacheAgent::new(&cache, "test-version");
+    seed.persist_task_manifest(&manifest).unwrap();
+    let path = seed.task_manifest_path(&task);
+    let written = std::fs::metadata(&path).unwrap();
+    let (_, selector) = CacheAgent::task_manifest_selector(&task).unwrap();
+    let found = server
+        .mock("GET", action_manifest_path(&selector).as_str())
+        .with_status(200)
+        .with_header("etag", &format!("\"{etag}\""))
+        .with_body(bytes)
+        .expect(1)
+        .create_async()
+        .await;
+    let skipped = server
+        .mock("PUT", action_manifest_path(&selector).as_str())
+        .expect(0)
+        .create_async()
+        .await;
+    let agent = remote_agent(&server, cache, RemoteCacheMode::WriteOnly);
+
+    let run = agent.begin_task_on_prediction(&task).await.unwrap();
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::RecordActionPrediction {
+                task: run.clone(),
+                prediction,
+            })
+            .await,
+        AgentResponse::ActionPredictionRecorded
+    ));
+    agent.commit_task(&run).await.unwrap();
+
+    found.assert_async().await;
+    skipped.assert_async().await;
+    let unchanged = std::fs::metadata(path).unwrap();
+    assert_eq!(unchanged.modified().unwrap(), written.modified().unwrap());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        assert_eq!(unchanged.ino(), written.ino(), "the manifest was replaced");
+    }
+}
+
+#[tokio::test]
+async fn a_write_only_hit_adds_a_fallback_missing_from_the_remote_manifest() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let mut server = mockito::Server::new_async().await;
+    let task = "f".repeat(64);
+    let predictions = seeded_predictions(&["remote baseline", "local-only fallback"]);
+    let local_manifest = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: predictions.clone(),
+    };
+    let remote_manifest = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: vec![predictions[0].clone()],
+    };
+    let remote_bytes = canonical_json(&remote_manifest).unwrap();
+    let etag = blake3::hash(&remote_bytes).to_hex().to_string();
+    let quoted_etag = format!("\"{etag}\"");
+    CacheAgent::new(&cache, "test-version")
+        .persist_task_manifest(&local_manifest)
+        .unwrap();
+    let (_, selector) = CacheAgent::task_manifest_selector(&task).unwrap();
+    let found = server
+        .mock("GET", action_manifest_path(&selector).as_str())
+        .with_status(200)
+        .with_header("etag", &quoted_etag)
+        .with_body(remote_bytes)
+        .expect(1)
+        .create_async()
+        .await;
+    let published = server
+        .mock("PUT", action_manifest_path(&selector).as_str())
+        .match_header("if-match", quoted_etag.as_str())
+        .match_body(
+            canonical_json(&TaskActionManifest {
+                version: TASK_ACTION_MANIFEST_VERSION,
+                task: task.clone(),
+                predictions: vec![predictions[1].clone(), predictions[0].clone()],
+            })
+            .unwrap(),
+        )
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = remote_agent(&server, cache, RemoteCacheMode::WriteOnly);
+
+    let run = agent.begin_task_on_prediction(&task).await.unwrap();
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::RecordActionPrediction {
+                task: run.clone(),
+                prediction: predictions[0].clone(),
+            })
+            .await,
+        AgentResponse::ActionPredictionRecorded
+    ));
+    agent.commit_task(&run).await.unwrap();
+
+    found.assert_async().await;
+    published.assert_async().await;
+}
+
+#[tokio::test]
 async fn the_newest_manifest_in_the_store_is_the_last_resort() {
     let directory = tempfile::tempdir().unwrap();
     let cache = directory.path().join("cache");
@@ -1102,6 +1704,21 @@ async fn a_fallback_manifest_is_fetched_from_the_remote_when_absent_locally() {
     agent.register_task_fallbacks(&current, fallbacks).unwrap();
     let run = agent.begin_task(&current).await.unwrap();
     assert_eq!(agent.stats().predictions_loaded, 1);
+    assert_eq!(
+        agent
+            .task_actions
+            .lock()
+            .unwrap()
+            .get(&run)
+            .unwrap()
+            .remote_predictions
+            .as_ref()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>(),
+        remote_manifest.predictions
+    );
     let adopted = agent.load_task_manifest(&current).unwrap().unwrap();
     assert_eq!(adopted.task, current);
     assert_eq!(adopted.predictions, remote_manifest.predictions);
@@ -1275,6 +1892,47 @@ async fn an_unchanged_prediction_is_receipted_without_rewriting_the_manifest() {
         task_manifest_actions(&cache, &task).unwrap(),
         vec![changed.action]
     );
+}
+
+#[tokio::test]
+async fn a_local_only_hit_below_the_refresh_margin_does_not_reorder_the_manifest() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let task = "8".repeat(64);
+    let predictions = seeded_predictions(&["older hit", "newer untouched"]);
+    let seed = CacheAgent::new(&cache, "test-version");
+    seed.persist_task_manifest(&TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: predictions.clone(),
+    })
+    .unwrap();
+    let manifest_path = seed.task_manifest_path(&task);
+    let before = fs::read(&manifest_path).unwrap();
+    let written = fs::metadata(&manifest_path).unwrap();
+
+    let agent = CacheAgent::new(&cache, "test-version");
+    let run = agent.begin_task(&task).await.unwrap();
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::RecordActionPrediction {
+                task: run.clone(),
+                prediction: predictions[0].clone(),
+            })
+            .await,
+        AgentResponse::ActionPredictionRecorded
+    ));
+    let completed = agent.commit_task_actions(&run).await.unwrap();
+
+    assert_eq!(completed, vec![predictions[0].clone()]);
+    assert_eq!(fs::read(&manifest_path).unwrap(), before);
+    let unchanged = fs::metadata(&manifest_path).unwrap();
+    assert_eq!(unchanged.modified().unwrap(), written.modified().unwrap());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        assert_eq!(unchanged.ino(), written.ino(), "the manifest was replaced");
+    }
 }
 
 #[tokio::test]
@@ -1589,16 +2247,14 @@ async fn round_trips_task_actions_between_fresh_local_caches() {
             .create_async()
             .await,
     );
-    mocks.push(
-        server
-            .mock("GET", action_manifest_path(&selector).as_str())
-            .with_status(200)
-            .with_header("etag", &format!("\"{manifest_etag}\""))
-            .with_body(manifest_bytes.clone())
-            .expect(1)
-            .create_async()
-            .await,
-    );
+    // The write-only publisher reads manifest metadata for provenance and an
+    // update precondition, but never uses it to satisfy an action lookup.
+    let missing_manifest = server
+        .mock("GET", action_manifest_path(&selector).as_str())
+        .with_status(404)
+        .expect(1)
+        .create_async()
+        .await;
     mocks.push(
         server
             .mock("GET", action_path(&action).as_str())
@@ -1675,6 +2331,18 @@ async fn round_trips_task_actions_between_fresh_local_caches() {
         AgentResponse::ActionPredictionRecorded
     ));
     writer.commit_task(&run).await.unwrap();
+    missing_manifest.assert_async().await;
+    missing_manifest.remove_async().await;
+    mocks.push(
+        server
+            .mock("GET", action_manifest_path(&selector).as_str())
+            .with_status(200)
+            .with_header("etag", &format!("\"{manifest_etag}\""))
+            .with_body(manifest_bytes.clone())
+            .expect(1)
+            .create_async()
+            .await,
+    );
 
     let reader = remote_agent(
         &server,
@@ -2755,13 +3423,10 @@ async fn an_action_result_is_published_after_the_blobs_it_references() {
     );
 }
 
-/// A failed re-upload must not retract what an earlier session advertised.
-///
-/// The conditional manifest write replaces the remote manifest when its entity
-/// tag still matches, so dropping an inherited prediction would un-advertise a
-/// result that is plausibly still on the server.
+/// A hit-only run must not retract or needlessly republish what an earlier
+/// session advertised, even if a speculative re-upload fails.
 #[tokio::test]
-async fn a_task_manifest_keeps_inherited_predictions_whose_upload_fails() {
+async fn a_task_hit_does_not_republish_inherited_predictions_whose_upload_fails() {
     let directory = tempfile::tempdir().unwrap();
     let mut server = mockito::Server::new_async().await;
     let task = "4".repeat(64);
@@ -2803,7 +3468,7 @@ async fn a_task_manifest_keeps_inherited_predictions_whose_upload_fails() {
         .mock("PUT", action_manifest_path(&selector).as_str())
         .match_body(manifest_bytes)
         .with_status(201)
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let agent = remote_agent(
@@ -2839,6 +3504,281 @@ async fn a_task_manifest_keeps_inherited_predictions_whose_upload_fails() {
     agent.wait_for_uploads().await;
 
     manifest.assert_async().await;
+}
+
+#[test]
+fn a_failed_replacement_drops_retired_remote_history() {
+    let task = "8".repeat(64);
+    let prediction = |label: &[u8]| {
+        let invocation = CacheDigest::blake3(label);
+        ActionPrediction {
+            action: CacheDigest::blake3(invocation.hash.as_bytes()),
+            invocation,
+            adapter: "rustc".into(),
+            payload: "{}".into(),
+        }
+    };
+    let baseline: Vec<_> = (0..MAX_TASK_ACTION_PREDICTIONS)
+        .map(|index| prediction(&index.to_le_bytes()))
+        .collect();
+    let retired = baseline
+        .iter()
+        .min_by_key(|prediction| &prediction.invocation)
+        .unwrap()
+        .clone();
+    let replacement = prediction(b"replacement whose upload fails");
+    let mut manifest = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task,
+        predictions: baseline
+            .iter()
+            .filter(|prediction| **prediction != retired)
+            .cloned()
+            .chain(std::iter::once(replacement.clone()))
+            .collect(),
+    };
+    let introduced = BTreeSet::from([replacement.invocation.clone()]);
+    let unpublished = BTreeSet::from([replacement.action.clone()]);
+    assert_eq!(
+        withhold_unpublished_updates(&mut manifest, &introduced, &[], &unpublished),
+        introduced
+    );
+    assert_eq!(manifest.predictions.len(), MAX_TASK_ACTION_PREDICTIONS - 1);
+    assert!(!manifest.predictions.contains(&replacement));
+    assert!(!manifest.predictions.contains(&retired));
+}
+
+#[test]
+fn an_unpublished_replacement_restores_the_previous_prediction() {
+    let task = "8".repeat(64);
+    let invocation = CacheDigest::blake3(b"same invocation");
+    let previous = ActionPrediction {
+        invocation: invocation.clone(),
+        action: CacheDigest::blake3(b"published action"),
+        adapter: "rustc".into(),
+        payload: "old".into(),
+    };
+    let replacement = ActionPrediction {
+        invocation,
+        action: CacheDigest::blake3(b"unpublished action"),
+        adapter: "rustc".into(),
+        payload: "new".into(),
+    };
+    let mut manifest = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task,
+        predictions: vec![replacement.clone()],
+    };
+
+    assert_eq!(
+        withhold_unpublished_updates(
+            &mut manifest,
+            &BTreeSet::from([previous.invocation.clone()]),
+            std::slice::from_ref(&previous),
+            &BTreeSet::from([replacement.action]),
+        ),
+        BTreeSet::from([previous.invocation.clone()])
+    );
+    assert_eq!(manifest.predictions, vec![previous]);
+}
+
+#[test]
+fn a_restored_remote_replacement_remains_newest() {
+    let task = "8".repeat(64);
+    let previous = seeded_predictions(&["previous"]).remove(0);
+    let replacement = ActionPrediction {
+        action: CacheDigest::blake3(b"unpublished replacement"),
+        payload: "replacement".into(),
+        ..previous.clone()
+    };
+    let newer = seeded_predictions(&["newer"]).remove(0);
+    let mut manifest = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task,
+        predictions: vec![replacement.clone(), newer.clone()],
+    };
+
+    let withheld = withhold_unpublished_updates(
+        &mut manifest,
+        &BTreeSet::from([previous.invocation.clone()]),
+        std::slice::from_ref(&previous),
+        &BTreeSet::from([replacement.action]),
+    );
+
+    assert_eq!(manifest.predictions, vec![newer, previous.clone()]);
+    assert_eq!(withheld, BTreeSet::from([previous.invocation]));
+}
+
+#[test]
+fn replacement_fallbacks_are_derived_for_every_withhold_candidate() {
+    let inherited = seeded_predictions(&["inherited"]).remove(0);
+    let replacement = ActionPrediction {
+        action: CacheDigest::blake3(b"unpublished replacement"),
+        payload: "replacement".into(),
+        ..inherited.clone()
+    };
+    let candidates = BTreeSet::from([replacement.invocation.clone()]);
+    let remote = BTreeMap::from([(inherited.invocation.clone(), inherited.clone())]);
+    let restored = replaced_task_predictions(&remote, &candidates);
+
+    assert_eq!(restored, vec![inherited]);
+    assert!(replaced_task_predictions(&BTreeMap::new(), &candidates).is_empty());
+}
+
+#[test]
+fn an_own_replacement_is_not_a_concurrent_prediction() {
+    let invocation = CacheDigest::blake3(b"same invocation");
+    let previous = ActionPrediction {
+        invocation: invocation.clone(),
+        action: CacheDigest::blake3(b"published action"),
+        adapter: "rustc".into(),
+        payload: "old".into(),
+    };
+    let replacement = ActionPrediction {
+        invocation: invocation.clone(),
+        action: CacheDigest::blake3(b"unpublished action"),
+        adapter: "rustc".into(),
+        payload: "new".into(),
+    };
+    let state = TaskActionState {
+        predictions: BTreeMap::from([(invocation.clone(), replacement.clone())]),
+        pending_predictions: BTreeMap::from([(invocation.clone(), replacement)]),
+        changed_predictions: BTreeMap::from([(invocation, Some(previous.clone()))]),
+        ..TaskActionState::default()
+    };
+
+    assert!(concurrent_task_predictions(&[previous], &state).is_empty());
+}
+
+#[test]
+fn a_hit_refreshes_a_concurrent_replacement_without_clobbering_it() {
+    let previous = seeded_predictions(&["same invocation"]).remove(0);
+    let concurrent = ActionPrediction {
+        action: CacheDigest::blake3(b"newer concurrent action"),
+        ..previous.clone()
+    };
+    let state = TaskActionState {
+        predictions: BTreeMap::from([(previous.invocation.clone(), previous.clone())]),
+        pending_predictions: BTreeMap::from([(previous.invocation.clone(), previous.clone())]),
+        ..TaskActionState::default()
+    };
+
+    let updates = effective_task_updates(std::slice::from_ref(&concurrent), &state);
+
+    assert_eq!(
+        updates.get(&concurrent.invocation),
+        Some(&concurrent),
+        "the hit refreshes the commit-time value rather than its stale snapshot"
+    );
+}
+
+#[test]
+fn a_withheld_concurrent_replacement_restores_only_its_remote_value() {
+    let previous = seeded_predictions(&["same invocation"]).remove(0);
+    let concurrent = ActionPrediction {
+        action: CacheDigest::blake3(b"unproven concurrent action"),
+        ..previous.clone()
+    };
+    let mut remote_predictions = BTreeMap::from([(previous.invocation.clone(), previous.clone())]);
+    let mut manifest = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: "8".repeat(64),
+        predictions: vec![concurrent.clone()],
+    };
+    let invocation = concurrent.invocation.clone();
+    let candidates = BTreeSet::from([invocation.clone()]);
+    let replaced = replaced_task_predictions(&remote_predictions, &candidates);
+
+    withhold_unpublished_updates(
+        &mut manifest,
+        &candidates,
+        &replaced,
+        &BTreeSet::from([concurrent.action.clone()]),
+    );
+    assert_eq!(manifest.predictions, vec![previous]);
+
+    remote_predictions.clear();
+    let replaced = replaced_task_predictions(&remote_predictions, &candidates);
+    let mut manifest = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: "8".repeat(64),
+        predictions: vec![concurrent.clone()],
+    };
+    withhold_unpublished_updates(
+        &mut manifest,
+        &BTreeSet::from([invocation]),
+        &replaced,
+        &BTreeSet::from([concurrent.action]),
+    );
+    assert!(manifest.predictions.is_empty());
+}
+
+#[test]
+fn hit_only_commits_refresh_order_only_near_the_prediction_limit() {
+    let threshold = MAX_TASK_ACTION_PREDICTIONS - TASK_ACTION_LRU_REFRESH_MARGIN;
+
+    assert!(!should_refresh_task_prediction_order(threshold - 1, true));
+    assert!(should_refresh_task_prediction_order(threshold, true));
+    assert!(!should_refresh_task_prediction_order(
+        MAX_TASK_ACTION_PREDICTIONS,
+        false
+    ));
+}
+
+#[test]
+fn a_successful_upload_proves_a_concurrent_value() {
+    let published = CacheDigest::blake3(b"published here");
+    let absent = CacheDigest::blake3(b"never queued here");
+    let failed = CacheDigest::blake3(b"queued but failed");
+    let unproven = BTreeSet::from([published.clone(), absent.clone(), failed.clone()]);
+    let held = BTreeSet::from([published, failed.clone()]);
+
+    assert_eq!(
+        unpublished_task_actions(unproven, &held, BTreeSet::from([failed.clone()])),
+        BTreeSet::from([absent, failed])
+    );
+}
+
+#[test]
+fn a_later_unrelated_commit_withholds_a_prior_local_only_prediction() {
+    let local_only = seeded_predictions(&["failed first-run upload"]).remove(0);
+    let published = seeded_predictions(&["remote baseline value"]).remove(0);
+    let manifest = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: "8".repeat(64),
+        predictions: vec![local_only.clone(), published.clone()],
+    };
+    let remote = BTreeMap::from([(published.invocation.clone(), published)]);
+
+    assert_eq!(
+        unproven_task_predictions(&manifest.predictions, &remote),
+        BTreeMap::from([(local_only.invocation, local_only.action)])
+    );
+}
+
+#[test]
+fn a_write_only_publication_preserves_remote_history() {
+    let task = "8".repeat(64);
+    let remote = seeded_predictions(&["remote history"]).remove(0);
+    let local = seeded_predictions(&["newly published here"]).remove(0);
+    let merged = merge_task_manifests(
+        &task,
+        TaskActionManifest {
+            version: TASK_ACTION_MANIFEST_VERSION,
+            task: task.clone(),
+            predictions: vec![remote.clone()],
+        },
+        TaskActionManifest {
+            version: TASK_ACTION_MANIFEST_VERSION,
+            task: task.clone(),
+            predictions: vec![local.clone()],
+        },
+        &BTreeSet::from([local.invocation.clone()]),
+        &BTreeSet::new(),
+    )
+    .unwrap();
+
+    assert_eq!(merged.predictions, vec![remote, local]);
 }
 
 #[tokio::test]
@@ -3688,6 +4628,121 @@ async fn benchmark_prefetch_output_tree_latency() {
     );
 }
 
+#[tokio::test]
+#[ignore = "local saturated task-manifest commit benchmark"]
+async fn benchmark_saturated_hit_only_task_manifest_commit() {
+    let iterations = std::env::var("MBX_BENCH_ITERATIONS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(10);
+    let task = "8".repeat(64);
+    let payload = serde_json::json!({
+        "args": [
+            "rustc",
+            "--crate-name",
+            "representative_dependency",
+            "--edition=2024",
+            "--emit=dep-info,metadata,link",
+            "-C",
+            "debuginfo=2",
+            "--cfg",
+            "feature=\"default\""
+        ],
+        "cwd": "/workspace/project",
+        "env": {
+            "CARGO_PKG_NAME": "representative-dependency",
+            "CARGO_PKG_VERSION": "1.2.3",
+            "OPT_LEVEL": "0",
+            "PROFILE": "debug",
+            "TARGET": "x86_64-unknown-linux-gnu"
+        }
+    })
+    .to_string();
+    let predictions: Vec<_> = (0..MAX_TASK_ACTION_PREDICTIONS)
+        .map(|index| {
+            let invocation = CacheDigest::blake3(format!("rustc invocation {index}").as_bytes());
+            ActionPrediction {
+                action: CacheDigest::blake3(format!("rustc action {index}").as_bytes()),
+                invocation,
+                adapter: "rustc".into(),
+                payload: payload.clone(),
+            }
+        })
+        .collect();
+    let manifest = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: predictions.clone(),
+    };
+    let serialized_bytes = canonical_json(&manifest).unwrap().len();
+
+    async fn measure(
+        directory: &std::path::Path,
+        task: &str,
+        manifest: &TaskActionManifest,
+        hit: &ActionPrediction,
+        iterations: usize,
+    ) -> (Duration, usize) {
+        let mut samples = Vec::with_capacity(iterations);
+        let mut bytes_written = 0;
+        for iteration in 0..iterations {
+            let cache = directory.join(format!("sample-{iteration}"));
+            let agent = CacheAgent::new(&cache, "benchmark-version");
+            agent.persist_task_manifest(manifest).unwrap();
+            let run = agent.begin_task_on_prediction(task).await.unwrap();
+            assert!(matches!(
+                agent
+                    .respond(AgentRequest::RecordActionPrediction {
+                        task: run.clone(),
+                        prediction: hit.clone(),
+                    })
+                    .await,
+                AgentResponse::ActionPredictionRecorded
+            ));
+            let path = agent.task_manifest_path(task);
+            let before = fs::read(&path).unwrap();
+            let started = std::time::Instant::now();
+            agent.commit_task(&run).await.unwrap();
+            samples.push(started.elapsed());
+            let after = fs::read(path).unwrap();
+            if before != after {
+                bytes_written += after.len();
+            }
+        }
+        samples.sort_unstable();
+        (samples[samples.len() / 2], bytes_written / iterations)
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let (refresh_median, refresh_bytes) = measure(
+        &directory.path().join("refresh"),
+        &task,
+        &manifest,
+        predictions.first().unwrap(),
+        iterations,
+    )
+    .await;
+    let (steady_median, steady_bytes) = measure(
+        &directory.path().join("steady"),
+        &task,
+        &manifest,
+        predictions.last().unwrap(),
+        iterations,
+    )
+    .await;
+
+    eprintln!(
+        "saturated hit-only task manifest: entries={}, serialized_bytes={serialized_bytes}, iterations={iterations}",
+        predictions.len()
+    );
+    eprintln!(
+        "changed LRU order: median_commit={refresh_median:?}, manifest_bytes_written_per_commit={refresh_bytes}"
+    );
+    eprintln!(
+        "identical LRU order: median_commit={steady_median:?}, manifest_bytes_written_per_commit={steady_bytes}"
+    );
+}
+
 fn output_tree_responses(files: usize) -> (BTreeMap<String, Vec<u8>>, CacheDigest) {
     let mut entries = Vec::with_capacity(files);
     let mut responses = BTreeMap::new();
@@ -4266,8 +5321,395 @@ async fn merges_overlapping_runs_into_one_task_manifest() {
     }
 }
 
+#[tokio::test]
+async fn full_task_manifest_rotates_stale_predictions_for_current_and_concurrent_runs() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let task = "6".repeat(64);
+    let prediction = |label: &[u8]| {
+        let invocation = CacheDigest::blake3(label);
+        ActionPrediction {
+            action: CacheDigest::blake3(invocation.hash.as_bytes()),
+            invocation,
+            adapter: "rustc".into(),
+            payload: "{}".into(),
+        }
+    };
+    let baseline: Vec<_> = (0..MAX_TASK_ACTION_PREDICTIONS)
+        .map(|index| prediction(&index.to_le_bytes()))
+        .collect();
+    let retained = baseline[0].clone();
+    let seed = CacheAgent::new(&cache, "test-version");
+    seed.persist_task_manifest(&TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: baseline.clone(),
+    })
+    .unwrap();
+
+    // Both runs begin from the full baseline. Re-recording a prediction makes
+    // it part of the working set, while each new prediction must displace
+    // untouched history instead of being refused.
+    let first = CacheAgent::new(&cache, "test-version");
+    let second = CacheAgent::new(&cache, "test-version");
+    let first_run = first.begin_task(&task).await.unwrap();
+    let second_run = second.begin_task(&task).await.unwrap();
+    let first_new = prediction(b"first new invocation");
+    let second_new = prediction(b"second new invocation");
+    for (agent, run, predictions) in [
+        (
+            &first,
+            &first_run,
+            vec![retained.clone(), first_new.clone()],
+        ),
+        (&second, &second_run, vec![second_new.clone()]),
+    ] {
+        for prediction in predictions {
+            assert!(matches!(
+                agent
+                    .respond(AgentRequest::RecordActionPrediction {
+                        task: run.clone(),
+                        prediction,
+                    })
+                    .await,
+                AgentResponse::ActionPredictionRecorded
+            ));
+        }
+    }
+    first.commit_task(&first_run).await.unwrap();
+    second.commit_task(&second_run).await.unwrap();
+
+    let manifest = second.load_task_manifest(&task).unwrap().unwrap();
+    assert_eq!(manifest.predictions.len(), MAX_TASK_ACTION_PREDICTIONS);
+    for expected in [&retained, &first_new, &second_new] {
+        assert!(manifest.predictions.contains(expected));
+    }
+    assert_eq!(
+        baseline
+            .iter()
+            .filter(|prediction| !manifest.predictions.contains(prediction))
+            .count(),
+        2
+    );
+}
+
 #[test]
-fn keeps_local_manifest_when_remote_merge_exceeds_prediction_limit() {
+fn a_conflict_merge_prunes_independently_rotated_full_manifests() {
+    let task = "9".repeat(64);
+    let prediction = |label: &[u8]| {
+        let invocation = CacheDigest::blake3(label);
+        ActionPrediction {
+            action: CacheDigest::blake3(invocation.hash.as_bytes()),
+            invocation,
+            adapter: "rustc".into(),
+            payload: "{}".into(),
+        }
+    };
+    let baseline: Vec<_> = (0..MAX_TASK_ACTION_PREDICTIONS)
+        .map(|index| prediction(&index.to_le_bytes()))
+        .collect();
+    let local_new = prediction(b"local replacement");
+    let remote_new = prediction(b"remote replacement");
+    let mut local_changed = baseline[2].clone();
+    local_changed.action = CacheDigest::blake3(b"newer local action");
+    let mut local_predictions: Vec<_> = baseline[1..]
+        .iter()
+        .cloned()
+        .chain(std::iter::once(local_new.clone()))
+        .collect();
+    *local_predictions
+        .iter_mut()
+        .find(|prediction| prediction.invocation == local_changed.invocation)
+        .unwrap() = local_changed.clone();
+    let local = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: local_predictions,
+    };
+    let remote = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: baseline[..baseline.len() - 1]
+            .iter()
+            .cloned()
+            .chain(std::iter::once(remote_new.clone()))
+            .collect(),
+    };
+    // The current run requires `local_new`; `local_changed` was committed by a
+    // concurrent local writer after this run loaded its baseline. Both must
+    // outrank the stale remote value during an ETag retry.
+    let required = BTreeSet::from([
+        local_new.invocation.clone(),
+        local_changed.invocation.clone(),
+    ]);
+
+    let merged = merge_task_manifests(&task, remote, local, &required, &BTreeSet::new()).unwrap();
+
+    assert_eq!(merged.predictions.len(), MAX_TASK_ACTION_PREDICTIONS);
+    assert!(merged.predictions.contains(&local_new));
+    assert!(merged.predictions.contains(&remote_new));
+    assert!(merged.predictions.contains(&local_changed));
+    assert!(!merged.predictions.contains(&baseline[2]));
+}
+
+#[test]
+fn a_remote_fallback_never_overwrites_a_newer_remote_prediction() {
+    let task = "9".repeat(64);
+    let previous = seeded_predictions(&["same invocation"]).remove(0);
+    let newer = ActionPrediction {
+        action: CacheDigest::blake3(b"newer remote action"),
+        ..previous.clone()
+    };
+    let invocation = previous.invocation.clone();
+    let local = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: vec![previous],
+    };
+    let remote = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: vec![newer.clone()],
+    };
+
+    let merged = merge_task_manifests(
+        &task,
+        remote,
+        local,
+        &BTreeSet::new(),
+        &BTreeSet::from([invocation]),
+    )
+    .unwrap();
+
+    assert_eq!(merged.predictions, vec![newer]);
+}
+
+#[test]
+fn an_unchanged_hit_does_not_overwrite_a_newer_remote_prediction() {
+    let task = "9".repeat(64);
+    let previous = seeded_predictions(&["same invocation"]).remove(0);
+    let newer = ActionPrediction {
+        action: CacheDigest::blake3(b"newer remote action"),
+        ..previous.clone()
+    };
+    let invocation = previous.invocation.clone();
+    let state = TaskActionState {
+        pending_predictions: BTreeMap::from([(invocation.clone(), previous.clone())]),
+        ..TaskActionState::default()
+    };
+    let local = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: vec![previous.clone()],
+    };
+    let published = BTreeMap::from([(invocation.clone(), &previous)]);
+    let (required, fallbacks) = remote_publication_precedence(
+        &state,
+        std::slice::from_ref(&previous),
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &published,
+        &BTreeSet::new(),
+    );
+
+    let merged = merge_task_manifests(
+        &task,
+        TaskActionManifest {
+            version: TASK_ACTION_MANIFEST_VERSION,
+            task: task.clone(),
+            predictions: vec![newer.clone()],
+        },
+        local,
+        &required,
+        &fallbacks,
+    )
+    .unwrap();
+
+    assert!(required.is_empty());
+    assert_eq!(fallbacks, BTreeSet::from([invocation]));
+    assert_eq!(merged.predictions, vec![newer]);
+}
+
+#[test]
+fn an_unknown_concurrent_hit_does_not_overwrite_a_remote_prediction() {
+    let task = "9".repeat(64);
+    let hit = seeded_predictions(&["same invocation"]).remove(0);
+    let concurrent = ActionPrediction {
+        action: CacheDigest::blake3(b"concurrent local action"),
+        ..hit.clone()
+    };
+    let remote = ActionPrediction {
+        action: CacheDigest::blake3(b"current remote action"),
+        ..hit.clone()
+    };
+    let invocation = hit.invocation.clone();
+    let state = TaskActionState {
+        pending_predictions: BTreeMap::from([(invocation.clone(), hit.clone())]),
+        remote_predictions: None,
+        ..TaskActionState::default()
+    };
+    let concurrent_updates = BTreeMap::from([(invocation.clone(), concurrent.clone())]);
+    let published = BTreeMap::from([(invocation.clone(), &concurrent)]);
+    let (required, fallbacks) = remote_publication_precedence(
+        &state,
+        std::slice::from_ref(&hit),
+        &concurrent_updates,
+        &BTreeSet::new(),
+        &published,
+        &BTreeSet::new(),
+    );
+
+    let merged = merge_task_manifests(
+        &task,
+        TaskActionManifest {
+            version: TASK_ACTION_MANIFEST_VERSION,
+            task: task.clone(),
+            predictions: vec![remote.clone()],
+        },
+        TaskActionManifest {
+            version: TASK_ACTION_MANIFEST_VERSION,
+            task: task.clone(),
+            predictions: vec![concurrent],
+        },
+        &required,
+        &fallbacks,
+    )
+    .unwrap();
+
+    assert!(required.is_empty());
+    assert_eq!(fallbacks, BTreeSet::from([invocation]));
+    assert_eq!(merged.predictions, vec![remote]);
+}
+
+#[test]
+fn a_proven_unknown_concurrent_update_overwrites_a_remote_prediction() {
+    let task = "9".repeat(64);
+    let hit = seeded_predictions(&["same invocation"]).remove(0);
+    let concurrent = ActionPrediction {
+        action: CacheDigest::blake3(b"concurrent uploaded action"),
+        ..hit.clone()
+    };
+    let remote = ActionPrediction {
+        action: CacheDigest::blake3(b"stale remote action"),
+        ..hit.clone()
+    };
+    let invocation = hit.invocation.clone();
+    let state = TaskActionState {
+        pending_predictions: BTreeMap::from([(invocation.clone(), hit.clone())]),
+        remote_predictions: None,
+        ..TaskActionState::default()
+    };
+    let concurrent_updates = BTreeMap::from([(invocation.clone(), concurrent.clone())]);
+    let proven_uploads = BTreeSet::from([concurrent.action.clone()]);
+    let published = BTreeMap::from([(invocation.clone(), &concurrent)]);
+    let (required, fallbacks) = remote_publication_precedence(
+        &state,
+        std::slice::from_ref(&hit),
+        &concurrent_updates,
+        &proven_uploads,
+        &published,
+        &BTreeSet::new(),
+    );
+
+    let merged = merge_task_manifests(
+        &task,
+        TaskActionManifest {
+            version: TASK_ACTION_MANIFEST_VERSION,
+            task: task.clone(),
+            predictions: vec![remote],
+        },
+        TaskActionManifest {
+            version: TASK_ACTION_MANIFEST_VERSION,
+            task: task.clone(),
+            predictions: vec![concurrent.clone()],
+        },
+        &required,
+        &fallbacks,
+    )
+    .unwrap();
+
+    assert_eq!(required, BTreeSet::from([invocation.clone()]));
+    assert_eq!(fallbacks, BTreeSet::from([invocation]));
+    assert_eq!(merged.predictions, vec![concurrent]);
+}
+
+#[test]
+fn a_missing_remote_fallback_is_protected_during_conflict_pruning() {
+    let task = "9".repeat(64);
+    let labels: Vec<_> = (0..MAX_TASK_ACTION_PREDICTIONS)
+        .map(|index| index.to_string())
+        .collect();
+    let names: Vec<_> = labels.iter().map(String::as_str).collect();
+    let remote_predictions = seeded_predictions(&names);
+    let fallback = seeded_predictions(&["known remote fallback"]).remove(0);
+    let invocation = fallback.invocation.clone();
+    let local = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: vec![fallback.clone()],
+    };
+    let remote = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: remote_predictions,
+    };
+    let state = TaskActionState {
+        remote_predictions: None,
+        remote_manifest: Some(remote.clone()),
+        ..TaskActionState::default()
+    };
+    let published = BTreeMap::from([(invocation.clone(), &fallback)]);
+    let (required, fallbacks) = remote_publication_precedence(
+        &state,
+        &[],
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &published,
+        &BTreeSet::new(),
+    );
+
+    let merged = merge_task_manifests(&task, remote, local, &required, &fallbacks).unwrap();
+
+    assert!(required.is_empty());
+    assert_eq!(fallbacks, BTreeSet::from([invocation]));
+    assert_eq!(merged.predictions.len(), MAX_TASK_ACTION_PREDICTIONS);
+    assert_eq!(merged.predictions.last(), Some(&fallback));
+}
+
+#[test]
+fn local_pruning_keeps_the_newest_concurrent_prediction() {
+    let prediction = |index: usize| {
+        let invocation = CacheDigest::blake3(&index.to_le_bytes());
+        ActionPrediction {
+            action: CacheDigest::blake3(invocation.hash.as_bytes()),
+            invocation,
+            adapter: "rustc".into(),
+            payload: "{}".into(),
+        }
+    };
+    let predictions: Vec<_> = (0..MAX_TASK_ACTION_PREDICTIONS).map(prediction).collect();
+    let concurrent = predictions.first().unwrap().clone();
+    let concurrent_updates = BTreeMap::from([(concurrent.invocation.clone(), concurrent.clone())]);
+    // Leave two existing predictions untouched and introduce one new one. The
+    // update therefore needs to retire one leftover entry, but not the newest
+    // prediction another process committed after this run began.
+    let mut updates: BTreeMap<_, _> = predictions[1..]
+        .iter()
+        .take(MAX_TASK_ACTION_PREDICTIONS - 2)
+        .map(|prediction| (prediction.invocation.clone(), prediction.clone()))
+        .collect();
+    let added = prediction(MAX_TASK_ACTION_PREDICTIONS);
+    updates.insert(added.invocation.clone(), added);
+    let required = required_local_predictions(&predictions, &updates, &concurrent_updates);
+
+    let manifest = update_task_predictions(predictions, &updates, &required).unwrap();
+
+    assert_eq!(manifest.len(), MAX_TASK_ACTION_PREDICTIONS);
+    assert!(manifest.contains(&concurrent));
+}
+
+#[test]
+fn remote_manifest_merge_prunes_to_the_prediction_limit() {
     let task = "7".repeat(64);
     let prediction = |index: usize| {
         let digest = CacheDigest::blake3(&index.to_le_bytes());
@@ -4283,17 +5725,64 @@ fn keeps_local_manifest_when_remote_merge_exceeds_prediction_limit() {
         task: task.clone(),
         predictions: (0..MAX_TASK_ACTION_PREDICTIONS).map(prediction).collect(),
     };
-    let expected_first = local.predictions[0].clone();
+    let oldest_local = local.predictions[0].clone();
+    let active_local = local.predictions.last().unwrap().clone();
+    let required = BTreeSet::from([active_local.invocation.clone()]);
+    let remote_only = prediction(MAX_TASK_ACTION_PREDICTIONS);
     let remote = TaskActionManifest {
         version: TASK_ACTION_MANIFEST_VERSION,
         task: task.clone(),
-        predictions: vec![prediction(MAX_TASK_ACTION_PREDICTIONS)],
+        predictions: vec![remote_only.clone()],
     };
 
-    let (manifest, merged) = merge_remote_task_manifest(&task, remote, local);
-    assert!(!merged);
+    let manifest = merge_task_manifests(&task, remote, local, &required, &BTreeSet::new()).unwrap();
+
     assert_eq!(manifest.predictions.len(), MAX_TASK_ACTION_PREDICTIONS);
-    assert_eq!(manifest.predictions[0], expected_first);
+    assert!(manifest.predictions.contains(&remote_only));
+    assert!(manifest.predictions.contains(&active_local));
+    assert!(!manifest.predictions.contains(&oldest_local));
+    assert_eq!(manifest.predictions.last(), Some(&active_local));
+}
+
+#[test]
+fn remote_manifest_merge_preserves_durable_lru_order() {
+    let task = "7".repeat(64);
+    let prediction = |label: &[u8]| {
+        let invocation = CacheDigest::blake3(label);
+        ActionPrediction {
+            action: CacheDigest::blake3(invocation.hash.as_bytes()),
+            invocation,
+            adapter: "rustc".into(),
+            payload: "{}".into(),
+        }
+    };
+    let remote_only = prediction(b"remote only");
+    let stale_overlap = prediction(b"overlap");
+    let mut local_overlap = stale_overlap.clone();
+    local_overlap.action = CacheDigest::blake3(b"local action");
+    let local_recent = prediction(b"local recent");
+    let remote = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: vec![stale_overlap, remote_only.clone()],
+    };
+    let local = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: task.clone(),
+        predictions: vec![local_overlap.clone(), local_recent.clone()],
+    };
+
+    let required = local
+        .predictions
+        .iter()
+        .map(|prediction| prediction.invocation.clone())
+        .collect();
+    let manifest = merge_task_manifests(&task, remote, local, &required, &BTreeSet::new()).unwrap();
+
+    assert_eq!(
+        manifest.predictions,
+        vec![remote_only, local_overlap, local_recent]
+    );
 }
 
 #[test]
