@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.1](https://github.com/jdx/mr-boxington/compare/v1.11.0...v1.11.1) - 2026-09-14
+
+### Fixed
+
+- reject NFS-backed build storage ([#428](https://github.com/jdx/mr-boxington/pull/428))
+- *(cargo)* preserve build fingerprints across path installs ([#455](https://github.com/jdx/mr-boxington/pull/455))
+- *(gc)* bound learned incremental storage ([#447](https://github.com/jdx/mr-boxington/pull/447))
+
+### Other
+
+- isolate integration tests from the host mbx config ([#440](https://github.com/jdx/mr-boxington/pull/440))
+- *(deps)* bump the cargo-dependencies group with 7 updates ([#451](https://github.com/jdx/mr-boxington/pull/451))
+
 ## [1.11.0](https://github.com/jdx/mr-boxington/compare/v1.10.1...v1.11.0) - 2026-09-11
 
 ### Added

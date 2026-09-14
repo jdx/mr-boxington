@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.25](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.24...mbx-cache-store-v0.1.25) - 2026-09-14
+
+### Fixed
+
+- *(store)* keep imported task manifests bounded and ordered ([#456](https://github.com/jdx/mr-boxington/pull/456))
+
 ## [0.1.24](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.23...mbx-cache-store-v0.1.24) - 2026-09-11
 
 ### Added

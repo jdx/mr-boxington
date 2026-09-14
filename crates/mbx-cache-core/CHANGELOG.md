@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.2](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.16.1...mbx-cache-core-v0.16.2) - 2026-09-14
+
+### Fixed
+
+- *(store)* keep imported task manifests bounded and ordered ([#456](https://github.com/jdx/mr-boxington/pull/456))
+- *(cache)* rotate stale action predictions ([#453](https://github.com/jdx/mr-boxington/pull/453))
+
+### Other
+
+- *(deps)* bump the cargo-dependencies group with 7 updates ([#451](https://github.com/jdx/mr-boxington/pull/451))
+
 ## [0.16.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.16.0...mbx-cache-core-v0.16.1) - 2026-09-11
 
 ### Added

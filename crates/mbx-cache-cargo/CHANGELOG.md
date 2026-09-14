@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.1.25...mbx-cache-cargo-v0.2.0) - 2026-09-14
+
+### Fixed
+
+- reject NFS-backed build storage ([#428](https://github.com/jdx/mr-boxington/pull/428))
+- *(cargo)* preserve build fingerprints across path installs ([#455](https://github.com/jdx/mr-boxington/pull/455))
+
+### Other
+
+- *(deps)* bump the cargo-dependencies group with 7 updates ([#451](https://github.com/jdx/mr-boxington/pull/451))
+
 ## [0.1.25](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.1.24...mbx-cache-cargo-v0.1.25) - 2026-09-11
 
 ### Added
