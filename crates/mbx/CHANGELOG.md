@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.0](https://github.com/jdx/mr-boxington/compare/v1.11.1...v1.12.0) - 2026-09-15
+
+### Added
+
+- *(cache)* export and import directory-form cache bundles ([#463](https://github.com/jdx/mr-boxington/pull/463))
+
+### Fixed
+
+- bind compiler input digests to validated file identities ([#433](https://github.com/jdx/mr-boxington/pull/433))
+
+### Other
+
+- *(perf)* make instruction counts informational ([#450](https://github.com/jdx/mr-boxington/pull/450))
+
 ## [1.11.1](https://github.com/jdx/mr-boxington/compare/v1.11.0...v1.11.1) - 2026-09-14
 
 ### Fixed

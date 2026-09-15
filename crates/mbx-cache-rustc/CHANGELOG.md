@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.16.2...mbx-cache-rustc-v0.16.3) - 2026-09-15
+
+### Fixed
+
+- bind compiler input digests to validated file identities ([#433](https://github.com/jdx/mr-boxington/pull/433))
+
 ## [0.16.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.16.0...mbx-cache-rustc-v0.16.1) - 2026-09-11
 
 ### Added

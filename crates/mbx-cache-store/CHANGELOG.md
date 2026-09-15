@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.26](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.25...mbx-cache-store-v0.1.26) - 2026-09-15
+
+### Added
+
+- *(cache)* export and import directory-form cache bundles ([#463](https://github.com/jdx/mr-boxington/pull/463))
+
+### Other
+
+- *(cache)* verify imported cache objects in parallel ([#462](https://github.com/jdx/mr-boxington/pull/462))
+
 ## [0.1.25](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.24...mbx-cache-store-v0.1.25) - 2026-09-14
 
 ### Fixed

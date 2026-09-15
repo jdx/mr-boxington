@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.16.2...mbx-cache-core-v0.16.3) - 2026-09-15
+
+### Fixed
+
+- bind compiler input digests to validated file identities ([#433](https://github.com/jdx/mr-boxington/pull/433))
+
 ## [0.16.2](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.16.1...mbx-cache-core-v0.16.2) - 2026-09-14
 
 ### Fixed
