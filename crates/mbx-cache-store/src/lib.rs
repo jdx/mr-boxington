@@ -531,6 +531,10 @@ fn export_receipts(
     for digest in &additions.objects {
         require_object(&cas, &mut closure, digest)?;
     }
+    // Hash the leaves before they are packed. An export is what another
+    // machine will trust, so publishing a blob this store has since corrupted
+    // would move the failure to whoever restores it.
+    verify_pending(&mut closure.pending).wrap_err("cache closure is incomplete or corrupt")?;
     let parent = archive
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -657,7 +661,9 @@ pub fn import_archive_with_attachments(store: &Path, archive: &Path) -> Result<I
     // would write every byte a second time, which is the whole cost the
     // directory form exists to avoid.
     let staged;
+    let _staging_lock;
     let root = if archive.is_dir() {
+        _staging_lock = None;
         validate_directory_bundle(archive)?;
         archive
     } else {
@@ -671,6 +677,11 @@ pub fn import_archive_with_attachments(store: &Path, archive: &Path) -> Result<I
         staged = tempfile::Builder::new()
             .prefix("import-")
             .tempdir_in(&staging_root)?;
+        // Held for the rest of the import so a concurrent sweep can tell this
+        // tree from one a killed process abandoned. The gap between creating
+        // the directory and taking the lock needs no closing: a sweep only
+        // considers trees a day old, and this one is new.
+        _staging_lock = Some(lock_import_staging(staged.path())?);
         unpack_archive(archive, staged.path())?;
         staged.path()
     };
@@ -1531,13 +1542,47 @@ fn prune_import_staging(store: &Path, dry_run: bool) {
             continue;
         }
         let path = entry.path();
+        // Age alone would be a guess. An import that outlives the retention
+        // window -- a very large bundle on slow storage -- still holds its
+        // lock, and taking its tree out from under it would fail a running
+        // restore. A lock nobody holds is one the kernel released for a
+        // process that is gone.
+        let lock_path = import_staging_lock_path(&path);
+        let Ok(mut lock) = fslock::LockFile::open(&lock_path) else {
+            continue;
+        };
+        if !matches!(lock.try_lock(), Ok(true)) {
+            continue;
+        }
         if let Err(error) = std::fs::remove_dir_all(&path) {
             log::debug!(
                 "could not remove abandoned import staging {}: {error}",
                 path.display()
             );
+            continue;
         }
+        drop(lock);
+        let _ = std::fs::remove_file(&lock_path);
     }
+}
+
+/// Where the liveness lock for one staging tree lives.
+///
+/// A sibling of the tree rather than a file inside it, so that removing the
+/// tree does not remove the lock the remover is holding.
+fn import_staging_lock_path(staging: &Path) -> PathBuf {
+    let mut name = staging.as_os_str().to_os_string();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+/// Claim a staging tree for the lifetime of one import.
+fn lock_import_staging(staging: &Path) -> Result<fslock::LockFile> {
+    let path = import_staging_lock_path(staging);
+    let mut lock = fslock::LockFile::open(&path)
+        .wrap_err_with(|| format!("failed to open {}", path.display()))?;
+    lock.lock()?;
+    Ok(lock)
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
