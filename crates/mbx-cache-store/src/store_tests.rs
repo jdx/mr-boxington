@@ -563,6 +563,213 @@ fn export_refuses_an_incomplete_build_closure() {
     assert!(!archive.exists());
 }
 
+/// Replace the body of each named CAS object in `archive`, keeping its length
+/// so that only the content digest is wrong.
+fn corrupt_archive_objects(archive: &Path, targets: &[CacheDigest]) {
+    use std::io::Read as _;
+
+    let names = targets
+        .iter()
+        .map(|digest| {
+            Path::new(CAS_DIR)
+                .join(&digest.algorithm)
+                .join(&digest.hash[..2])
+                .join(format!("{}-{}", digest.hash, digest.size))
+        })
+        .collect::<BTreeSet<_>>();
+    let mut members = Vec::new();
+    {
+        let mut source = tar::Archive::new(std::fs::File::open(archive).unwrap());
+        for entry in source.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().into_owned();
+            let mut body = Vec::new();
+            entry.read_to_end(&mut body).unwrap();
+            if names.contains(&path) {
+                body = vec![b'x'; body.len()];
+            }
+            members.push((path, body));
+        }
+    }
+    let mut builder = tar::Builder::new(std::fs::File::create(archive).unwrap());
+    for (path, body) in members {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        builder
+            .append_data(&mut header, &path, body.as_slice())
+            .unwrap();
+    }
+    builder.finish().unwrap();
+}
+
+/// Export one action whose output tree holds `outputs`, and return the archive.
+fn export_outputs(source: &Path, outputs: &[CacheDigest]) -> PathBuf {
+    let workspace = source.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let action = store_result(source, "compile action", outputs);
+    record_build(
+        source,
+        &"c".repeat(64),
+        &workspace,
+        std::slice::from_ref(&action),
+    );
+    let archive = source.join("build.tar");
+    export_checkout(source, &workspace, &archive).unwrap();
+    archive
+}
+
+#[test]
+fn import_rejects_an_object_whose_contents_were_tampered_with() {
+    let source = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let output = store_object(source.path(), b"compiled artifact");
+    let archive = export_outputs(source.path(), std::slice::from_ref(&output));
+    corrupt_archive_objects(&archive, std::slice::from_ref(&output));
+
+    let error = import_archive(destination.path(), &archive).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("cache export is incomplete or corrupt"),
+        "{error:?}"
+    );
+    assert!(
+        format!("{error:?}").contains("failed digest verification"),
+        "{error:?}"
+    );
+    // Nothing may be published from a closure that failed to verify.
+    assert_eq!(stats(destination.path()).unwrap(), StoreStats::default());
+}
+
+#[test]
+fn import_rejects_an_object_whose_length_changed() {
+    let source = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let output = store_object(source.path(), b"compiled artifact");
+    let archive = export_outputs(source.path(), std::slice::from_ref(&output));
+    // Truncating changes the length, which the walk catches before hashing.
+    let staged = Path::new(CAS_DIR)
+        .join(&output.algorithm)
+        .join(&output.hash[..2])
+        .join(format!("{}-{}", output.hash, output.size));
+    let mut members = Vec::new();
+    {
+        use std::io::Read as _;
+        let mut reader = tar::Archive::new(std::fs::File::open(&archive).unwrap());
+        for entry in reader.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().into_owned();
+            let mut body = Vec::new();
+            entry.read_to_end(&mut body).unwrap();
+            if path == staged {
+                body.truncate(1);
+            }
+            members.push((path, body));
+        }
+    }
+    let mut builder = tar::Builder::new(std::fs::File::create(&archive).unwrap());
+    for (path, body) in members {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        builder
+            .append_data(&mut header, &path, body.as_slice())
+            .unwrap();
+    }
+    builder.finish().unwrap();
+
+    let error = import_archive(destination.path(), &archive).unwrap_err();
+
+    assert!(
+        format!("{error:?}").contains("failed digest verification"),
+        "{error:?}"
+    );
+    assert_eq!(stats(destination.path()).unwrap(), StoreStats::default());
+}
+
+#[test]
+fn import_names_the_same_corrupt_object_every_run() {
+    let source = tempfile::tempdir().unwrap();
+    let first = store_object(source.path(), b"first compiled artifact");
+    let second = store_object(source.path(), b"second compiled artifact");
+    let archive = export_outputs(source.path(), &[first.clone(), second.clone()]);
+    corrupt_archive_objects(&archive, &[first.clone(), second.clone()]);
+    // Staged objects share a prefix, so the lowest path is the lowest hash.
+    let (lower, higher) = if first.hash < second.hash {
+        (&first, &second)
+    } else {
+        (&second, &first)
+    };
+
+    let messages = (0..2)
+        .map(|_| {
+            let destination = tempfile::tempdir().unwrap();
+            format!(
+                "{:?}",
+                import_archive(destination.path(), &archive).unwrap_err()
+            )
+        })
+        .collect::<Vec<_>>();
+
+    // Staging directories are named randomly, so the object named in the
+    // message is the claim under test, not the message itself.
+    for message in &messages {
+        assert!(message.contains(&lower.hash), "{message:?}");
+        assert!(!message.contains(&higher.hash), "{message:?}");
+    }
+}
+
+#[test]
+fn inspection_ignores_abandoned_import_staging() {
+    let directory = tempfile::tempdir().unwrap();
+    let live = store_object(directory.path(), b"live object");
+    let abandoned = directory
+        .path()
+        .join(IMPORT_STAGING_DIR)
+        .join("import-killed");
+    let staged = abandoned.join(CAS_DIR).join("blake3").join("ab");
+    std::fs::create_dir_all(&staged).unwrap();
+    std::fs::write(
+        staged.join(format!("{}-11", "a".repeat(64))),
+        b"stale bytes",
+    )
+    .unwrap();
+
+    let stats = stats(directory.path()).unwrap();
+    let outcome = verify(directory.path()).unwrap();
+    let entries = largest(directory.path(), 10).unwrap();
+
+    assert_eq!(stats.objects, 1);
+    assert_eq!(stats.object_bytes, live.size);
+    assert_eq!(outcome.checked_objects, 1);
+    assert!(outcome.problems.is_empty(), "{outcome:?}");
+    assert_eq!(entries.len(), 1);
+}
+
+#[test]
+fn gc_prunes_abandoned_import_staging() {
+    let directory = tempfile::tempdir().unwrap();
+    store_object(directory.path(), b"live object");
+    let root = directory.path().join(IMPORT_STAGING_DIR);
+    let killed = root.join("import-killed");
+    let running = root.join("import-running");
+    for staging in [&killed, &running] {
+        std::fs::create_dir_all(staging.join(CAS_DIR)).unwrap();
+        std::fs::write(staging.join(CAS_DIR).join("blob"), b"staged bytes").unwrap();
+    }
+    let stale = filetime::FileTime::from_system_time(
+        SystemTime::now() - IMPORT_STAGING_RETENTION - Duration::from_secs(60),
+    );
+    filetime::set_file_times(&killed, stale, stale).unwrap();
+
+    gc(directory.path(), u64::MAX).unwrap();
+
+    assert!(!killed.exists(), "an abandoned staging tree must be swept");
+    assert!(running.exists(), "a fresh staging tree must be left alone");
+}
+
 #[test]
 fn export_requires_a_build_from_the_current_checkout() {
     let source = tempfile::tempdir().unwrap();

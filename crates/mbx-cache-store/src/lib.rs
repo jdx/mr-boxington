@@ -19,6 +19,8 @@ use mbx_cache_core::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CAS_DIR: &str = "cas/v1";
@@ -29,10 +31,12 @@ const SWEEP_LOCK: &str = "gc/v1/sweep.lock";
 const CHECKOUT_RECORD_VERSION: u8 = 1;
 const BUILD_RECEIPTS_DIR: &str = "build-receipts/v1";
 const BUILD_RECEIPT_VERSION: u8 = 1;
+const IMPORT_STAGING_DIR: &str = "import-staging";
 const EXPORT_MANIFEST: &str = "mbx-cache-export-v1.json";
 const EXPORT_VERSION: u8 = 2;
 const LEGACY_EXPORT_VERSION: u8 = 1;
 
+const IMPORT_STAGING_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 const SESSION_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const MAX_SESSIONS: usize = 256;
 
@@ -456,10 +460,10 @@ fn export_receipts(
         eyre::bail!("combined export predictions exceed task manifest limits");
     }
     validate_export_additions(&additions)?;
-    let (mut objects, result_paths) = strict_closure(store, &actions)?;
+    let mut closure = strict_closure(store, &actions)?;
     let cas = LocalCas::new(store);
     for digest in &additions.objects {
-        require_object(&cas, &mut objects, digest)?;
+        require_object(&cas, &mut closure, digest)?;
     }
     let parent = archive
         .parent()
@@ -485,7 +489,7 @@ fn export_receipts(
             objects: additions.objects.iter().cloned().collect(),
         })?,
     )?;
-    for path in objects.iter().chain(result_paths.iter()) {
+    for path in closure.objects.iter().chain(closure.results.iter()) {
         append_file(&mut builder, store, path)?;
     }
     builder.finish()?;
@@ -497,7 +501,7 @@ fn export_receipts(
     let bytes = std::fs::metadata(archive)?.len();
     Ok(TransferOutcome {
         actions: actions.len() as u64,
-        objects: objects.len() as u64,
+        objects: closure.objects.len() as u64,
         bytes,
     })
 }
@@ -509,7 +513,16 @@ pub fn import_archive(store: &Path, archive: &Path) -> Result<TransferOutcome> {
 
 /// Import a cache archive and return its named higher-level CAS roots.
 pub fn import_archive_with_attachments(store: &Path, archive: &Path) -> Result<ImportOutcome> {
-    let staging = tempfile::tempdir()?;
+    // Stage inside the store, not the system temp directory. Publication moves
+    // the verified files with `fs::rename`, which only works within one
+    // filesystem; a `$TMPDIR` on another device silently downgrades every
+    // object to a copy and a second hash, and unpacking a multi-gigabyte
+    // export into a container's `/tmp` can simply run out of room.
+    let staging_root = store.join(IMPORT_STAGING_DIR);
+    std::fs::create_dir_all(&staging_root)?;
+    let staging = tempfile::Builder::new()
+        .prefix("import-")
+        .tempdir_in(&staging_root)?;
     let file = std::fs::File::open(archive)
         .wrap_err_with(|| format!("failed to open {}", archive.display()))?;
     let mut bundle = tar::Archive::new(file);
@@ -573,16 +586,17 @@ pub fn import_archive_with_attachments(store: &Path, archive: &Path) -> Result<I
     {
         eyre::bail!("unsupported or invalid cache export manifest");
     }
-    let (mut objects, result_paths) = strict_closure(staging.path(), &actions)
+    let mut closure = strict_closure(staging.path(), &actions)
         .wrap_err("cache export is incomplete or corrupt")?;
     let staged_cas = LocalCas::new(staging.path());
     for digest in &manifest.objects {
-        require_object(&staged_cas, &mut objects, digest)
+        require_object(&staged_cas, &mut closure, digest)
             .wrap_err("cache export attachment is incomplete or corrupt")?;
     }
+    verify_pending(&mut closure.pending).wrap_err("cache export is incomplete or corrupt")?;
 
     let cas = LocalCas::new(store);
-    for path in &objects {
+    for path in &closure.objects {
         let relative = path.strip_prefix(staging.path())?;
         let source = staging.path().join(relative);
         let digest = addressed_digest(staging.path(), &source, false)
@@ -593,7 +607,7 @@ pub fn import_archive_with_attachments(store: &Path, archive: &Path) -> Result<I
         cas.adopt_verified_file(&digest, &source)?;
     }
     let action_cache = mbx_cache_core::LocalActionCache::new(store);
-    for path in &result_paths {
+    for path in &closure.results {
         let result: RemoteActionResult = serde_json::from_slice(&std::fs::read(path)?)?;
         action_cache.store(&result)?;
     }
@@ -603,7 +617,7 @@ pub fn import_archive_with_attachments(store: &Path, archive: &Path) -> Result<I
     Ok(ImportOutcome {
         transfer: TransferOutcome {
             actions: actions.len() as u64,
-            objects: objects.len() as u64,
+            objects: closure.objects.len() as u64,
             bytes: std::fs::metadata(archive)?.len(),
         },
         attachments: manifest.attachments,
@@ -637,50 +651,122 @@ fn valid_attachment_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-fn strict_closure(
-    store: &Path,
-    actions: &BTreeSet<CacheDigest>,
-) -> Result<(BTreeSet<PathBuf>, BTreeSet<PathBuf>)> {
+/// Everything one closure walk reached, and the leaves still to be hashed.
+#[derive(Default)]
+struct Closure {
+    objects: BTreeSet<PathBuf>,
+    results: BTreeSet<PathBuf>,
+    pending: Vec<PendingObject>,
+}
+
+/// A leaf object recorded by the walk and awaiting content verification.
+struct PendingObject {
+    digest: CacheDigest,
+    path: PathBuf,
+}
+
+fn strict_closure(store: &Path, actions: &BTreeSet<CacheDigest>) -> Result<Closure> {
     let cas = LocalCas::new(store);
     let action_cache = mbx_cache_core::LocalActionCache::new(store);
-    let mut objects = BTreeSet::new();
-    let mut results = BTreeSet::new();
+    let mut closure = Closure::default();
     let mut directories = BTreeSet::new();
     for action in actions {
         let result = action_cache
             .find(action)?
             .ok_or_else(|| eyre::eyre!("action result is missing for {}", action.hash))?;
-        results.insert(action_cache.path_for(action)?);
-        require_object(&cas, &mut objects, &result.action)?;
+        closure.results.insert(action_cache.path_for(action)?);
+        require_object(&cas, &mut closure, &result.action)?;
         if let Some(metadata) = &result.metadata {
-            require_object(&cas, &mut objects, metadata)?;
-            let captured: CapturedOutput =
-                serde_json::from_slice(&std::fs::read(cas.path_for(metadata)?)?)
-                    .wrap_err("action metadata is invalid")?;
-            require_object(&cas, &mut objects, &captured.stdout)?;
-            require_object(&cas, &mut objects, &captured.stderr)?;
+            let path = require_parsed_object(&cas, &mut closure, metadata)?;
+            let captured: CapturedOutput = serde_json::from_slice(&std::fs::read(path)?)
+                .wrap_err("action metadata is invalid")?;
+            require_object(&cas, &mut closure, &captured.stdout)?;
+            require_object(&cas, &mut closure, &captured.stderr)?;
         }
         if let Some(root) = &result.output_root {
-            require_object(&cas, &mut objects, root)?;
-            let mut pending = vec![root.clone()];
-            while let Some(digest) = pending.pop() {
+            let mut nodes = vec![root.clone()];
+            while let Some(digest) = nodes.pop() {
                 if !directories.insert(digest.clone()) {
                     continue;
                 }
-                let directory: CacheDirectory =
-                    serde_json::from_slice(&std::fs::read(cas.path_for(&digest)?)?)
-                        .wrap_err("output directory is invalid")?;
+                let path = require_parsed_object(&cas, &mut closure, &digest)?;
+                let directory: CacheDirectory = serde_json::from_slice(&std::fs::read(path)?)
+                    .wrap_err("output directory is invalid")?;
                 for file in directory.files {
-                    require_object(&cas, &mut objects, &file.digest)?;
+                    require_object(&cas, &mut closure, &file.digest)?;
                 }
                 for child in directory.directories {
-                    require_object(&cas, &mut objects, &child.digest)?;
-                    pending.push(child.digest);
+                    nodes.push(child.digest);
                 }
             }
         }
     }
-    Ok((objects, results))
+    Ok(closure)
+}
+
+/// Verify every recorded leaf's contents, spread across the machine.
+///
+/// Callers must run this before publishing anything the walk reached: it is
+/// the step that proves the bytes match their content-addressed names, and
+/// both the exporter and the importer depend on that proof. A closure of a
+/// few thousand compiler outputs is several gigabytes read once, and the
+/// hash, not the read, is what saturates a core.
+fn verify_pending(pending: &mut [PendingObject]) -> Result<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    // Longest first. Handing out a half-gigabyte rlib last would leave one
+    // worker hashing it alone after the others have finished, and the lengths
+    // cost nothing: the walk already checked each one against its digest.
+    pending.sort_by(|left, right| {
+        right
+            .digest
+            .size
+            .cmp(&left.digest.size)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    let workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(pending.len());
+    let next = AtomicUsize::new(0);
+    // Report the lowest failing path rather than whichever worker happened to
+    // lose the race, so a corrupt closure names the same object every run.
+    let failure: Mutex<Option<(PathBuf, eyre::Report)>> = Mutex::new(None);
+    let pending: &[PendingObject] = pending;
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(entry) = pending.get(index) else {
+                        break;
+                    };
+                    let error = match entry.digest.matches_file(&entry.path) {
+                        Ok(true) => continue,
+                        Ok(false) => eyre::eyre!(
+                            "local CAS blob failed digest verification: {}",
+                            entry.path.display()
+                        ),
+                        Err(error) => {
+                            error.wrap_err(format!("failed to verify {}", entry.path.display()))
+                        }
+                    };
+                    let mut failure = failure.lock().unwrap_or_else(|error| error.into_inner());
+                    if failure.as_ref().is_none_or(|(path, _)| entry.path < *path) {
+                        *failure = Some((entry.path.clone(), error));
+                    }
+                }
+            });
+        }
+    });
+    match failure
+        .into_inner()
+        .unwrap_or_else(|error| error.into_inner())
+    {
+        Some((_, error)) => Err(error),
+        None => Ok(()),
+    }
 }
 
 #[derive(Deserialize)]
@@ -725,20 +811,55 @@ fn merge_imported_manifest(destination: &Path, mut imported: TaskActionManifest)
     write_atomic(&destination_path, &serde_json::to_vec(&imported)?)
 }
 
-fn require_object(
-    cas: &LocalCas,
-    objects: &mut BTreeSet<PathBuf>,
-    digest: &CacheDigest,
-) -> Result<()> {
+/// Record a leaf object, deferring its content hash to `verify_pending`.
+///
+/// Presence and declared length are settled here, while the walk can still say
+/// cheaply which object is wrong. The contents are left for the parallel pass
+/// because leaves are where the bytes are: compiler outputs, captured streams,
+/// and attachments, none of which steer the walk.
+fn require_object(cas: &LocalCas, closure: &mut Closure, digest: &CacheDigest) -> Result<()> {
     let expected = cas.path_for(digest)?;
-    if objects.contains(&expected) {
+    if !closure.objects.insert(expected.clone()) {
         return Ok(());
     }
+    let metadata = match std::fs::metadata(&expected) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eyre::bail!("cache object is missing for {}", digest.hash)
+        }
+        Err(error) => {
+            return Err(error).wrap_err_with(|| format!("failed to read {}", expected.display()));
+        }
+    };
+    if metadata.len() != digest.size {
+        eyre::bail!(
+            "local CAS blob failed digest verification: {}",
+            expected.display()
+        );
+    }
+    closure.pending.push(PendingObject {
+        digest: digest.clone(),
+        path: expected,
+    });
+    Ok(())
+}
+
+/// Verify an object the walk is about to deserialize, and return its path.
+///
+/// Action metadata and directory nodes decide what the walk visits next, so a
+/// forged one steers the walk itself and has to be trusted before `serde_json`
+/// sees it. They are canonical JSON and small, so hashing them in line costs
+/// little next to the leaves they point at.
+fn require_parsed_object(
+    cas: &LocalCas,
+    closure: &mut Closure,
+    digest: &CacheDigest,
+) -> Result<PathBuf> {
     let path = cas
         .find(digest)?
         .ok_or_else(|| eyre::eyre!("cache object is missing for {}", digest.hash))?;
-    objects.insert(path);
-    Ok(())
+    closure.objects.insert(path.clone());
+    Ok(path)
 }
 
 fn task_manifest_path(store: &Path, identity: &str) -> PathBuf {
@@ -1127,9 +1248,54 @@ fn gc_with_mode(store: &Path, max_bytes: u64, dry_run: bool) -> Result<GcOutcome
     let sessions = prune_sessions(store, dry_run)?;
     outcome.removed_session_streams += sessions.removed_streams;
     outcome.removed_bytes += sessions.removed_bytes;
+    prune_import_staging(store, dry_run);
 
     outcome.remaining_bytes = live_bytes;
     Ok(outcome)
+}
+
+/// Discard import staging trees that a killed process left behind.
+///
+/// A finished import removes its own tree, and a failed one unwinds through
+/// `TempDir`, so only a kill leaks. What leaks is the whole expanded export,
+/// and it sits outside `cas/v1` and `action-results/v1`, so the sweep's own
+/// accounting cannot see it and nothing else would ever reclaim it.
+///
+/// Age is what makes this safe to do without a lock: a concurrent import
+/// holds no claim this could consult, and one that has been extracting for a
+/// day has worse problems than a stale directory. Failures are logged rather
+/// than returned, because losing a staging tree must not fail a sweep.
+fn prune_import_staging(store: &Path, dry_run: bool) {
+    if dry_run {
+        return;
+    }
+    let root = store.join(IMPORT_STAGING_DIR);
+    let Ok(entries) = read_dir_or_empty(&root) else {
+        return;
+    };
+    for entry in entries {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_dir() {
+            continue;
+        }
+        let abandoned = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+            .is_some_and(|age| age >= IMPORT_STAGING_RETENTION);
+        if !abandoned {
+            continue;
+        }
+        let path = entry.path();
+        if let Err(error) = std::fs::remove_dir_all(&path) {
+            log::debug!(
+                "could not remove abandoned import staging {}: {error}",
+                path.display()
+            );
+        }
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
