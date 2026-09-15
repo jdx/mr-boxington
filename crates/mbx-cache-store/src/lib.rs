@@ -639,10 +639,21 @@ fn write_directory_export(
         }
     };
     if let Err(error) = std::fs::rename(&staged, destination) {
-        if let Some((_holder, moved)) = &retired {
-            let _ = std::fs::rename(moved, destination);
-        }
         let _ = std::fs::remove_dir_all(&staged);
+        if let Some((holder, moved)) = retired
+            && std::fs::rename(&moved, destination).is_err()
+        {
+            // Putting the old bundle back has failed too, and letting the
+            // holder drop here would delete the only remaining copy of it.
+            // Keep it instead, and say where it went: a stale bundle the
+            // caller has to move back by hand still beats no bundle at all.
+            let kept = holder.keep();
+            log::warn!(
+                "could not restore {} after a failed export; its previous contents are at {}",
+                destination.display(),
+                kept.join("bundle").display()
+            );
+        }
         return Err(error).wrap_err_with(|| format!("failed to publish {}", destination.display()));
     }
     // The replaced bundle is only discarded once the new one is in place.
