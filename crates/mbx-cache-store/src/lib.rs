@@ -275,6 +275,34 @@ fn validate_export_group(group: &str) -> Result<()> {
     Ok(())
 }
 
+/// How an export is laid out on disk.
+///
+/// Both forms carry the same manifest and the same `cas/v1` and
+/// `action-results/v1` layout; they differ only in whether that tree is
+/// wrapped in a tar. A transport that archives and compresses a directory
+/// itself, such as `actions/cache`, would otherwise write every byte twice:
+/// once into the tar and once again when the importer unpacks it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ExportForm {
+    /// One tar file: portable, and what a standalone bundle should be.
+    #[default]
+    Tar,
+    /// A directory tree, for transports that archive directories themselves.
+    Directory,
+}
+
+impl std::str::FromStr for ExportForm {
+    type Err = eyre::Report;
+
+    fn from_str(text: &str) -> Result<Self> {
+        match text {
+            "tar" => Ok(Self::Tar),
+            "directory" => Ok(Self::Directory),
+            other => eyre::bail!("unknown export format {other:?}; expected tar or directory"),
+        }
+    }
+}
+
 /// Export the complete local cache closure of this checkout's most recent build.
 pub fn export_checkout(
     store: &Path,
@@ -289,7 +317,13 @@ pub fn export_checkout(
                 workspace_root.display()
             )
         })?;
-    export_receipts(store, vec![receipt], archive, ExportAdditions::default())
+    export_receipts(
+        store,
+        vec![receipt],
+        archive,
+        ExportAdditions::default(),
+        ExportForm::Tar,
+    )
 }
 
 /// Return the target directory recorded for this checkout's latest build.
@@ -349,7 +383,26 @@ pub fn export_checkout_with(
                 workspace_root.display()
             )
         })?;
-    export_receipts(store, vec![receipt], archive, additions)
+    export_receipts(store, vec![receipt], archive, additions, ExportForm::Tar)
+}
+
+/// Export one checkout's closure in the requested form.
+pub fn export_checkout_as(
+    store: &Path,
+    workspace_root: &Path,
+    destination: &Path,
+    additions: ExportAdditions,
+    form: ExportForm,
+) -> Result<TransferOutcome> {
+    let receipt = read_build_receipt(&latest_receipt_path(store, workspace_root))
+        .filter(|receipt| receipt.workspace_root == workspace_root)
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "no completed mbx build is recorded for {}",
+                workspace_root.display()
+            )
+        })?;
+    export_receipts(store, vec![receipt], destination, additions, form)
 }
 
 /// Export the union of every completed build recorded under one CI group.
@@ -363,6 +416,17 @@ pub fn export_group_with(
     group: &str,
     archive: &Path,
     additions: ExportAdditions,
+) -> Result<TransferOutcome> {
+    export_group_as(store, group, archive, additions, ExportForm::Tar)
+}
+
+/// Export a grouped closure in the requested form.
+pub fn export_group_as(
+    store: &Path,
+    group: &str,
+    destination: &Path,
+    additions: ExportAdditions,
+    form: ExportForm,
 ) -> Result<TransferOutcome> {
     validate_export_group(group)?;
     let root = store
@@ -383,8 +447,9 @@ pub fn export_group_with(
             .iter()
             .map(|(_, receipt)| receipt.clone())
             .collect(),
-        archive,
+        destination,
         additions,
+        form,
     )?;
     // A receipt is a pending-export root. Retire only the files this export
     // consumed, and only after its complete archive has been published. A
@@ -402,6 +467,7 @@ fn export_receipts(
     mut receipts: Vec<BuildReceipt>,
     archive: &Path,
     additions: ExportAdditions,
+    form: ExportForm,
 ) -> Result<TransferOutcome> {
     receipts.sort_by(|left, right| {
         left.completed_nanos
@@ -470,26 +536,49 @@ fn export_receipts(
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
+    let manifest = serde_json::to_vec(&ExportManifest {
+        version: if additions.attachments.is_empty() && additions.objects.is_empty() {
+            LEGACY_EXPORT_VERSION
+        } else {
+            EXPORT_VERSION
+        },
+        tasks,
+        actions: actions.iter().cloned().collect(),
+        attachments: additions.attachments.clone(),
+        objects: additions.objects.iter().cloned().collect(),
+    })?;
+    let members = closure
+        .objects
+        .iter()
+        .chain(closure.results.iter())
+        .collect::<Vec<_>>();
+    let bytes = match form {
+        ExportForm::Tar => write_tar_export(store, archive, parent, &manifest, &members)?,
+        ExportForm::Directory => {
+            write_directory_export(store, archive, parent, &manifest, &members)?
+        }
+    };
+    Ok(TransferOutcome {
+        actions: actions.len() as u64,
+        objects: closure.objects.len() as u64,
+        bytes,
+    })
+}
+
+/// Write the export as one tar file, published atomically by rename.
+fn write_tar_export(
+    store: &Path,
+    archive: &Path,
+    parent: &Path,
+    manifest: &[u8],
+    members: &[&PathBuf],
+) -> Result<u64> {
     let temporary = tempfile::Builder::new()
         .prefix(".mbx-export-")
         .tempfile_in(parent)?;
     let mut builder = tar::Builder::new(temporary.reopen()?);
-    append_bytes(
-        &mut builder,
-        Path::new(EXPORT_MANIFEST),
-        &serde_json::to_vec(&ExportManifest {
-            version: if additions.attachments.is_empty() && additions.objects.is_empty() {
-                LEGACY_EXPORT_VERSION
-            } else {
-                EXPORT_VERSION
-            },
-            tasks,
-            actions: actions.iter().cloned().collect(),
-            attachments: additions.attachments.clone(),
-            objects: additions.objects.iter().cloned().collect(),
-        })?,
-    )?;
-    for path in closure.objects.iter().chain(closure.results.iter()) {
+    append_bytes(&mut builder, Path::new(EXPORT_MANIFEST), manifest)?;
+    for path in members {
         append_file(&mut builder, store, path)?;
     }
     builder.finish()?;
@@ -498,12 +587,46 @@ fn export_receipts(
         .persist(archive)
         .map_err(|error| error.error)
         .wrap_err_with(|| format!("failed to publish {}", archive.display()))?;
-    let bytes = std::fs::metadata(archive)?.len();
-    Ok(TransferOutcome {
-        actions: actions.len() as u64,
-        objects: closure.objects.len() as u64,
-        bytes,
-    })
+    Ok(std::fs::metadata(archive)?.len())
+}
+
+/// Write the export as a directory, published atomically by rename.
+///
+/// Built beside the destination and moved into place, so an interrupted export
+/// leaves a `.mbx-export-` directory rather than a bundle that looks complete
+/// and is not.
+fn write_directory_export(
+    store: &Path,
+    destination: &Path,
+    parent: &Path,
+    manifest: &[u8],
+    members: &[&PathBuf],
+) -> Result<u64> {
+    let staging = tempfile::Builder::new()
+        .prefix(".mbx-export-")
+        .tempdir_in(parent)?;
+    std::fs::write(staging.path().join(EXPORT_MANIFEST), manifest)?;
+    let mut bytes = manifest.len() as u64;
+    for path in members {
+        let relative = path.strip_prefix(store)?;
+        let target = staging.path().join(relative);
+        std::fs::create_dir_all(target.parent().expect("export member has a parent"))?;
+        bytes += std::fs::copy(path, &target)?;
+    }
+    // `rename` will not replace a populated directory, and an export is a
+    // whole-bundle publish: clear whatever the destination held first.
+    match std::fs::remove_dir_all(destination) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .wrap_err_with(|| format!("failed to replace {}", destination.display()));
+        }
+    }
+    let staged = staging.keep();
+    std::fs::rename(&staged, destination)
+        .wrap_err_with(|| format!("failed to publish {}", destination.display()))?;
+    Ok(bytes)
 }
 
 /// Validate a cache export in isolation, then publish its objects and actions.
@@ -513,40 +636,29 @@ pub fn import_archive(store: &Path, archive: &Path) -> Result<TransferOutcome> {
 
 /// Import a cache archive and return its named higher-level CAS roots.
 pub fn import_archive_with_attachments(store: &Path, archive: &Path) -> Result<ImportOutcome> {
-    // Stage inside the store, not the system temp directory. Publication moves
-    // the verified files with `fs::rename`, which only works within one
-    // filesystem; a `$TMPDIR` on another device silently downgrades every
-    // object to a copy and a second hash, and unpacking a multi-gigabyte
-    // export into a container's `/tmp` can simply run out of room.
-    let staging_root = store.join(IMPORT_STAGING_DIR);
-    std::fs::create_dir_all(&staging_root)?;
-    let staging = tempfile::Builder::new()
-        .prefix("import-")
-        .tempdir_in(&staging_root)?;
-    let file = std::fs::File::open(archive)
-        .wrap_err_with(|| format!("failed to open {}", archive.display()))?;
-    let mut bundle = tar::Archive::new(file);
-    let mut seen = BTreeSet::new();
-    for entry in bundle.entries()? {
-        let mut entry = entry?;
-        let entry_type = entry.header().entry_type();
-        if !entry_type.is_file() && !entry_type.is_gnu_sparse() {
-            eyre::bail!("cache export contains a non-file entry");
-        }
-        let path = entry.path()?.into_owned();
-        validate_archive_path(&path)?;
-        if !seen.insert(path.clone()) {
-            eyre::bail!("cache export contains duplicate entry {}", path.display());
-        }
-        let destination = staging.path().join(&path);
-        std::fs::create_dir_all(destination.parent().expect("entry has a parent"))?;
-        // `unpack` understands GNU sparse maps. A plain stream copy expands
-        // holes into physical zeroes, which is both slower and much larger for
-        // Rust artifacts containing sparse sections.
-        entry.unpack(&destination)?;
-    }
+    // A directory bundle is read where it lies. Unpacking one into staging
+    // would write every byte a second time, which is the whole cost the
+    // directory form exists to avoid.
+    let staged;
+    let root = if archive.is_dir() {
+        validate_directory_bundle(archive)?;
+        archive
+    } else {
+        // Stage inside the store, not the system temp directory. Publication
+        // moves the verified files with `fs::rename`, which only works within
+        // one filesystem; a `$TMPDIR` on another device silently downgrades
+        // every object to a copy and a second hash, and unpacking a
+        // multi-gigabyte export into a container's `/tmp` can run out of room.
+        let staging_root = store.join(IMPORT_STAGING_DIR);
+        std::fs::create_dir_all(&staging_root)?;
+        staged = tempfile::Builder::new()
+            .prefix("import-")
+            .tempdir_in(&staging_root)?;
+        unpack_archive(archive, staged.path())?;
+        staged.path()
+    };
     let manifest: ExportManifest =
-        serde_json::from_slice(&std::fs::read(staging.path().join(EXPORT_MANIFEST))?)?;
+        serde_json::from_slice(&std::fs::read(root.join(EXPORT_MANIFEST))?)?;
     let actions = manifest.actions.iter().cloned().collect::<BTreeSet<_>>();
     let task_identities = manifest
         .tasks
@@ -586,9 +698,9 @@ pub fn import_archive_with_attachments(store: &Path, archive: &Path) -> Result<I
     {
         eyre::bail!("unsupported or invalid cache export manifest");
     }
-    let mut closure = strict_closure(staging.path(), &actions)
-        .wrap_err("cache export is incomplete or corrupt")?;
-    let staged_cas = LocalCas::new(staging.path());
+    let mut closure =
+        strict_closure(root, &actions).wrap_err("cache export is incomplete or corrupt")?;
+    let staged_cas = LocalCas::new(root);
     for digest in &manifest.objects {
         require_object(&staged_cas, &mut closure, digest)
             .wrap_err("cache export attachment is incomplete or corrupt")?;
@@ -597,9 +709,9 @@ pub fn import_archive_with_attachments(store: &Path, archive: &Path) -> Result<I
 
     let cas = LocalCas::new(store);
     for path in &closure.objects {
-        let relative = path.strip_prefix(staging.path())?;
-        let source = staging.path().join(relative);
-        let digest = addressed_digest(staging.path(), &source, false)
+        let relative = path.strip_prefix(root)?;
+        let source = root.join(relative);
+        let digest = addressed_digest(root, &source, false)
             .ok_or_else(|| eyre::eyre!("invalid cache object path {}", relative.display()))?;
         // `strict_closure` verified every path in `objects` against its
         // content-addressed name. Preserve that proof and move the owned
@@ -614,11 +726,24 @@ pub fn import_archive_with_attachments(store: &Path, archive: &Path) -> Result<I
     for task in manifest.tasks {
         merge_imported_manifest(store, task)?;
     }
+    // Measure before consuming, and sum a directory's tree: a directory's own
+    // metadata length says nothing about what it held.
+    let bytes = if archive.is_dir() {
+        let bytes = tree_bytes(archive);
+        // Publication moved the objects out of the bundle, so what is left is
+        // a shell of empty directories. Removing it keeps a restored bundle
+        // from sitting in the job's disk budget for the rest of the run.
+        std::fs::remove_dir_all(archive)
+            .wrap_err_with(|| format!("failed to remove {}", archive.display()))?;
+        bytes
+    } else {
+        std::fs::metadata(archive)?.len()
+    };
     Ok(ImportOutcome {
         transfer: TransferOutcome {
             actions: actions.len() as u64,
             objects: closure.objects.len() as u64,
-            bytes: std::fs::metadata(archive)?.len(),
+            bytes,
         },
         attachments: manifest.attachments,
     })
@@ -890,6 +1015,83 @@ fn append_bytes(
     header.set_mode(0o644);
     header.set_cksum();
     builder.append_data(&mut header, name, bytes)?;
+    Ok(())
+}
+
+/// Unpack a tar export into an empty staging directory.
+fn unpack_archive(archive: &Path, staging: &Path) -> Result<()> {
+    let file = std::fs::File::open(archive)
+        .wrap_err_with(|| format!("failed to open {}", archive.display()))?;
+    let mut bundle = tar::Archive::new(file);
+    let mut seen = BTreeSet::new();
+    for entry in bundle.entries()? {
+        let mut entry = entry?;
+        let entry_type = entry.header().entry_type();
+        if !entry_type.is_file() && !entry_type.is_gnu_sparse() {
+            eyre::bail!("cache export contains a non-file entry");
+        }
+        let path = entry.path()?.into_owned();
+        validate_archive_path(&path)?;
+        if !seen.insert(path.clone()) {
+            eyre::bail!("cache export contains duplicate entry {}", path.display());
+        }
+        let destination = staging.join(&path);
+        std::fs::create_dir_all(destination.parent().expect("entry has a parent"))?;
+        // `unpack` understands GNU sparse maps. A plain stream copy expands
+        // holes into physical zeroes, which is both slower and much larger for
+        // Rust artifacts containing sparse sections.
+        entry.unpack(&destination)?;
+    }
+    Ok(())
+}
+
+/// Check a directory bundle against the policy a tar bundle is held to.
+///
+/// A tar carries its own entry types, so the importer can refuse a symlink or
+/// a device node by reading the header. A directory has to be walked for the
+/// same answer, and `DirEntry::metadata` does not follow symlinks, so anything
+/// that is not a plain file or a directory is rejected here rather than
+/// followed out of the bundle.
+fn validate_directory_bundle(root: &Path) -> Result<()> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)
+            .wrap_err_with(|| format!("failed to read {}", directory.display()))?
+        {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            let path = entry.path();
+            if metadata.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !metadata.is_file() {
+                eyre::bail!("cache export contains a non-file entry");
+            }
+            validate_archive_path(path.strip_prefix(root)?)?;
+            reject_linked_file(&metadata, &path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a bundle file that shares its inode with a name outside the bundle.
+///
+/// Import adopts objects by moving them into the CAS. A second hard link would
+/// survive that move and keep write access to a blob the store now treats as
+/// verified and immutable.
+#[cfg(unix)]
+fn reject_linked_file(metadata: &std::fs::Metadata, path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    if metadata.nlink() > 1 {
+        eyre::bail!("cache export contains a hard link at {}", path.display());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn reject_linked_file(_metadata: &std::fs::Metadata, _path: &Path) -> Result<()> {
     Ok(())
 }
 

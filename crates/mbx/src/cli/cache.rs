@@ -32,10 +32,11 @@ pub(super) enum CacheCommands {
     /// Cargo scheduler state for recorded workspaces, with compiler outputs referenced
     /// from the content-addressed closure instead of duplicated.
     Export(ExportArgs),
-    /// Import a cache export into the local store. If the export contains Cargo
-    /// workspace state and the command runs from a matching checkout with an absent or
-    /// empty target directory, restore that state as well. A non-empty target
-    /// directory is never replaced.
+    /// Import a cache export into the local store. A directory export is consumed:
+    /// its objects are moved into the store and the directory is removed. If the
+    /// export contains Cargo workspace state and the command runs from a matching
+    /// checkout with an absent or empty target directory, restore that state as well.
+    /// A non-empty target directory is never replaced.
     Import(ImportArgs),
     /// Remove managed targets, learned incremental state, and cache claims for
     /// one workspace or selected workspaces.
@@ -69,13 +70,17 @@ pub(super) struct ExportArgs {
     /// Export every build that set MBX_CACHE_EXPORT_GROUP to this CI group.
     #[usage(long, value_name = "GROUP")]
     group: Option<String>,
-    /// Tar archive to write.
+    /// Bundle layout: tar for a portable archive, or directory for a transport
+    /// that archives a directory itself, such as the GitHub Actions cache.
+    #[usage(long, value_name = "FORMAT", default = "tar")]
+    format: String,
+    /// Tar archive or directory to write.
     archive: PathBuf,
 }
 
 #[derive(usage::Args)]
 pub(super) struct ImportArgs {
-    /// Tar archive to import.
+    /// Tar archive or directory to import.
     archive: PathBuf,
 }
 
@@ -113,9 +118,13 @@ pub(super) fn run(config: &Config, command: CacheCommands) -> Result<ExitCode> {
             cache_largest(config, args.limit).map(|()| ExitCode::SUCCESS)
         }
         CacheCommands::Verify => cache_verify(config),
-        CacheCommands::Export(args) => {
-            cache_export(config, &args.archive, args.group.as_deref()).map(|()| ExitCode::SUCCESS)
-        }
+        CacheCommands::Export(args) => cache_export(
+            config,
+            &args.archive,
+            args.group.as_deref(),
+            args.format.parse()?,
+        )
+        .map(|()| ExitCode::SUCCESS),
         CacheCommands::Import(args) => {
             cache_import(config, &args.archive).map(|()| ExitCode::SUCCESS)
         }
@@ -133,7 +142,12 @@ pub(super) fn run(config: &Config, command: CacheCommands) -> Result<ExitCode> {
     }
 }
 
-pub(super) fn cache_export(config: &Config, archive: &Path, group: Option<&str>) -> Result<()> {
+pub(super) fn cache_export(
+    config: &Config,
+    archive: &Path,
+    group: Option<&str>,
+    form: store::ExportForm,
+) -> Result<()> {
     let working_dir = std::env::current_dir()?;
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let workspace = cargo_roots(&cargo, &[], None)
@@ -154,8 +168,8 @@ pub(super) fn cache_export(config: &Config, archive: &Path, group: Option<&str>)
         }
     };
     let outcome = match group {
-        Some(group) => store::export_group_with(&store_dir, group, archive, additions)?,
-        None => store::export_checkout_with(&store_dir, &workspace, archive, additions)?,
+        Some(group) => store::export_group_as(&store_dir, group, archive, additions, form)?,
+        None => store::export_checkout_as(&store_dir, &workspace, archive, additions, form)?,
     };
     let subject = group.map_or_else(
         || workspace.display().to_string(),

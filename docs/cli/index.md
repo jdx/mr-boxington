@@ -28,7 +28,7 @@
 - [`mbx cache projects`](/cli/cache/projects.md)
 - [`mbx cache largest [--limit <LIMIT>]`](/cli/cache/largest.md)
 - [`mbx cache verify`](/cli/cache/verify.md)
-- [`mbx cache export [--group <GROUP>] <ARCHIVE>`](/cli/cache/export.md)
+- [`mbx cache export [--group <GROUP>] [--format <FORMAT>] <ARCHIVE>`](/cli/cache/export.md)
 - [`mbx cache import <ARCHIVE>`](/cli/cache/import.md)
 - [`mbx cache remove [--interactive] [WORKSPACE]`](/cli/cache/remove.md)
 - [`mbx clean [WORKSPACE]`](/cli/clean.md)
