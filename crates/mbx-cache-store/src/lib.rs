@@ -727,6 +727,23 @@ pub fn import_archive_with_attachments(store: &Path, archive: &Path) -> Result<I
     }
     verify_pending(&mut closure.pending).wrap_err("cache export is incomplete or corrupt")?;
 
+    // Read every action result before anything is published. Publication moves
+    // a directory bundle's objects into the store, and a bundle cannot be
+    // re-imported once that has happened, so every failure that can be moved
+    // ahead of it should be: a malformed result has to fail while the bundle
+    // is still whole. What remains after this point is filesystem failure on
+    // the store itself, which a retry would not survive either.
+    let results = closure
+        .results
+        .iter()
+        .map(|path| {
+            let result: RemoteActionResult = serde_json::from_slice(&std::fs::read(path)?)
+                .wrap_err_with(|| format!("action result is invalid: {}", path.display()))?;
+            Ok(result)
+        })
+        .collect::<Result<Vec<_>>>()
+        .wrap_err("cache export is incomplete or corrupt")?;
+
     let cas = LocalCas::new(store);
     for path in &closure.objects {
         let relative = path.strip_prefix(root)?;
@@ -739,9 +756,8 @@ pub fn import_archive_with_attachments(store: &Path, archive: &Path) -> Result<I
         cas.adopt_verified_file(&digest, &source)?;
     }
     let action_cache = mbx_cache_core::LocalActionCache::new(store);
-    for path in &closure.results {
-        let result: RemoteActionResult = serde_json::from_slice(&std::fs::read(path)?)?;
-        action_cache.store(&result)?;
+    for result in &results {
+        action_cache.store(result)?;
     }
     for task in manifest.tasks {
         merge_imported_manifest(store, task)?;
