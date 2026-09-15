@@ -1286,9 +1286,6 @@ fn prune_import_staging(store: &Path, dry_run: bool) {
         let Ok(metadata) = entry.metadata() else {
             continue;
         };
-        if !metadata.is_dir() {
-            continue;
-        }
         let abandoned = metadata
             .modified()
             .ok()
@@ -1298,6 +1295,18 @@ fn prune_import_staging(store: &Path, dry_run: bool) {
             continue;
         }
         let path = entry.path();
+        if !metadata.is_dir() {
+            // A claim whose tree is already gone: reclaim it so claims cannot
+            // pile up one per import that was killed after its tree went.
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "lock")
+                && !claimed_staging_path(&path).exists()
+            {
+                let _ = std::fs::remove_file(&path);
+            }
+            continue;
+        }
         // Age alone would be a guess. An import that outlives the retention
         // window -- a very large bundle on slow storage -- still holds its
         // lock, and taking its tree out from under it would fail a running
@@ -1322,6 +1331,11 @@ fn prune_import_staging(store: &Path, dry_run: bool) {
     }
 }
 
+/// The staging tree a claim describes.
+fn claimed_staging_path(lock: &Path) -> PathBuf {
+    lock.with_extension("")
+}
+
 /// Where the liveness lock for one staging tree lives.
 ///
 /// A sibling of the tree rather than a file inside it, so that removing the
@@ -1332,13 +1346,35 @@ fn import_staging_lock_path(staging: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// One import's claim on its staging tree, released when the import ends.
+///
+/// The lock file is removed with the claim. `TempDir` takes the tree itself,
+/// and a claim left behind would otherwise outlive every tree it described:
+/// the sweep walks directories, so nothing would ever collect it.
+struct StagingClaim {
+    lock: Option<fslock::LockFile>,
+    path: PathBuf,
+}
+
+impl Drop for StagingClaim {
+    fn drop(&mut self) {
+        // Release before unlinking, so a sweep that already opened this file
+        // sees an unlocked claim rather than waiting on one that is going away.
+        drop(self.lock.take());
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// Claim a staging tree for the lifetime of one import.
-fn lock_import_staging(staging: &Path) -> Result<fslock::LockFile> {
+fn lock_import_staging(staging: &Path) -> Result<StagingClaim> {
     let path = import_staging_lock_path(staging);
     let mut lock = fslock::LockFile::open(&path)
         .wrap_err_with(|| format!("failed to open {}", path.display()))?;
     lock.lock()?;
-    Ok(lock)
+    Ok(StagingClaim {
+        lock: Some(lock),
+        path,
+    })
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]

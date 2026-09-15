@@ -803,6 +803,61 @@ fn export_refuses_a_corrupted_object_of_the_right_length() {
 }
 
 #[test]
+fn a_finished_import_leaves_no_staging_behind() {
+    let source = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let workspace = source.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let output = store_object(source.path(), b"compiled artifact");
+    let action = store_result(
+        source.path(),
+        "compile action",
+        std::slice::from_ref(&output),
+    );
+    record_build(
+        source.path(),
+        &"3".repeat(64),
+        &workspace,
+        std::slice::from_ref(&action),
+    );
+    let archive = source.path().join("build.tar");
+    export_checkout(source.path(), &workspace, &archive).unwrap();
+
+    import_archive(destination.path(), &archive).unwrap();
+
+    // The tree goes with its `TempDir`; the claim has to go with it, or every
+    // import would leave one behind where no sweep walks.
+    let staging = destination.path().join(IMPORT_STAGING_DIR);
+    let leftovers = read_dir_or_empty(&staging).unwrap();
+    assert!(
+        leftovers.is_empty(),
+        "import left {:?} behind",
+        leftovers
+            .iter()
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn gc_reclaims_a_staging_claim_whose_tree_is_gone() {
+    let directory = tempfile::tempdir().unwrap();
+    store_object(directory.path(), b"live object");
+    let root = directory.path().join(IMPORT_STAGING_DIR);
+    std::fs::create_dir_all(&root).unwrap();
+    let orphan = root.join("import-killed.lock");
+    std::fs::write(&orphan, b"").unwrap();
+    let stale = filetime::FileTime::from_system_time(
+        SystemTime::now() - IMPORT_STAGING_RETENTION - Duration::from_secs(60),
+    );
+    filetime::set_file_times(&orphan, stale, stale).unwrap();
+
+    gc(directory.path(), u64::MAX).unwrap();
+
+    assert!(!orphan.exists(), "a claim with no tree must be reclaimed");
+}
+
+#[test]
 fn gc_leaves_a_locked_import_staging_tree_alone() {
     let directory = tempfile::tempdir().unwrap();
     store_object(directory.path(), b"live object");
