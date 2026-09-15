@@ -613,19 +613,36 @@ fn write_directory_export(
         std::fs::create_dir_all(target.parent().expect("export member has a parent"))?;
         bytes += std::fs::copy(path, &target)?;
     }
-    // `rename` will not replace a populated directory, and an export is a
-    // whole-bundle publish: clear whatever the destination held first.
-    match std::fs::remove_dir_all(destination) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+    let staged = staging.keep();
+    // `rename` will not replace a populated directory, so an existing bundle
+    // has to move out of the way first. Move it aside rather than deleting it:
+    // if publication then fails, deleting first would have left no bundle at
+    // all, which is worse than the stale one the caller started with.
+    let retired = match std::fs::symlink_metadata(destination) {
+        Ok(_) => {
+            let holder = tempfile::Builder::new()
+                .prefix(".mbx-export-retired-")
+                .tempdir_in(parent)?;
+            let moved = holder.path().join("bundle");
+            std::fs::rename(destination, &moved)
+                .wrap_err_with(|| format!("failed to replace {}", destination.display()))?;
+            Some((holder, moved))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
             return Err(error)
                 .wrap_err_with(|| format!("failed to replace {}", destination.display()));
         }
+    };
+    if let Err(error) = std::fs::rename(&staged, destination) {
+        if let Some((_holder, moved)) = &retired {
+            let _ = std::fs::rename(moved, destination);
+        }
+        let _ = std::fs::remove_dir_all(&staged);
+        return Err(error).wrap_err_with(|| format!("failed to publish {}", destination.display()));
     }
-    let staged = staging.keep();
-    std::fs::rename(&staged, destination)
-        .wrap_err_with(|| format!("failed to publish {}", destination.display()))?;
+    // The replaced bundle is only discarded once the new one is in place.
+    drop(retired);
     Ok(bytes)
 }
 
@@ -657,6 +674,9 @@ pub fn import_archive_with_attachments(store: &Path, archive: &Path) -> Result<I
         unpack_archive(archive, staged.path())?;
         staged.path()
     };
+    // Measure a directory bundle now: publication moves its objects into the
+    // store, so by the end there is nothing left to measure.
+    let bundle_bytes = archive.is_dir().then(|| tree_bytes(archive));
     let manifest: ExportManifest =
         serde_json::from_slice(&std::fs::read(root.join(EXPORT_MANIFEST))?)?;
     let actions = manifest.actions.iter().cloned().collect::<BTreeSet<_>>();
@@ -726,18 +746,16 @@ pub fn import_archive_with_attachments(store: &Path, archive: &Path) -> Result<I
     for task in manifest.tasks {
         merge_imported_manifest(store, task)?;
     }
-    // Measure before consuming, and sum a directory's tree: a directory's own
-    // metadata length says nothing about what it held.
-    let bytes = if archive.is_dir() {
-        let bytes = tree_bytes(archive);
-        // Publication moved the objects out of the bundle, so what is left is
-        // a shell of empty directories. Removing it keeps a restored bundle
-        // from sitting in the job's disk budget for the rest of the run.
-        std::fs::remove_dir_all(archive)
-            .wrap_err_with(|| format!("failed to remove {}", archive.display()))?;
-        bytes
-    } else {
-        std::fs::metadata(archive)?.len()
+    let bytes = match bundle_bytes {
+        Some(bytes) => {
+            // Publication moved the objects out of the bundle, so what is left
+            // is a shell of empty directories. Removing it keeps a restored
+            // bundle out of the job's disk budget for the rest of the run.
+            std::fs::remove_dir_all(archive)
+                .wrap_err_with(|| format!("failed to remove {}", archive.display()))?;
+            bytes
+        }
+        None => std::fs::metadata(archive)?.len(),
     };
     Ok(ImportOutcome {
         transfer: TransferOutcome {
@@ -1078,8 +1096,9 @@ fn validate_directory_bundle(root: &Path) -> Result<()> {
 /// Refuse a bundle file that shares its inode with a name outside the bundle.
 ///
 /// Import adopts objects by moving them into the CAS. A second hard link would
-/// survive that move and keep write access to a blob the store now treats as
-/// verified and immutable.
+/// survive that move and keep write access to a blob the store then treats as
+/// verified and immutable, which is a way to change a verified object after it
+/// has been checked.
 #[cfg(unix)]
 fn reject_linked_file(metadata: &std::fs::Metadata, path: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt as _;
@@ -1090,6 +1109,11 @@ fn reject_linked_file(metadata: &std::fs::Metadata, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Windows reports a link count only through `MetadataExt::number_of_links`,
+/// which is unstable, so this check cannot be made there without reaching for
+/// the platform API directly. The gap is narrow -- it needs an attacker who
+/// can already write into the job's filesystem before the import runs -- but
+/// it is a gap, and a Windows directory bundle does not get this protection.
 #[cfg(not(unix))]
 fn reject_linked_file(_metadata: &std::fs::Metadata, _path: &Path) -> Result<()> {
     Ok(())

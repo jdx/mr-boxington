@@ -701,6 +701,7 @@ fn a_directory_export_replaces_whatever_the_destination_held() {
     assert!(bundle.join(EXPORT_MANIFEST).is_file());
 }
 
+#[cfg(unix)]
 #[test]
 fn import_refuses_a_directory_bundle_holding_a_symlink() {
     let source = tempfile::tempdir().unwrap();
@@ -738,6 +739,7 @@ fn import_refuses_a_directory_bundle_holding_a_symlink() {
     assert!(bundle.exists(), "a refused bundle is left alone");
 }
 
+#[cfg(unix)]
 #[test]
 fn import_refuses_a_directory_bundle_holding_a_hard_link() {
     let source = tempfile::tempdir().unwrap();
@@ -776,6 +778,54 @@ fn import_refuses_a_directory_bundle_holding_a_hard_link() {
     let error = import_archive(destination.path(), &bundle).unwrap_err();
 
     assert!(error.to_string().contains("hard link"), "{error:?}");
+}
+
+#[test]
+fn a_failed_directory_export_keeps_the_previous_bundle() {
+    let source = tempfile::tempdir().unwrap();
+    let workspace = source.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let output = store_object(source.path(), b"compiled artifact");
+    let action = store_result(
+        source.path(),
+        "compile action",
+        std::slice::from_ref(&output),
+    );
+    record_build(
+        source.path(),
+        &"1".repeat(64),
+        &workspace,
+        std::slice::from_ref(&action),
+    );
+    let bundle = source.path().join("bundle");
+    export_checkout_as(
+        source.path(),
+        &workspace,
+        &bundle,
+        ExportAdditions::default(),
+        ExportForm::Directory,
+    )
+    .unwrap();
+    // Break the closure so the next export fails before it publishes.
+    std::fs::remove_file(LocalCas::new(source.path()).path_for(&output).unwrap()).unwrap();
+
+    let error = export_checkout_as(
+        source.path(),
+        &workspace,
+        &bundle,
+        ExportAdditions::default(),
+        ExportForm::Directory,
+    )
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("cache object is missing"),
+        "{error:?}"
+    );
+    assert!(
+        bundle.join(EXPORT_MANIFEST).is_file(),
+        "a failed export must leave the previous bundle in place"
+    );
 }
 
 #[test]
