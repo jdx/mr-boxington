@@ -31,7 +31,7 @@ on:
         description: Released mbx version used by the small-edit comparison
         required: false
         type: string
-        default: "1.8.0"
+        default: "1.11.1"
       small_edit_mbx_ref:
         description: Build this mr-boxington ref instead of installing a release
         required: false
@@ -482,6 +482,12 @@ jobs:
           backend: local
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           toolchain: 1.97.1
+      # Restoring the bundle and importing it is the work that happens before a
+      # compiler runs, so time the two apart instead of leaving them folded into
+      # the restore-and-build total, where a few seconds sit under runner noise.
+      - name: Start bundle restore timer
+        if: matrix.tool == 'mbx-registry'
+        run: echo "SMALL_EDIT_RESTORE_STARTED_NS=$(date +%s%N)" >> "$GITHUB_ENV"
       - if: matrix.tool == 'mbx-registry'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -491,11 +497,16 @@ jobs:
             ${{ runner.temp }}/mbx-cache.tar
             ~/.cargo/registry
             ~/.cargo/git
-      - name: Import native mbx bundle
+      - id: import
+        name: Import native mbx bundle
         if: matrix.tool == 'mbx-registry'
         run: |
           set -o pipefail
+          restored=$(date +%s%N)
           mbx cache import "$RUNNER_TEMP/mbx-cache.tar" | tee "$RUNNER_TEMP/mbx-import.log"
+          imported=$(date +%s%N)
+          echo "restore_duration_ns=$((restored - SMALL_EDIT_RESTORE_STARTED_NS))" >> "$GITHUB_OUTPUT"
+          echo "import_duration_ns=$((imported - restored))" >> "$GITHUB_OUTPUT"
       - id: build
         name: Build edited commit
         env:
@@ -531,6 +542,8 @@ jobs:
         env:
           BUILD_DURATION_NS: ${{ steps.build.outputs.build_duration_ns }}
           TOTAL_DURATION_NS: ${{ steps.build.outputs.total_duration_ns }}
+          RESTORE_DURATION_NS: ${{ steps.import.outputs.restore_duration_ns }}
+          IMPORT_DURATION_NS: ${{ steps.import.outputs.import_duration_ns }}
           TOOL: ${{ matrix.tool }}
           TRIAL: ${{ matrix.trial }}
           REF: ${{ inputs.small_edit_mbx_ref }}
@@ -543,11 +556,15 @@ jobs:
           else
             REVISION=""
           fi
+          # Only the bundle arm restores and imports. The other arms record null
+          # so the summary can tell "does not apply" from "was not measured".
           jq -n --arg tool "$TOOL" --arg ref "$REF" --arg revision "$REVISION" --arg version "$VERSION" \
             --argjson trial "$TRIAL" \
             --argjson build_duration_ns "$BUILD_DURATION_NS" \
             --argjson restore_and_build_duration_ns "$TOTAL_DURATION_NS" \
-            '{schema:1,tool:$tool,mbx_version:$version,mbx_ref:$ref,mbx_revision:$revision,trial:$trial,build_duration_ns:$build_duration_ns,restore_and_build_duration_ns:$restore_and_build_duration_ns}' \
+            --argjson restore_duration_ns "${RESTORE_DURATION_NS:-null}" \
+            --argjson import_duration_ns "${IMPORT_DURATION_NS:-null}" \
+            '{schema:2,tool:$tool,mbx_version:$version,mbx_ref:$ref,mbx_revision:$revision,trial:$trial,build_duration_ns:$build_duration_ns,restore_and_build_duration_ns:$restore_and_build_duration_ns,restore_duration_ns:$restore_duration_ns,import_duration_ns:$import_duration_ns}' \
             > "$RUNNER_TEMP/small-edit/${TOOL}-${TRIAL}.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -600,15 +617,20 @@ jobs:
               mbx_revision: .[0].mbx_revision,
               trials: length,
               build_seconds: (([.[].build_duration_ns] | median) / 1e9),
-              restore_and_build_seconds: (([.[].restore_and_build_duration_ns] | median) / 1e9)
+              restore_and_build_seconds: (([.[].restore_and_build_duration_ns] | median) / 1e9),
+              cache_restore_seconds: ([.[].restore_duration_ns] | map(select(. != null))
+                | if length > 0 then (median / 1e9) else null end),
+              import_seconds: ([.[].import_duration_ns] | map(select(. != null))
+                | if length > 0 then (median / 1e9) else null end)
             })' "$RUNNER_TEMP"/small-edit/*.json \
             | tee "$RUNNER_TEMP/small-edit-summary.json"
           {
             echo '## hk parent-cache + small-edit comparison'
             echo
-            echo '| Tool | Trials | Median restore + build | Median build |'
-            echo '| :--- | ---: | ---: | ---: |'
-            jq -r '.[] | "| \(.tool) | \(.trials) | \(.restore_and_build_seconds * 100 | round / 100) s | \(.build_seconds * 100 | round / 100) s |"' \
+            echo '| Tool | Trials | Median restore + build | Median build | Median cache restore | Median mbx import |'
+            echo '| :--- | ---: | ---: | ---: | ---: | ---: |'
+            jq -r 'def seconds: if . == null then "n/a" else "\(. * 100 | round / 100) s" end;
+              .[] | "| \(.tool) | \(.trials) | \(.restore_and_build_seconds | seconds) | \(.build_seconds | seconds) | \(.cache_restore_seconds | seconds) | \(.import_seconds | seconds) |"' \
               "$RUNNER_TEMP/small-edit-summary.json"
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
