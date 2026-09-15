@@ -771,6 +771,59 @@ fn gc_prunes_abandoned_import_staging() {
 }
 
 #[test]
+fn export_refuses_a_corrupted_object_of_the_right_length() {
+    let source = tempfile::tempdir().unwrap();
+    let workspace = source.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let output = store_object(source.path(), b"compiled artifact");
+    let action = store_result(
+        source.path(),
+        "compile action",
+        std::slice::from_ref(&output),
+    );
+    record_build(
+        source.path(),
+        &"2".repeat(64),
+        &workspace,
+        std::slice::from_ref(&action),
+    );
+    // Same length, different bytes: only a content hash catches this, so it is
+    // exactly what a length check would wave through.
+    let path = LocalCas::new(source.path()).path_for(&output).unwrap();
+    std::fs::write(&path, vec![b'x'; output.size as usize]).unwrap();
+    let archive = source.path().join("rotted.tar");
+
+    let error = export_checkout(source.path(), &workspace, &archive).unwrap_err();
+
+    assert!(
+        format!("{error:?}").contains("failed digest verification"),
+        "{error:?}"
+    );
+    assert!(!archive.exists(), "a corrupt closure must publish nothing");
+}
+
+#[test]
+fn gc_leaves_a_locked_import_staging_tree_alone() {
+    let directory = tempfile::tempdir().unwrap();
+    store_object(directory.path(), b"live object");
+    let root = directory.path().join(IMPORT_STAGING_DIR);
+    let held = root.join("import-running-long");
+    std::fs::create_dir_all(held.join(CAS_DIR)).unwrap();
+    std::fs::write(held.join(CAS_DIR).join("blob"), b"staged bytes").unwrap();
+    // Old enough to sweep, but still claimed: a slow import on large storage
+    // can outlive the retention window.
+    let stale = filetime::FileTime::from_system_time(
+        SystemTime::now() - IMPORT_STAGING_RETENTION - Duration::from_secs(60),
+    );
+    filetime::set_file_times(&held, stale, stale).unwrap();
+    let _lock = lock_import_staging(&held).unwrap();
+
+    gc(directory.path(), u64::MAX).unwrap();
+
+    assert!(held.exists(), "a claimed staging tree must survive a sweep");
+}
+
+#[test]
 fn export_requires_a_build_from_the_current_checkout() {
     let source = tempfile::tempdir().unwrap();
     let workspace = source.path().join("never-built");
