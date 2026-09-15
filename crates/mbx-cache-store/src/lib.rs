@@ -1166,11 +1166,22 @@ fn validate_archive_path(path: &Path) -> Result<()> {
     {
         eyre::bail!("cache export contains unsafe path {}", path.display());
     }
-    let text = path.to_string_lossy();
-    if text != EXPORT_MANIFEST
-        && !text.starts_with("cas/v1/")
-        && !text.starts_with("action-results/v1/")
-    {
+    // Compare components rather than a spelling. A tar entry always writes its
+    // path with forward slashes, but a directory bundle is walked with the
+    // platform's separator, so on Windows a prefix match against "cas/v1/"
+    // would reject every file in the bundle.
+    let parts = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let expected = match parts.as_slice() {
+        [name] => name == EXPORT_MANIFEST,
+        [root, version, _rest @ ..] => {
+            parts.len() > 2 && (root == "cas" || root == "action-results") && version == "v1"
+        }
+        [] => false,
+    };
+    if !expected {
         eyre::bail!("cache export contains unexpected path {}", path.display());
     }
     Ok(())

@@ -1012,6 +1012,27 @@ fn export_refuses_a_corrupted_object_of_the_right_length() {
 }
 
 #[test]
+fn archive_paths_are_checked_by_component_not_by_spelling() {
+    // A directory bundle is walked with the platform's separator, so on
+    // Windows these carry backslashes where a tar entry would carry slashes.
+    // Both have to pass, and this is the assertion that says so on that CI.
+    validate_archive_path(&Path::new(CAS_DIR).join("blake3").join("ab").join("cd-1")).unwrap();
+    validate_archive_path(
+        &Path::new(ACTION_RESULTS_DIR)
+            .join("blake3")
+            .join("ab")
+            .join("cd-1.json"),
+    )
+    .unwrap();
+    validate_archive_path(Path::new(EXPORT_MANIFEST)).unwrap();
+
+    let _ = validate_archive_path(&Path::new("elsewhere").join("file")).unwrap_err();
+    let _ = validate_archive_path(&Path::new("cas").join("v2").join("blob")).unwrap_err();
+    // The tree roots themselves are not members.
+    let _ = validate_archive_path(Path::new(CAS_DIR)).unwrap_err();
+}
+
+#[test]
 fn a_finished_import_leaves_no_staging_behind() {
     let source = tempfile::tempdir().unwrap();
     let destination = tempfile::tempdir().unwrap();
