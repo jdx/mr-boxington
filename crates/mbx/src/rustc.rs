@@ -2643,11 +2643,20 @@ fn identity_field<'a>(verbose: &'a str, field: &str) -> Result<&'a str> {
 
 /// Environment inputs eligible for remapping.
 ///
-/// Deliberately just the one. `OUT_DIR` lives under the target directory, so
-/// remapping it confines the change to generated sources, and it is the value
-/// the plan identifies as the cross-checkout shortfall. Widening this list
-/// widens which paths disappear from debug info, which is its own decision.
-const PORTABLE_ENVIRONMENT: &[&str] = &["OUT_DIR"];
+/// Both name a directory a compilation reads to find something, not a value it
+/// is meant to carry: `OUT_DIR` for build-script output, `CARGO_MANIFEST_DIR`
+/// for files shipped with the crate, as `include_str!(concat!(env!(
+/// "CARGO_MANIFEST_DIR"), "/data"))` does. Each differs per checkout, so
+/// keeping either verbatim is what stops the compilations that read them from
+/// sharing -- along with every compilation downstream, whose only changed input
+/// is the artifact they produced.
+///
+/// A crate that keeps one of these as a runtime string is a different matter,
+/// and is caught after the fact: the outputs are read before publishing, and a
+/// compilation that carries the value is keyed literally. Widening this list
+/// further widens which paths disappear from debug info, which is its own
+/// decision.
+const PORTABLE_ENVIRONMENT: &[&str] = &["OUT_DIR", "CARGO_MANIFEST_DIR"];
 
 /// The environment values whose absolute paths this compilation was made
 /// independent of.

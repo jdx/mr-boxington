@@ -383,7 +383,7 @@ Logical CPUs to leave free for the rest of the machine.
 - **Default:** `true`
 - **Set with:** `MBX_SHARE_OUT_DIR`
 
-Share eligible compilations that read `OUT_DIR`.
+Share eligible compilations that read `OUT_DIR` or `CARGO_MANIFEST_DIR`.
 
 ### `stats_report`
 

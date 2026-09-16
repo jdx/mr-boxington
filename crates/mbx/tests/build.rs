@@ -1717,6 +1717,12 @@ enum Generated {
     /// Keeps `OUT_DIR` in a string constant. That lands in the artifact itself,
     /// where no remapping reaches it.
     Text,
+    /// Includes a file shipped with the crate, found through
+    /// `CARGO_MANIFEST_DIR`. Only the file's contents reach the artifact.
+    ManifestInclude,
+    /// Keeps `CARGO_MANIFEST_DIR` in a string constant, which does reach the
+    /// artifact.
+    ManifestText,
 }
 
 /// Write a build-script fixture that leaves an observable execution count and
@@ -2189,7 +2195,20 @@ fn write_generated_project(directory: &Path, generated: Generated) {
              pub fn value() -> u32 { VALUE }\n"
                 .to_string()
         }
+        Generated::ManifestInclude => {
+            "pub const DATA: &str = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/data.txt\"));\n\
+             pub fn value() -> u32 { DATA.len() as u32 }\n"
+                .to_string()
+        }
+        Generated::ManifestText => {
+            "pub const WHERE: &str = env!(\"CARGO_MANIFEST_DIR\");\n\
+             pub fn value() -> u32 { WHERE.len() as u32 }\n"
+                .to_string()
+        }
     };
+    if matches!(generated, Generated::ManifestInclude) {
+        std::fs::write(directory.join("data.txt"), "shipped with the crate\n").unwrap();
+    }
     std::fs::write(directory.join("src/lib.rs"), lib).unwrap();
     generate_lockfile(directory);
 }
@@ -2225,6 +2244,36 @@ fn out_dir_crosses_checkouts_only_where_the_artifact_allows_it() {
             "the default shared the wrong shape"
         );
     }
+}
+
+/// `CARGO_MANIFEST_DIR` is the other directory a compilation reads to find
+/// something rather than to carry it, and it divides the same way: a crate that
+/// includes a file shipped beside its manifest crosses checkouts, and one that
+/// keeps the directory as a runtime string does not.
+///
+/// The pair is the test. Sharing the first without refusing the second would be
+/// a wrong answer rather than a slow one.
+#[test]
+fn manifest_dir_crosses_checkouts_only_where_the_artifact_allows_it() {
+    for (generated, expect_hits) in [
+        (Generated::ManifestInclude, true),
+        (Generated::ManifestText, false),
+    ] {
+        assert_eq!(
+            two_checkouts_share(generated, &[]),
+            expect_hits,
+            "the default shared the wrong shape"
+        );
+    }
+}
+
+/// The opt-out covers both portable values, not just `OUT_DIR`.
+#[test]
+fn manifest_dir_sharing_can_be_turned_off() {
+    assert!(!two_checkouts_share(
+        Generated::ManifestInclude,
+        &[("MBX_SHARE_OUT_DIR", "0")]
+    ));
 }
 
 /// Build the same fixture in two checkouts, reporting whether the second one

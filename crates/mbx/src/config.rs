@@ -157,7 +157,7 @@ pub(crate) struct RawConfig {
         default = "8GiB"
     )]
     learned_incremental_max_size: String,
-    /// Share eligible compilations that read `OUT_DIR`.
+    /// Share eligible compilations that read `OUT_DIR` or `CARGO_MANIFEST_DIR`.
     #[usage(env = "MBX_SHARE_OUT_DIR", default = true)]
     share_out_dir: bool,
     /// Cache executions of build scripts using Cargo's freshness inputs. This may
@@ -371,9 +371,10 @@ pub struct Config {
     /// Let cargo compile workspace members incrementally, rather than forcing
     /// `CARGO_INCREMENTAL=0` for the whole build.
     pub incremental: bool,
-    /// Let a compilation that reads `OUT_DIR` be shared between checkouts.
+    /// Let a compilation that reads `OUT_DIR` or `CARGO_MANIFEST_DIR` be
+    /// shared between checkouts.
     ///
-    /// On by default: the compilation remaps generated sources to a stable
+    /// On by default: the compilation remaps those directories to a stable
     /// placeholder, and mbx reads the outputs before publishing to fall back
     /// to a checkout-specific key when a crate embeds the literal path.
     pub share_out_dir: bool,
