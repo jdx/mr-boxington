@@ -233,49 +233,87 @@ pub(super) fn cargo_proxy_passthrough(arguments: &[OsString]) -> bool {
         )
 }
 
-/// Preserve invocations outside a project, non-build aliases, and
-/// unknown-command diagnostics without allowing failed metadata to launch a
-/// build alias or an external Cargo command inside one.
-pub(super) fn metadata_failure_passthrough(cargo: &OsStr, arguments: &[OsString]) -> bool {
-    // A single-file `-Zscript` package compiles without a manifest, so absent
-    // manifests cannot speak for these the way they do for everything else.
-    if arguments
-        .iter()
-        .any(|arg| arg.to_string_lossy().starts_with("-Z"))
-    {
-        return false;
+/// What an invocation turns out to be once its aliases are expanded.
+enum Resolved {
+    /// Cargo has no such command, so it will say so and compile nothing.
+    Unknown,
+    /// A command that cannot compile, or an alias that reaches one.
+    Proxy,
+    /// A command that may compile: a build command, an alias that reaches one,
+    /// or a subcommand external to Cargo, whose work mbx cannot see.
+    Opaque,
+}
+
+/// Expand an invocation's aliases and say what it turned out to be.
+///
+/// Nothing when the listing cannot be read, which leaves the invocation
+/// unexplained and so unsafe to pass through.
+fn resolve_invocation(cargo: &OsStr, arguments: &[OsString]) -> Option<(Vec<OsString>, Resolved)> {
+    let command = super::launch::cargo_subcommand(arguments)?;
+    if is_build_command(command) {
+        return Some((arguments.to_vec(), Resolved::Opaque));
     }
-    // No manifest where Cargo looks for one means no package to build and no
-    // target directory to place, so the probe failed because Cargo has nothing
-    // to do here rather than because its storage is unverifiable. This is the
-    // ordinary way to reach a failed probe: an external subcommand such as
-    // `cargo binstall` run outside a project, where Cargo itself would not
-    // have read a manifest either. Where a manifest is found the question is
-    // which command this is, so the listing below has to answer it.
-    if let Ok(strings) = super::strings(arguments)
-        && let Ok(working_dir) = std::env::current_dir()
-        && !mbx_cache_cargo::manifest_in_scope(&strings, &working_dir)
-    {
-        return true;
+    // The listing describes whichever Cargo and configuration the invocation
+    // selects, so it carries the same global options. `--color=never`
+    // overrides `CARGO_TERM_COLOR` and `term.color`, which otherwise wrap both
+    // the header and every command name in ANSI escapes and defeat the
+    // plain-text parsing below.
+    let (index, _) = super::launch::cargo_subcommand_at(arguments)?;
+    let output = Command::new(cargo)
+        .args(&arguments[..index])
+        .args(["--color=never", "--list"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
     }
-    // A toolchain selector picks a different Cargo, and these options change
-    // the configuration it reads, so the listing would describe neither this
-    // invocation nor its aliases. Manifest discovery is unaffected by them:
-    // `manifest_in_scope` follows `-C` and `--directory` itself, and no
-    // configuration conjures a manifest where the filesystem has none.
-    if arguments.iter().any(|arg| {
-        let arg = arg.to_string_lossy();
-        arg.starts_with('+')
-            || arg.starts_with("--config")
-            || arg.starts_with("-C")
-            || arg.starts_with("--directory")
-    }) {
-        return false;
+    let listing = String::from_utf8_lossy(&output.stdout);
+    if !listing.starts_with("Installed Commands:") {
+        return None;
     }
-    let Some(command) = super::launch::cargo_subcommand(arguments) else {
-        return false;
-    };
-    if matches!(
+    let entries = listing
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let line = line.trim();
+            let end = line.find(char::is_whitespace).unwrap_or(line.len());
+            (!line.is_empty()).then_some((&line[..end], line[end..].trim()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut current = command.to_owned();
+    let mut invocation = arguments.to_vec();
+    for _ in 0..32 {
+        let Some(description) = entries.get(current.as_str()) else {
+            return Some((invocation, Resolved::Unknown));
+        };
+        let Some(alias) = description.strip_prefix("alias: ") else {
+            return Some((invocation, Resolved::Opaque));
+        };
+        let expansion = alias.split_whitespace().collect::<Vec<_>>();
+        let next = expansion.first().copied()?;
+        // Substitute the expansion for the alias and keep the rest of the
+        // command line. The expanded name alone would hide a `--path` from
+        // either place it can appear: the alias body, or the arguments after
+        // it. Both make an install compile a local package rather than fetch
+        // one.
+        let (index, _) = super::launch::cargo_subcommand_at(&invocation)?;
+        invocation.splice(
+            index..index + 1,
+            expansion.iter().copied().map(OsString::from),
+        );
+        if cargo_proxy_passthrough(&invocation) {
+            return Some((invocation, Resolved::Proxy));
+        }
+        if is_build_command(next) {
+            return Some((invocation, Resolved::Opaque));
+        }
+        current = next.to_owned();
+    }
+    None
+}
+
+fn is_build_command(command: &str) -> bool {
+    matches!(
         command,
         "build"
             | "b"
@@ -292,63 +330,40 @@ pub(super) fn metadata_failure_passthrough(cargo: &OsStr, arguments: &[OsString]
             | "rustdoc"
             | "clippy"
             | "fix"
-    ) {
+    )
+}
+
+/// Preserve invocations outside a project, non-build aliases, and
+/// unknown-command diagnostics without allowing failed metadata to launch a
+/// build alias or an external Cargo command inside one.
+pub(super) fn metadata_failure_passthrough(cargo: &OsStr, arguments: &[OsString]) -> bool {
+    // A single-file `-Zscript` package compiles without a manifest, so absent
+    // manifests cannot speak for these the way they do for everything else.
+    if arguments
+        .iter()
+        .any(|arg| arg.to_string_lossy().starts_with("-Z"))
+    {
         return false;
     }
-    // `--color=never` overrides `CARGO_TERM_COLOR` and `term.color`, which
-    // otherwise wrap both the header and every command name in ANSI escapes
-    // and defeat the plain-text parsing below.
-    let Ok(output) = Command::new(cargo)
-        .args(["--color=never", "--list"])
-        .output()
-    else {
+    // An alias can name a manifest that the command line does not, so expand
+    // it before reading the invocation: `i = "install --path /project"`
+    // compiles a local package from a directory that has none of its own.
+    let Some((invocation, resolved)) = resolve_invocation(cargo, arguments) else {
         return false;
     };
-    if !output.status.success() {
-        return false;
+    // No manifest where Cargo looks for one means no package to build and no
+    // target directory to place, so the probe failed because Cargo has nothing
+    // to do here rather than because its storage is unverifiable. This is the
+    // ordinary way to reach a failed probe: an external subcommand such as
+    // `cargo binstall` run outside a project, where Cargo itself would not
+    // have read a manifest either.
+    if let Ok(strings) = super::strings(&invocation)
+        && let Ok(working_dir) = std::env::current_dir()
+        && !mbx_cache_cargo::manifest_in_scope(&strings, &working_dir)
+    {
+        return true;
     }
-    let listing = String::from_utf8_lossy(&output.stdout);
-    if !listing.starts_with("Installed Commands:") {
-        return false;
-    }
-    let entries = listing
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let line = line.trim();
-            let end = line.find(char::is_whitespace).unwrap_or(line.len());
-            (!line.is_empty()).then_some((&line[..end], line[end..].trim()))
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut current = command;
-    let mut invocation = arguments.to_vec();
-    for _ in 0..32 {
-        let Some(description) = entries.get(current) else {
-            return current == command;
-        };
-        let Some(alias) = description.strip_prefix("alias: ") else {
-            return false;
-        };
-        let expansion = alias.split_whitespace().collect::<Vec<_>>();
-        let Some(next) = expansion.first().copied() else {
-            return false;
-        };
-        // Substitute the expansion for the alias and keep the rest of the
-        // command line. The expanded name alone would hide the `--path` that
-        // makes an install compile a local package rather than fetch one.
-        let Some((index, _)) = super::launch::cargo_subcommand_at(&invocation) else {
-            return false;
-        };
-        invocation.splice(
-            index..index + 1,
-            expansion.iter().copied().map(OsString::from),
-        );
-        if cargo_proxy_passthrough(&invocation) {
-            return true;
-        }
-        current = next;
-    }
-    false
+    matches!(resolved, Resolved::Unknown | Resolved::Proxy)
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {

@@ -279,9 +279,11 @@ fn an_invocation_outside_a_project_still_reaches_cargo() {
 }
 
 /// A path install compiles a local package, so it stays behind the storage
-/// check however its subcommand is spelled. Only Cargo can expand a user's
-/// alias, so neither the manifest-less passthrough nor the alias table may
-/// read `i --path` as the registry install that `install` alone would be.
+/// check however its subcommand is spelled and wherever its `--path` sits.
+/// Only Cargo can expand a user's alias, so neither the manifest-less
+/// passthrough nor the alias table may read one as the registry install that
+/// a bare `install` would be. The third case puts `--path` inside the alias
+/// body, where the command line alone does not show it at all.
 #[test]
 fn an_aliased_path_install_is_still_checked() {
     use std::os::unix::fs::PermissionsExt;
@@ -289,35 +291,42 @@ fn an_aliased_path_install_is_still_checked() {
     let bin = fixture.root.join("bin");
     std::fs::create_dir(&bin).unwrap();
     let cargo = bin.join("cargo");
-    std::fs::write(&cargo, "#!/bin/sh\ncase \" $* \" in *' metadata '*) exit 1;; *' --list '*) printf 'Installed Commands:\\n    i    alias: install\\n    install    Install a Rust binary\\n'; exit 0;; esac\ntouch \"$TEST_INSTALL_MARKER\"\n").unwrap();
+    std::fs::write(&cargo, "#!/bin/sh\ncase \" $* \" in *' metadata '*) exit 1;; *' --list '*) printf 'Installed Commands:\\n    i    alias: %s\\n    install    Install a Rust binary\\n' \"$TEST_ALIAS_BODY\"; exit 0;; esac\ntouch \"$TEST_INSTALL_MARKER\"\n").unwrap();
     std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
     let outside = fixture.root.join("outside-install");
     std::fs::create_dir(&outside).unwrap();
+    let project = fixture.project.to_string_lossy().into_owned();
+    let embedded = format!("install --path {project}");
+    let cases: [(&str, Vec<&str>, &str); 3] = [
+        ("literal", vec!["install", "--path", &project], "install"),
+        ("aliased", vec!["i", "--path", &project], "install"),
+        ("embedded", vec!["i"], &embedded),
+    ];
     for shim in [false, true] {
-        for install in ["install", "i"] {
-            let marker = fixture.root.join(format!("install-{shim}-{install}"));
+        for (name, arguments, alias) in &cases {
+            let marker = fixture.root.join(format!("install-{shim}-{name}"));
             let mut command = fixture.command();
             let inherited_path = std::env::var_os("PATH").unwrap();
             let paths = std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited_path));
             command
-                .args([install, "--path"])
-                .arg(&fixture.project)
+                .args(arguments)
                 .current_dir(&outside)
                 .env("PATH", std::env::join_paths(paths).unwrap())
                 .env("CARGO", &cargo)
                 .env("CARGO_BUILD_BUILD_DIR", fixture.nfs.join("intermediates"))
+                .env("TEST_ALIAS_BODY", alias)
                 .env("TEST_INSTALL_MARKER", &marker);
             if shim {
                 command.env("MBX_CARGO_SHIM_MODE", "1");
             }
             let output = command.output().unwrap();
             let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(!output.status.success(), "{install}: {stderr}");
+            assert!(!output.status.success(), "{name}: {stderr}");
             assert!(
                 stderr.contains("could not verify Cargo build storage"),
-                "{install}: {stderr}"
+                "{name}: {stderr}"
             );
-            assert!(!marker.exists(), "{install} reached Cargo: {stderr}");
+            assert!(!marker.exists(), "{name} reached Cargo: {stderr}");
         }
     }
 }
