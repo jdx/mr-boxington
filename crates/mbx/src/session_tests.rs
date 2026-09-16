@@ -714,6 +714,42 @@ fn a_compilation_that_probed_two_action_keys_is_one_miss() {
 }
 
 #[test]
+fn an_incremental_compilation_consulted_the_cache_and_counts_as_a_miss() {
+    // Its result is withheld from the store, which the summary says on its own
+    // line; the lookup still happened and still found nothing.
+    let stats = agent_stats(|stats| {
+        stats.lookups = 3;
+        stats.compiler = BTreeMap::from([
+            ("miss".into(), mbx_cache_core::CompilerStats::new(1, 4_000)),
+            (
+                "incremental".into(),
+                mbx_cache_core::CompilerStats::new(2, 4_000),
+            ),
+        ]);
+    });
+    assert_eq!(cache_misses(&stats), 3);
+}
+
+#[test]
+fn bypassed_and_unconsulted_compilations_are_not_misses() {
+    // Neither asked the cache anything, so neither can have missed it.
+    let stats = agent_stats(|stats| {
+        stats.unconsulted = 4;
+        stats.compiler = BTreeMap::from([
+            (
+                "bypass".into(),
+                mbx_cache_core::CompilerStats::new(7, 4_000),
+            ),
+            (
+                "unconsulted".into(),
+                mbx_cache_core::CompilerStats::new(4, 4_000),
+            ),
+        ]);
+    });
+    assert_eq!(cache_misses(&stats), 0);
+}
+
+#[test]
 fn a_hit_on_the_literal_key_is_not_also_a_miss() {
     // The portable key is probed first. Missing it and then hitting the
     // literal one is one hit, and no miss at all: nothing was compiled.

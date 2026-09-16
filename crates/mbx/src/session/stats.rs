@@ -517,9 +517,15 @@ fn slow_compilations(stats: &AgentStats) -> Vec<(&String, &u64)> {
 /// was reported as a hit and a miss at once, and a crate that missed both was
 /// reported twice. This is the number the per-action ledger holds, which is
 /// what `mbx explain` reads back.
+///
+/// An incremental compilation counts too. It consulted the cache like any
+/// other and compiled anyway; what makes it incremental is that its result was
+/// withheld from the store afterwards, which the summary says on its own line.
+/// Leaving it out would report an edit loop as though nothing had been asked.
 pub(crate) fn cache_misses(stats: &AgentStats) -> u64 {
-    stats
-        .compiler
-        .get("miss")
-        .map_or(0, |compiler| compiler.invocations)
+    ["miss", "incremental"]
+        .into_iter()
+        .filter_map(|outcome| stats.compiler.get(outcome))
+        .map(|compiler| compiler.invocations)
+        .sum()
 }

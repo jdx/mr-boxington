@@ -144,12 +144,16 @@ pub(crate) fn document(rustdoc: &OsStr, arguments: &[OsString]) -> Result<ExitCo
     let duration = duration_ns(started.elapsed());
     std::io::stdout().write_all(&output.stdout)?;
     std::io::stderr().write_all(&output.stderr)?;
+    // Recorded before the failure check: the lookup above happened either way,
+    // so a documentation build that fails is still a compilation the cache was
+    // asked about and could not answer. Returning first left it out of the
+    // session's accounting entirely.
+    session::record_compiler_invocation("miss", Some(&invocation.crate_name), duration);
     if !output.status.success() {
         return Ok(ExitCode::from(
             u8::try_from(output.status.code().unwrap_or(1)).unwrap_or(1),
         ));
     }
-    session::record_compiler_invocation("miss", Some(&invocation.crate_name), duration);
 
     let archive = generated.path().join("rustdoc.archive");
     write_archive(&archive, &[(&doc, "doc"), (&parts, "parts")])?;
