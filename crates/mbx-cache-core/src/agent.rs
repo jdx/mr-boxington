@@ -254,7 +254,10 @@ fn parse_action_diagnostic(
     let payload = message.strip_prefix(ACTION_DIAGNOSTIC_PREFIX)?;
     Some((|| {
         let envelope: ActionDiagnosticEnvelope = serde_json::from_str(payload)?;
-        if !matches!(envelope.outcome.as_str(), "hit" | "miss") {
+        // Unconsulted belongs here with hit and miss: it is the outcome a cold
+        // store gives every compilation it publishes, so refusing it threw away
+        // the only record of the key another checkout would later look up.
+        if !matches!(envelope.outcome.as_str(), "hit" | "miss" | "unconsulted") {
             bail!("invalid action diagnostic outcome");
         }
         validate_crate_name(envelope.crate_name.as_deref())?;

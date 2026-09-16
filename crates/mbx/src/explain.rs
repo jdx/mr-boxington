@@ -29,45 +29,85 @@ pub(crate) fn run_with_settings(
 }
 
 /// Replay the newest recorded build for this workspace and explain its misses
-/// against the most recent earlier hit for each compilation unit.
+/// against the most recent earlier recording of each compilation unit.
 pub(crate) fn last(config: &Config) -> Result<ExitCode> {
     let workspace = crate::util::workspace_root(&std::env::current_dir()?);
-    let sessions = recorded_sessions(&config.store_dir(), &workspace)?;
-    let Some((target_index, target)) = sessions.iter().enumerate().next_back() else {
+    let sessions = recorded_sessions(&config.store_dir())?;
+    let Some(target_index) = sessions
+        .iter()
+        .rposition(|session| session.workspace == workspace)
+    else {
         eyre::bail!(
             "no recorded build was found for {}; run a build with session events enabled first",
             workspace.display()
         );
     };
 
-    let mut previous_hits = PreviousHits::new();
-    for session in &sessions[..target_index] {
-        for event in &session.events {
-            if let SessionEvent::Action {
-                outcome: ActionOutcome::Hit,
-                crate_name: Some(crate_name),
-                diagnostic: Some(diagnostic),
-                ..
-            } = event
-                && let Some(unit) = compilation_unit(diagnostic)
-            {
-                previous_hits.insert((crate_name.clone(), unit), diagnostic.clone());
-            }
-        }
-    }
-
-    display_last(target, &previous_hits);
+    let baselines = Baselines::collect(&sessions[..target_index], &workspace);
+    display_last(&sessions[target_index], &baselines);
     Ok(ExitCode::SUCCESS)
 }
 
 struct RecordedSession {
+    workspace: std::path::PathBuf,
     command: Vec<String>,
     events: Vec<SessionEvent>,
 }
 
-type PreviousHits = BTreeMap<(String, String), ActionDiagnostic>;
+type RecordedKeys = BTreeMap<(String, String), ActionDiagnostic>;
 
-fn recorded_sessions(store: &Path, workspace: &Path) -> Result<Vec<RecordedSession>> {
+/// What an earlier build recorded for the same compilation unit.
+///
+/// Misses worth explaining are usually cross-checkout ones: the build that
+/// published the key ran in another worktree, and in a cold store its
+/// compilations are recorded as unconsulted rather than as hits. Restricting
+/// the comparison to hits from this workspace left exactly that case with
+/// nothing to compare against, which is the case `mbx` exists to make rare.
+///
+/// This workspace still wins when it has its own recording of the unit: the
+/// nearest neighbour is the better explanation when a local edit is what
+/// changed the key.
+#[derive(Default)]
+struct Baselines {
+    here: RecordedKeys,
+    elsewhere: RecordedKeys,
+}
+
+impl Baselines {
+    fn collect(sessions: &[RecordedSession], workspace: &Path) -> Self {
+        let mut baselines = Self::default();
+        for session in sessions {
+            let recorded = if session.workspace == workspace {
+                &mut baselines.here
+            } else {
+                &mut baselines.elsewhere
+            };
+            for event in &session.events {
+                if let SessionEvent::Action {
+                    outcome,
+                    crate_name: Some(crate_name),
+                    diagnostic: Some(diagnostic),
+                    ..
+                } = event
+                    && matches!(
+                        outcome,
+                        ActionOutcome::Hit | ActionOutcome::Miss | ActionOutcome::Unconsulted
+                    )
+                    && let Some(unit) = compilation_unit(diagnostic)
+                {
+                    recorded.insert((crate_name.clone(), unit), diagnostic.clone());
+                }
+            }
+        }
+        baselines
+    }
+
+    fn get(&self, key: &(String, String)) -> Option<&ActionDiagnostic> {
+        self.here.get(key).or_else(|| self.elsewhere.get(key))
+    }
+}
+
+fn recorded_sessions(store: &Path) -> Result<Vec<RecordedSession>> {
     let mut sessions = Vec::new();
     for id in crate::events::session_ids(store) {
         let path = crate::events::session_paths(store, &id).events;
@@ -89,10 +129,9 @@ fn recorded_sessions(store: &Path, workspace: &Path) -> Result<Vec<RecordedSessi
         }) else {
             continue;
         };
-        if recorded_workspace != workspace {
-            continue;
-        }
+        let workspace = recorded_workspace.clone();
         sessions.push(RecordedSession {
+            workspace,
             command: command.clone(),
             events,
         });
@@ -100,7 +139,7 @@ fn recorded_sessions(store: &Path, workspace: &Path) -> Result<Vec<RecordedSessi
     Ok(sessions)
 }
 
-fn display_last(session: &RecordedSession, previous_hits: &PreviousHits) {
+fn display_last(session: &RecordedSession, baselines: &Baselines) {
     let command = if session.command.is_empty() {
         "cargo".to_string()
     } else {
@@ -149,14 +188,14 @@ fn display_last(session: &RecordedSession, previous_hits: &PreviousHits) {
             );
             continue;
         }
-        let previous = previous_hit(previous_hits, crate_name, diagnostic);
+        let previous = previous_recording(baselines, crate_name, diagnostic);
         match (previous, diagnostic) {
             (Some(previous), Some(current)) => display_diff(previous, current),
             (None, _) => crate::session::note(
-                "  no earlier recorded hit with key details for this crate; the cache may be cold, this action may use another adapter, or its history may have expired",
+                "  no earlier build recorded key details for this crate; the cache may be cold, this action may use another adapter, or its history may have expired",
             ),
             (Some(_), None) => crate::session::note(
-                "  key details were not recorded for this action; run another rustc hit before comparing inputs",
+                "  key details were not recorded for this action; run another rustc compilation before comparing inputs",
             ),
         }
     }
@@ -172,13 +211,13 @@ fn compilation_unit(diagnostic: &ActionDiagnostic) -> Option<String> {
         .map(mbx_cache_core::CacheDigest::key)
 }
 
-fn previous_hit<'a>(
-    hits: &'a PreviousHits,
+fn previous_recording<'a>(
+    baselines: &'a Baselines,
     crate_name: &str,
     diagnostic: Option<&ActionDiagnostic>,
 ) -> Option<&'a ActionDiagnostic> {
     let unit = diagnostic.and_then(compilation_unit)?;
-    hits.get(&(crate_name.to_string(), unit))
+    baselines.get(&(crate_name.to_string(), unit))
 }
 
 fn display_diff(previous: &ActionDiagnostic, current: &ActionDiagnostic) {
@@ -188,13 +227,81 @@ fn display_diff(previous: &ActionDiagnostic, current: &ActionDiagnostic) {
         );
         return;
     }
-    crate::session::note("  inputs changed since the last hit:");
-    for name in changed_keys(&previous.components, &current.components) {
+    let components = changed_keys(&previous.components, &current.components);
+    let inputs = changed_keys(&previous.inputs, &current.inputs);
+    // A compilation whose own key material is identical did not change; one of
+    // the artifacts it consumes did, and the crate that produced that artifact
+    // is where the miss actually starts. Saying so keeps a reader from hunting
+    // through the arguments of a crate that is only collateral.
+    let dependencies = dependencies_behind(&inputs);
+    if components.is_empty() && !dependencies.is_empty() {
+        let (subject, verb, next) = if dependencies.len() == 1 {
+            ("the artifact of", "differs", "that crate")
+        } else {
+            ("the artifacts of", "differ", "those crates")
+        };
+        crate::session::note(&format!(
+            "  nothing in this compilation changed; it missed because {subject} {} {verb}, so explain {next} first",
+            join_names(&dependencies),
+        ));
+    }
+    crate::session::note("  inputs changed since the last recording:");
+    for name in components {
         crate::session::note(&format!("    - {name}"));
     }
-    for path in changed_keys(&previous.inputs, &current.inputs) {
-        crate::session::note(&format!("    - input {path}"));
+    for path in inputs {
+        match dependency_name(&path) {
+            Some(name) => crate::session::note(&format!("    - input {path} (artifact of {name})")),
+            None => crate::session::note(&format!("    - input {path}")),
+        }
     }
+}
+
+/// Render names as a reader would say them out loud.
+fn join_names(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [only] => only.clone(),
+        [head @ .., last] => format!("{} and {last}", head.join(", ")),
+    }
+}
+
+/// The crates whose artifacts account for every changed input, if they do.
+fn dependencies_behind(inputs: &[String]) -> Vec<String> {
+    let names: Vec<_> = inputs
+        .iter()
+        .filter_map(|path| dependency_name(path))
+        .collect();
+    if names.len() == inputs.len() {
+        let mut names: Vec<_> = names
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        names.sort();
+        names
+    } else {
+        Vec::new()
+    }
+}
+
+/// The crate behind a compiler artifact path, as Cargo spells one.
+///
+/// Cargo names these `lib<crate>-<metadata>.rmeta` (and `.rlib`, and the
+/// platform's dynamic library extension), which is enough to recover the crate
+/// without consulting the dependency graph. Anything else is a source file, and
+/// is left to speak for itself.
+fn dependency_name(path: &str) -> Option<String> {
+    let file = path.rsplit(['/', '\\']).next()?;
+    let (stem, extension) = file.rsplit_once('.')?;
+    if !matches!(extension, "rmeta" | "rlib" | "so" | "dylib" | "dll") {
+        return None;
+    }
+    let (name, metadata) = stem.trim_start_matches("lib").rsplit_once('-')?;
+    (!name.is_empty()
+        && !metadata.is_empty()
+        && metadata.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    .then(|| name.to_string())
 }
 
 fn changed_keys(
@@ -507,6 +614,99 @@ mod tests {
     }
 
     #[test]
+    fn a_dependency_artifact_names_the_crate_that_produced_it() {
+        assert_eq!(
+            dependency_name("${target}/debug/deps/libmanifest_dir-0b9adf9c9981063a.rmeta"),
+            Some("manifest_dir".into())
+        );
+        assert_eq!(
+            dependency_name("${target}/debug/deps/serde_derive-4c0f.so"),
+            Some("serde_derive".into())
+        );
+        // Source files are not artifacts, and neither is a name with nothing
+        // that looks like Cargo's metadata hash on the end.
+        assert_eq!(dependency_name("${workspace}/src/lib.rs"), None);
+        assert_eq!(dependency_name("${workspace}/data-file.rmeta"), None);
+    }
+
+    #[test]
+    fn changed_inputs_are_only_blamed_on_dependencies_when_all_of_them_are() {
+        let artifacts = [
+            "${target}/debug/deps/libone-00ff.rmeta".to_string(),
+            "${target}/debug/deps/libtwo-a1b2.rlib".to_string(),
+        ];
+        assert_eq!(dependencies_behind(&artifacts), ["one", "two"]);
+
+        let mixed = [
+            "${target}/debug/deps/libone-00ff.rmeta".to_string(),
+            "${workspace}/src/lib.rs".to_string(),
+        ];
+        assert!(dependencies_behind(&mixed).is_empty());
+    }
+
+    #[test]
+    fn names_read_as_a_sentence() {
+        assert_eq!(join_names(&["one".into()]), "one");
+        assert_eq!(join_names(&["one".into(), "two".into()]), "one and two");
+        assert_eq!(
+            join_names(&["one".into(), "two".into(), "three".into()]),
+            "one, two and three"
+        );
+    }
+
+    #[test]
+    fn a_baseline_from_another_checkout_is_used_when_this_one_has_none() {
+        let diagnostic = |action: &str| ActionDiagnostic {
+            action: mbx_cache_core::CacheDigest::blake3(action.as_bytes()),
+            components: BTreeMap::from([(
+                "compilation unit".into(),
+                mbx_cache_core::CacheDigest::blake3(b"unit"),
+            )]),
+            inputs: BTreeMap::new(),
+        };
+        let elsewhere = diagnostic("published-in-another-worktree");
+        let current = diagnostic("missed-here");
+        let key = (
+            "shared_name".to_string(),
+            compilation_unit(&current).unwrap(),
+        );
+        let baselines = Baselines {
+            here: RecordedKeys::new(),
+            elsewhere: RecordedKeys::from([(key, elsewhere)]),
+        };
+
+        let matched = previous_recording(&baselines, "shared_name", Some(&current)).unwrap();
+        assert_eq!(
+            matched.action,
+            mbx_cache_core::CacheDigest::blake3(b"published-in-another-worktree")
+        );
+    }
+
+    #[test]
+    fn this_workspace_outranks_another_checkout_as_a_baseline() {
+        let diagnostic = |action: &str| ActionDiagnostic {
+            action: mbx_cache_core::CacheDigest::blake3(action.as_bytes()),
+            components: BTreeMap::from([(
+                "compilation unit".into(),
+                mbx_cache_core::CacheDigest::blake3(b"unit"),
+            )]),
+            inputs: BTreeMap::new(),
+        };
+        let current = diagnostic("missed-here");
+        let key = (
+            "shared_name".to_string(),
+            compilation_unit(&current).unwrap(),
+        );
+        let baselines = Baselines {
+            here: RecordedKeys::from([(key.clone(), diagnostic("here"))]),
+            elsewhere: RecordedKeys::from([(key, diagnostic("elsewhere"))]),
+        };
+
+        let matched = previous_recording(&baselines, "shared_name", Some(&current)).unwrap();
+        assert_eq!(matched.action, mbx_cache_core::CacheDigest::blake3(b"here"));
+    }
+
+    #[test]
     fn matches_history_by_compilation_unit_not_only_crate_name() {
         let diagnostic = |unit: &str, action: &str| ActionDiagnostic {
             action: mbx_cache_core::CacheDigest::blake3(action.as_bytes()),
@@ -519,15 +719,18 @@ mod tests {
         let lib = diagnostic("lib-unit", "lib-hit");
         let test = diagnostic("test-unit", "test-hit");
         let current = diagnostic("lib-unit", "lib-miss");
-        let hits = PreviousHits::from([
-            (("shared_name".into(), compilation_unit(&lib).unwrap()), lib),
-            (
-                ("shared_name".into(), compilation_unit(&test).unwrap()),
-                test,
-            ),
-        ]);
+        let baselines = Baselines {
+            here: RecordedKeys::from([
+                (("shared_name".into(), compilation_unit(&lib).unwrap()), lib),
+                (
+                    ("shared_name".into(), compilation_unit(&test).unwrap()),
+                    test,
+                ),
+            ]),
+            elsewhere: RecordedKeys::new(),
+        };
 
-        let matched = previous_hit(&hits, "shared_name", Some(&current)).unwrap();
+        let matched = previous_recording(&baselines, "shared_name", Some(&current)).unwrap();
         assert_eq!(
             matched.action,
             mbx_cache_core::CacheDigest::blake3(b"lib-hit")
