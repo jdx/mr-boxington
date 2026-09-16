@@ -68,8 +68,25 @@ use stats::{
 
 pub const RUSTC_SHIM_STEM: &str = "mbx-rustc";
 pub const RUSTDOC_SHIM_STEM: &str = "mbx-rustdoc";
-pub const CC_SHIM_STEM: &str = "mbx-cc";
+/// File stem of the C shim, which build scripts inherit as an absolute path.
+///
+/// It deliberately does not end in `-cc` or `-gcc`. Those suffixes name a
+/// cross-compiler prefix by convention -- `aarch64-linux-gnu-gcc` compiles for
+/// `aarch64-linux-gnu` -- and tooling reads them back off whatever `CC` holds.
+/// The `autotools` crate strips one from the compiler path and passes the rest
+/// to `configure` as `--host`, so a shim named `mbx-cc` turned
+/// `/var/cache/mbx/shims/mbx-cc` into `--host=/var/cache/mbx/shims/mbx`, which
+/// `config.sub` rejects as a machine triple. Anything installed under a name a
+/// `CC` variable can carry has to stay clear of those two suffixes.
+pub const CC_SHIM_STEM: &str = "mbx-c";
 pub const CXX_SHIM_STEM: &str = "mbx-cxx";
+/// What the C shim was installed under before [`CC_SHIM_STEM`] changed.
+///
+/// The shim directory outlives the session that wrote it because a configure
+/// step records its compiler by absolute path -- into `CMakeCache.txt`, into a
+/// generated makefile -- so a tree configured by an older mbx still invokes
+/// this name. Nothing is installed under it any more; it is only recognized.
+const LEGACY_CC_SHIM_STEM: &str = "mbx-cc";
 pub(crate) const PATH_SHIMS_ENV: &str = "MBX_CC_SHIM_COMPILERS";
 pub(crate) const SOCKET_ENV: &str = "MBX_SOCKET";
 pub(crate) const REAL_CC_ENV: &str = "MBX_REAL_CC";
@@ -1194,14 +1211,24 @@ pub fn is_cc_shim() -> Option<CcLanguage> {
         .and_then(Path::file_stem)?
         .to_str()?
         .to_string();
-    match stem.as_str() {
-        CC_SHIM_STEM => Some(CcLanguage::C),
+    cc_shim_language(&stem)
+}
+
+/// The language a shim file stem selects, if it is one mbx installs.
+fn cc_shim_language(stem: &str) -> Option<CcLanguage> {
+    match stem {
+        CC_SHIM_STEM | LEGACY_CC_SHIM_STEM => Some(CcLanguage::C),
         CXX_SHIM_STEM => Some(CcLanguage::Cxx),
         "cl" if cfg!(windows) => Some(CcLanguage::Cxx),
-        // `mbx-cxx-...` is tested first: `mbx-cc-` is not a prefix of it, but
-        // reading it the other way round invites the mistake.
+        // `mbx-cxx-...` is tested first: neither `mbx-c-` nor `mbx-cc-` is a
+        // prefix of it, but reading it the other way round invites the mistake.
         other if other.starts_with(&format!("{CXX_SHIM_STEM}-")) => Some(CcLanguage::Cxx),
-        other if other.starts_with(&format!("{CC_SHIM_STEM}-")) => Some(CcLanguage::C),
+        other
+            if other.starts_with(&format!("{CC_SHIM_STEM}-"))
+                || other.starts_with(&format!("{LEGACY_CC_SHIM_STEM}-")) =>
+        {
+            Some(CcLanguage::C)
+        }
         other => path_shim_language(other),
     }
 }

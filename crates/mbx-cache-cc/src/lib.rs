@@ -531,9 +531,15 @@ pub enum CcLanguage {
 
 impl CcLanguage {
     /// Shim file stem that selects this language.
+    ///
+    /// Neither stem ends in `-cc` or `-gcc`. Build tooling reads those
+    /// suffixes off `CC` as a cross-compiler prefix -- the `autotools` crate
+    /// strips one and hands the remainder to `configure` as `--host` -- so a
+    /// shim named `mbx-cc` made an absolute shim path look like a machine
+    /// triple.
     pub fn shim_stem(self) -> &'static str {
         match self {
-            Self::C => "mbx-cc",
+            Self::C => "mbx-c",
             Self::Cxx => "mbx-cxx",
         }
     }

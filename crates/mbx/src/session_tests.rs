@@ -1156,7 +1156,7 @@ fn a_relative_target_is_resolved_before_it_is_linked() {
 fn a_missing_cpp_compiler_still_leaves_c_compilations_cached() {
     let shims = CcShims {
         cc: Some((
-            PathBuf::from("/session/mbx-cc"),
+            PathBuf::from("/session/mbx-c"),
             PathBuf::from("/usr/bin/cc"),
         )),
         cxx: None,
@@ -1167,7 +1167,7 @@ fn a_missing_cpp_compiler_still_leaves_c_compilations_cached() {
 
     assert_eq!(
         environment.get("HOST_CC").map(String::as_str),
-        Some("/session/mbx-cc")
+        Some("/session/mbx-c")
     );
     assert_eq!(
         environment.get("MBX_REAL_CC").map(String::as_str),
@@ -1184,7 +1184,7 @@ fn a_missing_cpp_compiler_still_leaves_c_compilations_cached() {
 fn both_compilers_present_are_both_redirected() {
     let shims = CcShims {
         cc: Some((
-            PathBuf::from("/session/mbx-cc"),
+            PathBuf::from("/session/mbx-c"),
             PathBuf::from("/usr/bin/cc"),
         )),
         cxx: Some((
@@ -1264,8 +1264,8 @@ fn a_cross_only_image_still_gets_its_named_compiler_wrapped() {
         cxx: None,
         targeted: vec![TargetedCompiler {
             variable: "CC_aarch64-unknown-linux-musl".into(),
-            shim_name: "mbx-cc-cc_aarch64-unknown-linux-musl".into(),
-            shim: PathBuf::from("/session/mbx-cc-cc_aarch64-unknown-linux-musl"),
+            shim_name: "mbx-c-cc_aarch64-unknown-linux-musl".into(),
+            shim: PathBuf::from("/session/mbx-c-cc_aarch64-unknown-linux-musl"),
             real: PathBuf::from("/usr/bin/aarch64-linux-musl-gcc"),
         }],
     };
@@ -1280,7 +1280,7 @@ fn a_cross_only_image_still_gets_its_named_compiler_wrapped() {
         environment
             .get("CC_aarch64-unknown-linux-musl")
             .map(String::as_str),
-        Some("/session/mbx-cc-cc_aarch64-unknown-linux-musl")
+        Some("/session/mbx-c-cc_aarch64-unknown-linux-musl")
     );
     assert!(!shims.pins().is_empty());
 }
@@ -1306,14 +1306,14 @@ fn a_compiler_named_as_a_command_is_not_wrapped() {
 fn naming_a_host_compiler_does_not_cost_the_cross_one_its_shim() {
     let shims = CcShims {
         cc: Some((
-            PathBuf::from("/session/mbx-cc"),
+            PathBuf::from("/session/mbx-c"),
             PathBuf::from("/usr/bin/cc"),
         )),
         cxx: None,
         targeted: vec![TargetedCompiler {
             variable: "CC_aarch64-unknown-linux-musl".into(),
-            shim_name: "mbx-cc-cc_aarch64-unknown-linux-musl".into(),
-            shim: PathBuf::from("/session/mbx-cc-cc_aarch64-unknown-linux-musl"),
+            shim_name: "mbx-c-cc_aarch64-unknown-linux-musl".into(),
+            shim: PathBuf::from("/session/mbx-c-cc_aarch64-unknown-linux-musl"),
             real: PathBuf::from("/usr/bin/aarch64-linux-musl-gcc"),
         }],
     };
@@ -1324,13 +1324,13 @@ fn naming_a_host_compiler_does_not_cost_the_cross_one_its_shim() {
         environment
             .get("CC_aarch64-unknown-linux-musl")
             .map(String::as_str),
-        Some("/session/mbx-cc-cc_aarch64-unknown-linux-musl")
+        Some("/session/mbx-c-cc_aarch64-unknown-linux-musl")
     );
     // Standing aside for the host pair must not have been applied here.
     assert!(!environment.contains_key("HOST_CC"));
     // The shim finds its compiler by the name it is invoked under.
     assert_eq!(
-        shims.pins().get("mbx-cc-cc_aarch64-unknown-linux-musl"),
+        shims.pins().get("mbx-c-cc_aarch64-unknown-linux-musl"),
         Some(&PathBuf::from("/usr/bin/aarch64-linux-musl-gcc"))
     );
 }
@@ -1339,17 +1339,72 @@ fn naming_a_host_compiler_does_not_cost_the_cross_one_its_shim() {
 #[test]
 fn targeted_shim_names_dispatch_to_their_language() {
     for (stem, expected) in [
-        ("mbx-cc-cc_aarch64-unknown-linux-musl", "C"),
-        ("mbx-cxx-cxx_aarch64-unknown-linux-musl", "Cxx"),
-        ("mbx-cc-target_cc", "C"),
-        ("mbx-cxx-target_cxx", "Cxx"),
+        ("mbx-c", Some(CcLanguage::C)),
+        ("mbx-cxx", Some(CcLanguage::Cxx)),
+        ("mbx-c-cc_aarch64-unknown-linux-musl", Some(CcLanguage::C)),
+        (
+            "mbx-cxx-cxx_aarch64-unknown-linux-musl",
+            Some(CcLanguage::Cxx),
+        ),
+        ("mbx-c-target_cc", Some(CcLanguage::C)),
+        ("mbx-cxx-target_cxx", Some(CcLanguage::Cxx)),
+        ("mbx-rustc", None),
+        ("gcc", Some(CcLanguage::C)),
+        ("clang++", Some(CcLanguage::Cxx)),
     ] {
-        let language = if stem.starts_with("mbx-cxx-") {
-            CcLanguage::Cxx
-        } else {
-            CcLanguage::C
-        };
-        assert_eq!(format!("{language:?}"), expected, "{stem}");
+        assert_eq!(cc_shim_language(stem), expected, "{stem}");
+    }
+}
+
+/// The shim directory outlives the session that wrote it: a configure step
+/// records its compiler by absolute path, so a tree configured by an mbx that
+/// installed `mbx-cc` still invokes that name after an upgrade. Recognising it
+/// is what keeps that build compiling instead of running mbx's CLI.
+#[test]
+fn the_shim_name_used_before_the_rename_is_still_recognised() {
+    assert_eq!(cc_shim_language("mbx-cc"), Some(CcLanguage::C));
+    assert_eq!(
+        cc_shim_language("mbx-cc-cc_aarch64-unknown-linux-musl"),
+        Some(CcLanguage::C)
+    );
+}
+
+/// A compiler path ending in `-cc` or `-gcc` reads as a cross-compiler prefix:
+/// `aarch64-linux-gnu-gcc` compiles for `aarch64-linux-gnu`. The `autotools`
+/// crate strips that suffix off whatever `CC` holds and passes the remainder to
+/// `configure` as `--host`, so `CC=/var/cache/mbx/shims/mbx-cc` became
+/// `--host=/var/cache/mbx/shims/mbx` and `config.sub` rejected it, failing
+/// every `protobuf-src`-style build script. Every name a `CC` or `CXX`
+/// variable can carry has to stay clear of both suffixes.
+#[test]
+fn no_shim_name_can_be_read_as_a_cross_compiler_prefix() {
+    let targeted = |variable: &str, language: CcLanguage| {
+        format!(
+            "{}-{}",
+            language.shim_stem(),
+            variable.to_ascii_lowercase().replace(['.', '/'], "_")
+        )
+    };
+    let names = [
+        CC_SHIM_STEM.to_string(),
+        CXX_SHIM_STEM.to_string(),
+        targeted("TARGET_CC", CcLanguage::C),
+        targeted("TARGET_CXX", CcLanguage::Cxx),
+        targeted("CC_aarch64-unknown-linux-musl", CcLanguage::C),
+        targeted("CXX_aarch64-unknown-linux-musl", CcLanguage::Cxx),
+    ]
+    .into_iter()
+    .chain(PATH_SHIM_NAMES.iter().map(|(name, _)| (*name).to_string()));
+    for name in names {
+        // The absolute form is what a build script reads, and it is the whole
+        // path that the suffix is stripped from.
+        let installed = format!("/var/cache/mbx/shims/{name}");
+        for suffix in ["-cc", "-gcc"] {
+            assert!(
+                !installed.ends_with(suffix),
+                "{installed} ends in {suffix}, which autoconf tooling reads as a machine triple"
+            );
+        }
     }
 }
 

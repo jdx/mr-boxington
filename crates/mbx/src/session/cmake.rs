@@ -220,18 +220,18 @@ mod tests {
             "-S",
             "source tree",
             "-D",
-            "CMAKE_C_COMPILER:FILEPATH=/cache dir/mbx-cc",
+            "CMAKE_C_COMPILER:FILEPATH=/cache dir/mbx-c",
             "-DCMAKE_CXX_COMPILER=/cache dir/mbx-cxx",
-            "-DCMAKE_ASM_COMPILER=/cache dir/mbx-cc",
+            "-DCMAKE_ASM_COMPILER=/cache dir/mbx-c",
             "-DCMAKE_C_COMPILER_LAUNCHER=user-launcher",
             "-DBUILD_TESTING=OFF",
-            "-DSOME_COMPILER=/cache dir/mbx-cc",
+            "-DSOME_COMPILER=/cache dir/mbx-c",
         ]
         .into_iter()
         .map(Into::into)
         .collect();
         let pins = BTreeMap::from([
-            ("/cache dir/mbx-cc".into(), "/tool chain/cc".into()),
+            ("/cache dir/mbx-c".into(), "/tool chain/cc".into()),
             ("/cache dir/mbx-cxx".into(), "/tool chain/c++".into()),
         ]);
         let launchers = rewrite_compilers(&mut arguments, &pins);
@@ -246,7 +246,7 @@ mod tests {
                 "-DCMAKE_ASM_COMPILER=/tool chain/cc",
                 "-DCMAKE_C_COMPILER_LAUNCHER=user-launcher",
                 "-DBUILD_TESTING=OFF",
-                "-DSOME_COMPILER=/cache dir/mbx-cc",
+                "-DSOME_COMPILER=/cache dir/mbx-c",
             ]
             .map(OsString::from)
         );
@@ -261,9 +261,9 @@ mod tests {
 
     #[test]
     fn compiler_overrides_are_not_rewritten_or_wrapped() {
-        let mut arguments = [OsString::from("-DCMAKE_C_COMPILER=/custom/mbx-cc")];
+        let mut arguments = [OsString::from("-DCMAKE_C_COMPILER=/custom/mbx-c")];
         let original = arguments.clone();
-        let pins = BTreeMap::from([("/cache/mbx-cc".into(), "/usr/bin/cc".into())]);
+        let pins = BTreeMap::from([("/cache/mbx-c".into(), "/usr/bin/cc".into())]);
         assert!(rewrite_compilers(&mut arguments, &pins).is_empty());
         assert_eq!(arguments, original);
     }

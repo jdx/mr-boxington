@@ -371,7 +371,7 @@ EOF
   if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]]; then
     executable_suffix=".exe"
   fi
-  local cc_shim="$MBX_CACHE_DIR/shims/mbx-cc$executable_suffix"
+  local cc_shim="$MBX_CACHE_DIR/shims/mbx-c$executable_suffix"
   local cxx_shim="$MBX_CACHE_DIR/shims/mbx-cxx$executable_suffix"
   mkdir -p "$real_bin" "$(dirname "$cc_shim")"
   touch "$cc_shim" "$cxx_shim"
