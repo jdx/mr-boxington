@@ -154,13 +154,25 @@ impl CacheSession {
     /// `session_dir` holds the shim, socket, and staging directory, and is
     /// expected to be a temporary directory owned by the caller.
     pub async fn start(session_dir: &Path, config: &Config) -> Result<Self> {
-        Self::start_with_jobs(
+        Self::start_with_events_limit(
             session_dir,
             config,
-            None,
             Some(crate::config::DEFAULT_EVENTS_MAX_SIZE),
         )
         .await
+    }
+
+    /// Start a session recording at most `events_max_size` bytes of rows.
+    ///
+    /// Every command that builds under mbx passes the configured value.
+    /// `start` keeps the declared default for callers outside this crate,
+    /// which have no settings to pass.
+    pub(crate) async fn start_with_events_limit(
+        session_dir: &Path,
+        config: &Config,
+        events_max_size: Option<u64>,
+    ) -> Result<Self> {
+        Self::start_with_jobs(session_dir, config, None, events_max_size).await
     }
 
     /// Start a session whose Cargo jobserver limits compiler concurrency.

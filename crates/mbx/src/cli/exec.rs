@@ -53,7 +53,12 @@ pub(super) fn run(config: &Config, settings: &CliSettings, args: &ExecArgs) -> R
             log::warn!("no C or C++ compiler was found on PATH, so this command is not cached");
             return Ok((run_cargo(&program, arguments, BTreeMap::new()), None));
         };
-        let session = CacheSession::start(session_dir.path(), config).await?;
+        let session = CacheSession::start_with_events_limit(
+            session_dir.path(),
+            config,
+            settings.events_max_size,
+        )
+        .await?;
         let mut environment = inherited_environment(|name| std::env::var(name).ok(), &working_dir);
         let run = session
             .begin_exec(&project_root, &args.command, &shims, &mut environment)

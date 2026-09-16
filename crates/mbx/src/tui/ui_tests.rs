@@ -18,7 +18,7 @@ fn render(app: &App, width: u16, height: u16) -> String {
 }
 
 fn build(store: &Path, name: &str, actions: usize) -> EventWriter {
-    let writer = EventWriter::new(store);
+    let writer = EventWriter::with_limit(store, Some(crate::config::DEFAULT_EVENTS_MAX_SIZE));
     writer.started(Path::new("/checkouts/fixture"), &[name.into()], None);
     for i in 0..actions {
         writer.action(

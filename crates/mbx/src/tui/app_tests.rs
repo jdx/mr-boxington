@@ -2,7 +2,7 @@ use super::*;
 use crate::events::{ActionDetail, EventWriter};
 
 fn writer(store: &Path) -> EventWriter {
-    let writer = EventWriter::new(store);
+    let writer = EventWriter::with_limit(store, Some(crate::config::DEFAULT_EVENTS_MAX_SIZE));
     writer.started(Path::new("/checkouts/fixture"), &["build".into()], None);
     writer
 }

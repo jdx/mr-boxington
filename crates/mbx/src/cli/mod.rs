@@ -221,7 +221,7 @@ pub fn run() -> Result<ExitCode> {
         Commands::Stats(args) => stats::run(&config, args, settings.savings),
         Commands::Prefetch(args) => {
             shim::prepare_explicit_cargo()?;
-            prefetch::run(&config, &args.cargo_args)
+            prefetch::run(&config, settings.events_max_size, &args.cargo_args)
         }
         Commands::Exec(args) => exec::run(&config, &settings, &args),
         Commands::Cargo(arguments) => {

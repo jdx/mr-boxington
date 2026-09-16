@@ -263,7 +263,10 @@ mod tests {
         let store = tempfile::tempdir().unwrap();
         let writers = (0..2)
             .map(|_| {
-                let writer = crate::events::EventWriter::new(store.path());
+                let writer = crate::events::EventWriter::with_limit(
+                    store.path(),
+                    Some(crate::config::DEFAULT_EVENTS_MAX_SIZE),
+                );
                 writer.started(Path::new("/fixture"), &["build".into()], None);
                 writer
             })

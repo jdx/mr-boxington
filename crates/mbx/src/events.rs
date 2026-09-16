@@ -32,14 +32,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub(crate) const SESSIONS_DIR: &str = "sessions/v1";
 const EVENT_VERSION: u8 = 1;
 
-/// The most one session may append.
-///
-/// A build compiling tens of thousands of crates would otherwise write a file
-/// the TUI has to read in full to show the last screen of it. Past this the
-/// counters carry on in memory and the summary is unaffected; only the row-level
-/// history stops.
-const MAX_EVENT_FILE_BYTES: u64 = 16 * 1024 * 1024;
-
 /// One line of a session's event stream.
 ///
 /// `serde(default)`-friendly and never `deny_unknown_fields`: a stream written
@@ -230,10 +222,6 @@ impl EventWriter {
     ///
     /// The file itself is not created until the first event, so a command that
     /// compiles nothing leaves nothing behind.
-    pub(crate) fn new(store: &Path) -> Self {
-        Self::with_cap(store, MAX_EVENT_FILE_BYTES)
-    }
-
     /// A stream that stops recording rows after `cap` bytes.
     ///
     /// `None` records the whole build. The counters a build reports are kept in

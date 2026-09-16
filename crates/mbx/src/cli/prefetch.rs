@@ -13,7 +13,11 @@ pub(super) struct PrefetchArgs {
     pub(super) cargo_args: Vec<String>,
 }
 
-pub(super) fn run(config: &Config, arguments: &[String]) -> Result<ExitCode> {
+pub(super) fn run(
+    config: &Config,
+    events_max_size: Option<u64>,
+    arguments: &[String],
+) -> Result<ExitCode> {
     validate_prefetch_config(config)?;
     crate::storage::check_cache(config)?;
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
@@ -24,7 +28,9 @@ pub(super) fn run(config: &Config, arguments: &[String]) -> Result<ExitCode> {
         .enable_all()
         .build()?;
     let stats = runtime.block_on(async {
-        let session = CacheSession::start(session_dir.path(), config).await?;
+        let session =
+            CacheSession::start_with_events_limit(session_dir.path(), config, events_max_size)
+                .await?;
         session.prefetch(&roots.workspace_root, arguments).await?;
         session.finish().await
     })?;
