@@ -237,14 +237,26 @@ fn previous_recording<'a>(
 }
 
 fn display_diff(previous: &ActionDiagnostic, current: &ActionDiagnostic) {
+    for line in diff_lines(previous, current) {
+        crate::session::note(&line);
+    }
+}
+
+/// What changed between two recordings of one compilation, as a reader sees it.
+///
+/// Key details and inputs get a heading each, and only when something under it
+/// changed. They were printed under one "inputs changed" heading, which named
+/// the wrong thing for a miss caused by an argument or an environment value --
+/// the two shapes this command exists to tell apart.
+fn diff_lines(previous: &ActionDiagnostic, current: &ActionDiagnostic) -> Vec<String> {
     if previous.action == current.action {
-        crate::session::note(
-            "  the action key did not change; its cached result was unavailable, evicted, or absent from the configured remote",
-        );
-        return;
+        return vec![
+            "  the action key did not change; its cached result was unavailable, evicted, or absent from the configured remote".into(),
+        ];
     }
     let components = changed_keys(&previous.components, &current.components);
     let inputs = changed_keys(&previous.inputs, &current.inputs);
+    let mut lines = Vec::new();
     // A compilation whose own key material is identical did not change; one of
     // the artifacts it consumes did, and the crate that produced that artifact
     // is where the miss actually starts. Saying so keeps a reader from hunting
@@ -256,21 +268,31 @@ fn display_diff(previous: &ActionDiagnostic, current: &ActionDiagnostic) {
         } else {
             ("the artifacts of", "differ", "those crates")
         };
-        crate::session::note(&format!(
+        lines.push(format!(
             "  nothing in this compilation changed; it missed because {subject} {} {verb}, so explain {next} first",
             join_names(&dependencies),
         ));
     }
-    crate::session::note("  inputs changed since the last recording:");
-    for name in components {
-        crate::session::note(&format!("    - {name}"));
+    if !components.is_empty() {
+        lines.push("  key details changed since the last recording:".into());
+        lines.extend(components.into_iter().map(|name| format!("    - {name}")));
     }
-    for path in inputs {
-        match dependency_name(&path) {
-            Some(name) => crate::session::note(&format!("    - input {path} (artifact of {name})")),
-            None => crate::session::note(&format!("    - input {path}")),
-        }
+    if !inputs.is_empty() {
+        lines.push("  inputs changed since the last recording:".into());
+        lines.extend(inputs.into_iter().map(|path| match dependency_name(&path) {
+            Some(name) => format!("    - input {path} (artifact of {name})"),
+            None => format!("    - input {path}"),
+        }));
     }
+    // Two keys that differ with nothing recorded to show for it: the details
+    // behind them were dropped or written by another version. Saying nothing at
+    // all would read as though the miss had been explained.
+    if lines.is_empty() {
+        lines.push(
+            "  the action key changed, but the recorded details do not say which part did".into(),
+        );
+    }
+    lines
 }
 
 /// Render names as a reader would say them out loud.
@@ -672,6 +694,75 @@ mod tests {
             "${workspace}/src/lib.rs".to_string(),
         ];
         assert!(dependencies_behind(&mixed).is_empty());
+    }
+
+    fn diagnostic(
+        action: &[u8],
+        components: &[(&str, &[u8])],
+        inputs: &[(&str, &[u8])],
+    ) -> ActionDiagnostic {
+        ActionDiagnostic {
+            action: mbx_cache_core::CacheDigest::blake3(action),
+            components: components
+                .iter()
+                .map(|(name, value)| ((*name).into(), mbx_cache_core::CacheDigest::blake3(value)))
+                .collect(),
+            inputs: inputs
+                .iter()
+                .map(|(path, value)| ((*path).into(), mbx_cache_core::CacheDigest::blake3(value)))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_key_detail_change_is_not_reported_under_the_input_heading() {
+        let previous = diagnostic(b"before", &[("environment OUT_DIR", b"old")], &[]);
+        let current = diagnostic(b"after", &[("environment OUT_DIR", b"new")], &[]);
+
+        assert_eq!(
+            diff_lines(&previous, &current),
+            [
+                "  key details changed since the last recording:",
+                "    - environment OUT_DIR",
+            ]
+        );
+    }
+
+    #[test]
+    fn each_heading_appears_only_when_something_under_it_changed() {
+        let previous = diagnostic(
+            b"before",
+            &[("argument --edition", b"same")],
+            &[("x.rs", b"o")],
+        );
+        let current = diagnostic(
+            b"after",
+            &[("argument --edition", b"same")],
+            &[("x.rs", b"n")],
+        );
+
+        let lines = diff_lines(&previous, &current);
+        assert!(
+            !lines.iter().any(|line| line.contains("key details")),
+            "{lines:?}"
+        );
+        assert_eq!(
+            lines.first().unwrap(),
+            "  inputs changed since the last recording:"
+        );
+    }
+
+    #[test]
+    fn a_key_that_changed_for_no_recorded_reason_says_so() {
+        // Rather than printing a heading with nothing under it, which reads as
+        // though the miss had been explained.
+        let previous = diagnostic(b"before", &[], &[]);
+        let current = diagnostic(b"after", &[], &[]);
+
+        assert_eq!(
+            diff_lines(&previous, &current),
+            ["  the action key changed, but the recorded details do not say which part did"]
+        );
     }
 
     #[test]
