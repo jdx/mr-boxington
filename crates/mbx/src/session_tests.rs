@@ -1369,6 +1369,58 @@ fn the_shim_name_used_before_the_rename_is_still_recognised() {
     );
 }
 
+/// Recognising the old name is not enough on its own. A targeted shim finds
+/// its cross compiler by looking its own invocation name up in the pin map, so
+/// a build whose makefiles recorded `mbx-cc-<variable>` has to reach the same
+/// entry as one that recorded `mbx-c-<variable>`. Pinning only the new name
+/// would not fail that build -- the lookup would fall through to `MBX_REAL_CC`
+/// and quietly build the cross target's objects with the host compiler.
+#[test]
+fn a_cross_compiler_is_pinned_under_its_pre_rename_name_too() {
+    let shims = CcShims {
+        cc: Some((
+            PathBuf::from("/session/mbx-c"),
+            PathBuf::from("/usr/bin/cc"),
+        )),
+        cxx: Some((
+            PathBuf::from("/session/mbx-cxx"),
+            PathBuf::from("/usr/bin/c++"),
+        )),
+        targeted: vec![
+            TargetedCompiler {
+                variable: "CC_aarch64-unknown-linux-musl".into(),
+                shim_name: "mbx-c-cc_aarch64-unknown-linux-musl".into(),
+                shim: PathBuf::from("/session/mbx-c-cc_aarch64-unknown-linux-musl"),
+                real: PathBuf::from("/usr/bin/aarch64-linux-musl-gcc"),
+            },
+            TargetedCompiler {
+                variable: "CXX_aarch64-unknown-linux-musl".into(),
+                shim_name: "mbx-cxx-cxx_aarch64-unknown-linux-musl".into(),
+                shim: PathBuf::from("/session/mbx-cxx-cxx_aarch64-unknown-linux-musl"),
+                real: PathBuf::from("/usr/bin/aarch64-linux-musl-g++"),
+            },
+        ],
+    };
+    let pins = shims.pins();
+
+    let cross_cc = PathBuf::from("/usr/bin/aarch64-linux-musl-gcc");
+    assert_eq!(
+        pins.get("mbx-c-cc_aarch64-unknown-linux-musl"),
+        Some(&cross_cc)
+    );
+    assert_eq!(
+        pins.get("mbx-cc-cc_aarch64-unknown-linux-musl"),
+        Some(&cross_cc),
+        "the pre-rename name must reach the cross compiler, not the host one"
+    );
+    // C++ never carried a legacy spelling, so it gains no alias.
+    assert_eq!(
+        pins.keys().filter(|name| name.contains("cxx")).count(),
+        1,
+        "{pins:?}"
+    );
+}
+
 /// A compiler path ending in `-cc` or `-gcc` reads as a cross-compiler prefix:
 /// `aarch64-linux-gnu-gcc` compiles for `aarch64-linux-gnu`. The `autotools`
 /// crate strips that suffix off whatever `CC` holds and passes the remainder to

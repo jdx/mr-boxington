@@ -2,6 +2,7 @@
 use super::SHIM_STAGING_NONCE;
 use super::{
     PATH_SHIM_NAMES, REAL_CC_ENV, REAL_CXX_ENV, RUSTC_SHIM_STEM, RUSTDOC_SHIM_STEM, is_same_binary,
+    legacy_cc_shim_name,
 };
 use eyre::{Context, Result};
 use log::debug;
@@ -66,10 +67,19 @@ impl CcShims {
     /// They share the map the standalone shims use, which is what lets one
     /// shim binary serve several compilers: it looks itself up by the name it
     /// was invoked under.
+    ///
+    /// Each C compiler is pinned under its pre-rename name as well, because the
+    /// name a build invokes is the one its makefiles recorded, which an older
+    /// mbx may have written. See [`legacy_cc_shim_name`].
     pub(super) fn pins(&self) -> BTreeMap<String, PathBuf> {
         self.targeted
             .iter()
-            .map(|targeted| (targeted.shim_name.clone(), targeted.real.clone()))
+            .flat_map(|targeted| {
+                legacy_cc_shim_name(&targeted.shim_name)
+                    .into_iter()
+                    .chain(std::iter::once(targeted.shim_name.clone()))
+                    .map(|name| (name, targeted.real.clone()))
+            })
             .collect()
     }
 }

@@ -1233,6 +1233,21 @@ fn cc_shim_language(stem: &str) -> Option<CcLanguage> {
     }
 }
 
+/// How a targeted C shim's name was spelled before [`CC_SHIM_STEM`] changed.
+///
+/// A targeted shim finds the cross compiler it stands in for by looking its own
+/// invocation name up in the pin map, so a build still invoking the old name
+/// has to reach the same entry. A miss would not fail that build: it would fall
+/// through to `MBX_REAL_CC` and compile the cross target's objects with the
+/// host compiler.
+///
+/// The trailing hyphen is what makes the prefix safe to strip. `mbx-c` on its
+/// own is a prefix of `mbx-cxx`; `mbx-c-` is a prefix of no C++ shim name.
+fn legacy_cc_shim_name(name: &str) -> Option<String> {
+    let rest = name.strip_prefix(&format!("{CC_SHIM_STEM}-"))?;
+    Some(format!("{LEGACY_CC_SHIM_STEM}-{rest}"))
+}
+
 /// The file name this process was invoked under.
 fn shim_invocation_name() -> Option<String> {
     std::env::args_os()
