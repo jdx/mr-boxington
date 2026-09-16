@@ -303,6 +303,40 @@ fn uninstall_keeps_the_shared_override_until_the_machine_wide_scope_goes() {
 }
 
 #[test]
+fn mise_config_paths_compare_by_identity() {
+    // `Path` equality already folds away `.`, so these cases use spellings it
+    // keeps: a `..` component, and a symlinked directory.
+    let directory = tempfile::tempdir().unwrap();
+    let nested = directory.path().join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let config = directory.path().join("config.toml");
+    std::fs::write(&config, "").unwrap();
+    let detour = nested.join("..").join("config.toml");
+    assert_ne!(config, detour);
+
+    assert!(same_config_path(&config, &config));
+    assert!(same_config_path(&config, &detour));
+    assert!(!same_config_path(
+        &config,
+        &directory.path().join("other.toml")
+    ));
+
+    // A config mise has not written yet still resolves through its directory.
+    let absent = nested.join("mise.toml");
+    let absent_detour = nested.join("..").join("nested").join("mise.toml");
+    assert_ne!(absent, absent_detour);
+    assert!(same_config_path(&absent, &absent_detour));
+    assert!(!same_config_path(&absent, &nested.join("other.toml")));
+
+    #[cfg(unix)]
+    {
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(directory.path(), &link).unwrap();
+        assert!(same_config_path(&config, &link.join("config.toml")));
+    }
+}
+
+#[test]
 fn setup_status_detects_a_missing_rust_analyzer_command() {
     let directory = tempfile::tempdir().unwrap();
     assert_eq!(

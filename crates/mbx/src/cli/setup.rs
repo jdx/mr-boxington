@@ -305,7 +305,36 @@ fn scope_is_machine_wide(scope: &MiseScope) -> bool {
         MiseScope::Global | MiseScope::None => true,
         MiseScope::Local => false,
         MiseScope::File(path) => mise_scope_config_path(&MiseScope::Global)
-            .is_ok_and(|global_config| global_config == *path),
+            .is_ok_and(|global_config| same_config_path(&global_config, path)),
+    }
+}
+
+/// Decide whether two mise configuration paths name one file.
+///
+/// `MISE_CONFIG_FILE` is taken verbatim while the global path is derived from
+/// `MISE_GLOBAL_CONFIG_FILE` or the platform default, so one file reaches the
+/// two sides under different spellings: a relative path, a `.` component, a
+/// symlinked home. Ask the filesystem, and fall back to the literal comparison
+/// when it cannot resolve either side.
+pub(super) fn same_config_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    let resolve = |path: &Path| -> Option<PathBuf> {
+        if let Ok(resolved) = std::fs::canonicalize(path) {
+            return Some(resolved);
+        }
+        let name = path.file_name()?;
+        let parent = match path.parent() {
+            Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
+            Some(parent) => parent,
+            None => return None,
+        };
+        Some(std::fs::canonicalize(parent).ok()?.join(name))
+    };
+    match (resolve(left), resolve(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
     }
 }
 
