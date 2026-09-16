@@ -283,6 +283,26 @@ fn setup_uninstall_removes_only_its_rust_analyzer_command() {
 }
 
 #[test]
+fn uninstall_keeps_the_shared_override_until_the_machine_wide_scope_goes() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("rust-analyzer.toml");
+    let shim = directory.path().join("bin/cargo");
+    assert!(!rust_analyzer_override_is_installed(&config, &shim).unwrap());
+    configure_rust_analyzer(&config, &shim, SetupAction::Install).unwrap();
+    assert!(rust_analyzer_override_is_installed(&config, &shim).unwrap());
+
+    assert!(override_is_shared_with_other_scopes(&MiseScope::Local));
+    assert!(override_is_shared_with_other_scopes(&MiseScope::File(
+        directory.path().join("mise.toml")
+    )));
+    assert!(!override_is_shared_with_other_scopes(&MiseScope::Global));
+    assert!(!override_is_shared_with_other_scopes(&MiseScope::None));
+
+    configure_rust_analyzer(&config, &shim, SetupAction::Uninstall).unwrap();
+    assert!(!rust_analyzer_override_is_installed(&config, &shim).unwrap());
+}
+
+#[test]
 fn setup_status_detects_a_missing_rust_analyzer_command() {
     let directory = tempfile::tempdir().unwrap();
     assert_eq!(

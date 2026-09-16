@@ -175,6 +175,10 @@ scope you enabled, and remove any mbx `PATH` entry you added manually. Open a
 new shell and check Cargo's path again. Uninstalling activation does not remove
 the mbx executable or clear the cache.
 
+One user-level rust-analyzer override serves every scope, so uninstalling a
+project scope leaves it in place for the others, the way it leaves the Cargo
+shim. Uninstalling the global scope removes it.
+
 ## Shell completions
 
 Generate a completion script for `bash`, `zsh`, `fish`, or `powershell`:

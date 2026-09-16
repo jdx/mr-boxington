@@ -276,7 +276,45 @@ pub(super) fn setup_with_rust_analyzer(
     {
         remove_inactive_project_override(project_config, &shim, config_path)?;
     }
+    if action == SetupAction::Uninstall && override_is_shared_with_other_scopes(scope) {
+        if rust_analyzer_override_is_installed(config_path, &shim)? {
+            println!(
+                "the rust-analyzer check command in {} was left in place for other scopes; remove it with `mbx setup --global --uninstall`",
+                config_path.display()
+            );
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
     configure_rust_analyzer(config_path, &shim, action)
+}
+
+/// One user-level override serves every mise scope, like the Cargo shim.
+///
+/// mise has no machine-wide list of project configurations, so uninstalling one
+/// project cannot tell whether another still relies on the override. Leave it
+/// alone from a project scope, the way `setup_at_action` leaves the shim, and
+/// remove it from the machine-wide scope that matches what it covers.
+pub(super) fn override_is_shared_with_other_scopes(scope: &MiseScope) -> bool {
+    matches!(scope, MiseScope::Local | MiseScope::File(_))
+}
+
+pub(super) fn rust_analyzer_override_is_installed(path: &Path, shim: &Path) -> Result<bool> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let Ok(document) = contents.parse::<toml_edit::DocumentMut>() else {
+        return Ok(false);
+    };
+    let configured = document
+        .get("check")
+        .and_then(toml_edit::Item::as_table_like)
+        .and_then(|check| check.get("overrideCommand"));
+    let expected = rust_analyzer_command(shim, RUST_ANALYZER_CHECK_ARGUMENTS);
+    let legacy = rust_analyzer_command(shim, LEGACY_RUST_ANALYZER_CHECK_ARGUMENTS);
+    Ok(rust_analyzer_command_matches(configured, &expected)
+        || rust_analyzer_command_matches(configured, &legacy))
 }
 
 /// rust-analyzer resolves its check command from the user configuration only.
@@ -322,7 +360,7 @@ pub(super) fn project_rust_analyzer_config_path_from(
             if mise_scope_config_path(&MiseScope::Global)
                 .is_ok_and(|global_config| global_config == *path)
             {
-                Ok(None)
+                Ok(active_workspace())
             } else if let Some(config) = active_workspace() {
                 Ok(Some(config))
             } else {
