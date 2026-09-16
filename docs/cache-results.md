@@ -173,9 +173,10 @@ The usual causes, roughly in the order they show up:
   recent recorded build and list, per missed crate, the key inputs that
   changed since its last recorded hit. Session history stores hashes, not
   source contents or environment values.
-- Build-script output paths. A crate that embeds its `OUT_DIR` produces
-  checkout-specific inputs for its dependents. mbx remaps this by default;
-  `MBX_SHARE_OUT_DIR=0` disables that sharing. See
+- Build-script output paths. A crate that reads its `OUT_DIR` is cached for
+  the checkout it ran in, so each new checkout compiles it once. mbx remaps the
+  path by default so its dependents can still share; `MBX_SHARE_OUT_DIR=0`
+  turns that off. See
   [limits](/limits#out-dir-sharing-remaps-generated-source-paths).
 - A build chose its own C compiler, or is cross-compiling. Setting `CC`,
   `HOST_CC`, `CXX`, or `HOST_CXX` leaves host compilations outside mbx.

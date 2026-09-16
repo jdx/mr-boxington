@@ -391,7 +391,7 @@ Logical CPUs to leave free for the rest of the machine.
 - **Default:** `true`
 - **Set with:** `MBX_SHARE_OUT_DIR`
 
-Remap `OUT_DIR` so compilations that read it produce checkout-independent artifacts, letting their dependents share.
+Remap `OUT_DIR` so rustc does not record it in the artifact, which lets a rebuilt dependency match between checkouts and its dependents share.
 
 ### `stats_report`
 

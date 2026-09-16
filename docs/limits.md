@@ -215,18 +215,26 @@ host C compilations uncached; `TARGET_CC`, `TARGET_CXX`, `CC_<target>`, and
 ## `OUT_DIR` sharing remaps generated source paths
 
 A generated source path can contain an absolute checkout-specific `OUT_DIR`.
-mbx remaps the path and inspects outputs before choosing a shared key, but
-generated sources then appear in debug info under a placeholder path. It cannot
-detect a value derived from the path without embedding the path itself. Set
-`MBX_SHARE_OUT_DIR=0` to keep generated source paths literal at the cost of
-cross-checkout cache sharing for their dependent crates.
+A compilation that reads one is cached for the checkout it ran in, and
+recompiles the first time each new checkout builds it. mbx cannot tell whether
+such an artifact depends on the path: reading the outputs back finds a path
+that was kept verbatim, but not one the crate derived a value from.
+
+mbx remaps the path so rustc records a placeholder instead, which is what lets
+a dependency recompiled in a second checkout come out byte-identical, so the
+crates above it still share. Two cases stay checkout-specific anyway. A
+workspace member records its own directory whatever `OUT_DIR` was remapped to.
+A crate that keeps the value it read through `env!` embeds it. Both produce a
+different artifact in each checkout, and their dependents recompile with them.
+
+Set `MBX_SHARE_OUT_DIR=0` to keep generated source paths literal in debug
+information, at the cost of that dependent sharing.
 
 This covers C and C++ as well as Rust. A build script that generates headers
 into `OUT_DIR` passes that directory to its own compilations, which record it
 in debug information, so the same remapping applies: rustc is told
-`--remap-path-prefix` and the C compiler `-fdebug-prefix-map`. In both cases an
-output that kept the literal path is left uncached. `MBX_SHARE_OUT_DIR=0` turns
-both off together.
+`--remap-path-prefix` and the C compiler `-fdebug-prefix-map`.
+`MBX_SHARE_OUT_DIR=0` turns both off together.
 
 ## Incremental output reduces sharing
 
