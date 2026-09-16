@@ -1717,6 +1717,10 @@ enum Generated {
     /// Keeps `OUT_DIR` in a string constant. That lands in the artifact itself,
     /// where no remapping reaches it.
     Text,
+    /// A crate that includes generated code, and a second crate depending on
+    /// it. The first is keyed to its checkout; the second is what the remapping
+    /// is for.
+    Dependent,
 }
 
 /// Write a build-script fixture that leaves an observable execution count and
@@ -2166,6 +2170,10 @@ fn installed_build_script_wrapper_is_transparent_outside_an_mbx_session() {
 
 /// Write a fixture whose build script generates code, used as `generated` says.
 fn write_generated_project(directory: &Path, generated: Generated) {
+    if matches!(generated, Generated::Dependent) {
+        write_dependent_generated_project(directory);
+        return;
+    }
     std::fs::create_dir_all(directory.join("src")).unwrap();
     std::fs::write(
         directory.join("Cargo.toml"),
@@ -2178,6 +2186,8 @@ fn write_generated_project(directory: &Path, generated: Generated) {
     )
     .unwrap();
     let lib = match generated {
+        // Handled above: this shape is a workspace, not one package.
+        Generated::Dependent => unreachable!("the dependent fixture writes its own tree"),
         Generated::Cfg => "#[cfg(generated)]\npub fn value() -> u32 { 7 }\n".to_string(),
         Generated::Include => {
             "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\npub fn value() -> u32 { VALUE }\n"
@@ -2194,11 +2204,52 @@ fn write_generated_project(directory: &Path, generated: Generated) {
     generate_lockfile(directory);
 }
 
-/// Turning sharing off preserves the old checkout-specific behavior for a
-/// compilation that consumes `OUT_DIR`, without affecting one that only uses a
-/// build-script cfg.
+/// Two crates: one reading `OUT_DIR`, and one that only depends on it.
+///
+/// The build script is the same one the single-crate fixtures use, so the inner
+/// crate is keyed to its checkout. The outer crate reads nothing remapped, and
+/// shares only if the artifact it consumes is identical in both checkouts.
+fn write_dependent_generated_project(directory: &Path) {
+    std::fs::create_dir_all(directory.join("inner/src")).unwrap();
+    std::fs::create_dir_all(directory.join("outer/src")).unwrap();
+    std::fs::write(
+        directory.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"inner\", \"outer\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("inner/Cargo.toml"),
+        "[package]\nname = \"inner\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lints.rust]\nunexpected_cfgs = { level = \"allow\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("inner/build.rs"),
+        "use std::{env, fs, path::PathBuf};\n         fn main() {\n         \u{20}   let out = PathBuf::from(env::var(\"OUT_DIR\").unwrap());\n         \u{20}   fs::write(out.join(\"generated.rs\"), \"pub const VALUE: u32 = 7;\\n\").unwrap();\n         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("inner/src/lib.rs"),
+        "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\npub fn value() -> u32 { VALUE }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("outer/Cargo.toml"),
+        "[package]\nname = \"outer\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ninner = { path = \"../inner\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("outer/src/lib.rs"),
+        "pub fn value() -> u32 { inner::value() }\n",
+    )
+    .unwrap();
+    generate_lockfile(directory);
+}
+
+/// Turning the remapping off changes nothing for a compilation that only uses a
+/// build-script cfg, and leaves one that consumes `OUT_DIR` where it already
+/// is: keyed to its checkout either way.
 #[test]
-fn out_dir_sharing_can_be_turned_off() {
+fn out_dir_remapping_can_be_turned_off() {
     let disabled = [("MBX_SHARE_OUT_DIR", "0")];
     for (generated, expect_hits) in [(Generated::Cfg, true), (Generated::Include, false)] {
         assert_eq!(
@@ -2209,22 +2260,37 @@ fn out_dir_sharing_can_be_turned_off() {
     }
 }
 
-/// By default, the compilation is remapped so rustc records the
-/// placeholder instead of the real `OUT_DIR`, and the include-only shape crosses
-/// checkouts. The shape that keeps the value in a string still does not: the
-/// remapping cannot reach into the artifact, and mbx reads the outputs rather
-/// than assuming it can.
+/// A compilation that reads `OUT_DIR` is keyed to the checkout it ran in,
+/// whether or not it keeps the path: the value reaches the key either way, and
+/// no claim is made that the artifact ignores it.
 ///
-/// The pair is the test. Either half alone would pass for the wrong reason.
+/// The pair is the test. The shape that only includes generated code used to be
+/// shared on the strength of finding no path in its outputs, which a crate that
+/// derives a value from the path defeats.
 #[test]
-fn out_dir_crosses_checkouts_only_where_the_artifact_allows_it() {
-    for (generated, expect_hits) in [(Generated::Include, true), (Generated::Text, false)] {
-        assert_eq!(
-            two_checkouts_share(generated, &[]),
-            expect_hits,
-            "the default shared the wrong shape"
+fn a_compilation_that_reads_out_dir_is_keyed_to_its_checkout() {
+    for generated in [Generated::Include, Generated::Text] {
+        assert!(
+            !two_checkouts_share(generated, &[]),
+            "a compilation that reads OUT_DIR was shared between checkouts"
         );
     }
+}
+
+/// Where the cost stops, and where it does not.
+///
+/// A registry or git dependency compiles with its working directory under
+/// `CARGO_HOME`, the same in every checkout, so recompiling one produces the
+/// same artifact and its dependents go on sharing: mbx's own graph gains
+/// exactly the three misses of the three crates that read `OUT_DIR`.
+///
+/// A workspace member compiles with its working directory in the checkout,
+/// which it records, so recompiling one produces a different artifact and
+/// everything above it misses as well. That is this fixture, and the cost is
+/// asserted rather than wished away.
+#[test]
+fn a_workspace_member_reading_out_dir_costs_its_dependents_too() {
+    assert!(!two_checkouts_share(Generated::Dependent, &[]));
 }
 
 /// Build the same fixture in two checkouts, reporting whether the second one

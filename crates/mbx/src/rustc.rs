@@ -595,13 +595,7 @@ pub(crate) fn compile(
                     let action = if learned.engaged() {
                         &candidates.literal
                     } else {
-                        publish_result(
-                            &candidates,
-                            &portable,
-                            &outputs,
-                            &output,
-                            &portable.mappings,
-                        )?
+                        publish_result(&candidates, &outputs, &output, &portable.mappings)?
                     };
                     install_build_script_shim(&invocation, &outputs, &action.digest);
                     // The flight prediction is only left behind a *published* result:
@@ -1477,10 +1471,7 @@ fn restore_prediction_payload(
 /// the literal one, which is what every action looked like before
 /// [`Portable`] existed.
 struct ActionCandidates {
-    /// Normalizes the portable environment values, so two checkouts agree.
-    portable: Option<RustcAction>,
-    /// What the compilation falls back to when an output carries one of those
-    /// values anyway.
+    /// The key this compilation is published under and looked up by.
     literal: RustcAction,
 }
 
@@ -1490,48 +1481,28 @@ impl ActionCandidates {
         context: ActionContext,
         linker: Option<LinkerIdentity>,
     ) -> Result<Self> {
-        // Only worth a second key if a portable name is actually an input here.
-        // Crates that never read one keep the key they always had.
-        let applies = context
-            .portable_environment
-            .iter()
-            .any(|name| context.environment.contains_key(name));
-        let literal_context = ActionContext {
-            portable_environment: BTreeSet::new(),
-            ..context.clone()
-        };
         Ok(Self {
-            portable: applies
-                .then(|| invocation.action_linked_by(context, linker.clone()))
-                .transpose()?,
-            literal: invocation.action_linked_by(literal_context, linker)?,
+            literal: invocation.action_linked_by(context, linker)?,
         })
     }
 
     fn contains(&self, digest: &CacheDigest) -> bool {
-        self.portable
-            .as_ref()
-            .is_some_and(|action| &action.digest == digest)
-            || &self.literal.digest == digest
+        &self.literal.digest == digest
     }
 
     /// The key this compilation is published under.
-    ///
-    /// The portable key is only honest if no output carries the value it
-    /// normalized away. `--remap-path-prefix` covers the paths rustc records
-    /// itself, but not one a crate reads through `env!` and keeps as a string,
-    /// and nothing in the inputs distinguishes the two shapes -- so the outputs
-    /// are read.
-    fn publishable(&self, outputs_are_clean: bool) -> &RustcAction {
-        match &self.portable {
-            Some(action) if outputs_are_clean => action,
-            _ => &self.literal,
-        }
+    fn publishable(&self) -> &RustcAction {
+        &self.literal
     }
 
-    /// Every key to look up, most portable first.
+    /// Every key to look up.
+    ///
+    /// One, since a compilation that reads a remapped value is keyed for the
+    /// checkout it ran in. It was two while a second, checkout-independent key
+    /// was offered as well, and the pair is what let one checkout's artifact be
+    /// restored into another.
     fn ordered(&self) -> impl Iterator<Item = &RustcAction> {
-        self.portable.iter().chain(std::iter::once(&self.literal))
+        std::iter::once(&self.literal)
     }
 }
 
@@ -1727,7 +1698,7 @@ fn base_action_context(
         working_dir: working_dir.to_path_buf(),
         path_mappings: portable.mappings.clone(),
         environment: BTreeMap::new(),
-        portable_environment: portable.names.clone(),
+        portable_environment: BTreeSet::new(),
         inputs: Vec::new(),
     };
     if Path::new(rustc).file_stem() == Some(OsStr::new("clippy-driver"))
@@ -2656,21 +2627,23 @@ const PORTABLE_ENVIRONMENT: &[&str] = &["OUT_DIR"];
 /// output reads it, its value differs per checkout, and keeping it in the key
 /// verbatim is what stops those compilations sharing between checkouts.
 ///
-/// Two things must hold before a key may normalize such a value, and this type
-/// is responsible for both. `--remap-path-prefix` makes rustc record the
-/// placeholder instead of the real path, which covers debug info, spans, and
-/// diagnostics -- everything rustc writes itself. It does not cover a value the
-/// crate reads through `env!` and keeps as a string, so the outputs are read
-/// before publishing and the portable key is used only if none carries it.
+/// `--remap-path-prefix` makes rustc record the placeholder instead of the real
+/// path, which covers debug info, spans and diagnostics -- everything rustc
+/// writes itself. That is what makes the *artifact* the same in every checkout,
+/// so the crates that depend on it share even though it does not.
+///
+/// The compilation's own key is not made to ignore the value. Deciding that it
+/// could be ignored meant proving the artifact does not depend on it, and
+/// nothing available here is a proof: reading the outputs back finds a path
+/// that was kept verbatim, but not one a crate derived something from, and a
+/// second compilation with the value spelled differently is a sample rather
+/// than a proof. A key that claims more than it can show restores one
+/// checkout's artifact into another.
 struct Portable {
     /// Path mappings for this compilation, ordered as keys need them.
     mappings: Vec<PathMapping>,
     /// Flags appended to the real rustc invocation, one per remapped value.
     arguments: Vec<OsString>,
-    /// Names whose values an action key may normalize.
-    names: BTreeSet<String>,
-    /// The literal values, for the check before publishing.
-    values: Vec<String>,
 }
 
 impl Portable {
@@ -2678,8 +2651,6 @@ impl Portable {
         let mut portable = Self {
             mappings: PathMapping::ordered(&path_mappings(working_dir, target_output, target)),
             arguments: Vec::new(),
-            names: BTreeSet::new(),
-            values: Vec::new(),
         };
         if !session::share_out_dir_requested() {
             return portable;
@@ -2703,8 +2674,6 @@ impl Portable {
             flag.push("=");
             flag.push(&placeholder);
             portable.arguments.push(flag);
-            portable.names.insert((*name).to_string());
-            portable.values.push(value);
         }
         portable
     }
@@ -2715,32 +2684,6 @@ impl Portable {
         applied.extend(self.arguments.iter().cloned());
         applied
     }
-
-    /// Whether the outputs are free of every value a portable key normalized.
-    ///
-    /// The dep-info file is not one of them: it records absolute input paths by
-    /// construction, and is restored as written for every action that already
-    /// shares across checkouts today. Judging the artifact by it would reject
-    /// every compilation.
-    fn contents_are_clean(&self, contents: &[u8]) -> bool {
-        !self.values.is_empty() && !self.values.iter().any(|value| carries(contents, value))
-    }
-}
-
-/// Whether `contents` holds `value` anywhere, in either separator spelling.
-///
-/// rustc writes paths with the platform separator in some places and forward
-/// slashes in others, and a value missed here becomes a wrong answer rather
-/// than a slow one, so both spellings are searched.
-fn carries(contents: &[u8], value: &str) -> bool {
-    if contains(contents, value.as_bytes()) {
-        return true;
-    }
-    value.contains('\\') && contains(contents, value.replace('\\', "/").as_bytes())
-}
-
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty() && memchr::memmem::find(haystack, needle).is_some()
 }
 
 fn path_mappings(
@@ -2909,7 +2852,6 @@ fn replay_output(output: &Output) -> Result<()> {
 
 fn publish_result<'a>(
     candidates: &'a ActionCandidates,
-    portable: &Portable,
     outputs: &RustcOutputs,
     output: &Output,
     mappings: &[PathMapping],
@@ -2938,7 +2880,7 @@ fn publish_result<'a>(
         .chain(std::iter::once(&outputs.dep_info));
     let mut files = Vec::with_capacity(outputs.files.len() + 1);
     let mut hashed_outputs = Vec::with_capacity(outputs.files.len());
-    let mut portable_outputs_are_clean = candidates.portable.is_some();
+
     for path in output_paths {
         let metadata = std::fs::metadata(path)
             .wrap_err_with(|| format!("failed to inspect rustc output {}", path.display()))?;
@@ -2958,14 +2900,7 @@ fn publish_result<'a>(
             // hash the artifact. Reading first and then calling `blake3_file`
             // made cold builds read every output twice merely to decide which
             // action key could safely name it.
-            let digest = if candidates.portable.is_some() {
-                let contents = std::fs::read(path)
-                    .wrap_err_with(|| format!("failed to read rustc output {}", path.display()))?;
-                portable_outputs_are_clean &= portable.contents_are_clean(&contents);
-                CacheDigest::blake3(&contents)
-            } else {
-                CacheDigest::blake3_file(path)?
-            };
+            let digest = CacheDigest::blake3_file(path)?;
             blobs.push((digest.clone(), path.clone()));
             // Freshly compiled artifacts enter the ledger too: on a cold
             // build these are exactly the rlibs every dependent is about to
@@ -2996,7 +2931,7 @@ fn publish_result<'a>(
     files.sort_by(|left, right| left.name.cmp(&right.name));
     session::record_file_digests(FileDigestScope::Content, hashed_outputs);
 
-    let action = candidates.publishable(portable_outputs_are_clean);
+    let action = candidates.publishable();
     blobs.push(staged_bytes(staging.path(), "action.json", &action.bytes)?);
 
     let metadata = canonical_json(&RustcMetadata {

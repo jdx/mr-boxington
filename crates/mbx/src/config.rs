@@ -166,7 +166,8 @@ pub(crate) struct RawConfig {
         default = "16MiB"
     )]
     events_max_size: String,
-    /// Share eligible compilations that read `OUT_DIR`.
+    /// Remap `OUT_DIR` so compilations that read it produce checkout-independent
+    /// artifacts, letting their dependents share.
     #[usage(env = "MBX_SHARE_OUT_DIR", default = true)]
     share_out_dir: bool,
     /// Cache executions of build scripts using Cargo's freshness inputs. This may
@@ -380,11 +381,13 @@ pub struct Config {
     /// Let cargo compile workspace members incrementally, rather than forcing
     /// `CARGO_INCREMENTAL=0` for the whole build.
     pub incremental: bool,
-    /// Let a compilation that reads `OUT_DIR` be shared between checkouts.
+    /// Remap `OUT_DIR` so a compilation that reads it still produces the same
+    /// artifact in every checkout.
     ///
-    /// On by default: the compilation remaps generated sources to a stable
-    /// placeholder, and mbx reads the outputs before publishing to fall back
-    /// to a checkout-specific key when a crate embeds the literal path.
+    /// On by default. The compilation itself stays keyed to the checkout it ran
+    /// in -- nothing available can prove its artifact ignores the path -- but
+    /// remapping keeps generated sources out of the artifact, so every crate
+    /// that depends on it shares between checkouts.
     pub share_out_dir: bool,
     /// Cache build-script execution when the script declares rerun inputs.
     pub build_script_execution: bool,

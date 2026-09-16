@@ -81,15 +81,6 @@ fn cargo_metadata_changes_are_diffs_within_one_compilation_unit() {
 use crate::materialize::{apply_file_mode, make_owner_writable};
 use std::io::Write as _;
 
-fn portable_for(values: &[&str]) -> Portable {
-    Portable {
-        mappings: Vec::new(),
-        arguments: Vec::new(),
-        names: values.iter().map(|_| "OUT_DIR".to_string()).collect(),
-        values: values.iter().map(|value| (*value).to_string()).collect(),
-    }
-}
-
 fn churn(sources: &str, streak: u32) -> ChurnState {
     ChurnState {
         version: CHURN_STATE_VERSION,
@@ -240,52 +231,6 @@ fn prediction_v1_does_not_supply_timing() {
     };
 
     assert!(decode_prediction_timing(&prediction, &invocation).is_err());
-}
-
-/// `--remap-path-prefix` covers the paths rustc writes itself, so most
-/// artifacts come out clean. A crate that keeps the value as a string does
-/// not, and that is the case the outputs are read to catch.
-#[test]
-fn an_output_carrying_a_normalized_value_is_not_portable() {
-    let root = tempfile::tempdir().unwrap();
-    let out_dir = "/checkout/target/debug/build/widget-abc/out";
-    let clean = root.path().join("clean.rlib");
-    std::fs::write(
-        &clean,
-        b"rustc output naming ${target}/debug/build/widget-abc/out",
-    )
-    .unwrap();
-    let carries = root.path().join("carries.rlib");
-    std::fs::write(&carries, format!("compiled in {out_dir} at some offset")).unwrap();
-
-    let portable = portable_for(&[out_dir]);
-    assert!(portable.contents_are_clean(&std::fs::read(&clean).unwrap()));
-    assert!(!portable.contents_are_clean(&std::fs::read(&carries).unwrap()));
-    // One dirty output is enough: the artifact is published as a set.
-    assert!(
-        ![clean, carries]
-            .iter()
-            .all(|output| portable.contents_are_clean(&std::fs::read(output).unwrap()))
-    );
-}
-
-/// Nothing was made portable, so there is no portable key to publish under
-/// and no claim to check.
-#[test]
-fn nothing_portable_is_never_clean() {
-    assert!(!portable_for(&[]).contents_are_clean(b"an artifact"));
-}
-
-#[test]
-fn a_value_is_found_at_any_offset_and_in_either_spelling() {
-    assert!(carries(b"/a/b", "/a/b"));
-    assert!(carries(b"...../a/b.....", "/a/b"));
-    assert!(carries(b"/a/a/b", "/a/b"));
-    assert!(!carries(b"/a/", "/a/b"));
-    assert!(!carries(b"", "/a/b"));
-    // A Windows value may have been written with forward slashes.
-    assert!(carries(b"c:/a/b", "c:\\a\\b"));
-    assert!(!carries(b"c:/a/c", "c:\\a\\b"));
 }
 
 fn staged_outputs(root: &Path, entries: Vec<(&[u8], PathBuf)>) -> StagedOutputs {
