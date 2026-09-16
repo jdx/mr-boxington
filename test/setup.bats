@@ -206,6 +206,7 @@ EOF
   assert_file_contains "$MBX_RA_CONFIG" "$MBX_SHIM_DIR/cargo"
 
   run env PATH="$fake_bin:$PATH" MISE_SHELL=zsh \
+    MISE_CONFIG_FILE="$BATS_TEST_TMPDIR/global.toml" \
     MISE_GLOBAL_CONFIG_FILE="$BATS_TEST_TMPDIR/global.toml" \
     MBX_TEST_MISE_CONFIGS="[{\"path\":\"$BATS_TEST_TMPDIR/global.toml\",\"tools\":[\"mr-boxington\"]}]" \
     MBX_TEST_MISE_LOG="$mise_log" MBX_TEST_SHIM_DIR="$MBX_SHIM_DIR" \

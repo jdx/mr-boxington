@@ -295,7 +295,18 @@ pub(super) fn setup_with_rust_analyzer(
 /// alone from a project scope, the way `setup_at_action` leaves the shim, and
 /// remove it from the machine-wide scope that matches what it covers.
 pub(super) fn override_is_shared_with_other_scopes(scope: &MiseScope) -> bool {
-    matches!(scope, MiseScope::Local | MiseScope::File(_))
+    !scope_is_machine_wide(scope)
+}
+
+/// `MISE_CONFIG_FILE` can name the global configuration, so a file scope is not
+/// automatically a project scope.
+fn scope_is_machine_wide(scope: &MiseScope) -> bool {
+    match scope {
+        MiseScope::Global | MiseScope::None => true,
+        MiseScope::Local => false,
+        MiseScope::File(path) => mise_scope_config_path(&MiseScope::Global)
+            .is_ok_and(|global_config| global_config == *path),
+    }
 }
 
 pub(super) fn rust_analyzer_override_is_installed(path: &Path, shim: &Path) -> Result<bool> {
@@ -351,17 +362,15 @@ pub(super) fn project_rust_analyzer_config_path_from(
         (root.join("Cargo.toml").is_file() || root.join("Cargo.lock").is_file())
             .then(|| root.join(RUST_ANALYZER_CONFIG_FILE))
     };
+    if scope_is_machine_wide(scope) {
+        return Ok(active_workspace());
+    }
     match scope {
-        MiseScope::Global | MiseScope::None => Ok(active_workspace()),
         MiseScope::Local => Ok(Some(
             crate::util::workspace_root(cwd).join(RUST_ANALYZER_CONFIG_FILE),
         )),
         MiseScope::File(path) => {
-            if mise_scope_config_path(&MiseScope::Global)
-                .is_ok_and(|global_config| global_config == *path)
-            {
-                Ok(active_workspace())
-            } else if let Some(config) = active_workspace() {
+            if let Some(config) = active_workspace() {
                 Ok(Some(config))
             } else {
                 let directory = path.parent().ok_or_else(|| {
@@ -372,6 +381,7 @@ pub(super) fn project_rust_analyzer_config_path_from(
                 ))
             }
         }
+        MiseScope::Global | MiseScope::None => Ok(active_workspace()),
     }
 }
 
