@@ -235,38 +235,45 @@ fn an_invocation_outside_a_project_still_reaches_cargo() {
     std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
     let outside = fixture.root.join("outside");
     std::fs::create_dir(&outside).unwrap();
+    // A toolchain selector and a configuration override reach a different
+    // Cargo and a different configuration, but neither can put a manifest
+    // where the filesystem has none, so they do not cost the passthrough.
+    // Only the shim forwards a bare `--config`; mbx's own CLI rejects it.
     for shim in [false, true] {
-        for (directory, reaches_cargo) in [(&outside, true), (&fixture.project, false)] {
-            let marker = fixture
-                .root
-                .join(format!("passthrough-{shim}-{reaches_cargo}"));
-            let mut command = fixture.command();
-            let inherited_path = std::env::var_os("PATH").unwrap();
-            let paths = std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited_path));
-            command
-                .arg("binstall")
-                .current_dir(directory)
-                .env("PATH", std::env::join_paths(paths).unwrap())
-                .env("CARGO", &cargo)
-                .env("TEST_PASSTHROUGH_MARKER", &marker);
-            if shim {
-                command.env("MBX_CARGO_SHIM_MODE", "1");
+        let mut globals: Vec<&[&str]> = vec![&[], &["+stable"]];
+        if shim {
+            globals.push(&["--config", "term.quiet=false"]);
+        }
+        for (index, global) in globals.iter().enumerate() {
+            for (directory, reaches_cargo) in [(&outside, true), (&fixture.project, false)] {
+                let marker = fixture
+                    .root
+                    .join(format!("passthrough-{shim}-{index}-{reaches_cargo}"));
+                let mut command = fixture.command();
+                let inherited_path = std::env::var_os("PATH").unwrap();
+                let paths =
+                    std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited_path));
+                command
+                    .args(*global)
+                    .arg("binstall")
+                    .current_dir(directory)
+                    .env("PATH", std::env::join_paths(paths).unwrap())
+                    .env("CARGO", &cargo)
+                    .env("TEST_PASSTHROUGH_MARKER", &marker);
+                if shim {
+                    command.env("MBX_CARGO_SHIM_MODE", "1");
+                }
+                let output = command.output().unwrap();
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let where_ = format!("{global:?} in {}", directory.display());
+                assert_eq!(output.status.success(), reaches_cargo, "{where_}: {stderr}");
+                assert_eq!(
+                    !stderr.contains("could not verify Cargo build storage"),
+                    reaches_cargo,
+                    "{where_}: {stderr}"
+                );
+                assert_eq!(marker.exists(), reaches_cargo, "{where_}: {stderr}");
             }
-            let output = command.output().unwrap();
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert_eq!(
-                output.status.success(),
-                reaches_cargo,
-                "in {}: {stderr}",
-                directory.display()
-            );
-            assert_eq!(
-                !stderr.contains("could not verify Cargo build storage"),
-                reaches_cargo,
-                "in {}: {stderr}",
-                directory.display()
-            );
-            assert_eq!(marker.exists(), reaches_cargo, "{stderr}");
         }
     }
 }

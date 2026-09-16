@@ -237,27 +237,40 @@ pub(super) fn cargo_proxy_passthrough(arguments: &[OsString]) -> bool {
 /// unknown-command diagnostics without allowing failed metadata to launch a
 /// build alias or an external Cargo command inside one.
 pub(super) fn metadata_failure_passthrough(cargo: &OsStr, arguments: &[OsString]) -> bool {
+    // A single-file `-Zscript` package compiles without a manifest, so absent
+    // manifests cannot speak for these the way they do for everything else.
+    if arguments
+        .iter()
+        .any(|arg| arg.to_string_lossy().starts_with("-Z"))
+    {
+        return false;
+    }
+    // No manifest where Cargo looks for one means no package to build and no
+    // target directory to place, so the probe failed because Cargo has nothing
+    // to do here rather than because its storage is unverifiable. This is the
+    // ordinary way to reach a failed probe: an external subcommand such as
+    // `cargo binstall` run outside a project, where Cargo itself would not
+    // have read a manifest either. Where a manifest is found the question is
+    // which command this is, so the listing below has to answer it.
+    if let Ok(strings) = super::strings(arguments)
+        && let Ok(working_dir) = std::env::current_dir()
+        && !mbx_cache_cargo::manifest_in_scope(&strings, &working_dir)
+    {
+        return true;
+    }
+    // A toolchain selector picks a different Cargo, and these options change
+    // the configuration it reads, so the listing would describe neither this
+    // invocation nor its aliases. Manifest discovery is unaffected by them:
+    // `manifest_in_scope` follows `-C` and `--directory` itself, and no
+    // configuration conjures a manifest where the filesystem has none.
     if arguments.iter().any(|arg| {
         let arg = arg.to_string_lossy();
         arg.starts_with('+')
             || arg.starts_with("--config")
             || arg.starts_with("-C")
             || arg.starts_with("--directory")
-            || arg.starts_with("-Z")
     }) {
         return false;
-    }
-    // No manifest above the invocation directory means no package to build and
-    // no target directory to place, so the probe failed because Cargo has
-    // nothing to do here rather than because its storage is unverifiable. This
-    // is the ordinary way to reach a failed probe: an external subcommand such
-    // as `cargo binstall` run outside a project, where Cargo itself would not
-    // have read a manifest either.
-    if let Ok(arguments) = super::strings(arguments)
-        && let Ok(working_dir) = std::env::current_dir()
-        && !mbx_cache_cargo::manifest_in_scope(&arguments, &working_dir)
-    {
-        return true;
     }
     let Some(command) = super::launch::cargo_subcommand(arguments) else {
         return false;
