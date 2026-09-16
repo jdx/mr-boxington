@@ -112,6 +112,8 @@ const PREVIOUS_RUSTC_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WRAPPER";
 const PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WORKSPACE_WRAPPER";
 const REAL_RUSTDOC_ENV: &str = "MBX_REAL_RUSTDOC";
 pub(crate) const BYPASS_LOG_ENV: &str = "MBX_BYPASS_LOG";
+/// Where shims record facts the store keeps between builds.
+pub(crate) const STORE_DIR_ENV: &str = "MBX_STORE_DIR";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg(unix)]
 static SHIM_STAGING_NONCE: AtomicU64 = AtomicU64::new(0);
@@ -390,6 +392,10 @@ impl CacheSession {
             self.staging.to_string_lossy().into_owned(),
         );
         environment.insert(BUILD_ENV.into(), identity);
+        environment.insert(
+            STORE_DIR_ENV.into(),
+            self.store.to_string_lossy().into_owned(),
+        );
         // Always state this explicitly: removing the key would leave the shim
         // inheriting whatever the parent environment had.
         environment.insert(
@@ -2171,6 +2177,20 @@ pub(crate) fn action_diagnostic_request(
 /// or path caused each one. It exists because stderr cannot be relied on:
 /// cargo swallows the output of its own probe invocations, so some bypasses are
 /// invisible there.
+/// Record an observation from a shim, for `mbx explain` to read back.
+///
+/// The session records these from its own environment map; a shim has only the
+/// variables it inherited, and the same destination.
+pub(crate) fn report_shim_observation(kind: &str, detail: &str) {
+    let Some(path) = std::env::var_os(BYPASS_LOG_ENV).filter(|path| !path.is_empty()) else {
+        return;
+    };
+    let line = format!("@observation\t{kind}\t{detail}\n");
+    if let Err(problem) = append_line(&path, &line) {
+        debug!("shim observation was not recorded: {problem}");
+    }
+}
+
 fn append_bypass_log(
     unit: Option<&str>,
     kind: &str,

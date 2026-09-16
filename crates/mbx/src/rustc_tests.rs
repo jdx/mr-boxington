@@ -87,6 +87,7 @@ fn portable_for(values: &[&str]) -> Portable {
         arguments: Vec::new(),
         names: values.iter().map(|_| "OUT_DIR".to_string()).collect(),
         values: values.iter().map(|value| (*value).to_string()).collect(),
+        placeholders: BTreeMap::new(),
     }
 }
 

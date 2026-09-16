@@ -5,6 +5,7 @@ use crate::materialize::{
     record_action_hit_with_diagnostic, record_verification, replay_bytes, resolve_executable,
     stage_verified_cached_output, staging_directory, validate_file_mode,
 };
+use crate::portability::Verdict;
 use crate::{session, util::workspace_root};
 use eyre::{Context, Result, bail};
 use mbx_cache_core::{
@@ -597,7 +598,9 @@ pub(crate) fn compile(
                     } else {
                         publish_result(
                             &candidates,
-                            &portable,
+                            &compilation,
+                            &arguments,
+                            wrapper_argument,
                             &outputs,
                             &output,
                             &portable.mappings,
@@ -2671,6 +2674,9 @@ struct Portable {
     names: BTreeSet<String>,
     /// The literal values, for the check before publishing.
     values: Vec<String>,
+    /// Each remapped name with the placeholder its value was mapped to, so a
+    /// differential compilation can remap a different spelling to the same one.
+    placeholders: BTreeMap<String, String>,
 }
 
 impl Portable {
@@ -2680,6 +2686,7 @@ impl Portable {
             arguments: Vec::new(),
             names: BTreeSet::new(),
             values: Vec::new(),
+            placeholders: BTreeMap::new(),
         };
         if !session::share_out_dir_requested() {
             return portable;
@@ -2704,6 +2711,9 @@ impl Portable {
             flag.push(&placeholder);
             portable.arguments.push(flag);
             portable.names.insert((*name).to_string());
+            portable
+                .placeholders
+                .insert((*name).to_string(), placeholder);
             portable.values.push(value);
         }
         portable
@@ -2716,6 +2726,35 @@ impl Portable {
         applied
     }
 
+    /// The same arguments, remapping `replacements` instead of the real values.
+    ///
+    /// The differential compilation has to remap its own spelling to the same
+    /// placeholder, or its artifact would differ merely by carrying a different
+    /// path in debug info -- which is the difference being tested for.
+    fn applied_to_alternates(
+        &self,
+        arguments: &[OsString],
+        replacements: &BTreeMap<String, PathBuf>,
+    ) -> Vec<OsString> {
+        let mut applied = arguments.to_vec();
+        for (name, value) in &self.placeholders {
+            let Some(replacement) = replacements.get(name) else {
+                continue;
+            };
+            let mut flag = OsString::from("--remap-path-prefix=");
+            flag.push(replacement);
+            flag.push("=");
+            flag.push(value);
+            applied.push(flag);
+        }
+        applied
+    }
+
+    /// The names whose values a differential compilation must respell.
+    fn portable_names(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.placeholders.iter()
+    }
+
     /// Whether the outputs are free of every value a portable key normalized.
     ///
     /// The dep-info file is not one of them: it records absolute input paths by
@@ -2725,6 +2764,189 @@ impl Portable {
     fn contents_are_clean(&self, contents: &[u8]) -> bool {
         !self.values.is_empty() && !self.values.iter().any(|value| carries(contents, value))
     }
+}
+
+/// Whether the portable key may be published, proving it when nothing has yet.
+///
+/// A recorded verdict is reused: it names the compilation by its portable
+/// action digest, which describes the compilation without describing a
+/// checkout, so the second compilation is paid for once rather than once per
+/// checkout -- and travels with the action to any other machine reading the
+/// same store.
+fn portable_is_proven(
+    compilation: &Compilation<'_>,
+    arguments: &[OsString],
+    wrapper_argument: Option<&OsStr>,
+    outputs: &RustcOutputs,
+    originals: &BTreeMap<PathBuf, Vec<u8>>,
+    candidates: &ActionCandidates,
+) -> bool {
+    let Some(action) = candidates.portable.as_ref() else {
+        return false;
+    };
+    let Some(store) = portability_store() else {
+        // Without somewhere to record the answer every build would pay for the
+        // proof again. Key literally instead: slower, never wrong.
+        return false;
+    };
+    if let Some(verdict) = crate::portability::recorded(&store, &action.digest) {
+        return verdict == Verdict::Portable;
+    }
+    let _phase = crate::phase_timing::phase("portability");
+    let verdict =
+        differential_verdict(compilation, arguments, wrapper_argument, outputs, originals);
+    if let Err(error) = crate::portability::record(&store, &action.digest, verdict) {
+        session::report_shim_warning(&format!("portability verdict was not recorded: {error:#}"));
+    }
+    if verdict == Verdict::CheckoutSpecific {
+        session::report_shim_observation(
+            "out-dir-portability",
+            &format!(
+                "{} keeps something derived from a remapped value, so it is cached for this checkout only",
+                compilation.invocation.crate_name()
+            ),
+        );
+    }
+    verdict == Verdict::Portable
+}
+
+/// Where portability verdicts are recorded for this build.
+fn portability_store() -> Option<PathBuf> {
+    std::env::var_os(session::STORE_DIR_ENV)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
+/// Compile again with every remapped value spelled differently, and say
+/// whether the artifact noticed.
+///
+/// The outputs are compared against `originals`, the bytes the real
+/// compilation produced, which the caller has already read. Identical bytes
+/// prove the artifact does not depend on the value: the compilations differed
+/// in nothing else, because the arguments, the working directory and the output
+/// paths are the ones the real compilation used.
+///
+/// Anything that stops the comparison being a proof -- a compilation that
+/// fails, a value that cannot be respelled, an output that cannot be read --
+/// answers `CheckoutSpecific`. A wrong "portable" is a wrong artifact in
+/// somebody else's checkout; a wrong "checkout-specific" costs one
+/// compilation.
+fn differential_verdict(
+    compilation: &Compilation<'_>,
+    arguments: &[OsString],
+    wrapper_argument: Option<&OsStr>,
+    outputs: &RustcOutputs,
+    originals: &BTreeMap<PathBuf, Vec<u8>>,
+) -> Verdict {
+    let Ok(alternates) = respelled_values(compilation.portable) else {
+        return Verdict::CheckoutSpecific;
+    };
+    if alternates.is_empty() {
+        return Verdict::CheckoutSpecific;
+    }
+    let arguments = compilation
+        .portable
+        .applied_to_alternates(arguments, &alternates.values);
+    let mut command = compiler_command(compilation.rustc, wrapper_argument);
+    command
+        .args(&arguments)
+        .current_dir(compilation.working_dir);
+    for (name, value) in &alternates.values {
+        command.env(name, value);
+    }
+    let verdict = match command.output() {
+        Ok(output) if output.status.success() => compare_outputs(outputs, originals, &alternates),
+        // A compilation that will not run again says nothing about the
+        // artifact, and the one on disk is now the alternate's. Both are
+        // handled by restoring the originals and keying literally.
+        _ => Verdict::CheckoutSpecific,
+    };
+    // The alternate's artifacts are in the output directory now. Put back what
+    // the real compilation wrote before Cargo looks at any of it.
+    for (path, contents) in originals {
+        if std::fs::write(path, contents).is_err() {
+            return Verdict::CheckoutSpecific;
+        }
+    }
+    verdict
+}
+
+/// Compare what the alternate compilation wrote with what the real one did.
+fn compare_outputs(
+    outputs: &RustcOutputs,
+    originals: &BTreeMap<PathBuf, Vec<u8>>,
+    alternates: &Respelled,
+) -> Verdict {
+    for (path, original) in originals {
+        // The dep-info records absolute input paths by construction, including
+        // the value being respelled, so it differs every time and says nothing
+        // about the artifact. It is restored as written, as it always was.
+        if path == &outputs.dep_info {
+            continue;
+        }
+        let Ok(alternate) = std::fs::read(path) else {
+            return Verdict::CheckoutSpecific;
+        };
+        if alternate != *original {
+            return Verdict::CheckoutSpecific;
+        }
+        // Equal bytes that both carry an alternate spelling would mean the
+        // respelling never reached the compilation, which proves nothing.
+        if alternates
+            .values
+            .values()
+            .any(|value| carries(&alternate, &value.to_string_lossy()))
+        {
+            return Verdict::CheckoutSpecific;
+        }
+    }
+    Verdict::Portable
+}
+
+/// A second spelling of every remapped value, with the same contents behind it.
+struct Respelled {
+    values: BTreeMap<String, PathBuf>,
+    /// Kept alive: the respelled directories live here.
+    _directory: tempfile::TempDir,
+}
+
+impl Respelled {
+    fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+}
+
+/// Copy each remapped directory somewhere spelled differently.
+///
+/// The new spelling differs in length as well as in bytes: a crate that keeps
+/// `env!("OUT_DIR").len()` is the shape that a search for the literal path
+/// cannot see, and two paths of the same length would hide it again.
+fn respelled_values(portable: &Portable) -> Result<Respelled> {
+    let directory = tempfile::Builder::new()
+        .prefix("mbx-portability-")
+        .tempdir()?;
+    let mut values = BTreeMap::new();
+    for (index, (name, _)) in portable.portable_names().enumerate() {
+        let Some(original) = std::env::var_os(name).map(PathBuf::from) else {
+            continue;
+        };
+        if !original.is_dir() {
+            continue;
+        }
+        // A name long enough that no source path can share its length, and
+        // stable so the verdict does not depend on where this build ran.
+        let root = directory
+            .path()
+            .join(format!("{index}-{}", "respelled".repeat(3)));
+        std::fs::create_dir_all(&root)?;
+        let destination = root.join(original.file_name().unwrap_or_else(|| OsStr::new("out")));
+        crate::util::copy_tree(&original, &destination)?;
+        values.insert(name.clone(), destination);
+    }
+    Ok(Respelled {
+        values,
+        _directory: directory,
+    })
 }
 
 /// Whether `contents` holds `value` anywhere, in either separator spelling.
@@ -2909,11 +3131,14 @@ fn replay_output(output: &Output) -> Result<()> {
 
 fn publish_result<'a>(
     candidates: &'a ActionCandidates,
-    portable: &Portable,
+    compilation: &Compilation<'_>,
+    arguments: &[OsString],
+    wrapper_argument: Option<&OsStr>,
     outputs: &RustcOutputs,
     output: &Output,
     mappings: &[PathMapping],
 ) -> Result<&'a RustcAction> {
+    let portable = compilation.portable;
     let _phase = crate::phase_timing::phase("store");
     if outputs.files.is_empty() {
         bail!("rustc produced no cacheable outputs");
@@ -2939,6 +3164,7 @@ fn publish_result<'a>(
     let mut files = Vec::with_capacity(outputs.files.len() + 1);
     let mut hashed_outputs = Vec::with_capacity(outputs.files.len());
     let mut portable_outputs_are_clean = candidates.portable.is_some();
+    let mut originals = BTreeMap::new();
     for path in output_paths {
         let metadata = std::fs::metadata(path)
             .wrap_err_with(|| format!("failed to inspect rustc output {}", path.display()))?;
@@ -2962,7 +3188,11 @@ fn publish_result<'a>(
                 let contents = std::fs::read(path)
                     .wrap_err_with(|| format!("failed to read rustc output {}", path.display()))?;
                 portable_outputs_are_clean &= portable.contents_are_clean(&contents);
-                CacheDigest::blake3(&contents)
+                let digest = CacheDigest::blake3(&contents);
+                // Kept for the differential compilation, which overwrites these
+                // files and compares what it wrote against them.
+                originals.insert(path.clone(), contents);
+                digest
             } else {
                 CacheDigest::blake3_file(path)?
             };
@@ -2996,7 +3226,23 @@ fn publish_result<'a>(
     files.sort_by(|left, right| left.name.cmp(&right.name));
     session::record_file_digests(FileDigestScope::Content, hashed_outputs);
 
-    let action = candidates.publishable(portable_outputs_are_clean);
+    // The dep-info is read here rather than with the artifacts: it is restored
+    // as written, and the differential compilation overwrites it too.
+    if portable_outputs_are_clean && let Ok(contents) = std::fs::read(&outputs.dep_info) {
+        originals.insert(outputs.dep_info.clone(), contents);
+    }
+    let action = candidates.publishable(
+        portable_outputs_are_clean.then(|| {
+            portable_is_proven(
+                compilation,
+                arguments,
+                wrapper_argument,
+                outputs,
+                &originals,
+                candidates,
+            )
+        }) == Some(true),
+    );
     blobs.push(staged_bytes(staging.path(), "action.json", &action.bytes)?);
 
     let metadata = canonical_json(&RustcMetadata {

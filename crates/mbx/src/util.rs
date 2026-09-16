@@ -463,6 +463,28 @@ pub fn memory_available_bytes() -> Option<u64> {
     None
 }
 
+/// Copy a directory tree, reflinking each file where the filesystem allows it.
+///
+/// Symbolic links are followed rather than recreated: the copy stands in for
+/// the original at a different path, so a link pointing back into the original
+/// tree would defeat the point of moving it.
+pub fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        // `metadata` rather than `file_type`, so a symbolic link is copied as
+        // whatever it points at.
+        if std::fs::metadata(&from)?.is_dir() {
+            copy_tree(&from, &to)?;
+        } else if reflink_copy::reflink_or_copy(&from, &to).is_err() {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
 /// Whether a reflink from inside `source_dir` can land inside
 /// `destination_dir`.
 ///
@@ -507,6 +529,45 @@ pub fn random_string(length: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::copy_tree as copy_tree_under_test;
+
+    #[test]
+    fn a_copied_tree_keeps_its_shape_and_contents() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(source.path().join("nested/deeper")).unwrap();
+        std::fs::write(source.path().join("top.rs"), b"top").unwrap();
+        std::fs::write(source.path().join("nested/deeper/leaf.h"), b"leaf").unwrap();
+
+        let into = destination.path().join("copy");
+        copy_tree_under_test(source.path(), &into).unwrap();
+
+        assert_eq!(std::fs::read(into.join("top.rs")).unwrap(), b"top");
+        assert_eq!(
+            std::fs::read(into.join("nested/deeper/leaf.h")).unwrap(),
+            b"leaf"
+        );
+    }
+
+    /// A link is copied as what it points at: the copy stands in for the
+    /// original at another path, and a link back into the original tree would
+    /// defeat moving it.
+    #[cfg(unix)]
+    #[test]
+    fn a_copied_tree_resolves_symbolic_links() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("real.rs"), b"real").unwrap();
+        std::os::unix::fs::symlink(source.path().join("real.rs"), source.path().join("link.rs"))
+            .unwrap();
+
+        let into = destination.path().join("copy");
+        copy_tree_under_test(source.path(), &into).unwrap();
+
+        assert_eq!(std::fs::read(into.join("link.rs")).unwrap(), b"real");
+        assert!(!into.join("link.rs").is_symlink());
+    }
+
     use super::*;
 
     #[cfg(unix)]

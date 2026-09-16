@@ -1717,6 +1717,10 @@ enum Generated {
     /// Keeps `OUT_DIR` in a string constant. That lands in the artifact itself,
     /// where no remapping reaches it.
     Text,
+    /// Derives a value from `OUT_DIR` without keeping the path. The artifact
+    /// differs between checkouts while carrying nothing to search for, so only
+    /// compiling it again with the value spelled differently tells them apart.
+    Derived,
 }
 
 /// Write a build-script fixture that leaves an observable execution count and
@@ -2189,6 +2193,12 @@ fn write_generated_project(directory: &Path, generated: Generated) {
              pub fn value() -> u32 { VALUE }\n"
                 .to_string()
         }
+        Generated::Derived => {
+            "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\n\
+             pub const WHERE_LEN: usize = env!(\"OUT_DIR\").len();\n\
+             pub fn value() -> u32 { VALUE + WHERE_LEN as u32 }\n"
+                .to_string()
+        }
     };
     std::fs::write(directory.join("src/lib.rs"), lib).unwrap();
     generate_lockfile(directory);
@@ -2216,6 +2226,13 @@ fn out_dir_sharing_can_be_turned_off() {
 /// than assuming it can.
 ///
 /// The pair is the test. Either half alone would pass for the wrong reason.
+/// Getting this wrong restores one checkout's constant into another, with
+/// nothing in the build output to say so.
+#[test]
+fn a_value_derived_from_out_dir_is_not_shared_between_checkouts() {
+    assert!(!two_checkouts_share(Generated::Derived, &[]));
+}
+
 #[test]
 fn out_dir_crosses_checkouts_only_where_the_artifact_allows_it() {
     for (generated, expect_hits) in [(Generated::Include, true), (Generated::Text, false)] {

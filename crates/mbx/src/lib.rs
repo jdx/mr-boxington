@@ -59,6 +59,7 @@ mod incremental;
 mod linker;
 mod managed_linker;
 mod materialize;
+mod portability;
 mod rustc;
 mod rustdoc;
 mod scheduler;
