@@ -281,10 +281,17 @@ impl EventWriter {
             Some(open) => open,
             None => state.insert(self.open()?),
         };
-        // The cap bounds rows, not the terminator: a finished stream has to be
-        // able to say so, or the TUI reads every long build as having died.
-        let terminal = matches!(event, SessionEvent::SessionFinished { .. });
-        if open.written >= self.cap && !terminal {
+        // The cap bounds rows, not the two events that make a stream readable:
+        // the one that says which build this is, and the one that says it
+        // finished. Without the first, a reader skips the stream and explains
+        // an older build; without the second, the TUI reads every long build as
+        // having died. A cap below the size of either would otherwise leave a
+        // file that says nothing except that something was dropped.
+        let structural = matches!(
+            event,
+            SessionEvent::SessionStarted { .. } | SessionEvent::SessionFinished { .. }
+        );
+        if open.written >= self.cap && !structural {
             if open.truncated {
                 return Ok(());
             }

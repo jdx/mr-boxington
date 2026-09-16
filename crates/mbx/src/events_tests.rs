@@ -233,6 +233,46 @@ fn tails_open_newest_first_and_no_more_than_asked() {
     assert_eq!(ids, ["300-1-cccc", "200-1-bbbb"]);
 }
 
+/// A cap smaller than the first row still leaves a readable stream.
+///
+/// The event that names the build is what makes the file worth anything:
+/// without it `mbx explain` skips the stream entirely and explains an older
+/// build instead, which is worse than saying the history was truncated.
+#[test]
+fn a_stream_records_what_it_is_before_any_cap_applies() {
+    let store = tempfile::tempdir().unwrap();
+    let writer = EventWriter::with_limit(store.path(), Some(0));
+    writer.started(Path::new("/workspace"), &["build".into()], None);
+    writer.action(
+        ActionOutcome::Miss,
+        Some("serde".into()),
+        1,
+        ActionDetail::default(),
+    );
+    writer.finished(serde_json::json!({ "hits": 0 }));
+
+    let paths = session_paths(store.path(), writer.id());
+    let events = parse_events(&std::fs::read_to_string(&paths.events).unwrap());
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::SessionStarted { .. })),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::Truncated { .. })),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::SessionFinished { .. })),
+        "{events:?}"
+    );
+}
+
 /// No limit records the whole build, for anyone diagnosing a miss on a
 /// workspace large enough to reach the default cap partway through.
 #[test]
