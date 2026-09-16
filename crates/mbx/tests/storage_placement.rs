@@ -220,6 +220,57 @@ fn failed_metadata_never_launches_a_build() {
     }
 }
 
+/// Outside a project there is no package to compile and no target directory to
+/// place, so a failed metadata probe reports only that Cargo has nothing to do
+/// here. `cargo binstall` and friends must still reach Cargo, while the same
+/// invocation inside a project stays behind the storage check.
+#[test]
+fn an_invocation_outside_a_project_still_reaches_cargo() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let bin = fixture.root.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let cargo = bin.join("cargo");
+    std::fs::write(&cargo, "#!/bin/sh\ncase \" $* \" in *' metadata '*) exit 1;; *' --list '*) printf 'Installed Commands:\\n    binstall    Install a Rust binary\\n    build    Compile\\n'; exit 0;; esac\ntouch \"$TEST_PASSTHROUGH_MARKER\"\n").unwrap();
+    std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let outside = fixture.root.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    for shim in [false, true] {
+        for (directory, reaches_cargo) in [(&outside, true), (&fixture.project, false)] {
+            let marker = fixture
+                .root
+                .join(format!("passthrough-{shim}-{reaches_cargo}"));
+            let mut command = fixture.command();
+            let inherited_path = std::env::var_os("PATH").unwrap();
+            let paths = std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited_path));
+            command
+                .arg("binstall")
+                .current_dir(directory)
+                .env("PATH", std::env::join_paths(paths).unwrap())
+                .env("CARGO", &cargo)
+                .env("TEST_PASSTHROUGH_MARKER", &marker);
+            if shim {
+                command.env("MBX_CARGO_SHIM_MODE", "1");
+            }
+            let output = command.output().unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(
+                output.status.success(),
+                reaches_cargo,
+                "in {}: {stderr}",
+                directory.display()
+            );
+            assert_eq!(
+                !stderr.contains("could not verify Cargo build storage"),
+                reaches_cargo,
+                "in {}: {stderr}",
+                directory.display()
+            );
+            assert_eq!(marker.exists(), reaches_cargo, "{stderr}");
+        }
+    }
+}
+
 /// A colored `cargo --list` must not cost an alias its passthrough. Cargo
 /// colors the listing whenever `CARGO_TERM_COLOR` or `term.color` says
 /// `always`, and the parser reads the listing as plain text, so both the

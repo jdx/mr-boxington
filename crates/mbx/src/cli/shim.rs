@@ -233,8 +233,9 @@ pub(super) fn cargo_proxy_passthrough(arguments: &[OsString]) -> bool {
         )
 }
 
-/// Preserve non-build aliases and unknown-command diagnostics without allowing
-/// failed metadata to launch a build alias or an external Cargo command.
+/// Preserve invocations outside a project, non-build aliases, and
+/// unknown-command diagnostics without allowing failed metadata to launch a
+/// build alias or an external Cargo command inside one.
 pub(super) fn metadata_failure_passthrough(cargo: &OsStr, arguments: &[OsString]) -> bool {
     if arguments.iter().any(|arg| {
         let arg = arg.to_string_lossy();
@@ -245,6 +246,18 @@ pub(super) fn metadata_failure_passthrough(cargo: &OsStr, arguments: &[OsString]
             || arg.starts_with("-Z")
     }) {
         return false;
+    }
+    // No manifest above the invocation directory means no package to build and
+    // no target directory to place, so the probe failed because Cargo has
+    // nothing to do here rather than because its storage is unverifiable. This
+    // is the ordinary way to reach a failed probe: an external subcommand such
+    // as `cargo binstall` run outside a project, where Cargo itself would not
+    // have read a manifest either.
+    if let Ok(arguments) = super::strings(arguments)
+        && let Ok(working_dir) = std::env::current_dir()
+        && !mbx_cache_cargo::manifest_in_scope(&arguments, &working_dir)
+    {
+        return true;
     }
     let Some(command) = super::launch::cargo_subcommand(arguments) else {
         return false;
