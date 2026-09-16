@@ -227,3 +227,36 @@ fn tails_open_newest_first_and_no_more_than_asked() {
     let ids: Vec<&str> = tails.iter().map(SessionTail::id).collect();
     assert_eq!(ids, ["300-1-cccc", "200-1-bbbb"]);
 }
+
+/// No limit records the whole build, for anyone diagnosing a miss on a
+/// workspace large enough to reach the default cap partway through.
+#[test]
+fn an_unlimited_stream_records_past_the_default_cap() {
+    let store = tempfile::tempdir().unwrap();
+    let writer = EventWriter::with_limit(store.path(), None);
+    writer.started(Path::new("/workspace"), &["build".into()], None);
+    for _ in 0..50 {
+        writer.action(
+            ActionOutcome::Hit,
+            Some("serde".into()),
+            1,
+            ActionDetail::default(),
+        );
+    }
+
+    let paths = session_paths(store.path(), writer.id());
+    let events = parse_events(&std::fs::read_to_string(&paths.events).unwrap());
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::Truncated { .. })),
+        "an unlimited stream should not truncate"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::Action { .. }))
+            .count(),
+        50
+    );
+}

@@ -78,6 +78,14 @@ Cargo display mode. Plain disables animated output even in a terminal.
 
 Record a per-compilation event stream for `mbx tui` to watch.
 
+### `events_max_size`
+
+- **Type:** `string`
+- **Default:** `16MiB`
+- **Set with:** `MBX_EVENTS_MAX_SIZE`
+
+How much per-compilation history one build may record, or "none" for no limit. Past this the counters carry on but the rows stop, and `mbx explain` says so.
+
 ### `gc.auto`
 
 - **Type:** `bool`

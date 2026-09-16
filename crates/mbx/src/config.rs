@@ -157,6 +157,15 @@ pub(crate) struct RawConfig {
         default = "8GiB"
     )]
     learned_incremental_max_size: String,
+    /// How much per-compilation history one build may record, or "none" for no
+    /// limit. Past this the counters carry on but the rows stop, and
+    /// `mbx explain` says so.
+    #[usage(
+        key = "events_max_size",
+        env = "MBX_EVENTS_MAX_SIZE",
+        default = "16MiB"
+    )]
+    events_max_size: String,
     /// Share eligible compilations that read `OUT_DIR`.
     #[usage(env = "MBX_SHARE_OUT_DIR", default = true)]
     share_out_dir: bool,
@@ -593,6 +602,15 @@ pub(crate) struct RetentionSettings {
 /// every edit would silently turn the edit loop back into full recompilation.
 pub(crate) const DEFAULT_LEARNED_INCREMENTAL_MAX_SIZE: u64 = 8 * 1024 * 1024 * 1024;
 
+/// The declared default of `events_max_size`.
+///
+/// The cap exists so the TUI can read a session's tail without reading a
+/// build-sized file first. A row carrying key details runs to several KiB, so a
+/// large workspace reaches this partway through a build and keeps only the part
+/// that fit -- enough for the TUI, and raisable for anyone diagnosing a miss
+/// with `mbx explain`.
+pub(crate) const DEFAULT_EVENTS_MAX_SIZE: u64 = 16 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub(crate) struct CliSettings {
     pub retention: RetentionSettings,
@@ -606,6 +624,9 @@ pub(crate) struct CliSettings {
     pub learned_incremental_max_size: Option<u64>,
     /// Whether natively linked programs may be cached.
     pub cache_links: bool,
+    /// How many bytes of per-compilation rows one build may record; `None` is
+    /// no limit.
+    pub events_max_size: Option<u64>,
 }
 
 /// Matches the declared defaults: a derived `Default` would silence the savings
@@ -621,6 +642,7 @@ impl Default for CliSettings {
             learned_incremental: true,
             learned_incremental_max_size: Some(DEFAULT_LEARNED_INCREMENTAL_MAX_SIZE),
             cache_links: true,
+            events_max_size: Some(DEFAULT_EVENTS_MAX_SIZE),
         }
     }
 }
@@ -958,6 +980,8 @@ impl Config {
                 )
                 .wrap_err("invalid learned_incremental_max_size")?,
                 cache_links: raw.cache_links,
+                events_max_size: parse_optional_byte_size(&raw.events_max_size)
+                    .wrap_err("invalid events_max_size")?,
             },
         ))
     }
@@ -1685,6 +1709,23 @@ mod tests {
         let error =
             configured_for_cli(None, &[("MBX_LEARNED_INCREMENTAL_MAX_SIZE", "lots")]).unwrap_err();
         assert!(error.to_string().contains("learned_incremental_max_size"));
+    }
+
+    /// The default keeps the TUI's read cheap; diagnosing a miss on a large
+    /// workspace needs more history than it allows.
+    #[test]
+    fn recorded_history_is_capped_by_default_and_can_be_lifted() {
+        let (_, settings) = configured_for_cli(None, &[]).unwrap();
+        assert_eq!(settings.events_max_size, Some(DEFAULT_EVENTS_MAX_SIZE));
+
+        let (_, settings) = configured_for_cli(None, &[("MBX_EVENTS_MAX_SIZE", "256MiB")]).unwrap();
+        assert_eq!(settings.events_max_size, Some(256 * 1024 * 1024));
+
+        let (_, settings) = configured_for_cli(None, &[("MBX_EVENTS_MAX_SIZE", "none")]).unwrap();
+        assert_eq!(settings.events_max_size, None);
+
+        let error = configured_for_cli(None, &[("MBX_EVENTS_MAX_SIZE", "lots")]).unwrap_err();
+        assert!(error.to_string().contains("events_max_size"));
     }
 
     #[test]

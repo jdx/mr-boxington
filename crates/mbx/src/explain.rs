@@ -82,11 +82,14 @@ type RecordedKeys = BTreeMap<(String, String), ActionDiagnostic>;
 struct Baselines {
     here: RecordedKeys,
     elsewhere: RecordedKeys,
+    /// Whether a session this drew on stopped recording before it finished.
+    truncated: bool,
 }
 
 impl Baselines {
     fn collect(sessions: &[RecordedSession], target: &RecordedSession) -> Self {
         let mut baselines = Self::default();
+        let mut truncated = false;
         for session in sessions {
             let recorded = if session.workspace == target.workspace {
                 &mut baselines.here
@@ -95,6 +98,7 @@ impl Baselines {
             } else {
                 continue;
             };
+            truncated |= is_truncated(session);
             for event in &session.events {
                 if let SessionEvent::Action {
                     outcome,
@@ -112,6 +116,7 @@ impl Baselines {
                 }
             }
         }
+        baselines.truncated = truncated;
         baselines
     }
 
@@ -155,6 +160,14 @@ fn recorded_sessions(store: &Path) -> Result<Vec<RecordedSession>> {
     Ok(sessions)
 }
 
+/// Whether this session stopped recording rows before the build ended.
+fn is_truncated(session: &RecordedSession) -> bool {
+    session
+        .events
+        .iter()
+        .any(|event| matches!(event, SessionEvent::Truncated { .. }))
+}
+
 fn display_last(session: &RecordedSession, baselines: &Baselines) {
     let command = if session.command.is_empty() {
         "cargo".to_string()
@@ -175,6 +188,16 @@ fn display_last(session: &RecordedSession, baselines: &Baselines) {
     crate::session::note(&format!(
         "cache explanation: last recorded build\n  command: {command}\n  results: {summary}"
     ));
+    // A large workspace reaches the per-session cap partway through a build,
+    // and the counts above then describe the rows that fit rather than the
+    // build. Saying so is the difference between a partial answer and a wrong
+    // one: the totals in the build's own summary remain complete.
+    if is_truncated(session) {
+        crate::session::note(
+            "\nthis build's recorded history stopped early: it reached the per-session size limit, so the results above and the misses below cover only the part that was recorded",
+        );
+        crate::session::note("  raise MBX_EVENTS_MAX_SIZE and build again to record all of it");
+    }
 
     let misses = session.events.iter().filter_map(|event| match event {
         SessionEvent::Action {
@@ -207,9 +230,11 @@ fn display_last(session: &RecordedSession, baselines: &Baselines) {
         let previous = previous_recording(baselines, crate_name, diagnostic);
         match (previous, diagnostic) {
             (Some(previous), Some(current)) => display_diff(previous, current),
-            (None, _) => crate::session::note(
-                "  no earlier build recorded key details for this crate; the cache may be cold, this action may use another adapter, or its history may have expired",
-            ),
+            (None, _) => crate::session::note(if baselines.truncated {
+                "  no earlier build recorded key details for this crate; an earlier build stopped recording at the per-session size limit, so its details may be among the rows that were dropped"
+            } else {
+                "  no earlier build recorded key details for this crate; the cache may be cold, this action may use another adapter, or its history may have expired"
+            }),
             (Some(_), None) => crate::session::note(
                 "  key details were not recorded for this action; run another rustc compilation before comparing inputs",
             ),
@@ -710,6 +735,31 @@ mod tests {
     }
 
     #[test]
+    fn a_truncated_baseline_session_is_reported_as_such() {
+        // The reason a cross-checkout miss has nothing to compare against is
+        // worth telling apart: a cold cache is a different problem from a
+        // build whose history stopped being written partway through.
+        let mut session = recorded("/a", Some("project"), "published");
+        session
+            .events
+            .push(SessionEvent::Truncated { v: 1, ts_ms: 0 });
+        let target = recorded("/b", Some("project"), "missed-here");
+
+        assert!(Baselines::collect(&[session], &target).truncated);
+        assert!(!Baselines::collect(&[recorded("/a", Some("project"), "p")], &target).truncated);
+    }
+
+    #[test]
+    fn a_session_that_stopped_recording_is_detected() {
+        let mut session = recorded("/a", None, "published");
+        assert!(!is_truncated(&session));
+        session
+            .events
+            .push(SessionEvent::Truncated { v: 1, ts_ms: 0 });
+        assert!(is_truncated(&session));
+    }
+
+    #[test]
     fn another_checkout_of_the_same_project_is_a_baseline() {
         let target = recorded("/b", Some("project"), "missed-here");
         let baselines =
@@ -762,6 +812,7 @@ mod tests {
         let baselines = Baselines {
             here: RecordedKeys::new(),
             elsewhere: RecordedKeys::from([(key, elsewhere)]),
+            truncated: false,
         };
 
         let matched = previous_recording(&baselines, "shared_name", Some(&current)).unwrap();
@@ -789,6 +840,7 @@ mod tests {
         let baselines = Baselines {
             here: RecordedKeys::from([(key.clone(), diagnostic("here"))]),
             elsewhere: RecordedKeys::from([(key, diagnostic("elsewhere"))]),
+            truncated: false,
         };
 
         let matched = previous_recording(&baselines, "shared_name", Some(&current)).unwrap();
@@ -817,6 +869,7 @@ mod tests {
                 ),
             ]),
             elsewhere: RecordedKeys::new(),
+            truncated: false,
         };
 
         let matched = previous_recording(&baselines, "shared_name", Some(&current)).unwrap();

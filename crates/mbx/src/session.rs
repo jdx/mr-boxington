@@ -154,14 +154,24 @@ impl CacheSession {
     /// `session_dir` holds the shim, socket, and staging directory, and is
     /// expected to be a temporary directory owned by the caller.
     pub async fn start(session_dir: &Path, config: &Config) -> Result<Self> {
-        Self::start_with_jobs(session_dir, config, None).await
+        Self::start_with_jobs(
+            session_dir,
+            config,
+            None,
+            Some(crate::config::DEFAULT_EVENTS_MAX_SIZE),
+        )
+        .await
     }
 
     /// Start a session whose Cargo jobserver limits compiler concurrency.
+    ///
+    /// `events_max_size` bounds the row-level history the build records;
+    /// `None` records all of it. The counters it reports are unaffected.
     pub(crate) async fn start_with_jobs(
         session_dir: &Path,
         config: &Config,
         cargo_jobs: Option<u64>,
+        events_max_size: Option<u64>,
     ) -> Result<Self> {
         let (shim, rustdoc_shim) =
             install_session_shims(session_dir, &config.cache_dir.join("shims"))?;
@@ -193,7 +203,7 @@ impl CacheSession {
         };
         let events = config
             .events
-            .then(|| Arc::new(EventWriter::new(&store)))
+            .then(|| Arc::new(EventWriter::with_limit(&store, events_max_size)))
             .map(EventStream::new);
         let agent = match &events {
             Some(events) => agent.with_observer(Arc::new(events.clone())),

@@ -261,7 +261,12 @@ fn cargo_with_settings_bypass_log_and_roots(
         .build()?;
 
     let session_outcome = runtime.block_on(async {
-        let session = match CacheSession::start_with_jobs(session_dir.path(), config, cargo_jobs)
+        let session = match CacheSession::start_with_jobs(
+            session_dir.path(),
+            config,
+            cargo_jobs,
+            settings.events_max_size,
+        )
             .await
         {
             Ok(session) => session,

@@ -234,6 +234,15 @@ impl EventWriter {
         Self::with_cap(store, MAX_EVENT_FILE_BYTES)
     }
 
+    /// A stream that stops recording rows after `cap` bytes.
+    ///
+    /// `None` records the whole build. The counters a build reports are kept in
+    /// memory and are complete either way; this bounds only the row-level
+    /// history that `mbx tui` and `mbx explain` read back.
+    pub(crate) fn with_limit(store: &Path, cap: Option<u64>) -> Self {
+        Self::with_cap(store, cap.unwrap_or(u64::MAX))
+    }
+
     /// A stream that truncates after `cap` bytes of rows, for tests that need
     /// to reach the cap without writing megabytes to get there.
     #[cfg(test)]
