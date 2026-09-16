@@ -138,15 +138,24 @@ running setup again.
 ## rust-analyzer
 
 The native mise option does not configure editor checks. Run `mbx setup` to
-configure rust-analyzer's background check in the matching global
-or project scope. The editor invokes the stable Cargo shim by its absolute path,
-so its build shares mbx's cache and machine-wide compiler pool even when the
-editor did not inherit mise's `PATH`. Its outputs go to
-`target/rust-analyzer`, separate from terminal builds so the two Cargo processes
-do not contend on the target-directory lock. When `target` is managed, the
-editor directory lives inside that view and is collected with it, while the
-shared store warms both builds. Existing rust-analyzer check settings are left
-unchanged.
+configure rust-analyzer's background check. Setup writes the override to
+rust-analyzer's user configuration file and prints the path, whichever mise
+scope activation uses. rust-analyzer resolves `check.overrideCommand` from that
+file alone; a `rust-analyzer.toml` beside `Cargo.toml` is parsed but its check
+settings never reach the editor's Cargo process.
+
+The editor invokes the stable Cargo shim by its absolute path, so its build
+shares mbx's cache and machine-wide compiler pool even when the editor did not
+inherit mise's `PATH`. Its outputs go to `target/rust-analyzer`, separate from
+terminal builds so the two Cargo processes do not contend on the
+target-directory lock. When `target` is managed, the editor directory lives
+inside that view and is collected with it, while the shared store warms both
+builds. Existing rust-analyzer check settings are left unchanged.
+
+Releases through 1.11.0 wrote the override beside `Cargo.toml` when mbx was
+activated in a project mise scope, where rust-analyzer never read it. `mbx
+setup` and `mbx setup --uninstall` take that setting back out and report the
+file they cleaned.
 
 ## Remove automatic wrapping
 

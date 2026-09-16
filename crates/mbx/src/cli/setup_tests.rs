@@ -63,6 +63,7 @@ fn setup_puts_rust_analyzer_checks_through_the_stable_cargo_shim() {
         &install,
         &MiseScope::None,
         &config,
+        None,
         SetupAction::Install,
     )
     .unwrap();
@@ -167,9 +168,98 @@ fn project_rust_analyzer_config_follows_the_active_cargo_workspace() {
     std::fs::write(&mise_config, "").unwrap();
 
     assert_eq!(
-        rust_analyzer_config_path_from(&MiseScope::File(mise_config), &source,).unwrap(),
-        crate_root.join("rust-analyzer.toml")
+        project_rust_analyzer_config_path_from(&MiseScope::File(mise_config), &source).unwrap(),
+        Some(crate_root.join("rust-analyzer.toml"))
     );
+    assert_eq!(
+        project_rust_analyzer_config_path_from(&MiseScope::Global, &source).unwrap(),
+        Some(crate_root.join("rust-analyzer.toml"))
+    );
+    assert_eq!(
+        project_rust_analyzer_config_path_from(&MiseScope::Global, directory.path()).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn setup_removes_a_project_override_rust_analyzer_never_ran() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = directory.path().join("mbx");
+    std::fs::write(&executable, b"mbx binary").unwrap();
+    let install = directory.path().join("data/bin");
+    let shim = install.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
+    let config = directory
+        .path()
+        .join("config/rust-analyzer/rust-analyzer.toml");
+    let project_config = directory.path().join("project/rust-analyzer.toml");
+    std::fs::create_dir_all(project_config.parent().unwrap()).unwrap();
+    let mut command = toml_edit::Array::new();
+    command.extend([
+        shim.to_string_lossy().into_owned(),
+        "check".into(),
+        "--workspace".into(),
+        "--all-targets".into(),
+        "--target-dir".into(),
+        "target/rust-analyzer".into(),
+        "--message-format=json".into(),
+    ]);
+    let mut document = toml_edit::DocumentMut::new();
+    document["check"]["overrideCommand"] = toml_edit::value(command);
+    std::fs::write(&project_config, document.to_string()).unwrap();
+
+    setup_with_rust_analyzer(
+        &executable,
+        &install,
+        &MiseScope::None,
+        &config,
+        Some(project_config.as_path()),
+        SetupAction::Install,
+    )
+    .unwrap();
+
+    assert!(!project_config.exists());
+    assert!(
+        std::fs::read_to_string(&config)
+            .unwrap()
+            .contains("overrideCommand")
+    );
+}
+
+#[test]
+fn setup_keeps_project_rust_analyzer_settings_it_does_not_own() {
+    let directory = tempfile::tempdir().unwrap();
+    let shim = directory.path().join("bin/cargo");
+    let config = directory.path().join("user/rust-analyzer.toml");
+    let project_config = directory.path().join("project/rust-analyzer.toml");
+    std::fs::create_dir_all(project_config.parent().unwrap()).unwrap();
+    let original = "# keep me\n[check]\noverrideCommand = [\"cargo\", \"clippy\"]\n";
+    std::fs::write(&project_config, original).unwrap();
+
+    remove_inactive_project_override(&project_config, &shim, &config).unwrap();
+
+    assert_eq!(std::fs::read_to_string(&project_config).unwrap(), original);
+
+    let mut command = toml_edit::Array::new();
+    command.extend([
+        shim.to_string_lossy().into_owned(),
+        "check".into(),
+        "--workspace".into(),
+        "--all-targets".into(),
+        "--target-dir".into(),
+        "target/rust-analyzer".into(),
+        "--message-format=json".into(),
+    ]);
+    let mut document = "[cargo]\nfeatures = [\"editor\"]\n"
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    document["check"]["overrideCommand"] = toml_edit::value(command);
+    std::fs::write(&project_config, document.to_string()).unwrap();
+
+    remove_inactive_project_override(&project_config, &shim, &config).unwrap();
+
+    let written = std::fs::read_to_string(&project_config).unwrap();
+    assert!(written.contains("features"));
+    assert!(!written.contains("overrideCommand"));
 }
 
 #[test]

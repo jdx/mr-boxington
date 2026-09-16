@@ -22,6 +22,8 @@ mbx setup --status
 Setup gives rust-analyzer's background check an absolute path to mbx's stable
 Cargo shim. That matters for editors launched from a desktop icon: they often
 do not inherit the shell activation that puts mise's Cargo wrapper on `PATH`.
+The override lands in rust-analyzer's user configuration file, the only place
+rust-analyzer reads check settings from, so one run covers every workspace.
 Restart the editor after setup so rust-analyzer reloads its configuration.
 
 Setup leaves an existing rust-analyzer check configuration untouched. If
