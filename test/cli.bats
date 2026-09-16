@@ -107,7 +107,7 @@ setup() {
   assert_success
   assert_output --partial "last recorded build"
   assert_output --partial "missed crates"
-  assert_output --partial "inputs changed since the last hit"
+  assert_output --partial "inputs changed since the last recording"
   assert_output --partial "src/lib.rs"
 }
 

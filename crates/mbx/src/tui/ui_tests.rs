@@ -19,7 +19,7 @@ fn render(app: &App, width: u16, height: u16) -> String {
 
 fn build(store: &Path, name: &str, actions: usize) -> EventWriter {
     let writer = EventWriter::new(store);
-    writer.started(Path::new("/checkouts/fixture"), &[name.into()]);
+    writer.started(Path::new("/checkouts/fixture"), &[name.into()], None);
     for i in 0..actions {
         writer.action(
             ActionOutcome::Miss,

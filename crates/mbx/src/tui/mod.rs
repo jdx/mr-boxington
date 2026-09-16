@@ -264,7 +264,7 @@ mod tests {
         let writers = (0..2)
             .map(|_| {
                 let writer = crate::events::EventWriter::new(store.path());
-                writer.started(Path::new("/fixture"), &["build".into()]);
+                writer.started(Path::new("/fixture"), &["build".into()], None);
                 writer
             })
             .collect::<Vec<_>>();

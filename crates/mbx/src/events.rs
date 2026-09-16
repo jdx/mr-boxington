@@ -63,6 +63,14 @@ pub(crate) enum SessionEvent {
         mbx_version: String,
         workspace_root: PathBuf,
         command: Vec<String>,
+        /// What this build calls the project, which worktrees of one project
+        /// share and unrelated projects do not.
+        ///
+        /// Absent in streams written before this was recorded, which is why
+        /// anything comparing two workspaces has to treat `None` as "no
+        /// answer" rather than as a match.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<String>,
     },
     /// One accounted compilation.
     Action {
@@ -323,7 +331,12 @@ impl EventWriter {
     }
 
     /// Record the build that owns this stream.
-    pub(crate) fn started(&self, workspace_root: &Path, command: &[String]) {
+    pub(crate) fn started(
+        &self,
+        workspace_root: &Path,
+        command: &[String],
+        identity: Option<&str>,
+    ) {
         self.write(&SessionEvent::SessionStarted {
             v: EVENT_VERSION,
             ts_ms: now_ms(),
@@ -332,6 +345,7 @@ impl EventWriter {
             mbx_version: env!("CARGO_PKG_VERSION").to_string(),
             workspace_root: workspace_root.to_path_buf(),
             command: command.to_vec(),
+            identity: identity.map(str::to_string),
         });
     }
 

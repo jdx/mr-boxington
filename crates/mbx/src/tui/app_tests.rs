@@ -3,7 +3,7 @@ use crate::events::{ActionDetail, EventWriter};
 
 fn writer(store: &Path) -> EventWriter {
     let writer = EventWriter::new(store);
-    writer.started(Path::new("/checkouts/fixture"), &["build".into()]);
+    writer.started(Path::new("/checkouts/fixture"), &["build".into()], None);
     writer
 }
 
@@ -180,7 +180,7 @@ fn pausing_stops_reading_and_resuming_catches_up() {
 fn a_capped_stream_says_so() {
     let store = tempfile::tempdir().unwrap();
     let build = crate::events::EventWriter::with_cap_for_test(store.path(), 1);
-    build.started(Path::new("/checkouts/fixture"), &["build".into()]);
+    build.started(Path::new("/checkouts/fixture"), &["build".into()], None);
     build.action(ActionOutcome::Hit, None, 1, ActionDetail::default());
 
     let mut app = App::new(store.path(), 10);

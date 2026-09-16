@@ -43,13 +43,16 @@ pub(crate) fn last(config: &Config) -> Result<ExitCode> {
         );
     };
 
-    let baselines = Baselines::collect(&sessions[..target_index], &workspace);
-    display_last(&sessions[target_index], &baselines);
+    let target = &sessions[target_index];
+    let baselines = Baselines::collect(&sessions[..target_index], target);
+    display_last(target, &baselines);
     Ok(ExitCode::SUCCESS)
 }
 
 struct RecordedSession {
     workspace: std::path::PathBuf,
+    /// What that build called the project, when it recorded one.
+    identity: Option<String>,
     command: Vec<String>,
     events: Vec<SessionEvent>,
 }
@@ -67,6 +70,14 @@ type RecordedKeys = BTreeMap<(String, String), ActionDiagnostic>;
 /// This workspace still wins when it has its own recording of the unit: the
 /// nearest neighbour is the better explanation when a local edit is what
 /// changed the key.
+///
+/// Another workspace counts only when it built the same project. A unit is
+/// identified by its crate name and a digest of its normalized source path and
+/// unit arguments, which every package's `build_script_build` at
+/// `${workspace}/build.rs` answers to -- so without this, an unrelated
+/// repository could be offered as the explanation for a miss. Recordings from
+/// before the identity was written carry none, and a missing identity is not a
+/// match.
 #[derive(Default)]
 struct Baselines {
     here: RecordedKeys,
@@ -74,13 +85,15 @@ struct Baselines {
 }
 
 impl Baselines {
-    fn collect(sessions: &[RecordedSession], workspace: &Path) -> Self {
+    fn collect(sessions: &[RecordedSession], target: &RecordedSession) -> Self {
         let mut baselines = Self::default();
         for session in sessions {
-            let recorded = if session.workspace == workspace {
+            let recorded = if session.workspace == target.workspace {
                 &mut baselines.here
-            } else {
+            } else if session.identity.is_some() && session.identity == target.identity {
                 &mut baselines.elsewhere
+            } else {
+                continue;
             };
             for event in &session.events {
                 if let SessionEvent::Action {
@@ -119,19 +132,22 @@ fn recorded_sessions(store: &Path) -> Result<Vec<RecordedSession>> {
             }
         };
         let events = crate::events::parse_events(&contents);
-        let Some((recorded_workspace, command)) = events.iter().find_map(|event| match event {
-            SessionEvent::SessionStarted {
-                workspace_root,
-                command,
-                ..
-            } => Some((workspace_root, command)),
-            _ => None,
-        }) else {
+        let Some((recorded_workspace, command, identity)) =
+            events.iter().find_map(|event| match event {
+                SessionEvent::SessionStarted {
+                    workspace_root,
+                    command,
+                    identity,
+                    ..
+                } => Some((workspace_root, command, identity)),
+                _ => None,
+            })
+        else {
             continue;
         };
-        let workspace = recorded_workspace.clone();
         sessions.push(RecordedSession {
-            workspace,
+            workspace: recorded_workspace.clone(),
+            identity: identity.clone(),
             command: command.clone(),
             events,
         });
@@ -297,7 +313,11 @@ fn dependency_name(path: &str) -> Option<String> {
     if !matches!(extension, "rmeta" | "rlib" | "so" | "dylib" | "dll") {
         return None;
     }
-    let (name, metadata) = stem.trim_start_matches("lib").rsplit_once('-')?;
+    // Exactly one prefix: Cargo writes `libc` as `liblibc-<hash>.rlib`, and
+    // stripping repeatedly would send a reader off to explain a crate called
+    // `c`. Windows dynamic libraries carry no prefix at all.
+    let stem = stem.strip_prefix("lib").unwrap_or(stem);
+    let (name, metadata) = stem.rsplit_once('-')?;
     (!name.is_empty()
         && !metadata.is_empty()
         && metadata.bytes().all(|byte| byte.is_ascii_hexdigit()))
@@ -623,6 +643,16 @@ mod tests {
             dependency_name("${target}/debug/deps/serde_derive-4c0f.so"),
             Some("serde_derive".into())
         );
+        // Cargo spells crate `libc` as `liblibc-<hash>.rlib`. Stripping the
+        // prefix more than once would name a crate that does not exist.
+        assert_eq!(
+            dependency_name("${target}/debug/deps/liblibc-9f2a.rlib"),
+            Some("libc".into())
+        );
+        assert_eq!(
+            dependency_name("${target}/debug/deps/liblibloading-9f2a.rmeta"),
+            Some("libloading".into())
+        );
         // Source files are not artifacts, and neither is a name with nothing
         // that looks like Cargo's metadata hash on the end.
         assert_eq!(dependency_name("${workspace}/src/lib.rs"), None);
@@ -652,6 +682,65 @@ mod tests {
             join_names(&["one".into(), "two".into(), "three".into()]),
             "one, two and three"
         );
+    }
+
+    fn recorded(workspace: &str, identity: Option<&str>, action: &str) -> RecordedSession {
+        let diagnostic = ActionDiagnostic {
+            action: mbx_cache_core::CacheDigest::blake3(action.as_bytes()),
+            components: BTreeMap::from([(
+                "compilation unit".into(),
+                mbx_cache_core::CacheDigest::blake3(b"unit"),
+            )]),
+            inputs: BTreeMap::new(),
+        };
+        RecordedSession {
+            workspace: workspace.into(),
+            identity: identity.map(str::to_string),
+            command: vec!["build".into()],
+            events: vec![SessionEvent::Action {
+                v: 1,
+                ts_ms: 0,
+                outcome: ActionOutcome::Unconsulted,
+                crate_name: Some("build_script_build".into()),
+                duration_ns: 0,
+                detail: Default::default(),
+                diagnostic: Some(diagnostic),
+            }],
+        }
+    }
+
+    #[test]
+    fn another_checkout_of_the_same_project_is_a_baseline() {
+        let target = recorded("/b", Some("project"), "missed-here");
+        let baselines =
+            Baselines::collect(&[recorded("/a", Some("project"), "published")], &target);
+
+        assert_eq!(baselines.here.len(), 0);
+        assert_eq!(baselines.elsewhere.len(), 1);
+    }
+
+    #[test]
+    fn an_unrelated_project_is_never_a_baseline() {
+        // Every package's build script is crate `build_script_build` compiled
+        // from `${workspace}/build.rs`, so the unit alone cannot tell two
+        // repositories apart; without the identity this pairs a miss with a
+        // recording that has nothing to do with it.
+        let target = recorded("/b", Some("project"), "missed-here");
+        for other in [
+            recorded("/elsewhere", Some("another project"), "unrelated"),
+            recorded("/older", None, "recorded before identities were written"),
+        ] {
+            let baselines = Baselines::collect(&[other], &target);
+            assert!(baselines.here.is_empty() && baselines.elsewhere.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_session_without_an_identity_still_uses_its_own_workspace() {
+        let target = recorded("/b", None, "missed-here");
+        let baselines = Baselines::collect(&[recorded("/b", None, "published")], &target);
+
+        assert_eq!(baselines.here.len(), 1);
     }
 
     #[test]

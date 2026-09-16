@@ -14,7 +14,7 @@ fn write_line(path: &Path, line: &str) {
 fn a_stream_records_a_build_from_start_to_totals() {
     let store = tempfile::tempdir().unwrap();
     let writer = EventWriter::new(store.path());
-    writer.started(Path::new("/workspace"), &["build".into()]);
+    writer.started(Path::new("/workspace"), &["build".into()], None);
     writer.action(
         ActionOutcome::Hit,
         Some("serde".into()),
@@ -77,7 +77,7 @@ fn a_command_that_records_nothing_leaves_no_stream() {
 fn a_tail_reads_only_what_was_appended() {
     let store = tempfile::tempdir().unwrap();
     let writer = EventWriter::new(store.path());
-    writer.started(Path::new("/workspace"), &["build".into()]);
+    writer.started(Path::new("/workspace"), &["build".into()], None);
     let id = writer.id().to_string();
 
     let mut tail = SessionTail::new(store.path(), id);
@@ -155,7 +155,7 @@ fn a_live_stream_is_told_apart_from_a_finished_and_an_abandoned_one() {
     let store = tempfile::tempdir().unwrap();
 
     let writer = EventWriter::new(store.path());
-    writer.started(Path::new("/workspace"), &["build".into()]);
+    writer.started(Path::new("/workspace"), &["build".into()], None);
     let mut live = SessionTail::new(store.path(), writer.id().to_string());
     live.read();
     assert_eq!(live.state(), SessionState::Live);
@@ -169,7 +169,7 @@ fn a_live_stream_is_told_apart_from_a_finished_and_an_abandoned_one() {
     // The build dies: the lock goes with the process, and no totals were ever
     // written.
     let abandoned = EventWriter::new(store.path());
-    abandoned.started(Path::new("/workspace"), &["build".into()]);
+    abandoned.started(Path::new("/workspace"), &["build".into()], None);
     let id = abandoned.id().to_string();
     drop(abandoned);
     let mut tail = SessionTail::new(store.path(), id);
@@ -183,7 +183,7 @@ fn a_stream_stops_growing_at_its_cap_but_still_reports_its_totals() {
     // A cap of one byte: the first row reaches it, so every later row is
     // dropped, which is the same path a 16 MiB build takes.
     let writer = EventWriter::with_cap(store.path(), 1);
-    writer.started(Path::new("/workspace"), &["build".into()]);
+    writer.started(Path::new("/workspace"), &["build".into()], None);
     for _ in 0..5 {
         writer.action(
             ActionOutcome::Miss,

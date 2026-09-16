@@ -579,6 +579,105 @@ async fn reports_each_accounted_decision_to_an_observer() {
     ));
 }
 
+/// A cold store records every compilation it publishes as unconsulted, so its
+/// diagnostics are the only record of the keys a later checkout looks up. They
+/// were dropped at this boundary, leaving a cross-checkout miss with nothing to
+/// be compared against.
+#[tokio::test]
+async fn an_unconsulted_compilation_keeps_its_diagnostic() {
+    let directory = tempfile::tempdir().unwrap();
+    let observer = Arc::new(RecordingObserver::default());
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version")
+        .with_observer(observer.clone());
+    let diagnostic = ActionDiagnostic {
+        action: CacheDigest::blake3(b"published-while-cold"),
+        components: BTreeMap::new(),
+        inputs: BTreeMap::new(),
+    };
+
+    agent
+        .handle_requests([
+            AgentRequest::RecordWarning {
+                message: format!(
+                    "{ACTION_DIAGNOSTIC_PREFIX}{}",
+                    serde_json::json!({
+                        "outcome": "unconsulted",
+                        "crate_name": "serde",
+                        "diagnostic": diagnostic,
+                    })
+                ),
+            },
+            AgentRequest::RecordCompilerInvocation {
+                outcome: "unconsulted".into(),
+                crate_name: Some("serde".into()),
+                duration_ns: 42,
+            },
+        ])
+        .await;
+
+    let events = observer.events.lock().unwrap();
+    assert!(
+        matches!(
+            events.as_slice(),
+            [
+                AgentEvent::ActionDiagnostic {
+                    outcome: diagnostic_outcome,
+                    crate_name: Some(diagnostic_crate),
+                    diagnostic: observed,
+                },
+                AgentEvent::CompilerInvocation { outcome, .. },
+            ] if diagnostic_outcome == "unconsulted"
+                && diagnostic_crate == "serde"
+                && observed == &diagnostic
+                && outcome == "unconsulted"
+        ),
+        "{events:?}"
+    );
+}
+
+/// Outcomes that describe no action key stay out: a bypass has no key to
+/// record, and accepting one would attach it to the next invocation that asks.
+#[tokio::test]
+async fn a_diagnostic_for_an_unkeyed_outcome_is_refused() {
+    let directory = tempfile::tempdir().unwrap();
+    let observer = Arc::new(RecordingObserver::default());
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version")
+        .with_observer(observer.clone());
+    let diagnostic = ActionDiagnostic {
+        action: CacheDigest::blake3(b"bypassed"),
+        components: BTreeMap::new(),
+        inputs: BTreeMap::new(),
+    };
+
+    agent
+        .handle_requests([
+            AgentRequest::RecordWarning {
+                message: format!(
+                    "{ACTION_DIAGNOSTIC_PREFIX}{}",
+                    serde_json::json!({
+                        "outcome": "bypass",
+                        "crate_name": "serde",
+                        "diagnostic": diagnostic,
+                    })
+                ),
+            },
+            AgentRequest::RecordCompilerInvocation {
+                outcome: "bypass".into(),
+                crate_name: Some("serde".into()),
+                duration_ns: 42,
+            },
+        ])
+        .await;
+
+    let events = observer.events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ActionDiagnostic { .. })),
+        "{events:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_rejected_hit_reports_no_event() {
     let directory = tempfile::tempdir().unwrap();

@@ -263,7 +263,9 @@ impl CacheSession {
         // Named before the first compilation, so a TUI that attaches mid-build
         // can say whose build it is watching rather than showing bare rows.
         if let Some(events) = &self.events {
-            events.writer.started(workspace_root, command);
+            events
+                .writer
+                .started(workspace_root, command, Some(&identity));
         }
         // Recorded before the build rather than after it: a build that fails
         // still means this checkout is here and using the store, and the record
@@ -514,7 +516,9 @@ impl CacheSession {
     ) -> Option<ActionRun> {
         let identity = exec_identity(project_root, command);
         if let Some(events) = &self.events {
-            events.writer.started(project_root, command);
+            events
+                .writer
+                .started(project_root, command, Some(&identity));
         }
         // The project root stands in for the target directory: a standalone
         // build owns its output directory, so there is nothing managed to
