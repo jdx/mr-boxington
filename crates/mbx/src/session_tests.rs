@@ -714,11 +714,13 @@ fn a_compilation_that_probed_two_action_keys_is_one_miss() {
 }
 
 #[test]
-fn an_incremental_compilation_consulted_the_cache_and_counts_as_a_miss() {
-    // Its result is withheld from the store, which the summary says on its own
-    // line; the lookup still happened and still found nothing.
+fn an_incremental_compilation_is_reported_on_its_own_terms_not_as_a_miss() {
+    // A unit re-entering hot workspace state never looks anything up, and none
+    // of them reach the per-action ledger, so calling them misses would put the
+    // summary back out of step with `mbx explain`. They still have to be
+    // visible: an edit loop reporting "0 hits, 0 misses" reads as a no-op.
     let stats = agent_stats(|stats| {
-        stats.lookups = 3;
+        stats.lookups = 1;
         stats.compiler = BTreeMap::from([
             ("miss".into(), mbx_cache_core::CompilerStats::new(1, 4_000)),
             (
@@ -727,7 +729,23 @@ fn an_incremental_compilation_consulted_the_cache_and_counts_as_a_miss() {
             ),
         ]);
     });
-    assert_eq!(cache_misses(&stats), 3);
+    assert_eq!(cache_misses(&stats), 1);
+    let summary = short_summary(&stats);
+    assert!(summary.contains("1 misses, 2 incremental"), "{summary}");
+}
+
+#[test]
+fn a_build_that_was_only_incremental_still_reports() {
+    // Nothing was looked up, stored or bypassed, so every other gate is closed
+    // and the build would otherwise finish without a word about the work it did.
+    let stats = agent_stats(|stats| {
+        stats.compiler = BTreeMap::from([(
+            "incremental".into(),
+            mbx_cache_core::CompilerStats::new(3, 4_000),
+        )]);
+    });
+    assert!(should_display_short_stats(&stats));
+    assert!(short_summary(&stats).contains("3 incremental"));
 }
 
 #[test]

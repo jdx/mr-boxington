@@ -239,7 +239,11 @@ pub(crate) fn display_stats(stats: &AgentStats, config: &Config, style: SummaryS
             format_nanos(stats.avoided_compiler_duration_ns),
             format_nanos(spent),
         ));
-        if let Some(compiler) = stats.compiler.get("incremental") {
+        if let Some(compiler) = stats
+            .compiler
+            .get("incremental")
+            .filter(|compiler| compiler.invocations > 0)
+        {
             // The compiler-time line above already counts these; what it cannot
             // say is why they are absent from the store.
             note(&format!(
@@ -328,6 +332,13 @@ pub(super) fn short_summary(stats: &AgentStats) -> String {
     ];
     if stats.unconsulted > 0 {
         outcomes.push(format!("{} not looked up", stats.unconsulted));
+    }
+    // Without this, an edit loop that compiled every unit from its own
+    // incremental state reports "0 hits, 0 misses" and reads as though nothing
+    // had happened. The full summary explains why they were not stored; the
+    // one-liner at least has to admit they exist.
+    if incremental_compilations(stats) > 0 {
+        outcomes.push(format!("{} incremental", incremental_compilations(stats)));
     }
     if stats.prefetched_actions > 0 {
         outcomes.push(format!("{} prefetched", stats.prefetched_actions));
@@ -424,6 +435,7 @@ pub(crate) fn unexpected_bypasses(stats: &AgentStats) -> u64 {
 pub(super) fn should_display_short_stats(stats: &AgentStats) -> bool {
     stats.lookups > 0
         || stats.unconsulted > 0
+        || incremental_compilations(stats) > 0
         || stats.prefetched_actions > 0
         || stats.stores > 0
         || stats.verifications > 0
@@ -518,14 +530,25 @@ fn slow_compilations(stats: &AgentStats) -> Vec<(&String, &u64)> {
 /// reported twice. This is the number the per-action ledger holds, which is
 /// what `mbx explain` reads back.
 ///
-/// An incremental compilation counts too. It consulted the cache like any
-/// other and compiled anyway; what makes it incremental is that its result was
-/// withheld from the store afterwards, which the summary says on its own line.
-/// Leaving it out would report an edit loop as though nothing had been asked.
+/// An incremental compilation is not one of these, though the old subtraction
+/// counted most of them. A unit that re-enters hot workspace state engages
+/// before an action key is built and never looks anything up, and the outcome
+/// alone cannot say which did; they also get no row in the per-action ledger,
+/// so counting them here would put the summary back out of step with
+/// `mbx explain`. They are reported on their own terms instead, which is the
+/// honest thing to say about a compilation whose result was withheld from the
+/// store.
 pub(crate) fn cache_misses(stats: &AgentStats) -> u64 {
-    ["miss", "incremental"]
-        .into_iter()
-        .filter_map(|outcome| stats.compiler.get(outcome))
-        .map(|compiler| compiler.invocations)
-        .sum()
+    stats
+        .compiler
+        .get("miss")
+        .map_or(0, |compiler| compiler.invocations)
+}
+
+/// Compilations that kept private incremental state, and so were not stored.
+pub(super) fn incremental_compilations(stats: &AgentStats) -> u64 {
+    stats
+        .compiler
+        .get("incremental")
+        .map_or(0, |compiler| compiler.invocations)
 }
