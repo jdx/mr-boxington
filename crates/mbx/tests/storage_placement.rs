@@ -271,6 +271,50 @@ fn an_invocation_outside_a_project_still_reaches_cargo() {
     }
 }
 
+/// A path install compiles a local package, so it stays behind the storage
+/// check however its subcommand is spelled. Only Cargo can expand a user's
+/// alias, so neither the manifest-less passthrough nor the alias table may
+/// read `i --path` as the registry install that `install` alone would be.
+#[test]
+fn an_aliased_path_install_is_still_checked() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let bin = fixture.root.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let cargo = bin.join("cargo");
+    std::fs::write(&cargo, "#!/bin/sh\ncase \" $* \" in *' metadata '*) exit 1;; *' --list '*) printf 'Installed Commands:\\n    i    alias: install\\n    install    Install a Rust binary\\n'; exit 0;; esac\ntouch \"$TEST_INSTALL_MARKER\"\n").unwrap();
+    std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let outside = fixture.root.join("outside-install");
+    std::fs::create_dir(&outside).unwrap();
+    for shim in [false, true] {
+        for install in ["install", "i"] {
+            let marker = fixture.root.join(format!("install-{shim}-{install}"));
+            let mut command = fixture.command();
+            let inherited_path = std::env::var_os("PATH").unwrap();
+            let paths = std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited_path));
+            command
+                .args([install, "--path"])
+                .arg(&fixture.project)
+                .current_dir(&outside)
+                .env("PATH", std::env::join_paths(paths).unwrap())
+                .env("CARGO", &cargo)
+                .env("CARGO_BUILD_BUILD_DIR", fixture.nfs.join("intermediates"))
+                .env("TEST_INSTALL_MARKER", &marker);
+            if shim {
+                command.env("MBX_CARGO_SHIM_MODE", "1");
+            }
+            let output = command.output().unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{install}: {stderr}");
+            assert!(
+                stderr.contains("could not verify Cargo build storage"),
+                "{install}: {stderr}"
+            );
+            assert!(!marker.exists(), "{install} reached Cargo: {stderr}");
+        }
+    }
+}
+
 /// A colored `cargo --list` must not cost an alias its passthrough. Cargo
 /// colors the listing whenever `CARGO_TERM_COLOR` or `term.color` says
 /// `always`, and the parser reads the listing as plain text, so both the

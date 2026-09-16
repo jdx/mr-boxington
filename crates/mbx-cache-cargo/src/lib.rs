@@ -395,12 +395,16 @@ fn directory_option_dir(arguments: &[String], working_dir: &Path) -> PathBuf {
 /// one, and the caller can hand the invocation straight to it.
 pub fn manifest_in_scope(arguments: &[String], working_dir: &Path) -> bool {
     let arguments = cargo_arguments(arguments);
-    // `install --path` reads the named directory's own manifest and does not
-    // walk up to a surrounding workspace for it.
-    if let Some(source) = path_install_dir(arguments, working_dir) {
-        return source.join("Cargo.toml").is_file();
-    }
     let invocation = directory_option_dir(arguments, working_dir);
+    // A path install compiles the manifest in the directory it names, which it
+    // has even where the invocation directory has none. Its subcommand may be
+    // spelled by an alias that only Cargo can expand, so any `--path` naming a
+    // manifest counts rather than a literal `install` alone.
+    if let Some(path) = flag_value(arguments, "--path")
+        && absolute(&invocation, path).join("Cargo.toml").is_file()
+    {
+        return true;
+    }
     match flag_value(arguments, "--manifest-path") {
         Some(manifest) => absolute(&invocation, manifest).is_file(),
         None => invocation
@@ -1025,19 +1029,36 @@ mod tests {
             project
         ));
 
-        // `install --path` reads that directory's own manifest and does not
-        // walk up to the surrounding package for it.
-        assert!(manifest_in_scope(
+        // A path install names a manifest the invocation directory does not
+        // have, under whatever spelling of the subcommand. Only Cargo can
+        // expand a user's alias, so `--path` counts on its own.
+        for install in ["install", "i"] {
+            assert!(manifest_in_scope(
+                &[
+                    install.into(),
+                    "--path".into(),
+                    project.to_string_lossy().into_owned()
+                ],
+                outside
+            ));
+        }
+        assert!(!manifest_in_scope(
             &[
                 "install".into(),
+                "--path".into(),
+                outside.join("absent").to_string_lossy().into_owned()
+            ],
+            outside
+        ));
+        // Arguments after `--` belong to the built program, not to Cargo.
+        assert!(!manifest_in_scope(
+            &[
+                "run".into(),
+                "--".into(),
                 "--path".into(),
                 project.to_string_lossy().into_owned()
             ],
             outside
-        ));
-        assert!(!manifest_in_scope(
-            &["install".into(), "--path".into(), "src".into()],
-            project
         ));
     }
 

@@ -92,15 +92,23 @@ pub(super) fn needs_plain_launch(arguments: &[String]) -> bool {
 /// Locate the command without interpreting option values or program arguments
 /// as subcommands. Cargo globals may precede a command through the Cargo shim.
 pub(super) fn cargo_subcommand<T: AsRef<OsStr>>(arguments: &[T]) -> Option<&str> {
-    let mut arguments = arguments.iter();
-    while let Some(argument) = arguments.next() {
+    cargo_subcommand_at(arguments).map(|(_, command)| command)
+}
+
+/// The subcommand and where it sits, so a caller can put an alias expansion in
+/// its place and keep the rest of the command line.
+pub(super) fn cargo_subcommand_at<T: AsRef<OsStr>>(arguments: &[T]) -> Option<(usize, &str)> {
+    let mut arguments = arguments.iter().enumerate();
+    while let Some((index, argument)) = arguments.next() {
         let argument = argument.as_ref().to_str()?;
         match argument {
             "--" => return None,
             "--color" | "--config" | "-Z" | "-C" | "--directory" => {
                 arguments.next()?;
             }
-            value if !value.starts_with('-') && !value.starts_with('+') => return Some(value),
+            value if !value.starts_with('-') && !value.starts_with('+') => {
+                return Some((index, value));
+            }
             _ => {}
         }
     }

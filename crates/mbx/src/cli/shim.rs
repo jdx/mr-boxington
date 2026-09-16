@@ -308,6 +308,7 @@ pub(super) fn metadata_failure_passthrough(cargo: &OsStr, arguments: &[OsString]
         })
         .collect::<BTreeMap<_, _>>();
     let mut current = command;
+    let mut invocation = arguments.to_vec();
     for _ in 0..32 {
         let Some(description) = entries.get(current) else {
             return current == command;
@@ -315,10 +316,21 @@ pub(super) fn metadata_failure_passthrough(cargo: &OsStr, arguments: &[OsString]
         let Some(alias) = description.strip_prefix("alias: ") else {
             return false;
         };
-        let Some(next) = alias.split_whitespace().next() else {
+        let expansion = alias.split_whitespace().collect::<Vec<_>>();
+        let Some(next) = expansion.first().copied() else {
             return false;
         };
-        if cargo_proxy_passthrough(&[OsString::from(next)]) {
+        // Substitute the expansion for the alias and keep the rest of the
+        // command line. The expanded name alone would hide the `--path` that
+        // makes an install compile a local package rather than fetch one.
+        let Some((index, _)) = super::launch::cargo_subcommand_at(&invocation) else {
+            return false;
+        };
+        invocation.splice(
+            index..index + 1,
+            expansion.iter().copied().map(OsString::from),
+        );
+        if cargo_proxy_passthrough(&invocation) {
             return true;
         }
         current = next;
