@@ -507,9 +507,19 @@ fn slow_compilations(stats: &AgentStats) -> Vec<(&String, &u64)> {
     slow
 }
 
+/// Compilations that consulted the cache and had to compile anyway.
+///
+/// Counted from the compiler invocations the adapters record, not from
+/// `lookups`, because one compilation may probe more than one action key: a
+/// crate that reads a portable environment value is looked up under both its
+/// portable and its literal key. Deriving misses by subtraction counted the
+/// second probe as a miss of its own, so a crate that hit on its literal key
+/// was reported as a hit and a miss at once, and a crate that missed both was
+/// reported twice. This is the number the per-action ledger holds, which is
+/// what `mbx explain` reads back.
 pub(crate) fn cache_misses(stats: &AgentStats) -> u64 {
     stats
-        .lookups
-        .saturating_sub(stats.hits)
-        .saturating_sub(stats.verifications)
+        .compiler
+        .get("miss")
+        .map_or(0, |compiler| compiler.invocations)
 }

@@ -45,6 +45,7 @@ fn cache_mix_matches_existing_stats_and_excludes_probes() {
     stats.lookups = 10;
     stats.hits = 6;
     stats.verifications = 1;
+    stats.compiler = BTreeMap::from([("miss".into(), mbx_cache_core::CompilerStats::new(3, 0))]);
     stats.bypasses = BTreeMap::from([("compiler-query".into(), 4), ("unsupported".into(), 2)]);
     stats.avoided_compiler_duration_ns = 42;
     let mix = CacheMix::from(stats);

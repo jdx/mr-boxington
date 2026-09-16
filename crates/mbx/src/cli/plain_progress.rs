@@ -105,6 +105,10 @@ mod tests {
                 let mut stats = AgentStats::default();
                 stats.hits = 1;
                 stats.lookups = 3;
+                stats.compiler = std::collections::BTreeMap::from([(
+                    "miss".into(),
+                    mbx_cache_core::CompilerStats::new(2, 0),
+                )]);
                 stats.avoided_compiler_duration_ns = 1_500_000_000;
                 stats
             },

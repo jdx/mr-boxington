@@ -693,8 +693,35 @@ fn qualification_results_are_not_reported_as_misses() {
         stats.lookups = 5;
         stats.hits = 2;
         stats.verifications = 2;
+        stats.compiler =
+            BTreeMap::from([("miss".into(), mbx_cache_core::CompilerStats::new(1, 4_000))]);
     });
     assert_eq!(cache_misses(&stats), 1);
+}
+
+#[test]
+fn a_compilation_that_probed_two_action_keys_is_one_miss() {
+    // A crate that reads a portable environment value is looked up under both
+    // its portable and its literal key, so its lookups outnumber its
+    // compilations. Subtracting hits from lookups reported this crate twice.
+    let stats = agent_stats(|stats| {
+        stats.lookups = 2;
+        stats.hits = 0;
+        stats.compiler =
+            BTreeMap::from([("miss".into(), mbx_cache_core::CompilerStats::new(1, 4_000))]);
+    });
+    assert_eq!(cache_misses(&stats), 1);
+}
+
+#[test]
+fn a_hit_on_the_literal_key_is_not_also_a_miss() {
+    // The portable key is probed first. Missing it and then hitting the
+    // literal one is one hit, and no miss at all: nothing was compiled.
+    let stats = agent_stats(|stats| {
+        stats.lookups = 2;
+        stats.hits = 1;
+    });
+    assert_eq!(cache_misses(&stats), 0);
 }
 
 #[test]
@@ -765,6 +792,8 @@ fn short_summary_omits_routine_compiler_probe_bypasses() {
     let mixed = agent_stats(|stats| {
         stats.lookups = 4;
         stats.hits = 3;
+        stats.compiler =
+            BTreeMap::from([("miss".into(), mbx_cache_core::CompilerStats::new(1, 4_000))]);
         stats.bypasses = BTreeMap::from([
             ("compiler-query".into(), 2),
             ("standard-input".into(), 1),
@@ -820,6 +849,8 @@ fn ci_summary_preserves_verification_and_failure_diagnostics() {
     let stats = agent_stats(|stats| {
         stats.lookups = 10;
         stats.hits = 6;
+        stats.compiler =
+            BTreeMap::from([("miss".into(), mbx_cache_core::CompilerStats::new(2, 4_000))]);
         stats.verifications = 2;
         stats.divergences = 1;
         stats.remote_failures = 3;
@@ -854,7 +885,7 @@ fn an_off_summary_still_writes_the_versioned_stats_report() {
     let path = directory.path().join("nested").join("stats.json");
     let stats = agent_stats(|stats| {
         stats.session_duration_ns = 42;
-        stats.lookups = 5;
+        stats.lookups = 6;
         stats.hits = 2;
         stats.verifications = 1;
         stats.prefetched_actions = 3;
@@ -887,7 +918,7 @@ fn an_off_summary_still_writes_the_versioned_stats_report() {
     assert_eq!(report["predictions_loaded"], 11);
     assert_eq!(report["session_duration_ns"], 42);
     assert_eq!(report["hits"], 2);
-    assert_eq!(report["misses"], 2);
+    assert_eq!(report["misses"], 3);
     assert_eq!(report["compiler_invocations_avoided"], 2);
     assert_eq!(report["estimated_compiler_duration_avoided_ns"], 2_000);
     assert_eq!(report["compiler"]["miss"]["invocations"], 3);
