@@ -166,8 +166,10 @@ pub(crate) struct RawConfig {
         default = "16MiB"
     )]
     events_max_size: String,
-    /// Remap `OUT_DIR` so rustc does not record it in the artifact, which lets
-    /// a rebuilt dependency match between checkouts and its dependents share.
+    /// Remap `OUT_DIR` so rustc does not record it in the artifact, which can
+    /// leave a rebuilt dependency byte-identical between checkouts so its
+    /// dependents share. The compilation that read it stays checkout-specific
+    /// either way, as does any artifact still carrying a checkout path.
     #[usage(env = "MBX_SHARE_OUT_DIR", default = true)]
     share_out_dir: bool,
     /// Cache executions of build scripts using Cargo's freshness inputs. This may
