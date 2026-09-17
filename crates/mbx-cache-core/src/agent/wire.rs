@@ -186,9 +186,15 @@ pub enum AgentRequest {
     RecordUnconsulted,
     /// Account for one real compiler invocation performed by the adapter.
     RecordCompilerInvocation {
-        /// Stable outcome category such as `miss`, `unconsulted`, `bypass`, or
-        /// `incremental` for a compilation the adapter deliberately ran with
-        /// incremental state instead of publishing.
+        /// Stable outcome category: `miss`, `unconsulted`, `bypass` or
+        /// `verification`.
+        ///
+        /// A compilation the adapter deliberately ran with incremental state
+        /// instead of publishing reports `incremental-miss` or
+        /// `incremental-unconsulted`, saying both what its lookup did and that
+        /// its result was withheld. The agent counts those separately; a bare
+        /// `incremental` is no longer an outcome, because it could not say
+        /// whether the cache had been consulted.
         outcome: String,
         /// Compiler crate name, when the invocation supplied one.
         crate_name: Option<String>,

@@ -618,6 +618,79 @@ async fn an_incremental_outcome_records_its_lookup_and_its_state_separately() {
     assert!(!stats.compiler.contains_key("incremental"));
 }
 
+/// The diagnostic and the invocation it belongs to are paired by outcome, so
+/// both have to be normalized or the ledger row arrives without its key details
+/// and `mbx explain` has nothing to compare.
+#[tokio::test]
+async fn an_incremental_miss_keeps_the_diagnostic_it_was_sent_with() {
+    let directory = tempfile::tempdir().unwrap();
+    let observer = Arc::new(RecordingObserver::default());
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version")
+        .with_observer(observer.clone());
+    let diagnostic = ActionDiagnostic {
+        action: CacheDigest::blake3(b"action"),
+        components: BTreeMap::new(),
+        inputs: BTreeMap::new(),
+    };
+
+    agent
+        .handle_requests([
+            AgentRequest::RecordWarning {
+                message: format!(
+                    "{ACTION_DIAGNOSTIC_PREFIX}{}",
+                    serde_json::json!({
+                        "outcome": "incremental-miss",
+                        "crate_name": "serde",
+                        "diagnostic": diagnostic,
+                    })
+                ),
+            },
+            AgentRequest::RecordCompilerInvocation {
+                outcome: "incremental-miss".into(),
+                crate_name: Some("serde".into()),
+                duration_ns: 42,
+            },
+        ])
+        .await;
+
+    let events = observer.events.lock().unwrap();
+    assert!(
+        matches!(
+            events.as_slice(),
+            [
+                AgentEvent::ActionDiagnostic {
+                    outcome: diagnostic_outcome,
+                    diagnostic: observed,
+                    ..
+                },
+                AgentEvent::CompilerInvocation { outcome, .. },
+            ] if diagnostic_outcome == "miss" && outcome == "miss" && observed == &diagnostic
+        ),
+        "{events:?}"
+    );
+}
+
+/// The TUI's per-unit column reports what the cache did, so an incremental
+/// compilation lands under its lookup rather than a label of its own.
+#[tokio::test]
+async fn a_unit_outcome_is_recorded_as_what_its_lookup_did() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+
+    agent
+        .respond(AgentRequest::RecordDebug {
+            target: "mbx::unit-outcome".into(),
+            message: serde_json::to_string(&("lib:serde", "incremental-miss")).unwrap(),
+        })
+        .await;
+
+    let stats = agent.stats();
+    assert_eq!(
+        stats.unit_outcomes.get("lib:serde"),
+        Some(&BTreeSet::from(["miss".to_string()]))
+    );
+}
+
 #[tokio::test]
 async fn an_unconsulted_compilation_keeps_its_diagnostic() {
     let directory = tempfile::tempdir().unwrap();

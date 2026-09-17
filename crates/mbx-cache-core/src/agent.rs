@@ -249,6 +249,20 @@ struct ActionDiagnosticEnvelope {
     diagnostic: ActionDiagnostic,
 }
 
+/// Split a reported outcome into what the lookup did and whether the result was
+/// withheld.
+///
+/// Every consumer normalizes through this. The diagnostic envelope and the
+/// invocation it belongs to are matched by outcome, so a name normalized in one
+/// place and not the other leaves the ledger row without its key details.
+pub(crate) fn lookup_outcome(outcome: &str) -> (&str, bool) {
+    match outcome {
+        "incremental-miss" => ("miss", true),
+        "incremental-unconsulted" => ("unconsulted", true),
+        other => (other, false),
+    }
+}
+
 fn parse_action_diagnostic(
     message: &str,
 ) -> Option<Result<(String, Option<String>, ActionDiagnostic)>> {
@@ -258,11 +272,16 @@ fn parse_action_diagnostic(
         // Unconsulted belongs here with hit and miss: it is the outcome a cold
         // store gives every compilation it publishes, so refusing it threw away
         // the only record of the key another checkout would later look up.
-        if !matches!(envelope.outcome.as_str(), "hit" | "miss" | "unconsulted") {
+        let (outcome, _) = lookup_outcome(&envelope.outcome);
+        if !matches!(outcome, "hit" | "miss" | "unconsulted") {
             bail!("invalid action diagnostic outcome");
         }
         validate_crate_name(envelope.crate_name.as_deref())?;
-        Ok((envelope.outcome, envelope.crate_name, envelope.diagnostic))
+        Ok((
+            outcome.to_string(),
+            envelope.crate_name,
+            envelope.diagnostic,
+        ))
     })())
 }
 
@@ -1945,16 +1964,15 @@ impl CacheAgent {
                 }
                 if target == "mbx::unit-outcome" {
                     let (unit, outcome): (String, String) = serde_json::from_str(&message)?;
+                    // Recorded as what the cache did, which is the column the
+                    // TUI shows. Whether a compilation kept incremental state
+                    // is reported by the summary, not per unit.
+                    let (outcome, _) = lookup_outcome(&outcome);
                     if unit.len() > 256
                         || !unit.contains(':')
                         || !matches!(
-                            outcome.as_str(),
-                            "hit"
-                                | "miss"
-                                | "bypass"
-                                | "unconsulted"
-                                | "incremental"
-                                | "verification"
+                            outcome,
+                            "hit" | "miss" | "bypass" | "unconsulted" | "verification"
                         )
                     {
                         bail!("invalid unit outcome");
@@ -1965,7 +1983,7 @@ impl CacheAgent {
                         .unwrap()
                         .entry(unit)
                         .or_default()
-                        .insert(outcome);
+                        .insert(outcome.to_string());
                 } else {
                     debug!(target: &target, "{message}");
                 }
@@ -2013,6 +2031,11 @@ impl CacheAgent {
                 crate_name,
                 duration_ns,
             } => {
+                // Normalized before the diagnostic is claimed: it was stored
+                // under the lookup outcome, and an unnormalized name here would
+                // never find it.
+                let (outcome, incremental) = lookup_outcome(&outcome);
+                let outcome = outcome.to_string();
                 let diagnostic = connection
                     .take_action_diagnostic(&outcome, crate_name.as_deref())
                     .map(|diagnostic| AgentEvent::ActionDiagnostic {
@@ -2022,6 +2045,7 @@ impl CacheAgent {
                     });
                 self.record_compiler_invocation(
                     &outcome,
+                    incremental,
                     crate_name.as_deref(),
                     duration_ns,
                     diagnostic,
@@ -2424,19 +2448,11 @@ impl CacheAgent {
     fn record_compiler_invocation(
         &self,
         outcome: &str,
+        incremental: bool,
         crate_name: Option<&str>,
         duration_ns: u64,
         diagnostic: Option<AgentEvent>,
     ) -> Result<AgentResponse> {
-        // A compilation that kept private incremental state reports that along
-        // with what the lookup did. The two are counted separately here so the
-        // outcomes stay what they say they are: what the cache was asked, and
-        // what it answered.
-        let (outcome, incremental) = match outcome {
-            "incremental-miss" => ("miss", true),
-            "incremental-unconsulted" => ("unconsulted", true),
-            other => (other, false),
-        };
         if !matches!(outcome, "miss" | "unconsulted" | "bypass" | "verification") {
             bail!("invalid compiler invocation outcome");
         }
