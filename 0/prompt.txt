@@ -1,1 +1,1 @@
-pull origin/main, go through the docs thoroughly and clean up prose/content/structure
+make a pr
