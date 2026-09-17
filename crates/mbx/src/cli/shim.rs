@@ -262,6 +262,7 @@ struct Invocation {
 /// Nothing when the listing cannot be read, which leaves the invocation
 /// unexplained and so unsafe to pass through.
 fn resolve_invocation(cargo: &OsStr, arguments: &[OsString]) -> Option<Invocation> {
+    let working_dir = std::env::current_dir().ok();
     let certain = |arguments: &[OsString], resolved| Invocation {
         arguments: arguments.to_vec(),
         resolved,
@@ -320,7 +321,7 @@ fn resolve_invocation(cargo: &OsStr, arguments: &[OsString]) -> Option<Invocatio
         if expansion.is_empty() {
             return None;
         }
-        paths_certain &= path_words_intact(&expansion);
+        paths_certain &= path_words_intact(&expansion, working_dir.as_deref());
         // Substitute the expansion for the alias and keep the rest of the
         // command line. The expanded name alone would hide a `--path` from
         // either place it can appear: the alias body, or the arguments after
@@ -354,20 +355,21 @@ fn resolve_invocation(cargo: &OsStr, arguments: &[OsString]) -> Option<Invocatio
     None
 }
 
-/// Whether an expansion's path arguments survived the listing intact.
+/// Whether an expansion's path arguments can be read back from the listing.
 ///
 /// `cargo --list` prints an alias body space-joined, so a value holding a
-/// space arrives as several words and names some prefix of the real path. The
-/// split shows itself in the word following the value: an alias's remaining
-/// arguments are flags, and `install` takes no positional package beside
-/// `--path`, so a bare word there is the tail of a value this cannot put back
-/// together.
+/// space arrives as several words, and no syntax recovers where it ended: the
+/// continuation can look like an option, as `/src -x/pkg` does, as readily as
+/// it can look like a bare word. What such a value names is a place, so ask
+/// the filesystem rather than the spelling. Where a longer reading of the
+/// words also names one, Cargo may be working there and this cannot tell
+/// which reading was meant.
 ///
 /// Every argument that decides which manifest Cargo reads is checked, which
 /// is the directory options as much as the path ones: `manifest_in_scope`
 /// starts its search from `-C`, so a `-C` it misreads sends the search
 /// somewhere Cargo will not go.
-fn path_words_intact(words: &[&str]) -> bool {
+fn path_words_intact(words: &[&str], working_dir: Option<&Path>) -> bool {
     let mut index = 0;
     while index < words.len() {
         let word = words[index];
@@ -376,20 +378,47 @@ fn path_words_intact(words: &[&str]) -> bool {
             .iter()
             .any(|flag| word.starts_with(flag))
             || (word.starts_with("-C") && word.len() > 2);
-        let after = if separate {
-            index + 2
-        } else if attached {
+        let value = if separate {
             index + 1
+        } else if attached {
+            index
         } else {
             index += 1;
             continue;
         };
-        if words.get(after).is_some_and(|word| !word.starts_with('-')) {
+        // Without a directory to resolve against, a relative value cannot be
+        // looked for at all, and the reading has nothing to stand on.
+        let Some(working_dir) = working_dir else {
+            return false;
+        };
+        // An alias's remaining arguments are flags, and `install` takes no
+        // positional package beside `--path`, so a bare word after the value
+        // is its tail even where the whole path no longer exists to be found.
+        if words
+            .get(value + 1)
+            .is_some_and(|word| !word.starts_with('-'))
+        {
             return false;
         }
-        index = after;
+        for end in (value + 1)..words.len() {
+            if names_a_place(working_dir, &words[value..=end].join(" ")) {
+                return false;
+            }
+        }
+        index = value + 1;
     }
     true
+}
+
+/// Whether `value`, read as a path, names something that exists.
+fn names_a_place(working_dir: &Path, value: &str) -> bool {
+    let value = value.split_once('=').map_or(value, |(_, value)| value);
+    let path = Path::new(value);
+    if path.is_absolute() {
+        path.exists()
+    } else {
+        working_dir.join(path).exists()
+    }
 }
 
 fn is_build_command(command: &str) -> bool {

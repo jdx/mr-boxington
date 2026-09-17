@@ -320,13 +320,21 @@ fn an_aliased_path_install_is_still_checked() {
     // A directory option decides where the manifest search starts, so a value
     // the listing split is as unreadable there as in a path option.
     let directed = format!("build -C {} --offline", spaced_root.display());
-    let cases: [(&str, Vec<&str>, &str); 6] = [
+    // The word a split leaves behind can look like an option as readily as
+    // it can look like a bare word, so the spelling settles nothing and the
+    // filesystem has to be asked which reading names a real place.
+    let dashed_root = fixture.root.join("dashed -x");
+    std::fs::create_dir(&dashed_root).unwrap();
+    write_project(&dashed_root);
+    let dashed = format!("install --path {}", dashed_root.display());
+    let cases: [(&str, Vec<&str>, &str); 7] = [
         ("literal", vec!["install", "--path", &project], "install"),
         ("aliased", vec!["i", "--path", &project], "install"),
         ("embedded", vec!["i"], &embedded),
         ("spaced", vec!["i"], &spaced),
         ("prefixed", vec!["i"], &prefixed),
         ("directed", vec!["i"], &directed),
+        ("dashed", vec!["i"], &dashed),
     ];
     for shim in [false, true] {
         for (name, arguments, alias) in &cases {
