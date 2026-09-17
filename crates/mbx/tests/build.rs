@@ -2329,10 +2329,14 @@ fn mapping_the_workspace_root_shares_the_dependents_of_a_checkout_specific_crate
 
 /// What the second checkout's build recorded for each crate it compiled.
 ///
-/// The store holds one stream per build, so the second one is the newest.
+/// A stream is named for the millisecond its build started, so sorting the
+/// names orders the two builds the way `events::session_ids` does. Modification
+/// times would not: a filesystem that records them coarsely can give both
+/// streams the same one, and the later build would be chosen by directory
+/// order.
 fn second_build_outcomes(store: &Path) -> std::collections::BTreeMap<String, String> {
     let directory = store.join("actions/sessions/v1");
-    let newest = std::fs::read_dir(&directory)
+    let mut streams: Vec<std::path::PathBuf> = std::fs::read_dir(&directory)
         .expect("a session directory should exist")
         .flatten()
         .map(|entry| entry.path())
@@ -2340,13 +2344,14 @@ fn second_build_outcomes(store: &Path) -> std::collections::BTreeMap<String, Str
             path.extension()
                 .is_some_and(|extension| extension == "jsonl")
         })
-        .max_by_key(|path| {
-            std::fs::metadata(path)
-                .and_then(|metadata| metadata.modified())
-                .expect("a recorded stream should have a modification time")
-        })
-        .expect("two builds should have recorded a stream each");
-    std::fs::read_to_string(newest)
+        .collect();
+    streams.sort();
+    assert_eq!(
+        streams.len(),
+        2,
+        "two builds should record one stream each, found {streams:?}"
+    );
+    std::fs::read_to_string(streams.pop().unwrap())
         .unwrap()
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
