@@ -1,0 +1,77 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M2PB10M69D2GTBP18R7C4HDW",
+  "session_id": "01a0aca7-37be-7b03-b07f-9b84e4bef3d3",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-17T00:07:26.165075Z",
+  "branch": "codex/docs-cleanup",
+  "checkpoints_count": 1,
+  "save_step_count": 1,
+  "files_touched": [
+    "CONTRIBUTING.md",
+    "README.md",
+    "RELEASING.md",
+    "benchmarks/README.md",
+    "docs/benchmarks.md",
+    "docs/cache-results.md",
+    "docs/cache-server.md",
+    "docs/configuration.md",
+    "docs/cookbook/local-development.md",
+    "docs/faq.md",
+    "docs/getting-started.md",
+    "docs/how-it-works.md",
+    "docs/incremental.md",
+    "docs/installation.md",
+    "docs/limits.md",
+    "docs/managed-targets.md",
+    "docs/protocol-compatibility.md",
+    "docs/remote-cache.md",
+    "docs/setup.md",
+    "docs/stability.md",
+    "docs/standalone-builds.md",
+    "docs/troubleshooting.md",
+    "docs/tui.md"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6-astra",
+  "turn_id": "f1dcbebd8d55",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 450068,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 3430656,
+    "output_tokens": 14214,
+    "api_call_count": 33
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-17T00:07:26.032198Z",
+    "agent_lines": 462,
+    "agent_removed": 353,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 462,
+    "total_lines_changed": 815,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 397,
+      "agent_lines_removed": 342
+    }
+  ]
+}

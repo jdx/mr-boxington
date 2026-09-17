@@ -1,0 +1,48 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M2PB10M69D2GTBP18R7C4HDW",
+  "strategy": "manual-commit",
+  "branch": "codex/docs-cleanup",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CONTRIBUTING.md",
+    "README.md",
+    "RELEASING.md",
+    "benchmarks/README.md",
+    "docs/benchmarks.md",
+    "docs/cache-results.md",
+    "docs/cache-server.md",
+    "docs/configuration.md",
+    "docs/cookbook/local-development.md",
+    "docs/faq.md",
+    "docs/getting-started.md",
+    "docs/how-it-works.md",
+    "docs/incremental.md",
+    "docs/installation.md",
+    "docs/limits.md",
+    "docs/managed-targets.md",
+    "docs/protocol-compatibility.md",
+    "docs/remote-cache.md",
+    "docs/setup.md",
+    "docs/stability.md",
+    "docs/standalone-builds.md",
+    "docs/troubleshooting.md",
+    "docs/tui.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 450068,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 3430656,
+    "output_tokens": 14214,
+    "api_call_count": 33
+  }
+}
