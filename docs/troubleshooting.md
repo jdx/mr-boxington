@@ -11,6 +11,8 @@ cached work.
 | Plain Cargo does not use mbx | [Check Cargo's path](/setup#verify-plain-cargo); for standalone setup, also run `mbx setup --status` |
 | A build restores little or nothing | `mbx explain --last`, then [read the results](/cache-results#troubleshooting-a-low-hit-rate) |
 | Cargo waits for a target lock | Give simultaneous builds [separate targets](/scheduling) |
+| Cargo metadata fails before a build | [Check workspace discovery](#workspace-discovery-fails) |
+| Build storage is on NFS | Move outputs to [local storage](/configuration#local-build-storage) |
 | Remote requests fail | `mbx doctor`, then [check authentication](/remote-cache#authenticate) |
 | Build storage is larger than expected | `mbx cache stats` and `mbx gc --dry-run`; review [budgets](/managed-targets#budgets-scale-with-the-disk) |
 | Breakpoints point at an old checkout | Use the [debugger recipe](/cookbook/local-development#debug-a-binary-restored-from-another-checkout) |
@@ -55,6 +57,19 @@ blocks Unix socket listeners but permits filesystem FIFOs, mbx automatically
 uses FIFO transport and keeps caching enabled. If neither transport is
 available, mbx warns and runs Cargo without caching instead of preventing the
 build from starting.
+
+## Workspace discovery fails
+
+Managed Cargo builds need a successful metadata probe to locate the workspace
+and verify output storage. If the probe fails, mbx stops before compilation.
+Run the probe directly with the same manifest and configuration options:
+
+```sh
+cargo metadata --no-deps --format-version 1
+```
+
+Resolve the reported Cargo error, then retry the build. Help, cleanup, and
+explicitly disabled shim invocations still pass through without this probe.
 
 ## Inspect a build
 
@@ -105,11 +120,11 @@ paths and the URL and namespace of any configured remote, and the logs name
 the crates you build. Credentials are never printed. Remove anything else you
 would rather not publish before posting.
 
-`MBX_LOG` takes an [env_logger](https://docs.rs/env_logger) filter, so
-`debug`, `trace`, or a per-module filter such as `mbx=trace` all work; it
-defaults to `info`. It covers the `mbx` process that drives the build. The
-rustc shim runs without a logger, so per-compilation detail comes from
-`MBX_BYPASS_LOG` instead, or from `mbx explain` for a grouped summary. See
+`MBX_LOG` takes an [env_logger](https://docs.rs/env_logger) filter, so `debug`,
+`trace`, or a per-module filter such as `mbx=trace` all work; it defaults to
+`info`. It filters logs in the `mbx` process that drives the build, including
+routine shim diagnostics forwarded to the session. Use `MBX_BYPASS_LOG` for
+per-compilation bypass records, or `mbx explain` for a grouped summary. See
 [Cache results](/cache-results).
 
 Report a problem in

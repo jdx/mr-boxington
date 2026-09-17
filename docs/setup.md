@@ -140,9 +140,9 @@ running setup again.
 The native mise option does not configure editor checks. Run `mbx setup` to
 configure rust-analyzer's background check. Setup writes the override to
 rust-analyzer's user configuration file and prints the path, whichever mise
-scope activation uses. rust-analyzer resolves `check.overrideCommand` from that
-file alone; a `rust-analyzer.toml` beside `Cargo.toml` is parsed but its check
-settings never reach the editor's Cargo process.
+scope activation uses. For the TOML integration used by setup, the override
+belongs in that user file. A `rust-analyzer.toml` beside `Cargo.toml` does not
+apply the override to the editor's Cargo process.
 
 The editor invokes the stable Cargo shim by its absolute path, so its build
 shares mbx's cache and machine-wide compiler pool even when the editor did not

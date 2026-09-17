@@ -29,10 +29,10 @@ reworded at any time.
 
 ### Session event streams are not a public API {#session-event-streams-are-not}
 
-The per-compilation streams under `sessions/v1/` that back
-[`mbx tui`](/tui) are an implementation detail of that command. Their records
-carry a version field, but the format may change in any release and nothing
-parses them but mbx itself. Scripts should read `MBX_STATS_REPORT`.
+The per-compilation streams under `sessions/v1/` that back [`mbx tui`](/tui) are
+an implementation detail of that command. Their records carry a version field,
+but the format may change in any release. Use mbx commands to read them; scripts
+should consume `MBX_STATS_REPORT` for build statistics.
 
 ## Configuration
 

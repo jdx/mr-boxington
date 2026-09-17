@@ -4,19 +4,22 @@ description: Compare Cargo, mbx, and kache on a pinned Rust project with documen
 # Benchmarks
 
 mbx is measured against plain Cargo and
-[kache](https://github.com/kunobi-ninja/kache) on [jdx/hk](https://github.com/jdx/hk),
-a mid-size Rust CLI with C dependencies, pinned to one commit and built with
-`cargo build --locked`. The scenarios cover work a developer or CI runner may repeat. The numbers come from a GitHub Actions run, never a laptop, and the page
-will not name a fastest tool when the gap is inside run-to-run noise.
+[kache](https://github.com/kunobi-ninja/kache) on
+[jdx/hk](https://github.com/jdx/hk), a mid-size Rust CLI with C dependencies,
+pinned to one commit and built with `cargo build --locked`. The scenarios cover
+work a developer or CI runner may repeat. Published results come from GitHub
+Actions. The page labels a tool fastest only when its lead exceeds the observed
+variation between trials.
 
 <BenchmarkResults />
 
 ## Reading the results {#reading-the-cards}
 
-Every timed scenario runs three times per tool from a fresh clone and an
-empty store. The bar shows the median; the whisker spans the fastest and slowest trial. A tool is marked fastest only when its lead over the next
-one is wider than either tool's own whisker; otherwise the card says so and
-names nobody.
+Each scenario has three independent trials per tool. A trial starts with a
+fresh clone and empty store, then performs the scenario's warm-up and measured
+builds. The bar shows the median; the whisker spans the fastest and slowest
+trial. A tool is marked fastest only when its lead exceeds both tools' trial
+ranges. Otherwise, the card reports no clear winner.
 
 The Cargo row means something different in each scenario, so the card tags it.
 In the commit scenario it is the uncached build CI does without a cache. In
@@ -41,14 +44,15 @@ build, since with an empty `target/` that is all it can do.
 ### Local edit
 
 A full build, then one line of hk's own source changed and rebuilt in the same
-`target/` with incremental compilation on. Almost nothing recompiles, so the
-cache's own bookkeeping is most of what shows up. Two details keep it honest:
+`target/` with incremental compilation on. This measures the edit/build loop,
+including cache bookkeeping and incremental compilation. Two details make the
+comparison useful:
 
 - `CI` is unset for every tool. mbx switches
   [learned incremental reuse](/incremental#learned-incremental-reuse) off
-  when it sees that variable, on the reasoning that a fresh runner never edits
-  code. With it set, every edit recompiled the crate in full.
-- The first edit after a build is discarded and the second is timed. Cargo's
+  in CI because fresh runners have no earlier edit state to reuse.
+- The first edit establishes incremental state; the second supplies the
+  headline timing. Cargo's
   own build already wrote its incremental state, while mbx builds an edited
   crate's [private state](/incremental#learned-incremental-reuse) on the
   first edit and reuses it afterwards. The card shows what that first edit
@@ -99,9 +103,10 @@ written to `benchmarks/results.json`.
 
 The
 [bench-refresh workflow](https://github.com/jdx/mr-boxington/actions/workflows/bench-refresh.yml)
-runs weekly, only when the published numbers were measured with an older mbx
-than the one on `main`, and opens a pull request rather than publishing
-directly.
+checks weekly and reruns when the recorded mbx version differs from the latest
+release. It measures that released version and opens a pull request with the
+results. Manual runs can force a refresh or measure source changes without
+publishing them.
 
 ## What this does not measure
 

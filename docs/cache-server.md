@@ -38,8 +38,19 @@ installations should terminate TLS at an ingress or proxy and configure
 tokens. The repository ships a Helm chart for horizontally scaled Kubernetes
 deployments and a Terraform-managed single-host example.
 
-Clients connect as described in [remote cache](/remote-cache): a `[remote]`
-URL, a required namespace, and a token or OIDC audience.
+Connect mbx to the local example with this global configuration:
+
+```toml
+[remote]
+url = "http://127.0.0.1:8080"
+namespace = "example/project"
+mode = "read-only"
+```
+
+Run `mbx doctor` to check connectivity. A local shell is read-only even when
+`mode` is `read-write`; use [trusted CI](/remote-cache#read-and-write-policy)
+to populate the remote through mbx. For an authenticated deployment, use
+HTTPS and add a token or OIDC audience as described in [Remote cache](/remote-cache).
 
 ## Configuration
 
@@ -133,8 +144,9 @@ On the client side, mbx acquires the GitHub Actions job token itself: set
 
 ## Operations
 
-For S3-backed storage, expire blobs with the bucket's lifecycle rule; the server removes
-the metadata those objects leave behind and exits without serving:
+For S3-backed storage, expire blobs with a bucket lifecycle rule. Run a
+separate metadata sweep to remove old records; this command exits after
+cleanup without starting the server:
 
 ```sh
 mbx-cache --sweep-metadata-older-than-days 35

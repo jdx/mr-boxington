@@ -14,6 +14,7 @@ cache the result. A bypass preserves the build; it reduces reuse. Run
 | Built-in self-contained WebAssembly links | Eligible for the targets listed below |
 | Build-script execution | Eligible using Cargo's declared freshness inputs |
 | C and C++ object compilation | Eligible through supported compiler wrappers |
+| GCC/Clang preprocessing to a file | Eligible, with checkout-specific keys |
 | Incremental state | Private to the checkout; never shared |
 | Unknown flags, inputs, or extra outputs | Runs without shared caching |
 
@@ -111,9 +112,8 @@ without one links for the host, and that is the only linker mbx identifies.
 
 ## Restored artifacts are equivalent, not always identical
 
-A restore writes this checkout's spelling of the outputs that describe where a
-compilation ran, its dep-info and its diagnostics, so the files Cargo reads
-name the directory it is building into.
+On restore, mbx rewrites dep-info and diagnostics to use the current checkout
+and target paths. Cargo can then read them as if the compilation ran locally.
 
 The compiled artifacts are reused as they were produced, and a few things can
 make them differ from what a fresh compilation here would have written. rustc
@@ -123,22 +123,23 @@ object compiled with debug information does the same, recording the directory
 the compiler ran in.
 
 A C or C++ object also records the absolute include directories it was given,
-which is how a `-sys` crate whose build script generates headers into
-`OUT_DIR` used to produce a different object in every target directory. With
+which is how a `-sys` crate whose build script generates headers into `OUT_DIR`
+used to produce a different object in every target directory. With
 [`OUT_DIR` sharing](/configuration#share-out-dir) on (the default), mbx passes
 the compiler `-fdebug-prefix-map` for that directory, so the object records the
-same placeholder the key does and two target directories produce the same
-bytes. An object that keeps the path anyway, in a string the source holds, is
-not published. The object path alone never did this on Linux or macOS; on
-Windows it does, because the debug information also records where the object
-was written.
+same placeholder the key does and two target directories produce the same bytes.
+An object that still embeds a checkout or target path is stored under a checkout-specific
+key by default. Set `MBX_CC_STORE_PATH_SPECIFIC=0` to skip storing those
+objects; existing entries remain readable. Windows debug information can also
+record the object output path.
 
-None of these changes what the artifact does. All of them are visible to
-`MBX_VERIFY=1`, which compares bytes: a divergence it reports for a
-compilation restored from another checkout, or from another target directory
-whose paths the object records, is that difference and not a fault. The
-divergence names the file and what differed about it, so a run's divergences
-can be told apart.
+These path differences can affect debugging and byte-for-byte comparisons.
+`MBX_VERIFY=1` reports them as divergences, but a divergence alone does not
+establish its cause. Inspect the named output and mismatch before attributing it
+to paths, and report unexplained differences. See
+[Verify mode](/configuration#verify-mode) for a controlled comparison and the
+[debugger recipe](/cookbook/local-development#debug-a-binary-restored-from-another-checkout)
+for a build using local source paths.
 
 ## C and C++ caching covers the host compiles mbx drives
 
@@ -159,32 +160,44 @@ target implies lives in the `cc` crate's own tables, and a wrong guess would
 build the object with the wrong compiler. A value that is a command, such as
 `ccache gcc`, is left alone for the same reason.
 
-Single-source object compiles through gcc-, clang-, or MSVC-style drivers
-are admitted, with preprocessed assembly (`.S`, or `-x
-assembler-with-cpp`) counting as C: its includes are what dependency discovery
-reads, and the assembler is part of a GCC identity. Linking, preprocessing to stdout,
-assembly that skips the preprocessor (`.s`), Objective-C, precompiled
-headers, coverage instrumentation, compiler plugins, options forwarded to a
-sub-tool with `-Wp,`/`-Wl,`/`-Xclang`, unmodeled `-Wa,` assembler options, and
-assembler-time `.include`/`.sinclude`/`.incbin` inputs, and response files all
-bypass, as does any flag the adapter does not model. Known
-assembler options that add no inputs, such as `-Wa,--noexecstack`, are keyed
-and admitted. MSVC compiler PDBs, modules, and other extra outputs also bypass.
-GCC/Clang preprocessing with `-E ... -o file` is also cached. The file is
-restored byte-for-byte; line markers and `__FILE__` values are preserved. These
-entries include literal argument paths, the working directory, and mapped
-roots in their keys, so they are not shared across different checkout paths.
-Header discovery and include-directory invalidation still apply. `-E` with
-`-MD`/`-MMD` requires an explicit `-MF`; without it, GCC gives `-o` a different
-meaning, so mbx bypasses that invocation. `-o -` and dependency output to
-stdout with `-MF -` remain bypasses.
+### Supported compiler calls
 
-A source or header that expands `__DATE__`, `__TIME__`, or `__TIMESTAMP__`
-bypasses too: its object is not a function of its inputs.
+mbx caches single-source object compiles through GCC-, Clang-, and MSVC-style
+drivers. Preprocessed assembly (`.S` or `-x assembler-with-cpp`) is supported:
+its includes participate in dependency discovery, and the assembler is part
+of the GCC toolchain identity. Known assembler options that add no inputs,
+such as `-Wa,--noexecstack`, are also supported.
 
-A flag that tunes for the machine's own processor, such as `-march=native` and
-its relatives, bypasses as well, because the object depends on the host CPU and
-the key does not name it.
+GCC/Clang preprocessing with `-E ... -o file` is cached too. The file is
+restored byte-for-byte, preserving line markers and `__FILE__` values. These
+entries key literal argument paths, the working directory, and mapped roots,
+so they cannot be shared across different checkout paths. Header discovery
+and include-directory invalidation still apply.
+
+With `-E` and `-MD`/`-MMD`, an explicit `-MF` is required. Without it, GCC gives
+`-o` a different meaning and mbx bypasses the invocation.
+
+### Calls that bypass the cache
+
+The C/C++ adapter leaves these calls uncached:
+
+- Links, multi-source calls, preprocessing to stdout, and dependency output
+  to stdout (`-MF -`).
+- Assembly without preprocessing (`.s`), Objective-C, precompiled headers,
+  coverage instrumentation, compiler plugins, and response files.
+- Unmodeled sub-tool options, including `-Wp,`, `-Wl,`, `-Xclang`, and
+  unsupported `-Wa,` options; assembler-time `.include`, `.sinclude`, and
+  `.incbin` inputs.
+- MSVC compiler PDBs, modules, and other unsupported extra outputs.
+- Sources or headers that expand `__DATE__`, `__TIME__`, or `__TIMESTAMP__`:
+  the result depends on when compilation runs.
+- Host CPU tuning such as `-march=native`: the cache key does not identify
+  the host processor.
+- Any other flag or input the adapter cannot model.
+
+Setting `CC`, `CXX`, `HOST_CC`, or `HOST_CXX` leaves the selected host compiler
+outside mbx's wrappers. Explicit target compilers are handled as described
+above. `MBX_CC=0` disables C and C++ caching entirely.
 
 ## Shadowing is modeled by name, not by content
 
@@ -206,11 +219,6 @@ otherwise claim a state that did not produce this object.
 System roots are exempt from manifests. Enumerating an SDK on every compile
 costs more than the risk, and anything read from one is digested like any other
 input.
-
-The host shims are only installed when the build has not chosen its own host
-compiler. Setting `CC`, `CXX`, `HOST_CC`, or `HOST_CXX` leaves that build's
-host C compilations uncached; `TARGET_CC`, `TARGET_CXX`, `CC_<target>`, and
-`CXX_<target>` are wrapped as described above. `MBX_CC=0` disables the feature.
 
 ## `OUT_DIR` sharing remaps generated source paths
 

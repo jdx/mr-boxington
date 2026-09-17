@@ -56,8 +56,11 @@ number, and one written by hand either collides with its calculation or is
 overwritten by it. If an API break is intended, the pull request should say so
 and leave the version alone.
 
-An intended break is declared on the commit — `feat!:`, or a `BREAKING
-CHANGE:` footer — so release-plz can choose the appropriate next version.
+Declare an intended break with `!` in the conventional commit title and a
+`BREAKING CHANGE:` footer. These markers apply to every crate touched by the
+commit, regardless of scope. Isolate a breaking pre-1.0 subcrate change from
+`mbx` changes so it does not trigger a CLI major release. A breaking CLI change
+requires explicit maintainer agreement; see [AGENTS.md](AGENTS.md).
 
 release-plz computes each line from the commits that touched it and updates the
 path dependencies' version requirements, so a release can move one crate and
@@ -128,7 +131,7 @@ The ticket lives on Apple's side and is never stapled into the archive.
 resolves the ticket online instead, which is the normal arrangement for a CLI
 distributed this way. Two consequences worth knowing:
 
-- The shipped archive is byte-identical to the signed binary. Nothing may
+- The archive contains the exact binary submitted for notarization. Nothing may
   re-sign, strip, or rewrite it after notarization, or the ticket no longer
   matches what a user runs.
 - A machine with no network reaching Apple cannot confirm the ticket. That is

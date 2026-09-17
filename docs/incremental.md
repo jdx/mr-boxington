@@ -52,9 +52,9 @@ is a backstop. A large debug build can need several GiB. If the warning appears
 on every edit, the limit may be too small to retain useful state: raising it
 can prevent repeated full recompilations.
 
-The per-crate limit is a backstop. GC also bounds all checkout-private state
-together with `gc.incremental_max_size`, which defaults to 5% of the cache disk
-between 10 GiB and 100 GiB. `gc.incremental_max_age` defaults to 30 days. The
+Garbage collection also bounds private state across all checkouts with
+`gc.incremental_max_size`, which defaults to 5% of the cache disk between 10
+GiB and 100 GiB. `gc.incremental_max_age` defaults to 30 days. The
 least-recently-used checkouts are collected first, while mbx keeps the most
 recent one even when it alone exceeds the aggregate budget:
 

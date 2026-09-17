@@ -126,9 +126,9 @@ on a cache that has quietly stopped serving.
 ## Watching a build instead
 
 Everything above describes results reported after a build. To see the same
-outcomes as they are decided, one row per compilation with the crate it
-belongs to, run [`mbx tui`](/tui) in another terminal. It reads every build
-on the machine, including ones already running.
+outcomes as they are decided, one row per compilation with the crate it belongs
+to, run [`mbx tui`](/tui) in another terminal. It reads builds using the same
+local cache, including ones already running.
 
 ## Reading the hit rate
 

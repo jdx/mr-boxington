@@ -56,8 +56,9 @@ differed. See
 ## Where does everything live?
 
 `mbx cache dir` prints the store's location. Managed target directories live
-under the same root ([managed targets](/managed-targets)), and configuration
-comes from the paths listed at the top of [configuration](/configuration).
+under that root by default; [`target.root`](/managed-targets#change-target-placement)
+can place them elsewhere. Configuration comes from the paths listed in
+[Configuration](/configuration).
 
 ## How do I turn one feature off?
 

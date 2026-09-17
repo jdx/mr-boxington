@@ -93,11 +93,14 @@ mbx[cache]: 139 hits, 8 misses, 4 not looked up, 147 prefetched, 7 bypassed; 312
 | Result | What happened |
 | --- | --- |
 | Hit | mbx restored a matching compilation |
-| Miss | mbx looked up a key, then compiled and stored a new result |
-| Not looked up | mbx needed a first compilation to learn the inputs |
+| Miss | No result matched the key; successful compilation can fill the cache |
+| Not looked up | mbx lacked a usable input prediction and had to compile first |
 | Bypassed | The invocation ran without shared caching |
 
-[Cache results](/cache-results) explains all counters and how to measure reuse.
+To check reuse, build into two fresh target directories with the same command
+and options. The [cache reuse walkthrough](/cache-results#measure-cache-reuse)
+shows the commands and explains why simply rerunning an up-to-date Cargo build may
+produce no mbx hits.
 Use `mbx explain --last` to inspect the last recorded build or `mbx tui` to
 [watch builds live](/tui).
 

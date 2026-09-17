@@ -27,9 +27,11 @@ commit subjects and pull request titles such as `docs: clarify cache setup` or
 repository rules.
 
 Do not bump crate versions or edit changelogs in ordinary pull requests.
-Release-plz generates both. Declare an API break with `!` in the title and
-explain it in a `BREAKING CHANGE:` footer; [RELEASING.md](RELEASING.md) describes
-the release process.
+Release-plz generates both. Breaking markers apply to the whole commit, not
+just the named scope. Isolate a breaking API change in a pre-1.0 subcrate from
+changes to `mbx` before adding `!` and a `BREAKING CHANGE:` footer. A CLI break
+requires explicit maintainer agreement. See [AGENTS.md](AGENTS.md) for the
+complete rule and [RELEASING.md](RELEASING.md) for the release process.
 
 ## Check your work
 

@@ -28,6 +28,56 @@ path to `.git/info/exclude` when necessary. A directory-only `target/` pattern
 does not match a symlink; the local exclude keeps `git status` clean without
 changing the project's `.gitignore`.
 
+## When mbx leaves a target alone
+
+mbx does not override an explicit target directory supplied by:
+
+- `--target-dir`
+- `CARGO_TARGET_DIR`
+- Cargo's `build.target-dir` configuration
+
+## Change target placement
+
+Set `target.root` in your global configuration to place managed targets on
+another local disk:
+
+```toml
+[target]
+root = "/path/to/local/build-targets"
+```
+
+After any builds using the old target have finished, the next build can update
+an mbx-owned `target` link to the new managed location. It does not copy the old
+outputs. Matching compilations can be restored from the shared cache; other work
+must compile again. The target budget scales with the destination disk unless
+you set it explicitly.
+
+Changing the root does not delete data at the old location. To remove a
+workspace's old managed outputs through mbx, run `mbx clean` before changing
+its placement configuration.
+
+## Existing target directories
+
+When an interactive mbx command finds an existing real `target/`, it offers to
+remove the old outputs and replace the directory with a managed link:
+
+```text
+Use a managed target directory?
+mbx can remove /path/to/project/target and replace it with a managed target that is pruned after this checkout is deleted.
+```
+
+“Keep it” is selected by default. Declining leaves every output untouched and
+the Cargo command continues normally. Non-interactive runs never prompt or
+remove the directory.
+
+After acceptance, mbx temporarily moves the old directory aside. It removes
+those outputs only after the managed link and its collection record both
+succeed, then reports how much space the old outputs occupied. If placement
+fails, mbx restores the original directory.
+
+mbx does not offer removal for an explicitly configured target directory or a
+symlink it does not own.
+
 ## Collection
 
 mbx records the checkout associated with each target view. Collection runs
@@ -58,9 +108,9 @@ learned incremental state, and the action store share the cache disk. A custom
 | `gc.incremental_max_size` (learned incremental) | 5% of the disk | 10 GiB to 100 GiB |
 
 Scaled budgets are rounded down to a whole 5 GiB. When the disk cannot be
-measured, mbx uses 20 GiB, 30 GiB, and 20 GiB respectively. Any value you set outright
-wins, and `mbx gc --dry-run` previews the effect of a policy without deleting
-anything.
+measured, mbx uses 20 GiB, 30 GiB, and 20 GiB respectively. An explicit budget
+overrides these defaults, and `mbx gc --dry-run` previews the effect of a policy
+without deleting anything.
 
 ### Changing or disabling the limits
 
@@ -78,45 +128,10 @@ incremental_max_age = "30d"
 
 `"none"` turns off `target.max_size`, `target.max_age`,
 `gc.incremental_max_size`, `gc.incremental_max_age`, or `gc.max_total_size`.
-Invalid sizes and durations are errors, so a typo cannot disable collection. `gc.max_size` has no `"none"`; the action
-store is always bounded. `MBX_TARGET_VIEWS=0` opts out of managed target
-directories altogether. A directory that is still reached through an existing
-`target` symlink keeps counting as in use, so turning placement off does not
-schedule existing outputs for deletion.
-
-Each budget is measured against the disk that holds it, so putting
-[`target.root`](/configuration#target-root) on a large scratch volume sizes
-the target budget from that volume.
-
-## When mbx leaves a target alone
-
-mbx does not override an explicit target directory supplied by:
-
-- `--target-dir`
-- `CARGO_TARGET_DIR`
-- Cargo's `build.target-dir` configuration
-
-## Existing target directories
-
-When an interactive mbx command finds an existing real `target/`, it offers to
-remove the old outputs and replace the directory with a managed link:
-
-```text
-Use a managed target directory?
-mbx can remove /path/to/project/target and replace it with a managed target that is pruned after this checkout is deleted.
-```
-
-“Keep it” is selected by default. Declining leaves every output untouched and
-the Cargo command continues normally. Non-interactive runs never prompt or
-remove the directory.
-
-After acceptance, mbx temporarily moves the old directory aside. It removes
-those outputs only after the managed link and its collection record both
-succeed, then reports how much space the old outputs occupied. If placement
-fails, mbx restores the original directory.
-
-mbx does not offer removal for an explicitly configured target directory or a
-symlink it does not own.
+Invalid sizes and durations are errors, so a typo cannot disable collection.
+`gc.max_size` does not accept `"none"`; the action store is always bounded. To
+stop creating managed targets, see
+[Disable managed targets](#disable-managed-targets).
 
 ## Inspect and clean up
 
@@ -128,8 +143,14 @@ symlink it does not own.
 | `mbx clean` | Remove this workspace's managed target, link, and learned incremental state |
 | `mbx cache remove /path/to/workspace` | Remove the target and incremental state, then forget that workspace's cache claims |
 
-`mbx clean` does not clear the shared cache. Cargo's `cargo clean` is a
-separate command and follows Cargo's own target-directory behavior.
+`mbx clean` also accepts a workspace path. It keeps shared cached objects and
+the workspace's cache claims, so a later build can restore matching outputs.
+`mbx cache remove` forgets those claims as well; objects used by other
+workspaces remain available and normal garbage collection reclaims unneeded
+objects.
+
+Cargo's `cargo clean` follows Cargo's own target-directory behavior and does not
+remove mbx's private incremental state.
 
 ## Disable managed targets
 
@@ -144,21 +165,15 @@ Turning placement off does not delete a target directory mbx already manages.
 The existing `target` link continues to work, and collection can still reclaim
 the directory after its checkout disappears.
 
-Run `mbx clean` inside a workspace to remove its managed target, link, and
-learned incremental state immediately. An optional workspace path cleans another checkout. Shared cached
-objects and checkout claims remain available, so the next build can restore
-outputs normally.
-
-To remove the target and learned incremental state, then forget the workspace's cache claims, run
-`mbx cache remove /path/to/workspace`. Shared objects stay available to other
-workspaces and are reclaimed by normal garbage collection.
+Use the [cleanup commands](#inspect-and-clean-up) to remove existing managed
+outputs immediately.
 
 ::: warning Windows
 Creating the link requires Developer Mode or a privileged process on Windows.
 If Windows cannot create it, mbx lets Cargo use its ordinary target directory.
 :::
 
-### Collection byte counts
+## Collection byte counts
 
 Collection reports **logical bytes**: the sum of removed file lengths. The
 `removed_bytes` and `remaining_bytes` fields in `mbx gc --json` use this measure;

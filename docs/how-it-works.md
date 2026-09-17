@@ -8,7 +8,8 @@ mbx decides whether each eligible invocation can be restored from cached work.
 An **action** is one modeled invocation and its inputs. The **content-addressed
 store** (CAS) holds outputs under digests of their content.
 
-Run `mbx build` directly, or use ordinary `cargo build` after [`mbx setup`](/setup).
+Run `mbx build` directly, or use ordinary `cargo build` after
+[enabling automatic wrapping](/setup).
 Both follow the same build lifecycle.
 
 ## From command to result
@@ -21,9 +22,6 @@ Both follow the same build lifecycle.
 5. A hit restores the action's outputs; a miss runs the real compiler and publishes the result.
 6. The agent exits with the build, draining any remote uploads it still owes.
    There is no persistent daemon.
-
-The installed Cargo shim and the zero-config `mbx <cargo-command>` form both
-work this way. The installed shim follows the active mbx when mbx is upgraded.
 
 That wrapper boundary also covers multiple Cargo builds running at the same
 time. Their compiler shims share a machine-wide permit pool and an
@@ -48,20 +46,19 @@ alone. Explicit target compilers can be wrapped; see the
 [C and C++ limits](/limits#c-and-c-caching-covers-the-host-compiles-mbx-drives).
 `MBX_CC=0` turns this caching off.
 
-Unlike rustc, a C compile leaves no dependency record behind for a later build
-to read, and publishing one would add a file the uncached build never produced.
-So the shim asks for its own dependency list, keeps it private, and keys the
-compilation on the files that list names. A cold compilation therefore has no
-key to look up yet; it is stored after compiling and warms the next build.
-A build that asks the compiler for its own list, as OpenSSL's makefiles and
-CMake do with `-MD` or `-MMD`, gets one from the shim instead, written from the
-same files whether the object was compiled or restored; the flags shape that
-list and nothing else, so they are not part of the key. The
-directories the compile searched also contribute a manifest of the names in
-them that could answer an `#include`, so a header appearing where it would
-*shadow* one that was read changes the key even though every file that was read
-is unchanged. What a manifest counts and leaves out is covered in
-[limits](/limits#shadowing-is-modeled-by-name-not-by-content).
+The C shim requests a private dependency list and keys the compilation on the
+files it names. A cold call may need to compile before that list is known;
+the stored result and prediction can serve later builds.
+
+If the build requests its own depfile with `-MD` or `-MMD`, mbx writes one on
+both a compilation and a cache hit. Depfile formatting flags affect that file
+without changing the object-cache key.
+
+The key also records include-directory names that could change which header
+an `#include` resolves to. Adding a header that shadows an existing one must
+invalidate the result even if every previously read file is unchanged. See
+[include shadowing](/limits#shadowing-is-modeled-by-name-not-by-content) for the
+manifest rules.
 
 ## Portable keys
 
@@ -80,18 +77,17 @@ prediction for later invocations. A cold compilation may therefore have no key
 to look up yet. It still gets stored after compiling and can warm the next
 build.
 
-Predictions are filed under the digest of `Cargo.lock`, so a dependency bump
-starts a new record. A build whose lockfile has no record yet borrows the one
-made for the lockfile before it, found through Git's history of the file, up to
-eight states back, and failing that the newest records in the store, which on a
-runner that restored a cache bundle are the builds that produced it. A bump
-leaves most of the graph unchanged, and those predictions still hash to results
-the cache holds; the crates the bump touched miss and are recorded afresh.
-The borrowed record is kept under the new lockfile, so the commands that
-follow, tests and lints included, start from it as well, and a trusted build
-publishes it there. A shallow clone offers only the history it fetched: a pull request checkout with
-`fetch-depth: 2` reaches its base branch's lockfile, and a `fetch-depth: 1`
-checkout relies on the store.
+Predictions are grouped by the `Cargo.lock` digest. When a dependency update
+creates a new group, mbx looks for earlier predictions in up to eight lockfile
+states from Git history, then in recent local store records. Each borrowed
+prediction is checked against the current inputs: unchanged crates can hit,
+while changed crates compile and record new predictions.
+
+mbx saves the borrowed record under the new lockfile for subsequent commands,
+and eligible trusted CI builds publish it remotely. A shallow clone limits
+which history is available. For GitHub Actions' default pull-request merge
+checkout, `fetch-depth: 2` includes the base parent; a depth-one checkout relies
+on local store records.
 
 Hashing those files is shared too. The agent keeps a ledger of every file a
 shim has hashed, keyed by the file's length, modification time, and change
@@ -143,24 +139,25 @@ memory budgets. Cache hits never wait, Cargo keeps its own dependency
 scheduling, and permits are released by the kernel if a process dies, so a
 crashed build cannot wedge its siblings.
 
-Concurrent builds also stop repeating each other. Four CI jobs building one
-commit compile the same dependency graph four times; under the scheduler, a
-compilation identical to one already running anywhere on the machine waits for
-that one to finish and restores its result from the cache. The finished
+Concurrent builds also stop repeating each other. Separate CI jobs with fresh
+targets can otherwise repeat the same dependency compilations. With mbx, a
+compilation identical to one already running against the same local cache waits
+for that one to finish and restores its result from the cache. The finished
 compilation also leaves its input list behind, so a job arriving after it is
 already done can build the cache key it would otherwise lack and hit where it
 would have compiled cold. Both paths rehash every input before trusting
 anything, so the worst a stale record can do is fall back to compiling.
 
 Permits are weighted by memory. Native links start at two permits, and every
-compilation is thereafter weighted by what it actually used, so the predicted
-memory of everything running stays inside the budget. A link that turns out to
-fit in one permit stops being charged for two, which keeps the link-heavy tail
-of a build from running at half concurrency. A link mbx has never seen is
-weighed by the heaviest of this machine's recent links; test binaries each
-have their own crate name, so a cold `cargo test --no-run` has no per-crate
-history for the links in front of it. A compilation the Linux OOM killer stops
-is recorded heavier than it measured, so its retry runs with more room.
+compilation is thereafter weighted by what it actually used, so admission uses
+the estimated memory cost of the running work. This is a scheduling estimate,
+not an operating-system memory limit. A link that turns out to fit in one permit
+stops being charged for two, which keeps the link-heavy tail of a build from
+running at half concurrency. A link mbx has never seen is weighed by the
+heaviest of this machine's recent links; test binaries each have their own crate
+name, so a cold `cargo test --no-run` has no per-crate history for the links in
+front of it. A compilation the Linux OOM killer stops is recorded heavier than
+it measured, so its retry runs with more room.
 
 The pool size, memory budget, and priority are settings; see
 [machine-wide compile scheduling](/scheduling#machine-wide-compile-scheduling).

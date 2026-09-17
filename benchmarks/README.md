@@ -80,5 +80,7 @@ tool fastest only when its lead exceeds either tool's range. See the
 [benchmark guide](../docs/benchmarks.md) for scenario definitions and limits.
 
 The [refresh workflow](../.github/workflows/bench-refresh.yml) checks weekly,
-reruns when the published results predate mbx on `main`, and opens a pull
-request with updated data. Do not hand-edit timings to match an expected result.
+reruns when the recorded mbx version differs from the latest release, measures
+that release, and opens a pull request with updated data. Manual source runs
+produce reports without proposing a published update. Do not hand-edit timings
+to match an expected result.

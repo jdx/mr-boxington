@@ -12,7 +12,7 @@ and machine budget.
 ## Put editor checks through mbx
 
 The native mise Rust option wraps Cargo but does not configure rust-analyzer.
-Run setup once in the same scope in which mbx is installed:
+Run setup to add the editor integration:
 
 ```sh
 mbx setup
@@ -22,8 +22,9 @@ mbx setup --status
 Setup gives rust-analyzer's background check an absolute path to mbx's stable
 Cargo shim. That matters for editors launched from a desktop icon: they often
 do not inherit the shell activation that puts mise's Cargo wrapper on `PATH`.
-The override lands in rust-analyzer's user configuration file, the only place
-rust-analyzer reads check settings from, so one run covers every workspace.
+The override lands in rust-analyzer's user configuration file, so one run
+covers every workspace. Project-level `rust-analyzer.toml` files do not apply
+this override to the editor's Cargo process.
 Restart the editor after setup so rust-analyzer reloads its configuration.
 
 Setup leaves an existing rust-analyzer check configuration untouched. If

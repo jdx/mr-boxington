@@ -120,12 +120,12 @@ for complete workflows, parallel builds, remote servers, and release policy.
 
 ```sh
 mbx doctor          # check tools, setup, and cache access
-mbx tui             # watch builds across the machine
+mbx tui            # watch builds using this cache
 mbx stats           # report lifetime savings and workspace sharing
 mbx explain --last  # explain the last recorded build
 mbx cache stats     # inspect storage
 mbx gc --dry-run    # preview collection
-mbx clean           # remove this workspace's managed target
+mbx clean          # remove this workspace's managed target
 ```
 
 On a filesystem that supports reflinks, restored outputs share data blocks

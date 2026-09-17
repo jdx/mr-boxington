@@ -29,29 +29,24 @@ response variant against `tests/fixtures/agent-protocol-v9.jsonl`. Its exhaustiv
 matches make a newly added variant fail to compile until the fixture and the
 protocol-version decision are reviewed together.
 
-Agent protocol v2 adds compiler-duration accounting to hits and real compiler
-invocations. v3 adds the crate name to a recorded hit plus `begin_task` and
-`commit_task`, allowing an embedded Cargo shim to create one prediction manifest
-for each real Cargo invocation. v4 adds `record_warning`, which is how a shim
-reports a diagnostic: a C or C++ shim stands in for a compiler whose stderr its
-caller reads as an answer, so it cannot write there itself, and the agent
-prints each distinct message once from the process that owns the build. v5 adds
-`find_file_digests` and `record_file_digests`, which let a shim reuse the
-digest of a file the session already read in full instead of rehashing it. v6
-adds `join_action_promise` and `complete_action_promise`, carrying the local
-shim's invocation identity and the server lease or completed prediction needed
-for fleet-wide in-flight deduplication. v7 adds `resolve_file_digests`, which
-has the agent read a ledger miss once and hand the digest to every shim that
-asked for it at the same time. v8 adds `pins` to `store_executable_identity`:
-the files a probe read, as they were when it read them, whose presence, length
-and modification time let the agent keep a compiler or linker identity across
-sessions instead of probing it in every build. The client and agent still require exact
-protocol and application-version equality, including when different
-applications ship them.
+### Local protocol history
 
-Agent protocol v9 adds `record_debug` and `debug_recorded`. Routine shim logs
-carry their original module target and are filtered by the session logger.
-They do not consume the warning/error diagnostic allowance.
+Every revision still requires exact protocol and application-version equality,
+including when different applications embed the client and agent.
+
+| Version | Addition |
+| --- | --- |
+| v2 | Compiler-duration accounting for hits and real compilations |
+| v3 | Crate names on hits; `begin_task` and `commit_task` for per-command manifests |
+| v4 | `record_warning` forwards shim diagnostics for the agent to print once |
+| v5 | `find_file_digests` and `record_file_digests` share hashes within a session |
+| v6 | `join_action_promise` and `complete_action_promise` coordinate remote compilations |
+| v7 | `resolve_file_digests` coalesces simultaneous hashing requests |
+| v8 | `pins` on `store_executable_identity` validate cached compiler and linker probes |
+| v9 | `record_debug` and `debug_recorded` forward routine shim logs to the session logger |
+
+Routine debug logs retain their module target and do not consume the
+warning/error diagnostic allowance.
 
 ## Remote cache protocol
 
@@ -62,8 +57,8 @@ storage, and adapter execution remain implementation details of their
 respective packages.
 
 Remote cache endpoints live below `/v{PROTOCOL_VERSION}/` and every request
-carries `mbx-cache-protocol` and `mbx-cache-namespace` headers. The v1 baseline
-uses these resources:
+carries `mbx-cache-protocol` and `mbx-cache-namespace` headers. The v1 protocol
+defines these resources; extensions require the capabilities described below:
 
 | Operation | Method and path | Representation |
 | --- | --- | --- |
@@ -131,9 +126,10 @@ subcrates remain on `0.x`, so their APIs may change in a minor release and CI
 does not currently enforce API compatibility. Wire format changes still require
 the protocol-version steps above.
 
-A breaking API change is declared, not numbered by hand: the commit carries
-`feat!:` or a `BREAKING CHANGE:` footer, and release-plz uses it to choose the
-version when it opens the release PR.
+Release-plz chooses version bumps from conventional commits. Declare breaking
+API changes with `!` and a `BREAKING CHANGE:` footer, and isolate pre-1.0
+subcrate breaks from changes to `mbx`: breaking markers apply to every crate
+touched by a commit, regardless of its scope.
 [RELEASING.md](https://github.com/jdx/mr-boxington/blob/main/RELEASING.md)
 covers what that means for contributors.
 

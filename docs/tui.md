@@ -3,8 +3,8 @@ description: Watch live cache activity, inspect completed sessions, and read a p
 ---
 # Watching builds
 
-`mbx tui` shows what every build on this machine is doing to the cache, as it
-happens.
+`mbx tui` shows live and recent builds using the same local cache. Open it in
+a second terminal while a build runs:
 
 ```sh
 mbx tui
@@ -15,8 +15,7 @@ mbx tui
 *Live, with example build data. Open any screenshot at full size to read the details.*
 
 `mbx tui` shows one row per compilation, with its crate name and cache outcome.
-Open it in a second terminal while your normal build continues. For the
-end-of-build summary, see [Cache results](/cache-results).
+For the end-of-build summary, see [Cache results](/cache-results).
 
 The TUI reads local session files; it does not need a daemon or cache server. Each build appends
 its decisions to a stream under the cache, and the dashboard reads those
@@ -27,9 +26,8 @@ opened it, and any number of builds at once.
 
 **Live** lists recorded builds and, for the selected one, the
 compilations as they are decided. Outcomes are colored: green for a hit, red for
-a miss, grey for a compilation no lookup was possible for, yellow for one mbx
-bypassed, cyan for a shadow verification that matched, and magenta for one that
-diverged.
+a miss, grey when no lookup was possible, yellow for a bypass, cyan for a successful
+verification, and magenta for a verification mismatch.
 
 The selected build stays visible as you move through the list. The activity
 panel follows the newest compilations by default. Use `Page Up` and `Page Down`
@@ -175,8 +173,8 @@ mbx build                           finished        0      0            3       
 Recording is on by default. A build appends one short line per compilation
 directly to its stream, with no buffering, so the dashboard is live. The cost
 is one small append against a compilation measured in milliseconds. Turn it
-off with `events = false`, or `MBX_EVENTS=0`, and a build records nothing and
-leaves nothing behind.
+off with `events = false` or `MBX_EVENTS=0` to disable session event recording.
+Cache entries and other build state are still stored.
 
 Streams live beside the rest of the store's bookkeeping:
 
@@ -191,9 +189,10 @@ system releases the lock with the process either way.
 
 Collection bounds them without any configuration: a stream is dropped once it is
 a week old or once it is not among the newest 256, and a single build stops
-adding rows after 16 MiB, though its totals are still recorded. A stream a build
-is still writing is never collected. `mbx gc --dry-run` reports what it would
-drop alongside everything else.
+adding rows after 16 MiB by default, though its totals are still recorded.
+Change that cap with [`events_max_size`](/configuration#events-max-size). A
+stream a build is still writing is never collected. `mbx gc --dry-run` reports
+what it would drop alongside everything else.
 
 Session history does not affect cache keys or count against the action-store
 size budget. Deleting finished session files removes their rows from the TUI

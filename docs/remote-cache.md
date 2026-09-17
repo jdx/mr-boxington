@@ -8,10 +8,10 @@ actions a build needs. The local content-addressed store remains the working
 cache; remote objects are downloaded into it and newly completed actions may be
 uploaded from trusted CI.
 
-mbx reaches a remote in one of two ways. A **cache server** speaks the mbx
-protocol and answers with the extensions built on top of it. An
-**S3-compatible bucket** stores the same objects with nothing to run. The URL's
-scheme chooses the backend.
+Choose a **cache server** for server-side authorization and optional batch
+transfers, compression, and compilation deduplication. Choose an
+**S3-compatible bucket** to use object storage directly. The URL scheme
+selects the backend.
 
 | Backend | Use it when | Credentials |
 | --- | --- | --- |
@@ -36,6 +36,20 @@ mode = "read-write"
 The namespace isolates one project's cache from another. It is required when a
 remote URL is set. To host your own server, see [cache server](/cache-server).
 
+## Authenticate
+
+For a cache server, choose one authentication method:
+
+- `MBX_REMOTE_TOKEN` for a bearer token.
+- `MBX_REMOTE_TOKEN_FILE` for a file containing the token.
+- `MBX_REMOTE_OIDC_AUDIENCE` for CI-issued OIDC credentials.
+
+Avoid long-lived secrets in pull request workflows. On GitHub Actions, OIDC
+requires `id-token: write` permission.
+
+These settings are specific to cache servers. For an `s3://` URL, use the
+[AWS credential variables](#configure-an-s3-compatible-bucket) instead.
+
 ## Configure an S3-compatible bucket
 
 ```toml
@@ -50,13 +64,12 @@ Credentials come from the standard AWS environment variables:
 temporary credentials. `MBX_REMOTE_S3_REGION` names the signing region, falling
 back to `AWS_REGION` or `AWS_DEFAULT_REGION`.
 
-Anything that mints temporary credentials must export them there first. On
-GitHub Actions that is
-[`aws-actions/configure-aws-credentials`](https://github.com/aws-actions/configure-aws-credentials),
-which exchanges the runner's OIDC token for a role, so no long-lived secret has
-to exist. mbx does not read other credential sources: EKS IRSA, EC2 and ECS
-instance roles, `~/.aws/config` profiles, and SSO all work once their
-credentials are exported as those variables.
+Export temporary credentials into those variables before starting mbx. On GitHub
+Actions,
+[`aws-actions/configure-aws-credentials`](https://github.com/aws-actions/configure-aws-credentials)
+can exchange the runner's OIDC token for temporary role credentials. mbx does
+not directly read EKS IRSA, EC2 or ECS instance roles, `~/.aws/config` profiles,
+or SSO sessions; export their credentials first.
 
 The URL may carry a prefix, as `s3://acme-build-cache/teams/backend`, to share
 one bucket between projects. Keys are laid out under
@@ -87,7 +100,7 @@ s3_endpoint = "https://<account>.r2.cloudflarestorage.com"
 s3_region = "auto"
 ```
 
-MinIO is the same with its own endpoint. `http://` is refused for anything but
+For MinIO, use its endpoint and signing region. `http://` is refused for anything but
 a loopback address, since a signature and the objects it fetches are readable
 in transit without TLS.
 
@@ -105,13 +118,14 @@ them against S3 and falls back to per-object requests, the same requests it
 makes against a server without the extensions. Expect more requests for the
 same build, and no compression on the wire.
 
-The one record mbx updates in place is the task action manifest that drives
-[prefetch](#prefetch), and it needs conditional writes. AWS S3, R2, and current
-MinIO all implement them. Against a store that does not, mbx says so once and
-continues without them. Blobs and action results are content-addressed, so
-writing one twice is harmless, but concurrent manifest updates can then lose
-each other's predictions, which costs prefetch coverage on later builds.
-`MBX_REMOTE_S3_CONDITIONAL_WRITES=required` refuses such a store instead.
+The task action manifest that drives [prefetch](#prefetch) is updated in place.
+Conditional writes prevent concurrent updates from overwriting one another. AWS
+S3, R2, and current MinIO all implement them. Against a store that does not, mbx
+says so once and continues without them. Blobs and action results are
+content-addressed, so writing one twice is harmless, but concurrent manifest
+updates can then lose each other's predictions, which costs prefetch coverage on
+later builds. `MBX_REMOTE_S3_CONDITIONAL_WRITES=required` refuses such a store
+instead.
 
 ### Who may publish
 
@@ -119,26 +133,12 @@ A cache server enforces namespace grants; a bucket enforces its object-storage
 permissions. Whatever a bucket credential can write is within reach of code
 holding that credential. The client-side [write
 policy](#read-and-write-policy) still applies, so pull requests never publish,
-but with a bucket that policy is the only thing between an untrusted build and
-your cache unless IAM agrees.
+but code holding a write credential can bypass mbx and write to the bucket
+directly. Enforce the same restriction in your storage permissions.
 
 Scope the write credential to the builds you trust. On GitHub Actions, restrict
 the role's trust policy to the branches that may assume it, and give pull
 request jobs a read-only role.
-
-## Authenticate
-
-For a cache server, use one of:
-
-- `MBX_REMOTE_TOKEN` for a bearer token.
-- `MBX_REMOTE_TOKEN_FILE` for a file containing the token.
-- `MBX_REMOTE_OIDC_AUDIENCE` for CI-issued OIDC credentials.
-
-Avoid long-lived secrets in pull request workflows. On GitHub Actions, OIDC
-requires `id-token: write` permission.
-
-These authenticate to a server and are refused alongside an `s3://` URL, which
-authenticates with AWS credentials instead.
 
 ## Read and write policy
 
@@ -154,25 +154,9 @@ This policy prevents untrusted code from publishing objects that later builds
 would trust. The server should still authenticate and authorize requests; the
 client-side policy is not an access-control boundary.
 
-### In-flight deduplication
-
-When a cache server advertises action promises, read-write runners atomically
-claim a cold compiler invocation before starting it. One runner compiles and
-publishes the result; other runners wait for its promise, rebuild the final
-action key from the promised input prediction, verify every input, and restore
-the published result. The prediction is only fulfilled after the action result
-and all referenced blobs are remotely durable.
-
-Claims are keyed by the pre-discovery invocation digest because a cold runner
-does not yet know the compiler-discovered inputs in the final action key. They
-are leases: a runner that dies or cannot publish leaves no durable cache record,
-and the server expires its claim so another runner can compile. Any endpoint
-error, unsupported server, read-only policy, or expired client wait degrades to
-an ordinary compilation. Read-only runners never acquire claims.
-
 ## GitLab CI
 
-The write policy recognizes GitLab CI with the same shape as GitHub Actions: a
+GitLab CI follows the same write policy as GitHub Actions: a
 push pipeline on a protected branch may write, merge requests and unprotected
 branches are read-only, and tag pipelines cannot publish to the remote.
 
@@ -211,26 +195,43 @@ what it pulled:
 prefetched 161 actions; 214.8 MiB downloaded and 214.8 MiB stored locally
 ```
 
-A workspace and command nobody has published a manifest for print
-`no recorded actions for this workspace and Cargo command` and exit
-successfully. There was nothing to fetch, which is normal for a first build.
-A lockfile that has not been built yet borrows the manifest of the lockfile
-before it in Git history, so a dependency bump still prefetches the unchanged
-part of the graph. A shallow checkout needs that history fetched: on GitHub
-Actions, `fetch-depth: 2` lets a pull request build reach its base branch.
-A lookup that fails, such as an unreachable host or refused credentials, is an
-error, so CI can tell an empty cache from a broken one. A typical place for the
-command is a runner or devcontainer image's start-up hook, so the store is
-warm before anyone builds.
+If no manifest has been published for the workspace and command, mbx prints
+`no recorded actions for this workspace and Cargo command` and exits
+successfully. There was nothing to fetch, which is normal for a first build. A
+lockfile that has not been built yet borrows the manifest of the lockfile before
+it in Git history, so a dependency bump still prefetches the unchanged part of
+the graph. A shallow checkout needs that history fetched. For GitHub Actions
+builds of the default pull-request merge commit, `fetch-depth: 2` includes its
+base parent; builds of a PR head or another ref may need more history. A lookup
+that fails, such as an unreachable host or refused credentials, is an error, so
+CI can tell an empty cache from a broken one. A typical place for the command is
+a runner or devcontainer image's start-up hook, so the store is warm before
+anyone builds.
+
+## In-flight deduplication
+
+When a cache server advertises action promises, read-write runners atomically
+claim a cold compiler invocation before starting it. One runner compiles and
+publishes the result; other runners wait for its promise, rebuild the final
+action key from the promised input prediction, verify every input, and restore
+the published result. The prediction is only fulfilled after the action result
+and all referenced blobs are remotely durable.
+
+Claims are keyed by the pre-discovery invocation digest because a cold runner
+does not yet know the compiler-discovered inputs in the final action key. They
+are leases: a runner that dies or cannot publish leaves no durable cache record,
+and the server expires its claim so another runner can compile. Any endpoint
+error, unsupported server, read-only policy, or expired client wait degrades to
+an ordinary compilation. Read-only runners never acquire claims.
 
 ## Deferred publication
 
 Uploads are not on the critical path of the build that produced them. They are
-queued while the build continues and drained before the session exits. An
-action result is published only after every blob it references, so a reader
-never fetches a result whose outputs it cannot restore. A command killed part
-way through publishes less than it stored; the next build recomputes what never
-landed.
+queued while the build continues and drained before the session exits. An action
+result is published only after every blob it references, so a reader never
+fetches a result whose outputs it cannot restore. A command killed before the
+queue drains may leave some results only in the local store. Other machines must
+compile work that was not uploaded.
 
 A failed upload is reported, counted in `remote_failures`, and recovered from;
 the build keeps its local result either way. The session summary reports what
@@ -247,10 +248,10 @@ mbx[cache]: uploads: 143 published (118 of them in 2 packs), 0 not published; 41
 
 ## Batched lookups
 
-A prefetch knows every action it wants before it asks for any of them, so where
-the server offers batched lookups it asks for them together instead of once per
-action. `remote_action_lookups` counts requests, not actions, so the same build
-reports far fewer of them against a server with the extension.
+Prefetch requests known actions together when the server supports batched
+lookups, reducing the number of HTTP requests. `remote_action_lookups` counts
+requests, not actions, so the same build reports far fewer of them against a
+server with the extension.
 
 Batch lookups and packed uploads are negotiated. A server without them, or one that advertises an
 endpoint it does not serve, gets the single-object requests every version of mbx
@@ -271,10 +272,8 @@ and object count it asks for, since the configured value describes a single
 blob. Raise it if a slow link makes large artifacts run out of time before
 their retries are spent.
 
-That deadline bounds one download, not a build. An unhealthy server charges it
-again for every object, so `MBX_HTTP_READ_STALL_BUDGET` bounds the sum: once a
-session has lost that much wall clock to reads that failed, it stops reading and
-compiles instead. Reads are best effort — a miss costs a local compile, while a
-stall costs the whole job — so this trades a cold build for a bounded one. Only
-failed reads count against it; a slow read that returned an object paid for
-itself. Set it to `0` to keep reading however long the remote takes to fail.
+The download deadline applies per object. `MBX_HTTP_READ_STALL_BUDGET` limits
+the cumulative time spent on failed reads in a session. Once that budget is
+exhausted, mbx stops remote reads and compiles locally. Successful reads do not
+count against the budget, even when slow. Set it to `0` to disable this
+session-wide limit while retaining the per-download deadline.

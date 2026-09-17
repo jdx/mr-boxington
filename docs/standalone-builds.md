@@ -70,7 +70,9 @@ real compiler without using the cache.
 ## What gets cached
 
 mbx caches ordinary gcc-, clang-, and MSVC-style compile commands that compile
-one C or C++ source file into an object. It does not cache links,
+one C or C++ source file into an object. It also caches GCC/Clang preprocessing
+to a file (`-E ... -o file`), using checkout-specific keys to preserve literal
+paths in the output. It does not cache links,
 multi-source compiler calls, or commands whose behavior it cannot model
 safely. Those commands still run normally; the session summary counts their
 bypasses, and `MBX_SUMMARY=full` reports the grouped reasons.

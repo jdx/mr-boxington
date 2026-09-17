@@ -3,13 +3,6 @@ description: Find configuration files, understand precedence, and look up every 
 ---
 # Configuration
 
-Managed Cargo builds require a successful metadata probe so mbx can verify build
-storage before launching compilation. If probing fails, mbx reports an error
-instead of guessing output paths or silently launching through the Cargo shim.
-Run `cargo metadata --no-deps --format-version 1` with the same manifest and
-configuration options to diagnose the failure. Help, cleanup, and explicitly
-disabled shim invocations retain their passthrough behavior.
-
 Defaults work without a configuration file. Add only the values you want to
 change. mbx reads configuration from three places; the first value found wins:
 
@@ -41,6 +34,9 @@ can set `$env:NAME` before the command and remove it afterward.
 
 ## Local build storage
 
+Keep the working cache and build outputs on local storage. Remote caches are
+configured separately under `[remote]`.
+
 On Linux and macOS, mbx rejects NFS-backed working caches and Cargo output
 storage before starting a build. Set `cache_dir` (`MBX_CACHE_DIR`) and, when
 configured separately, `target.root` (`MBX_TARGET_ROOT`) to local storage.
@@ -58,7 +54,8 @@ Other platforms do not currently enforce this filesystem check.
 Help, cache inspection, and cleanup commands remain available with the old
 configuration so you can inspect or remove previous NFS storage. Changing the
 configuration does not copy the cache to the new disk; expect a cold cache.
-Existing managed targets follow the normal [target relocation rules](/managed-targets).
+See [changing target placement](/managed-targets#change-target-placement) before
+moving managed targets to another disk.
 
 ## Disk-scaled defaults
 
@@ -70,14 +67,14 @@ learned incremental state are also collected after 30 days unused. The table in
 [managed target directories](/managed-targets#budgets-scale-with-the-disk)
 lists the bounds and what collection removes.
 
-Setting any of them outright overrides the scaling; `"none"` disables
+Setting an explicit budget overrides the scaling; `"none"` disables
 `target.max_size`, `target.max_age`, `gc.incremental_max_size`,
 `gc.incremental_max_age`, and `gc.max_total_size`.
 
 ## Example
 
 This example shows several available controls, not a recommended configuration.
-Copy the sections you need into your global configuration file. Remote settings
+Copy only the settings you need into your global configuration file. Remote settings
 and machine-specific paths do not belong in a checked-in `.mbx.toml`.
 
 <details>
@@ -213,7 +210,7 @@ between a shared budget and Cargo's per-build `-j` limit.
 ## Verify mode
 
 `MBX_VERIFY=1` compiles and consults the cache side by side and compares the
-results. It is expensive; use it to qualify correctness, not for everyday
+results. It is expensive; use it to investigate correctness, not for everyday
 builds.
 
 For routine checks, set `MBX_VERIFY_SAMPLE_RATE=5` (or `verify_sample_rate = 5`)
@@ -263,18 +260,15 @@ Investigate remaining divergences rather than treating every cross-worktree
 mismatch as harmless. Please report unexplained differences, including the
 identified unit and action.
 
-This is how to qualify a setting whose tier you want to check against your
-own workload, such as
-[native link caching](/limits#native-linking-is-cached-only-where-the-linker-can-be-described),
-before relying on it.
+Use verification to check a caching feature against your own workload, including
+[native link caching](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
 
 ## The savings line
 
 `savings` controls the one-line report of accumulated savings after a build
-(`MBX_SAVINGS` from the environment). `quips`, the default, draws the line
-from a pool of dry one-liners. `plain` states the same facts in the register
-of the other `mbx[...]` lines. `off` keeps the totals without printing
-anything.
+(`MBX_SAVINGS` from the environment). `quips`, the default, draws the line from
+a pool of dry one-liners. `plain` reports the same figures without a quip. `off`
+keeps the totals without printing anything.
 
 ## Build summaries
 
@@ -289,10 +283,10 @@ artifacts Cargo reused directly and archives restored or saved by a CI action.
 Compiler time avoided is summed across compilations, not elapsed job time saved.
 CI also skips the first-build notice about local cache management.
 
-Set a fixed style to override automatic selection. `full` prints the detailed timing, compiler, bypass, transfer,
-and materialization breakdown. `off` prints no cache summary, while still
-writing `MBX_STATS_REPORT` when configured. Cargo's `-q` and `--quiet` also
-suppress the summary for that invocation.
+Set a fixed style to override automatic selection. `full` prints detailed
+timing, compiler, bypass, transfer, and output-restoration figures. `off` prints
+no cache summary, while still writing `MBX_STATS_REPORT` when configured.
+Cargo's `-q` and `--quiet` also suppress the summary for that invocation.
 
 ## Incremental builds
 
