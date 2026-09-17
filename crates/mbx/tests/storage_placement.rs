@@ -348,6 +348,62 @@ fn an_aliased_path_install_is_still_checked() {
     }
 }
 
+/// An alias the first probe could not read still names a package, so asking
+/// again as Cargo will expand it recovers that package's roots and the build
+/// is managed rather than refused. The roots are the expansion's; the child
+/// keeps the command line as typed, because Cargo expands the alias itself.
+#[test]
+fn an_aliased_path_install_recovers_its_roots() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let bin = fixture.root.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let cargo = bin.join("cargo");
+    std::fs::write(&cargo, "#!/bin/sh\ncase \" $* \" in\n  *' metadata '*)\n    [ \"$(pwd)\" = \"$TEST_PACKAGE\" ] || exit 1\n    build=\n    [ -n \"$CARGO_BUILD_BUILD_DIR\" ] && build=\",\\\"build_directory\\\":\\\"$CARGO_BUILD_BUILD_DIR\\\"\"\n    printf '{\"workspace_root\":\"%s\",\"target_directory\":\"%s/target\"%s}\\n' \"$TEST_PACKAGE\" \"$TEST_PACKAGE\" \"$build\"\n    exit 0;;\n  *' --list '*) printf 'Installed Commands:\\n    i    alias: install --path %s\\n    install    Install a Rust binary\\n' \"$TEST_PACKAGE\"; exit 0;;\nesac\ntouch \"$TEST_INSTALL_MARKER\"\n").unwrap();
+    std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let outside = fixture.root.join("outside-recovery");
+    std::fs::create_dir(&outside).unwrap();
+    for shim in [false, true] {
+        for nfs in [false, true] {
+            let marker = fixture.root.join(format!("recovered-{shim}-{nfs}"));
+            let mut command = fixture.command();
+            let inherited_path = std::env::var_os("PATH").unwrap();
+            let paths = std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited_path));
+            command
+                .arg("i")
+                .current_dir(&outside)
+                .env("PATH", std::env::join_paths(paths).unwrap())
+                .env("CARGO", &cargo)
+                .env("TEST_PACKAGE", &fixture.project)
+                .env("TEST_INSTALL_MARKER", &marker);
+            if shim {
+                command.env("MBX_CARGO_SHIM_MODE", "1");
+            }
+            if nfs {
+                command.env("CARGO_BUILD_BUILD_DIR", fixture.nfs.join("intermediates"));
+            }
+            let output = command.output().unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Whichever way it goes, the roots were read: the metadata failure
+            // this used to report is gone.
+            assert!(
+                !stderr.contains("could not verify Cargo build storage"),
+                "shim={shim} nfs={nfs}: {stderr}"
+            );
+            if nfs {
+                // Storage the recovered roots name is checked like any other,
+                // which is the point of recovering them.
+                assert!(!output.status.success(), "shim={shim}: {stderr}");
+                assert!(stderr.contains("is on NFS"), "shim={shim}: {stderr}");
+                assert!(!marker.exists(), "shim={shim}: {stderr}");
+            } else {
+                assert!(output.status.success(), "shim={shim}: {stderr}");
+                assert!(marker.exists(), "shim={shim}: {stderr}");
+            }
+        }
+    }
+}
+
 /// A colored `cargo --list` must not cost an alias its passthrough. Cargo
 /// colors the listing whenever `CARGO_TERM_COLOR` or `term.color` says
 /// `always`, and the parser reads the listing as plain text, so both the

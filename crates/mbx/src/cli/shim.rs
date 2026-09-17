@@ -93,17 +93,16 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
             "MBX_CACHE_DIR",
         )?;
     }
-    let Some(roots) = cargo_roots(
-        &real_cargo,
-        &string_arguments,
-        std::env::var_os(CARGO_TARGET_DIR_ENV).as_deref(),
-    ) else {
-        if metadata_failure_passthrough(&real_cargo, &arguments) {
-            return run_real_cargo(&real_cargo, &arguments);
-        }
-        eyre::bail!(
-            "could not verify Cargo build storage: metadata probing failed; run cargo metadata --no-deps --format-version 1 with the same manifest and configuration options to diagnose it"
-        );
+    let target_dir_env = std::env::var_os(CARGO_TARGET_DIR_ENV);
+    let roots = match cargo_roots(&real_cargo, &string_arguments, target_dir_env.as_deref()) {
+        Some(roots) => roots,
+        None => match failed_probe(&real_cargo, &arguments, target_dir_env.as_deref()) {
+            FailedProbe::Roots(roots) => *roots,
+            FailedProbe::Passthrough => return run_real_cargo(&real_cargo, &arguments),
+            FailedProbe::Reject => eyre::bail!(
+                "could not verify Cargo build storage: metadata probing failed; run cargo metadata --no-deps --format-version 1 with the same manifest and configuration options to diagnose it"
+            ),
+        },
     };
     // Every probe and the final child must name Cargo directly.
     unsafe { std::env::set_var("CARGO", &real_cargo) };
@@ -319,11 +318,7 @@ fn resolve_invocation(cargo: &OsStr, arguments: &[OsString]) -> Option<Invocatio
         };
         let expansion = alias.split_whitespace().collect::<Vec<_>>();
         let next = expansion.first().copied()?;
-        paths_certain &= !expansion.iter().any(|word| {
-            matches!(*word, "--path" | "--manifest-path")
-                || word.starts_with("--path=")
-                || word.starts_with("--manifest-path=")
-        });
+        paths_certain &= path_words_intact(&expansion);
         // Substitute the expansion for the alias and keep the rest of the
         // command line. The expanded name alone would hide a `--path` from
         // either place it can appear: the alias body, or the arguments after
@@ -353,6 +348,34 @@ fn resolve_invocation(cargo: &OsStr, arguments: &[OsString]) -> Option<Invocatio
     None
 }
 
+/// Whether an expansion's path arguments survived the listing intact.
+///
+/// `cargo --list` prints an alias body space-joined, so a value holding a
+/// space arrives as several words and names some prefix of the real path. The
+/// split shows itself in the word following the value: an alias's remaining
+/// arguments are flags, and `install` takes no positional package beside
+/// `--path`, so a bare word there is the tail of a value this cannot put back
+/// together.
+fn path_words_intact(words: &[&str]) -> bool {
+    let mut index = 0;
+    while index < words.len() {
+        let word = words[index];
+        let after = if matches!(word, "--path" | "--manifest-path") {
+            index + 2
+        } else if word.starts_with("--path=") || word.starts_with("--manifest-path=") {
+            index + 1
+        } else {
+            index += 1;
+            continue;
+        };
+        if words.get(after).is_some_and(|word| !word.starts_with('-')) {
+            return false;
+        }
+        index = after;
+    }
+    true
+}
+
 fn is_build_command(command: &str) -> bool {
     matches!(
         command,
@@ -374,22 +397,57 @@ fn is_build_command(command: &str) -> bool {
     )
 }
 
-/// Preserve invocations outside a project, non-build aliases, and
-/// unknown-command diagnostics without allowing failed metadata to launch a
-/// build alias or an external Cargo command inside one.
-pub(super) fn metadata_failure_passthrough(cargo: &OsStr, arguments: &[OsString]) -> bool {
-    // A single-file `-Zscript` package compiles without a manifest, so absent
-    // manifests cannot speak for these the way they do for everything else.
-    if arguments
-        .iter()
-        .any(|arg| arg.to_string_lossy().starts_with("-Z"))
-    {
-        return false;
-    }
+/// What to do with an invocation whose roots probe failed.
+pub(super) enum FailedProbe {
+    /// Roots recovered from the expanded invocation: manage the build.
+    Roots(Box<super::cargo::Roots>),
+    /// Hand the invocation to Cargo as it was typed.
+    Passthrough,
+    /// Refuse it: the build storage cannot be verified.
+    Reject,
+}
+
+/// Decide what a failed roots probe leaves the caller able to do.
+///
+/// The listing this reads is one Cargo process, so the whole decision is made
+/// here rather than once per question.
+pub(super) fn failed_probe(
+    cargo: &OsStr,
+    arguments: &[OsString],
+    target_dir_env: Option<&OsStr>,
+) -> FailedProbe {
     // An alias can name a manifest that the command line does not, so expand
     // it before reading the invocation: `i = "install --path /project"`
     // compiles a local package from a directory that has none of its own.
-    let Some(invocation) = resolve_invocation(cargo, arguments) else {
+    let invocation = resolve_invocation(cargo, arguments);
+    // The first probe asked about the alias's own name and got nothing back.
+    // Ask again as Cargo will read it: the roots belong to the package the
+    // expansion names, though the child still receives the command line as it
+    // was typed, since Cargo expands the alias itself.
+    if let Some(resolved) = &invocation
+        && resolved.paths_certain
+        && resolved.arguments != arguments
+        && let Ok(expanded) = super::strings(&resolved.arguments)
+        && let Some(roots) = super::cargo::cargo_roots(cargo, &expanded, target_dir_env)
+    {
+        return FailedProbe::Roots(Box::new(roots));
+    }
+    // A single-file `-Zscript` package compiles without a manifest, so absent
+    // manifests cannot speak for these the way they do for everything else.
+    let scripted = arguments
+        .iter()
+        .any(|arg| arg.to_string_lossy().starts_with("-Z"));
+    if !scripted && metadata_failure_passthrough(invocation.as_ref()) {
+        return FailedProbe::Passthrough;
+    }
+    FailedProbe::Reject
+}
+
+/// Preserve invocations outside a project, non-build aliases, and
+/// unknown-command diagnostics without allowing failed metadata to launch a
+/// build alias or an external Cargo command inside one.
+fn metadata_failure_passthrough(invocation: Option<&Invocation>) -> bool {
+    let Some(invocation) = invocation else {
         return false;
     };
     // No manifest where Cargo looks for one means no package to build and no

@@ -104,19 +104,25 @@ fn cargo_with_settings_bypass_log_and_roots(
     let working_dir = std::env::current_dir()?;
     let roots = match roots {
         Some(roots) => roots,
-        None => match cargo_roots(
-            &cargo,
-            arguments,
-            std::env::var_os(CARGO_TARGET_DIR_ENV).as_deref(),
-        ) {
-            Some(roots) => roots,
-            None if super::shim::metadata_failure_passthrough(&cargo, &os_arguments) => {
-                return run_cargo(&cargo, arguments, BTreeMap::new());
+        None => {
+            let target_dir_env = std::env::var_os(CARGO_TARGET_DIR_ENV);
+            match cargo_roots(&cargo, arguments, target_dir_env.as_deref()) {
+                Some(roots) => roots,
+                None => match super::shim::failed_probe(
+                    &cargo,
+                    &os_arguments,
+                    target_dir_env.as_deref(),
+                ) {
+                    super::shim::FailedProbe::Roots(roots) => *roots,
+                    super::shim::FailedProbe::Passthrough => {
+                        return run_cargo(&cargo, arguments, BTreeMap::new());
+                    }
+                    super::shim::FailedProbe::Reject => eyre::bail!(
+                        "could not verify Cargo build storage: metadata probing failed; run cargo metadata --no-deps --format-version 1 with the same manifest and configuration options to diagnose it"
+                    ),
+                },
             }
-            None => eyre::bail!(
-                "could not verify Cargo build storage: metadata probing failed; run cargo metadata --no-deps --format-version 1 with the same manifest and configuration options to diagnose it"
-            ),
-        },
+        }
     };
     let mut config = config.clone();
     config.apply_workspace_policy(&roots.workspace_root)?;
