@@ -29,7 +29,7 @@ impl Write for Stderr {
 /// library quiet by default so its copy of the message does not reach a user
 /// whose build then succeeds. `MBX_LOG` replaces this filter outright, so
 /// `MBX_LOG=debug` still shows the reason the view stood down.
-const DEFAULT_FILTER: &str = "info,portable_pty=off";
+pub(crate) const DEFAULT_FILTER: &str = "info,portable_pty=off";
 
 /// Initialize the command logger while retaining its existing filter settings.
 pub fn init() {

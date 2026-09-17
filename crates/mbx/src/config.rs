@@ -208,8 +208,15 @@ pub(crate) struct RawConfig {
     /// Append the full reason for every bypassed compilation to this path.
     #[usage(key = "bypass_log", env = "MBX_BYPASS_LOG", scope = "env")]
     _bypass_log: Option<PathBuf>,
-    /// Log filter for mbx's own diagnostics, such as `debug` or `mbx=trace`.
-    #[usage(key = "log", env = "MBX_LOG", default = "info", scope = "env")]
+    /// Log filter for mbx's diagnostics, such as `debug` or `mbx=trace`. The
+    /// default keeps the pty library behind the inline build view quiet,
+    /// because mbx falls back to plain Cargo when that view cannot start.
+    #[usage(
+        key = "log",
+        env = "MBX_LOG",
+        default = "info,portable_pty=off",
+        scope = "env"
+    )]
     _log: String,
     #[usage(flatten)]
     remote: RawRemote,
@@ -2176,5 +2183,7 @@ default = "rust-lld"
         assert!(spec.contains("10% of the cache disk"));
         assert!(spec.contains(r#"env "MBX_SAVINGS""#));
         assert!(spec.contains(r#"default="quips""#));
+        // The declared log default is the filter the logger actually installs.
+        assert!(spec.contains(&format!(r#"default="{}""#, crate::logging::DEFAULT_FILTER)));
     }
 }

@@ -218,11 +218,11 @@ Override the configured linker for this invocation.
 ### `log`
 
 - **Type:** `string`
-- **Default:** `info`
+- **Default:** `info,portable_pty=off`
 - **Scope:** only from the environment or the command line
 - **Set with:** `MBX_LOG`
 
-Log filter for mbx's own diagnostics, such as `debug` or `mbx=trace`.
+Log filter for mbx's diagnostics, such as `debug` or `mbx=trace`. The default keeps the pty library behind the inline build view quiet, because mbx falls back to plain Cargo when that view cannot start.
 
 ### `pretty_inspect`
 

@@ -122,10 +122,10 @@ would rather not publish before posting.
 
 `MBX_LOG` takes an [env_logger](https://docs.rs/env_logger) filter, so `debug`,
 `trace`, or a per-module filter such as `mbx=trace` all work; it defaults to
-`info`. It filters logs in the `mbx` process that drives the build, including
-routine shim diagnostics forwarded to the session. Use `MBX_BYPASS_LOG` for
-per-compilation bypass records, or `mbx explain` for a grouped summary. See
-[Cache results](/cache-results).
+`info,portable_pty=off`. It filters logs in the `mbx` process that drives the
+build, including routine shim diagnostics forwarded to the session. Use
+`MBX_BYPASS_LOG` for per-compilation bypass records, or `mbx explain` for a
+grouped summary. See [Cache results](/cache-results).
 
 Report a problem in
 [Q&A discussions](https://github.com/jdx/mr-boxington/discussions/categories/q-a),
