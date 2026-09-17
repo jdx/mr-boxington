@@ -166,6 +166,7 @@ struct AtomicAgentStats {
     wrapper_phases_ns: Mutex<BTreeMap<String, u64>>,
     lookups: AtomicU64,
     unconsulted: AtomicU64,
+    incremental_compilations: AtomicU64,
     hits: AtomicU64,
     stores: AtomicU64,
     stored_bytes: AtomicU64,
@@ -1745,6 +1746,7 @@ impl CacheAgent {
             session_duration_ns: 0,
             lookups: self.stats.lookups.load(Ordering::Relaxed),
             unconsulted: self.stats.unconsulted.load(Ordering::Relaxed),
+            incremental_compilations: self.stats.incremental_compilations.load(Ordering::Relaxed),
             hits: self.stats.hits.load(Ordering::Relaxed),
             stores: self.stats.stores.load(Ordering::Relaxed),
             stored_bytes: self.stats.stored_bytes.load(Ordering::Relaxed),
@@ -2426,13 +2428,24 @@ impl CacheAgent {
         duration_ns: u64,
         diagnostic: Option<AgentEvent>,
     ) -> Result<AgentResponse> {
-        if !matches!(
-            outcome,
-            "miss" | "unconsulted" | "bypass" | "verification" | "incremental"
-        ) {
+        // A compilation that kept private incremental state reports that along
+        // with what the lookup did. The two are counted separately here so the
+        // outcomes stay what they say they are: what the cache was asked, and
+        // what it answered.
+        let (outcome, incremental) = match outcome {
+            "incremental-miss" => ("miss", true),
+            "incremental-unconsulted" => ("unconsulted", true),
+            other => (other, false),
+        };
+        if !matches!(outcome, "miss" | "unconsulted" | "bypass" | "verification") {
             bail!("invalid compiler invocation outcome");
         }
         validate_crate_name(crate_name)?;
+        if incremental {
+            self.stats
+                .incremental_compilations
+                .fetch_add(1, Ordering::Relaxed);
+        }
         let mut compiler = self.stats.compiler.lock().unwrap();
         let stats = compiler.entry(outcome.to_string()).or_default();
         stats.invocations = stats.invocations.saturating_add(1);

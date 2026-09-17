@@ -23,6 +23,14 @@ pub struct AgentStats {
     pub unconsulted: u64,
     /// Number of lookups that found a valid local action result.
     pub hits: u64,
+    /// Compilations that kept private incremental state, so their results were
+    /// not stored.
+    ///
+    /// Counted beside the lookup outcome rather than instead of it: these
+    /// compilations both consulted the cache, or did not, and withheld their
+    /// result, and a summary that reports only one of those is wrong about the
+    /// other.
+    pub incremental_compilations: u64,
     /// Number of newly stored content-addressed objects.
     pub stores: u64,
     /// Total size of newly stored objects.

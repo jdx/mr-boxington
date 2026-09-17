@@ -18,6 +18,7 @@ pub(super) struct StatsReport {
     hits: u64,
     misses: u64,
     unconsulted: u64,
+    incremental_compilations: u64,
     compiler_invocations_avoided: u64,
     estimated_compiler_duration_avoided_ns: u64,
     compiler: BTreeMap<String, CompilerStatsReport>,
@@ -73,13 +74,14 @@ struct SlowCompilationReport {
 impl From<&AgentStats> for StatsReport {
     fn from(stats: &AgentStats) -> Self {
         Self {
-            version: 4,
+            version: 5,
             wrapper_phases_ns: stats.wrapper_phases_ns.clone(),
             session_duration_ns: stats.session_duration_ns,
             lookups: stats.lookups,
             hits: stats.hits,
             misses: cache_misses(stats),
             unconsulted: stats.unconsulted,
+            incremental_compilations: incremental_compilations(stats),
             compiler_invocations_avoided: stats.hits,
             estimated_compiler_duration_avoided_ns: stats.avoided_compiler_duration_ns,
             compiler: stats
@@ -239,16 +241,12 @@ pub(crate) fn display_stats(stats: &AgentStats, config: &Config, style: SummaryS
             format_nanos(stats.avoided_compiler_duration_ns),
             format_nanos(spent),
         ));
-        if let Some(compiler) = stats
-            .compiler
-            .get("incremental")
-            .filter(|compiler| compiler.invocations > 0)
-        {
+        if incremental_compilations(stats) > 0 {
             // The compiler-time line above already counts these; what it cannot
             // say is why they are absent from the store.
             note(&format!(
                 "mbx[cache]: {} compilations kept their own incremental state, so they were not stored",
-                compiler.invocations
+                incremental_compilations(stats)
             ));
         }
         let slow = slow_compilations(stats);
@@ -530,14 +528,11 @@ fn slow_compilations(stats: &AgentStats) -> Vec<(&String, &u64)> {
 /// reported twice. This is the number the per-action ledger holds, which is
 /// what `mbx explain` reads back.
 ///
-/// An incremental compilation is not one of these, though the old subtraction
-/// counted most of them. A unit that re-enters hot workspace state engages
-/// before an action key is built and never looks anything up, and the outcome
-/// alone cannot say which did; they also get no row in the per-action ledger,
-/// so counting them here would put the summary back out of step with
-/// `mbx explain`. They are reported on their own terms instead, which is the
-/// honest thing to say about a compilation whose result was withheld from the
-/// store.
+/// An incremental compilation counts when its lookup missed, and not when it
+/// never made one: those are separate outcomes now rather than one word
+/// covering both. Keeping private incremental state is reported beside this
+/// rather than instead of it, because it says what became of the result, not
+/// what the cache was asked.
 pub(crate) fn cache_misses(stats: &AgentStats) -> u64 {
     stats
         .compiler
@@ -547,8 +542,5 @@ pub(crate) fn cache_misses(stats: &AgentStats) -> u64 {
 
 /// Compilations that kept private incremental state, and so were not stored.
 pub(super) fn incremental_compilations(stats: &AgentStats) -> u64 {
-    stats
-        .compiler
-        .get("incremental")
-        .map_or(0, |compiler| compiler.invocations)
+    stats.incremental_compilations
 }

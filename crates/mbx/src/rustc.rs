@@ -490,14 +490,22 @@ pub(crate) fn compile(
             .try_into()
             .unwrap_or(u64::MAX),
     };
-    let recorded_outcome = if verification.is_some() {
-        "verification"
-    } else if learned.engaged() {
-        "incremental"
-    } else if action_lookup_attempted {
-        "miss"
-    } else {
-        "unconsulted"
+    // Whether the cache was consulted and whether the result may be stored are
+    // separate facts, and one outcome could only carry one of them. A unit
+    // re-entering hot workspace state never looks anything up; one whose
+    // incremental state arrived from a prediction did, and missed. Reporting
+    // both as "incremental" left the summary unable to say which, so a build
+    // was either overcounted or the whole class went missing.
+    let recorded_outcome = match (
+        verification.is_some(),
+        learned.engaged(),
+        action_lookup_attempted,
+    ) {
+        (true, _, _) => "verification",
+        (_, true, true) => "incremental-miss",
+        (_, true, false) => "incremental-unconsulted",
+        (_, false, true) => "miss",
+        (_, false, false) => "unconsulted",
     };
     if let Some(cached) = verification {
         session::record_compiler_invocation_with_diagnostic(

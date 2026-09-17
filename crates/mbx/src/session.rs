@@ -807,8 +807,12 @@ impl AgentEventObserver for EventStream {
                 duration_ns,
             } => {
                 let recorded_outcome = match outcome.as_str() {
-                    "miss" => ActionOutcome::Miss,
-                    "unconsulted" => ActionOutcome::Unconsulted,
+                    // An incremental compilation reaches the ledger under what
+                    // its lookup did. It had no row at all while its outcome
+                    // said only that its result was withheld, which is how the
+                    // summary and `mbx explain` came to disagree.
+                    "miss" | "incremental-miss" => ActionOutcome::Miss,
+                    "unconsulted" | "incremental-unconsulted" => ActionOutcome::Unconsulted,
                     // A verification's own row comes from the verification
                     // event, which knows whether it matched; a bypass already
                     // has one.

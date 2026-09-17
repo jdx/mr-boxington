@@ -713,25 +713,32 @@ fn a_compilation_that_probed_two_action_keys_is_one_miss() {
     assert_eq!(cache_misses(&stats), 1);
 }
 
+/// The two shapes an incremental compilation comes in, told apart.
+///
+/// One re-entered hot workspace state and asked the cache nothing; the other
+/// had its state from a prediction, asked, and got nothing. Reporting both as
+/// the same outcome meant the summary either invented a lookup or lost one.
 #[test]
-fn an_incremental_compilation_is_reported_on_its_own_terms_not_as_a_miss() {
-    // A unit re-entering hot workspace state never looks anything up, and none
-    // of them reach the per-action ledger, so calling them misses would put the
-    // summary back out of step with `mbx explain`. They still have to be
-    // visible: an edit loop reporting "0 hits, 0 misses" reads as a no-op.
+fn an_incremental_compilation_is_counted_by_what_its_lookup_did() {
     let stats = agent_stats(|stats| {
         stats.lookups = 1;
+        stats.unconsulted = 1;
+        stats.incremental_compilations = 2;
         stats.compiler = BTreeMap::from([
             ("miss".into(), mbx_cache_core::CompilerStats::new(1, 4_000)),
             (
-                "incremental".into(),
-                mbx_cache_core::CompilerStats::new(2, 4_000),
+                "unconsulted".into(),
+                mbx_cache_core::CompilerStats::new(1, 4_000),
             ),
         ]);
     });
+
     assert_eq!(cache_misses(&stats), 1);
     let summary = short_summary(&stats);
-    assert!(summary.contains("1 misses, 2 incremental"), "{summary}");
+    assert!(
+        summary.contains("0 hits, 1 misses, 1 not looked up, 2 incremental"),
+        "{summary}"
+    );
 }
 
 #[test]
@@ -739,8 +746,9 @@ fn a_build_that_was_only_incremental_still_reports() {
     // Nothing was looked up, stored or bypassed, so every other gate is closed
     // and the build would otherwise finish without a word about the work it did.
     let stats = agent_stats(|stats| {
+        stats.incremental_compilations = 3;
         stats.compiler = BTreeMap::from([(
-            "incremental".into(),
+            "unconsulted".into(),
             mbx_cache_core::CompilerStats::new(3, 4_000),
         )]);
     });
@@ -968,7 +976,9 @@ fn an_off_summary_still_writes_the_versioned_stats_report() {
 
     // Bumped whenever the report grows a field, so a reader can tell from the
     // version alone which ones it may expect.
-    assert_eq!(report["version"], 4);
+    // Bumped to 5 when `compiler` stopped carrying an "incremental" entry and
+    // the count moved to a field of its own.
+    assert_eq!(report["version"], 5);
     assert_eq!(report["predictions_loaded"], 11);
     assert_eq!(report["session_duration_ns"], 42);
     assert_eq!(report["hits"], 2);

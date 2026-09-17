@@ -1183,9 +1183,10 @@ fn learned_sessions(cache: &Path) -> usize {
 }
 
 fn compiled_incrementally(stats: &serde_json::Value) -> u64 {
-    stats["compiler"]["incremental"]["invocations"]
-        .as_u64()
-        .unwrap_or(0)
+    // Its own field since report version 5: `compiler` groups compilations by
+    // what their lookup did, and keeping private incremental state is not one
+    // of those.
+    stats["incremental_compilations"].as_u64().unwrap_or(0)
 }
 
 /// A workspace crate somebody is editing misses on every build no matter what

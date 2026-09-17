@@ -314,7 +314,7 @@ async fn compiler_invocations_are_counted_by_known_outcomes() {
     let directory = tempfile::tempdir().unwrap();
     let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
 
-    for outcome in ["miss", "incremental", "incremental"] {
+    for outcome in ["miss", "incremental-miss", "incremental-unconsulted"] {
         agent
             .respond(AgentRequest::RecordCompilerInvocation {
                 outcome: outcome.into(),
@@ -332,11 +332,13 @@ async fn compiler_invocations_are_counted_by_known_outcomes() {
         .await;
 
     let stats = agent.stats();
+    // The incremental miss joins the plain one: both asked and both compiled.
+    assert_eq!(stats.compiler.get("miss").map(|it| it.invocations), Some(2));
     assert_eq!(
-        stats.compiler.get("incremental").map(|it| it.invocations),
-        Some(2)
+        stats.compiler.get("unconsulted").map(|it| it.invocations),
+        Some(1)
     );
-    assert_eq!(stats.compiler.get("miss").map(|it| it.invocations), Some(1));
+    assert_eq!(stats.incremental_compilations, 2);
     assert!(matches!(rejected, AgentResponse::Error { .. }));
 }
 
@@ -583,6 +585,39 @@ async fn reports_each_accounted_decision_to_an_observer() {
 /// diagnostics are the only record of the keys a later checkout looks up. They
 /// were dropped at this boundary, leaving a cross-checkout miss with nothing to
 /// be compared against.
+/// The adapter reports one outcome; the agent keeps the two facts in it apart.
+#[tokio::test]
+async fn an_incremental_outcome_records_its_lookup_and_its_state_separately() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+
+    for outcome in ["incremental-miss", "incremental-unconsulted"] {
+        agent
+            .respond(AgentRequest::RecordCompilerInvocation {
+                outcome: outcome.into(),
+                crate_name: Some("serde".into()),
+                duration_ns: 42,
+            })
+            .await;
+    }
+
+    let stats = agent.stats();
+    assert_eq!(stats.incremental_compilations, 2);
+    assert_eq!(
+        stats.compiler.get("miss").map(|stats| stats.invocations),
+        Some(1)
+    );
+    assert_eq!(
+        stats
+            .compiler
+            .get("unconsulted")
+            .map(|stats| stats.invocations),
+        Some(1)
+    );
+    // The word that carried both facts is not an outcome any more.
+    assert!(!stats.compiler.contains_key("incremental"));
+}
+
 #[tokio::test]
 async fn an_unconsulted_compilation_keeps_its_diagnostic() {
     let directory = tempfile::tempdir().unwrap();
