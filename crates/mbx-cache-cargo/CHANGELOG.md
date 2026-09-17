@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.3.0...mbx-cache-cargo-v0.3.1) - 2026-09-17
+
+### Fixed
+
+- *(cargo)* restore outside-project commands with lossless alias resolution ([#484](https://github.com/jdx/mr-boxington/pull/484))
+
+### Other
+
+- clarify cache behavior and organize setup guides ([#483](https://github.com/jdx/mr-boxington/pull/483))
+
 ## [0.3.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.2.0...mbx-cache-cargo-v0.3.0) - 2026-09-15
 
 ### Added

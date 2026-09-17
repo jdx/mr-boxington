@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.4](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.16.3...mbx-cache-core-v0.16.4) - 2026-09-17
+
+### Fixed
+
+- *(stats)* tell an incremental compilation's lookup apart from its storage ([#482](https://github.com/jdx/mr-boxington/pull/482))
+- *(explain)* diagnose cross-checkout misses and name the crate behind them ([#468](https://github.com/jdx/mr-boxington/pull/468))
+
+### Other
+
+- clarify cache behavior and organize setup guides ([#483](https://github.com/jdx/mr-boxington/pull/483))
+
 ## [0.16.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.16.2...mbx-cache-core-v0.16.3) - 2026-09-15
 
 ### Fixed

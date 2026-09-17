@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.4](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.16.3...mbx-cache-rustc-v0.16.4) - 2026-09-17
+
+### Other
+
+- clarify cache behavior and organize setup guides ([#483](https://github.com/jdx/mr-boxington/pull/483))
+
 ## [0.16.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.16.2...mbx-cache-rustc-v0.16.3) - 2026-09-15
 
 ### Fixed

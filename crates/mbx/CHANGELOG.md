@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.0](https://github.com/jdx/mr-boxington/compare/v1.12.0...v1.13.0) - 2026-09-17
+
+### Added
+
+- *(cache)* share dependents of a crate keyed to its checkout ([#488](https://github.com/jdx/mr-boxington/pull/488))
+
+### Fixed
+
+- *(pretty)* stop an inline view that cannot start from reporting an error ([#487](https://github.com/jdx/mr-boxington/pull/487))
+- *(cargo)* restore outside-project commands with lossless alias resolution ([#484](https://github.com/jdx/mr-boxington/pull/484))
+- *(stats)* tell an incremental compilation's lookup apart from its storage ([#482](https://github.com/jdx/mr-boxington/pull/482))
+- *(cache)* keep a compilation that reads OUT_DIR keyed to its checkout ([#479](https://github.com/jdx/mr-boxington/pull/479))
+- *(setup)* put project-scoped rust-analyzer checks back through mbx ([#477](https://github.com/jdx/mr-boxington/pull/477))
+- *(explain)* report a build whose history stopped at the size limit ([#475](https://github.com/jdx/mr-boxington/pull/475))
+- *(cc)* stop autotools reading the C shim path as a cross-compile triple ([#476](https://github.com/jdx/mr-boxington/pull/476))
+- *(explain)* label key-detail changes separately from input changes ([#474](https://github.com/jdx/mr-boxington/pull/474))
+- *(explain)* diagnose cross-checkout misses and name the crate behind them ([#468](https://github.com/jdx/mr-boxington/pull/468))
+- *(stats)* count one miss per compilation, not one per action-key probe ([#467](https://github.com/jdx/mr-boxington/pull/467))
+
+### Other
+
+- clarify cache behavior and organize setup guides ([#483](https://github.com/jdx/mr-boxington/pull/483))
+
 ## [1.12.0](https://github.com/jdx/mr-boxington/compare/v1.11.1...v1.12.0) - 2026-09-15
 
 ### Added

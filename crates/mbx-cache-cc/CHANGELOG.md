@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.4](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.16.3...mbx-cache-cc-v0.16.4) - 2026-09-17
+
+### Fixed
+
+- *(cc)* stop autotools reading the C shim path as a cross-compile triple ([#476](https://github.com/jdx/mr-boxington/pull/476))
+
+### Other
+
+- clarify cache behavior and organize setup guides ([#483](https://github.com/jdx/mr-boxington/pull/483))
+
 ## [0.16.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.16.2...mbx-cache-cc-v0.16.3) - 2026-09-15
 
 ### Fixed
