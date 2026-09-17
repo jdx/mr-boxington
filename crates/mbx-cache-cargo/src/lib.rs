@@ -396,14 +396,14 @@ fn directory_option_dir(arguments: &[String], working_dir: &Path) -> PathBuf {
 pub fn manifest_in_scope(arguments: &[String], working_dir: &Path) -> bool {
     let arguments = cargo_arguments(arguments);
     let invocation = directory_option_dir(arguments, working_dir);
-    // A path install compiles the manifest in the directory it names, which it
-    // has even where the invocation directory has none. Its subcommand may be
-    // spelled by an alias that only Cargo can expand, so any `--path` naming a
-    // manifest counts rather than a literal `install` alone.
-    if let Some(path) = flag_value(arguments, "--path")
-        && absolute(&invocation, path).join("Cargo.toml").is_file()
-    {
-        return true;
+    // `install --path` compiles the manifest in the directory it names, which
+    // it has even where the invocation directory has none, and does not walk
+    // up to a surrounding workspace for it. Only a real install gives `--path`
+    // that meaning: other subcommands use the same flag for their own
+    // purposes, such as the local template `cargo generate --path` reads.
+    // Callers expand aliases first, so an aliased install arrives spelled out.
+    if let Some(source) = path_install_dir(arguments, working_dir) {
+        return source.join("Cargo.toml").is_file();
     }
     match flag_value(arguments, "--manifest-path") {
         Some(manifest) => absolute(&invocation, manifest).is_file(),
@@ -1029,19 +1029,26 @@ mod tests {
             project
         ));
 
-        // A path install names a manifest the invocation directory does not
-        // have, under whatever spelling of the subcommand. Only Cargo can
-        // expand a user's alias, so `--path` counts on its own.
-        for install in ["install", "i"] {
-            assert!(manifest_in_scope(
-                &[
-                    install.into(),
-                    "--path".into(),
-                    project.to_string_lossy().into_owned()
-                ],
-                outside
-            ));
-        }
+        // `install --path` names a manifest the invocation directory does not
+        // have. Callers expand aliases before asking, so only a real install
+        // gives `--path` that meaning here; other subcommands spend the same
+        // flag on their own arguments and must not be read as path installs.
+        assert!(manifest_in_scope(
+            &[
+                "install".into(),
+                "--path".into(),
+                project.to_string_lossy().into_owned()
+            ],
+            outside
+        ));
+        assert!(!manifest_in_scope(
+            &[
+                "generate".into(),
+                "--path".into(),
+                project.to_string_lossy().into_owned()
+            ],
+            outside
+        ));
         assert!(!manifest_in_scope(
             &[
                 "install".into(),

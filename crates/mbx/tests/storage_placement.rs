@@ -235,6 +235,14 @@ fn an_invocation_outside_a_project_still_reaches_cargo() {
     std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
     let outside = fixture.root.join("outside");
     std::fs::create_dir(&outside).unwrap();
+    // A subcommand external to Cargo spends `--path` on its own argument, as
+    // `cargo generate --path` does on a local template. That the template is
+    // itself a package must not read as a path install and cost the
+    // passthrough, since only a real install compiles what `--path` names.
+    let template = fixture.root.join("template");
+    std::fs::create_dir(&template).unwrap();
+    write_project(&template);
+    let template = template.to_string_lossy().into_owned();
     // A toolchain selector and a configuration override reach a different
     // Cargo and a different configuration, but neither can put a manifest
     // where the filesystem has none, so they do not cost the passthrough.
@@ -255,7 +263,7 @@ fn an_invocation_outside_a_project_still_reaches_cargo() {
                     std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited_path));
                 command
                     .args(*global)
-                    .arg("binstall")
+                    .args(["binstall", "--path", &template])
                     .current_dir(directory)
                     .env("PATH", std::env::join_paths(paths).unwrap())
                     .env("CARGO", &cargo)
