@@ -309,15 +309,24 @@ fn an_aliased_path_install_is_still_checked() {
     // body space-joined, so reading it back cannot tell that value from two
     // arguments. The path this leaves is not a package, and taking that for
     // an absent manifest would hand Cargo the real one unchecked.
-    let spaced = fixture.root.join("spaced project");
-    std::fs::create_dir(&spaced).unwrap();
-    write_project(&spaced);
-    let spaced = format!("install --path {}", spaced.display());
-    let cases: [(&str, Vec<&str>, &str); 4] = [
+    let spaced_root = fixture.root.join("spaced project");
+    std::fs::create_dir(&spaced_root).unwrap();
+    write_project(&spaced_root);
+    let spaced = format!("install --path {}", spaced_root.display());
+    // An alias body may lead with global options. Those name no command and
+    // appear in no listing, so reading the body's first word would call the
+    // whole invocation unknown and wave through the install behind it.
+    let prefixed = format!("--offline install --path {project}");
+    // A directory option decides where the manifest search starts, so a value
+    // the listing split is as unreadable there as in a path option.
+    let directed = format!("build -C {} --offline", spaced_root.display());
+    let cases: [(&str, Vec<&str>, &str); 6] = [
         ("literal", vec!["install", "--path", &project], "install"),
         ("aliased", vec!["i", "--path", &project], "install"),
         ("embedded", vec!["i"], &embedded),
         ("spaced", vec!["i"], &spaced),
+        ("prefixed", vec!["i"], &prefixed),
+        ("directed", vec!["i"], &directed),
     ];
     for shim in [false, true] {
         for (name, arguments, alias) in &cases {

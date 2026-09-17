@@ -317,7 +317,9 @@ fn resolve_invocation(cargo: &OsStr, arguments: &[OsString]) -> Option<Invocatio
             });
         };
         let expansion = alias.split_whitespace().collect::<Vec<_>>();
-        let next = expansion.first().copied()?;
+        if expansion.is_empty() {
+            return None;
+        }
         paths_certain &= path_words_intact(&expansion);
         // Substitute the expansion for the alias and keep the rest of the
         // command line. The expanded name alone would hide a `--path` from
@@ -336,14 +338,18 @@ fn resolve_invocation(cargo: &OsStr, arguments: &[OsString]) -> Option<Invocatio
                 paths_certain,
             });
         }
-        if is_build_command(next) {
+        // An alias body may lead with global options, which name no command
+        // and appear in no listing. What it runs is the command the expanded
+        // line now names, so read that rather than the body's first word.
+        let next = super::launch::cargo_subcommand(&invocation)?.to_owned();
+        if is_build_command(&next) {
             return Some(Invocation {
                 arguments: invocation,
                 resolved: Resolved::Opaque,
                 paths_certain,
             });
         }
-        current = next.to_owned();
+        current = next;
     }
     None
 }
@@ -356,13 +362,23 @@ fn resolve_invocation(cargo: &OsStr, arguments: &[OsString]) -> Option<Invocatio
 /// arguments are flags, and `install` takes no positional package beside
 /// `--path`, so a bare word there is the tail of a value this cannot put back
 /// together.
+///
+/// Every argument that decides which manifest Cargo reads is checked, which
+/// is the directory options as much as the path ones: `manifest_in_scope`
+/// starts its search from `-C`, so a `-C` it misreads sends the search
+/// somewhere Cargo will not go.
 fn path_words_intact(words: &[&str]) -> bool {
     let mut index = 0;
     while index < words.len() {
         let word = words[index];
-        let after = if matches!(word, "--path" | "--manifest-path") {
+        let separate = matches!(word, "--path" | "--manifest-path" | "-C" | "--directory");
+        let attached = ["--path=", "--manifest-path=", "--directory="]
+            .iter()
+            .any(|flag| word.starts_with(flag))
+            || (word.starts_with("-C") && word.len() > 2);
+        let after = if separate {
             index + 2
-        } else if word.starts_with("--path=") || word.starts_with("--manifest-path=") {
+        } else if attached {
             index + 1
         } else {
             index += 1;
@@ -434,9 +450,17 @@ pub(super) fn failed_probe(
     }
     // A single-file `-Zscript` package compiles without a manifest, so absent
     // manifests cannot speak for these the way they do for everything else.
-    let scripted = arguments
-        .iter()
-        .any(|arg| arg.to_string_lossy().starts_with("-Z"));
+    // An alias body carries its own options, so the expansion answers this as
+    // much as the command line does.
+    let unstable = |arguments: &[OsString]| {
+        arguments
+            .iter()
+            .any(|argument| argument.to_string_lossy().starts_with("-Z"))
+    };
+    let scripted = unstable(arguments)
+        || invocation
+            .as_ref()
+            .is_some_and(|resolved| unstable(&resolved.arguments));
     if !scripted && metadata_failure_passthrough(invocation.as_ref()) {
         return FailedProbe::Passthrough;
     }
