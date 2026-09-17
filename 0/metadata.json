@@ -1,0 +1,56 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M2PD56884JD8C5B5A88SYCKZ",
+  "session_id": "01a0acc4-12b0-7a12-bf08-b323a6816a63",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-17T00:44:38.581455Z",
+  "branch": "codex/cargo-alias-storage",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "crates/mbx-cache-cargo/src/lib.rs",
+    "crates/mbx/src/cli/cargo.rs",
+    "crates/mbx/src/cli/cargo_invocation.rs",
+    "crates/mbx/src/cli/launch.rs",
+    "crates/mbx/src/cli/mod.rs",
+    "crates/mbx/src/cli/shim.rs",
+    "crates/mbx/tests/cargo_invocation.rs",
+    "crates/mbx/tests/storage_placement.rs",
+    "docs/troubleshooting.md",
+    "test/setup.bats"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6-astra",
+  "turn_id": "05a504722d8a",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 173989,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 6442368,
+    "output_tokens": 24605,
+    "api_call_count": 56
+  },
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-17T00:44:38.525692Z",
+    "agent_lines": 1137,
+    "agent_removed": 111,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1137,
+    "total_lines_changed": 1248,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
