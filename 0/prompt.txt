@@ -1,11 +1,1 @@
-review [https://github.com/jdx/mr-boxington/pull/481?notification\_referrer\_id=NT\REDACTED#pullrequestreview-5229725273](https://github.com/jdx/mr-boxington/pull/481?REDACTED#pullrequestreview-5229725273)
-
----
-
-the agent mentioned this, what are your thoughts:
-
-> My assessment from last round stands and I'd weight it higher now: eight commits in, this function has absorbed a lot of cargo-semantics knowledge that only these tests hold. The bots keep finding real variants, which is useful, but none of them is evaluating whether `resolve_invocation` is the right shape — and that's the question I'd want a maintainer to answer before merge.
-
----
-
 i want a comprehensive pr
