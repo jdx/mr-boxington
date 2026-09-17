@@ -305,10 +305,19 @@ fn an_aliased_path_install_is_still_checked() {
     std::fs::create_dir(&outside).unwrap();
     let project = fixture.project.to_string_lossy().into_owned();
     let embedded = format!("install --path {project}");
-    let cases: [(&str, Vec<&str>, &str); 3] = [
+    // An array alias keeps a value holding a space, but the listing prints the
+    // body space-joined, so reading it back cannot tell that value from two
+    // arguments. The path this leaves is not a package, and taking that for
+    // an absent manifest would hand Cargo the real one unchecked.
+    let spaced = fixture.root.join("spaced project");
+    std::fs::create_dir(&spaced).unwrap();
+    write_project(&spaced);
+    let spaced = format!("install --path {}", spaced.display());
+    let cases: [(&str, Vec<&str>, &str); 4] = [
         ("literal", vec!["install", "--path", &project], "install"),
         ("aliased", vec!["i", "--path", &project], "install"),
         ("embedded", vec!["i"], &embedded),
+        ("spaced", vec!["i"], &spaced),
     ];
     for shim in [false, true] {
         for (name, arguments, alias) in &cases {

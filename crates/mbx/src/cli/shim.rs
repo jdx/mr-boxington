@@ -244,14 +244,33 @@ enum Resolved {
     Opaque,
 }
 
+/// An invocation with its aliases expanded.
+struct Invocation {
+    arguments: Vec<OsString>,
+    resolved: Resolved,
+    /// Whether the path-valued flags in `arguments` can be believed.
+    ///
+    /// `cargo --list` prints an alias body space-joined, so a value holding a
+    /// space cannot be told apart from two arguments, and an array alias keeps
+    /// such values where a string alias could not. Where the unreadable value
+    /// is the one that decides which package compiles, no absent manifest can
+    /// speak for the invocation.
+    paths_certain: bool,
+}
+
 /// Expand an invocation's aliases and say what it turned out to be.
 ///
 /// Nothing when the listing cannot be read, which leaves the invocation
 /// unexplained and so unsafe to pass through.
-fn resolve_invocation(cargo: &OsStr, arguments: &[OsString]) -> Option<(Vec<OsString>, Resolved)> {
+fn resolve_invocation(cargo: &OsStr, arguments: &[OsString]) -> Option<Invocation> {
+    let certain = |arguments: &[OsString], resolved| Invocation {
+        arguments: arguments.to_vec(),
+        resolved,
+        paths_certain: true,
+    };
     let command = super::launch::cargo_subcommand(arguments)?;
     if is_build_command(command) {
-        return Some((arguments.to_vec(), Resolved::Opaque));
+        return Some(certain(arguments, Resolved::Opaque));
     }
     // The listing describes whichever Cargo and configuration the invocation
     // selects, so it carries the same global options. `--color=never`
@@ -282,15 +301,29 @@ fn resolve_invocation(cargo: &OsStr, arguments: &[OsString]) -> Option<(Vec<OsSt
         .collect::<BTreeMap<_, _>>();
     let mut current = command.to_owned();
     let mut invocation = arguments.to_vec();
+    let mut paths_certain = true;
     for _ in 0..32 {
         let Some(description) = entries.get(current.as_str()) else {
-            return Some((invocation, Resolved::Unknown));
+            return Some(Invocation {
+                arguments: invocation,
+                resolved: Resolved::Unknown,
+                paths_certain,
+            });
         };
         let Some(alias) = description.strip_prefix("alias: ") else {
-            return Some((invocation, Resolved::Opaque));
+            return Some(Invocation {
+                arguments: invocation,
+                resolved: Resolved::Opaque,
+                paths_certain,
+            });
         };
         let expansion = alias.split_whitespace().collect::<Vec<_>>();
         let next = expansion.first().copied()?;
+        paths_certain &= !expansion.iter().any(|word| {
+            matches!(*word, "--path" | "--manifest-path")
+                || word.starts_with("--path=")
+                || word.starts_with("--manifest-path=")
+        });
         // Substitute the expansion for the alias and keep the rest of the
         // command line. The expanded name alone would hide a `--path` from
         // either place it can appear: the alias body, or the arguments after
@@ -302,10 +335,18 @@ fn resolve_invocation(cargo: &OsStr, arguments: &[OsString]) -> Option<(Vec<OsSt
             expansion.iter().copied().map(OsString::from),
         );
         if cargo_proxy_passthrough(&invocation) {
-            return Some((invocation, Resolved::Proxy));
+            return Some(Invocation {
+                arguments: invocation,
+                resolved: Resolved::Proxy,
+                paths_certain,
+            });
         }
         if is_build_command(next) {
-            return Some((invocation, Resolved::Opaque));
+            return Some(Invocation {
+                arguments: invocation,
+                resolved: Resolved::Opaque,
+                paths_certain,
+            });
         }
         current = next.to_owned();
     }
@@ -348,7 +389,7 @@ pub(super) fn metadata_failure_passthrough(cargo: &OsStr, arguments: &[OsString]
     // An alias can name a manifest that the command line does not, so expand
     // it before reading the invocation: `i = "install --path /project"`
     // compiles a local package from a directory that has none of its own.
-    let Some((invocation, resolved)) = resolve_invocation(cargo, arguments) else {
+    let Some(invocation) = resolve_invocation(cargo, arguments) else {
         return false;
     };
     // No manifest where Cargo looks for one means no package to build and no
@@ -356,14 +397,17 @@ pub(super) fn metadata_failure_passthrough(cargo: &OsStr, arguments: &[OsString]
     // to do here rather than because its storage is unverifiable. This is the
     // ordinary way to reach a failed probe: an external subcommand such as
     // `cargo binstall` run outside a project, where Cargo itself would not
-    // have read a manifest either.
-    if let Ok(strings) = super::strings(&invocation)
+    // have read a manifest either. An alias whose own path arguments came back
+    // unreadable is the exception: Cargo can still reach a manifest that this
+    // cannot see, so it answers below on what the command is instead.
+    if invocation.paths_certain
+        && let Ok(strings) = super::strings(&invocation.arguments)
         && let Ok(working_dir) = std::env::current_dir()
         && !mbx_cache_cargo::manifest_in_scope(&strings, &working_dir)
     {
         return true;
     }
-    matches!(resolved, Resolved::Unknown | Resolved::Proxy)
+    matches!(invocation.resolved, Resolved::Unknown | Resolved::Proxy)
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
