@@ -47,14 +47,16 @@ root = "/path/to/local/build-targets"
 ```
 
 After any builds using the old target have finished, the next build can update
-an mbx-owned `target` link to the new managed location. It does not copy the old
-outputs. Matching compilations can be restored from the shared cache; other work
-must compile again. The target budget scales with the destination disk unless
-you set it explicitly.
+an mbx-owned `target` link to the new managed location:
 
-Changing the root does not delete data at the old location. To remove a
-workspace's old managed outputs through mbx, run `mbx clean` before changing
-its placement configuration.
+- When the old directory can be renamed to the new location, mbx moves it and
+  preserves its outputs.
+- When a rename fails, including across filesystems, mbx creates the destination
+  and removes the old directory. It does not copy the old outputs. Matching
+  compilations can be restored from the shared cache; other work compiles again.
+
+The old collection record is retired after relocation. The target budget
+scales with the destination disk unless you set it explicitly.
 
 ## Existing target directories
 

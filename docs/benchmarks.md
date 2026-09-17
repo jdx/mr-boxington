@@ -105,8 +105,10 @@ The
 [bench-refresh workflow](https://github.com/jdx/mr-boxington/actions/workflows/bench-refresh.yml)
 checks weekly and reruns when the recorded mbx version differs from the latest
 release. It measures that released version and opens a pull request with the
-results. Manual runs can force a refresh or measure source changes without
-publishing them.
+results. On `main`, a manual run with `force` also opens or updates that PR,
+even when the recorded version already matches. Set `dry_run` to measure
+without proposing an update, or `source` to measure the selected source ref
+instead of the latest release; `source` implies `dry_run`.
 
 ## What this does not measure
 
