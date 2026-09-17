@@ -222,7 +222,7 @@ Override the configured linker for this invocation.
 - **Scope:** only from the environment or the command line
 - **Set with:** `MBX_LOG`
 
-Log filter for mbx's diagnostics, such as `debug` or `mbx=trace`. The default keeps the pty library behind the inline build view quiet, because mbx falls back to plain Cargo when that view cannot start.
+Log filter such as `debug` or `mbx=trace`. It covers every log the mbx process emits, its own and those of the libraries it builds on. The default keeps the pty library behind the inline build view quiet, because mbx falls back to plain Cargo when that view cannot start.
 
 ### `pretty_inspect`
 

@@ -208,7 +208,8 @@ pub(crate) struct RawConfig {
     /// Append the full reason for every bypassed compilation to this path.
     #[usage(key = "bypass_log", env = "MBX_BYPASS_LOG", scope = "env")]
     _bypass_log: Option<PathBuf>,
-    /// Log filter for mbx's diagnostics, such as `debug` or `mbx=trace`. The
+    /// Log filter such as `debug` or `mbx=trace`. It covers every log the mbx
+    /// process emits, its own and those of the libraries it builds on. The
     /// default keeps the pty library behind the inline build view quiet,
     /// because mbx falls back to plain Cargo when that view cannot start.
     #[usage(
