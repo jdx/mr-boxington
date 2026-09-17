@@ -360,10 +360,11 @@ fn resolve_invocation(cargo: &OsStr, arguments: &[OsString]) -> Option<Invocatio
 /// `cargo --list` prints an alias body space-joined, so a value holding a
 /// space arrives as several words, and no syntax recovers where it ended: the
 /// continuation can look like an option, as `/src -x/pkg` does, as readily as
-/// it can look like a bare word. What such a value names is a place, so ask
-/// the filesystem rather than the spelling. Where a longer reading of the
-/// words also names one, Cargo may be working there and this cannot tell
-/// which reading was meant.
+/// it can look like a bare word, and a bare word there is as often an
+/// argument the command takes. What such a value names is a place, so ask the
+/// filesystem rather than the spelling. Where a longer reading of the words
+/// also names one, Cargo may be working there and this cannot tell which
+/// reading was meant.
 ///
 /// Every argument that decides which manifest Cargo reads is checked, which
 /// is the directory options as much as the path ones: `manifest_in_scope`
@@ -391,15 +392,12 @@ fn path_words_intact(words: &[&str], working_dir: Option<&Path>) -> bool {
         let Some(working_dir) = working_dir else {
             return false;
         };
-        // An alias's remaining arguments are flags, and `install` takes no
-        // positional package beside `--path`, so a bare word after the value
-        // is its tail even where the whole path no longer exists to be found.
-        if words
-            .get(value + 1)
-            .is_some_and(|word| !word.starts_with('-'))
-        {
-            return false;
-        }
+        // Only a place the words could name settles this. A bare word after
+        // the value is as often a subcommand or an argument of the command's
+        // own -- `binstall --path <dir> ripgrep` -- as it is the tail of a
+        // split path, and reading it as a tail refuses that invocation for
+        // nothing. Where no longer reading names anything, the path the alias
+        // meant does not exist either, so Cargo compiles nothing regardless.
         for end in (value + 1)..words.len() {
             if names_a_place(working_dir, &words[value..=end].join(" ")) {
                 return false;

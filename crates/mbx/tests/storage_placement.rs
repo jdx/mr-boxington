@@ -231,7 +231,7 @@ fn an_invocation_outside_a_project_still_reaches_cargo() {
     let bin = fixture.root.join("bin");
     std::fs::create_dir(&bin).unwrap();
     let cargo = bin.join("cargo");
-    std::fs::write(&cargo, "#!/bin/sh\ncase \" $* \" in *' metadata '*) exit 1;; *' --list '*) printf 'Installed Commands:\\n    binstall    Install a Rust binary\\n    build    Compile\\n'; exit 0;; esac\ntouch \"$TEST_PASSTHROUGH_MARKER\"\n").unwrap();
+    std::fs::write(&cargo, "#!/bin/sh\ncase \" $* \" in *' metadata '*) exit 1;; *' --list '*) printf 'Installed Commands:\\n    binstall    Install a Rust binary\\n    build    Compile\\n    bi    alias: %s\\n' \"$TEST_ALIAS_BODY\"; exit 0;; esac\ntouch \"$TEST_PASSTHROUGH_MARKER\"\n").unwrap();
     std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
     let outside = fixture.root.join("outside");
     std::fs::create_dir(&outside).unwrap();
@@ -243,6 +243,11 @@ fn an_invocation_outside_a_project_still_reaches_cargo() {
     std::fs::create_dir(&template).unwrap();
     write_project(&template);
     let template = template.to_string_lossy().into_owned();
+    // Such a command takes its own positionals too, so the bare word after
+    // the value is no evidence that the listing split the path, and reading
+    // it as one would refuse an ordinary invocation for nothing.
+    let trailing = format!("binstall --path {template} ripgrep");
+    let invocations: [&[&str]; 2] = [&["binstall", "--path", &template], &["bi"]];
     // A toolchain selector and a configuration override reach a different
     // Cargo and a different configuration, but neither can put a manifest
     // where the filesystem has none, so they do not cost the passthrough.
@@ -253,34 +258,37 @@ fn an_invocation_outside_a_project_still_reaches_cargo() {
             globals.push(&["--config", "term.quiet=false"]);
         }
         for (index, global) in globals.iter().enumerate() {
-            for (directory, reaches_cargo) in [(&outside, true), (&fixture.project, false)] {
-                let marker = fixture
-                    .root
-                    .join(format!("passthrough-{shim}-{index}-{reaches_cargo}"));
-                let mut command = fixture.command();
-                let inherited_path = std::env::var_os("PATH").unwrap();
-                let paths =
-                    std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited_path));
-                command
-                    .args(*global)
-                    .args(["binstall", "--path", &template])
-                    .current_dir(directory)
-                    .env("PATH", std::env::join_paths(paths).unwrap())
-                    .env("CARGO", &cargo)
-                    .env("TEST_PASSTHROUGH_MARKER", &marker);
-                if shim {
-                    command.env("MBX_CARGO_SHIM_MODE", "1");
+            for (spelling, invocation) in invocations.iter().enumerate() {
+                for (directory, reaches_cargo) in [(&outside, true), (&fixture.project, false)] {
+                    let marker = fixture.root.join(format!(
+                        "passthrough-{shim}-{index}-{spelling}-{reaches_cargo}"
+                    ));
+                    let mut command = fixture.command();
+                    let inherited_path = std::env::var_os("PATH").unwrap();
+                    let paths =
+                        std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited_path));
+                    command
+                        .args(*global)
+                        .args(*invocation)
+                        .current_dir(directory)
+                        .env("PATH", std::env::join_paths(paths).unwrap())
+                        .env("CARGO", &cargo)
+                        .env("TEST_ALIAS_BODY", &trailing)
+                        .env("TEST_PASSTHROUGH_MARKER", &marker);
+                    if shim {
+                        command.env("MBX_CARGO_SHIM_MODE", "1");
+                    }
+                    let output = command.output().unwrap();
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let where_ = format!("{global:?} {invocation:?} in {}", directory.display());
+                    assert_eq!(output.status.success(), reaches_cargo, "{where_}: {stderr}");
+                    assert_eq!(
+                        !stderr.contains("could not verify Cargo build storage"),
+                        reaches_cargo,
+                        "{where_}: {stderr}"
+                    );
+                    assert_eq!(marker.exists(), reaches_cargo, "{where_}: {stderr}");
                 }
-                let output = command.output().unwrap();
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let where_ = format!("{global:?} in {}", directory.display());
-                assert_eq!(output.status.success(), reaches_cargo, "{where_}: {stderr}");
-                assert_eq!(
-                    !stderr.contains("could not verify Cargo build storage"),
-                    reaches_cargo,
-                    "{where_}: {stderr}"
-                );
-                assert_eq!(marker.exists(), reaches_cargo, "{where_}: {stderr}");
             }
         }
     }
