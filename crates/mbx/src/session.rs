@@ -95,6 +95,7 @@ pub(crate) const STAGING_ENV: &str = "MBX_STAGING_DIR";
 pub(crate) const BUILD_ENV: &str = "MBX_BUILD";
 pub(crate) const VERIFY_ENV: &str = "MBX_VERIFY";
 pub(crate) const SHARE_OUT_DIR_ENV: &str = "MBX_SHARE_OUT_DIR";
+pub(crate) const SHARE_WORKSPACE_ROOT_ENV: &str = "MBX_SHARE_WORKSPACE_ROOT";
 pub(crate) const BUILD_SCRIPT_EXECUTION_ENV: &str = "MBX_BUILD_SCRIPT_EXECUTION";
 pub(crate) const BUILD_SCRIPT_SHIM_PATH_ENV: &str = "MBX_BUILD_SCRIPT_SHIM_PATH";
 pub(crate) const LEARNED_INCREMENTAL_ENV: &str = "MBX_LEARNED_INCREMENTAL";
@@ -128,6 +129,7 @@ pub struct CacheSession {
     verify_sample_rate: u8,
     incremental: bool,
     share_out_dir: bool,
+    share_workspace_root: bool,
     cc_store_path_specific: bool,
     build_script_execution: bool,
     agent: CacheAgent,
@@ -267,6 +269,7 @@ impl CacheSession {
             verify_sample_rate: config.verify_sample_rate,
             incremental: config.incremental,
             share_out_dir: config.share_out_dir,
+            share_workspace_root: config.share_workspace_root,
             cc_store_path_specific: config.cc_store_path_specific,
             build_script_execution: config.build_script_execution,
             agent,
@@ -412,6 +415,10 @@ impl CacheSession {
         environment.insert(
             SHARE_OUT_DIR_ENV.into(),
             if self.share_out_dir { "1" } else { "0" }.into(),
+        );
+        environment.insert(
+            SHARE_WORKSPACE_ROOT_ENV.into(),
+            if self.share_workspace_root { "1" } else { "0" }.into(),
         );
         environment.insert(
             BUILD_SCRIPT_EXECUTION_ENV.into(),
@@ -1817,6 +1824,14 @@ pub(crate) fn cache_links_requested() -> bool {
 /// checkouts can share it. Read the same way as verify mode.
 pub(crate) fn share_out_dir_requested() -> bool {
     std::env::var_os(SHARE_OUT_DIR_ENV).is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+/// Whether the shim may keep the checkout out of what rustc records, so a
+/// crate rebuilt in a second checkout matches the first. Read the same way as
+/// verify mode.
+pub(crate) fn share_workspace_root_requested() -> bool {
+    std::env::var_os(SHARE_WORKSPACE_ROOT_ENV)
+        .is_some_and(|value| !value.is_empty() && value != "0")
 }
 
 /// Whether the shim may compile a churning crate with its own incremental

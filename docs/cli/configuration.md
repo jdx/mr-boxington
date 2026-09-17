@@ -393,6 +393,14 @@ Logical CPUs to leave free for the rest of the machine.
 
 Remap `OUT_DIR` so rustc does not record it in the artifact, which can leave a rebuilt dependency byte-identical between checkouts so its dependents share. The compilation that read it stays checkout-specific either way, as does any artifact still carrying a checkout path.
 
+### `share_workspace_root`
+
+- **Type:** `bool`
+- **Default:** `false`
+- **Set with:** `MBX_SHARE_WORKSPACE_ROOT`
+
+Remap the workspace root so rustc does not record which checkout a compilation ran in, which lets a crate rebuilt in a second checkout come out byte-identical so its dependents still share. Source paths in debug information and panic messages then name a placeholder. This may also be set in workspace `.mbx.toml`; the environment variable wins.
+
 ### `stats_report`
 
 - **Type:** `option<path>`

@@ -223,9 +223,10 @@ that was kept verbatim, but not one the crate derived a value from.
 mbx remaps the path so rustc records a placeholder instead, which is what lets
 a dependency recompiled in a second checkout come out byte-identical, so the
 crates above it still share. Two cases stay checkout-specific anyway. A
-workspace member records its own directory whatever `OUT_DIR` was remapped to.
-A crate that keeps the value it read through `env!` embeds it. Both produce a
-different artifact in each checkout, and their dependents recompile with them.
+workspace member records its own directory, which `MBX_SHARE_WORKSPACE_ROOT`
+covers and the `OUT_DIR` remapping does not. A crate that keeps the value it
+read through `env!` embeds it. Both produce a different artifact in each
+checkout, and their dependents recompile with them.
 
 Set `MBX_SHARE_OUT_DIR=0` to keep generated source paths literal in debug
 information, at the cost of that dependent sharing.
@@ -235,6 +236,27 @@ into `OUT_DIR` passes that directory to its own compilations, which record it
 in debug information, so the same remapping applies: rustc is told
 `--remap-path-prefix` and the C compiler `-fdebug-prefix-map`.
 `MBX_SHARE_OUT_DIR=0` turns both off together.
+
+## A rebuilt workspace crate records its checkout
+
+Cargo runs rustc with the crate's own directory as the working directory, and
+rustc stores that directory in the artifact. Two checkouts of the same commit
+therefore produce different bytes for the same workspace crate whenever it is
+actually compiled rather than restored, and every crate above it misses too,
+because what it consumes differs.
+
+Most builds never see this: a workspace crate that can be restored is restored,
+byte for byte. It shows up where a crate has to be compiled in each checkout
+anyway, which is what a compilation keyed to its checkout does. One crate low in
+the graph that reads `OUT_DIR` or `CARGO_MANIFEST_DIR` can carry most of a large
+workspace with it.
+
+Set `MBX_SHARE_WORKSPACE_ROOT=1` (or `share_workspace_root = true`) to map the
+workspace root to a placeholder, which leaves the two checkouts producing the
+same bytes. The compilation that read the value is still keyed to its checkout;
+what changes is that its dependents stop paying for that. The cost is that
+source paths under the workspace are recorded as the placeholder, in debug
+information, `file!()` and panic locations, which is why it is off by default.
 
 ## Incremental output reduces sharing
 

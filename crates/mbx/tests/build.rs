@@ -2293,6 +2293,27 @@ fn a_workspace_member_reading_out_dir_costs_its_dependents_too() {
     assert!(!two_checkouts_share(Generated::Dependent, &[]));
 }
 
+/// Mapping the workspace root stops that cost at the crate that read the value.
+///
+/// The working directory is the only reason the rebuilt artifact differed, so
+/// removing it from what rustc records leaves the two checkouts producing the
+/// same bytes, and the crate above goes back to sharing. What the crate that
+/// read `OUT_DIR` does is unchanged: it is keyed to its checkout, and the pair
+/// below says so rather than reporting the dependent's hit as though the
+/// compilation had been shared.
+#[test]
+fn mapping_the_workspace_root_shares_the_dependents_of_a_checkout_specific_crate() {
+    let mapped = [("MBX_SHARE_WORKSPACE_ROOT", "1")];
+    assert!(
+        !two_checkouts_share(Generated::Include, &mapped),
+        "a compilation that reads OUT_DIR was shared between checkouts"
+    );
+    assert!(
+        two_checkouts_share(Generated::Dependent, &mapped),
+        "the dependent of a checkout-specific crate still recompiled"
+    );
+}
+
 /// Build the same fixture in two checkouts, reporting whether the second one
 /// reused anything from the first.
 /// Whether the *crate* shares, which is what every caller here is asking.

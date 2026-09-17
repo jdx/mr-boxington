@@ -172,6 +172,13 @@ pub(crate) struct RawConfig {
     /// either way, as does any artifact still carrying a checkout path.
     #[usage(env = "MBX_SHARE_OUT_DIR", default = true)]
     share_out_dir: bool,
+    /// Remap the workspace root so rustc does not record which checkout a
+    /// compilation ran in, which lets a crate rebuilt in a second checkout come
+    /// out byte-identical so its dependents still share. Source paths in debug
+    /// information and panic messages then name a placeholder. This may also be
+    /// set in workspace `.mbx.toml`; the environment variable wins.
+    #[usage(env = "MBX_SHARE_WORKSPACE_ROOT", default = false)]
+    share_workspace_root: bool,
     /// Cache executions of build scripts using Cargo's freshness inputs. This may
     /// also be set in workspace `.mbx.toml`; the environment variable wins.
     #[usage(env = "MBX_BUILD_SCRIPT_EXECUTION", default = true)]
@@ -396,6 +403,16 @@ pub struct Config {
     /// the value it read through `env!` embeds it; both produce a different
     /// artifact in a second checkout, and their dependents recompile too.
     pub share_out_dir: bool,
+    /// Remap the workspace root so rustc does not record the checkout a
+    /// compilation ran in.
+    ///
+    /// Off by default. Cargo gives rustc the crate's own directory to work in,
+    /// and rustc records it, so a workspace member rebuilt in a second checkout
+    /// produces a different artifact even when everything it read was the same
+    /// -- and every crate above it rebuilds with it. Remapping the root removes
+    /// that difference, at the cost of naming a placeholder wherever a source
+    /// path is recorded: debug information, `file!()`, and panic locations.
+    pub share_workspace_root: bool,
     /// Cache build-script execution when the script declares rerun inputs.
     pub build_script_execution: bool,
     /// Append a per-compilation event stream to the store, for `mbx tui`.
@@ -457,6 +474,7 @@ impl Config {
             verify_sample_rate: 0,
             incremental: false,
             share_out_dir: false,
+            share_workspace_root: false,
             build_script_execution: false,
             events: false,
             // Off like the rest: a test that says nothing about C compilation
@@ -958,6 +976,7 @@ impl Config {
                 .ok_or_else(|| eyre::eyre!("invalid verify_sample_rate: expected 0–100"))?,
             incremental: raw.incremental,
             share_out_dir: raw.share_out_dir,
+            share_workspace_root: raw.share_workspace_root,
             build_script_execution: raw.build_script_execution,
             events: raw.events,
             cc: raw.cc,
@@ -1101,10 +1120,14 @@ impl Config {
             }
             if !matches!(
                 key,
-                "incremental" | "share_out_dir" | "build_script_execution" | "cc"
+                "incremental"
+                    | "share_out_dir"
+                    | "share_workspace_root"
+                    | "build_script_execution"
+                    | "cc"
             ) {
                 bail!(
-                    "{} contains unsupported workspace setting {key:?}; only incremental, share_out_dir, build_script_execution, cc, linker, and scheduler are allowed",
+                    "{} contains unsupported workspace setting {key:?}; only incremental, share_out_dir, share_workspace_root, build_script_execution, cc, linker, and scheduler are allowed",
                     path.display()
                 );
             }
@@ -1118,13 +1141,20 @@ impl Config {
                 "share_out_dir" if !environment_contains("MBX_SHARE_OUT_DIR") => {
                     self.share_out_dir = value;
                 }
+                "share_workspace_root" if !environment_contains("MBX_SHARE_WORKSPACE_ROOT") => {
+                    self.share_workspace_root = value;
+                }
                 "build_script_execution" if !environment_contains("MBX_BUILD_SCRIPT_EXECUTION") => {
                     self.build_script_execution = value;
                 }
                 "cc" if !environment_contains("MBX_CC") => {
                     self.cc = value;
                 }
-                "incremental" | "share_out_dir" | "build_script_execution" | "cc" => {}
+                "incremental"
+                | "share_out_dir"
+                | "share_workspace_root"
+                | "build_script_execution"
+                | "cc" => {}
                 _ => unreachable!("workspace policy keys were validated above"),
             }
         }

@@ -2652,6 +2652,10 @@ impl Portable {
             mappings: PathMapping::ordered(&path_mappings(working_dir, target_output, target)),
             arguments: Vec::new(),
         };
+        // Before the values below, because rustc takes the last mapping that
+        // matches: `OUT_DIR` usually sits under the workspace, and its own
+        // placeholder is the one its generated sources should carry.
+        portable.map_workspace_root();
         if !session::share_out_dir_requested() {
             return portable;
         }
@@ -2679,6 +2683,38 @@ impl Portable {
     }
 
     /// The compiler arguments, with the remapping flags appended.
+    /// Keep the checkout out of what rustc records about a compilation.
+    ///
+    /// Cargo runs rustc with the crate's own directory as the working
+    /// directory and rustc stores it, so a workspace member rebuilt in a second
+    /// checkout produces a different artifact from the first even when every
+    /// input matched -- and every crate above it rebuilds with it, because what
+    /// it consumes differs. That is the cost a compilation keyed to its
+    /// checkout imposes on crates that are not.
+    ///
+    /// Mapping the root removes the difference: two checkouts compiling the
+    /// same crate produce the same bytes. The price is that every recorded
+    /// source path under the workspace names the placeholder instead, in debug
+    /// information, `file!()` and panic locations, which is why this is off
+    /// until asked for.
+    fn map_workspace_root(&mut self) {
+        if !session::share_workspace_root_requested() {
+            return;
+        }
+        let Some(mapping) = self
+            .mappings
+            .iter()
+            .find(|mapping| mapping.placeholder == "workspace")
+        else {
+            return;
+        };
+        let mut flag = OsString::from("--remap-path-prefix=");
+        flag.push(&mapping.root);
+        flag.push("=");
+        flag.push(format!("${{{}}}", mapping.placeholder));
+        self.arguments.push(flag);
+    }
+
     fn applied_to(&self, arguments: &[OsString]) -> Vec<OsString> {
         let mut applied = arguments.to_vec();
         applied.extend(self.arguments.iter().cloned());

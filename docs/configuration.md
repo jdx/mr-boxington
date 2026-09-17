@@ -89,6 +89,7 @@ cache_dir = "/var/cache/mbx"
 incremental = false
 learned_incremental_max_size = "8GiB"  # or "none"
 share_out_dir = true
+share_workspace_root = false
 build_script_execution = true
 cc = true
 summary = "auto"         # or "short", "ci", "full", "off"
@@ -154,6 +155,7 @@ and scheduler policy below:
 ```toml
 incremental = false
 share_out_dir = false
+share_workspace_root = false
 build_script_execution = true
 cc = true
 
@@ -177,6 +179,14 @@ compilation is cached for the checkout it ran in either way. A workspace may
 set it to false when generated source paths must remain literal in debug
 information. This applies to C and C++ objects as well as Rust artifacts,
 because a build script's generated headers reach both.
+
+`share_workspace_root = false` is the global default. Setting it to true maps
+the workspace root to a placeholder wherever rustc records a source path, so a
+crate rebuilt in a second checkout comes out byte-identical and the crates above
+it still share. It is worth turning on for a machine that builds many checkouts
+of one repository, and costs literal source paths in debug information,
+`file!()` and panic locations. See
+[A rebuilt workspace crate records its checkout](/limits).
 
 `build_script_execution = true` (`MBX_BUILD_SCRIPT_EXECUTION`) caches eligible
 `build.rs` executions. Set it to false to keep compilation caching while every
