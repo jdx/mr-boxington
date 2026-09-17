@@ -551,6 +551,7 @@ fn cargo_with(
         // Same reason: a test asserting the default cross-checkout behaviour
         // must not read an answer out of the developer's environment.
         .env_remove("MBX_SHARE_OUT_DIR")
+        .env_remove("MBX_SHARE_WORKSPACE_ROOT")
         .env_remove("MBX_BUILD_SCRIPT_EXECUTION")
         .env_remove("MBX_LEARNED_INCREMENTAL")
         .env_remove("MBX_VERIFY")
@@ -2308,10 +2309,55 @@ fn mapping_the_workspace_root_shares_the_dependents_of_a_checkout_specific_crate
         !two_checkouts_share(Generated::Include, &mapped),
         "a compilation that reads OUT_DIR was shared between checkouts"
     );
-    assert!(
-        two_checkouts_share(Generated::Dependent, &mapped),
-        "the dependent of a checkout-specific crate still recompiled"
+    // By crate rather than by the session total: the fixture also compiles a
+    // build script, whose own compilation reads nothing remapped and shares
+    // between these checkouts either way, so a total would report this as
+    // fixed while the dependent went on recompiling.
+    let (store, _) = two_checkouts(Generated::Dependent, &mapped);
+    let outcomes = second_build_outcomes(store.path());
+    assert_eq!(
+        outcomes.get("outer").map(String::as_str),
+        Some("hit"),
+        "the dependent of a checkout-specific crate still recompiled: {outcomes:?}"
     );
+    assert_eq!(
+        outcomes.get("inner").map(String::as_str),
+        Some("miss"),
+        "the crate that read OUT_DIR was shared between checkouts: {outcomes:?}"
+    );
+}
+
+/// What the second checkout's build recorded for each crate it compiled.
+///
+/// The store holds one stream per build, so the second one is the newest.
+fn second_build_outcomes(store: &Path) -> std::collections::BTreeMap<String, String> {
+    let directory = store.join("actions/sessions/v1");
+    let newest = std::fs::read_dir(&directory)
+        .expect("a session directory should exist")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .max_by_key(|path| {
+            std::fs::metadata(path)
+                .and_then(|metadata| metadata.modified())
+                .expect("a recorded stream should have a modification time")
+        })
+        .expect("two builds should have recorded a stream each");
+    std::fs::read_to_string(newest)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["type"] == "action")
+        .filter_map(|event| {
+            Some((
+                event["crate_name"].as_str()?.to_string(),
+                event["outcome"]["kind"].as_str()?.to_string(),
+            ))
+        })
+        .collect()
 }
 
 /// Build the same fixture in two checkouts, reporting whether the second one
@@ -2323,6 +2369,16 @@ fn mapping_the_workspace_root_shares_the_dependents_of_a_checkout_specific_crate
 /// compiles -- so it shares between these checkouts whatever the crate does,
 /// and counting it would answer a question nobody asked.
 fn two_checkouts_share(generated: Generated, settings: &[(&str, &str)]) -> bool {
+    let (_store, stats) = two_checkouts(generated, settings);
+    count(&stats, "hits") > 0
+}
+
+/// Build the same fixture in two checkouts of it, handing back the store so a
+/// caller can read what the second build recorded rather than only its totals.
+fn two_checkouts(
+    generated: Generated,
+    settings: &[(&str, &str)],
+) -> (tempfile::TempDir, serde_json::Value) {
     let store = tempfile::tempdir().unwrap();
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
@@ -2349,7 +2405,7 @@ fn two_checkouts_share(generated: Generated, settings: &[(&str, &str)]) -> bool 
         &reports.path().join("second.json"),
         &settings,
     );
-    count(&stats, "hits") > 0
+    (store, stats)
 }
 
 #[test]
