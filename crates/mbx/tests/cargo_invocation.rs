@@ -293,7 +293,6 @@ fn unsupported_configuration_and_recursive_aliases_are_not_guessed() {
         "[alias]\nx=['-Zscript','example.rs']\n",
         "[alias]\nx=['build','-C','somewhere']\n",
         "[alias]\nx=['--config','alias.y=\"probe\"','y']\n",
-        "include=['extra.toml']\n[alias]\nx='probe'\n",
     ] {
         f.config(config);
         for shim in [false, true] {
@@ -315,6 +314,60 @@ fn unsupported_configuration_and_recursive_aliases_are_not_guessed() {
             .unwrap(),
     );
     assert!(!f.root.join("external-ran").exists());
+}
+
+/// An `include` is configuration this cannot read, but only aliases can come
+/// out of one, and Cargo's own listing reports the aliases it honours. So a
+/// command Cargo knows as an alias is refused rather than guessed, while a
+/// command that is no alias at all is untouched: an include cannot turn
+/// `cargo probe` into something else, and refusing it would put back the very
+/// failure outside a project that this change exists to remove.
+#[test]
+fn configuration_includes_refuse_aliases_without_refusing_everything() {
+    let f = Fixture::new();
+    let include = |text: &str| {
+        std::fs::write(f.outside.join(".cargo/extra.toml"), text).unwrap();
+        f.config("include=['extra.toml']\n");
+    };
+    for shim in [false, true] {
+        // Cargo honours the alias and says so in its listing, so it is refused
+        // rather than read from configuration this cannot follow.
+        include("[alias]\nx='probe'\n");
+        rejected(
+            f.command(shim)
+                .arg("x")
+                .env("REJECT_METADATA", "1")
+                .output()
+                .unwrap(),
+        );
+        assert!(!f.root.join("external-ran").exists());
+        // The same configuration must not cost an ordinary external command
+        // its passthrough.
+        let stdout = succeeded(
+            f.command(shim)
+                .arg("probe")
+                .env("REJECT_METADATA", "1")
+                .output()
+                .unwrap(),
+        );
+        assert!(stdout.starts_with("probe\n"), "{stdout}");
+        std::fs::remove_file(f.root.join("external-ran")).unwrap();
+    }
+    // An include Cargo cannot load leaves it honouring no alias at all, and
+    // its own diagnostic is the one worth showing. Nothing is built either way.
+    f.config("include=['missing.toml']\n[alias]\nx='probe'\n");
+    for shim in [false, true] {
+        let output = f
+            .command(shim)
+            .arg("x")
+            .env("REJECT_METADATA", "1")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("could not verify"), "{stderr}");
+        assert!(!stderr.contains("Compiling"), "{stderr}");
+        assert!(!f.root.join("external-ran").exists(), "{stderr}");
+    }
 }
 
 #[test]

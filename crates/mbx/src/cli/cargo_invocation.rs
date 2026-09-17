@@ -42,6 +42,14 @@ impl Alias {
 // and array merging. Its unresolved representation retains string vs array,
 // allowing Cargo's alias-specific whitespace rule to be applied to strings.
 // It does not implement includes; never silently ignore those.
+//
+// Nothing where the configuration cannot be read in full. An `include` can
+// define an alias or redefine one, so an alias read past it could name a
+// different package, and the shorthand names are configuration that an
+// include can redefine too. The caller reads nothing from configuration in
+// that case and lets the listing answer, which refuses whatever Cargo calls
+// an alias. A command that is no alias at all is unaffected: no include turns
+// `cargo binstall` into something else.
 fn aliases(cwd: &Path) -> Option<BTreeMap<String, Alias>> {
     for path in cargo_config2::Walk::new(cwd) {
         let value: toml::Value = toml::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
@@ -144,29 +152,39 @@ pub(super) fn resolve(cargo: &OsStr, arguments: &[OsString]) -> Option<Invocatio
             return Some(Invocation { arguments, kind });
         }
         if aliases.is_none() {
-            aliases = Some(self::aliases(&std::env::current_dir().ok()?)?);
+            aliases = Some(self::aliases(&std::env::current_dir().ok()?));
         }
-        let aliases = aliases.as_mut()?;
-        // Cargo looks up the environment by normalized key, including aliases
-        // not present in any file. Do not enumerate uppercase names as commands.
-        let key = format!("CARGO_ALIAS_{}", command.replace('-', "_").to_uppercase());
-        let configured = aliases.remove(command);
-        let alias = match (configured, std::env::var_os(key)) {
-            (Some(Alias::Array(mut words)), Some(value)) => {
-                // Cargo concatenates environment values onto configured
-                // arrays, whereas strings are replaced by the environment.
-                words.extend(
-                    value
-                        .into_string()
-                        .ok()?
-                        .split_whitespace()
-                        .map(str::to_owned),
-                );
-                Some(Alias::Array(words))
+        // Configuration that could not be read in full supplies no alias, not
+        // even a shorthand: the environment merges onto what a file declared,
+        // and an unread file leaves nothing to merge onto. The listing below
+        // then classifies the command and refuses any alias among them.
+        let alias = match aliases.as_mut()?.as_mut() {
+            None => None,
+            Some(aliases) => {
+                // Cargo looks up the environment by normalized key, including
+                // aliases not present in any file. Do not enumerate uppercase
+                // names as commands.
+                let key = format!("CARGO_ALIAS_{}", command.replace('-', "_").to_uppercase());
+                let configured = aliases.remove(command);
+                match (configured, std::env::var_os(key)) {
+                    (Some(Alias::Array(mut words)), Some(value)) => {
+                        // Cargo concatenates environment values onto configured
+                        // arrays, whereas strings are replaced by the environment.
+                        words.extend(
+                            value
+                                .into_string()
+                                .ok()?
+                                .split_whitespace()
+                                .map(str::to_owned),
+                        );
+                        Some(Alias::Array(words))
+                    }
+                    (_, Some(value)) => Some(Alias::String(value.into_string().ok()?)),
+                    (value, None) => value.or_else(|| {
+                        default_alias(command).map(|value| Alias::String(value.to_owned()))
+                    }),
+                }
             }
-            (_, Some(value)) => Some(Alias::String(value.into_string().ok()?)),
-            (value, None) => value
-                .or_else(|| default_alias(command).map(|value| Alias::String(value.to_owned()))),
         };
         if let Some(alias) = alias {
             // Cargo applies CLI overrides at a different stage from alias

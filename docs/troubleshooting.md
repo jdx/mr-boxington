@@ -87,10 +87,13 @@ including recursive aliases and Cargo's built-in shorthand commands.
 
 When metadata fails, alias recovery does not support configuration `include`
 files, aliases with `--config` overrides, directory-changing options, or unstable
-Cargo options. These invocations remain refused when their storage cannot be
-verified. Spell out the build command with its manifest or path instead of the
-alias to diagnose it. mbx never reconstructs alias arguments from `cargo --list`,
-which loses the boundaries of arguments containing whitespace.
+Cargo options. An alias mbx cannot read in full is refused rather than guessed
+when its storage cannot be verified; spell out the build command with its
+manifest or path instead of the alias to diagnose it. Commands that are not
+aliases keep passing through, so an `include` in your configuration does not
+stop `cargo binstall` working outside a project. mbx never reconstructs alias
+arguments from `cargo --list`, which loses the boundaries of arguments
+containing whitespace.
 
 ## Inspect a build
 
