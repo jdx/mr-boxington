@@ -22,9 +22,18 @@ impl Write for Stderr {
     }
 }
 
+/// portable-pty reports a pty it could not open or spawn into at error level
+/// before returning that failure to its caller, and mbx is the caller that
+/// decides what the failure means: an inline view that cannot start is not a
+/// build problem, because the build continues under plain Cargo. Keep the
+/// library quiet by default so its copy of the message does not reach a user
+/// whose build then succeeds. `MBX_LOG` replaces this filter outright, so
+/// `MBX_LOG=debug` still shows the reason the view stood down.
+const DEFAULT_FILTER: &str = "info,portable_pty=off";
+
 /// Initialize the command logger while retaining its existing filter settings.
 pub fn init() {
-    env_logger::Builder::from_env(env_logger::Env::default().filter_or("MBX_LOG", "info"))
+    env_logger::Builder::from_env(env_logger::Env::default().filter_or("MBX_LOG", DEFAULT_FILTER))
         .format_target(false)
         .format_timestamp(None)
         .target(env_logger::Target::Pipe(Box::new(Stderr)))
@@ -67,6 +76,21 @@ impl Drop for Capture {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use log::Log;
+
+    fn enabled(target: &str, level: log::Level) -> bool {
+        env_logger::Builder::new()
+            .parse_filters(DEFAULT_FILTER)
+            .build()
+            .enabled(&log::Metadata::builder().target(target).level(level).build())
+    }
+
+    #[test]
+    fn a_pty_failure_mbx_recovers_from_is_not_announced_to_the_user() {
+        assert!(!enabled("portable_pty", log::Level::Error));
+        assert!(enabled("mbx::cli::cargo", log::Level::Info));
+        assert!(!enabled("mbx::cli::cargo", log::Level::Debug));
+    }
 
     #[test]
     fn background_notes_and_logger_writes_share_the_screen_queue() {
