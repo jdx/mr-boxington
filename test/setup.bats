@@ -357,6 +357,8 @@ EOF
 }
 
 @test "the Cargo shim preserves Cargo's namespace and disable escape hatch" {
+  # Alias arguments come from configuration; the listing is only an inventory.
+  printf '[alias]\ncache = "version"\n' >"$CARGO_HOME/config.toml"
   local real_bin="$BATS_TEST_TMPDIR/real-bin"
   mkdir -p "$real_bin"
   cat >"$real_bin/cargo" <<'EOF'

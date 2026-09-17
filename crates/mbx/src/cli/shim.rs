@@ -1,7 +1,6 @@
 use super::cargo::{CARGO_TARGET_DIR_ENV, cargo_roots, exit_code};
 use crate::config::Config;
 use eyre::{Context, Result};
-use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -93,17 +92,16 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
             "MBX_CACHE_DIR",
         )?;
     }
-    let Some(roots) = cargo_roots(
-        &real_cargo,
-        &string_arguments,
-        std::env::var_os(CARGO_TARGET_DIR_ENV).as_deref(),
-    ) else {
-        if metadata_failure_passthrough(&real_cargo, &arguments) {
-            return run_real_cargo(&real_cargo, &arguments);
-        }
-        eyre::bail!(
-            "could not verify Cargo build storage: metadata probing failed; run cargo metadata --no-deps --format-version 1 with the same manifest and configuration options to diagnose it"
-        );
+    let target_dir_env = std::env::var_os(CARGO_TARGET_DIR_ENV);
+    let roots = match cargo_roots(&real_cargo, &string_arguments, target_dir_env.as_deref()) {
+        Some(roots) => roots,
+        None => match failed_probe(&real_cargo, &arguments, target_dir_env.as_deref()) {
+            FailedProbe::Roots(roots) => *roots,
+            FailedProbe::Passthrough => return run_real_cargo(&real_cargo, &arguments),
+            FailedProbe::Reject => eyre::bail!(
+                "could not verify Cargo build storage: metadata probing failed; run cargo metadata --no-deps --format-version 1 with the same manifest and configuration options to diagnose it"
+            ),
+        },
     };
     // Every probe and the final child must name Cargo directly.
     unsafe { std::env::set_var("CARGO", &real_cargo) };
@@ -233,84 +231,74 @@ pub(super) fn cargo_proxy_passthrough(arguments: &[OsString]) -> bool {
         )
 }
 
-/// Preserve non-build aliases and unknown-command diagnostics without allowing
-/// failed metadata to launch a build alias or an external Cargo command.
-pub(super) fn metadata_failure_passthrough(cargo: &OsStr, arguments: &[OsString]) -> bool {
-    if arguments.iter().any(|arg| {
-        let arg = arg.to_string_lossy();
-        arg.starts_with('+')
-            || arg.starts_with("--config")
-            || arg.starts_with("-C")
-            || arg.starts_with("--directory")
-            || arg.starts_with("-Z")
-    }) {
-        return false;
+/// What to do with an invocation whose roots probe failed.
+pub(super) enum FailedProbe {
+    /// Roots recovered from the expanded invocation: manage the build.
+    Roots(Box<super::cargo::Roots>),
+    /// Hand the invocation to Cargo as it was typed.
+    Passthrough,
+    /// Refuse it: the build storage cannot be verified.
+    Reject,
+}
+
+/// Decide what a failed roots probe leaves the caller able to do.
+///
+/// Resolve once, then use the same arguments for root recovery and the
+/// decision to allow a manifest-less invocation.
+pub(super) fn failed_probe(
+    cargo: &OsStr,
+    arguments: &[OsString],
+    target_dir_env: Option<&OsStr>,
+) -> FailedProbe {
+    // An alias can name a manifest that the command line does not, so expand
+    // it before reading the invocation: `i = "install --path /project"`
+    // compiles a local package from a directory that has none of its own.
+    let invocation = super::cargo_invocation::resolve(cargo, arguments);
+    // The first probe asked about the alias's own name and got nothing back.
+    // Ask again as Cargo will read it: the roots belong to the package the
+    // expansion names, though the child still receives the command line as it
+    // was typed, since Cargo expands the alias itself.
+    if let Some(resolved) = &invocation
+        && resolved.arguments != arguments
+        && let Ok(expanded) = super::strings(&resolved.arguments)
+        && let Some(roots) = super::cargo::cargo_roots(cargo, &expanded, target_dir_env)
+    {
+        return FailedProbe::Roots(Box::new(roots));
     }
-    let Some(command) = super::launch::cargo_subcommand(arguments) else {
+    if metadata_failure_passthrough(invocation.as_ref()) {
+        return FailedProbe::Passthrough;
+    }
+    FailedProbe::Reject
+}
+
+/// Preserve invocations outside a project, non-build aliases, and
+/// unknown-command diagnostics without allowing failed metadata to launch a
+/// build alias or an external Cargo command inside one.
+fn metadata_failure_passthrough(invocation: Option<&super::cargo_invocation::Invocation>) -> bool {
+    let Some(invocation) = invocation else {
         return false;
     };
-    if matches!(
-        command,
-        "build"
-            | "b"
-            | "check"
-            | "c"
-            | "test"
-            | "t"
-            | "run"
-            | "r"
-            | "bench"
-            | "doc"
-            | "d"
-            | "rustc"
-            | "rustdoc"
-            | "clippy"
-            | "fix"
-    ) {
-        return false;
+    // Only losslessly resolved invocations reach this point. No manifest
+    // means Cargo has no local package whose storage needs verification.
+    if let Ok(strings) = super::strings(&invocation.arguments)
+        && let Ok(working_dir) = std::env::current_dir()
+        && !mbx_cache_cargo::manifest_in_scope(
+            // External commands own their flags. A missing --manifest-path
+            // must not disguise the project the invocation runs inside.
+            if matches!(invocation.kind, super::cargo_invocation::Kind::External) {
+                &[]
+            } else {
+                &strings
+            },
+            &working_dir,
+        )
+    {
+        return true;
     }
-    // `--color=never` overrides `CARGO_TERM_COLOR` and `term.color`, which
-    // otherwise wrap both the header and every command name in ANSI escapes
-    // and defeat the plain-text parsing below.
-    let Ok(output) = Command::new(cargo)
-        .args(["--color=never", "--list"])
-        .output()
-    else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
-    let listing = String::from_utf8_lossy(&output.stdout);
-    if !listing.starts_with("Installed Commands:") {
-        return false;
-    }
-    let entries = listing
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let line = line.trim();
-            let end = line.find(char::is_whitespace).unwrap_or(line.len());
-            (!line.is_empty()).then_some((&line[..end], line[end..].trim()))
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut current = command;
-    for _ in 0..32 {
-        let Some(description) = entries.get(current) else {
-            return current == command;
-        };
-        let Some(alias) = description.strip_prefix("alias: ") else {
-            return false;
-        };
-        let Some(next) = alias.split_whitespace().next() else {
-            return false;
-        };
-        if cargo_proxy_passthrough(&[OsString::from(next)]) {
-            return true;
-        }
-        current = next;
-    }
-    false
+    matches!(
+        invocation.kind,
+        super::cargo_invocation::Kind::Unknown | super::cargo_invocation::Kind::Proxy
+    )
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {

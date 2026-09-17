@@ -14,6 +14,7 @@ use std::process::ExitCode;
 
 mod cache;
 mod cargo;
+mod cargo_invocation;
 mod clean;
 mod doctor;
 mod exec;

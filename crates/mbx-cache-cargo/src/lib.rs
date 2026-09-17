@@ -145,7 +145,7 @@ fn resolve_with_reported(
     let cargo_args = cargo_arguments(arguments);
     let install_source = path_install_dir(cargo_args, working_dir);
     let invocation_dir = if install_source.is_some() {
-        path_install_invocation_dir(cargo_args, working_dir)
+        directory_option_dir(cargo_args, working_dir)
     } else {
         invocation_dir(cargo_args, working_dir)
     };
@@ -373,9 +373,9 @@ fn invocation_dir(arguments: &[String], working_dir: &Path) -> PathBuf {
         .unwrap_or_else(|| working_dir.to_path_buf())
 }
 
-// Path installs change the probe's cwd, so resolve all directory-option
-// spellings before constructing their source-directory probe.
-fn path_install_invocation_dir(arguments: &[String], working_dir: &Path) -> PathBuf {
+// Path installs change the probe's cwd, and manifest discovery starts from
+// wherever Cargo was pointed, so resolve every directory-option spelling.
+fn directory_option_dir(arguments: &[String], working_dir: &Path) -> PathBuf {
     flag_value(arguments, "-C")
         .or_else(|| flag_value(arguments, "--directory"))
         .or_else(|| {
@@ -385,6 +385,32 @@ fn path_install_invocation_dir(arguments: &[String], working_dir: &Path) -> Path
         })
         .map(|value| absolute(working_dir, value))
         .unwrap_or_else(|| working_dir.to_path_buf())
+}
+
+/// Whether Cargo has a manifest to work from here.
+///
+/// Without one there is no package to compile, no target directory to place,
+/// and nothing for a probe to report, so a metadata failure means only that
+/// Cargo was run outside a project. Cargo's own diagnostic is then the useful
+/// one, and the caller can hand the invocation straight to it.
+pub fn manifest_in_scope(arguments: &[String], working_dir: &Path) -> bool {
+    let arguments = cargo_arguments(arguments);
+    let invocation = directory_option_dir(arguments, working_dir);
+    // `install --path` compiles the manifest in the directory it names, which
+    // it has even where the invocation directory has none, and does not walk
+    // up to a surrounding workspace for it. Only a real install gives `--path`
+    // that meaning: other subcommands use the same flag for their own
+    // purposes, such as the local template `cargo generate --path` reads.
+    // Callers expand aliases first, so an aliased install arrives spelled out.
+    if let Some(source) = path_install_dir(arguments, working_dir) {
+        return source.join("Cargo.toml").is_file();
+    }
+    match flag_value(arguments, "--manifest-path") {
+        Some(manifest) => absolute(&invocation, manifest).is_file(),
+        None => invocation
+            .ancestors()
+            .any(|directory| directory.join("Cargo.toml").is_file()),
+    }
 }
 
 // Only a real install subcommand gives --path this meaning; option values
@@ -401,7 +427,7 @@ fn path_install_dir(arguments: &[String], working_dir: &Path) -> Option<PathBuf>
                 return (value == "install")
                     .then(|| {
                         flag_value(arguments, "--path").map(|path| {
-                            absolute(&path_install_invocation_dir(arguments, working_dir), path)
+                            absolute(&directory_option_dir(arguments, working_dir), path)
                         })
                     })
                     .flatten();
@@ -465,7 +491,7 @@ fn recalled_cargo_roots(
         // `install --path` reads configuration from the source directory,
         // whereas metadata normally reads it from the caller's directory.
         // Probe there, retaining caller-relative CLI paths and target overrides.
-        let caller = path_install_invocation_dir(arguments, working_dir);
+        let caller = directory_option_dir(arguments, working_dir);
         let mut probe_args = Vec::new();
         if let Some(target) =
             std::env::var_os("CARGO_BUILD_TARGET_DIR").filter(|value| !value.is_empty())
@@ -947,6 +973,100 @@ mod tests {
         } else {
             path.canonicalize().unwrap()
         }
+    }
+
+    #[test]
+    fn a_manifest_is_in_scope_only_where_cargo_would_read_one() {
+        let outside = tempfile::tempdir().unwrap();
+        let outside = outside.path();
+        let arguments = |value: &str| {
+            value
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert!(!manifest_in_scope(&arguments("binstall"), outside));
+        assert!(!manifest_in_scope(&arguments("build"), outside));
+
+        let project = cargo_fixture();
+        let project = project.path();
+        let nested = project.join("src");
+        assert!(manifest_in_scope(&arguments("binstall"), project));
+        // Cargo walks up for the nearest manifest, so a subdirectory of a
+        // package is inside it.
+        assert!(manifest_in_scope(&arguments("binstall"), &nested));
+
+        // A directory option moves the search, either way.
+        assert!(manifest_in_scope(
+            &[
+                "-C".into(),
+                project.to_string_lossy().into_owned(),
+                "binstall".into()
+            ],
+            outside
+        ));
+        assert!(!manifest_in_scope(
+            &[
+                "--directory".into(),
+                outside.to_string_lossy().into_owned(),
+                "binstall".into()
+            ],
+            project
+        ));
+
+        // `--manifest-path` names the manifest outright rather than starting
+        // a search, so a missing one is out of scope even inside a package.
+        assert!(manifest_in_scope(
+            &[
+                "binstall".into(),
+                "--manifest-path".into(),
+                "Cargo.toml".into()
+            ],
+            project
+        ));
+        assert!(!manifest_in_scope(
+            &["binstall".into(), "--manifest-path=src/Cargo.toml".into()],
+            project
+        ));
+
+        // `install --path` names a manifest the invocation directory does not
+        // have. Callers expand aliases before asking, so only a real install
+        // gives `--path` that meaning here; other subcommands spend the same
+        // flag on their own arguments and must not be read as path installs.
+        assert!(manifest_in_scope(
+            &[
+                "install".into(),
+                "--path".into(),
+                project.to_string_lossy().into_owned()
+            ],
+            outside
+        ));
+        assert!(!manifest_in_scope(
+            &[
+                "generate".into(),
+                "--path".into(),
+                project.to_string_lossy().into_owned()
+            ],
+            outside
+        ));
+        assert!(!manifest_in_scope(
+            &[
+                "install".into(),
+                "--path".into(),
+                outside.join("absent").to_string_lossy().into_owned()
+            ],
+            outside
+        ));
+        // Arguments after `--` belong to the built program, not to Cargo.
+        assert!(!manifest_in_scope(
+            &[
+                "run".into(),
+                "--".into(),
+                "--path".into(),
+                project.to_string_lossy().into_owned()
+            ],
+            outside
+        ));
     }
 
     #[test]
