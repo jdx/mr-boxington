@@ -120,20 +120,23 @@ example `zstd-sys`, `ring`, `aws-lc-sys`, `libz-sys`, and `openssl-sys` when
 linking statically) compile their rlib this way, and mbx caches those
 compilations.
 
-For `-l static=NAME`, with any modifiers, rustc reads the archive and bundles
-it into the rlib. mbx resolves the file the way rustc does, taking the first
-`-L native` directory in command-line order that holds `libNAME.a` (or
-`NAME.lib` on MSVC targets; the literal name with `+verbatim`), and hashes it
-into the action key exactly like an `--extern` artifact. A rebuilt archive
+For `-l static=NAME`, rustc reads the archive and bundles it into the rlib.
+mbx resolves the file the way rustc does, taking the first `-L native`
+directory in command-line order that holds `libNAME.a` (or `NAME.lib` on
+Windows MSVC and UEFI targets; the literal name with `+verbatim`), and hashes
+it into the action key exactly like an `--extern` artifact. A rebuilt archive
 with the same name therefore gives the library a new key, on a fresh
 compilation and on a predicted restore alike. If no search directory holds
 the archive, the compilation bypasses as `missing-native-library`; an archive
 outside the workspace, target, Cargo, toolchain, and home roots bypasses as
-`unmapped-absolute-path`, like any other input there.
+`unmapped-absolute-path`, like any other input there. A custom target
+specification names its archives its own way, so a `-l static` compile for
+one bypasses as `custom-target-native-library` unless the flag is `+verbatim`.
 
-For `-l dylib=NAME`, `-l framework=NAME`, `-l link-arg=...`, and a plain
-`-l NAME`, rustc reads nothing and records the name in the crate's metadata
-for a later link, so the flag enters the key as text.
+For `-l static:-bundle=NAME`, `-l dylib=NAME`, `-l framework=NAME`,
+`-l link-arg=...`, and a plain `-l NAME`, rustc reads nothing and records the
+name in the crate's metadata for a later link, so the flag enters the key as
+text.
 
 An archive built with debug information usually records the checkout's C
 source paths. When the build script that produces it reruns in another

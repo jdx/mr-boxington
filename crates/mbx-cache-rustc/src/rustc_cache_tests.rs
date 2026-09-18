@@ -366,14 +366,14 @@ fn name_only_native_libraries_are_keyed_as_text_on_a_library_emit() {
 /// A static library is read: rustc bundles the archive into the rlib, so the
 /// archive is a required input whatever modifiers travel with it.
 #[test]
-fn a_static_library_is_a_required_input_with_any_modifiers() {
+fn a_static_library_is_a_required_input_with_any_bundling_modifiers() {
     let (_directory, working_dir, native) = static_library_fixture();
     std::fs::write(native.join("libzstd.a"), "archive").unwrap();
     for library in [
         "static=zstd",
         "static:+whole-archive=zstd",
-        "static:+whole-archive,-bundle=zstd",
-        "static:-bundle=zstd",
+        "static:+bundle=zstd",
+        "static:-bundle,+bundle=zstd",
         "static:+verbatim,-verbatim=zstd",
     ] {
         let invocation =
@@ -385,6 +385,59 @@ fn a_static_library_is_a_required_input_with_any_modifiers() {
             "{library}"
         );
     }
+}
+
+/// With `-bundle` rustc records the name for the downstream link and never
+/// opens the archive, so the flag is text: the archive need not exist, and
+/// its contents do not reach the key. The last spelling of the modifier wins.
+#[test]
+fn an_unbundled_static_library_is_keyed_as_text() {
+    let (_directory, working_dir, native) = static_library_fixture();
+    for library in [
+        "static:-bundle=zstd",
+        "static:+whole-archive,-bundle=zstd",
+        "static:+bundle,-bundle=zstd",
+    ] {
+        let invocation =
+            RustcInvocation::parse(&library_linking(&[("native=", &native)], &[library]))
+                .unwrap_or_else(|error| panic!("{library}: {error}"));
+        assert!(
+            required_inputs(&invocation, &working_dir).is_empty(),
+            "{library}"
+        );
+    }
+}
+
+/// UEFI targets use MSVC library names without `msvc` in the triple, and a
+/// custom target specification chooses its own, which the adapter does not
+/// read: guessing `libNAME.a` there could hash an archive rustc never bundles.
+#[test]
+fn static_library_naming_follows_the_target_specification() {
+    let (_directory, working_dir, native) = static_library_fixture();
+    std::fs::write(native.join("zstd.lib"), "msvc").unwrap();
+    std::fs::write(native.join("libzstd.a"), "unix").unwrap();
+    let mut uefi = library_linking(&[("native=", &native)], &["static=zstd"]);
+    uefi.insert(0, "--target=x86_64-unknown-uefi".into());
+    assert_eq!(
+        required_inputs(&RustcInvocation::parse(&uefi).unwrap(), &working_dir),
+        vec![native.join("zstd.lib")]
+    );
+
+    let spec = working_dir.join("custom.json");
+    std::fs::write(&spec, "{}").unwrap();
+    let mut custom = library_linking(&[("native=", &native)], &["static=zstd"]);
+    custom.insert(0, format!("--target={}", spec.display()).into());
+    assert_eq!(
+        RustcInvocation::parse(&custom),
+        Err(BypassReason::CustomTargetNativeLibrary(
+            "static=zstd".into()
+        ))
+    );
+    // `+verbatim` names the file itself, so the specification is not needed.
+    let mut verbatim = library_linking(&[("native=", &native)], &["static:+verbatim=libzstd.a"]);
+    verbatim.insert(0, format!("--target={}", spec.display()).into());
+    let inputs = required_inputs(&RustcInvocation::parse(&verbatim).unwrap(), &working_dir);
+    assert!(inputs.contains(&native.join("libzstd.a")), "{inputs:?}");
 }
 
 /// `-l static=NAME:RENAME` links RENAME in place of the `#[link]` attribute's

@@ -232,6 +232,10 @@ pub enum BypassReason {
     /// read it from, so there is no archive to hash.
     #[error("native static library was not found on any search path: {0}")]
     MissingNativeLibrary(String),
+    /// A custom target specification chooses its own static-library file
+    /// names, so the archive rustc would read cannot be named without it.
+    #[error("static library file names are not known for a custom target: {0}")]
+    CustomTargetNativeLibrary(String),
     /// An output's name does not say whether it is a program or a library.
     #[error("rustc output name does not distinguish a program from a library: {0}")]
     AmbiguousOutputName(PathBuf),
@@ -1184,6 +1188,15 @@ struct InputDescriptor {
     digest: CacheDigest,
 }
 
+/// The static-library file names a built-in target uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StaticLibraryNaming {
+    /// `NAME.lib`, then the Unix spelling as a fallback.
+    Msvc,
+    /// `libNAME.a`.
+    Unix,
+}
+
 struct Parser<'a> {
     arguments: &'a [OsString],
     index: usize,
@@ -1642,8 +1655,8 @@ impl<'a> Parser<'a> {
     /// members into the rlib, so the archive's content decides the output. It
     /// is found the way rustc finds it and named as a required input, keyed
     /// by content exactly like an `--extern` artifact. With `-bundle` rustc
-    /// records the name for a downstream link instead of reading the archive;
-    /// hashing it anyway costs one file digest and errs toward a miss.
+    /// records the name for a downstream link instead of reading the archive,
+    /// so that flag is text like the name-only kinds.
     ///
     /// A linked output hands every `-l` to its linker, whose search is not
     /// modeled here, so those still bypass whatever the kind.
@@ -1665,15 +1678,22 @@ impl<'a> Parser<'a> {
             // A rename links RENAME in place of the NAME a `#[link]` attribute
             // gave, so RENAME is the archive on disk.
             let name = name.split_once(':').map_or(name, |(_, renamed)| renamed);
-            let verbatim = modifiers
-                .split(',')
-                .fold(false, |verbatim, modifier| match modifier {
-                    "+verbatim" => true,
-                    "-verbatim" => false,
-                    _ => verbatim,
-                });
+            let (mut verbatim, mut bundle) = (false, true);
+            for modifier in modifiers.split(',') {
+                match modifier {
+                    "+verbatim" => verbatim = true,
+                    "-verbatim" => verbatim = false,
+                    "+bundle" => bundle = true,
+                    "-bundle" => bundle = false,
+                    _ => {}
+                }
+            }
+            if !bundle {
+                continue;
+            }
             let archive = self
                 .find_native_static_library(name, verbatim)
+                .map_err(|()| BypassReason::CustomTargetNativeLibrary(library.clone()))?
                 .ok_or_else(|| BypassReason::MissingNativeLibrary(library.clone()))?;
             self.required_inputs.push(archive);
         }
@@ -1681,22 +1701,34 @@ impl<'a> Parser<'a> {
     }
 
     /// Resolve a static library the way rustc does: the first `-L native`
-    /// directory, in command-line order, holding the platform's file name for
+    /// directory, in command-line order, holding the target's file name for
     /// it. rustc would also search a plain `-L` directory, but that kind
-    /// already bypasses as unsupported before it gets here. MSVC targets
-    /// accept `NAME.lib` before falling back to the `libNAME.a` every other
-    /// target uses; `+verbatim` names the file literally. A relative search
-    /// directory resolves against the process working directory, as it does
-    /// for rustc.
-    fn find_native_static_library(&self, name: &str, verbatim: bool) -> Option<PathBuf> {
+    /// already bypasses as unsupported before it gets here. Targets with
+    /// MSVC-style libraries (Windows MSVC and UEFI) accept `NAME.lib` before
+    /// falling back to the `libNAME.a` every built-in target otherwise uses;
+    /// `+verbatim` names the file literally. A custom target specification
+    /// sets its own prefix and suffix, which are not read here, so it is an
+    /// `Err` rather than a guess that could hash a different archive than
+    /// rustc bundles. A relative search directory resolves against the
+    /// process working directory, as it does for rustc.
+    fn find_native_static_library(
+        &self,
+        name: &str,
+        verbatim: bool,
+    ) -> Result<Option<PathBuf>, ()> {
         let file_names = if verbatim {
             vec![name.to_owned()]
-        } else if self.targets_msvc() {
-            vec![format!("{name}.lib"), format!("lib{name}.a")]
         } else {
-            vec![format!("lib{name}.a")]
+            match self.static_library_naming() {
+                Some(StaticLibraryNaming::Msvc) => {
+                    vec![format!("{name}.lib"), format!("lib{name}.a")]
+                }
+                Some(StaticLibraryNaming::Unix) => vec![format!("lib{name}.a")],
+                None => return Err(()),
+            }
         };
-        self.parsed
+        Ok(self
+            .parsed
             .iter()
             .filter_map(|argument| match argument {
                 Argument::SearchPath { kind, path } if kind == "native" => Some(path),
@@ -1707,13 +1739,29 @@ impl<'a> Parser<'a> {
                     .iter()
                     .map(move |file_name| directory.join(file_name))
             })
-            .find(|candidate| candidate.is_file())
+            .find(|candidate| candidate.is_file()))
     }
 
-    fn targets_msvc(&self) -> bool {
-        self.target
-            .as_deref()
-            .map_or(cfg!(target_env = "msvc"), |target| target.contains("msvc"))
+    /// How the target names a static library, or `None` for a custom target
+    /// specification, whose names only the specification knows.
+    fn static_library_naming(&self) -> Option<StaticLibraryNaming> {
+        let Some(target) = self.target.as_deref() else {
+            return Some(if cfg!(any(target_env = "msvc", target_os = "uefi")) {
+                StaticLibraryNaming::Msvc
+            } else {
+                StaticLibraryNaming::Unix
+            });
+        };
+        if target.ends_with(".json") || target.contains(['/', '\\']) {
+            return None;
+        }
+        // rustc's `is_like_msvc` targets: `*-windows-msvc`, `*-win7-windows-msvc`,
+        // and the UEFI targets, which borrow the MSVC toolchain's conventions.
+        Some(if target.contains("msvc") || target.ends_with("-uefi") {
+            StaticLibraryNaming::Msvc
+        } else {
+            StaticLibraryNaming::Unix
+        })
     }
 
     fn parse_input(&mut self, value: &str) -> Result<(), BypassReason> {

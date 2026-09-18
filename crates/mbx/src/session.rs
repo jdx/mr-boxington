@@ -1947,6 +1947,7 @@ fn expected_rustc_bypass(reason: Option<&mbx_cache_rustc::BypassReason>) -> bool
                 | NoDepInfo
                 | NativeLibrary(_)
                 | MissingNativeLibrary(_)
+                | CustomTargetNativeLibrary(_)
                 | UnportableNativeLink(_)
                 | UnmodeledLinkArgument(_)
                 | UnsupportedSearchPath(_)
