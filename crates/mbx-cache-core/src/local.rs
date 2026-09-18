@@ -123,15 +123,19 @@ impl LocalCas {
             Ok(None) => false,
             Err(_) => true,
         };
-        // The source is hashed before it is copied, and the copy is only
-        // trusted if the source still looks the same afterwards. A compiler
-        // output was written moments ago, so its pages are hot; the reflinked
-        // copy is a fresh inode whose pages are not, and hashing it instead
-        // read every published byte back from disk. A source rewritten
-        // between the hash and the copy shows in its length or timestamps
-        // and is refused, so what lands under the digest is what was hashed.
-        let before = verify.then(|| fs::metadata(source)).transpose()?;
-        if verify && !digest.matches_file(source)? {
+        // On Unix the source is hashed before it is copied, and the copy is
+        // only trusted if the source still looks the same afterwards. A
+        // compiler output was written moments ago, so its pages are hot; the
+        // reflinked copy is a fresh inode whose pages are not, and hashing it
+        // instead read every published byte back from disk. A source
+        // rewritten between the hash and the copy shows in its change time,
+        // which nothing in user space can set back, and is refused, so what
+        // lands under the digest is what was hashed. Windows reports no
+        // change time and lets a writer restore the modification time, so
+        // there the copy itself is hashed, as it always was.
+        let hash_source = verify && cfg!(unix);
+        let before = hash_source.then(|| fs::metadata(source)).transpose()?;
+        if hash_source && !digest.matches_file(source)? {
             bail!("staged blob does not match the declared CAS digest");
         }
         let parent = destination.parent().expect("CAS path has a parent");
@@ -145,6 +149,9 @@ impl LocalCas {
             && !same_identity(&before, &fs::metadata(source)?)
         {
             bail!("source changed while it was being stored in the CAS");
+        }
+        if verify && !hash_source && !digest.matches_file(&temporary)? {
+            bail!("staged blob does not match the declared CAS digest");
         }
         // Not fsynced: every read verifies the digest, so a blob torn by a
         // crash is detected and treated as absent rather than trusted.
@@ -204,9 +211,9 @@ impl LocalCas {
 
 /// Whether two views of a file could describe the same unmodified bytes.
 ///
-/// Length and modification time are what a rewrite through any path changes;
-/// the change time, where the platform reports one, cannot be set back from
-/// user space.
+/// Length and modification time are what a rewrite through any path changes,
+/// and the change time is what a writer cannot set back. Only Unix reports
+/// one, which is why the store trusts this check only there.
 fn same_identity(before: &fs::Metadata, after: &fs::Metadata) -> bool {
     if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
         return false;
