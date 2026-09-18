@@ -167,9 +167,16 @@ pub(crate) fn compile(
     // A platform without native-link action caching still needs to observe a
     // build-script executable so execution caching can key it by its exact
     // bytes. Parsing it is safe: the linked output itself is not published.
+    // Scanned after response-file expansion, so a `--target` inside an
+    // `@argfile` is seen; an expansion the parser would refuse is left as is,
+    // since parsing fails on it below anyway.
+    let expanded = RustcInvocation::expand_arguments(arguments);
     let options =
         ParseOptions::caching_native_links(cache_native_links || execution_only_build_script)
-            .with_custom_target_search(custom_target_may_resolve(rustc, arguments));
+            .with_custom_target_search(custom_target_may_resolve(
+                rustc,
+                expanded.as_deref().unwrap_or(arguments),
+            ));
     // Appended before anything parses: the debug-map rule inside the parser is
     // exactly what this flag satisfies, so an invocation that would bypass
     // without it has to carry it going in.
@@ -849,10 +856,15 @@ fn compile_execution_only_build_script(
 ///
 /// rustc tries its built-in targets first, then `<dir>/<NAME>.json` under each
 /// `RUST_TARGET_PATH` directory, then `lib/rustlib/<NAME>/target.json` in the
-/// sysroot, which is `--sysroot` when given and the directory above the
-/// compiler's `bin` otherwise. A specification found in either place chooses
-/// its own static-library file names, so the parser is told not to guess
-/// them. A `--target` that is already a path is the parser's own case.
+/// sysroot. A specification found in either place chooses its own
+/// static-library file names, so the parser is told not to guess them. A
+/// `--target` that is already a path is the parser's own case.
+///
+/// The sysroot is `--sysroot` when given. Otherwise it is the directory above
+/// the compiler's `bin` when that holds a `lib/rustlib`, which is what a
+/// toolchain's own rustc sits in; a rustup proxy at `~/.cargo/bin/rustc` does
+/// not, and for it the toolchain rustup selected is read from its
+/// environment, or failing that asked of the compiler itself.
 fn custom_target_may_resolve(rustc: &OsStr, arguments: &[OsString]) -> bool {
     let Some(target) = flag_value(arguments, "--target") else {
         return false;
@@ -869,10 +881,7 @@ fn custom_target_may_resolve(rustc: &OsStr, arguments: &[OsString]) -> bool {
     }
     let sysroot = flag_value(arguments, "--sysroot")
         .map(PathBuf::from)
-        .or_else(|| {
-            let executable = resolve_executable(rustc).ok()?;
-            Some(executable.parent()?.parent()?.to_path_buf())
-        });
+        .or_else(|| compiler_sysroot(rustc));
     sysroot.is_some_and(|sysroot| {
         sysroot
             .join("lib/rustlib")
@@ -880,6 +889,33 @@ fn custom_target_may_resolve(rustc: &OsStr, arguments: &[OsString]) -> bool {
             .join("target.json")
             .is_file()
     })
+}
+
+/// The sysroot of the compiler the shim was handed. See
+/// [`custom_target_may_resolve`] for the order.
+fn compiler_sysroot(rustc: &OsStr) -> Option<PathBuf> {
+    if let Ok(executable) = resolve_executable(rustc)
+        && let Some(root) = executable.parent().and_then(Path::parent)
+        && root.join("lib/rustlib").is_dir()
+    {
+        return Some(root.to_path_buf());
+    }
+    if let Some(toolchain) = std::env::var_os("RUSTUP_TOOLCHAIN").filter(|name| !name.is_empty())
+    {
+        let toolchain = PathBuf::from(&toolchain);
+        if toolchain.is_absolute() {
+            return Some(toolchain);
+        }
+        let home = std::env::var_os("RUSTUP_HOME")
+            .map(PathBuf::from)
+            .or_else(|| Some(dirs::home_dir()?.join(".rustup")))?;
+        return Some(home.join("toolchains").join(toolchain));
+    }
+    let output = Command::new(rustc).args(["--print", "sysroot"]).output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
 }
 
 /// The value of `--flag=VALUE` or `--flag VALUE`, whichever comes first.

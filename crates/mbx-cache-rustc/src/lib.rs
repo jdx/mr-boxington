@@ -449,6 +449,14 @@ impl RustcInvocation {
         Self::parse_with(arguments, ParseOptions::default())
     }
 
+    /// The command line with `@argfile` response files expanded, as the
+    /// parser sees it. A caller that scans the arguments before parsing, for a
+    /// `--target` a response file may carry, reads this rather than the raw
+    /// list.
+    pub fn expand_arguments(arguments: &[OsString]) -> Result<Vec<OsString>, BypassReason> {
+        Ok(expand_response_files(arguments)?.arguments)
+    }
+
     /// Parse as [`RustcInvocation::parse`] does, admitting what `options`
     /// says the caller can model.
     pub fn parse_with(arguments: &[OsString], options: ParseOptions) -> Result<Self, BypassReason> {

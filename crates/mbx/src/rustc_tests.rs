@@ -1170,7 +1170,17 @@ fn custom_target_resolution_follows_the_sysroot() {
         ));
     }
 
-    // An explicit sysroot wins over the compiler's location.
+    // The target may arrive through a response file; the shim scans the
+    // expanded line, as the parser does.
+    let argfile = directory.path().join("rustc.args");
+    std::fs::write(&argfile, "--target=my-custom-target\n").unwrap();
+    let expanded =
+        RustcInvocation::expand_arguments(&args(&[&format!("@{}", argfile.display()), "src.rs"]))
+            .unwrap();
+    assert!(custom_target_may_resolve(&rustc, &expanded));
+
+    // A compiler outside a toolchain directory, such as a rustup proxy, does
+    // not imply a sysroot; here nothing else supplies one either.
     let elsewhere: OsString = directory.path().join("other/bin/rustc").into();
     assert!(!custom_target_may_resolve(
         &elsewhere,
