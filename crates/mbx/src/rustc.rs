@@ -862,9 +862,8 @@ fn compile_execution_only_build_script(
 ///
 /// The sysroot is `--sysroot` when given. Otherwise it is the directory above
 /// the compiler's `bin` when that holds a `lib/rustlib`, which is what a
-/// toolchain's own rustc sits in; a rustup proxy at `~/.cargo/bin/rustc` does
-/// not, and for it the toolchain rustup selected is read from its
-/// environment, or failing that asked of the compiler itself.
+/// toolchain's own rustc sits in; a compiler laid out any other way, such as
+/// a rustup proxy at `~/.cargo/bin/rustc`, is asked for its sysroot.
 fn custom_target_may_resolve(rustc: &OsStr, arguments: &[OsString]) -> bool {
     let Some(target) = flag_value(arguments, "--target") else {
         return false;
@@ -894,32 +893,16 @@ fn custom_target_may_resolve(rustc: &OsStr, arguments: &[OsString]) -> bool {
 /// The sysroot of the compiler the shim was handed. See
 /// [`custom_target_may_resolve`] for the order.
 ///
-/// The rustup environment is trusted only for a rustup proxy, which is what
-/// consults it; any other compiler whose layout does not show its sysroot is
-/// asked for it, so a custom compiler running under a rustup shell is not
-/// mistaken for the toolchain rustup selected.
+/// A compiler whose layout does not show its sysroot is asked for it. That
+/// is a rustup proxy at `~/.cargo/bin/rustc`, or any compiler installed
+/// apart from its libraries; rustup's own `cargo` puts the toolchain's real
+/// `rustc` first on `PATH`, so the usual build never gets here.
 fn compiler_sysroot(rustc: &OsStr) -> Option<PathBuf> {
-    let executable = resolve_executable(rustc).ok();
-    if let Some(root) = executable
-        .as_deref()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
+    if let Ok(executable) = resolve_executable(rustc)
+        && let Some(root) = executable.parent().and_then(Path::parent)
         && root.join("lib/rustlib").is_dir()
     {
         return Some(root.to_path_buf());
-    }
-    if executable.as_deref().is_some_and(is_rustup_proxy)
-        && let Some(toolchain) =
-            std::env::var_os("RUSTUP_TOOLCHAIN").filter(|name| !name.is_empty())
-    {
-        let toolchain = PathBuf::from(&toolchain);
-        if toolchain.is_absolute() {
-            return Some(toolchain);
-        }
-        let home = std::env::var_os("RUSTUP_HOME")
-            .map(PathBuf::from)
-            .or_else(|| Some(dirs::home_dir()?.join(".rustup")))?;
-        return Some(home.join("toolchains").join(toolchain));
     }
     let output = Command::new(rustc)
         .args(["--print", "sysroot"])
@@ -929,22 +912,6 @@ fn compiler_sysroot(rustc: &OsStr) -> Option<PathBuf> {
         .status
         .success()
         .then(|| PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
-}
-
-/// Whether `executable` is one of rustup's proxies: rustup installs them as
-/// copies or hard links of itself beside a `rustup` binary, so the two files
-/// have the same length.
-fn is_rustup_proxy(executable: &Path) -> bool {
-    let Some(bin) = executable.parent() else {
-        return false;
-    };
-    let rustup = bin.join(format!("rustup{}", std::env::consts::EXE_SUFFIX));
-    match (std::fs::metadata(executable), std::fs::metadata(&rustup)) {
-        (Ok(proxy), Ok(rustup)) => {
-            proxy.is_file() && rustup.is_file() && proxy.len() == rustup.len()
-        }
-        _ => false,
-    }
 }
 
 /// The value of `--flag=VALUE` or `--flag VALUE`, whichever comes first.
