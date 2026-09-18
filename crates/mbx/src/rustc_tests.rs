@@ -1192,3 +1192,20 @@ fn custom_target_resolution_follows_the_sysroot() {
         &args(&["--target=my-custom-target", &sysroot_flag, "src.rs"])
     ));
 }
+
+/// rustup's proxies are copies of rustup itself; a compiler of another size
+/// beside a `rustup`, or with no `rustup` beside it, is not one.
+#[test]
+fn a_rustup_proxy_is_a_copy_of_rustup_beside_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let rustup = bin.join(format!("rustup{}", std::env::consts::EXE_SUFFIX));
+    let rustc = bin.join("rustc");
+    std::fs::write(&rustc, b"proxy bytes").unwrap();
+    assert!(!is_rustup_proxy(&rustc));
+    std::fs::write(&rustup, b"proxy bytes").unwrap();
+    assert!(is_rustup_proxy(&rustc));
+    std::fs::write(&rustc, b"a real compiler, much longer").unwrap();
+    assert!(!is_rustup_proxy(&rustc));
+}
