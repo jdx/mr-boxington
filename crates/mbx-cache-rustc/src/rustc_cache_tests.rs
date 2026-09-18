@@ -257,26 +257,20 @@ fn tracks_native_search_path_contents_and_hashes_a_named_static_library() {
     // Naming a static library in that directory is what a `-sys` crate's
     // build script does with `cargo:rustc-link-lib=static`. rustc bundles the
     // archive into the rlib, so it is a required input rather than a bypass.
-    std::fs::write(native.join("libfixture.a"), "archive").unwrap();
+    // A name of its own, so no host spelling of `fixture` shadows it.
+    std::fs::write(native.join("libbundled.a"), "archive").unwrap();
     let linked = RustcInvocation::parse(&args(&[
         "--crate-type=lib",
         "--emit=dep-info,metadata,link",
         &native_argument,
-        "-lstatic=fixture",
+        "-lstatic=bundled",
         "src/lib.rs",
     ]))
     .unwrap();
-    // Without `--target` the host decides the file name, and this directory
-    // holds both spellings: an MSVC host takes `fixture.lib` first.
-    let archive = if cfg!(any(target_env = "msvc", target_os = "uefi")) {
-        "fixture.lib"
-    } else {
-        "libfixture.a"
-    };
     assert!(
         linked
             .required_inputs_in(&working_dir)
-            .contains(&native.join(archive))
+            .contains(&native.join("libbundled.a"))
     );
 }
 

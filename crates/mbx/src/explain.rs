@@ -519,7 +519,7 @@ fn guidance(kind: &str) -> &'static str {
             "A native search path kind is not a precise compiler input, so mbx cannot safely reuse this action."
         }
         "native-library" => {
-            "This linked program or proc macro hands a native library to its linker, whose search mbx does not model. A library that names one is cached; its static archive is hashed into the key."
+            "This linked program or proc macro hands a native library to its linker, whose search mbx does not model. A library compile that names one is cached: a bundled `-l static` archive it resolves is hashed into the key, and dylib, framework, link-arg, plain, and unbundled static flags are keyed as text."
         }
         "missing-native-library" => {
             "A `-l static` library was not found in any `-L` search directory, so there is no archive for mbx to hash. Check the build script's `cargo:rustc-link-search` directive."
