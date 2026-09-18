@@ -266,10 +266,17 @@ fn tracks_native_search_path_contents_and_hashes_a_named_static_library() {
         "src/lib.rs",
     ]))
     .unwrap();
+    // Without `--target` the host decides the file name, and this directory
+    // holds both spellings: an MSVC host takes `fixture.lib` first.
+    let archive = if cfg!(any(target_env = "msvc", target_os = "uefi")) {
+        "fixture.lib"
+    } else {
+        "libfixture.a"
+    };
     assert!(
         linked
             .required_inputs_in(&working_dir)
-            .contains(&native.join("libfixture.a"))
+            .contains(&native.join(archive))
     );
 }
 
@@ -429,6 +436,17 @@ fn static_library_naming_follows_the_target_specification() {
     custom.insert(0, format!("--target={}", spec.display()).into());
     assert_eq!(
         RustcInvocation::parse(&custom),
+        Err(BypassReason::CustomTargetNativeLibrary(
+            "static=zstd".into()
+        ))
+    );
+    // A bare name is only proven built-in when rustc has nowhere else to
+    // look it up.
+    let mut bare = library_linking(&[("native=", &native)], &["static=zstd"]);
+    bare.insert(0, "--target=x86_64-unknown-linux-gnu".into());
+    let options = ParseOptions::default().with_custom_target_search(true);
+    assert_eq!(
+        RustcInvocation::parse_with(&bare, options),
         Err(BypassReason::CustomTargetNativeLibrary(
             "static=zstd".into()
         ))

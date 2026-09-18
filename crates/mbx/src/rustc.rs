@@ -167,8 +167,13 @@ pub(crate) fn compile(
     // A platform without native-link action caching still needs to observe a
     // build-script executable so execution caching can key it by its exact
     // bytes. Parsing it is safe: the linked output itself is not published.
+    // rustc consults `RUST_TARGET_PATH` for any bare `--target` it does not
+    // know, so while it is set a bare name may be a custom specification.
+    let custom_target_search =
+        std::env::var_os("RUST_TARGET_PATH").is_some_and(|path| !path.is_empty());
     let options =
-        ParseOptions::caching_native_links(cache_native_links || execution_only_build_script);
+        ParseOptions::caching_native_links(cache_native_links || execution_only_build_script)
+            .with_custom_target_search(custom_target_search);
     // Appended before anything parses: the debug-map rule inside the parser is
     // exactly what this flag satisfies, so an invocation that would bypass
     // without it has to carry it going in.

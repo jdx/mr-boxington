@@ -400,6 +400,11 @@ pub struct ParseOptions {
     /// Admit natively linked test binaries, executables, and proc macros,
     /// given a linker identity in the action key. Off by default.
     pub cache_native_links: bool,
+    /// rustc may resolve a bare `--target NAME` to a custom specification:
+    /// `RUST_TARGET_PATH` is set, so a name that is not built in is looked up
+    /// there. Such a target chooses its own static-library file names, which
+    /// the parser cannot know, so `-l static` bypasses for every bare name.
+    pub custom_target_search: bool,
 }
 
 impl ParseOptions {
@@ -407,7 +412,15 @@ impl ParseOptions {
     pub fn caching_native_links(enabled: bool) -> Self {
         Self {
             cache_native_links: enabled,
+            ..Self::default()
         }
+    }
+
+    /// Options that also say whether rustc could resolve a bare target name
+    /// to a custom specification.
+    pub fn with_custom_target_search(mut self, enabled: bool) -> Self {
+        self.custom_target_search = enabled;
+        self
     }
 }
 
@@ -1744,6 +1757,12 @@ impl<'a> Parser<'a> {
 
     /// How the target names a static library, or `None` for a custom target
     /// specification, whose names only the specification knows.
+    ///
+    /// A bare name is a built-in target unless rustc has somewhere else to
+    /// look it up: a `RUST_TARGET_PATH` directory, which the caller reports
+    /// through [`ParseOptions::custom_target_search`]. A specification
+    /// installed into the sysroot as `lib/rustlib/NAME/target.json` is not
+    /// detected, and keys as the built-in naming would.
     fn static_library_naming(&self) -> Option<StaticLibraryNaming> {
         let Some(target) = self.target.as_deref() else {
             return Some(if cfg!(any(target_env = "msvc", target_os = "uefi")) {
@@ -1752,7 +1771,10 @@ impl<'a> Parser<'a> {
                 StaticLibraryNaming::Unix
             });
         };
-        if target.ends_with(".json") || target.contains(['/', '\\']) {
+        if target.ends_with(".json")
+            || target.contains(['/', '\\'])
+            || self.options.custom_target_search
+        {
             return None;
         }
         // rustc's `is_like_msvc` targets: `*-windows-msvc`, `*-win7-windows-msvc`,

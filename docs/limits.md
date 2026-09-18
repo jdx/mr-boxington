@@ -131,7 +131,8 @@ the archive, the compilation bypasses as `missing-native-library`; an archive
 outside the workspace, target, Cargo, toolchain, and home roots bypasses as
 `unmapped-absolute-path`, like any other input there. A custom target
 specification names its archives its own way, so a `-l static` compile for
-one bypasses as `custom-target-native-library` unless the flag is `+verbatim`.
+one bypasses as `custom-target-native-library` unless the flag is `+verbatim`;
+while `RUST_TARGET_PATH` is set, every bare target name counts as one.
 
 For `-l static:-bundle=NAME`, `-l dylib=NAME`, `-l framework=NAME`,
 `-l link-arg=...`, and a plain `-l NAME`, rustc reads nothing and records the
