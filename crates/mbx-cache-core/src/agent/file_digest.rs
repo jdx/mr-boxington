@@ -172,12 +172,8 @@ impl FileSnapshot {
     /// Capture the strongest comparison the file's filesystem can support.
     pub fn capture(path: &Path) -> io::Result<Option<Self>> {
         let metadata = std::fs::metadata(path)?;
-        capture_file_snapshot(
-            path,
-            &NoFileDigestCache,
-            metadata_identity_is_unreliable(path, &metadata)?,
-            metadata,
-        )
+        let unreliable = metadata_identity_is_unreliable(path, &metadata)?;
+        capture_file_snapshot(path, &NoFileDigestCache, unreliable, unreliable, metadata)
     }
 
     /// Capture a snapshot while reusing or publishing a content digest through
@@ -187,12 +183,8 @@ impl FileSnapshot {
         digests: &dyn FileDigestCache,
     ) -> io::Result<Option<Self>> {
         let metadata = std::fs::metadata(path)?;
-        capture_file_snapshot(
-            path,
-            digests,
-            metadata_identity_is_unreliable(path, &metadata)?,
-            metadata,
-        )
+        let unreliable = metadata_identity_is_unreliable(path, &metadata)?;
+        capture_file_snapshot(path, digests, unreliable, unreliable, metadata)
     }
 
     /// Capture a content-backed snapshot whatever the filesystem, for a file
@@ -208,7 +200,11 @@ impl FileSnapshot {
         digests: &dyn FileDigestCache,
     ) -> io::Result<Option<Self>> {
         let metadata = std::fs::metadata(path)?;
-        capture_file_snapshot(path, digests, true, metadata)
+        // The ledger identity still follows the filesystem: recording under
+        // the ordinary identity and looking up under the NFS one would miss
+        // every time, and every dependent would re-hash the artifact.
+        let unreliable = metadata_identity_is_unreliable(path, &metadata)?;
+        capture_file_snapshot(path, digests, unreliable, true, metadata)
     }
 
     /// Whether `identity` and `content` still describe this snapshot.
@@ -287,13 +283,17 @@ fn metadata_identity_is_unreliable(
     Ok(false)
 }
 
+/// `unreliable` selects the ledger identity the filesystem calls for, as
+/// [`digest_file_validated`] does when it records one; `content_identity`
+/// asks for the bytes to be compared as well.
 fn capture_file_snapshot(
     path: &Path,
     digests: &dyn FileDigestCache,
+    unreliable: bool,
     content_identity: bool,
     metadata: std::fs::Metadata,
 ) -> io::Result<Option<FileSnapshot>> {
-    let cache_identity = digest_cache_identity(path, &metadata, content_identity)?;
+    let cache_identity = digest_cache_identity(path, &metadata, unreliable)?;
     let Some(identity) = cache_identity
         .clone()
         .or_else(|| FileIdentity::describe(path, &metadata))
@@ -826,7 +826,7 @@ mod tests {
             recorded: std::sync::Mutex::new(Vec::new()),
         };
 
-        let snapshot = capture_file_snapshot(&path, &cache, true, before)
+        let snapshot = capture_file_snapshot(&path, &cache, true, true, before)
             .unwrap()
             .unwrap();
         let current = FileIdentity::for_digest_cache(&path, &std::fs::metadata(&path).unwrap())
@@ -872,7 +872,7 @@ mod tests {
             recorded: std::sync::Mutex::new(Vec::new()),
         };
 
-        let snapshot = capture_file_snapshot(&path, &cache, true, before)
+        let snapshot = capture_file_snapshot(&path, &cache, true, true, before)
             .unwrap()
             .unwrap();
         let current = FileIdentity::for_digest_cache(&path, &std::fs::metadata(&path).unwrap())
@@ -933,6 +933,7 @@ mod tests {
             &path,
             &NoFileDigestCache,
             false,
+            false,
             std::fs::metadata(&path).unwrap(),
         )
         .unwrap()
@@ -959,6 +960,7 @@ mod tests {
         let snapshot = capture_file_snapshot(
             &path,
             &NoFileDigestCache,
+            true,
             true,
             std::fs::metadata(&path).unwrap(),
         )

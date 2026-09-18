@@ -296,7 +296,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         .map(|path| absolute(path, &working_dir))
         .collect::<Vec<_>>();
     let input_snapshots =
-        crate::util::snapshot_compiler_inputs(required_inputs.iter().map(PathBuf::as_path));
+        crate::util::snapshot_compiler_inputs(required_inputs.iter().map(PathBuf::as_path), None);
     let demand = crate::scheduler::Demand::new(&compilation_name(&invocation), false);
     let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
     let started = Instant::now();

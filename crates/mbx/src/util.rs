@@ -15,16 +15,18 @@ use std::time::Duration;
 /// into its incremental session directory when it finishes, which changes the
 /// token without changing a byte. Nothing rewrites an artifact in place while
 /// Cargo holds the build directory, so bytes, length, and file object are the
-/// comparison that describes what the dependent actually read.
+/// comparison that describes what the dependent actually read. The `source`
+/// is always a source, whatever its extension is spelled like.
 #[cfg(unix)]
 pub(crate) fn snapshot_compiler_inputs<'a>(
     paths: impl IntoIterator<Item = &'a Path>,
+    source: Option<&Path>,
 ) -> std::io::Result<BTreeMap<PathBuf, FileSnapshot>> {
     let digests = crate::session::file_digest_cache();
     paths
         .into_iter()
         .map(|path| {
-            let snapshot = if is_compiler_artifact(path) {
+            let snapshot = if source != Some(path) && is_compiler_artifact(path) {
                 FileSnapshot::capture_content_with_cache(path, digests)
             } else {
                 FileSnapshot::capture_with_cache(path, digests)
@@ -65,6 +67,7 @@ fn is_compiler_artifact(path: &Path) -> bool {
 #[cfg(not(unix))]
 pub(crate) fn snapshot_compiler_inputs<'a>(
     _paths: impl IntoIterator<Item = &'a Path>,
+    _source: Option<&Path>,
 ) -> std::io::Result<BTreeMap<PathBuf, FileSnapshot>> {
     Ok(BTreeMap::new())
 }
@@ -539,7 +542,7 @@ mod tests {
     fn compiler_input_snapshot_fails_closed() {
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("missing-input");
-        let error = snapshot_compiler_inputs([missing.as_path()]).unwrap_err();
+        let error = snapshot_compiler_inputs([missing.as_path()], None).unwrap_err();
         assert!(
             error
                 .to_string()

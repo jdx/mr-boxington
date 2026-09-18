@@ -454,8 +454,11 @@ pub(crate) fn compile(
     // capacity happened before rustc ran and belongs to the valid compilation
     // it is about to perform, not to the overlap this snapshot detects.
     let required_inputs = invocation.required_inputs_in(&working_dir);
-    let input_snapshots =
-        crate::util::snapshot_compiler_inputs(required_inputs.iter().map(PathBuf::as_path));
+    let source = working_dir.join(invocation.source());
+    let input_snapshots = crate::util::snapshot_compiler_inputs(
+        required_inputs.iter().map(PathBuf::as_path),
+        Some(&source),
+    );
     let compilation_started = SystemTime::now();
     let compiler_timer = Instant::now();
     let mut command = compiler_command(rustc, wrapper_argument);
@@ -861,8 +864,11 @@ fn compile_execution_only_build_script(
     let demand = crate::scheduler::Demand::new(invocation.crate_name(), true);
     let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
     let required_inputs = invocation.required_inputs_in(working_dir);
-    let input_snapshots =
-        crate::util::snapshot_compiler_inputs(required_inputs.iter().map(PathBuf::as_path));
+    let source = working_dir.join(invocation.source());
+    let input_snapshots = crate::util::snapshot_compiler_inputs(
+        required_inputs.iter().map(PathBuf::as_path),
+        Some(&source),
+    );
     let compilation_started = SystemTime::now();
     let started = Instant::now();
     let forwarded = session::forward_compiler_notifications_requested();
