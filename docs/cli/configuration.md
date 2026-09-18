@@ -86,6 +86,14 @@ Record a per-compilation event stream for `mbx tui` to watch.
 
 How much per-compilation history one build may record, or "none" for no limit. Past this the counters carry on but the rows stop, and `mbx explain` says so.
 
+### `forward_compiler_notifications`
+
+- **Type:** `bool`
+- **Default:** `true`
+- **Set with:** `MBX_FORWARD_COMPILER_NOTIFICATIONS`
+
+Forward rustc's diagnostics and artifact notifications to Cargo as the compiler prints them, so Cargo can start a dependent against this crate's metadata while its code generation continues. Turn it off to hold the compiler's output until mbx has stored the result, which is useful when diagnosing the shim itself.
+
 ### `gc.auto`
 
 - **Type:** `bool`

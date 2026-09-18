@@ -21,8 +21,9 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Output};
+use std::process::{Command, ExitCode, Output, Stdio};
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime};
 
@@ -476,7 +477,8 @@ pub(crate) fn compile(
             ));
         }
     }
-    let output = crate::phase_timing::measure("compiler", || command.output())
+    let forwarded = session::forward_compiler_notifications_requested();
+    let output = crate::phase_timing::measure("compiler", || run_compiler(&mut command, forwarded))
         .wrap_err("failed to execute rustc")?;
     // Released before the outputs are read back and published: hashing and
     // storing cost I/O, not the CPU and memory the permit stands for.
@@ -525,7 +527,11 @@ pub(crate) fn compile(
             )
         {
             if discard_modified_compiler_result(&outputs, &input_snapshots, &error) {
-                let _ = replay_bytes(&[], &output.stderr);
+                // The same reasoning as the discard below the publication
+                // path: Cargo may already have read the notification.
+                if !forwarded {
+                    let _ = replay_bytes(&[], &output.stderr);
+                }
                 return Ok(ExitCode::FAILURE);
             }
             session::report_shim_warning(&format!(
@@ -542,7 +548,9 @@ pub(crate) fn compile(
                 &divergence,
             ));
         }
-        let _ = replay_output(&output);
+        if !forwarded {
+            let _ = replay_output(&output);
+        }
         return Ok(exit_code(output.status));
     }
     let mut compiler_input_invalid = false;
@@ -640,17 +648,120 @@ pub(crate) fn compile(
         current_diagnostic,
     );
     if compiler_input_invalid {
-        // Keep rustc's diagnostics, but do not forward stdout notifications
-        // for an artifact that was just rejected. Cargo pipelines dependents
-        // as soon as it observes those notifications.
-        let _ = replay_bytes(&[], &output.stderr);
+        // The result was rejected because its inputs moved while rustc read
+        // them, and its files are gone. When the output was forwarded live,
+        // Cargo has already seen the metadata notification rustc printed on
+        // standard error and may have started dependents against the .rmeta.
+        // That is wasted work, not a wrong build:
+        //
+        // - This shim exits non-zero, so Cargo fails the unit, never writes
+        //   its fingerprint, and stops scheduling. The unit and everything
+        //   above it are dirty on the next build, whether or not a dependent
+        //   managed to finish first.
+        // - A dependent that did finish read a complete .rmeta: rustc prints
+        //   the notification only after writing it. Its mbx entry is keyed on
+        //   the content digest of that exact .rmeta, so the entry answers
+        //   only a lookup that presents the same bytes again, for which it is
+        //   the right answer. A dependent whose .rmeta was removed before it
+        //   was hashed fails to publish instead.
+        // - The rejected result itself is never stored, and no prediction or
+        //   flight record is left behind pointing at it.
+        //
+        // The dependent's own input check has to tolerate one thing this
+        // overlap makes visible: rustc hardlinks a finished .rmeta into its
+        // incremental session directory as it exits, so the file a pipelined
+        // dependent snapshotted changes its metadata token without changing a
+        // byte. `snapshot_compiler_inputs` therefore snapshots artifacts by
+        // content, which still rejects a replaced or rewritten one.
+        //
+        // Holding the output back until here never changed any of that: the
+        // notification travels on standard error, which this branch always
+        // replayed. Without forwarding, keep doing so for the diagnostics.
+        if !forwarded {
+            let _ = replay_bytes(&[], &output.stderr);
+        }
         Ok(ExitCode::FAILURE)
     } else {
-        // Publication validates the inputs and keeps invalid metadata out of
-        // Cargo's hands. Only advertise rustc's result after that completes.
-        let _ = replay_output(&output);
+        // Forwarded output already reached Cargo while rustc ran, so a
+        // dependent could start against this crate's metadata before its code
+        // generation and this publication finished. Otherwise it goes out now.
+        if !forwarded {
+            let _ = replay_output(&output);
+        }
         Ok(exit_code(output.status))
     }
+}
+
+/// Run the compiler and capture both of its streams, forwarding each line to
+/// the shim's own stream the moment it arrives when `forward` is set.
+///
+/// Cargo learns that a crate's metadata is ready from an artifact notification
+/// rustc prints on standard error, and starts the crate's dependents against
+/// the `.rmeta` while code generation continues. Holding the output until the
+/// process exits, as `Command::output` does, serializes that: no dependent can
+/// start before this compilation ends and its result is published. The bytes
+/// are still captured whole, because a cache entry stores them for replay on a
+/// hit and a verification run compares them.
+fn run_compiler(command: &mut Command, forward: bool) -> std::io::Result<Output> {
+    if !forward {
+        return command.output();
+    }
+    run_compiler_forwarding(command, std::io::stdout(), std::io::stderr())
+}
+
+/// [`run_compiler`] with the forwarding destinations spelled out, so a test can
+/// see what would have reached Cargo.
+fn run_compiler_forwarding(
+    command: &mut Command,
+    stdout_sink: impl Write + Send + 'static,
+    stderr_sink: impl Write,
+) -> std::io::Result<Output> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let stderr = child.stderr.take().expect("stderr was piped");
+    // Standard error carries the diagnostics and the notifications, so it is
+    // read here; standard output is drained alongside so that neither pipe
+    // can fill up and stall the compiler.
+    let stdout = std::thread::spawn(move || forward_stream(stdout, stdout_sink));
+    let stderr = forward_stream(stderr, stderr_sink);
+    let status = child.wait()?;
+    let stdout = stdout
+        .join()
+        .map_err(|_| std::io::Error::other("the compiler's stdout reader panicked"))??;
+    Ok(Output {
+        status,
+        stdout,
+        stderr: stderr?,
+    })
+}
+
+/// Copy a stream into a buffer, handing each line to `sink` as soon as it is
+/// complete. A final line without a newline is forwarded when the stream ends.
+///
+/// Forwarding is best effort: once the sink fails, the rest of the stream is
+/// still captured, because the compiler must be drained for it to finish and
+/// its exit status is what decides the build.
+fn forward_stream(source: impl Read, mut sink: impl Write) -> std::io::Result<Vec<u8>> {
+    let mut reader = BufReader::new(source);
+    let mut captured = Vec::new();
+    let mut forwarding = true;
+    loop {
+        let start = captured.len();
+        if reader.read_until(b'\n', &mut captured)? == 0 {
+            break;
+        }
+        if forwarding {
+            forwarding = sink
+                .write_all(&captured[start..])
+                .and_then(|()| sink.flush())
+                .is_ok();
+        }
+    }
+    Ok(captured)
 }
 
 /// Whether publication failed because the compiler's inputs moved underneath it.

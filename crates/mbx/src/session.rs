@@ -97,6 +97,7 @@ pub(crate) const VERIFY_ENV: &str = "MBX_VERIFY";
 pub(crate) const SHARE_OUT_DIR_ENV: &str = "MBX_SHARE_OUT_DIR";
 pub(crate) const SHARE_WORKSPACE_ROOT_ENV: &str = "MBX_SHARE_WORKSPACE_ROOT";
 pub(crate) const BUILD_SCRIPT_EXECUTION_ENV: &str = "MBX_BUILD_SCRIPT_EXECUTION";
+pub(crate) const FORWARD_COMPILER_NOTIFICATIONS_ENV: &str = "MBX_FORWARD_COMPILER_NOTIFICATIONS";
 pub(crate) const BUILD_SCRIPT_SHIM_PATH_ENV: &str = "MBX_BUILD_SCRIPT_SHIM_PATH";
 pub(crate) const LEARNED_INCREMENTAL_ENV: &str = "MBX_LEARNED_INCREMENTAL";
 pub(crate) const LEARNED_INCREMENTAL_MAX_SIZE_ENV: &str = "MBX_LEARNED_INCREMENTAL_MAX_SIZE";
@@ -132,6 +133,7 @@ pub struct CacheSession {
     share_workspace_root: bool,
     cc_store_path_specific: bool,
     build_script_execution: bool,
+    forward_compiler_notifications: bool,
     agent: CacheAgent,
     /// The stream `mbx tui` watches, when event recording is on.
     events: Option<EventStream>,
@@ -272,6 +274,7 @@ impl CacheSession {
             share_workspace_root: config.share_workspace_root,
             cc_store_path_specific: config.cc_store_path_specific,
             build_script_execution: config.build_script_execution,
+            forward_compiler_notifications: config.forward_compiler_notifications,
             agent,
             events,
             scheduler_env: crate::scheduler::session_environment_with_jobs(config, cargo_jobs),
@@ -423,6 +426,15 @@ impl CacheSession {
         environment.insert(
             BUILD_SCRIPT_EXECUTION_ENV.into(),
             if self.build_script_execution {
+                "1"
+            } else {
+                "0"
+            }
+            .into(),
+        );
+        environment.insert(
+            FORWARD_COMPILER_NOTIFICATIONS_ENV.into(),
+            if self.forward_compiler_notifications {
                 "1"
             } else {
                 "0"
@@ -1836,6 +1848,14 @@ pub(crate) fn share_out_dir_requested() -> bool {
 pub(crate) fn share_workspace_root_requested() -> bool {
     std::env::var_os(SHARE_WORKSPACE_ROOT_ENV)
         .is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+/// Whether the shim forwards the compiler's output as it arrives. Unlike the
+/// other switches this is on when unset: a shim running outside a session
+/// should behave like a released build, not like a diagnosis of one.
+pub(crate) fn forward_compiler_notifications_requested() -> bool {
+    std::env::var_os(FORWARD_COMPILER_NOTIFICATIONS_ENV)
+        .is_none_or(|value| value.is_empty() || value != "0")
 }
 
 /// Whether the shim may compile a churning crate with its own incremental

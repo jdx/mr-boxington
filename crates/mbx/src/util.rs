@@ -6,6 +6,16 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Capture clock-independent snapshots for compiler inputs known up front.
+///
+/// A source file is snapshotted by its metadata change token, which catches a
+/// rewrite that keeps the length and restores the mtime. An artifact another
+/// compilation in this build produced is snapshotted by content instead: a
+/// dependent Cargo pipelines behind a crate's metadata reads the `.rmeta`
+/// while that crate's rustc is still running, and rustc hardlinks the file
+/// into its incremental session directory when it finishes, which changes the
+/// token without changing a byte. Nothing rewrites an artifact in place while
+/// Cargo holds the build directory, so bytes, length, and file object are the
+/// comparison that describes what the dependent actually read.
 #[cfg(unix)]
 pub(crate) fn snapshot_compiler_inputs<'a>(
     paths: impl IntoIterator<Item = &'a Path>,
@@ -14,7 +24,12 @@ pub(crate) fn snapshot_compiler_inputs<'a>(
     paths
         .into_iter()
         .map(|path| {
-            let snapshot = FileSnapshot::capture_with_cache(path, digests).map_err(|error| {
+            let snapshot = if is_compiler_artifact(path) {
+                FileSnapshot::capture_content_with_cache(path, digests)
+            } else {
+                FileSnapshot::capture_with_cache(path, digests)
+            };
+            let snapshot = snapshot.map_err(|error| {
                 std::io::Error::new(
                     error.kind(),
                     format!(
@@ -35,6 +50,16 @@ pub(crate) fn snapshot_compiler_inputs<'a>(
             Ok((path.to_path_buf(), snapshot))
         })
         .collect()
+}
+
+/// Whether a compiler input is an artifact this build produced rather than a
+/// source: Rust metadata, an rlib, or a proc-macro or dynamic library.
+#[cfg(unix)]
+fn is_compiler_artifact(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("rmeta" | "rlib" | "so" | "dylib" | "dll")
+    )
 }
 
 #[cfg(not(unix))]

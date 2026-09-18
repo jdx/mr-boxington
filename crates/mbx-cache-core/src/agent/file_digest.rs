@@ -195,6 +195,22 @@ impl FileSnapshot {
         )
     }
 
+    /// Capture a content-backed snapshot whatever the filesystem, for a file
+    /// whose metadata is expected to change without its bytes.
+    ///
+    /// A compiler artifact is one: rustc hardlinks the `.rmeta` it just
+    /// emitted into its incremental session directory when it finishes, which
+    /// bumps the change token of a file a pipelined dependent is already
+    /// reading. Comparing the bytes, length, and file object instead accepts
+    /// that and still rejects a replacement or a rewrite.
+    pub fn capture_content_with_cache(
+        path: &Path,
+        digests: &dyn FileDigestCache,
+    ) -> io::Result<Option<Self>> {
+        let metadata = std::fs::metadata(path)?;
+        capture_file_snapshot(path, digests, true, metadata)
+    }
+
     /// Whether `identity` and `content` still describe this snapshot.
     ///
     /// A content-backed snapshot ignores both timestamps: NFS can reconcile
@@ -726,6 +742,38 @@ impl FileDigestCache for NoFileDigestCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// rustc links a finished `.rmeta` into its incremental directory, which
+    /// changes the file's metadata but not its bytes. A metadata snapshot
+    /// cannot tell that from a rewrite; a content snapshot can, and still
+    /// notices when the bytes do change.
+    #[cfg(unix)]
+    #[test]
+    fn a_content_snapshot_survives_a_hardlink_and_a_metadata_one_does_not() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("libdep.rmeta");
+        std::fs::write(&path, b"metadata").unwrap();
+        let by_metadata = FileSnapshot::capture(&path).unwrap().unwrap();
+        let by_content = FileSnapshot::capture_content_with_cache(&path, &NoFileDigestCache)
+            .unwrap()
+            .unwrap();
+        let digest = CacheDigest::blake3_file(&path).unwrap();
+        // A new ctime, so the change token cannot be mistaken for the old one.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::hard_link(&path, directory.path().join("metadata.rmeta")).unwrap();
+        let after = FileIdentity::describe(&path, &std::fs::metadata(&path).unwrap()).unwrap();
+
+        assert!(by_content.proves_content_change());
+        assert!(by_content.matches(Some(&after), &digest));
+        if by_metadata.proves_content_change() {
+            assert!(!by_metadata.matches(Some(&after), &digest));
+        }
+
+        std::fs::write(&path, b"rewritten").unwrap();
+        let rewritten = CacheDigest::blake3_file(&path).unwrap();
+        let after = FileIdentity::describe(&path, &std::fs::metadata(&path).unwrap()).unwrap();
+        assert!(!by_content.matches(Some(&after), &rewritten));
+    }
 
     #[cfg(unix)]
     struct RecordingDigestCache {

@@ -71,6 +71,7 @@ fn test_config(cache_dir: &Path) -> Config {
         events: false,
         cc: false,
         cc_store_path_specific: true,
+        forward_compiler_notifications: true,
         remote: Default::default(),
         http: Default::default(),
         gc: Default::default(),

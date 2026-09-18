@@ -194,6 +194,13 @@ pub(crate) struct RawConfig {
     /// reused at another path. Existing entries may still be restored.
     #[usage(env = "MBX_CC_STORE_PATH_SPECIFIC", default = true)]
     cc_store_path_specific: bool,
+    /// Forward rustc's diagnostics and artifact notifications to Cargo as the
+    /// compiler prints them, so Cargo can start a dependent against this
+    /// crate's metadata while its code generation continues. Turn it off to
+    /// hold the compiler's output until mbx has stored the result, which is
+    /// useful when diagnosing the shim itself.
+    #[usage(env = "MBX_FORWARD_COMPILER_NOTIFICATIONS", default = true)]
+    forward_compiler_notifications: bool,
     /// How the savings line after a build reads.
     #[usage(
         env = "MBX_SAVINGS",
@@ -436,6 +443,14 @@ pub struct Config {
     pub cc: bool,
     /// Store path-specific C outputs for reuse at the same checkout path.
     pub cc_store_path_specific: bool,
+    /// Forward the compiler's diagnostics and artifact notifications as they
+    /// arrive instead of after the result is stored.
+    ///
+    /// On by default. Cargo reads the metadata notification from rustc's
+    /// standard error and starts dependents against the `.rmeta` right away,
+    /// which the shim would otherwise delay until publication finished. The
+    /// bytes are still captured for the cache entry and for verification.
+    pub forward_compiler_notifications: bool,
     pub remote: RemoteSettings,
     pub http: HttpSettings,
     pub gc: GcSettings,
@@ -489,6 +504,7 @@ impl Config {
             // should not have compiler shims installed underneath it.
             cc: false,
             cc_store_path_specific: true,
+            forward_compiler_notifications: true,
             remote: Default::default(),
             http: Default::default(),
             gc: Default::default(),
@@ -989,6 +1005,7 @@ impl Config {
             events: raw.events,
             cc: raw.cc,
             cc_store_path_specific: raw.cc_store_path_specific,
+            forward_compiler_notifications: raw.forward_compiler_notifications,
             remote: RemoteSettings {
                 url: raw.remote.url,
                 namespace: raw.remote.namespace,

@@ -79,7 +79,158 @@ fn cargo_metadata_changes_are_diffs_within_one_compilation_unit() {
     );
 }
 use crate::materialize::{apply_file_mode, make_owner_writable};
-use std::io::Write as _;
+use std::sync::{Arc, Mutex};
+
+/// A forwarding destination a test can read back after the compiler exits.
+#[derive(Clone, Default)]
+struct Sink(Arc<Mutex<Vec<u8>>>);
+
+impl Sink {
+    fn bytes(&self) -> Vec<u8> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl Write for Sink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A destination that stops accepting bytes after the first line.
+struct ClosedAfterOneLine {
+    seen: Sink,
+    lines: usize,
+}
+
+impl Write for ClosedAfterOneLine {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.lines >= 1 {
+            return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        }
+        self.lines += 1;
+        self.seen.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn forwarded_lines_are_the_captured_bytes() {
+    let mut sink = Sink::default();
+    let captured = forward_stream(&b"one\ntwo\n\nthree"[..], &mut sink).unwrap();
+    assert_eq!(captured, b"one\ntwo\n\nthree");
+    assert_eq!(
+        sink.bytes(),
+        captured,
+        "a final line without a newline is forwarded too"
+    );
+    assert!(forward_stream(&b""[..], &mut sink).unwrap().is_empty());
+}
+
+#[test]
+fn a_closed_forwarding_destination_still_drains_the_compiler() {
+    let seen = Sink::default();
+    let sink = ClosedAfterOneLine {
+        seen: seen.clone(),
+        lines: 0,
+    };
+    let captured = forward_stream(&b"first\nsecond\nthird\n"[..], sink).unwrap();
+    assert_eq!(captured, b"first\nsecond\nthird\n");
+    assert_eq!(seen.bytes(), b"first\n");
+}
+
+/// Both streams of a real child, interleaved, with a partial final line on
+/// each: what Cargo receives is byte for byte what the cache entry keeps.
+#[cfg(unix)]
+#[test]
+fn a_forwarded_compiler_run_captures_what_it_forwards() {
+    let script = concat!(
+        "printf 'out one\\n'; ",
+        "printf '{\"$message_type\":\"artifact\",\"emit\":\"metadata\"}\\n' >&2; ",
+        "printf 'out two\\n'; ",
+        "printf 'warning: x\\n' >&2; ",
+        "printf 'tail without newline'; ",
+        "printf 'err tail' >&2; ",
+        "exit 3"
+    );
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(script);
+    let stdout_sink = Sink::default();
+    let stderr_sink = Sink::default();
+    let output =
+        run_compiler_forwarding(&mut command, stdout_sink.clone(), stderr_sink.clone()).unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        output.stdout, b"out one\nout two\ntail without newline",
+        "standard output is captured whole"
+    );
+    assert_eq!(
+        output.stderr,
+        b"{\"$message_type\":\"artifact\",\"emit\":\"metadata\"}\nwarning: x\nerr tail",
+        "standard error is captured whole"
+    );
+    assert_eq!(stdout_sink.bytes(), output.stdout);
+    assert_eq!(stderr_sink.bytes(), output.stderr);
+    // The plain path returns the same thing Cargo would have seen at the end.
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(script);
+    let held = run_compiler(&mut command, false).unwrap();
+    assert_eq!(held.stdout, output.stdout);
+    assert_eq!(held.stderr, output.stderr);
+    assert_eq!(held.status.code(), Some(3));
+}
+
+/// A line is handed on as soon as it is complete, not once the process exits:
+/// the child prints its notification, then waits for a file the test creates
+/// only after the line has been seen.
+#[cfg(unix)]
+#[test]
+fn a_notification_is_forwarded_before_the_compiler_exits() {
+    let root = tempfile::tempdir().unwrap();
+    let release = root.path().join("release");
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(format!(
+        "printf 'metadata ready\\n' >&2; while [ ! -e '{}' ]; do sleep 0.02; done; printf 'done\\n' >&2",
+        release.display()
+    ));
+    struct Releasing {
+        seen: Sink,
+        release: PathBuf,
+    }
+    impl Write for Releasing {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let written = self.seen.write(buf)?;
+            if self.seen.bytes() == b"metadata ready\n" {
+                std::fs::write(&self.release, b"").unwrap();
+            }
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let seen = Sink::default();
+    let sink = Releasing {
+        seen: seen.clone(),
+        release,
+    };
+    let output = run_compiler_forwarding(&mut command, Sink::default(), sink).unwrap();
+    assert!(
+        output.status.success(),
+        "the child only exits once its first line was forwarded"
+    );
+    assert_eq!(output.stderr, b"metadata ready\ndone\n");
+    assert_eq!(seen.bytes(), output.stderr);
+}
 
 fn churn(sources: &str, streak: u32) -> ChurnState {
     ChurnState {

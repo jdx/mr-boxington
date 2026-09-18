@@ -14,6 +14,7 @@ fn test_config(root: &Path, views: bool) -> Config {
         events: false,
         cc: false,
         cc_store_path_specific: true,
+        forward_compiler_notifications: true,
         remote: Default::default(),
         http: Default::default(),
         gc: Default::default(),

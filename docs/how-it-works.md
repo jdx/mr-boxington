@@ -20,6 +20,11 @@ Both follow the same build lifecycle.
    scripts inherit `HOST_CC` and `HOST_CXX` pointing at the C and C++ shims.
 4. Each shim analyzes its compiler invocation and derives a content-addressed action key.
 5. A hit restores the action's outputs; a miss runs the real compiler and publishes the result.
+   The compiler's diagnostics and artifact notifications reach Cargo as rustc
+   prints them, so Cargo starts a crate's dependents against its metadata while
+   code generation and publication continue, the same as without mbx.
+   `forward_compiler_notifications = false` (`MBX_FORWARD_COMPILER_NOTIFICATIONS=0`)
+   holds the output until the result is stored, for diagnosing the shim.
 6. The agent exits with the build, draining any remote uploads it still owes.
    There is no persistent daemon.
 
