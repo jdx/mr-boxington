@@ -221,7 +221,11 @@ fn same_identity(before: &fs::Metadata, after: &fs::Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
-        if before.ctime() != after.ctime() || before.ctime_nsec() != after.ctime_nsec() {
+        if before.dev() != after.dev()
+            || before.ino() != after.ino()
+            || before.ctime() != after.ctime()
+            || before.ctime_nsec() != after.ctime_nsec()
+        {
             return false;
         }
     }

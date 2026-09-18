@@ -436,6 +436,9 @@ struct VerifiedBlob {
     path: PathBuf,
     len: u64,
     modified: SystemTime,
+    /// The file object on Unix, so a blob replaced by another file of the
+    /// same length and modification time is noticed.
+    object: Option<(u64, u64)>,
 }
 
 impl VerifiedBlob {
@@ -447,6 +450,7 @@ impl VerifiedBlob {
             path: path.to_path_buf(),
             len: metadata.len(),
             modified: metadata.modified().ok()?,
+            object: file_object(&metadata),
         })
     }
 
@@ -455,8 +459,22 @@ impl VerifiedBlob {
         let Ok(metadata) = std::fs::metadata(&self.path) else {
             return false;
         };
-        metadata.len() == self.len && metadata.modified().is_ok_and(|now| now == self.modified)
+        metadata.len() == self.len
+            && metadata.modified().is_ok_and(|now| now == self.modified)
+            && file_object(&metadata) == self.object
     }
+}
+
+/// The device and inode of a file, where the platform reports them.
+#[cfg(unix)]
+fn file_object(metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_object(_metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
+    None
 }
 
 #[derive(Debug, Clone, Default)]
