@@ -183,5 +183,9 @@ allowlist of built-in WebAssembly targets whose default linker and system
 inputs ship with rustc. Everything else (native libraries, custom linkers,
 unrecognized toolchains) links as it always did; see
 [limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
+A library that names a native library is cached: nothing links, so a
+`-l static` archive is hashed into its key like an `--extern` artifact, and
+other `-l` kinds are keyed by name; see
+[limits](/limits#native-libraries-are-inputs-where-nothing-links).
 `MBX_VERIFY=1` compiles while also consulting the cache and compares the
 result, an expensive qualification mode.

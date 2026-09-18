@@ -10,6 +10,7 @@ cache the result. A bypass preserves the build; it reduces reuse. Run
 | Work | Cache behavior |
 | --- | --- |
 | Rust compilations without a link | Eligible when inputs can be modeled |
+| Rust libraries naming a native library (`-l`) | Eligible; a `-l static` archive is hashed into the key |
 | Native executables, tests, and proc macros | Eligible on described Linux, macOS, and Windows hosts |
 | Built-in self-contained WebAssembly links | Eligible for the targets listed below |
 | Build-script execution | Eligible using Cargo's declared freshness inputs |
@@ -101,14 +102,47 @@ without either having pinned what it stood for. The same goes for a driver that
 names no linker or reports no version. Those links appear in `mbx explain` like
 any other bypass.
 
-Even then, a link bypasses if it names a native library, overrides the linker,
-or carries a flag that would embed this checkout's paths (`-Crpath`,
-`-Cprefer-dynamic`) or leave a file beside the binary that mbx does not store
-(`-Csplit-debuginfo`). On macOS a debug-info link records absolute object
-paths and their timestamps in the binary's debug map, so the shim passes ld64
-`-oso_prefix` for its own output directory, which lets those links cache. An
-explicit `--target` bypasses too, even when it spells the host triple: rustc
-without one links for the host, and that is the only linker mbx identifies.
+Even then, a link bypasses if it names a native library (`-l`, which a build
+script emits as `cargo:rustc-link-lib`), overrides the linker, or carries a
+flag that would embed this checkout's paths (`-Crpath`, `-Cprefer-dynamic`) or
+leave a file beside the binary that mbx does not store (`-Csplit-debuginfo`).
+On macOS a debug-info link records absolute object paths and their timestamps
+in the binary's debug map, so the shim passes ld64 `-oso_prefix` for its own
+output directory, which lets those links cache. An explicit `--target`
+bypasses too, even when it spells the host triple: rustc without one links for
+the host, and that is the only linker mbx identifies.
+
+## Native libraries are inputs where nothing links
+
+A library compilation runs no linker, so a `-l` flag on it is not a linker
+argument. `-sys` crates whose build script emits `cargo:rustc-link-lib` (for
+example `zstd-sys`, `ring`, `aws-lc-sys`, `libz-sys`, and `openssl-sys` when
+linking statically) compile their rlib this way, and mbx caches those
+compilations.
+
+For `-l static=NAME`, with any modifiers, rustc reads the archive and bundles
+it into the rlib. mbx resolves the file the way rustc does, taking the first
+`-L native` directory in command-line order that holds `libNAME.a` (or
+`NAME.lib` on MSVC targets; the literal name with `+verbatim`), and hashes it
+into the action key exactly like an `--extern` artifact. A rebuilt archive
+with the same name therefore gives the library a new key, on a fresh
+compilation and on a predicted restore alike. If no search directory holds
+the archive, the compilation bypasses as `missing-native-library`; an archive
+outside the workspace, target, Cargo, toolchain, and home roots bypasses as
+`unmapped-absolute-path`, like any other input there.
+
+For `-l dylib=NAME`, `-l framework=NAME`, `-l link-arg=...`, and a plain
+`-l NAME`, rustc reads nothing and records the name in the crate's metadata
+for a later link, so the flag enters the key as text.
+
+An archive built with debug information usually records the checkout's C
+source paths. When the build script that produces it reruns in another
+checkout, the archive differs and so does the library's key; when
+[build-script execution](#build-script-execution-follows-cargos-freshness-inputs)
+restores the archive from the cache instead, the bytes match and the library
+hits there too. Either way the library is reused across builds at the same
+path, including after the target directory is removed. Linked programs, tests,
+and proc macros that name a native library still bypass, as described above.
 
 ## Restored artifacts are equivalent, not always identical
 

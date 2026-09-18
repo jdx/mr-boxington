@@ -194,7 +194,7 @@ fn compiler_driver_identity_distinguishes_clippy_actions() {
 }
 
 #[test]
-fn tracks_native_search_path_contents_but_still_rejects_native_libraries() {
+fn tracks_native_search_path_contents_and_hashes_a_named_static_library() {
     let directory = tempfile::tempdir().unwrap();
     let working_dir = directory.path().join("registry/widget");
     let native = directory.path().join("target/native");
@@ -254,16 +254,382 @@ fn tracks_native_search_path_contents_but_still_rejects_native_libraries() {
             .any(|input| input.path == native.join("added.lib"))
     );
 
-    let linked = args(&[
+    // Naming a static library in that directory is what a `-sys` crate's
+    // build script does with `cargo:rustc-link-lib=static`. rustc bundles the
+    // archive into the rlib, so it is a required input rather than a bypass.
+    std::fs::write(native.join("libfixture.a"), "archive").unwrap();
+    let linked = RustcInvocation::parse(&args(&[
         "--crate-type=lib",
         "--emit=dep-info,metadata,link",
-        "-Lnative=target/native",
+        &native_argument,
         "-lstatic=fixture",
         "src/lib.rs",
+    ]))
+    .unwrap();
+    assert!(
+        linked
+            .required_inputs_in(&working_dir)
+            .contains(&native.join("libfixture.a"))
+    );
+}
+
+/// A `-sys` crate compiled as a library: its build script placed the archive
+/// in `OUT_DIR` and told cargo to pass `-L native` and `-l static` for it.
+fn static_library_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let directory = tempfile::tempdir().unwrap();
+    let working_dir = directory.path().join("registry/zstd-sys");
+    let native = directory.path().join("target/debug/build/zstd-sys-abc/out");
+    std::fs::create_dir_all(&working_dir).unwrap();
+    std::fs::create_dir_all(&native).unwrap();
+    std::fs::write(working_dir.join("src.rs"), "pub fn value() {}\n").unwrap();
+    (directory, working_dir, native)
+}
+
+fn library_linking(native: &[(&str, &Path)], libraries: &[&str]) -> Vec<OsString> {
+    let mut arguments = args(&[
+        "--crate-name=zstd_sys",
+        "--crate-type=lib",
+        "--emit=dep-info,metadata,link",
+        "--out-dir=target/debug/deps",
     ]);
+    for (kind, directory) in native {
+        arguments.push(format!("-L{kind}{}", directory.display()).into());
+    }
+    for library in libraries {
+        arguments.push("-l".into());
+        arguments.push((*library).into());
+    }
+    arguments.push("src.rs".into());
+    arguments
+}
+
+fn required_inputs(invocation: &RustcInvocation, working_dir: &Path) -> Vec<PathBuf> {
+    let mut inputs = invocation.required_inputs_in(working_dir);
+    inputs.retain(|input| input.file_name().is_some_and(|name| name != "src.rs"));
+    inputs
+}
+
+/// Every `-l` kind that only records a name: rustc reads no file for a
+/// dynamic library, a framework, a raw link argument, or the default kind
+/// when nothing links, so the flag text is the whole input and stays in the
+/// key as written.
+#[test]
+fn name_only_native_libraries_are_keyed_as_text_on_a_library_emit() {
+    let (_directory, working_dir, native) = static_library_fixture();
+    let invocation = RustcInvocation::parse(&library_linking(
+        &[("native=", &native)],
+        &[
+            "dylib=z",
+            "framework=Security",
+            "link-arg=-Wl,--as-needed",
+            "m",
+        ],
+    ))
+    .unwrap();
+    assert!(required_inputs(&invocation, &working_dir).is_empty());
+    let action = invocation
+        .action(ActionContext {
+            working_dir: working_dir.clone(),
+            path_mappings: vec![
+                PathMapping::new(&working_dir, "workspace"),
+                PathMapping::new(
+                    native
+                        .parent()
+                        .unwrap()
+                        .parent()
+                        .unwrap()
+                        .parent()
+                        .unwrap()
+                        .parent()
+                        .unwrap(),
+                    "target",
+                ),
+            ],
+            inputs: vec![ActionInput {
+                path: working_dir.join("src.rs"),
+                digest: digest("source"),
+            }],
+            ..context(&[])
+        })
+        .unwrap();
+    let json = String::from_utf8(action.bytes).unwrap();
+    for flag in [
+        r#""-ldylib=z""#,
+        r#""-lframework=Security""#,
+        r#""-llink-arg=-Wl,--as-needed""#,
+        r#""-lm""#,
+    ] {
+        assert!(json.contains(flag), "{flag} missing from {json}");
+    }
+}
+
+/// A static library is read: rustc bundles the archive into the rlib, so the
+/// archive is a required input whatever modifiers travel with it.
+#[test]
+fn a_static_library_is_a_required_input_with_any_modifiers() {
+    let (_directory, working_dir, native) = static_library_fixture();
+    std::fs::write(native.join("libzstd.a"), "archive").unwrap();
+    for library in [
+        "static=zstd",
+        "static:+whole-archive=zstd",
+        "static:+whole-archive,-bundle=zstd",
+        "static:-bundle=zstd",
+        "static:+verbatim,-verbatim=zstd",
+    ] {
+        let invocation =
+            RustcInvocation::parse(&library_linking(&[("native=", &native)], &[library]))
+                .unwrap_or_else(|error| panic!("{library}: {error}"));
+        assert_eq!(
+            required_inputs(&invocation, &working_dir),
+            vec![native.join("libzstd.a")],
+            "{library}"
+        );
+    }
+}
+
+/// `-l static=NAME:RENAME` links RENAME in place of the `#[link]` attribute's
+/// NAME, so RENAME is the archive rustc opens.
+#[test]
+fn a_renamed_static_library_resolves_under_its_new_name() {
+    let (_directory, working_dir, native) = static_library_fixture();
+    std::fs::write(native.join("librenamed.a"), "archive").unwrap();
+    let invocation = RustcInvocation::parse(&library_linking(
+        &[("native=", &native)],
+        &["static=original:renamed"],
+    ))
+    .unwrap();
     assert_eq!(
-        RustcInvocation::parse(&linked),
-        Err(BypassReason::NativeLibrary)
+        required_inputs(&invocation, &working_dir),
+        vec![native.join("librenamed.a")]
+    );
+}
+
+/// `+verbatim` turns off the platform naming: the file is NAME itself.
+#[test]
+fn a_verbatim_static_library_is_named_literally() {
+    let (_directory, working_dir, native) = static_library_fixture();
+    std::fs::write(native.join("libzstd.a"), "conventional").unwrap();
+    std::fs::write(native.join("zstd.lib"), "literal").unwrap();
+    let invocation = RustcInvocation::parse(&library_linking(
+        &[("native=", &native)],
+        &["static:+verbatim=zstd.lib"],
+    ))
+    .unwrap();
+    assert_eq!(
+        required_inputs(&invocation, &working_dir),
+        vec![native.join("zstd.lib")]
+    );
+    assert_eq!(
+        RustcInvocation::parse(&library_linking(
+            &[("native=", &native)],
+            &["static:+verbatim=zstd"],
+        )),
+        Err(BypassReason::MissingNativeLibrary(
+            "static:+verbatim=zstd".into()
+        ))
+    );
+}
+
+/// rustc takes the first `-L native` directory, in command order, that holds
+/// the archive; `-L dependency` directories are for rlibs and are never
+/// searched.
+#[test]
+fn a_static_library_resolves_in_search_path_order() {
+    let (directory, working_dir, native) = static_library_fixture();
+    let vendored = directory.path().join("target/vendored");
+    let dependency = directory.path().join("target/debug/deps");
+    for path in [&vendored, &dependency] {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(path.join("libzstd.a"), "elsewhere").unwrap();
+    }
+    std::fs::write(native.join("libzstd.a"), "archive").unwrap();
+
+    let first_wins = RustcInvocation::parse(&library_linking(
+        &[
+            ("dependency=", &dependency),
+            ("native=", &vendored),
+            ("native=", &native),
+        ],
+        &["static=zstd"],
+    ))
+    .unwrap();
+    assert_eq!(
+        required_inputs(&first_wins, &working_dir),
+        vec![vendored.join("libzstd.a")]
+    );
+
+    let order_matters = RustcInvocation::parse(&library_linking(
+        &[
+            ("dependency=", &dependency),
+            ("native=", &native),
+            ("native=", &vendored),
+        ],
+        &["static=zstd"],
+    ))
+    .unwrap();
+    assert_eq!(
+        required_inputs(&order_matters, &working_dir),
+        vec![native.join("libzstd.a")]
+    );
+
+    assert_eq!(
+        RustcInvocation::parse(&library_linking(
+            &[("dependency=", &dependency)],
+            &["static=zstd"],
+        )),
+        Err(BypassReason::MissingNativeLibrary("static=zstd".into()))
+    );
+}
+
+/// An MSVC target names its archives `NAME.lib`, and rustc still falls back
+/// to the `libNAME.a` a GNU toolchain would have written. Other targets never
+/// look for `NAME.lib`.
+#[test]
+fn a_static_library_is_named_for_the_target() {
+    let (_directory, working_dir, native) = static_library_fixture();
+    std::fs::write(native.join("zstd.lib"), "msvc").unwrap();
+    let mut msvc = library_linking(&[("native=", &native)], &["static=zstd"]);
+    msvc.insert(0, "--target=x86_64-pc-windows-msvc".into());
+    let invocation = RustcInvocation::parse(&msvc).unwrap();
+    assert_eq!(
+        required_inputs(&invocation, &working_dir),
+        vec![native.join("zstd.lib")]
+    );
+
+    let mut gnu = library_linking(&[("native=", &native)], &["static=zstd"]);
+    gnu.insert(0, "--target=x86_64-unknown-linux-gnu".into());
+    assert_eq!(
+        RustcInvocation::parse(&gnu),
+        Err(BypassReason::MissingNativeLibrary("static=zstd".into()))
+    );
+    std::fs::write(native.join("libzstd.a"), "gnu").unwrap();
+    assert_eq!(
+        required_inputs(&RustcInvocation::parse(&gnu).unwrap(), &working_dir),
+        vec![native.join("libzstd.a")]
+    );
+    assert_eq!(
+        required_inputs(&RustcInvocation::parse(&msvc).unwrap(), &working_dir),
+        vec![native.join("zstd.lib")]
+    );
+}
+
+/// A kind rustc itself rejects is not guessed at.
+#[test]
+fn an_unknown_native_library_kind_bypasses_as_an_unknown_flag() {
+    let (_directory, _working_dir, native) = static_library_fixture();
+    assert_eq!(
+        RustcInvocation::parse(&library_linking(&[("native=", &native)], &["shared=zstd"])),
+        Err(BypassReason::UnknownFlag("-lshared=zstd".into()))
+    );
+}
+
+/// The archive is keyed by content like an `--extern` artifact, along both
+/// discovery paths: a rebuilt archive with the same name can never be
+/// restored against, and a prediction replays exactly the key dep-info
+/// discovery built.
+#[test]
+fn a_static_library_changes_the_action_key_with_its_contents() {
+    let (directory, working_dir, native) = static_library_fixture();
+    let archive = native.join("libzstd.a");
+    std::fs::write(&archive, "first").unwrap();
+    let invocation =
+        RustcInvocation::parse(&library_linking(&[("native=", &native)], &["static=zstd"]))
+            .unwrap();
+    let mappings = vec![
+        PathMapping::new(&working_dir, "workspace"),
+        PathMapping::new(directory.path().join("target"), "target"),
+    ];
+    let base = ActionContext {
+        working_dir: working_dir.clone(),
+        path_mappings: mappings.clone(),
+        inputs: Vec::new(),
+        ..context(&[])
+    };
+    let dep_info = RustcDepInfo::parse("target/debug/deps/zstd_sys.d: src.rs\n").unwrap();
+    let discovered = invocation
+        .discover_inputs_with_mappings(
+            &dep_info,
+            &working_dir,
+            &mappings,
+            &mbx_cache_core::NoFileDigestCache,
+        )
+        .unwrap();
+    let mut from_dep_info = base.clone();
+    discovered.clone().apply_to(&mut from_dep_info).unwrap();
+    let first = invocation.action(from_dep_info).unwrap();
+    let json = String::from_utf8(first.bytes.clone()).unwrap();
+    assert!(
+        json.contains(r#""${target}/debug/build/zstd-sys-abc/out/libzstd.a""#),
+        "{json}"
+    );
+    assert!(json.contains(&CacheDigest::blake3(b"first").hash), "{json}");
+
+    let prediction = invocation.prediction(&base, &discovered).unwrap();
+    let replay = |base: &ActionContext| {
+        let predicted = prediction
+            .discover(&working_dir, &mappings, &mbx_cache_core::NoFileDigestCache)
+            .unwrap();
+        let mut from_prediction = base.clone();
+        predicted.apply_to(&mut from_prediction).unwrap();
+        invocation.action(from_prediction)
+    };
+    assert_eq!(replay(&base).unwrap().digest, first.digest);
+
+    std::fs::write(&archive, "second").unwrap();
+    assert_ne!(replay(&base).unwrap().digest, first.digest);
+
+    // The archive sits beneath a walked native directory, so the prediction
+    // rediscovers whatever is there; once it is gone, no key can be built
+    // rather than one that omits it.
+    std::fs::remove_file(&archive).unwrap();
+    assert_eq!(
+        replay(&base).unwrap_err(),
+        BypassReason::MissingRequiredInput(
+            "${target}/debug/build/zstd-sys-abc/out/libzstd.a".into()
+        )
+    );
+}
+
+/// A static archive outside every mapped root has no portable name, so the
+/// invocation bypasses like an `--extern` there would, on both discovery
+/// paths.
+#[test]
+fn a_static_library_outside_every_mapped_root_bypasses_as_unmapped() {
+    let (directory, working_dir, _native) = static_library_fixture();
+    let system = directory.path().join("usr/lib");
+    std::fs::create_dir_all(&system).unwrap();
+    let archive = system.join("libzstd.a");
+    std::fs::write(&archive, "system").unwrap();
+    let invocation =
+        RustcInvocation::parse(&library_linking(&[("native=", &system)], &["static=zstd"]))
+            .unwrap();
+    let mappings = vec![
+        PathMapping::new(&working_dir, "workspace"),
+        PathMapping::new(directory.path().join("target"), "target"),
+    ];
+    let dep_info = RustcDepInfo::parse("target/debug/deps/zstd_sys.d: src.rs\n").unwrap();
+    let discovered = invocation
+        .discover_inputs_with_mappings(
+            &dep_info,
+            &working_dir,
+            &mappings,
+            &mbx_cache_core::NoFileDigestCache,
+        )
+        .unwrap();
+    let mut action_context = ActionContext {
+        working_dir: working_dir.clone(),
+        path_mappings: mappings,
+        inputs: Vec::new(),
+        ..context(&[])
+    };
+    assert_eq!(
+        invocation.prediction(&action_context, &discovered),
+        Err(BypassReason::UnmappedAbsolutePath(archive.clone()))
+    );
+    discovered.apply_to(&mut action_context).unwrap();
+    assert_eq!(
+        invocation.action(action_context).unwrap_err(),
+        BypassReason::UnmappedAbsolutePath(archive)
     );
 }
 
@@ -1448,19 +1814,36 @@ fn macos_debug_info_makes_a_native_link_unportable() {
     assert!(RustcInvocation::parse_with(&none, native_links()).is_ok());
 }
 
-/// A native library is still not a precise input, whoever is asking.
+/// A linked program hands its native libraries to the linker, whose search
+/// is not modeled, so a `-l` of any kind still bypasses it -- even when the
+/// archive itself would have resolved.
 #[test]
-fn native_libraries_bypass_even_for_admitted_links() {
-    let arguments = args(&[
-        "--test",
-        "--emit=dep-info,link",
-        "-lstatic=fixture",
-        "src/lib.rs",
-    ]);
-
+fn native_libraries_bypass_admitted_native_links() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("libfixture.a"), "archive").unwrap();
+    let search = format!("-Lnative={}", directory.path().display());
+    for library in ["static=fixture", "dylib=z", "m"] {
+        let arguments = args(&[
+            "--test",
+            "--emit=dep-info,link",
+            &search,
+            "-l",
+            library,
+            "src/lib.rs",
+        ]);
+        assert_eq!(
+            RustcInvocation::parse_with(&arguments, native_links()),
+            Err(BypassReason::NativeLibrary(library.into())),
+            "{library}"
+        );
+    }
     assert_eq!(
-        RustcInvocation::parse_with(&arguments, native_links()),
-        Err(BypassReason::NativeLibrary)
+        BypassReason::NativeLibrary("m".into()).kind(),
+        "native-library"
+    );
+    assert_eq!(
+        BypassReason::MissingNativeLibrary("static=fixture".into()).kind(),
+        "missing-native-library"
     );
 }
 
@@ -1772,21 +2155,34 @@ fn proc_macro_prefer_dynamic_is_pinned_by_the_compiler_identity() {
     assert!(invocation.links_natively());
 }
 
-/// A native library is a linker input, and the reason it bypasses -- mbx does
-/// not model where it came from -- does not soften because this particular
-/// compilation stopped short of the link.
+/// A check compilation of a test target links nothing, so its native
+/// libraries are inputs rather than linker arguments: the static archive is
+/// hashed, and a missing one bypasses rather than being guessed at.
 #[test]
-fn a_native_library_still_bypasses_a_check_compilation() {
+fn a_check_compilation_hashes_its_static_library() {
+    let directory = tempfile::tempdir().unwrap();
+    let native = directory.path().join("out");
+    std::fs::create_dir_all(&native).unwrap();
+    let search = format!("-Lnative={}", native.display());
+    let check = args(&[
+        "--crate-name=widget",
+        "--test",
+        "--emit=dep-info,metadata",
+        "--out-dir=target/debug/deps",
+        &search,
+        "-lstatic=fixture",
+        "src/lib.rs",
+    ]);
     assert_eq!(
-        RustcInvocation::parse(&args(&[
-            "--crate-name=widget",
-            "--test",
-            "--emit=dep-info,metadata",
-            "--out-dir=target/debug/deps",
-            "-lstatic=fixture",
-            "src/lib.rs",
-        ])),
-        Err(BypassReason::NativeLibrary)
+        RustcInvocation::parse(&check),
+        Err(BypassReason::MissingNativeLibrary("static=fixture".into()))
+    );
+    std::fs::write(native.join("libfixture.a"), "archive").unwrap();
+    let invocation = RustcInvocation::parse(&check).unwrap();
+    assert!(
+        invocation
+            .required_inputs_in(directory.path())
+            .contains(&native.join("libfixture.a"))
     );
 }
 

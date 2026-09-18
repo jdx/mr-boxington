@@ -224,9 +224,14 @@ pub enum BypassReason {
     /// `-o` leaves the name of an implicit emit ambiguous.
     #[error("rustc -o with an emit that has no explicit path is not modeled: {0}")]
     ImplicitEmitWithOutputFile(PathBuf),
-    /// Native-library lookup is not modeled as a precise input.
-    #[error("native library lookup is not cacheable yet")]
-    NativeLibrary,
+    /// A linked output hands its native libraries to a linker whose search
+    /// is not modeled; only a library emit can name what rustc reads.
+    #[error("native library on a linked output is not cacheable yet: {0}")]
+    NativeLibrary(String),
+    /// A static library named by `-l` is not in any directory rustc would
+    /// read it from, so there is no archive to hash.
+    #[error("native static library was not found on any search path: {0}")]
+    MissingNativeLibrary(String),
     /// An output's name does not say whether it is a program or a library.
     #[error("rustc output name does not distinguish a program from a library: {0}")]
     AmbiguousOutputName(PathBuf),
@@ -509,12 +514,14 @@ impl RustcInvocation {
     /// Whether the contents of native search directories cannot reach this
     /// invocation's outputs.
     ///
-    /// A library emit never runs a linker, so a `-L native` directory is only
-    /// read for a static library named by `-l` -- and any `-l` already bypasses
-    /// the whole invocation. On Windows every crate downstream of a `cc`-built
-    /// dependency carries the MSVC toolset's `-L native` directories, which sit
-    /// outside every checkout root; treating them as content inputs would leave
-    /// all of those compilations permanently uncacheable. A `#[link]` attribute
+    /// A library emit never runs a linker, so the only file rustc reads out of
+    /// a `-L native` directory is a static archive it bundles into the rlib.
+    /// One named by `-l static` is resolved at parse time and hashed as a
+    /// required input, so the directory it came from need not be walked for
+    /// it. On Windows every crate downstream of a `cc`-built dependency
+    /// carries the MSVC toolset's `-L native` directories, which sit outside
+    /// every checkout root; treating them as content inputs would leave all of
+    /// those compilations permanently uncacheable. A `#[link]` attribute
     /// naming a bundled static library could in principle reach through such a
     /// directory without an `-l` flag, but toolchain directories are
     /// version-stamped by their path, which the key still carries verbatim.
@@ -1185,6 +1192,7 @@ struct Parser<'a> {
     crate_types: Vec<String>,
     emits: Vec<Emit>,
     required_inputs: Vec<PathBuf>,
+    native_libraries: Vec<String>,
     test: bool,
     crate_name: Option<String>,
     extra_filename: String,
@@ -1272,6 +1280,7 @@ impl<'a> Parser<'a> {
             crate_types: Vec::new(),
             emits: Vec::new(),
             required_inputs: Vec::new(),
+            native_libraries: Vec::new(),
             test: false,
             crate_name: None,
             extra_filename: String::new(),
@@ -1296,6 +1305,7 @@ impl<'a> Parser<'a> {
 
         let source = self.source.clone().ok_or(BypassReason::MissingInput)?;
         let link_output = self.classify()?;
+        self.require_native_libraries(link_output)?;
         let crate_name = self.crate_name.clone().map_or_else(
             || {
                 source
@@ -1523,8 +1533,11 @@ impl<'a> Parser<'a> {
             });
             return Ok(());
         }
-        if value == "-l" || value.starts_with("-l") {
-            return Err(BypassReason::NativeLibrary);
+        if let Some(attached) = value.strip_prefix("-l") {
+            let library = self.take_value("-l", (!attached.is_empty()).then_some(attached))?;
+            self.parsed.push(Argument::Plain(format!("-l{library}")));
+            self.native_libraries.push(library);
+            return Ok(());
         }
         if let Some(attached) = value.strip_prefix("-o") {
             let path = self.take_value("-o", (!attached.is_empty()).then_some(attached))?;
@@ -1618,6 +1631,89 @@ impl<'a> Parser<'a> {
                 .map_or(String::new(), |(_, value)| value.to_string());
         }
         Ok(())
+    }
+
+    /// Model what rustc reads for each `-l`, now that the emit is known.
+    ///
+    /// A library emit runs no linker. For `dylib`, `framework`, `link-arg`,
+    /// and an unspecified kind, rustc only records the name in the crate's
+    /// metadata, so the flag text already in the key is the whole input. A
+    /// `static` library is different: rustc opens the archive and bundles its
+    /// members into the rlib, so the archive's content decides the output. It
+    /// is found the way rustc finds it and named as a required input, keyed
+    /// by content exactly like an `--extern` artifact. With `-bundle` rustc
+    /// records the name for a downstream link instead of reading the archive;
+    /// hashing it anyway costs one file digest and errs toward a miss.
+    ///
+    /// A linked output hands every `-l` to its linker, whose search is not
+    /// modeled here, so those still bypass whatever the kind.
+    fn require_native_libraries(&mut self, link_output: LinkOutput) -> Result<(), BypassReason> {
+        for library in std::mem::take(&mut self.native_libraries) {
+            if link_output != LinkOutput::Library {
+                return Err(BypassReason::NativeLibrary(library));
+            }
+            // `-l [KIND[:MODIFIERS]=]NAME[:RENAME]`.
+            let Some((kind, name)) = library.split_once('=') else {
+                continue;
+            };
+            let (kind, modifiers) = kind.split_once(':').unwrap_or((kind, ""));
+            match kind {
+                "static" => {}
+                "dylib" | "framework" | "link-arg" => continue,
+                _ => return Err(BypassReason::UnknownFlag(format!("-l{library}"))),
+            }
+            // A rename links RENAME in place of the NAME a `#[link]` attribute
+            // gave, so RENAME is the archive on disk.
+            let name = name.split_once(':').map_or(name, |(_, renamed)| renamed);
+            let verbatim = modifiers
+                .split(',')
+                .fold(false, |verbatim, modifier| match modifier {
+                    "+verbatim" => true,
+                    "-verbatim" => false,
+                    _ => verbatim,
+                });
+            let archive = self
+                .find_native_static_library(name, verbatim)
+                .ok_or_else(|| BypassReason::MissingNativeLibrary(library.clone()))?;
+            self.required_inputs.push(archive);
+        }
+        Ok(())
+    }
+
+    /// Resolve a static library the way rustc does: the first `-L native`
+    /// directory, in command-line order, holding the platform's file name for
+    /// it. rustc would also search a plain `-L` directory, but that kind
+    /// already bypasses as unsupported before it gets here. MSVC targets
+    /// accept `NAME.lib` before falling back to the `libNAME.a` every other
+    /// target uses; `+verbatim` names the file literally. A relative search
+    /// directory resolves against the process working directory, as it does
+    /// for rustc.
+    fn find_native_static_library(&self, name: &str, verbatim: bool) -> Option<PathBuf> {
+        let file_names = if verbatim {
+            vec![name.to_owned()]
+        } else if self.targets_msvc() {
+            vec![format!("{name}.lib"), format!("lib{name}.a")]
+        } else {
+            vec![format!("lib{name}.a")]
+        };
+        self.parsed
+            .iter()
+            .filter_map(|argument| match argument {
+                Argument::SearchPath { kind, path } if kind == "native" => Some(path),
+                _ => None,
+            })
+            .flat_map(|directory| {
+                file_names
+                    .iter()
+                    .map(move |file_name| directory.join(file_name))
+            })
+            .find(|candidate| candidate.is_file())
+    }
+
+    fn targets_msvc(&self) -> bool {
+        self.target
+            .as_deref()
+            .map_or(cfg!(target_env = "msvc"), |target| target.contains("msvc"))
     }
 
     fn parse_input(&mut self, value: &str) -> Result<(), BypassReason> {
