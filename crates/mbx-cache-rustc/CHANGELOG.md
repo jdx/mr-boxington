@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.16.4...mbx-cache-rustc-v0.17.0) - 2026-09-18
+
+### Added
+
+- *(cache)* cache library compiles that name a native library ([#490](https://github.com/jdx/mr-boxington/pull/490))
+
 ## [0.16.4](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.16.3...mbx-cache-rustc-v0.16.4) - 2026-09-17
 
 ### Other

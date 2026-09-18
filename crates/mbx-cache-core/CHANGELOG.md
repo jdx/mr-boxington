@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.16.4...mbx-cache-core-v0.17.0) - 2026-09-18
+
+### Added
+
+- *(rustc)* let Cargo pipeline dependents while mbx finishes a miss ([#492](https://github.com/jdx/mr-boxington/pull/492))
+
+### Other
+
+- *(cache)* take two disk round trips off every cache miss ([#491](https://github.com/jdx/mr-boxington/pull/491))
+
 ## [0.16.4](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.16.3...mbx-cache-core-v0.16.4) - 2026-09-17
 
 ### Fixed

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.0](https://github.com/jdx/mr-boxington/compare/v1.13.0...v1.14.0) - 2026-09-18
+
+### Added
+
+- *(cache)* cache library compiles that name a native library ([#490](https://github.com/jdx/mr-boxington/pull/490))
+- *(rustc)* let Cargo pipeline dependents while mbx finishes a miss ([#492](https://github.com/jdx/mr-boxington/pull/492))
+
+### Other
+
+- *(cache)* take two disk round trips off every cache miss ([#491](https://github.com/jdx/mr-boxington/pull/491))
+
 ## [1.13.0](https://github.com/jdx/mr-boxington/compare/v1.12.0...v1.13.0) - 2026-09-17
 
 ### Added
