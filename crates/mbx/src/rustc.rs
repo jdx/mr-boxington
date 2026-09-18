@@ -878,16 +878,20 @@ fn custom_target_may_resolve(rustc: &OsStr, arguments: &[OsString]) -> bool {
     if under_target_path {
         return true;
     }
-    let sysroot = flag_value(arguments, "--sysroot")
+    // With no sysroot to look in, the name cannot be proven built in, so it
+    // is reported as possibly custom and `-l static` bypasses: the only job
+    // of this check is to never guess a file name rustc would not use.
+    let Some(sysroot) = flag_value(arguments, "--sysroot")
         .map(PathBuf::from)
-        .or_else(|| compiler_sysroot(rustc));
-    sysroot.is_some_and(|sysroot| {
-        sysroot
-            .join("lib/rustlib")
-            .join(&target)
-            .join("target.json")
-            .is_file()
-    })
+        .or_else(|| compiler_sysroot(rustc))
+    else {
+        return true;
+    };
+    sysroot
+        .join("lib/rustlib")
+        .join(&target)
+        .join("target.json")
+        .is_file()
 }
 
 /// The sysroot of the compiler the shim was handed. See

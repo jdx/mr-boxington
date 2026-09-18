@@ -1180,11 +1180,18 @@ fn custom_target_resolution_follows_the_sysroot() {
     assert!(custom_target_may_resolve(&rustc, &expanded));
 
     // A compiler outside a toolchain directory, such as a rustup proxy, does
-    // not imply a sysroot; here nothing else supplies one either.
+    // not imply a sysroot, and this one cannot be asked either. With nowhere
+    // to look, the name is not proven built in.
     let elsewhere: OsString = directory.path().join("other/bin/rustc").into();
-    assert!(!custom_target_may_resolve(
+    assert!(custom_target_may_resolve(
         &elsewhere,
         &args(&["--target=my-custom-target", "src.rs"])
+    ));
+    // A built-in name with no spec file under an explicit sysroot is built in.
+    let empty_sysroot = format!("--sysroot={}", directory.path().join("other").display());
+    assert!(!custom_target_may_resolve(
+        &elsewhere,
+        &args(&["--target=my-custom-target", &empty_sysroot, "src.rs"])
     ));
     let sysroot_flag = format!("--sysroot={}", sysroot.display());
     assert!(custom_target_may_resolve(
