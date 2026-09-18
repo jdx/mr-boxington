@@ -889,8 +889,13 @@ fn flag_value(arguments: &[OsString], flag: &str) -> Option<String> {
         if argument == flag {
             return arguments.next()?.to_str().map(str::to_string);
         }
-        if let Some(value) = argument.to_str()?.strip_prefix(flag)
-            && let Some(value) = value.strip_prefix('=')
+        // A non-UTF-8 argument is skipped, not the end of the scan: the
+        // parser refuses the invocation for it later, and the target must
+        // still be found so that refusal is the only reason it bypasses.
+        if let Some(value) = argument
+            .to_str()
+            .and_then(|argument| argument.strip_prefix(flag))
+            .and_then(|value| value.strip_prefix('='))
         {
             return Some(value.to_string());
         }

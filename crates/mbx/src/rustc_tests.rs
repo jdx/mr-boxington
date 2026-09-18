@@ -1159,6 +1159,17 @@ fn custom_target_resolution_follows_the_sysroot() {
         &args(&["--target=/somewhere/custom.json", "src.rs"])
     ));
 
+    // A non-UTF-8 argument earlier in the line does not hide the target.
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+        let odd = OsString::from_vec(vec![b'-', b'-', b'c', b'f', b'g', b'=', 0xff]);
+        assert!(custom_target_may_resolve(
+            &rustc,
+            &[odd, "--target=my-custom-target".into(), "src.rs".into()]
+        ));
+    }
+
     // An explicit sysroot wins over the compiler's location.
     let elsewhere: OsString = directory.path().join("other/bin/rustc").into();
     assert!(!custom_target_may_resolve(
