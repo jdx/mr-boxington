@@ -115,15 +115,25 @@ impl LocalCas {
     ) -> Result<PathBuf> {
         let destination = self.path_for(digest)?;
         // A blob that fails verification cannot be restored from, and nothing
-        // else repairs it: the read path reports an error rather than a miss,
-        // so without republishing over it the digest stays poisoned until
-        // eviction happens to reclaim it. `LocalActionCache::store` already
-        // recovers this way one layer up.
+        // else repairs it: readers treat it as a miss, so without republishing
+        // over it the digest stays poisoned until eviction happens to reclaim
+        // it. `LocalActionCache::store` already recovers this way one layer up.
         let replace_invalid = match self.find(digest) {
             Ok(Some(existing)) => return Ok(existing),
             Ok(None) => false,
             Err(_) => true,
         };
+        // The source is hashed before it is copied, and the copy is only
+        // trusted if the source still looks the same afterwards. A compiler
+        // output was written moments ago, so its pages are hot; the reflinked
+        // copy is a fresh inode whose pages are not, and hashing it instead
+        // read every published byte back from disk. A source rewritten
+        // between the hash and the copy shows in its length or timestamps
+        // and is refused, so what lands under the digest is what was hashed.
+        let before = verify.then(|| fs::metadata(source)).transpose()?;
+        if verify && !digest.matches_file(source)? {
+            bail!("staged blob does not match the declared CAS digest");
+        }
         let parent = destination.parent().expect("CAS path has a parent");
         fs::create_dir_all(parent)?;
         let staging = tempfile::tempdir_in(parent)?;
@@ -131,11 +141,13 @@ impl LocalCas {
         reflink_copy::reflink_or_copy(source, &temporary)?;
         let temporary = tempfile::TempPath::try_from_path(temporary)?;
         make_owner_writable(&temporary)?;
+        if let Some(before) = before
+            && !same_identity(&before, &fs::metadata(source)?)
+        {
+            bail!("source changed while it was being stored in the CAS");
+        }
         // Not fsynced: every read verifies the digest, so a blob torn by a
         // crash is detected and treated as absent rather than trusted.
-        if verify && !digest.matches_file(&temporary)? {
-            bail!("staged blob does not match the declared CAS digest");
-        }
         if fs::metadata(&temporary)?.len() != digest.size {
             bail!("staged blob size does not match the declared CAS digest");
         }
@@ -160,11 +172,7 @@ impl LocalCas {
         write: impl FnOnce(&mut tempfile::NamedTempFile) -> Result<()>,
     ) -> Result<PathBuf> {
         let destination = self.path_for(digest)?;
-        // A blob that fails verification cannot be restored from, and nothing
-        // else repairs it: the read path reports an error rather than a miss,
-        // so without republishing over it the digest stays poisoned until
-        // eviction happens to reclaim it. `LocalActionCache::store` already
-        // recovers this way one layer up.
+        // See `store_file_inner` for why an invalid blob is replaced.
         let replace_invalid = match self.find(digest) {
             Ok(Some(existing)) => return Ok(existing),
             Ok(None) => false,
@@ -192,6 +200,25 @@ impl LocalCas {
             Err(error) => Err(error.error.into()),
         }
     }
+}
+
+/// Whether two views of a file could describe the same unmodified bytes.
+///
+/// Length and modification time are what a rewrite through any path changes;
+/// the change time, where the platform reports one, cannot be set back from
+/// user space.
+fn same_identity(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if before.ctime() != after.ctime() || before.ctime_nsec() != after.ctime_nsec() {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(unix)]
@@ -361,6 +388,38 @@ mod tests {
 
         assert!(cas.store_file(&digest, &source).is_err());
         assert!(!cas.path_for(&digest).unwrap().exists());
+    }
+
+    #[test]
+    fn a_stored_file_is_hashed_from_the_source_and_matches_on_disk() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = LocalCas::new(directory.path().join("cache"));
+        let source = directory.path().join("source");
+        let bytes = vec![7u8; 3 * 1024 * 1024];
+        fs::write(&source, &bytes).unwrap();
+        let digest = CacheDigest::blake3(&bytes);
+
+        let stored = cas.store_file(&digest, &source).unwrap();
+
+        assert_eq!(fs::read(&stored).unwrap(), bytes);
+        assert!(digest.matches_file(&stored).unwrap());
+        assert_eq!(cas.find(&digest).unwrap(), Some(stored));
+    }
+
+    #[test]
+    fn a_source_that_changed_is_not_the_same_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        fs::write(&source, b"cached object").unwrap();
+        let before = fs::metadata(&source).unwrap();
+        assert!(same_identity(&before, &fs::metadata(&source).unwrap()));
+
+        fs::write(&source, b"other object!").unwrap();
+        let file = fs::File::open(&source).unwrap();
+        file.set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+        drop(file);
+        assert!(!same_identity(&before, &fs::metadata(&source).unwrap()));
     }
 
     #[test]

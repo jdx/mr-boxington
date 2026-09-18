@@ -372,14 +372,77 @@ async fn handshake_and_blob_round_trip() {
     ));
     drop(client);
     task.await.unwrap().unwrap();
+    let stats = agent.stats();
+    assert_eq!(stats.stores, 1);
+    assert_eq!(stats.stored_bytes, digest.size);
+    // The time a store spends writing the CAS is what the summary's "CAS
+    // write" figure reports; a build that only stores must not report none.
+    assert!(stats.local_cas_write_duration_ns > 0);
     assert_eq!(
-        agent.stats(),
         AgentStats {
-            stores: 1,
-            stored_bytes: digest.size,
-            ..AgentStats::default()
-        }
+            stores: 0,
+            stored_bytes: 0,
+            local_cas_write_duration_ns: 0,
+            ..stats
+        },
+        AgentStats::default()
     );
+}
+
+/// A blob torn by a crash between its rename and the bytes reaching disk sits
+/// under a valid name with the wrong content. Nothing restores from it, and
+/// nothing fails on it either: it is a miss, and the compilation that follows
+/// republishes over it.
+#[test]
+fn a_torn_blob_is_a_miss_that_republishing_repairs() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    let digest = CacheDigest::blake3(b"cached object");
+    let path = agent.cas.store_bytes(&digest, b"cached object").unwrap();
+    std::fs::write(&path, b"torn").unwrap();
+
+    assert_eq!(agent.find_verified_blob(&digest).unwrap(), None);
+    assert!(!agent.verified_blobs.lock().unwrap().contains_key(&digest));
+    assert!(
+        agent.cas.find(&digest).is_err(),
+        "the bytes on disk stay wrong until republished"
+    );
+
+    let source = directory.path().join("source");
+    std::fs::write(&source, b"cached object").unwrap();
+    let mut connection = ConnectionUploads::default();
+    let response = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(agent.store_blob(&digest, &source, &mut connection))
+        .unwrap();
+    assert!(matches!(response, AgentResponse::Stored { .. }));
+    assert_eq!(
+        agent.find_verified_blob(&digest).unwrap(),
+        Some(path.clone())
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"cached object");
+}
+
+/// A pending action whose blobs are all intact is a hit; one whose blob is
+/// torn is a miss for that blob, never an error and never a hit.
+#[tokio::test]
+async fn a_lookup_of_a_torn_blob_reports_a_miss_not_an_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    let intact = CacheDigest::blake3(b"intact object");
+    let torn = CacheDigest::blake3(b"torn object");
+    let intact_path = agent.cas.store_bytes(&intact, b"intact object").unwrap();
+    let torn_path = agent.cas.store_bytes(&torn, b"torn object").unwrap();
+    std::fs::write(&torn_path, b"torn").unwrap();
+
+    let response = agent
+        .find_blobs(vec![intact.clone(), torn.clone()])
+        .await
+        .unwrap();
+    match response {
+        AgentResponse::Blobs { paths } => assert_eq!(paths, vec![Some(intact_path), None]),
+        other => panic!("unexpected response {other:?}"),
+    }
 }
 
 /// A remembered blob is revalidated by file identity rather than by rehashing
@@ -405,7 +468,7 @@ fn remembered_blobs_reject_same_size_corruption() {
         .unwrap();
     drop(file);
 
-    assert!(agent.find_verified_blob(&digest).is_err());
+    assert_eq!(agent.find_verified_blob(&digest).unwrap(), None);
     assert!(!agent.verified_blobs.lock().unwrap().contains_key(&digest));
 }
 
@@ -422,7 +485,7 @@ fn remembered_blobs_reject_truncation() {
 
     std::fs::write(&path, b"torn").unwrap();
 
-    assert!(agent.find_verified_blob(&digest).is_err());
+    assert_eq!(agent.find_verified_blob(&digest).unwrap(), None);
     assert!(!agent.verified_blobs.lock().unwrap().contains_key(&digest));
 }
 

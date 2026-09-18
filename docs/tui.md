@@ -208,7 +208,8 @@ release. Scripts should read `MBX_STATS_REPORT`, which is
 ## Wrapper phase traces
 
 Rustc and C/C++ cache attempts also record startup, key construction, cache
-lookup, blob transfer, restore, store, compiler execution, and scheduler waits.
+lookup, blob transfer, restore, store, prediction recording, compiler
+execution, and scheduler waits.
 `MBX_STATS_REPORT` includes these as `wrapper_phases_ns`. The durations are
 cumulative across wrappers and exclusive: nested work is subtracted from its
 parent phase. They do not add up to build wall time because compilers run in

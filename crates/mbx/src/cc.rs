@@ -442,14 +442,16 @@ fn publish(
             return Err(error);
         }
     }
-    record_prediction(
-        task,
-        invocation_digest,
-        &action.digest,
-        &prediction,
-        flight,
-        remote_claim,
-    );
+    crate::phase_timing::measure("predict", || {
+        record_prediction(
+            task,
+            invocation_digest,
+            &action.digest,
+            &prediction,
+            flight,
+            remote_claim,
+        )
+    });
     Ok(())
 }
 

@@ -2151,7 +2151,9 @@ impl CacheAgent {
             if let Some(path) = self.find_verified_blob(digest)? {
                 path
             } else {
+                let timer = AtomicDurationTimer::start(&self.stats.local_cas_write_duration_ns);
                 let path = self.cas.store_file(digest, source)?;
+                drop(timer);
                 self.remember_verified_blob(digest, &path);
                 self.stats.stores.fetch_add(1, Ordering::Relaxed);
                 self.stats
@@ -2186,7 +2188,22 @@ impl CacheAgent {
             }
             self.verified_blobs.lock().unwrap().remove(digest);
         }
-        let path = self.cas.find(digest)?;
+        // Blobs are published by rename without an fsync, so a crash can leave
+        // one torn under a valid name. It is not restored from, and it is not
+        // an error either: the compilation runs again and its publication
+        // replaces the bad bytes, the same way a blob that was never stored
+        // gets there. Reporting it as a failure would surface a warning for a
+        // build that is behaving correctly.
+        let path = match self.cas.find(digest) {
+            Ok(path) => path,
+            Err(error) => {
+                warn!(
+                    "local CAS blob {} is not restorable and will be republished: {error}",
+                    digest.hash
+                );
+                return Ok(None);
+            }
+        };
         if let Some(path) = &path {
             self.remember_verified_blob(digest, path);
         }

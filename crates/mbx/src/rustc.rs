@@ -1861,6 +1861,7 @@ fn record_prediction(
     flight: Option<&crate::scheduler::Flight>,
     remote_claim: Option<&str>,
 ) {
+    let _phase = crate::phase_timing::phase("predict");
     let result = (|| {
         let invocation = compilation.invocation;
         let context = base_action_context(

@@ -19,6 +19,17 @@ Prefer [`mbx gc`](/managed-targets#inspect-and-clean-up) for routine cleanup.
 Managed target directories live under a versioned root (`targets/v1/…`), and
 the `target` symlink in each checkout keeps working across upgrades.
 
+The store is also not fsynced. Cached objects and action results are published
+by atomic rename, so a reader sees a whole file or none, but a crash or power
+cut before the bytes reach disk can leave a file whose content does not match
+its name. Every object is checked against its content hash the first time a
+build reads it, and one that fails is a miss: the compilation runs again and
+its result is republished over the bad bytes. Records that only shortcut work,
+such as the input list a finished compilation leaves for the next build of the
+same invocation, are written the same way and ignored when they fail to parse.
+`mbx cache verify` reads the whole store back and reports any object left in
+that state.
+
 ## JSON output is versioned
 
 `mbx doctor --json`, `mbx stats --json`, `mbx cache stats --json`, `mbx gc --json`, and

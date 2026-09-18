@@ -288,7 +288,12 @@ impl Flight {
     /// Written beside the lock file rather than into it, because the lock
     /// file's contents belong to the lock: releasing one truncates it. The
     /// record is only ever read and written under the lock, and the write is
-    /// atomic besides, so a reader can never see half of one.
+    /// atomic besides, so a reader can never see half of one. It is not
+    /// fsynced: a record lost to a crash costs the next build of this
+    /// invocation a cold key, and a torn one fails to parse and is ignored.
+    /// The disk round trip was paid once per compilation, on the shim's
+    /// critical path, and build scripts that compile many C files at once
+    /// queued behind each other on it.
     pub(crate) fn leave(&self, payload: &str) {
         if payload.len() > MAX_FLIGHT_PAYLOAD {
             return;
@@ -301,7 +306,7 @@ impl Flight {
         };
         let written = serde_json::to_vec(&record)
             .map_err(eyre::Report::from)
-            .and_then(|bytes| crate::util::write_atomic(&record_path(&self.path), &bytes));
+            .and_then(|bytes| crate::util::write_advisory(&record_path(&self.path), &bytes));
         if let Err(error) = written {
             debug!("a flight prediction was not left behind: {error:#}");
         }
