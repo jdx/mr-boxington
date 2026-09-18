@@ -138,7 +138,7 @@ for a later link, so the flag enters the key as text.
 An archive built with debug information usually records the checkout's C
 source paths. When the build script that produces it reruns in another
 checkout, the archive differs and so does the library's key; when
-[build-script execution](#build-script-execution-follows-cargos-freshness-inputs)
+[build-script execution](#build-script-execution-follows-cargo-s-freshness-inputs)
 restores the archive from the cache instead, the bytes match and the library
 hits there too. Either way the library is reused across builds at the same
 path, including after the target directory is removed. Linked programs, tests,
