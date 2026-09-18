@@ -900,8 +900,7 @@ fn compiler_sysroot(rustc: &OsStr) -> Option<PathBuf> {
     {
         return Some(root.to_path_buf());
     }
-    if let Some(toolchain) = std::env::var_os("RUSTUP_TOOLCHAIN").filter(|name| !name.is_empty())
-    {
+    if let Some(toolchain) = std::env::var_os("RUSTUP_TOOLCHAIN").filter(|name| !name.is_empty()) {
         let toolchain = PathBuf::from(&toolchain);
         if toolchain.is_absolute() {
             return Some(toolchain);
@@ -911,7 +910,10 @@ fn compiler_sysroot(rustc: &OsStr) -> Option<PathBuf> {
             .or_else(|| Some(dirs::home_dir()?.join(".rustup")))?;
         return Some(home.join("toolchains").join(toolchain));
     }
-    let output = Command::new(rustc).args(["--print", "sysroot"]).output().ok()?;
+    let output = Command::new(rustc)
+        .args(["--print", "sysroot"])
+        .output()
+        .ok()?;
     output
         .status
         .success()
