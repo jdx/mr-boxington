@@ -1122,3 +1122,52 @@ fn incremental_state_is_discarded_only_past_its_budget() {
     );
     assert!(fresh.is_dir());
 }
+
+/// A bare `--target` is a custom specification when rustc would find a file
+/// for it: in the sysroot given by `--sysroot`, in the one implied by the
+/// compiler's location, but not for a name with no such file. A path target
+/// is the parser's case and never reported here.
+#[test]
+fn custom_target_resolution_follows_the_sysroot() {
+    let directory = tempfile::tempdir().unwrap();
+    let sysroot = directory.path().join("toolchain");
+    std::fs::create_dir_all(sysroot.join("bin")).unwrap();
+    std::fs::create_dir_all(sysroot.join("lib/rustlib/my-custom-target")).unwrap();
+    std::fs::write(
+        sysroot.join("lib/rustlib/my-custom-target/target.json"),
+        "{}",
+    )
+    .unwrap();
+    let rustc: OsString = sysroot.join("bin/rustc").into();
+    let args = |list: &[&str]| -> Vec<OsString> { list.iter().map(OsString::from).collect() };
+
+    assert!(custom_target_may_resolve(
+        &rustc,
+        &args(&["--target=my-custom-target", "src.rs"])
+    ));
+    assert!(custom_target_may_resolve(
+        &rustc,
+        &args(&["--target", "my-custom-target", "src.rs"])
+    ));
+    assert!(!custom_target_may_resolve(
+        &rustc,
+        &args(&["--target=x86_64-unknown-linux-gnu", "src.rs"])
+    ));
+    assert!(!custom_target_may_resolve(&rustc, &args(&["src.rs"])));
+    assert!(!custom_target_may_resolve(
+        &rustc,
+        &args(&["--target=/somewhere/custom.json", "src.rs"])
+    ));
+
+    // An explicit sysroot wins over the compiler's location.
+    let elsewhere: OsString = directory.path().join("other/bin/rustc").into();
+    assert!(!custom_target_may_resolve(
+        &elsewhere,
+        &args(&["--target=my-custom-target", "src.rs"])
+    ));
+    let sysroot_flag = format!("--sysroot={}", sysroot.display());
+    assert!(custom_target_may_resolve(
+        &elsewhere,
+        &args(&["--target=my-custom-target", &sysroot_flag, "src.rs"])
+    ));
+}

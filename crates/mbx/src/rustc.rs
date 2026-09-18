@@ -167,13 +167,9 @@ pub(crate) fn compile(
     // A platform without native-link action caching still needs to observe a
     // build-script executable so execution caching can key it by its exact
     // bytes. Parsing it is safe: the linked output itself is not published.
-    // rustc consults `RUST_TARGET_PATH` for any bare `--target` it does not
-    // know, so while it is set a bare name may be a custom specification.
-    let custom_target_search =
-        std::env::var_os("RUST_TARGET_PATH").is_some_and(|path| !path.is_empty());
     let options =
         ParseOptions::caching_native_links(cache_native_links || execution_only_build_script)
-            .with_custom_target_search(custom_target_search);
+            .with_custom_target_search(custom_target_may_resolve(rustc, arguments));
     // Appended before anything parses: the debug-map rule inside the parser is
     // exactly what this flag satisfies, so an invocation that would bypass
     // without it has to carry it going in.
@@ -846,6 +842,60 @@ fn compile_execution_only_build_script(
     }
     let _ = replay_output(&output);
     Ok(exit_code(output.status))
+}
+
+/// Whether rustc could load this invocation's bare `--target` name from a
+/// custom target specification instead of a built-in target.
+///
+/// rustc tries its built-in targets first, then `<dir>/<NAME>.json` under each
+/// `RUST_TARGET_PATH` directory, then `lib/rustlib/<NAME>/target.json` in the
+/// sysroot, which is `--sysroot` when given and the directory above the
+/// compiler's `bin` otherwise. A specification found in either place chooses
+/// its own static-library file names, so the parser is told not to guess
+/// them. A `--target` that is already a path is the parser's own case.
+fn custom_target_may_resolve(rustc: &OsStr, arguments: &[OsString]) -> bool {
+    let Some(target) = flag_value(arguments, "--target") else {
+        return false;
+    };
+    if target.ends_with(".json") || target.contains(['/', '\\']) {
+        return false;
+    }
+    let under_target_path = std::env::var_os("RUST_TARGET_PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths)
+            .any(|directory| directory.join(format!("{target}.json")).is_file())
+    });
+    if under_target_path {
+        return true;
+    }
+    let sysroot = flag_value(arguments, "--sysroot")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let executable = resolve_executable(rustc).ok()?;
+            Some(executable.parent()?.parent()?.to_path_buf())
+        });
+    sysroot.is_some_and(|sysroot| {
+        sysroot
+            .join("lib/rustlib")
+            .join(&target)
+            .join("target.json")
+            .is_file()
+    })
+}
+
+/// The value of `--flag=VALUE` or `--flag VALUE`, whichever comes first.
+fn flag_value(arguments: &[OsString], flag: &str) -> Option<String> {
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        if argument == flag {
+            return arguments.next()?.to_str().map(str::to_string);
+        }
+        if let Some(value) = argument.to_str()?.strip_prefix(flag)
+            && let Some(value) = value.strip_prefix('=')
+        {
+            return Some(value.to_string());
+        }
+    }
+    None
 }
 
 fn compiler_command(rustc: &OsStr, wrapper_argument: Option<&OsStr>) -> Command {

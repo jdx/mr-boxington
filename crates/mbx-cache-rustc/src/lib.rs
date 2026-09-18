@@ -400,10 +400,11 @@ pub struct ParseOptions {
     /// Admit natively linked test binaries, executables, and proc macros,
     /// given a linker identity in the action key. Off by default.
     pub cache_native_links: bool,
-    /// rustc may resolve a bare `--target NAME` to a custom specification:
-    /// `RUST_TARGET_PATH` is set, so a name that is not built in is looked up
-    /// there. Such a target chooses its own static-library file names, which
-    /// the parser cannot know, so `-l static` bypasses for every bare name.
+    /// rustc may resolve this invocation's bare `--target NAME` to a custom
+    /// specification: a `NAME.json` under `RUST_TARGET_PATH` or a
+    /// `lib/rustlib/NAME/target.json` in the sysroot exists. Such a target
+    /// chooses its own static-library file names, which the parser cannot
+    /// know, so `-l static` bypasses.
     pub custom_target_search: bool,
 }
 
@@ -1758,11 +1759,10 @@ impl<'a> Parser<'a> {
     /// How the target names a static library, or `None` for a custom target
     /// specification, whose names only the specification knows.
     ///
-    /// A bare name is a built-in target unless rustc has somewhere else to
-    /// look it up: a `RUST_TARGET_PATH` directory, which the caller reports
-    /// through [`ParseOptions::custom_target_search`]. A specification
-    /// installed into the sysroot as `lib/rustlib/NAME/target.json` is not
-    /// detected, and keys as the built-in naming would.
+    /// A bare name is a built-in target unless a specification file for it
+    /// exists where rustc would look, under `RUST_TARGET_PATH` or in the
+    /// sysroot, which the caller reports through
+    /// [`ParseOptions::custom_target_search`].
     fn static_library_naming(&self) -> Option<StaticLibraryNaming> {
         let Some(target) = self.target.as_deref() else {
             return Some(if cfg!(any(target_env = "msvc", target_os = "uefi")) {
