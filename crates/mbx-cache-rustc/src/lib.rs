@@ -1420,7 +1420,12 @@ impl<'a> Parser<'a> {
             }
             "target" => {
                 let value = self.take_value(&rendered_flag, inline)?;
-                self.target = Some(value.clone());
+                // rustc reads the first `--target`, as getopts does; a later
+                // one is still keyed as an argument but does not decide the
+                // target, and so not the static-library naming either.
+                if self.target.is_none() {
+                    self.target = Some(value.clone());
+                }
                 if value.ends_with(".json") || value.contains(['/', '\\']) {
                     let path = PathBuf::from(value);
                     self.required_inputs.push(path.clone());
@@ -1429,7 +1434,6 @@ impl<'a> Parser<'a> {
                         path,
                     });
                 } else {
-                    self.target = Some(value.clone());
                     self.parsed
                         .push(Argument::Plain(format!("{rendered_flag}={value}")));
                 }
@@ -1687,7 +1691,13 @@ impl<'a> Parser<'a> {
             if link_output != LinkOutput::Library {
                 return Err(BypassReason::NativeLibrary(library));
             }
-            // `-l [KIND[:MODIFIERS]=]NAME[:RENAME]`.
+            // `-l [KIND[:MODIFIERS]=]NAME[:RENAME]`. Without a kind the
+            // library is rustc's "unspecified" kind: it is handed to the
+            // linker of whatever finally links, and an rlib only records the
+            // name. rustc bundles into an rlib only what `-l static` names
+            // (`link_rlib` takes `NativeLibKind::Static` with bundling on),
+            // so a `libNAME.a` that later appears beside a plain `-l NAME`
+            // changes that final link, not this compilation.
             let Some((kind, name)) = library.split_once('=') else {
                 continue;
             };

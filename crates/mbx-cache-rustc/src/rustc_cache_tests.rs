@@ -445,6 +445,16 @@ fn static_library_naming_follows_the_target_specification() {
             "static=zstd".into()
         ))
     );
+    // rustc reads the first `--target`; a second one does not change which
+    // naming the archive is looked up under.
+    let mut twice = library_linking(&[("native=", &native)], &["static=zstd"]);
+    twice.insert(0, "--target=x86_64-unknown-linux-gnu".into());
+    twice.insert(1, "--target=x86_64-pc-windows-msvc".into());
+    assert_eq!(
+        required_inputs(&RustcInvocation::parse(&twice).unwrap(), &working_dir),
+        vec![native.join("libzstd.a")]
+    );
+
     // `+verbatim` names the file itself, so the specification is not needed.
     let mut verbatim = library_linking(&[("native=", &native)], &["static:+verbatim=libzstd.a"]);
     verbatim.insert(0, format!("--target={}", spec.display()).into());
