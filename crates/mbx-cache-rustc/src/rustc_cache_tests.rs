@@ -454,6 +454,18 @@ fn static_library_naming_follows_the_target_specification() {
         required_inputs(&RustcInvocation::parse(&twice).unwrap(), &working_dir),
         vec![native.join("libzstd.a")]
     );
+    // An ignored later specification is keyed but is not read, so it need
+    // not exist.
+    let mut ignored_spec = library_linking(&[("native=", &native)], &["static=zstd"]);
+    ignored_spec.insert(0, "--target=x86_64-unknown-linux-gnu".into());
+    ignored_spec.insert(1, "--target=/nowhere/unused.json".into());
+    assert_eq!(
+        required_inputs(
+            &RustcInvocation::parse(&ignored_spec).unwrap(),
+            &working_dir
+        ),
+        vec![native.join("libzstd.a")]
+    );
 
     // `+verbatim` names the file itself, so the specification is not needed.
     let mut verbatim = library_linking(&[("native=", &native)], &["static:+verbatim=libzstd.a"]);

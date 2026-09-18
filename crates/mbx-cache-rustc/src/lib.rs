@@ -1422,13 +1422,16 @@ impl<'a> Parser<'a> {
                 let value = self.take_value(&rendered_flag, inline)?;
                 // rustc reads the first `--target`, as getopts does; a later
                 // one is still keyed as an argument but does not decide the
-                // target, and so not the static-library naming either.
-                if self.target.is_none() {
+                // target, so it is not read and not a required input either.
+                let effective = self.target.is_none();
+                if effective {
                     self.target = Some(value.clone());
                 }
                 if value.ends_with(".json") || value.contains(['/', '\\']) {
                     let path = PathBuf::from(value);
-                    self.required_inputs.push(path.clone());
+                    if effective {
+                        self.required_inputs.push(path.clone());
+                    }
                     self.parsed.push(Argument::Path {
                         flag: rendered_flag,
                         path,
