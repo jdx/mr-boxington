@@ -865,11 +865,10 @@ fn compile_execution_only_build_script(
         crate::util::snapshot_compiler_inputs(required_inputs.iter().map(PathBuf::as_path));
     let compilation_started = SystemTime::now();
     let started = Instant::now();
-    let output = compiler_command(rustc, wrapper_argument)
-        .args(arguments)
-        .current_dir(working_dir)
-        .output()
-        .wrap_err("failed to execute rustc")?;
+    let forwarded = session::forward_compiler_notifications_requested();
+    let mut command = compiler_command(rustc, wrapper_argument);
+    command.args(arguments).current_dir(working_dir);
+    let output = run_compiler(&mut command, forwarded).wrap_err("failed to execute rustc")?;
     drop(permit);
     crate::scheduler::record_compiler_memory(&demand, &output.status);
     session::record_compiler_invocation(
@@ -888,7 +887,9 @@ fn compile_execution_only_build_script(
         )
     {
         if discard_modified_compiler_result(outputs, &input_snapshots, &error) {
-            let _ = replay_bytes(&[], &output.stderr);
+            if !forwarded {
+                let _ = replay_bytes(&[], &output.stderr);
+            }
             return Ok(ExitCode::FAILURE);
         }
         session::report_shim_warning(&format!(
@@ -950,7 +951,9 @@ fn compile_execution_only_build_script(
             ));
         }
     }
-    let _ = replay_output(&output);
+    if !forwarded {
+        let _ = replay_output(&output);
+    }
     Ok(exit_code(output.status))
 }
 

@@ -223,7 +223,24 @@ fn a_notification_is_forwarded_before_the_compiler_exits() {
         seen: seen.clone(),
         release,
     };
-    let output = run_compiler_forwarding(&mut command, Sink::default(), sink).unwrap();
+    // Bounded: if forwarding regressed, the child would wait for a file
+    // nobody creates. The worker is released and the test fails instead.
+    let (done, finished) = std::sync::mpsc::channel();
+    let release_on_timeout = root.path().join("release");
+    let worker = std::thread::spawn(move || {
+        let output = run_compiler_forwarding(&mut command, Sink::default(), sink);
+        let _ = done.send(());
+        output
+    });
+    if finished
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .is_err()
+    {
+        std::fs::write(&release_on_timeout, b"").unwrap();
+        let _ = worker.join();
+        panic!("the notification was not forwarded while the compiler was still running");
+    }
+    let output = worker.join().unwrap().unwrap();
     assert!(
         output.status.success(),
         "the child only exits once its first line was forwarded"
