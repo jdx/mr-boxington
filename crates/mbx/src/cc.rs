@@ -442,16 +442,14 @@ fn publish(
             return Err(error);
         }
     }
-    crate::phase_timing::measure("predict", || {
-        record_prediction(
-            task,
-            invocation_digest,
-            &action.digest,
-            &prediction,
-            flight,
-            remote_claim,
-        )
-    });
+    record_prediction(
+        task,
+        invocation_digest,
+        &action.digest,
+        &prediction,
+        flight,
+        remote_claim,
+    );
     Ok(())
 }
 
@@ -1122,6 +1120,7 @@ fn record_prediction(
     flight: Option<&crate::scheduler::Flight>,
     remote_claim: Option<&str>,
 ) {
+    let _phase = crate::phase_timing::phase("predict");
     let Ok(payload) = serde_json::to_string(prediction) else {
         return;
     };

@@ -415,7 +415,8 @@ mod tests {
         assert!(same_identity(&before, &fs::metadata(&source).unwrap()));
 
         fs::write(&source, b"other object!").unwrap();
-        let file = fs::File::open(&source).unwrap();
+        // Windows only lets a handle opened for writing change the times.
+        let file = fs::OpenOptions::new().write(true).open(&source).unwrap();
         file.set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1))
             .unwrap();
         drop(file);
