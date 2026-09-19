@@ -477,12 +477,25 @@ pub(crate) fn collect(
     };
     let now = SystemTime::now();
     for entry in entries {
-        let entry = entry?;
+        // An entry that cannot be read is still on the disk. It is kept and
+        // counted, not skipped, so a budget sized from this walk sees it.
+        let Ok(entry) = entry else {
+            outcome.remaining_directories += 1;
+            continue;
+        };
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !entry.file_type()?.is_dir() {
+        let path = entry.path();
+        let is_dir = match entry.file_type() {
+            Ok(kind) => kind.is_dir(),
+            Err(_) => {
+                outcome.remaining_directories += 1;
+                outcome.remaining_bytes = outcome.remaining_bytes.saturating_add(tree_bytes(&path));
+                continue;
+            }
+        };
+        if !is_dir {
             continue;
         }
-        let path = entry.path();
         if name.starts_with(STAGING_PREFIX) {
             let abandoned = age_of(&path, now).is_some_and(|age| age > STAGING_MAX_AGE);
             if abandoned && !dry_run {
@@ -504,9 +517,10 @@ pub(crate) fn collect(
         if !dry_run {
             // Under the registrar from the lease check to the removal, so a
             // compilation cannot take a lease on a tree halfway gone: it
-            // waits, finds the tree missing, and copies it again.
+            // waits, finds the tree missing, and copies it again. A tree
+            // whose leases cannot be read is treated as leased.
             let _registrar = registrar(root)?;
-            if leased(root, &name)? {
+            if leased(root, &name).unwrap_or(true) {
                 outcome.remaining_directories += 1;
                 outcome.remaining_bytes = outcome.remaining_bytes.saturating_add(bytes);
                 continue;
@@ -529,9 +543,16 @@ pub(crate) fn collect(
     Ok(outcome)
 }
 
-/// Bytes and count of stable trees, for reports.
+/// Bytes and count of stable trees, for reports and budgets.
+///
+/// A root that cannot be listed is measured as a plain tree instead, which
+/// tolerates what it cannot read: the bytes are on the disk whether or not
+/// they can be told apart, and a budget must not treat them as free space.
 pub(crate) fn stats(root: &Path) -> PruneOutcome {
-    collect(root, None, true).unwrap_or_default()
+    collect(root, None, true).unwrap_or_else(|_| PruneOutcome {
+        remaining_bytes: tree_bytes(root),
+        ..PruneOutcome::default()
+    })
 }
 
 fn is_digest_name(name: &str) -> bool {
