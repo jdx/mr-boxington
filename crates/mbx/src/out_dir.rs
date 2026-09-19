@@ -170,7 +170,7 @@ pub(crate) fn stabilize(real: &Path, root: &Path) -> Result<Option<PathBuf>> {
     // a tree this process is guaranteed to keep until it exits.
     lease(root, &digest)?;
     if !stable.is_dir() {
-        materialize(real, root, &stable, &files, &directories)?;
+        materialize(real, root, &stable, &manifest, &files, &directories)?;
     }
     stamp_use(root, &digest);
     Ok(Some(stable))
@@ -286,6 +286,7 @@ fn materialize(
     real: &Path,
     root: &Path,
     stable: &Path,
+    manifest: &[u8],
     files: &[(PathBuf, bool)],
     directories: &[PathBuf],
 ) -> Result<()> {
@@ -324,6 +325,23 @@ fn materialize(
     if let Err(error) = copied {
         let _ = remove_tree(&staging);
         return Err(error);
+    }
+    // The copy is what carries the name, so it is the copy that is checked
+    // against it. Cargo runs the build script to completion before rustc, so
+    // the source tree does not move under the shim in practice; if something
+    // does move it, the digest would name bytes nobody copied, and the copy
+    // is discarded rather than published under that name.
+    let mut copied_manifest = Vec::new();
+    let described = describe_tree(
+        &staging,
+        Path::new(""),
+        &mut copied_manifest,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+    if !matches!(described, Ok(true)) || copied_manifest != manifest {
+        let _ = remove_tree(&staging);
+        eyre::bail!("the build-script output changed while it was being copied");
     }
     match std::fs::rename(&staging, stable) {
         Ok(()) => Ok(()),
