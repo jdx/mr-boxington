@@ -182,7 +182,7 @@ fn unused_trees_are_collected_by_age_and_used_ones_kept() {
     let old = stabilize(&old, &root).unwrap().unwrap();
     let recent = stabilize(&recent, &root).unwrap().unwrap();
     // The compilations that used them have exited.
-    LEASES.lock().unwrap().clear();
+    release_all_under(&root);
     let old_marker = marker_path(&root, &old.file_name().unwrap().to_string_lossy());
     let long_ago = std::time::SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60);
     std::fs::File::options()
@@ -200,11 +200,11 @@ fn unused_trees_are_collected_by_age_and_used_ones_kept() {
         .ok()
         .map(|file| file.set_times(std::fs::FileTimes::new().set_modified(long_ago)));
 
-    let dry = collect(&root, Some(Duration::from_secs(24 * 60 * 60)), true).unwrap();
+    let dry = collect(&root, None, Some(Duration::from_secs(24 * 60 * 60)), true).unwrap();
     assert_eq!(dry.removed_directories, 1);
     assert!(old.exists(), "a dry run removes nothing");
 
-    let outcome = collect(&root, Some(Duration::from_secs(24 * 60 * 60)), false).unwrap();
+    let outcome = collect(&root, None, Some(Duration::from_secs(24 * 60 * 60)), false).unwrap();
 
     assert_eq!(outcome.removed_directories, 1);
     assert_eq!(outcome.removed_bytes, 3);
@@ -276,7 +276,7 @@ fn a_tree_a_compilation_holds_a_lease_on_is_not_collected() {
         .set_times(std::fs::FileTimes::new().set_modified(long_ago))
         .unwrap();
 
-    let outcome = collect(&root, Some(Duration::ZERO), false).unwrap();
+    let outcome = collect(&root, None, Some(Duration::ZERO), false).unwrap();
 
     assert_eq!(outcome.removed_directories, 0, "a leased tree is kept");
     assert_eq!(outcome.remaining_directories, 1);
@@ -284,8 +284,8 @@ fn a_tree_a_compilation_holds_a_lease_on_is_not_collected() {
 
     // The compilations exit: their leases are nobody's, and the tree goes.
     drop(compiling);
-    LEASES.lock().unwrap().clear();
-    let outcome = collect(&root, Some(Duration::ZERO), false).unwrap();
+    release_all_under(&root);
+    let outcome = collect(&root, None, Some(Duration::ZERO), false).unwrap();
 
     assert_eq!(outcome.removed_directories, 1);
     assert!(!stable.exists());
@@ -311,7 +311,7 @@ fn the_shared_copy_cannot_be_altered_through_its_directories() {
         );
     }
     // Collection still removes it, opening the directories up first.
-    LEASES.lock().unwrap().clear();
+    release_all_under(&root);
     let marker = marker_path(&root, &stable.file_name().unwrap().to_string_lossy());
     let long_ago = std::time::SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60);
     std::fs::File::options()
@@ -320,7 +320,7 @@ fn the_shared_copy_cannot_be_altered_through_its_directories() {
         .unwrap()
         .set_times(std::fs::FileTimes::new().set_modified(long_ago))
         .unwrap();
-    collect(&root, Some(Duration::ZERO), false).unwrap();
+    collect(&root, None, Some(Duration::ZERO), false).unwrap();
     assert!(!stable.exists());
 }
 
@@ -373,4 +373,70 @@ fn a_name_that_spells_like_a_path_keeps_cargos_out_dir() {
 
     assert!(stabilize(&nested, &root).unwrap().is_some());
     assert_eq!(stabilize(&flat, &root).unwrap(), None);
+}
+
+#[test]
+fn a_budget_evicts_the_least_recently_used_trees_first() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("out-dirs");
+    let mut trees = Vec::new();
+    for (name, age_secs) in [("old", 300), ("older", 600), ("recent", 0)] {
+        let out = directory.path().join(name).join("out");
+        write_tree(&out, &[("generated.rs", format!("{name:>10}").as_bytes())]);
+        let stable = stabilize(&out, &root).unwrap().unwrap();
+        let marker = marker_path(&root, &stable.file_name().unwrap().to_string_lossy());
+        let when = std::time::SystemTime::now() - Duration::from_secs(age_secs);
+        std::fs::File::options()
+            .write(true)
+            .open(&marker)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(when))
+            .unwrap();
+        trees.push((name, stable));
+    }
+    release_all_under(&root);
+
+    // Ten bytes each: a budget of fifteen keeps one.
+    let outcome = collect(&root, Some(15), None, false).unwrap();
+
+    assert_eq!(outcome.removed_directories, 2);
+    assert_eq!(outcome.remaining_bytes, 10);
+    for (name, stable) in &trees {
+        assert_eq!(stable.exists(), *name == "recent", "{name}");
+    }
+}
+
+#[test]
+fn a_failed_copy_leaves_no_lease_behind() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("out-dirs");
+    let out = directory.path().join("a/out");
+    write_tree(&out, &[("generated.rs", b"x")]);
+    // The root is a file, so nothing can be copied under it.
+    std::fs::write(&root, b"").unwrap();
+
+    assert!(stabilize(&out, &root).is_err());
+    assert!(
+        LEASES.lock().unwrap().is_empty()
+            || !LEASES.lock().unwrap().keys().any(|p| p.starts_with(&root))
+    );
+}
+
+#[test]
+fn leases_of_a_tree_that_is_gone_are_swept() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("out-dirs");
+    let out = directory.path().join("a/out");
+    write_tree(&out, &[("generated.rs", b"x")]);
+    let stable = stabilize(&out, &root).unwrap().unwrap();
+    let digest = stable.file_name().unwrap().to_string_lossy().into_owned();
+    release_all_under(&root);
+    // The tree went without its leases, as when a copy failed after the
+    // lease was taken and the process died.
+    remove_tree(&stable).unwrap();
+    assert!(leases_dir(&root, &digest).exists());
+
+    collect(&root, None, None, false).unwrap();
+
+    assert!(!leases_dir(&root, &digest).exists());
 }

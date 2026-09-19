@@ -51,7 +51,16 @@ pub(super) fn run(
             }
         }
     };
-    let generated = collect_generated(config, retention.target_max_age, dry_run);
+    // Generated source trees share the learned incremental budget: both are
+    // per-checkout state that a compilation reads, and both come back on
+    // their own when evicted.
+    let generated = collect_generated(
+        config,
+        incremental_budget(retention, max_bytes)
+            .map(|budget| budget.saturating_sub(incremental.remaining_bytes)),
+        retention.target_max_age,
+        dry_run,
+    );
     // What survives counts against the combined budget the same as learned
     // incremental state: bytes on the disk the limit was set for.
     let reserved_bytes = incremental
@@ -177,11 +186,13 @@ pub(super) fn run(
 /// freed; the trees are small beside what the rest of a sweep handles.
 fn collect_generated(
     config: &Config,
+    max_bytes: Option<u64>,
     max_age: Option<std::time::Duration>,
     dry_run: bool,
 ) -> crate::out_dir::PruneOutcome {
     match crate::out_dir::collect(
         &config.cache_dir.join(crate::out_dir::ROOT),
+        max_bytes,
         max_age,
         dry_run,
     ) {
@@ -380,7 +391,13 @@ pub(super) fn prune_targets(
             (0, remaining)
         }
     };
-    let generated = collect_generated(config, retention.target_max_age, false);
+    let generated = collect_generated(
+        config,
+        incremental_budget(retention, store_reserve)
+            .map(|budget| budget.saturating_sub(incremental_remaining)),
+        retention.target_max_age,
+        false,
+    );
     if generated.removed_directories > 0 {
         crate::session::note(&format!(
             "mbx[gc]: {}",

@@ -190,11 +190,26 @@ pub(crate) fn stabilize(real: &Path, root: &Path) -> Result<Option<PathBuf>> {
     // already removed it or cannot: whichever way, what is looked at next is
     // a tree this process is guaranteed to keep until it exits.
     lease(root, &digest)?;
-    if !stable.is_dir() {
-        materialize(real, root, &stable, &manifest, &files, &directories)?;
+    if !stable.is_dir()
+        && let Err(error) = materialize(real, root, &stable, &manifest, &files, &directories)
+    {
+        // Nothing was published, so nothing needs the lease; a lease left
+        // behind here would name a tree that never existed.
+        release(root, &digest);
+        return Err(error);
     }
     stamp_use(root, &digest);
     Ok(Some(stable))
+}
+
+/// Give up this process's lease on a tree and take its file with it.
+fn release(root: &Path, digest: &str) {
+    let leases = leases_dir(root, digest);
+    let path = leases.join(format!("{}.lease", std::process::id()));
+    if LEASES.lock().unwrap().remove(&path).is_some() {
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&leases);
+    }
 }
 
 fn leases_dir(root: &Path, digest: &str) -> PathBuf {
@@ -455,8 +470,9 @@ pub(crate) struct PruneOutcome {
     pub remaining_bytes: u64,
 }
 
-/// Remove trees nothing has used for `max_age`, and staging directories left
-/// by a copy that never finished.
+/// Remove trees nothing has used for `max_age`, the least recently used of
+/// the rest until they fit `max_bytes`, and staging directories left by a
+/// copy that never finished.
 ///
 /// A removed tree costs at most a rebuild: the next compilation that needs it
 /// finds the path in its dep-info missing, Cargo runs rustc again, and the
@@ -464,6 +480,7 @@ pub(crate) struct PruneOutcome {
 /// keyed to the tree's presence, only to its contents.
 pub(crate) fn collect(
     root: &Path,
+    max_bytes: Option<u64>,
     max_age: Option<Duration>,
     dry_run: bool,
 ) -> Result<PruneOutcome> {
@@ -476,6 +493,10 @@ pub(crate) fn collect(
         }
     };
     let now = SystemTime::now();
+    // Trees by age, oldest first, so what the budget evicts is what was used
+    // least recently.
+    let mut trees: Vec<(String, PathBuf, u64, Option<Duration>)> = Vec::new();
+    let mut lease_dirs = Vec::new();
     for entry in entries {
         // An entry that cannot be read is still on the disk. It is kept and
         // counted, not skipped, so a budget sized from this walk sees it.
@@ -503,15 +524,29 @@ pub(crate) fn collect(
             }
             continue;
         }
+        if let Some(digest) = name.strip_suffix(".leases") {
+            if is_digest_name(digest) {
+                lease_dirs.push(digest.to_owned());
+            }
+            continue;
+        }
         if !is_digest_name(&name) {
             continue;
         }
-        let bytes = tree_bytes(&path);
         let age = age_of(&marker_path(root, &name), now).or_else(|| age_of(&path, now));
+        trees.push((name, path, 0, age));
+    }
+    trees.sort_by_key(|tree| std::cmp::Reverse(tree.3));
+    let mut remaining_bytes = 0_u64;
+    for tree in &mut trees {
+        tree.2 = tree_bytes(&tree.1);
+        remaining_bytes = remaining_bytes.saturating_add(tree.2);
+    }
+    let mut kept = trees.len() as u64;
+    for (name, path, bytes, age) in &trees {
         let expired = max_age.is_some_and(|max_age| age.is_some_and(|age| age > max_age));
-        if !expired {
-            outcome.remaining_directories += 1;
-            outcome.remaining_bytes = outcome.remaining_bytes.saturating_add(bytes);
+        let over_budget = max_bytes.is_some_and(|max_bytes| remaining_bytes > max_bytes);
+        if !expired && !over_budget {
             continue;
         }
         if !dry_run {
@@ -520,25 +555,39 @@ pub(crate) fn collect(
             // waits, finds the tree missing, and copies it again. A tree
             // whose leases cannot be read is treated as leased.
             let _registrar = registrar(root)?;
-            if leased(root, &name).unwrap_or(true) {
-                outcome.remaining_directories += 1;
-                outcome.remaining_bytes = outcome.remaining_bytes.saturating_add(bytes);
+            if leased(root, name).unwrap_or(true) {
                 continue;
             }
-            let _ = std::fs::remove_file(marker_path(root, &name));
-            if let Err(error) = remove_tree(&path) {
+            let _ = std::fs::remove_file(marker_path(root, name));
+            if let Err(error) = remove_tree(path) {
                 log::warn!(
                     "could not remove the generated source tree {}: {error}",
                     path.display()
                 );
-                outcome.remaining_directories += 1;
-                outcome.remaining_bytes = outcome.remaining_bytes.saturating_add(bytes);
                 continue;
             }
-            let _ = std::fs::remove_dir_all(leases_dir(root, &name));
+            let _ = std::fs::remove_dir_all(leases_dir(root, name));
         }
+        kept -= 1;
+        remaining_bytes = remaining_bytes.saturating_sub(*bytes);
         outcome.removed_directories += 1;
-        outcome.removed_bytes = outcome.removed_bytes.saturating_add(bytes);
+        outcome.removed_bytes = outcome.removed_bytes.saturating_add(*bytes);
+    }
+    outcome.remaining_directories += kept;
+    outcome.remaining_bytes = outcome.remaining_bytes.saturating_add(remaining_bytes);
+    // Leases of a tree that was never published, or is gone: a copy that
+    // failed after its lease was taken, or a process that died between the
+    // two. Nobody holds them, so nobody is waiting on the tree.
+    if !dry_run {
+        for digest in lease_dirs {
+            if root.join(&digest).is_dir() {
+                continue;
+            }
+            let _registrar = registrar(root)?;
+            if !leased(root, &digest).unwrap_or(true) {
+                let _ = std::fs::remove_dir_all(leases_dir(root, &digest));
+            }
+        }
     }
     Ok(outcome)
 }
@@ -549,7 +598,7 @@ pub(crate) fn collect(
 /// tolerates what it cannot read: the bytes are on the disk whether or not
 /// they can be told apart, and a budget must not treat them as free space.
 pub(crate) fn stats(root: &Path) -> PruneOutcome {
-    collect(root, None, true).unwrap_or_else(|_| PruneOutcome {
+    collect(root, None, None, true).unwrap_or_else(|_| PruneOutcome {
         remaining_bytes: tree_bytes(root),
         ..PruneOutcome::default()
     })
@@ -624,6 +673,17 @@ fn tree_bytes(directory: &Path) -> u64 {
         }
     }
     total
+}
+
+/// Let go of every lease this process holds under `root`, as the exit of the
+/// compilations that took them would. Only tests need this: a shim is one
+/// compilation, and its leases end with it.
+#[cfg(test)]
+fn release_all_under(root: &Path) {
+    LEASES
+        .lock()
+        .unwrap()
+        .retain(|path, _| !path.starts_with(root));
 }
 
 #[cfg(test)]
