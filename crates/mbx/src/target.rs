@@ -61,6 +61,9 @@ pub(crate) struct CollectionOutcome {
     pub removed_bytes: u64,
     pub removed_stale_views: u64,
     pub removed_live_views: u64,
+    /// Selected for removal, then found in use by a build that started after
+    /// the selection was made.
+    pub kept_active_views: u64,
     pub remaining_bytes: u64,
     pub remaining_views: u64,
 }
@@ -518,16 +521,34 @@ fn lock_replaced_view(
     {
         return Ok(Vec::new());
     }
-    let mut pending = vec![(existing, 0)];
+    match cargo_locks(&existing)? {
+        Some(locks) => Ok(locks),
+        None => eyre::bail!("Cargo is using {}", existing.display()),
+    }
+}
+
+/// Take every Cargo lock in a target directory, or report that one is held.
+///
+/// `None` means a build is running there. The locks come back held, so the
+/// caller decides how long a build stays excluded; on Windows an open handle
+/// stops the file being deleted, so they are dropped before any removal.
+fn cargo_locks(directory: &Path) -> Result<Option<Vec<fslock::LockFile>>> {
+    let mut pending = vec![(directory.to_path_buf(), 0)];
     let mut locks = Vec::new();
     while let Some((directory, depth)) = pending.pop() {
-        for entry in std::fs::read_dir(&directory)? {
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            // A directory that vanished under the walk holds no lock.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
             let entry = entry?;
             let kind = entry.file_type()?;
             if kind.is_file() && entry.file_name() == ".cargo-lock" {
                 let mut lock = fslock::LockFile::open(&entry.path())?;
                 if !lock.try_lock()? {
-                    eyre::bail!("Cargo is using {}", directory.display());
+                    return Ok(None);
                 }
                 locks.push(lock);
             } else if kind.is_dir() && depth < 2 {
@@ -535,7 +556,7 @@ fn lock_replaced_view(
             }
         }
     }
-    Ok(locks)
+    Ok(Some(locks))
 }
 
 /// Point `target_dir` at `managed` so the paths people type keep working.
@@ -767,6 +788,18 @@ pub(crate) fn collect(
     max_age: Option<Duration>,
     dry_run: bool,
 ) -> Result<CollectionOutcome> {
+    collect_with(root, max_bytes, max_age, dry_run, || {})
+}
+
+/// [`collect`] with a hook between selecting views and removing them, which
+/// is where a build can arrive; tests stand in for that build.
+fn collect_with(
+    root: &Path,
+    max_bytes: Option<u64>,
+    max_age: Option<Duration>,
+    dry_run: bool,
+    before_removal: impl FnOnce(),
+) -> Result<CollectionOutcome> {
     let mut outcome = CollectionOutcome::default();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -842,9 +875,41 @@ pub(crate) fn collect(
         }
     }
 
-    for (record_path, directory, _, bytes, live) in entries {
+    before_removal();
+    for (record_path, directory, updated, bytes, live) in entries {
         if !selected.contains(&record_path) {
             continue;
+        }
+        // The selection above is a snapshot, and collection runs in a process
+        // of its own after the build that scheduled it: a build can begin in
+        // one of the selected checkouts while the earlier ones are still being
+        // removed. Its placement refreshes the record, and Cargo holds its
+        // lock for as long as it compiles, so either is grounds to leave the
+        // directory standing until the next sweep looks again. The locks are
+        // kept while the directory goes on Unix, so a build arriving in the
+        // middle of the removal waits on Cargo's lock and starts afterwards
+        // with nothing half-deleted under it.
+        if live && !dry_run {
+            let claimed_since =
+                read_view_record(&record_path).is_some_and(|record| record.updated_secs > updated);
+            let locks = match cargo_locks(&directory) {
+                Ok(locks) => locks,
+                Err(error) => {
+                    log::warn!(
+                        "could not tell whether {} is in use: {error}",
+                        directory.display()
+                    );
+                    None
+                }
+            };
+            let Some(locks) = locks.filter(|_| !claimed_since) else {
+                outcome.kept_active_views += 1;
+                continue;
+            };
+            #[cfg(unix)]
+            let _held = locks;
+            #[cfg(not(unix))]
+            drop(locks);
         }
         let removal = if dry_run {
             Ok(())

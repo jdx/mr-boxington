@@ -68,3 +68,38 @@ fn an_automatic_sweep_that_is_not_due_leaves_no_report() {
 
     assert!(!config.store_dir().join(SWEEP_REPORT).exists());
 }
+
+#[test]
+fn an_automatic_sweep_stands_down_while_another_collector_holds_the_store() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = super::cargo_tests::managed_target_config(directory.path());
+    config.gc.auto = true;
+    config.gc.interval = std::time::Duration::ZERO;
+    let store = config.store_dir();
+    let mut other = collector_lock(&store).unwrap();
+    assert!(other.try_lock().unwrap());
+
+    run_automatic(&config, &RetentionSettings::default()).unwrap();
+
+    assert!(
+        !store.join("gc/v1/last-sweep").exists(),
+        "the sweep was neither claimed nor run"
+    );
+}
+
+#[test]
+fn sweep_reports_accumulate_until_a_build_says_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    for report in ["first\n", "second\n"] {
+        std::fs::create_dir_all(store.join("gc/v1")).unwrap();
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(store.join(SWEEP_REPORT))
+            .and_then(|mut file| std::io::Write::write_all(&mut file, report.as_bytes()))
+            .unwrap();
+    }
+
+    assert_eq!(take_sweep_report(store), ["first", "second"]);
+}
