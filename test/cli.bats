@@ -317,6 +317,20 @@ JSON
   assert_file_exists projects/two/target/debug/artifact
 }
 
+@test "adopt accepts a checkout named through a link" {
+  cargo init --lib --vcs none projects/linked-project
+  mkdir -p projects/linked-project/target/debug
+  printf 'old output' >projects/linked-project/target/debug/artifact
+  ln -s projects linked
+
+  run "$MBX_BIN" adopt linked/linked-project
+
+  assert_success
+  assert_output --partial "adopted $(pwd -P)/projects/linked-project/target"
+  assert_link_exists projects/linked-project/target
+  assert_file_exists projects/linked-project/target/debug/artifact
+}
+
 @test "adopt leaves a configured target directory alone" {
   cargo init --lib --vcs none configured-project
   mkdir -p configured-project/.cargo configured-project/target

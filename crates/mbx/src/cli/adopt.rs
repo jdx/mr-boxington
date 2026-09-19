@@ -136,17 +136,15 @@ pub(super) fn adopt_checkout(
     if !checkout.join("Cargo.toml").is_file() {
         return skipped("there is no Cargo.toml beside it".to_string());
     }
-    // A build resolves its roots from the working directory Cargo is run in,
-    // and that is the resolved path, so resolve the same way here or the
-    // record would name a checkout no build ever asks for.
-    let checkout = std::fs::canonicalize(checkout)
-        .wrap_err_with(|| format!("could not resolve {}", checkout.display()))?;
+    // Resolved with the checkout as the working directory, as a build run
+    // inside it would resolve, so the workspace root Cargo reports is the one
+    // that build will look for and everything below keys on it.
     let target_dir_env = std::env::var_os(super::cargo::CARGO_TARGET_DIR_ENV);
-    let Some(roots) = mbx_cache_cargo::resolve_reported(cargo, &[], &checkout, target_dir_env)
+    let Some(roots) = mbx_cache_cargo::resolve_reported(cargo, &[], checkout, target_dir_env)
     else {
         return skipped("Cargo could not describe the checkout".to_string());
     };
-    if roots.workspace_root != checkout {
+    if !same_directory(&roots.workspace_root, checkout) {
         return skipped(format!(
             "it belongs to a member of the workspace at {}, whose target directory is the one Cargo uses",
             roots.workspace_root.display()
@@ -189,6 +187,19 @@ pub(super) fn adopt_checkout(
         target,
         bytes: outcome.adopted_bytes,
     })
+}
+
+/// Whether two paths name one directory.
+///
+/// Compared in resolved form: Cargo reports the workspace root as a physical
+/// path while the checkout may have been named through a link, and on Windows
+/// a resolved path carries a verbatim prefix that Cargo's answer omits, so
+/// neither side can be compared to the other as spelled.
+fn same_directory(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 /// Every directory under `root` holding a `Cargo.toml` and a real `target`
