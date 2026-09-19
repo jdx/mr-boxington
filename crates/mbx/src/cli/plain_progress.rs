@@ -1,5 +1,6 @@
 //! Append-only cache progress for pipes and agents using a terminal.
 use crate::session;
+use crate::util::{format_clock, format_duration};
 use eyre::Result;
 use mbx_cache_core::AgentStats;
 use std::collections::BTreeMap;
@@ -46,15 +47,35 @@ pub(super) fn run(
 ) -> Result<ExitCode> {
     crate::logging::note(&super::mascot::Mascot::plain());
     with_progress(
-        Duration::from_secs(15),
+        cadence,
         stats,
         |line| crate::logging::note(&line),
         || super::cargo::run_cargo(cargo, arguments, environment),
     )
 }
 
+/// How long to wait for the next progress line, given the time already spent.
+///
+/// The opening minutes are when somebody is still deciding whether to wait for
+/// this build, so the line comes often. After that it has less and less to add
+/// by saying the same thing again, and the gap widens: a three-hour build
+/// reports 34 times rather than the 720 a fixed cadence would produce. That
+/// keeps the tail of a long log readable, and keeps a build that is watched by
+/// an agent or piped into a file from burying its own result.
+fn cadence(elapsed: Duration) -> Duration {
+    const LADDER: [(Duration, Duration); 3] = [
+        (Duration::from_secs(2 * 60), Duration::from_secs(15)),
+        (Duration::from_secs(10 * 60), Duration::from_secs(60)),
+        (Duration::from_secs(60 * 60), Duration::from_secs(5 * 60)),
+    ];
+    LADDER
+        .into_iter()
+        .find(|(until, _)| elapsed < *until)
+        .map_or(Duration::from_secs(15 * 60), |(_, gap)| gap)
+}
+
 fn with_progress<T>(
-    interval: Duration,
+    cadence: impl Fn(Duration) -> Duration + Send,
     stats: impl Fn() -> AgentStats + Sync,
     report: impl Fn(String) + Sync,
     operation: impl FnOnce() -> T,
@@ -65,8 +86,10 @@ fn with_progress<T>(
         let report = &report;
         scope.spawn(move || {
             let started = Instant::now();
+            // The gap is measured from what the build has already spent, so a
+            // report that arrives after a widening never lands on the old beat.
             while matches!(
-                stopped.recv_timeout(interval),
+                stopped.recv_timeout(cadence(started.elapsed())),
                 Err(mpsc::RecvTimeoutError::Timeout)
             ) {
                 report(line(started.elapsed(), &stats()));
@@ -80,15 +103,18 @@ fn with_progress<T>(
     })
 }
 
+/// Elapsed time here is a clock reading rather than a measurement: the line
+/// repeats for as long as the build runs, so by the time anyone cares about it,
+/// it is reporting a quarter of an hour. That reads "13m 33s", not "813s".
 fn line(elapsed: Duration, stats: &AgentStats) -> String {
     format!(
-        "mbx[progress]: {}s elapsed; {} hits, {} misses, {} bypassed, {} not looked up; ~{:.1}s compiler work saved",
-        elapsed.as_secs(),
+        "mbx[progress]: {} elapsed; {} hits, {} misses, {} bypassed, {} not looked up; ~{} compiler work saved",
+        format_clock(elapsed),
         stats.hits,
         session::cache_misses(stats),
         session::unexpected_bypasses(stats),
         stats.unconsulted,
-        stats.avoided_compiler_duration_ns as f64 / 1e9,
+        format_duration(Duration::from_nanos(stats.avoided_compiler_duration_ns)),
     )
 }
 
@@ -100,7 +126,7 @@ mod tests {
     fn long_commands_report_without_changing_the_result_or_using_terminal_controls() {
         let (send, receive) = mpsc::channel();
         let result = with_progress(
-            Duration::from_millis(5),
+            |_| Duration::from_millis(5),
             || {
                 let mut stats = AgentStats::default();
                 stats.hits = 1;
@@ -116,7 +142,7 @@ mod tests {
             || {
                 let line = receive.recv_timeout(Duration::from_secs(2)).unwrap();
                 assert!(line.contains("1 hits, 2 misses"));
-                assert!(line.contains("~1.5s compiler work saved"));
+                assert!(line.contains("~1.50s compiler work saved"));
                 assert!(!line.contains(['\r', '\x1b']));
                 101
             },
@@ -125,10 +151,55 @@ mod tests {
     }
 
     #[test]
+    fn a_long_build_reports_its_time_as_a_clock_reading() {
+        let mut stats = AgentStats::default();
+        stats.avoided_compiler_duration_ns = 1_840_000_000_000;
+        let reported = line(Duration::from_secs(813), &stats);
+        assert!(reported.contains("13m 33s elapsed"), "{reported}");
+        assert!(
+            reported.contains("~30m 40s compiler work saved"),
+            "{reported}"
+        );
+    }
+
+    #[test]
+    fn a_long_build_reports_less_and_less_often() {
+        // Fifteen seconds while the build is still young enough to abandon.
+        assert_eq!(cadence(Duration::ZERO), Duration::from_secs(15));
+        assert_eq!(cadence(Duration::from_secs(119)), Duration::from_secs(15));
+        // Then a minute, then five, then a quarter of an hour for as long as it
+        // takes. Each step is a round number so the log reads as a cadence.
+        assert_eq!(cadence(Duration::from_secs(120)), Duration::from_secs(60));
+        assert_eq!(cadence(Duration::from_secs(599)), Duration::from_secs(60));
+        assert_eq!(cadence(Duration::from_secs(600)), Duration::from_secs(300));
+        assert_eq!(
+            cadence(Duration::from_secs(3_599)),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            cadence(Duration::from_secs(3_600)),
+            Duration::from_secs(900)
+        );
+        assert_eq!(
+            cadence(Duration::from_secs(12 * 3_600)),
+            Duration::from_secs(900)
+        );
+
+        let mut elapsed = Duration::ZERO;
+        let mut reports = 0;
+        while elapsed < Duration::from_secs(3 * 3_600) {
+            elapsed += cadence(elapsed);
+            reports += 1;
+        }
+        // A fixed fifteen seconds would have said it 720 times.
+        assert_eq!(reports, 34, "reports during a three-hour build");
+    }
+
+    #[test]
     fn short_commands_stop_reporting_immediately() {
         let started = Instant::now();
         with_progress(
-            Duration::from_secs(60),
+            |_| Duration::from_secs(60),
             AgentStats::default,
             |_| panic!("short command reported"),
             || (),

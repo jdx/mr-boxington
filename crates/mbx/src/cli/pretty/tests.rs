@@ -305,6 +305,16 @@ fn small_viewports_promote_waiting_crates_without_moving_visible_crates() {
 }
 
 #[test]
+fn a_long_build_is_summarized_in_minutes_rather_than_hundreds_of_seconds() {
+    let mut model = Model::new(&["build".into()]);
+    model.finished = Some((true, std::time::Duration::from_secs(813)));
+    model.mix.saved_ns = 6_600_000_000_000;
+    let text = strip_ansi(&view::summary(&model).to_string());
+    assert!(text.contains("Built in 13m 33s"), "{text}");
+    assert!(text.contains("saved ~1h 50m compiler work"), "{text}");
+}
+
+#[test]
 fn summary_uses_the_cargo_verb_and_build_scripts_normalize_like_rustc() {
     for (arguments, expected) in [
         (vec!["c".into()], "Checked"),

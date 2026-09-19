@@ -4,10 +4,17 @@
 use super::model::{Model, segments};
 use super::norimel::{self as rimel, Block, palette};
 use super::upstream::{fade, warning_panel};
+use crate::util::format_duration;
+use std::time::Duration;
 
 const BAR_WIDTH: usize = 28;
 const NAME_WIDTH: usize = 32;
 const ROWS: usize = 6;
+/// Width of the per-crate time column, so the outcome beside it stays in line.
+/// Wide enough for the longest reading a compilation produces in practice:
+/// "45.32s", "13m 32s", "1h 4m". A crate slower than that spends a column
+/// rather than losing a digit.
+const TIME_WIDTH: usize = 7;
 
 #[derive(Default)]
 pub(super) struct Browser {
@@ -108,8 +115,7 @@ fn render_content(
             lines.push(rimel::row([
                 rimel::text("● ").fg(palette::YELLOW),
                 rimel::text(format!("{:<NAME_WIDTH$}", short_name(name))).fg(palette::TEXT),
-                rimel::text(format!("{:05.2}s", start.elapsed().as_secs_f32()))
-                    .fg(palette::SUBTEXT0),
+                rimel::text(clock(format_duration(start.elapsed()))).fg(palette::SUBTEXT0),
             ]));
         } else {
             lines.push(rimel::text(""));
@@ -133,12 +139,11 @@ fn render_content(
     }
     let count = recent.len();
     for (i, row) in recent.into_iter().rev().enumerate() {
-        let time = if row.fresh {
+        let time = clock(if row.fresh {
             "—".into()
         } else {
-            row.duration
-                .map_or("—".into(), |d| format!("{:05.2}s", d.as_secs_f32()))
-        };
+            row.duration.map_or("—".into(), format_duration)
+        });
         lines.push(fade(
             rimel::row([
                 rimel::text(if row.failed { "✗ " } else { "✓ " }).fg(if row.failed {
@@ -166,7 +171,7 @@ fn render_content(
     lines.extend(cache(model));
     lines.push(rimel::row([
         rimel::text("Elapsed       ").dim(),
-        rimel::text(format!("{:.2}s", model.started.elapsed().as_secs_f32())),
+        rimel::text(format_duration(model.started.elapsed())),
     ]));
     if !model.warnings.is_empty() || !model.failures.is_empty() {
         lines.push(
@@ -215,8 +220,8 @@ fn cache(model: &Model) -> Vec<Block> {
             .fg(palette::SUBTEXT0),
         ]),
         rimel::text(format!(
-            "Estimated compiler time saved: {:.2}s",
-            model.mix.saved_ns as f64 / 1e9
+            "Estimated compiler time saved: {}",
+            format_duration(Duration::from_nanos(model.mix.saved_ns))
         ))
         .dim(),
     ]
@@ -235,10 +240,10 @@ pub(super) fn summary(model: &Model) -> Block {
     };
     let mut lines = vec![
         rimel::text(format!(
-            "{} {verb} in {:.2}s · saved ~{:.2}s compiler work",
+            "{} {verb} in {} · saved ~{} compiler work",
             if ok { "✓" } else { "✗" },
-            elapsed.as_secs_f32(),
-            model.mix.saved_ns as f64 / 1e9
+            format_duration(elapsed),
+            format_duration(Duration::from_nanos(model.mix.saved_ns))
         ))
         .fg(if ok { palette::GREEN } else { palette::RED })
         .bold(),
@@ -298,6 +303,14 @@ fn crop(block: Block, scroll: usize, width: u16, height: u16) -> Block {
 
 fn short_name(name: &str) -> &str {
     name.rsplit_once(" v").map_or(name, |(name, _)| name)
+}
+
+/// Right-align a time in the crate rows so the column beside it starts at one
+/// place. The times vary in width now that a long compile reads "1m 23s"
+/// instead of a run of digits, and a fresh crate has no time at all.
+fn clock(time: String) -> String {
+    let width = TIME_WIDTH.saturating_sub(time.chars().count());
+    format!("{:width$}{time}", "")
 }
 
 fn outcome<'a>(model: &'a Model, row: &super::model::Row) -> &'a str {

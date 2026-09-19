@@ -15,7 +15,7 @@
 //! message, so every failure here is logged and forgotten rather than raised.
 
 use crate::config::SavingsStyle;
-use crate::util::{format_duration, write_advisory};
+use crate::util::{format_clock, format_duration, write_advisory};
 use bytesize::ByteSize;
 use eyre::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -380,34 +380,15 @@ fn iec(bytes: u64) -> String {
 
 /// A duration the way a person would say it: "6h 14m", "2m 51s", "45s".
 ///
-/// [`format_duration`] is for measurements and renders six hours as
-/// `22440.00s`, which is no way to tell somebody good news. Two units carry
-/// all the precision a brag needs.
+/// A brag is stated in whole units, so this rounds off the fraction a second
+/// carries: "45s", not "45.32s". Below a second there is nothing left to round
+/// away and the measurement itself is the friendliest thing to say.
 pub(crate) fn nanos(nanoseconds: u64) -> String {
-    if nanoseconds == 0 {
-        return "0s".into();
+    let duration = Duration::from_nanos(nanoseconds);
+    if duration.as_secs() == 0 && !duration.is_zero() {
+        return format_duration(duration);
     }
-    let total = Duration::from_nanos(nanoseconds).as_secs();
-    if total == 0 {
-        return format_duration(Duration::from_nanos(nanoseconds));
-    }
-    let units = [(86_400, "d"), (3_600, "h"), (60, "m"), (1, "s")];
-    // The two largest units that are actually present. A zero unit in between
-    // must not spend a slot: "1d 0h" would hide real minutes behind it and
-    // understate the number this line exists to state.
-    let mut parts = Vec::new();
-    let mut rest = total;
-    for (size, suffix) in units {
-        let amount = rest / size;
-        rest %= size;
-        if amount > 0 {
-            parts.push(format!("{amount}{suffix}"));
-            if parts.len() == 2 {
-                break;
-            }
-        }
-    }
-    parts.join(" ")
+    format_clock(duration)
 }
 
 /// "1 build" is not "1 builds", and the one machine that hits it would be the
