@@ -838,3 +838,30 @@ fn a_view_a_dead_collector_moved_aside_is_finished_off() {
     assert!(kept.exists());
     assert_eq!(outcome.removed_views, 0, "and is not counted as a view");
 }
+
+/// A checkout deleted after its last build and cloned again at the same path
+/// keeps the same view, so the clone's first build lands in the directory an
+/// earlier selection marked abandoned.
+#[test]
+fn a_checkout_recreated_since_the_selection_is_kept() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "gone");
+    let view = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    std::fs::write(view.join("artifact"), vec![0_u8; 5]).unwrap();
+    std::fs::remove_dir_all(&workspace).unwrap();
+
+    let rebuilt = view.clone();
+    let outcome = collect_with(&config.target.root, None, None, false, move || {
+        // The clone's build: Cargo holds its lock in the same view.
+        std::fs::create_dir_all(rebuilt.join("debug")).unwrap();
+        let mut cargo = fslock::LockFile::open(&rebuilt.join("debug/.cargo-lock")).unwrap();
+        assert!(cargo.try_lock().unwrap());
+        std::mem::forget(cargo);
+    })
+    .unwrap();
+
+    assert_eq!(outcome.kept_active_views, 1);
+    assert_eq!(outcome.removed_views, 0);
+    assert!(view.exists());
+}

@@ -891,8 +891,11 @@ fn collect_with(
         // one of the selected checkouts while the earlier ones are still being
         // removed. Its placement refreshes the record, and Cargo holds its
         // lock for as long as it compiles, so either is grounds to leave the
-        // directory standing until the next sweep looks again.
-        if live && !dry_run {
+        // directory standing until the next sweep looks again. Every selected
+        // view gets the checks, not only the live ones: a checkout deleted and
+        // cloned again at the same path has the same view, and the clone can
+        // start building it before its predecessor's directory is gone.
+        if !dry_run {
             let claimed_since =
                 read_view_record(&record_path).is_some_and(|record| record.updated_secs > updated);
             let in_use = match cargo_locks(&directory) {
