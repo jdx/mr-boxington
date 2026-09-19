@@ -77,8 +77,9 @@ mbx adopt --recursive --dry-run ~/src
 ```
 
 Use `--dry-run` to see which directories are eligible without moving them.
-Each result includes the logical size of the directory, and runs over multiple
-checkouts end with a total:
+Each adopted result includes the logical size of the directory, a skipped
+checkout reports only why it was left alone, and runs over multiple checkouts
+end with a total:
 
 ```text
 adopted /home/me/src/project/target (2.4 GiB logical)

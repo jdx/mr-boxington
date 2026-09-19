@@ -1,4 +1,3 @@
-use super::cargo::absolute;
 use crate::config::Config;
 use crate::target;
 use bytesize::ByteSize;
@@ -39,7 +38,13 @@ pub(super) fn run(config: &Config, args: &AdoptArgs) -> Result<ExitCode> {
     } else {
         args.paths
             .iter()
-            .map(|path| absolute(&working_dir, &path.to_string_lossy()))
+            .map(|path| {
+                if path.is_absolute() {
+                    path.clone()
+                } else {
+                    working_dir.join(path)
+                }
+            })
             .collect()
     };
     let mut checkouts = Vec::new();
