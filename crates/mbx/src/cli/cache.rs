@@ -358,6 +358,16 @@ pub(super) struct GcReport {
     pub(super) action_store: GcActionStoreReport,
     pub(super) targets: GcTargetReport,
     pub(super) incremental: GcIncrementalReport,
+    pub(super) generated: GcGeneratedReport,
+}
+
+/// Content-addressed copies of build-script output that compilations read.
+#[derive(serde::Serialize)]
+pub(super) struct GcGeneratedReport {
+    pub(super) removed_directories: u64,
+    pub(super) removed_bytes: u64,
+    pub(super) remaining_directories: u64,
+    pub(super) remaining_bytes: u64,
 }
 
 #[derive(serde::Serialize)]

@@ -1,5 +1,6 @@
 use super::cache::{
-    GcActionStoreReport, GcIncrementalReport, GcReport, GcTargetReport, print_json,
+    GcActionStoreReport, GcGeneratedReport, GcIncrementalReport, GcReport, GcTargetReport,
+    print_json,
 };
 use crate::config::{Config, RetentionSettings};
 use crate::{store, target};
@@ -162,6 +163,12 @@ pub(super) fn run(
                 remaining_bytes: incremental.remaining_bytes,
                 skipped_active_directories: incremental.skipped_active_directories,
                 untracked_directories: incremental.untracked_directories,
+            },
+            generated: GcGeneratedReport {
+                removed_directories: generated.removed_directories,
+                removed_bytes: generated.removed_bytes,
+                remaining_directories: generated.remaining_directories,
+                remaining_bytes: generated.remaining_bytes,
             },
         })?;
     } else {
@@ -345,7 +352,12 @@ pub(super) fn sweep_store(config: &Config, retention: &RetentionSettings) -> cra
                 let incremental_bytes =
                     crate::incremental::stats(&config.cache_dir.join("incremental"))
                         .map_or(0, |stats| stats.bytes);
-                target_bytes.saturating_add(incremental_bytes)
+                let generated_bytes =
+                    crate::out_dir::stats(&config.cache_dir.join(crate::out_dir::ROOT))
+                        .map_or(0, |stats| stats.remaining_bytes);
+                target_bytes
+                    .saturating_add(incremental_bytes)
+                    .saturating_add(generated_bytes)
             });
             let store_budget = store_budget(retention, config.gc.max_bytes, non_store_bytes);
             crate::scheduler::prune_flights(&config.cache_dir);

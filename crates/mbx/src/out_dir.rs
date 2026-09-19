@@ -190,9 +190,19 @@ pub(crate) fn stabilize(real: &Path, root: &Path) -> Result<Option<PathBuf>> {
     // already removed it or cannot: whichever way, what is looked at next is
     // a tree this process is guaranteed to keep until it exits.
     lease(root, &digest)?;
-    if !stable.is_dir()
-        && let Err(error) = materialize(real, root, &stable, &manifest, &files, &directories)
-    {
+    // One publisher per tree at a time, and nobody reuses a tree until its
+    // publication is complete: the existence check and the copy sit under
+    // the same lock, so a second process either finds the finished,
+    // protected tree or waits for it.
+    let published = (|| -> Result<()> {
+        let mut publishing = fslock::LockFile::open(&publish_lock_path(root, &digest))?;
+        publishing.lock()?;
+        if !stable.is_dir() {
+            materialize(real, root, &stable, &manifest, &files, &directories)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = published {
         // Nothing was published, so nothing needs the lease; a lease left
         // behind here would name a tree that never existed.
         release(root, &digest);
@@ -200,6 +210,10 @@ pub(crate) fn stabilize(real: &Path, root: &Path) -> Result<Option<PathBuf>> {
     }
     stamp_use(root, &digest);
     Ok(Some(stable))
+}
+
+fn publish_lock_path(root: &Path, digest: &str) -> PathBuf {
+    root.join(format!("{digest}.publish.lock"))
 }
 
 /// Give up this process's lease on a tree and take its file with it.
@@ -395,8 +409,15 @@ fn materialize(
         // The top directory last, and after the move: macOS will not rename
         // a directory it cannot write, since the move rewrites its parent
         // entry.
-        Ok(()) => make_directory_read_only(stable)
-            .wrap_err_with(|| format!("failed to protect {}", stable.display())),
+        // A tree that could not be protected is not left standing: the next
+        // process would take it for a finished one.
+        Ok(()) => match make_directory_read_only(stable) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let _ = remove_tree(stable);
+                Err(error).wrap_err_with(|| format!("failed to protect {}", stable.display()))
+            }
+        },
         Err(_) if stable.is_dir() => {
             let _ = remove_tree(&staging);
             Ok(())
@@ -573,6 +594,7 @@ pub(crate) fn collect(
                 continue;
             }
             let _ = std::fs::remove_dir_all(leases_dir(root, name));
+            let _ = std::fs::remove_file(publish_lock_path(root, name));
         }
         kept -= 1;
         remaining_bytes = remaining_bytes.saturating_sub(*bytes);
@@ -592,6 +614,7 @@ pub(crate) fn collect(
             let _registrar = registrar(root)?;
             if !leased(root, &digest, true).unwrap_or(true) {
                 let _ = std::fs::remove_dir_all(leases_dir(root, &digest));
+                let _ = std::fs::remove_file(publish_lock_path(root, &digest));
             }
         }
     }

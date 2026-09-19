@@ -443,6 +443,7 @@ fn leases_of_a_tree_that_is_gone_are_swept() {
     collect(&root, None, None, false).unwrap();
 
     assert!(!leases_dir(&root, &digest).exists());
+    assert!(!publish_lock_path(&root, &digest).exists());
 }
 
 #[test]
