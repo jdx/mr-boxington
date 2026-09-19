@@ -3,14 +3,14 @@
 
 - **Usage:** `mbx adopt [-r --recursive] [--dry-run] [PATH]…`
 
-Move existing target directories under the managed root, keeping their outputs.
+Bring existing Cargo target directories under mbx management without deleting their contents.
 
-Each adopted checkout gets a `target` link to its managed directory, which is then pruned like any other once the checkout is deleted or goes unused.
+mbx moves each directory under the managed root and leaves a `target` link in its place. The adopted directory then follows the usual managed-target collection policy.
 
 ## Arguments
-- **`[PATH]…`** — Checkouts to adopt, or directories to search with --recursive. Defaults to the current directory.
+- **`[PATH]…`** — Cargo checkouts to adopt, or directories to search with --recursive. Defaults to the current directory.
 
 ## Flags
-- **`-r --recursive`** — Search each path for checkouts holding a target directory instead of treating the path itself as a checkout. Hidden directories, target directories, and symbolic links are not searched.
+- **`-r --recursive`** — Search below each path for Cargo checkouts with a target directory. Hidden directories, target directories, and symbolic links are skipped.
 - **`--dry-run`** — Report what would be adopted without moving anything.
 - **`-h --help`** — Print help
