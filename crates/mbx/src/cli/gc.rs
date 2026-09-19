@@ -52,7 +52,12 @@ pub(super) fn run(
         }
     };
     let generated = collect_generated(config, retention.target_max_age, dry_run);
-    let target_budget = target_budget(retention, max_bytes, incremental.remaining_bytes);
+    // What survives counts against the combined budget the same as learned
+    // incremental state: bytes on the disk the limit was set for.
+    let reserved_bytes = incremental
+        .remaining_bytes
+        .saturating_add(generated.remaining_bytes);
+    let target_budget = target_budget(retention, max_bytes, reserved_bytes);
     let pruned = target::collect(
         &config.target.root,
         target_budget,
@@ -69,7 +74,7 @@ pub(super) fn run(
     let store_budget = store_budget(
         retention,
         max_bytes,
-        projected_target_bytes.saturating_add(incremental.remaining_bytes),
+        projected_target_bytes.saturating_add(reserved_bytes),
     );
     // Small and never load-bearing: a swept flight costs at most one
     // compilation that would have been a hit, so it is not part of the
@@ -381,6 +386,7 @@ pub(super) fn prune_targets(
         ));
     }
     let incremental_bytes = incremental_bytes.saturating_add(generated.removed_bytes);
+    let incremental_remaining = incremental_remaining.saturating_add(generated.remaining_bytes);
     let target_budget = target_budget(retention, store_reserve, incremental_remaining);
     match target::collect(
         &config.target.root,

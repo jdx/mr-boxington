@@ -27,6 +27,7 @@
 use eyre::{Context, Result};
 use mbx_cache_core::CacheDigest;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 /// Where the session tells the shim to keep stable trees.
@@ -55,6 +56,19 @@ const STAGING_PREFIX: &str = ".tmp-";
 /// How long a staging directory may exist before a sweep assumes the process
 /// copying into it died.
 const STAGING_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Serializes taking a lease on a tree with collecting it, so a collector that
+/// found no lease held cannot lose to a compilation that takes one a moment
+/// later. Held only for the moment of the check, never across the compile.
+const REGISTRAR: &str = ".registrar.lock";
+
+/// Leases held by this process, by lease file, for as long as it lives: the
+/// shim is one compilation, and rustc reads the tree until it exits. Keyed so
+/// a second request for the same tree finds the lease already held rather
+/// than blocking on its own lock, which is what a second file lock on a path
+/// this process already holds would do.
+static LEASES: Mutex<std::collections::BTreeMap<PathBuf, fslock::LockFile>> =
+    Mutex::new(std::collections::BTreeMap::new());
 
 /// Give this compilation a stable `OUT_DIR`, when it has one to read.
 ///
@@ -151,11 +165,68 @@ pub(crate) fn stabilize(real: &Path, root: &Path) -> Result<Option<PathBuf>> {
     }
     let digest = CacheDigest::blake3(&manifest).hash;
     let stable = root.join(&digest);
+    // The lease comes first, so a collector that finds the tree unused has
+    // already removed it or cannot: whichever way, what is looked at next is
+    // a tree this process is guaranteed to keep until it exits.
+    lease(root, &digest)?;
     if !stable.is_dir() {
         materialize(real, root, &stable, &files, &directories)?;
     }
     stamp_use(root, &digest);
     Ok(Some(stable))
+}
+
+fn leases_dir(root: &Path, digest: &str) -> PathBuf {
+    root.join(format!("{digest}.leases"))
+}
+
+fn registrar(root: &Path) -> Result<fslock::LockFile> {
+    std::fs::create_dir_all(root)?;
+    let mut lock = fslock::LockFile::open(&root.join(REGISTRAR))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+/// Keep a tree from being collected while this process compiles against it.
+///
+/// One lock file per process, held until it exits, so a collector can tell a
+/// live compilation from the debris of one that died: a lease it can take is
+/// nobody's.
+fn lease(root: &Path, digest: &str) -> Result<()> {
+    let leases = leases_dir(root, digest);
+    let path = leases.join(format!("{}.lease", std::process::id()));
+    let mut held = LEASES.lock().unwrap();
+    if held.contains_key(&path) {
+        return Ok(());
+    }
+    let _registrar = registrar(root)?;
+    std::fs::create_dir_all(&leases)?;
+    let mut lock = fslock::LockFile::open(&path)?;
+    lock.lock()?;
+    held.insert(path, lock);
+    Ok(())
+}
+
+/// Whether a compilation holds a lease on the tree. Called under the
+/// registrar, so the answer holds until it is released. Lease files nobody
+/// holds are removed along the way.
+fn leased(root: &Path, digest: &str) -> std::io::Result<bool> {
+    let leases = leases_dir(root, digest);
+    let entries = match std::fs::read_dir(&leases) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let mut lock = fslock::LockFile::open(&entry.path())?;
+        if !lock.try_lock()? {
+            return Ok(true);
+        }
+        drop(lock);
+        let _ = std::fs::remove_file(entry.path());
+    }
+    Ok(false)
 }
 
 /// Describe a tree in an order and form that two copies of the same bytes
@@ -241,6 +312,13 @@ fn materialize(
             // `OUT_DIR` fails loudly here rather than corrupting the others.
             make_read_only(&destination, *executable)?;
         }
+        // The directories too, or a file could be unlinked and replaced
+        // through its writable parent. Deepest last, so the walk above them
+        // could still create them.
+        for directory in directories.iter().rev() {
+            make_directory_read_only(&staging.join(directory))?;
+        }
+        make_directory_read_only(&staging)?;
         Ok(())
     })();
     if let Err(error) = copied {
@@ -283,6 +361,19 @@ fn make_read_only(path: &Path, _executable: bool) -> std::io::Result<()> {
     let mut permissions = std::fs::metadata(path)?.permissions();
     permissions.set_readonly(true);
     std::fs::set_permissions(path, permissions)
+}
+
+#[cfg(unix)]
+fn make_directory_read_only(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o555))
+}
+
+/// Windows has no directory permission that stops entries being replaced,
+/// only the file attribute, which the files already carry.
+#[cfg(not(unix))]
+fn make_directory_read_only(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn marker_path(root: &Path, digest: &str) -> PathBuf {
@@ -358,6 +449,15 @@ pub(crate) fn collect(
             continue;
         }
         if !dry_run {
+            // Under the registrar from the lease check to the removal, so a
+            // compilation cannot take a lease on a tree halfway gone: it
+            // waits, finds the tree missing, and copies it again.
+            let _registrar = registrar(root)?;
+            if leased(root, &name)? {
+                outcome.remaining_directories += 1;
+                outcome.remaining_bytes = outcome.remaining_bytes.saturating_add(bytes);
+                continue;
+            }
             let _ = std::fs::remove_file(marker_path(root, &name));
             if let Err(error) = remove_tree(&path) {
                 log::warn!(
@@ -368,6 +468,7 @@ pub(crate) fn collect(
                 outcome.remaining_bytes = outcome.remaining_bytes.saturating_add(bytes);
                 continue;
             }
+            let _ = std::fs::remove_dir_all(leases_dir(root, &name));
         }
         outcome.removed_directories += 1;
         outcome.removed_bytes = outcome.removed_bytes.saturating_add(bytes);
@@ -391,10 +492,26 @@ fn age_of(path: &Path, now: SystemTime) -> Option<Duration> {
     now.duration_since(modified).ok()
 }
 
-/// Remove a tree whose files were made read-only. Directories stayed writable,
-/// which is all unlinking needs on Unix; Windows refuses to delete a read-only
-/// file, so the attribute comes off first there.
+/// Remove a tree that was made read-only. Unlinking needs a writable parent
+/// on Unix, so the directories are opened up first; Windows refuses to delete
+/// a read-only file, so the attribute comes off the files first there.
 fn remove_tree(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if !path.is_dir() {
+            return std::fs::remove_dir_all(path);
+        }
+        let mut pending = vec![path.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755))?;
+            for entry in std::fs::read_dir(&directory)?.flatten() {
+                if entry.file_type()?.is_dir() {
+                    pending.push(entry.path());
+                }
+            }
+        }
+    }
     #[cfg(not(unix))]
     {
         let mut pending = vec![path.to_path_buf()];

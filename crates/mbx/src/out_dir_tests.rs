@@ -181,6 +181,8 @@ fn unused_trees_are_collected_by_age_and_used_ones_kept() {
     write_tree(&recent, &[("generated.rs", b"recent")]);
     let old = stabilize(&old, &root).unwrap().unwrap();
     let recent = stabilize(&recent, &root).unwrap().unwrap();
+    // The compilations that used them have exited.
+    LEASES.lock().unwrap().clear();
     let old_marker = marker_path(&root, &old.file_name().unwrap().to_string_lossy());
     let long_ago = std::time::SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60);
     std::fs::File::options()
@@ -249,4 +251,75 @@ fn a_use_refreshes_the_marker_at_most_hourly() {
             > long_ago + Duration::from_secs(60),
         "two hours old is restamped"
     );
+}
+
+#[test]
+fn a_tree_a_compilation_holds_a_lease_on_is_not_collected() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("out-dirs");
+    let out = directory.path().join("a/out");
+    write_tree(&out, &[("generated.rs", b"x")]);
+    let stable = stabilize(&out, &root).unwrap().unwrap();
+    let digest = stable.file_name().unwrap().to_string_lossy().into_owned();
+    // A lease of this test's own, standing in for the shim of another
+    // process: the leases this process took above are shared with every
+    // other test in it, and released by whichever of them finishes first.
+    let mut compiling =
+        fslock::LockFile::open(&leases_dir(&root, &digest).join("other.lease")).unwrap();
+    compiling.lock().unwrap();
+    let marker = marker_path(&root, &digest);
+    let long_ago = std::time::SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60);
+    std::fs::File::options()
+        .write(true)
+        .open(&marker)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(long_ago))
+        .unwrap();
+
+    let outcome = collect(&root, Some(Duration::ZERO), false).unwrap();
+
+    assert_eq!(outcome.removed_directories, 0, "a leased tree is kept");
+    assert_eq!(outcome.remaining_directories, 1);
+    assert!(stable.exists());
+
+    // The compilations exit: their leases are nobody's, and the tree goes.
+    drop(compiling);
+    LEASES.lock().unwrap().clear();
+    let outcome = collect(&root, Some(Duration::ZERO), false).unwrap();
+
+    assert_eq!(outcome.removed_directories, 1);
+    assert!(!stable.exists());
+    assert!(!leases_dir(&root, &digest).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_shared_copy_cannot_be_altered_through_its_directories() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("out-dirs");
+    let out = directory.path().join("a/out");
+    write_tree(&out, &[("nested/generated.rs", b"x")]);
+    let stable = stabilize(&out, &root).unwrap().unwrap();
+
+    for path in [stable.clone(), stable.join("nested")] {
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o555,
+            "{}",
+            path.display()
+        );
+    }
+    // Collection still removes it, opening the directories up first.
+    LEASES.lock().unwrap().clear();
+    let marker = marker_path(&root, &stable.file_name().unwrap().to_string_lossy());
+    let long_ago = std::time::SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60);
+    std::fs::File::options()
+        .write(true)
+        .open(&marker)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(long_ago))
+        .unwrap();
+    collect(&root, Some(Duration::ZERO), false).unwrap();
+    assert!(!stable.exists());
 }
