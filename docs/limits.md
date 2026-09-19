@@ -298,16 +298,18 @@ or derives a value from it sees the same value in both checkouts.
 ### Compatibility and cleanup
 
 For eligible compilations, `env!("OUT_DIR")` names the cached copy. Its files
-are marked read-only; code that needs to modify generated output during
-compilation should disable sharing. Build scripts still write their output to
-the directory Cargo gives them before mbx makes the copy.
+and directories are marked read-only; code that needs to modify generated
+output during compilation should disable sharing. Build scripts still write
+their output to the directory Cargo gives them before mbx makes the copy.
 
 `mbx cache stats` reports these copies as **generated source trees**. Automatic
 collection and `mbx gc` remove copies according to `target.max_age`, based on
-when mbx last used them for a compilation or cache lookup. A build Cargo
-considers fresh does not refresh that timestamp. mbx recreates an evicted copy
-when a later compilation needs it, so an embedded `OUT_DIR` path should not be
-treated as permanent runtime storage.
+when mbx last used them for a compilation or cache lookup, and count the
+remaining copies toward `gc.max_total_size`. A compilation holds a lease on
+the copy it reads until rustc exits, and collection leaves a leased copy in
+place. A build Cargo considers fresh does not refresh the use timestamp. mbx
+recreates an evicted copy when a later compilation needs it, so an embedded
+`OUT_DIR` path should not be treated as permanent runtime storage.
 
 To preserve Cargo's original `OUT_DIR` and literal generated source paths:
 
