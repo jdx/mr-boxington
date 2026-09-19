@@ -166,10 +166,10 @@ pub(crate) struct RawConfig {
         default = "16MiB"
     )]
     events_max_size: String,
-    /// Give a compilation that reads `OUT_DIR` a copy of it under the cache,
-    /// named for its contents, so checkouts whose generated sources match hand
-    /// rustc the same path and share the compilation; the path is also
-    /// remapped out of what rustc records.
+    /// Reuse Rust compilations across checkouts with matching build-script
+    /// output by giving rustc a shared, content-addressed `OUT_DIR` under the
+    /// cache. Also remap generated source paths in Rust and C/C++ debug
+    /// information. Disable to preserve Cargo's original `OUT_DIR` and paths.
     #[usage(env = "MBX_SHARE_OUT_DIR", default = true)]
     share_out_dir: bool,
     /// Remap the workspace root so rustc does not record which checkout a
@@ -407,20 +407,17 @@ pub struct Config {
     pub incremental: bool,
     /// Share compilations that read `OUT_DIR` between checkouts.
     ///
-    /// On by default. A crate whose sources mention `OUT_DIR` is compiled with
-    /// a copy of its build-script output kept under the cache in a directory
-    /// named for the output's contents. Two checkouts whose build scripts
-    /// wrote the same bytes then hand rustc the same path, so the compilation
-    /// and whatever it derives from the path agree, and the second checkout
-    /// restores it. Output that differs, because the script wrote the
-    /// checkout's path into it, is a different input and misses as it should.
-    /// The path is also remapped out of what rustc records, so a dependency
-    /// that does have to be rebuilt comes out byte-identical for the crates
-    /// above it.
+    /// Enabled by default. When the source scan finds `OUT_DIR`, rustc receives
+    /// a copy of the build-script output under the cache, in a directory named
+    /// for its contents. Matching output trees give rustc the same path across
+    /// checkouts, allowing a cache hit when the other inputs also match.
+    /// Different output trees use different paths and cache keys. If the scan
+    /// misses the reference or the output cannot be copied, rustc keeps Cargo's
+    /// original `OUT_DIR`.
     ///
-    /// Off, the compilation sees the `OUT_DIR` Cargo gave it, is keyed to the
-    /// checkout it ran in, and its generated source paths stay literal in
-    /// debug information.
+    /// Also remap generated source paths in Rust and C/C++ debug information.
+    /// Disabling this preserves Cargo's original `OUT_DIR` and literal paths,
+    /// so Rust compilations that read `OUT_DIR` remain checkout-specific.
     pub share_out_dir: bool,
     /// Remap the workspace root so rustc does not record the checkout a
     /// compilation ran in.

@@ -399,7 +399,7 @@ Logical CPUs to leave free for the rest of the machine.
 - **Default:** `true`
 - **Set with:** `MBX_SHARE_OUT_DIR`
 
-Give a compilation that reads `OUT_DIR` a copy of it under the cache, named for its contents, so checkouts whose generated sources match hand rustc the same path and share the compilation; the path is also remapped out of what rustc records.
+Reuse Rust compilations across checkouts with matching build-script output by giving rustc a shared, content-addressed `OUT_DIR` under the cache. Also remap generated source paths in Rust and C/C++ debug information. Disable to preserve Cargo's original `OUT_DIR` and paths.
 
 ### `share_workspace_root`
 
