@@ -1556,6 +1556,9 @@ fn executable_stem(executable: &OsStr) -> Option<&str> {
 }
 
 fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode {
+    // The compiler below may replace this process, and with it any lease on
+    // a stable `OUT_DIR`; it compiles against Cargo's own tree instead.
+    crate::out_dir::restore();
     let crate_name = crate_name_argument(&arguments);
     // A bypassed compilation is still a real compiler process the machine has
     // to pay for. Probe invocations pass through unscheduled: cargo runs them

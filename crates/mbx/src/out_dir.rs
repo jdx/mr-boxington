@@ -70,6 +70,11 @@ const REGISTRAR: &str = ".registrar.lock";
 static LEASES: Mutex<std::collections::BTreeMap<PathBuf, fslock::LockFile>> =
     Mutex::new(std::collections::BTreeMap::new());
 
+/// The `OUT_DIR` Cargo gave this process, once it has been replaced, so a
+/// compilation that ends up bypassing the cache can be handed back the tree
+/// the shim is not going to keep a lease on.
+static ORIGINAL: Mutex<Option<std::ffi::OsString>> = Mutex::new(None);
+
 /// Give this compilation a stable `OUT_DIR`, when it has one to read.
 ///
 /// On success the process environment carries the stable path, which is what
@@ -96,6 +101,7 @@ pub(crate) fn stabilize_for(source: &Path) -> Option<PathBuf> {
         Ok(Some(stable)) => {
             // Single-threaded here, ahead of any thread the shim starts, and
             // rustc inherits what is set by the time it is spawned.
+            *ORIGINAL.lock().unwrap() = Some(real.into_os_string());
             unsafe { std::env::set_var("OUT_DIR", &stable) };
             Some(stable)
         }
@@ -107,6 +113,21 @@ pub(crate) fn stabilize_for(source: &Path) -> Option<PathBuf> {
             None
         }
     }
+}
+
+/// Hand a compilation that bypasses the cache the `OUT_DIR` Cargo gave it.
+///
+/// A bypassed compilation may replace this process with rustc, and a lease
+/// lives only as long as the process holding it, so the compiler must not be
+/// left reading a tree nothing protects. Cargo's own tree is the checkout's
+/// and needs no lease. The leases go with the value: nothing this process
+/// will run reads the stable tree any more.
+pub(crate) fn restore() {
+    let Some(original) = ORIGINAL.lock().unwrap().take() else {
+        return;
+    };
+    unsafe { std::env::set_var("OUT_DIR", original) };
+    LEASES.lock().unwrap().clear();
 }
 
 /// Whether any Rust source below `directory` mentions `OUT_DIR`.

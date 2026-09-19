@@ -323,3 +323,37 @@ fn the_shared_copy_cannot_be_altered_through_its_directories() {
     collect(&root, Some(Duration::ZERO), false).unwrap();
     assert!(!stable.exists());
 }
+
+/// Environment-wide, so it runs in one test with the others' state cleared.
+#[test]
+fn a_bypassed_compilation_gets_cargos_out_dir_back_and_holds_no_lease() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("out-dirs");
+    let real = directory.path().join("target/build/x/out");
+    write_tree(&real, &[("generated.rs", b"x")]);
+    let stable = stabilize(&real, &root).unwrap().unwrap();
+    let digest = stable.file_name().unwrap().to_string_lossy().into_owned();
+    *ORIGINAL.lock().unwrap() = Some(real.clone().into_os_string());
+    unsafe { std::env::set_var("OUT_DIR", &stable) };
+    assert!(
+        LEASES
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|path| path.starts_with(leases_dir(&root, &digest)))
+    );
+
+    restore();
+
+    assert_eq!(
+        std::env::var_os("OUT_DIR").as_deref(),
+        Some(real.as_os_str())
+    );
+    assert!(ORIGINAL.lock().unwrap().is_none());
+    let _registrar = registrar(&root).unwrap();
+    assert!(
+        !leased(&root, &digest).unwrap(),
+        "the lease went with the value"
+    );
+    unsafe { std::env::remove_var("OUT_DIR") };
+}
