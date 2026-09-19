@@ -36,6 +36,11 @@ const VIEWS_DIR: &str = "v1";
 /// which is a bare hex digest.
 const REMOVAL_SUFFIX: &str = ".removing-";
 const VIEW_RECORD_VERSION: u8 = 1;
+/// How recently a view's record must have been refreshed for collection to
+/// treat a build as having just claimed it. Records carry whole seconds, so a
+/// refresh in the same second as the selection is invisible to a comparison;
+/// a record this fresh is a build starting, whatever the selection said.
+const RECENTLY_CLAIMED: u64 = 2;
 
 /// Which checkout a managed target directory belongs to.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -791,17 +796,19 @@ pub(crate) fn collect(
     max_age: Option<Duration>,
     dry_run: bool,
 ) -> Result<CollectionOutcome> {
-    collect_with(root, max_bytes, max_age, dry_run, || {})
+    collect_with(root, max_bytes, max_age, dry_run, || {}, || {})
 }
 
-/// [`collect`] with a hook between selecting views and removing them, which
-/// is where a build can arrive; tests stand in for that build.
+/// [`collect`] with hooks where a build can arrive: between selecting views
+/// and removing them, and between removing a directory and its record. Tests
+/// stand in for that build.
 fn collect_with(
     root: &Path,
     max_bytes: Option<u64>,
     max_age: Option<Duration>,
     dry_run: bool,
     before_removal: impl FnOnce(),
+    mut after_removal: impl FnMut(),
 ) -> Result<CollectionOutcome> {
     let mut outcome = CollectionOutcome::default();
     if !dry_run {
@@ -896,8 +903,8 @@ fn collect_with(
         // cloned again at the same path has the same view, and the clone can
         // start building it before its predecessor's directory is gone.
         if !dry_run {
-            let claimed_since =
-                read_view_record(&record_path).is_some_and(|record| record.updated_secs > updated);
+            let claimed_since = read_view_record(&record_path)
+                .is_some_and(|record| recently_claimed(root, &record, updated));
             let in_use = match cargo_locks(&directory) {
                 Ok(locks) => locks.is_none(),
                 Err(error) => {
@@ -954,8 +961,20 @@ fn collect_with(
                 continue;
             }
         }
+        if !dry_run {
+            after_removal();
+        }
         // Last, so a failed removal above leaves the record to try again with.
+        // And only if it still describes the directory just removed: a build
+        // that placed the checkout while the removal ran has written a new
+        // record and made a new directory, and taking that record would leave
+        // the directory invisible to every later collection.
+        let superseded = !dry_run
+            && (read_view_record(&record_path)
+                .is_some_and(|record| recently_claimed(root, &record, updated))
+                || directory.exists());
         if !dry_run
+            && !superseded
             && let Err(error) = std::fs::remove_file(&record_path)
             && error.kind() != std::io::ErrorKind::NotFound
         {
@@ -968,6 +987,24 @@ fn collect_with(
     outcome.remaining_bytes = remaining;
     outcome.remaining_views = total_views.saturating_sub(outcome.removed_views);
     Ok(outcome)
+}
+
+/// Whether a record read back during collection shows a build claiming the
+/// view since it was selected on `updated`.
+///
+/// The grace for a same-second refresh applies only while the checkout
+/// exists: a record written moments ago for a checkout that is already gone
+/// is a test fixture or a deleted clone, not a build about to start.
+fn recently_claimed(root: &Path, record: &ViewRecord, updated: u64) -> bool {
+    if record.updated_secs > updated {
+        return true;
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    now.saturating_sub(record.updated_secs) <= RECENTLY_CLAIMED
+        && crate::store::checkout_is_live_on(root, &record.workspace_root)
 }
 
 /// Where a view goes while its files are removed.
