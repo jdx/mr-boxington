@@ -387,6 +387,7 @@ fn adoption_sees_a_lock_in_an_editors_cross_compiled_profile() {
     // lock hidden inside one of those must not count either way.
     let profile = target.join("rust-analyzer/x86_64-unknown-linux-gnu/debug");
     std::fs::create_dir_all(profile.join("deps")).unwrap();
+    std::fs::write(profile.join(".cargo-lock"), b"").unwrap();
     std::fs::write(profile.join("deps/.cargo-lock"), b"").unwrap();
     let mut decoy = fslock::LockFile::open(&profile.join("deps/.cargo-lock")).unwrap();
     decoy.lock().unwrap();
@@ -394,7 +395,17 @@ fn adoption_sees_a_lock_in_an_editors_cross_compiled_profile() {
         cargo_locks(&target).unwrap().is_some(),
         "a lock inside an output directory is not Cargo's"
     );
-    std::fs::write(profile.join(".cargo-lock"), b"").unwrap();
+    // The same name directly under the target directory is a custom profile,
+    // whose lock counts.
+    std::fs::create_dir_all(target.join("deps")).unwrap();
+    std::fs::write(target.join("deps/.cargo-lock"), b"").unwrap();
+    let mut custom = fslock::LockFile::open(&target.join("deps/.cargo-lock")).unwrap();
+    custom.lock().unwrap();
+    assert!(
+        cargo_locks(&target).unwrap().is_none(),
+        "a custom profile named like an output directory still holds Cargo's lock"
+    );
+    drop(custom);
     let mut build = fslock::LockFile::open(&profile.join(".cargo-lock")).unwrap();
     build.lock().unwrap();
 

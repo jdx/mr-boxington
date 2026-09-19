@@ -702,8 +702,10 @@ fn lock_replaced_view(
 /// Cargo's lock is `<profile>/.cargo-lock`, or
 /// `<target-triple>/<profile>/.cargo-lock` when cross-compiling, and an
 /// editor's target directory nested one level down repeats that shape, so the
-/// walk goes three levels deep. The directories Cargo fills a profile with
-/// hold thousands of entries and never a lock, so they are not entered.
+/// walk goes three levels deep. A directory holding a lock is a profile, and
+/// the output directories Cargo fills a profile with hold thousands of entries
+/// and never a lock, so those are not entered. The same names above a lock
+/// are entered: a custom profile may be called `deps`.
 fn cargo_locks(directory: &Path) -> Result<Option<Vec<fslock::LockFile>>> {
     let mut pending = vec![(directory.to_path_buf(), 0)];
     let mut locks = Vec::new();
@@ -714,6 +716,8 @@ fn cargo_locks(directory: &Path) -> Result<Option<Vec<fslock::LockFile>>> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.into()),
         };
+        let mut is_profile = false;
+        let mut children = Vec::new();
         for entry in entries {
             let entry = entry?;
             let kind = entry.file_type()?;
@@ -723,9 +727,16 @@ fn cargo_locks(directory: &Path) -> Result<Option<Vec<fslock::LockFile>>> {
                     return Ok(None);
                 }
                 locks.push(lock);
-            } else if kind.is_dir() && depth < 3 && !is_profile_output_dir(&entry.file_name()) {
-                pending.push((entry.path(), depth + 1));
+                is_profile = true;
+            } else if kind.is_dir() && depth < 3 {
+                children.push((entry.file_name(), entry.path()));
             }
+        }
+        for (name, path) in children {
+            if is_profile && is_profile_output_dir(&name) {
+                continue;
+            }
+            pending.push((path, depth + 1));
         }
     }
     Ok(Some(locks))
