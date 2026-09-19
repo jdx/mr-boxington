@@ -203,6 +203,12 @@ pub fn run() -> Result<ExitCode> {
             explain::run(&config, &settings, args, toolchain)
         }
         Commands::Setup(args) => setup::run(&args, args.action()?),
+        Commands::Gc(args) if args.automatic => {
+            if args.json || args.dry_run || args.max_size.is_some() {
+                eyre::bail!("--automatic runs the configured sweep and takes no other option");
+            }
+            gc::run_automatic(&config, &settings.retention).map(|()| ExitCode::SUCCESS)
+        }
         Commands::Gc(args) => gc::run(
             &config,
             args.max_size

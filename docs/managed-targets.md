@@ -83,8 +83,11 @@ symlink it does not own.
 ## Collection
 
 mbx records the checkout associated with each target view. Collection runs
-after a build, at most once an hour, and needs no configuration. A target
-directory is removed when any of these is true:
+after a build, at most once an hour, and needs no configuration. It runs in
+the background once the build has returned, so a walk of every managed
+directory never holds up the build that happened to come due; the next build
+reports what it removed. A target directory is removed when any of these is
+true:
 
 - Its checkout is gone. This happens regardless of the limits below.
 - It has gone unused for `target.max_age`, 30 days by default. The next build

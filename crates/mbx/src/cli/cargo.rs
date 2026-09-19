@@ -1,4 +1,4 @@
-use super::gc::sweep_store;
+use super::gc::{schedule_sweep, take_sweep_report};
 use crate::config::{CliSettings, Config, RetentionSettings, SummaryStyle};
 use crate::session::{self, CacheSession};
 use crate::{policy, target};
@@ -451,11 +451,12 @@ pub(super) fn place_target_view(config: &Config, roots: &Roots) -> TargetViewPla
     }
 }
 
-/// Sweep the store and record the session's savings after a build session.
+/// Record the session's savings and leave the store sweep behind it.
 ///
 /// Shared by every session-running command, and placed after its runtime has
-/// been dropped, so a walk of the whole store cannot occupy a worker thread
-/// and adds nothing to the build the user is waiting on.
+/// been dropped. The sweep itself runs in a process of its own, so a walk of
+/// the whole store adds nothing to the build the user is waiting on; what the
+/// previous sweep freed is said here, once.
 pub(super) fn account_session(
     config: &Config,
     settings: &CliSettings,
@@ -469,15 +470,17 @@ pub(super) fn account_session(
         Ok((status, stats)) => (status, stats),
         Err(error) => (Err(error), None),
     };
-    let mut delta = sweep_store(config, retention);
-    delta.auto_pruned_bytes = delta
-        .freed_target_bytes
-        .saturating_add(delta.freed_store_bytes);
+    for line in take_sweep_report(&config.store_dir()) {
+        session::note(&format!("mbx[gc]: {line}"));
+    }
     // Removing the checkout's own `target/` on the way in freed disk too, and
     // it is the largest single reclaim a first build ever reports -- but the
     // user confirmed it, so it must not feed the counters the collection
     // brags read: that directory had not outlived anything.
-    delta.freed_requested_bytes = removed_target_bytes.unwrap_or_default();
+    let mut delta = crate::savings::Delta {
+        freed_requested_bytes: removed_target_bytes.unwrap_or_default(),
+        ..crate::savings::Delta::default()
+    };
     let facts = stats
         .as_ref()
         .map_or_else(crate::savings::SessionFacts::default, |stats| {
@@ -496,14 +499,14 @@ pub(super) fn account_session(
         delta.avoided_compiler_ns = stats.avoided_compiler_duration_ns;
         delta.reflinked_bytes = stats.reflinked_output_bytes;
     }
-    // Unconditional, including on a run that built nothing: a sweep that came
-    // due during `cargo build --help` really did reclaim those bytes, and the
-    // lifetime total is wrong if they go unrecorded.
     if let Some(line) =
         crate::savings::record_and_describe(&config.store_dir(), &delta, &facts, settings.savings)
     {
         crate::session::note(&line);
     }
+    // Unconditional, including after a run that built nothing: a sweep that
+    // comes due during `cargo build --help` is as due as any other.
+    schedule_sweep(config, retention);
     status
 }
 
