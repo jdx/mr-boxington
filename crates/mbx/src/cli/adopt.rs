@@ -194,12 +194,12 @@ pub(super) fn adopt_checkout(
 /// Compared in resolved form: Cargo reports the workspace root as a physical
 /// path while the checkout may have been named through a link, and on Windows
 /// a resolved path carries a verbatim prefix that Cargo's answer omits, so
-/// neither side can be compared to the other as spelled.
+/// neither side can be compared to the other as spelled. Each side resolves
+/// on its own, so a path that cannot be resolved is still compared to the
+/// other's resolved form rather than dragging both back to their spelling.
 fn same_directory(a: &Path, b: &Path) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    }
+    let resolve = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    resolve(a) == resolve(b)
 }
 
 /// Every directory under `root` holding a `Cargo.toml` and a real `target`

@@ -349,8 +349,14 @@ fn adopt_existing_with(
 /// outputs this call was never asked to replace, and the failure is reported
 /// before anything has moved.
 fn move_into_view(target_dir: &Path, managed: &Path) -> Result<()> {
-    if std::fs::rename(target_dir, managed).is_ok() {
-        return Ok(());
+    let refused = match std::fs::rename(target_dir, managed) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    if std::fs::symlink_metadata(managed).is_err() {
+        // Nothing stood in the way, so the refusal is the rename's own.
+        return Err(refused)
+            .wrap_err_with(|| format!("could not move the outputs into {}", managed.display()));
     }
     std::fs::remove_dir(managed).wrap_err_with(|| {
         format!(
@@ -692,6 +698,12 @@ fn lock_replaced_view(
 /// `None` means a build is running there. The locks come back held for the
 /// caller that needs them held, such as a migration that replaces the view;
 /// collection only asks and lets them go.
+///
+/// Cargo's lock is `<profile>/.cargo-lock`, or
+/// `<target-triple>/<profile>/.cargo-lock` when cross-compiling, and an
+/// editor's target directory nested one level down repeats that shape, so the
+/// walk goes three levels deep. The directories Cargo fills a profile with
+/// hold thousands of entries and never a lock, so they are not entered.
 fn cargo_locks(directory: &Path) -> Result<Option<Vec<fslock::LockFile>>> {
     let mut pending = vec![(directory.to_path_buf(), 0)];
     let mut locks = Vec::new();
@@ -711,12 +723,21 @@ fn cargo_locks(directory: &Path) -> Result<Option<Vec<fslock::LockFile>>> {
                     return Ok(None);
                 }
                 locks.push(lock);
-            } else if kind.is_dir() && depth < 2 {
+            } else if kind.is_dir() && depth < 3 && !is_profile_output_dir(&entry.file_name()) {
                 pending.push((entry.path(), depth + 1));
             }
         }
     }
     Ok(Some(locks))
+}
+
+/// Whether a directory name is one Cargo creates inside a profile directory
+/// for outputs, beside the lock rather than above one.
+fn is_profile_output_dir(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some("deps" | "build" | "incremental" | "examples" | ".fingerprint" | "doc")
+    )
 }
 
 /// Point `target_dir` at `managed` so the paths people type keep working.

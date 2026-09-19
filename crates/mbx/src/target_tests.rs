@@ -363,7 +363,9 @@ fn adoption_refuses_a_directory_cargo_is_using() {
     );
     assert!(!view_record_path(&config.target.root, &workspace).exists());
     assert!(!view_dir(&config.target.root, &workspace).exists());
-    build.unlock().unwrap();
+    // Closed, not merely unlocked: Cargo closes its lock when it finishes,
+    // and Windows will not rename a directory holding an open handle.
+    drop(build);
 
     let outcome = adopt_existing(&config, &workspace, &target, false).unwrap();
 
@@ -372,6 +374,37 @@ fn adoption_refuses_a_directory_cargo_is_using() {
         std::fs::read(target.join("debug/artifact")).unwrap(),
         b"old output"
     );
+}
+
+#[test]
+fn adoption_sees_a_lock_in_an_editors_cross_compiled_profile() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    let target = workspace.join("target");
+    // Three levels down: an editor's own target directory, a target triple,
+    // and the profile. Cargo's outputs beside a lock are never entered, so a
+    // lock hidden inside one of those must not count either way.
+    let profile = target.join("rust-analyzer/x86_64-unknown-linux-gnu/debug");
+    std::fs::create_dir_all(profile.join("deps")).unwrap();
+    std::fs::write(profile.join("deps/.cargo-lock"), b"").unwrap();
+    let mut decoy = fslock::LockFile::open(&profile.join("deps/.cargo-lock")).unwrap();
+    decoy.lock().unwrap();
+    assert!(
+        cargo_locks(&target).unwrap().is_some(),
+        "a lock inside an output directory is not Cargo's"
+    );
+    std::fs::write(profile.join(".cargo-lock"), b"").unwrap();
+    let mut build = fslock::LockFile::open(&profile.join(".cargo-lock")).unwrap();
+    build.lock().unwrap();
+
+    let error = adopt_existing(&config, &workspace, &target, false).unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("Cargo is using"),
+        "unexpected error: {error:#}"
+    );
+    assert!(std::fs::symlink_metadata(&target).unwrap().is_dir());
 }
 
 #[test]
