@@ -166,10 +166,10 @@ pub(crate) struct RawConfig {
         default = "16MiB"
     )]
     events_max_size: String,
-    /// Remap `OUT_DIR` so rustc does not record it in the artifact, which can
-    /// leave a rebuilt dependency byte-identical between checkouts so its
-    /// dependents share. The compilation that read it stays checkout-specific
-    /// either way, as does any artifact still carrying a checkout path.
+    /// Give a compilation that reads `OUT_DIR` a copy of it under the cache,
+    /// named for its contents, so checkouts whose generated sources match hand
+    /// rustc the same path and share the compilation; the path is also
+    /// remapped out of what rustc records.
     #[usage(env = "MBX_SHARE_OUT_DIR", default = true)]
     share_out_dir: bool,
     /// Remap the workspace root so rustc does not record which checkout a
@@ -405,18 +405,22 @@ pub struct Config {
     /// Let cargo compile workspace members incrementally, rather than forcing
     /// `CARGO_INCREMENTAL=0` for the whole build.
     pub incremental: bool,
-    /// Remap `OUT_DIR` so rustc does not record it in the artifact.
+    /// Share compilations that read `OUT_DIR` between checkouts.
     ///
-    /// On by default. The compilation itself is keyed to the checkout it ran
-    /// in either way: nothing available can prove its artifact ignores the
-    /// path. What remapping buys is that a dependency recompiled in a second
-    /// checkout can come out byte-identical, so the crates above it still
-    /// share.
+    /// On by default. A crate whose sources mention `OUT_DIR` is compiled with
+    /// a copy of its build-script output kept under the cache in a directory
+    /// named for the output's contents. Two checkouts whose build scripts
+    /// wrote the same bytes then hand rustc the same path, so the compilation
+    /// and whatever it derives from the path agree, and the second checkout
+    /// restores it. Output that differs, because the script wrote the
+    /// checkout's path into it, is a different input and misses as it should.
+    /// The path is also remapped out of what rustc records, so a dependency
+    /// that does have to be rebuilt comes out byte-identical for the crates
+    /// above it.
     ///
-    /// It does not guarantee that. A workspace member records its own
-    /// directory whatever `OUT_DIR` was remapped to, and a crate that keeps
-    /// the value it read through `env!` embeds it; both produce a different
-    /// artifact in a second checkout, and their dependents recompile too.
+    /// Off, the compilation sees the `OUT_DIR` Cargo gave it, is keyed to the
+    /// checkout it ran in, and its generated source paths stay literal in
+    /// debug information.
     pub share_out_dir: bool,
     /// Remap the workspace root so rustc does not record the checkout a
     /// compilation ran in.

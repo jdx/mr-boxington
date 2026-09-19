@@ -184,6 +184,10 @@ pub(crate) fn compile(
     let arguments = with_oso_prefix(arguments, cache_native_links || execution_only_build_script);
     let arguments = arguments.as_ref();
     let initial_invocation = RustcInvocation::parse_with(arguments, options)?;
+    // Before anything reads the environment: the key, the remapping and the
+    // compiler all take `OUT_DIR` from the process, and this is what decides
+    // which value they see.
+    crate::out_dir::stabilize_for(initial_invocation.source());
     let initial_outputs = initial_invocation.outputs(&working_dir)?;
     let portable = Portable::detect(
         &working_dir,
@@ -2966,6 +2970,24 @@ fn path_mappings_with_env(
 ) -> Vec<PathMapping> {
     let mut mappings = Vec::new();
     let mut roots = BTreeSet::new();
+    // A stable `OUT_DIR` is its own root, named for the variable rather than
+    // for the tree: a prediction that lists `${out_dir}/generated.rs` resolves
+    // in every checkout against that checkout's own tree, and the key then
+    // compares the trees by the digest in the path rustc was given.
+    if let (Some(root), Some(out_dir)) = (
+        environment(crate::out_dir::ROOT_ENV).map(PathBuf::from),
+        environment("OUT_DIR").map(PathBuf::from),
+    ) && out_dir.is_absolute()
+        && out_dir.starts_with(&root)
+        && out_dir != root
+    {
+        add_mapping(
+            &mut mappings,
+            &mut roots,
+            out_dir,
+            crate::out_dir::PLACEHOLDER,
+        );
+    }
     let home_roots = ["HOME", "USERPROFILE"]
         .into_iter()
         .filter_map(|name| environment(name).map(PathBuf::from))

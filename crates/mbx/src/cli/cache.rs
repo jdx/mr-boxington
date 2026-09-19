@@ -234,10 +234,12 @@ pub(super) fn cache_stats(config: &Config, json: bool) -> Result<()> {
     let stats = store::stats(&store)?;
     let views = target::stats(&config.target.root)?;
     let incremental = crate::incremental::stats(&config.cache_dir.join("incremental"))?;
+    let generated = crate::out_dir::stats(&config.cache_dir.join(crate::out_dir::ROOT));
     let combined_total_bytes = stats
         .total_bytes()
         .saturating_add(views.bytes)
-        .saturating_add(incremental.bytes);
+        .saturating_add(incremental.bytes)
+        .saturating_add(generated.remaining_bytes);
     if json {
         return print_json(&CacheStatsReport {
             version: 1,
@@ -257,6 +259,8 @@ pub(super) fn cache_stats(config: &Config, json: bool) -> Result<()> {
             incremental_live_checkouts: incremental.live_checkouts,
             incremental_stale_checkouts: incremental.stale_checkouts,
             incremental_untracked_directories: incremental.untracked_directories,
+            generated_directories: generated.remaining_directories,
+            generated_bytes: generated.remaining_bytes,
             combined_total_bytes,
         });
     }
@@ -293,6 +297,11 @@ pub(super) fn cache_stats(config: &Config, json: bool) -> Result<()> {
         incremental.untracked_directories,
     );
     println!(
+        "generated source trees: {} ({})",
+        generated.remaining_directories,
+        ByteSize::b(generated.remaining_bytes).display().iec()
+    );
+    println!(
         "combined logical total: {}",
         ByteSize::b(combined_total_bytes).display().iec()
     );
@@ -324,6 +333,9 @@ pub(super) struct CacheStatsReport {
     incremental_live_checkouts: u64,
     incremental_stale_checkouts: u64,
     incremental_untracked_directories: u64,
+    /// Content-addressed copies of build-script output that compilations read.
+    generated_directories: u64,
+    generated_bytes: u64,
     combined_total_bytes: u64,
 }
 

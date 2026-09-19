@@ -1,0 +1,440 @@
+//! A stable `OUT_DIR` for compilations that read build-script output.
+//!
+//! Cargo hands rustc an `OUT_DIR` under the checkout's target directory, and a
+//! crate that includes generated sources reads the value through `env!`. That
+//! puts the checkout's path into the artifact whenever the crate keeps the
+//! value, and into the action key either way, so the crate compiles again in
+//! every new checkout even though its generated sources are byte for byte the
+//! same.
+//!
+//! Nothing available to the shim can prove an artifact ignores the path, so
+//! the key must not pretend it does. What the shim can do is give every
+//! checkout the *same* path: the generated tree is copied under the cache into
+//! a directory named for a digest of its contents, and rustc is run with that
+//! directory as `OUT_DIR`. Two checkouts whose build scripts produced the same
+//! bytes then hand rustc the same string, and whatever the crate derives from
+//! it -- a constant, a length, a hash -- agrees by construction. A tree that
+//! differs, because the script wrote the checkout's path into it, gets a
+//! different digest and a different key, which is the miss it deserves.
+//!
+//! The copy is only made for a crate whose own sources mention `OUT_DIR`. The
+//! test is deliberately cheap and one-sided: a crate that mentions it without
+//! reading it costs one copy and nothing else, since the key never sees an
+//! environment value the compilation did not read; a crate that reads it
+//! through a source the scan cannot see keeps today's checkout-specific key,
+//! which is sound.
+
+use eyre::{Context, Result};
+use mbx_cache_core::CacheDigest;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+/// Where the session tells the shim to keep stable trees.
+pub(crate) const ROOT_ENV: &str = "MBX_OUT_DIR_ROOT";
+
+/// The cache-relative home of stable trees.
+pub(crate) const ROOT: &str = "out-dirs/v1";
+
+/// The placeholder a stable tree normalizes to in keys and predictions. Named
+/// for the variable rather than the digest, so a prediction recorded in one
+/// checkout resolves against another checkout's tree, whose digest is what the
+/// key then compares.
+pub(crate) const PLACEHOLDER: &str = "out_dir";
+
+/// How often a use is stamped. The marker is what collection ages, and a
+/// crate compiled in an edit loop would otherwise rewrite it every build.
+const USE_STAMP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+/// Files scanned for a mention before the scan gives up and leaves the key
+/// checkout-specific.
+const SCAN_FILE_LIMIT: usize = 10_000;
+
+/// Marks a tree still being copied into place.
+const STAGING_PREFIX: &str = ".tmp-";
+
+/// How long a staging directory may exist before a sweep assumes the process
+/// copying into it died.
+const STAGING_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Give this compilation a stable `OUT_DIR`, when it has one to read.
+///
+/// On success the process environment carries the stable path, which is what
+/// every later step reads: the key, the remapping, the compiler itself. A
+/// problem copying the tree is reported and leaves the checkout's own value in
+/// place, which is the behavior without this at all.
+pub(crate) fn stabilize_for(source: &Path) -> Option<PathBuf> {
+    if !crate::session::share_out_dir_requested() {
+        return None;
+    }
+    let real = PathBuf::from(std::env::var_os("OUT_DIR")?);
+    if !real.is_absolute() || !real.is_dir() {
+        return None;
+    }
+    let root = PathBuf::from(std::env::var_os(ROOT_ENV)?);
+    if !root.is_absolute() || real.starts_with(&root) {
+        return None;
+    }
+    let sources = source.parent()?;
+    if !sources_mention_out_dir(sources) {
+        return None;
+    }
+    match stabilize(&real, &root) {
+        Ok(Some(stable)) => {
+            // Single-threaded here, ahead of any thread the shim starts, and
+            // rustc inherits what is set by the time it is spawned.
+            unsafe { std::env::set_var("OUT_DIR", &stable) };
+            Some(stable)
+        }
+        Ok(None) => None,
+        Err(error) => {
+            crate::session::report_shim_warning(&format!(
+                "OUT_DIR was not made stable for this compilation: {error:#}"
+            ));
+            None
+        }
+    }
+}
+
+/// Whether any Rust source below `directory` mentions `OUT_DIR`.
+///
+/// Hidden directories, `target`, and `node_modules` are skipped: none of them
+/// hold a crate's own sources, and a workspace root package would otherwise
+/// walk the whole checkout.
+pub(crate) fn sources_mention_out_dir(directory: &Path) -> bool {
+    let mut pending = vec![directory.to_path_buf()];
+    let mut scanned = 0;
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                if !name.starts_with('.') && name != "target" && name != "node_modules" {
+                    pending.push(entry.path());
+                }
+            } else if kind.is_file() && name.ends_with(".rs") {
+                scanned += 1;
+                if scanned > SCAN_FILE_LIMIT {
+                    return false;
+                }
+                if std::fs::read(entry.path())
+                    .is_ok_and(|contents| memchr::memmem::find(&contents, b"OUT_DIR").is_some())
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Copy `real` under `root` into a directory named for its contents, and
+/// return that directory. `None` when the tree has something a copy could not
+/// reproduce faithfully, such as a symlink.
+pub(crate) fn stabilize(real: &Path, root: &Path) -> Result<Option<PathBuf>> {
+    let mut manifest = Vec::new();
+    let mut files = Vec::new();
+    let mut directories = Vec::new();
+    if !describe_tree(
+        real,
+        Path::new(""),
+        &mut manifest,
+        &mut files,
+        &mut directories,
+    )? {
+        return Ok(None);
+    }
+    let digest = CacheDigest::blake3(&manifest).hash;
+    let stable = root.join(&digest);
+    if !stable.is_dir() {
+        materialize(real, root, &stable, &files, &directories)?;
+    }
+    stamp_use(root, &digest);
+    Ok(Some(stable))
+}
+
+/// Describe a tree in an order and form that two copies of the same bytes
+/// share: relative paths with `/` separators, the executable bit, and each
+/// file's content digest. Returns `false` for a tree that cannot be copied.
+fn describe_tree(
+    root: &Path,
+    relative: &Path,
+    manifest: &mut Vec<u8>,
+    files: &mut Vec<(PathBuf, bool)>,
+    directories: &mut Vec<PathBuf>,
+) -> Result<bool> {
+    let directory = root.join(relative);
+    let mut entries = std::fs::read_dir(&directory)
+        .wrap_err_with(|| format!("failed to read {}", directory.display()))?
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Ok(false);
+        };
+        let path = relative.join(name);
+        let spelled = path.to_string_lossy().replace('\\', "/");
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() {
+            return Ok(false);
+        } else if metadata.is_dir() {
+            manifest.extend_from_slice(b"d ");
+            manifest.extend_from_slice(spelled.as_bytes());
+            manifest.push(b'\n');
+            directories.push(path.clone());
+            if !describe_tree(root, &path, manifest, files, directories)? {
+                return Ok(false);
+            }
+        } else if metadata.is_file() {
+            let executable = is_executable(&metadata);
+            let digest = CacheDigest::blake3_file(&entry.path())?;
+            manifest.extend_from_slice(if executable { b"x " } else { b"f " });
+            manifest.extend_from_slice(digest.hash.as_bytes());
+            manifest.push(b' ');
+            manifest.extend_from_slice(spelled.as_bytes());
+            manifest.push(b'\n');
+            files.push((path, executable));
+        } else {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Copy the tree into place through a staging directory renamed at the end,
+/// so a reader never sees a partial tree under the final name. Two shims
+/// copying the same tree at once both finish; whichever renames second finds
+/// the name taken and discards its own copy.
+fn materialize(
+    real: &Path,
+    root: &Path,
+    stable: &Path,
+    files: &[(PathBuf, bool)],
+    directories: &[PathBuf],
+) -> Result<()> {
+    std::fs::create_dir_all(root)?;
+    let name = stable
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let staging = root.join(format!("{STAGING_PREFIX}{name}-{}", std::process::id()));
+    let _ = remove_tree(&staging);
+    std::fs::create_dir(&staging)?;
+    let copied = (|| -> Result<()> {
+        for directory in directories {
+            std::fs::create_dir_all(staging.join(directory))?;
+        }
+        for (file, executable) in files {
+            let source = real.join(file);
+            let destination = staging.join(file);
+            reflink_copy::reflink_or_copy(&source, &destination)
+                .wrap_err_with(|| format!("failed to copy {}", source.display()))?;
+            // Read-only: the tree is shared by every checkout whose generated
+            // sources match, and a write through one compilation would leave
+            // it disagreeing with its own name. A compilation that writes into
+            // `OUT_DIR` fails loudly here rather than corrupting the others.
+            make_read_only(&destination, *executable)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = copied {
+        let _ = remove_tree(&staging);
+        return Err(error);
+    }
+    match std::fs::rename(&staging, stable) {
+        Ok(()) => Ok(()),
+        Err(_) if stable.is_dir() => {
+            let _ = remove_tree(&staging);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = remove_tree(&staging);
+            Err(error).wrap_err_with(|| format!("failed to place {}", stable.display()))
+        }
+    }
+}
+
+#[cfg(unix)]
+fn is_executable(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable(_: &std::fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn make_read_only(path: &Path, executable: bool) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = if executable { 0o555 } else { 0o444 };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn make_read_only(path: &Path, _executable: bool) -> std::io::Result<()> {
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(path, permissions)
+}
+
+fn marker_path(root: &Path, digest: &str) -> PathBuf {
+    root.join(format!("{digest}.used"))
+}
+
+/// Note that a tree was used, at most once an hour.
+fn stamp_use(root: &Path, digest: &str) {
+    let marker = marker_path(root, digest);
+    let fresh = std::fs::metadata(&marker)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|since| since < USE_STAMP_INTERVAL);
+    if !fresh {
+        let _ = std::fs::write(&marker, b"");
+    }
+}
+
+/// What a collection of stable trees removed and left.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct PruneOutcome {
+    pub removed_directories: u64,
+    pub removed_bytes: u64,
+    pub remaining_directories: u64,
+    pub remaining_bytes: u64,
+}
+
+/// Remove trees nothing has used for `max_age`, and staging directories left
+/// by a copy that never finished.
+///
+/// A removed tree costs at most a rebuild: the next compilation that needs it
+/// finds the path in its dep-info missing, Cargo runs rustc again, and the
+/// shim copies the tree back before looking the compilation up. Nothing is
+/// keyed to the tree's presence, only to its contents.
+pub(crate) fn collect(
+    root: &Path,
+    max_age: Option<Duration>,
+    dry_run: bool,
+) -> Result<PruneOutcome> {
+    let mut outcome = PruneOutcome::default();
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(outcome),
+        Err(error) => {
+            return Err(error).wrap_err_with(|| format!("failed to read {}", root.display()));
+        }
+    };
+    let now = SystemTime::now();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        if name.starts_with(STAGING_PREFIX) {
+            let abandoned = age_of(&path, now).is_some_and(|age| age > STAGING_MAX_AGE);
+            if abandoned && !dry_run {
+                let _ = remove_tree(&path);
+            }
+            continue;
+        }
+        if !is_digest_name(&name) {
+            continue;
+        }
+        let bytes = tree_bytes(&path);
+        let age = age_of(&marker_path(root, &name), now).or_else(|| age_of(&path, now));
+        let expired = max_age.is_some_and(|max_age| age.is_some_and(|age| age > max_age));
+        if !expired {
+            outcome.remaining_directories += 1;
+            outcome.remaining_bytes = outcome.remaining_bytes.saturating_add(bytes);
+            continue;
+        }
+        if !dry_run {
+            let _ = std::fs::remove_file(marker_path(root, &name));
+            if let Err(error) = remove_tree(&path) {
+                log::warn!(
+                    "could not remove the generated source tree {}: {error}",
+                    path.display()
+                );
+                outcome.remaining_directories += 1;
+                outcome.remaining_bytes = outcome.remaining_bytes.saturating_add(bytes);
+                continue;
+            }
+        }
+        outcome.removed_directories += 1;
+        outcome.removed_bytes = outcome.removed_bytes.saturating_add(bytes);
+    }
+    Ok(outcome)
+}
+
+/// Bytes and count of stable trees, for reports.
+pub(crate) fn stats(root: &Path) -> PruneOutcome {
+    collect(root, None, true).unwrap_or_default()
+}
+
+fn is_digest_name(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn age_of(path: &Path, now: SystemTime) -> Option<Duration> {
+    let modified = std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()?;
+    now.duration_since(modified).ok()
+}
+
+/// Remove a tree whose files were made read-only. Directories stayed writable,
+/// which is all unlinking needs on Unix; Windows refuses to delete a read-only
+/// file, so the attribute comes off first there.
+fn remove_tree(path: &Path) -> std::io::Result<()> {
+    #[cfg(not(unix))]
+    {
+        let mut pending = vec![path.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory)?.flatten() {
+                let kind = entry.file_type()?;
+                if kind.is_dir() {
+                    pending.push(entry.path());
+                } else {
+                    let mut permissions = entry.metadata()?.permissions();
+                    permissions.set_readonly(false);
+                    std::fs::set_permissions(entry.path(), permissions)?;
+                }
+            }
+        }
+    }
+    std::fs::remove_dir_all(path)
+}
+
+fn tree_bytes(directory: &Path) -> u64 {
+    let mut total = 0;
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else {
+                total += metadata.len();
+            }
+        }
+    }
+    total
+}
+
+#[cfg(test)]
+#[path = "out_dir_tests.rs"]
+mod tests;

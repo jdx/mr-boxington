@@ -1719,6 +1719,10 @@ enum Generated {
     /// Keeps `OUT_DIR` in a string constant. That lands in the artifact itself,
     /// where no remapping reaches it.
     Text,
+    /// Includes generated code into which the build script wrote the
+    /// checkout's own path. The generated sources differ per checkout, so
+    /// nothing about them can be shared.
+    Divergent,
     /// A crate that includes generated code, and a second crate depending on
     /// it. The first is keyed to its checkout; the second is what the remapping
     /// is for.
@@ -2201,6 +2205,15 @@ fn write_generated_project(directory: &Path, generated: Generated) {
              pub fn value() -> u32 { VALUE }\n"
                 .to_string()
         }
+        Generated::Divergent => {
+            std::fs::write(
+                directory.join("build.rs"),
+                "use std::{env, fs, path::PathBuf};\n         fn main() {\n         \u{20}   let out = PathBuf::from(env::var(\"OUT_DIR\").unwrap());\n         \u{20}   fs::write(out.join(\"generated.rs\"), format!(\"pub const VALUE: u32 = 7;\\npub const HERE: &str = {:?};\\n\", env::var(\"CARGO_MANIFEST_DIR\").unwrap())).unwrap();\n         \u{20}   println!(\"cargo:rustc-cfg=generated\");\n         }\n",
+            )
+            .unwrap();
+            "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\npub fn value() -> u32 { VALUE }\n"
+                .to_string()
+        }
     };
     std::fs::write(directory.join("src/lib.rs"), lib).unwrap();
     generate_lockfile(directory);
@@ -2247,9 +2260,9 @@ fn write_dependent_generated_project(directory: &Path) {
     generate_lockfile(directory);
 }
 
-/// Turning the remapping off changes nothing for a compilation that only uses a
-/// build-script cfg, and leaves one that consumes `OUT_DIR` where it already
-/// is: keyed to its checkout either way.
+/// Turning sharing off changes nothing for a compilation that only uses a
+/// build-script cfg, and leaves one that consumes `OUT_DIR` with the value
+/// Cargo gave it: keyed to its checkout.
 #[test]
 fn out_dir_remapping_can_be_turned_off() {
     let disabled = [("MBX_SHARE_OUT_DIR", "0")];
@@ -2262,69 +2275,120 @@ fn out_dir_remapping_can_be_turned_off() {
     }
 }
 
-/// A compilation that reads `OUT_DIR` is keyed to the checkout it ran in,
-/// whether or not it keeps the path: the value reaches the key either way, and
-/// no claim is made that the artifact ignores it.
+/// A compilation that reads `OUT_DIR` shares between checkouts whose generated
+/// sources are the same bytes, whether or not it keeps the path.
 ///
-/// The pair is the test. The shape that only includes generated code used to be
-/// shared on the strength of finding no path in its outputs, which a crate that
-/// derives a value from the path defeats.
+/// Both checkouts hand rustc the same stable path, so a crate that keeps the
+/// value, or derives anything from it, embeds the same thing in both; no claim
+/// that the artifact ignores the path is needed, or made.
 #[test]
-fn a_compilation_that_reads_out_dir_is_keyed_to_its_checkout() {
+fn a_compilation_that_reads_out_dir_shares_between_checkouts_with_the_same_generated_sources() {
     for generated in [Generated::Include, Generated::Text] {
         assert!(
-            !two_checkouts_share(generated, &[]),
-            "a compilation that reads OUT_DIR was shared between checkouts"
+            two_checkouts_share(generated, &[]),
+            "a compilation reading identical generated sources was not shared"
         );
     }
 }
 
-/// Where the cost stops, and where it does not.
-///
-/// A registry or git dependency compiles with its working directory under
-/// `CARGO_HOME`, the same in every checkout, so recompiling one produces the
-/// same artifact and its dependents go on sharing: mbx's own graph gains
-/// exactly the three misses of the three crates that read `OUT_DIR`.
-///
-/// A workspace member compiles with its working directory in the checkout,
-/// which it records, so recompiling one produces a different artifact and
-/// everything above it misses as well. That is this fixture, and the cost is
-/// asserted rather than wished away.
+/// Generated sources that differ between checkouts are different inputs, and
+/// the compilation that reads them is keyed to its own.
 #[test]
-fn a_workspace_member_reading_out_dir_costs_its_dependents_too() {
-    assert!(!two_checkouts_share(Generated::Dependent, &[]));
+fn a_compilation_reading_divergent_generated_sources_is_not_shared() {
+    assert!(
+        !two_checkouts_share(Generated::Divergent, &[]),
+        "generated sources carrying the checkout path were shared"
+    );
 }
 
-/// Mapping the workspace root stops that cost at the crate that read the value.
-///
-/// The working directory is the only reason the rebuilt artifact differed, so
-/// removing it from what rustc records leaves the two checkouts producing the
-/// same bytes, and the crate above goes back to sharing. What the crate that
-/// read `OUT_DIR` does is unchanged: it is keyed to its checkout, and the pair
-/// below says so rather than reporting the dependent's hit as though the
-/// compilation had been shared.
+/// A workspace member that reads `OUT_DIR` is restored rather than rebuilt,
+/// so the crate above it consumes the same artifact in both checkouts and
+/// shares too. The pair is checked by crate: the fixture also compiles a build
+/// script, which shares either way and would hide a dependent still rebuilding
+/// behind the session total.
 #[test]
-fn mapping_the_workspace_root_shares_the_dependents_of_a_checkout_specific_crate() {
-    let mapped = [("MBX_SHARE_WORKSPACE_ROOT", "1")];
-    assert!(
-        !two_checkouts_share(Generated::Include, &mapped),
-        "a compilation that reads OUT_DIR was shared between checkouts"
+fn a_workspace_member_reading_out_dir_shares_with_its_dependents() {
+    let (store, _) = two_checkouts(Generated::Dependent, &[]);
+    let outcomes = second_build_outcomes(store.path());
+    assert_eq!(
+        outcomes.get("inner").map(String::as_str),
+        Some("hit"),
+        "the crate that read OUT_DIR recompiled: {outcomes:?}"
     );
-    // By crate rather than by the session total: the fixture also compiles a
-    // build script, whose own compilation reads nothing remapped and shares
-    // between these checkouts either way, so a total would report this as
-    // fixed while the dependent went on recompiling.
+    assert_eq!(
+        outcomes.get("outer").map(String::as_str),
+        Some("hit"),
+        "its dependent recompiled: {outcomes:?}"
+    );
+}
+
+/// Cargo's freshness check sees the stable tree as ordinary input files, so a
+/// checkout that restored a compilation reading it is fresh on the next build:
+/// nothing reaches the shim at all.
+#[test]
+fn a_restored_out_dir_reader_stays_fresh_for_cargo() {
+    let store = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_generated_project(first.path(), Generated::Text);
+    write_generated_project(second.path(), Generated::Text);
+    let settings = [
+        ("MBX_CACHE_LINKS", "0"),
+        ("MBX_BUILD_SCRIPT_EXECUTION", "0"),
+    ];
+    build_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+        &settings,
+    );
+    let (warm, _) = build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+        &settings,
+    );
+    assert!(
+        count(&warm, "hits") > 0,
+        "the second checkout should restore: {warm}"
+    );
+
+    let (again, stderr) = build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("again.json"),
+        &settings,
+    );
+
+    assert_eq!(
+        count(&again, "lookups"),
+        0,
+        "cargo should have found everything fresh: {again}\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Compiling"),
+        "cargo should have compiled nothing: {stderr}"
+    );
+}
+
+/// Mapping the workspace root still stops a checkout path recorded by rustc
+/// itself from reaching the artifact, which is what makes the rebuilt member
+/// match; with the generated sources stable as well, both crates share.
+#[test]
+fn mapping_the_workspace_root_keeps_the_dependents_of_an_out_dir_reader_sharing() {
+    let mapped = [("MBX_SHARE_WORKSPACE_ROOT", "1")];
     let (store, _) = two_checkouts(Generated::Dependent, &mapped);
     let outcomes = second_build_outcomes(store.path());
     assert_eq!(
         outcomes.get("outer").map(String::as_str),
         Some("hit"),
-        "the dependent of a checkout-specific crate still recompiled: {outcomes:?}"
+        "the dependent recompiled: {outcomes:?}"
     );
     assert_eq!(
         outcomes.get("inner").map(String::as_str),
-        Some("miss"),
-        "the crate that read OUT_DIR was shared between checkouts: {outcomes:?}"
+        Some("hit"),
+        "the crate that read OUT_DIR recompiled: {outcomes:?}"
     );
 }
 

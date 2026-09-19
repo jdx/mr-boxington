@@ -1367,3 +1367,37 @@ fn custom_target_resolution_follows_the_sysroot() {
         &args(&["--target=my-custom-target", &sysroot_flag, "src.rs"])
     ));
 }
+
+#[test]
+fn a_stable_out_dir_is_mapped_by_name_beneath_its_root() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("cache/out-dirs/v1");
+    let out_dir = root.join("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    let workspace = directory.path().join("src/project");
+    let mappings = path_mappings_with_env(&workspace, None, None, |name| match name {
+        "OUT_DIR" => Some(out_dir.as_os_str().to_owned()),
+        crate::out_dir::ROOT_ENV => Some(root.as_os_str().to_owned()),
+        _ => None,
+    });
+
+    assert!(
+        mappings
+            .iter()
+            .any(|mapping| mapping.placeholder == "out_dir" && mapping.root == out_dir),
+        "{mappings:?}"
+    );
+
+    // Cargo's own OUT_DIR, under the target directory, is not a root of its
+    // own: it normalizes under `${target}` as it always did.
+    let checkout_out_dir = workspace.join("target/debug/build/x/out");
+    let mappings = path_mappings_with_env(&workspace, None, None, |name| match name {
+        "OUT_DIR" => Some(checkout_out_dir.as_os_str().to_owned()),
+        crate::out_dir::ROOT_ENV => Some(root.as_os_str().to_owned()),
+        _ => None,
+    });
+    assert!(
+        !mappings
+            .iter()
+            .any(|mapping| mapping.placeholder == "out_dir")
+    );
+}

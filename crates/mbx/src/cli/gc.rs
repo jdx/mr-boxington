@@ -51,6 +51,7 @@ pub(super) fn run(
             }
         }
     };
+    let generated = collect_generated(config, retention.target_max_age, dry_run);
     let target_budget = target_budget(retention, max_bytes, incremental.remaining_bytes);
     let pruned = target::collect(
         &config.target.root,
@@ -86,7 +87,7 @@ pub(super) fn run(
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
-            let mut freed_bytes = incremental.removed_bytes;
+            let mut freed_bytes = incremental.removed_bytes + generated.removed_bytes;
             match pruned {
                 Ok(pruned) => {
                     // Credit what the targets gave back even though the store
@@ -103,6 +104,7 @@ pub(super) fn run(
             record_collection(&store, 0, freed_bytes, dry_run);
             if !json {
                 print_incremental_removals(&incremental, dry_run);
+                print_generated_removals(&generated, dry_run);
             }
             return Err(error);
         }
@@ -110,7 +112,9 @@ pub(super) fn run(
     record_collection(
         &store,
         outcome.removed_bytes,
-        pruned.as_ref().map_or(0, |pruned| pruned.removed_bytes) + incremental.removed_bytes,
+        pruned.as_ref().map_or(0, |pruned| pruned.removed_bytes)
+            + incremental.removed_bytes
+            + generated.removed_bytes,
         dry_run,
     );
     if json {
@@ -151,12 +155,54 @@ pub(super) fn run(
         // This collection is independent of the managed-target walk below,
         // so report it even if that walk failed.
         print_incremental_removals(&incremental, dry_run);
+        print_generated_removals(&generated, dry_run);
         let pruned = pruned?;
         if pruned.removed_views > 0 {
             println!("{}", target_removals(&pruned, dry_run));
         }
     }
     Ok(())
+}
+
+/// Collect the stable copies of build-script output nothing has used lately.
+///
+/// Aged like target directories: a copy is only ever reached through a
+/// compilation in some checkout, so what keeps a checkout's target also keeps
+/// what its compilations read. A failure is logged and counts as nothing
+/// freed; the trees are small beside what the rest of a sweep handles.
+fn collect_generated(
+    config: &Config,
+    max_age: Option<std::time::Duration>,
+    dry_run: bool,
+) -> crate::out_dir::PruneOutcome {
+    match crate::out_dir::collect(
+        &config.cache_dir.join(crate::out_dir::ROOT),
+        max_age,
+        dry_run,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            log::warn!("generated source trees were not collected: {error}");
+            crate::out_dir::PruneOutcome::default()
+        }
+    }
+}
+
+fn print_generated_removals(outcome: &crate::out_dir::PruneOutcome, dry_run: bool) {
+    if outcome.removed_directories > 0 {
+        println!("{}", generated_removals(outcome, dry_run));
+    }
+}
+
+/// One line describing the generated source trees a sweep freed.
+fn generated_removals(outcome: &crate::out_dir::PruneOutcome, dry_run: bool) -> String {
+    let verb = if dry_run { "would remove" } else { "removed" };
+    format!(
+        "{verb} {} generated source trees ({} logical); {} logical remain",
+        outcome.removed_directories,
+        ByteSize::b(outcome.removed_bytes).display().iec(),
+        ByteSize::b(outcome.remaining_bytes).display().iec(),
+    )
 }
 
 fn print_incremental_removals(outcome: &crate::incremental::PruneOutcome, dry_run: bool) {
@@ -327,6 +373,14 @@ pub(super) fn prune_targets(
             (0, remaining)
         }
     };
+    let generated = collect_generated(config, retention.target_max_age, false);
+    if generated.removed_directories > 0 {
+        crate::session::note(&format!(
+            "mbx[gc]: {}",
+            generated_removals(&generated, false)
+        ));
+    }
+    let incremental_bytes = incremental_bytes.saturating_add(generated.removed_bytes);
     let target_budget = target_budget(retention, store_reserve, incremental_remaining);
     match target::collect(
         &config.target.root,

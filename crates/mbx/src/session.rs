@@ -141,6 +141,8 @@ pub struct CacheSession {
     scheduler_env: Vec<(String, String)>,
     store: PathBuf,
     incremental_root: PathBuf,
+    /// Where the shim keeps content-addressed copies of build-script output.
+    out_dir_root: PathBuf,
     /// Active leases keep collection from deleting checkout-private state
     /// while this session's compiler processes may still be using it.
     incremental_leases: Mutex<Vec<crate::incremental::ActiveLease>>,
@@ -280,6 +282,7 @@ impl CacheSession {
             scheduler_env: crate::scheduler::session_environment_with_jobs(config, cargo_jobs),
             store,
             incremental_root: config.cache_dir.join("incremental"),
+            out_dir_root: config.cache_dir.join(crate::out_dir::ROOT),
             incremental_leases: Mutex::new(Vec::new()),
             ledger_dir: Mutex::new(None),
             ledger_stamp: Arc::new(Mutex::new(None)),
@@ -353,6 +356,13 @@ impl CacheSession {
         environment.insert(
             TARGET_DIR_ENV.into(),
             target_dir.to_string_lossy().into_owned(),
+        );
+        // A compilation that reads build-script output is handed a copy of it
+        // under the cache, named for its contents, so checkouts whose
+        // generated sources match hand rustc the same path.
+        environment.insert(
+            crate::out_dir::ROOT_ENV.into(),
+            self.out_dir_root.to_string_lossy().into_owned(),
         );
         // Always replace an inherited value. If recording this checkout fails,
         // the shim must use its target-local fallback rather than another

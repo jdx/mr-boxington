@@ -399,7 +399,7 @@ Logical CPUs to leave free for the rest of the machine.
 - **Default:** `true`
 - **Set with:** `MBX_SHARE_OUT_DIR`
 
-Remap `OUT_DIR` so rustc does not record it in the artifact, which can leave a rebuilt dependency byte-identical between checkouts so its dependents share. The compilation that read it stays checkout-specific either way, as does any artifact still carrying a checkout path.
+Give a compilation that reads `OUT_DIR` a copy of it under the cache, named for its contents, so checkouts whose generated sources match hand rustc the same path and share the compilation; the path is also remapped out of what rustc records.
 
 ### `share_workspace_root`
 
