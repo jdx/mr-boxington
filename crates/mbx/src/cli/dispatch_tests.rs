@@ -221,10 +221,21 @@ fn cli_exposes_its_usage_spec() {
     assert!(spec.contains("external_subcommand #true"));
     // Still declared, so it keeps working and stays out of help and
     // completions rather than being removed from under anyone using it.
-    assert!(spec.contains("cmd setup"));
+    let setup = spec
+        .lines()
+        .find(|line| line.starts_with("cmd setup"))
+        .expect("setup should be declared");
+    assert!(!setup.contains("hide="), "setup should be public: {setup}");
+    // The collector a build starts is a command like any other, so a stale
+    // completion or an old shim can still reach it; it is only kept out of
+    // help and completions because nobody types it.
+    let automatic = spec
+        .lines()
+        .find(|line| line.trim_start().starts_with("flag --automatic"))
+        .expect("the automatic sweep should be declared");
     assert!(
-        !spec.contains("hide=#true"),
-        "setup should be public: {spec}"
+        automatic.contains("hide=#true"),
+        "the automatic sweep should be hidden: {automatic}"
     );
     assert!(
         spec.contains("sigil=+"),

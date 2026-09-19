@@ -4,8 +4,25 @@ use super::cache::{
 use crate::config::{Config, RetentionSettings};
 use crate::{store, target};
 use bytesize::ByteSize;
-use eyre::Result;
-use std::path::Path;
+use eyre::{Context, Result};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+/// Where the collector a build started leaves what it freed, for the next
+/// build to say. Claimed by rename, so two builds finishing together cannot
+/// both report it.
+pub(super) const SWEEP_REPORT: &str = "gc/v1/last-sweep-report";
+
+/// The detached collector's stderr: warnings a sweep logs have no terminal
+/// to reach, and a sweep that never finished is diagnosed from here.
+const SWEEP_LOG: &str = "gc/v1/sweep.log";
+
+/// Held by a collector for as long as it sweeps. A build's due check is
+/// unlocked and a zero interval makes every build due, so without this two
+/// collectors could walk the same store at once and each report only its own
+/// half; an automatic collector that finds it held has nothing left to do, and
+/// an explicit `mbx gc` waits its turn.
+const COLLECTOR_LOCK: &str = "gc/v1/collector.lock";
 
 #[derive(usage::Args)]
 pub(super) struct GcArgs {
@@ -19,6 +36,10 @@ pub(super) struct GcArgs {
     /// Show what collection would remove without changing any files.
     #[usage(long)]
     pub(super) dry_run: bool,
+    /// Run the throttled sweep a build schedules, if one is due. Builds start
+    /// this in the background; it is not meant to be typed.
+    #[usage(long, hide = true)]
+    pub(super) automatic: bool,
 }
 
 pub(super) fn run(
@@ -29,6 +50,10 @@ pub(super) fn run(
     retention: &RetentionSettings,
 ) -> Result<()> {
     let store = config.store_dir();
+    let mut collector = collector_lock(&store)?;
+    if !dry_run {
+        collector.lock()?;
+    }
     // The collector below remains the authority for store errors. Estimating
     // a combined budget must not prevent independent target collection when
     // the action store is damaged.
@@ -224,8 +249,16 @@ pub(super) fn print_gc_store_outcome(outcome: &store::GcOutcome, dry_run: bool) 
 /// One line describing the target directories a sweep freed.
 pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool) -> String {
     let verb = if dry_run { "would remove" } else { "removed" };
+    let kept = if outcome.kept_active_views > 0 {
+        format!(
+            ", {} kept for builds that started meanwhile",
+            outcome.kept_active_views
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "{verb} {} target directories ({} logical, {} abandoned and {} live); {} logical remain",
+        "{verb} {} target directories ({} logical, {} abandoned and {} live{kept}); {} logical remain",
         outcome.removed_views,
         ByteSize::b(outcome.removed_bytes).display().iec(),
         outcome.removed_stale_views,
@@ -248,22 +281,32 @@ pub(super) fn evictions(outcome: &store::GcOutcome) -> String {
     )
 }
 
+/// What an automatic sweep freed, and the lines that say so.
+#[derive(Debug, Default)]
+pub(super) struct Sweep {
+    pub(super) delta: crate::savings::Delta,
+    /// One line per collection that removed something, without the `mbx[gc]`
+    /// prefix: a sweep that evicted nothing says nothing.
+    pub(super) lines: Vec<String>,
+}
+
 /// Keep the store inside its budget, at most once per configured interval.
 ///
-/// Reported like the cache summary beside it: a sweep that evicted nothing says
-/// nothing. A sweep that fails is logged and forgotten -- the build is already
-/// over, and its exit status is the build's answer, not the collector's. What it
-/// freed is returned so the lifetime totals can count it.
-pub(super) fn sweep_store(config: &Config, retention: &RetentionSettings) -> crate::savings::Delta {
-    let mut delta = crate::savings::Delta::default();
+/// A sweep that fails is logged and forgotten -- the build that scheduled it
+/// is already over, and its exit status is the build's answer, not the
+/// collector's. What it freed is returned so the lifetime totals can count it.
+pub(super) fn sweep_store(config: &Config, retention: &RetentionSettings) -> Sweep {
+    let mut sweep = Sweep::default();
     if !config.gc.auto {
-        return delta;
+        return sweep;
     }
     match store::claim_sweep(&config.store_dir(), config.gc.interval) {
         Ok(false) => {}
         Ok(true) => {
+            start_sweep_log(&config.store_dir());
             let pruned = prune_targets(config, retention, config.gc.max_bytes);
-            delta.freed_target_bytes = pruned.freed_bytes;
+            sweep.delta.freed_target_bytes = pruned.freed_bytes;
+            sweep.lines.extend(pruned.removals);
             let non_store_bytes = pruned.remaining_bytes.unwrap_or_else(|| {
                 let target_bytes =
                     target::stats(&config.target.root).map_or(0, |stats| stats.bytes);
@@ -278,21 +321,199 @@ pub(super) fn sweep_store(config: &Config, retention: &RetentionSettings) -> cra
                 Ok(outcome) => outcome,
                 Err(error) => {
                     log::warn!("the store was not swept: {error}");
-                    return delta;
+                    return sweep;
                 }
             };
-            delta.freed_store_bytes = outcome.removed_bytes;
+            sweep.delta.freed_store_bytes = outcome.removed_bytes;
             if outcome.removed_bytes > 0 {
-                crate::session::note(&format!("mbx[gc]: {}", evictions(&outcome)));
+                sweep.lines.push(evictions(&outcome));
             }
         }
         Err(error) => {
             log::warn!("the store was not swept: {error}");
-            delta.freed_target_bytes =
-                prune_targets(config, retention, config.gc.max_bytes).freed_bytes;
+            let pruned = prune_targets(config, retention, config.gc.max_bytes);
+            sweep.delta.freed_target_bytes = pruned.freed_bytes;
+            sweep.lines.extend(pruned.removals);
         }
     }
-    delta
+    sweep
+}
+
+/// Begin the sweep log again for the collector that claimed this sweep.
+///
+/// The parent opened it for appending so a speculative collector could not
+/// erase an earlier one's warnings; the one that swept owns it from here.
+fn start_sweep_log(store: &Path) {
+    if let Ok(log) = std::fs::OpenOptions::new()
+        .write(true)
+        .open(store.join(SWEEP_LOG))
+    {
+        let _ = log.set_len(0);
+    }
+}
+
+/// Start the sweep a finished build leaves behind, in a process of its own.
+///
+/// The walk of every managed target and the whole store is the slowest thing
+/// mbx does after a build, and on a machine with many checkouts it takes
+/// longer than the edit-loop build that happened to come due: measured at
+/// twelve seconds added to a two-second build. Nothing the build printed
+/// depends on it, so the build exits and the collector runs on without a
+/// terminal. What it frees is written for the next build to report, and the
+/// lifetime totals are updated by the collector itself.
+///
+/// The due check here is unlocked, so two builds finishing together may both
+/// start a collector; the claim inside the collector lets exactly one sweep.
+/// A collector that cannot be started sweeps in this process instead, as
+/// builds always did, so a machine where spawning fails is still collected.
+pub(super) fn schedule_sweep(config: &Config, retention: &RetentionSettings) {
+    if !config.gc.auto {
+        return;
+    }
+    let store = config.store_dir();
+    if !store::sweep_is_due(&store, config.gc.interval) {
+        return;
+    }
+    if let Err(error) = spawn_collector(config) {
+        log::debug!("the automatic sweep runs in the foreground: {error:#}");
+        if let Err(error) = run_automatic(config, retention) {
+            log::warn!("the store was not swept: {error:#}");
+        }
+    }
+}
+
+fn spawn_collector(config: &Config) -> Result<()> {
+    let executable = std::env::current_exe().wrap_err("failed to locate mbx")?;
+    // The collector reads its configuration for itself, so the cache it was
+    // started for is named absolutely: a relative `MBX_CACHE_DIR` would resolve
+    // against the collector's working directory, and that is not the
+    // checkout. The checkout is left as the working directory of nothing here,
+    // because a process holding it open would stop it being renamed or
+    // removed on Windows.
+    let cache_dir =
+        std::path::absolute(&config.cache_dir).wrap_err("failed to resolve the cache directory")?;
+    let store = cache_dir.join("actions");
+    let log_path = store.join(SWEEP_LOG);
+    std::fs::create_dir_all(log_path.parent().expect("the sweep log has a parent"))?;
+    // Appended, not truncated: a collector that loses the claim must not erase
+    // what the one that swept had to say. The winner starts the log afresh.
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .wrap_err_with(|| format!("failed to open {}", log_path.display()))?;
+    let mut command = Command::new(executable);
+    command
+        .args(["gc", "--automatic"])
+        .current_dir(&cache_dir)
+        .env("MBX_CACHE_DIR", &cache_dir)
+        // The build may have arrived through the Cargo shim. The collector is
+        // an mbx command, and must not be dispatched as Cargo.
+        .env_remove("MBX_CARGO_SHIM_MODE")
+        .env_remove("MBX_CARGO_SHIM_PATH")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log);
+    detach(&mut command);
+    command.spawn().wrap_err("failed to start the collector")?;
+    Ok(())
+}
+
+pub(super) fn collector_lock(store: &Path) -> Result<fslock::LockFile> {
+    let path = store.join(COLLECTOR_LOCK);
+    std::fs::create_dir_all(path.parent().expect("the collector lock has a parent"))?;
+    Ok(fslock::LockFile::open(&path)?)
+}
+
+/// Keep the collector out of the terminal's process group, so the interrupt
+/// that stops the next build does not stop a sweep halfway through.
+#[cfg(unix)]
+fn detach(command: &mut Command) {
+    use std::os::unix::process::CommandExt as _;
+    command.process_group(0);
+}
+
+#[cfg(windows)]
+fn detach(command: &mut Command) {
+    use std::os::windows::process::CommandExt as _;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+}
+
+/// The sweep a build scheduled: `mbx gc --automatic`.
+///
+/// Claims the throttle stamp like the in-process sweep always did, counts what
+/// it freed toward the lifetime totals, and leaves the description for the
+/// next build to print. Its own stderr is the sweep log.
+pub(super) fn run_automatic(config: &Config, retention: &RetentionSettings) -> Result<()> {
+    let store = config.store_dir();
+    let mut collector = collector_lock(&store)?;
+    if !collector.try_lock()? {
+        log::debug!("another collector is sweeping the store");
+        return Ok(());
+    }
+    let sweep = sweep_store(config, retention);
+    log::debug!(
+        "the automatic sweep freed {} target bytes and {} store bytes: {:?}",
+        sweep.delta.freed_target_bytes,
+        sweep.delta.freed_store_bytes,
+        sweep.lines
+    );
+    let mut delta = sweep.delta;
+    delta.auto_pruned_bytes = delta
+        .freed_target_bytes
+        .saturating_add(delta.freed_store_bytes);
+    if delta != crate::savings::Delta::default() {
+        crate::savings::record_quietly(&store, &delta);
+    }
+    if sweep.lines.is_empty() {
+        return Ok(());
+    }
+    // Appended: a report nobody has printed yet is not this sweep's to
+    // replace, and the next build says both.
+    let report = sweep.lines.join("\n") + "\n";
+    let path = store.join(SWEEP_REPORT);
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, report.as_bytes()))
+        .wrap_err_with(|| format!("failed to write {}", path.display()))
+}
+
+/// What the last background sweep freed, said once.
+///
+/// The report is claimed by renaming it away before it is read, so of two
+/// builds finishing at the same moment, the one whose rename succeeds prints
+/// it and the other finds nothing. The collector lock is held for the read,
+/// and is what a running collector holds while it appends.
+pub(super) fn take_sweep_report(store: &Path) -> Vec<String> {
+    // A collector appends while it holds the lock. Reading under it would
+    // catch a report half written; a held lock means the report keeps until
+    // the next build, which is when the collector would have been done anyway.
+    let Ok(mut collector) = collector_lock(store) else {
+        return Vec::new();
+    };
+    if !collector.try_lock().unwrap_or(false) {
+        return Vec::new();
+    }
+    let path = store.join(SWEEP_REPORT);
+    let claimed = claimed_report_path(&path);
+    if std::fs::rename(&path, &claimed).is_err() {
+        return Vec::new();
+    }
+    let report = std::fs::read_to_string(&claimed).unwrap_or_default();
+    let _ = std::fs::remove_file(&claimed);
+    report
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn claimed_report_path(report: &Path) -> PathBuf {
+    report.with_extension(format!("claimed-{}", std::process::id()))
 }
 
 /// What one target collection left behind, and what it reclaimed.
@@ -301,6 +522,8 @@ pub(super) struct PruneReport {
     /// knows to measure rather than assume.
     remaining_bytes: Option<u64>,
     freed_bytes: u64,
+    /// The line describing removed target directories, when any were.
+    removals: Option<String>,
 }
 
 /// Collect target views as the other half of a due automatic sweep.
@@ -335,12 +558,16 @@ pub(super) fn prune_targets(
         false,
     ) {
         Ok(pruned) => {
-            if pruned.removed_views > 0 {
-                crate::session::note(&format!("mbx[gc]: {}", target_removals(&pruned, false)));
-            }
+            log::debug!(
+                "target collection removed {} directories ({} abandoned) and kept {}",
+                pruned.removed_views,
+                pruned.removed_stale_views,
+                pruned.remaining_views
+            );
             PruneReport {
                 remaining_bytes: Some(pruned.remaining_bytes.saturating_add(incremental_remaining)),
                 freed_bytes: pruned.removed_bytes.saturating_add(incremental_bytes),
+                removals: (pruned.removed_views > 0).then(|| target_removals(&pruned, false)),
             }
         }
         Err(error) => {
@@ -348,6 +575,7 @@ pub(super) fn prune_targets(
             PruneReport {
                 remaining_bytes: None,
                 freed_bytes: incremental_bytes,
+                removals: None,
             }
         }
     }

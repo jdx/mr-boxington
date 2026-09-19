@@ -1933,15 +1933,30 @@ pub fn claim_sweep(store: &Path, interval: Duration) -> Result<bool> {
     lock.lock()?;
 
     let stamp = store.join(SWEEP_STAMP);
-    if let Ok(metadata) = std::fs::metadata(&stamp)
-        && let Ok(modified) = metadata.modified()
-        && let Ok(since) = modified.elapsed()
-        && since < interval
-    {
+    if sweep_stamp_is_fresh(&stamp, interval) {
         return Ok(false);
     }
     write_atomic(&stamp, b"")?;
     Ok(true)
+}
+
+/// Whether [`claim_sweep`] would stamp a sweep now.
+///
+/// A read of the stamp, no lock and no write: this answers a build that only
+/// wants to know whether to start a collector, and may be answered yes to two
+/// builds at once. The claim itself stays inside the collector, which is where
+/// the lock and the stamp are, so of two collectors started together, one
+/// sweeps and the other finds the stamp fresh and exits.
+pub fn sweep_is_due(store: &Path, interval: Duration) -> bool {
+    !sweep_stamp_is_fresh(&store.join(SWEEP_STAMP), interval)
+}
+
+fn sweep_stamp_is_fresh(stamp: &Path, interval: Duration) -> bool {
+    std::fs::metadata(stamp)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|since| since < interval)
 }
 
 /// What the checkout registry says about the identities in this store.

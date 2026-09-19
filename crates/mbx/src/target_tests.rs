@@ -868,3 +868,215 @@ fn counts_nothing_before_anything_is_placed() {
         PruneOutcome::default()
     );
 }
+
+/// Collection runs after the build that scheduled it has returned, so a
+/// build can start in a checkout that collection had already picked.
+#[test]
+fn a_view_a_build_is_compiling_in_is_kept() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let old_workspace = checkout(directory.path(), "old");
+    let new_workspace = checkout(directory.path(), "new");
+    let old = place(
+        &config,
+        &old_workspace,
+        &old_workspace.join("target"),
+        false,
+    )
+    .unwrap();
+    let new = place(
+        &config,
+        &new_workspace,
+        &new_workspace.join("target"),
+        false,
+    )
+    .unwrap();
+    std::fs::write(old.join("artifact"), vec![0_u8; 5]).unwrap();
+    std::fs::write(new.join("artifact"), vec![0_u8; 10]).unwrap();
+    let old_record = view_record_path(&config.target.root, &old_workspace);
+    let mut record: ViewRecord =
+        serde_json::from_slice(&std::fs::read(&old_record).unwrap()).unwrap();
+    record.updated_secs = 1;
+    std::fs::write(&old_record, serde_json::to_vec(&record).unwrap()).unwrap();
+    // Cargo's lock for the profile it is building.
+    std::fs::create_dir_all(old.join("debug")).unwrap();
+    let mut cargo = fslock::LockFile::open(&old.join("debug/.cargo-lock")).unwrap();
+    assert!(cargo.try_lock().unwrap());
+
+    let outcome = collect(&config.target.root, Some(10), None, false).unwrap();
+
+    assert_eq!(outcome.kept_active_views, 1);
+    assert_eq!(outcome.removed_views, 0);
+    assert!(old.exists(), "a directory being built in is not removed");
+    assert!(new.exists());
+
+    // Once the build is over the next sweep removes it as before. The handle
+    // goes with the lock: Windows will not rename a directory while a file
+    // inside it is open, which is the same answer as a held lock.
+    drop(cargo);
+    let outcome = collect(&config.target.root, Some(10), None, false).unwrap();
+
+    assert_eq!(outcome.removed_live_views, 1);
+    assert!(!old.exists());
+}
+
+#[test]
+fn a_view_claimed_since_the_selection_is_kept() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let old_workspace = checkout(directory.path(), "old");
+    let new_workspace = checkout(directory.path(), "new");
+    let old = place(
+        &config,
+        &old_workspace,
+        &old_workspace.join("target"),
+        false,
+    )
+    .unwrap();
+    place(
+        &config,
+        &new_workspace,
+        &new_workspace.join("target"),
+        false,
+    )
+    .unwrap();
+    std::fs::write(old.join("artifact"), vec![0_u8; 5]).unwrap();
+    let old_record = view_record_path(&config.target.root, &old_workspace);
+    let mut record: ViewRecord =
+        serde_json::from_slice(&std::fs::read(&old_record).unwrap()).unwrap();
+    // Expired at selection time, and refreshed by a build before removal: the
+    // record collection reads back is newer than the one it selected on.
+    record.updated_secs = 1;
+    std::fs::write(&old_record, serde_json::to_vec(&record).unwrap()).unwrap();
+    let refreshed = old_record.clone();
+    let outcome = collect_with(
+        &config.target.root,
+        None,
+        Some(Duration::from_secs(10)),
+        false,
+        move || {
+            let mut record: ViewRecord =
+                serde_json::from_slice(&std::fs::read(&refreshed).unwrap()).unwrap();
+            record.updated_secs = 2;
+            std::fs::write(&refreshed, serde_json::to_vec(&record).unwrap()).unwrap();
+        },
+        || {},
+    )
+    .unwrap();
+
+    assert_eq!(outcome.kept_active_views, 1);
+    assert!(old.exists());
+}
+
+#[test]
+fn a_view_a_dead_collector_moved_aside_is_finished_off() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "kept");
+    let kept = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    let aside = views_root(&config.target.root).join("abc123.removing-4242");
+    std::fs::create_dir_all(aside.join("debug")).unwrap();
+    std::fs::write(aside.join("debug/artifact"), b"x").unwrap();
+
+    let outcome = collect(&config.target.root, None, None, false).unwrap();
+
+    assert!(!aside.exists(), "the leftover is removed");
+    assert!(kept.exists());
+    assert_eq!(outcome.removed_views, 0, "and is not counted as a view");
+}
+
+/// A checkout deleted after its last build and cloned again at the same path
+/// keeps the same view, so the clone's first build lands in the directory an
+/// earlier selection marked abandoned.
+#[test]
+fn a_checkout_recreated_since_the_selection_is_kept() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "gone");
+    let view = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    std::fs::write(view.join("artifact"), vec![0_u8; 5]).unwrap();
+    std::fs::remove_dir_all(&workspace).unwrap();
+
+    let rebuilt = view.clone();
+    let outcome = collect_with(
+        &config.target.root,
+        None,
+        None,
+        false,
+        move || {
+            // The clone's build: Cargo holds its lock in the same view.
+            std::fs::create_dir_all(rebuilt.join("debug")).unwrap();
+            let mut cargo = fslock::LockFile::open(&rebuilt.join("debug/.cargo-lock")).unwrap();
+            assert!(cargo.try_lock().unwrap());
+            std::mem::forget(cargo);
+        },
+        || {},
+    )
+    .unwrap();
+
+    assert_eq!(outcome.kept_active_views, 1);
+    assert_eq!(outcome.removed_views, 0);
+    assert!(view.exists());
+}
+
+/// Records carry whole seconds, so a build that refreshed the record in the
+/// same second as the selection cannot be told apart by comparing them; a
+/// record refreshed within the last couple of seconds is a build starting.
+#[test]
+fn a_view_refreshed_within_the_last_seconds_is_kept() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "fresh");
+    let view = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    let record_path = view_record_path(&config.target.root, &workspace);
+    let mut record: ViewRecord =
+        serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    // One second old: expired against a zero age, and just refreshed.
+    record.updated_secs -= 1;
+    std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    let outcome = collect(&config.target.root, None, Some(Duration::ZERO), false).unwrap();
+
+    assert_eq!(outcome.kept_active_views, 1);
+    assert!(view.exists());
+}
+
+/// A build that places the checkout after its old directory was moved aside
+/// writes a new record and a new directory. The record it wrote is not the one
+/// collection selected on, and stays.
+#[test]
+fn a_record_rewritten_during_the_removal_is_kept() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "gone");
+    let view = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    std::fs::write(view.join("artifact"), vec![0_u8; 5]).unwrap();
+    std::fs::remove_dir_all(&workspace).unwrap();
+    let record_path = view_record_path(&config.target.root, &workspace);
+    let mut record: ViewRecord =
+        serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    record.updated_secs = 1;
+    std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    let rebuilt = view.clone();
+    let rewritten = record_path.clone();
+    let root = config.target.root.clone();
+    let outcome = collect_with(
+        &config.target.root,
+        None,
+        None,
+        false,
+        || {},
+        move || {
+            // The clone's placement: a fresh record, then a fresh directory.
+            record_view(&root, &workspace).unwrap();
+            std::fs::create_dir_all(&rebuilt).unwrap();
+            assert!(rewritten.exists());
+        },
+    )
+    .unwrap();
+
+    assert_eq!(outcome.removed_views, 1, "the old directory still went");
+    assert!(record_path.exists(), "the record the build wrote stays");
+    assert!(view.exists(), "and so does the directory it made");
+}

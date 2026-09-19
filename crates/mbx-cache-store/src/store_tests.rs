@@ -2320,3 +2320,22 @@ fn collection_leaves_the_lock_of_a_stream_that_is_still_there() {
     assert!(paths.events.exists());
     assert!(paths.lock.exists());
 }
+
+#[test]
+fn a_due_sweep_is_reported_without_being_claimed() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    let interval = Duration::from_secs(3600);
+
+    assert!(sweep_is_due(store, interval), "nothing has swept yet");
+    assert!(
+        sweep_is_due(store, interval),
+        "asking did not stamp the store"
+    );
+    assert!(claim_sweep(store, interval).unwrap());
+    assert!(
+        !sweep_is_due(store, interval),
+        "the claim is what stamps it"
+    );
+    assert!(sweep_is_due(store, Duration::ZERO));
+}

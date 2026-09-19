@@ -493,6 +493,7 @@ fn document(project: &Path, store: &Path, report: &Path) -> serde_json::Value {
         .args(["doc", "--offline", "--no-deps"])
         .env("MBX_CACHE_DIR", store)
         .env("MBX_STATS_REPORT", report)
+        .env("MBX_GC_AUTO", "0")
         .env_remove("MBX_SOCKET")
         // This suite may itself be run through mbx. The fixture needs a fresh
         // session rather than chaining the outer test build's compiler shim.
@@ -536,6 +537,10 @@ fn cargo_with(
         .args(arguments)
         .env("MBX_CACHE_DIR", store)
         .env("MBX_STATS_REPORT", report)
+        // The automatic sweep runs in a process the build leaves behind, and a
+        // fresh store is always due one. It would race whatever the test does
+        // next to the store, so only the tests about it turn it on.
+        .env("MBX_GC_AUTO", "0")
         // Cargo's own environment for this test would otherwise redirect the
         // fixture's output into this crate's target directory.
         .env_remove("CARGO_TARGET_DIR")
@@ -2530,18 +2535,64 @@ fn a_build_sweeps_the_store_to_its_budget() {
         &reports.path().join("cold.json"),
         // A one-byte budget swept every build: nothing this build stored can
         // stay, so the sweep is unambiguous.
-        &[("MBX_GC_MAX_SIZE", "1"), ("MBX_GC_INTERVAL", "0")],
+        &[
+            ("MBX_GC_AUTO", "1"),
+            ("MBX_GC_MAX_SIZE", "1"),
+            ("MBX_GC_INTERVAL", "0"),
+        ],
     );
 
+    // The sweep runs after the build has exited, in a process of its own, so
+    // the build that scheduled it has nothing to say about it yet.
     assert!(
-        stderr.contains("mbx[gc]: evicted"),
-        "the sweep should say what it evicted: {stderr}"
+        !stderr.contains("mbx[gc]:"),
+        "the build should not wait for the sweep: {stderr}"
     );
+    wait_for_sweep_report(store.path());
     let stats = mbx(store.path(), &["cache", "stats"]);
     assert!(
         stats.contains("objects: 0"),
         "the store should be swept empty: {stats}"
     );
+
+    // Collection is off for the build that reports, so what it says can only
+    // be the sweep that already happened.
+    let (_, stderr) = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("warm.json"),
+        &[("MBX_GC_AUTO", "0")],
+    );
+
+    assert!(
+        stderr.contains("mbx[gc]: evicted"),
+        "the next build should say what the sweep evicted: {stderr}"
+    );
+    assert!(
+        !store
+            .path()
+            .join("actions/gc/v1/last-sweep-report")
+            .exists(),
+        "the report should be said once"
+    );
+}
+
+/// Wait for the collector a build started to leave its report.
+///
+/// The collector is detached from the build, so a test that wants to observe
+/// what it did has to wait for it. Only a sweep that removed something leaves
+/// a report; tests that call this made sure theirs does.
+fn wait_for_sweep_report(store: &Path) {
+    let report = store.join("actions/gc/v1/last-sweep-report");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !report.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the background sweep should finish; its log says: {}",
+            std::fs::read_to_string(store.join("actions/gc/v1/sweep.log")).unwrap_or_default()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 #[test]
@@ -2565,6 +2616,10 @@ fn automatic_sweeps_can_be_turned_off() {
     assert!(
         !stderr.contains("mbx[gc]:"),
         "no sweep should run: {stderr}"
+    );
+    assert!(
+        !store.path().join("actions/gc/v1/sweep.log").exists(),
+        "no collector should have been started"
     );
     let stats = mbx(store.path(), &["cache", "stats"]);
     assert!(
@@ -2972,17 +3027,31 @@ mod target_views {
         let cas = store.path().join("actions/cas/v1");
         std::fs::remove_dir_all(&cas).unwrap();
         std::fs::write(&cas, b"not a directory").unwrap();
-        let (_, stderr) = build_with(
+        build_with(
             current.path(),
             store.path(),
             &reports.path().join("current.json"),
-            &[("MBX_TARGET_VIEWS", "1"), ("MBX_GC_INTERVAL", "0")],
+            &[
+                ("MBX_TARGET_VIEWS", "1"),
+                ("MBX_GC_AUTO", "1"),
+                ("MBX_GC_INTERVAL", "0"),
+            ],
         );
 
-        assert!(stderr.contains("the store was not swept"), "{stderr}");
+        // Target collection removes the gone checkout's directory, and that
+        // is what the sweep reports even though the store half failed.
+        wait_for_sweep_report(store.path());
+        let log = std::fs::read_to_string(store.path().join("actions/gc/v1/sweep.log")).unwrap();
+        assert!(log.contains("the store was not swept"), "{log}");
         assert!(
             !directory.exists(),
             "target collection should still run when store collection fails"
+        );
+        let report =
+            std::fs::read_to_string(store.path().join("actions/gc/v1/last-sweep-report")).unwrap();
+        assert!(
+            report.contains("removed 1 target directories"),
+            "the next build should hear about the target: {report}"
         );
     }
 
