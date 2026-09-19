@@ -557,7 +557,7 @@ fn diagnostic_and_action_events_are_emitted_as_one_pair() {
 
     let events = observer.events.lock().unwrap();
     assert_eq!(events.len(), 16);
-    for pair in events.chunks_exact(2) {
+    for pair in events.as_chunks::<2>().0 {
         assert!(matches!(
             pair,
             [
