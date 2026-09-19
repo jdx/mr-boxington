@@ -276,6 +276,10 @@ fn a_tree_a_compilation_holds_a_lease_on_is_not_collected() {
         .set_times(std::fs::FileTimes::new().set_modified(long_ago))
         .unwrap();
 
+    let projected = collect(&root, None, Some(Duration::ZERO), true).unwrap();
+    assert_eq!(projected.removed_directories, 0, "a dry run keeps it too");
+    assert_eq!(projected.remaining_directories, 1);
+
     let outcome = collect(&root, None, Some(Duration::ZERO), false).unwrap();
 
     assert_eq!(outcome.removed_directories, 0, "a leased tree is kept");
@@ -352,7 +356,7 @@ fn a_bypassed_compilation_gets_cargos_out_dir_back_and_holds_no_lease() {
     assert!(ORIGINAL.lock().unwrap().is_none());
     let _registrar = registrar(&root).unwrap();
     assert!(
-        !leased(&root, &digest).unwrap(),
+        !leased(&root, &digest, true).unwrap(),
         "the lease went with the value"
     );
     unsafe { std::env::remove_var("OUT_DIR") };

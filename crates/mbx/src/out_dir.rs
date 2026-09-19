@@ -245,8 +245,8 @@ fn lease(root: &Path, digest: &str) -> Result<()> {
 
 /// Whether a compilation holds a lease on the tree. Called under the
 /// registrar, so the answer holds until it is released. Lease files nobody
-/// holds are removed along the way.
-fn leased(root: &Path, digest: &str) -> std::io::Result<bool> {
+/// holds are removed along the way when `prune` is set.
+fn leased(root: &Path, digest: &str, prune: bool) -> std::io::Result<bool> {
     let leases = leases_dir(root, digest);
     let entries = match std::fs::read_dir(&leases) {
         Ok(entries) => entries,
@@ -260,7 +260,9 @@ fn leased(root: &Path, digest: &str) -> std::io::Result<bool> {
             return Ok(true);
         }
         drop(lock);
-        let _ = std::fs::remove_file(entry.path());
+        if prune {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
     Ok(false)
 }
@@ -457,7 +459,10 @@ fn stamp_use(root: &Path, digest: &str) {
         .and_then(|modified| modified.elapsed().ok())
         .is_some_and(|since| since < USE_STAMP_INTERVAL);
     if !fresh {
-        let _ = std::fs::write(&marker, b"");
+        // The time is set rather than left to the write: Windows does not
+        // move a file's time for a write of nothing.
+        let _ =
+            std::fs::File::create(&marker).and_then(|file| file.set_modified(SystemTime::now()));
     }
 }
 
@@ -549,15 +554,16 @@ pub(crate) fn collect(
         if !expired && !over_budget {
             continue;
         }
+        // Under the registrar from the lease check to the removal, so a
+        // compilation cannot take a lease on a tree halfway gone: it waits,
+        // finds the tree missing, and copies it again. A tree whose leases
+        // cannot be read is treated as leased. A dry run asks the same
+        // question, so what it projects is what a sweep would do.
+        let _registrar = registrar(root)?;
+        if leased(root, name, !dry_run).unwrap_or(true) {
+            continue;
+        }
         if !dry_run {
-            // Under the registrar from the lease check to the removal, so a
-            // compilation cannot take a lease on a tree halfway gone: it
-            // waits, finds the tree missing, and copies it again. A tree
-            // whose leases cannot be read is treated as leased.
-            let _registrar = registrar(root)?;
-            if leased(root, name).unwrap_or(true) {
-                continue;
-            }
             let _ = std::fs::remove_file(marker_path(root, name));
             if let Err(error) = remove_tree(path) {
                 log::warn!(
@@ -584,7 +590,7 @@ pub(crate) fn collect(
                 continue;
             }
             let _registrar = registrar(root)?;
-            if !leased(root, &digest).unwrap_or(true) {
+            if !leased(root, &digest, true).unwrap_or(true) {
                 let _ = std::fs::remove_dir_all(leases_dir(root, &digest));
             }
         }
