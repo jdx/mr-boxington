@@ -17,22 +17,18 @@ pub(crate) struct SharingEstimate {
 
 impl SharingEstimate {
     pub(crate) fn read(store: &Path, shared_store_bytes: u64) -> Result<Self> {
-        Ok(Self::from_projects(
-            &store::projects(store)?,
+        Ok(Self::from_live_projects(
+            &store::live_project_cache_bytes(store)?,
             shared_store_bytes,
         ))
     }
 
-    fn from_projects(projects: &[store::ProjectUsage], shared_store_bytes: u64) -> Self {
-        let live = projects
+    fn from_live_projects(live_cache_bytes: &[u64], shared_store_bytes: u64) -> Self {
+        let independent_cache_bytes = live_cache_bytes
             .iter()
-            .filter(|project| project.live)
-            .collect::<Vec<_>>();
-        let independent_cache_bytes = live.iter().fold(0u64, |total, project| {
-            total.saturating_add(project.action_bytes)
-        });
+            .fold(0u64, |total, bytes| total.saturating_add(*bytes));
         Self {
-            live_workspaces: live.len() as u64,
+            live_workspaces: live_cache_bytes.len() as u64,
             independent_cache_bytes,
             shared_store_bytes,
             // The store also contains unclaimed objects. Subtracting all of it
@@ -259,35 +255,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sharing_is_a_lower_bound_and_excludes_stale_workspaces_and_targets() {
-        let projects = vec![
-            store::ProjectUsage {
-                workspace_root: "first".into(),
-                identities: 1,
-                action_bytes: 100,
-                target_bytes: 500,
-                live: true,
-            },
-            store::ProjectUsage {
-                workspace_root: "second".into(),
-                identities: 1,
-                action_bytes: 100,
-                target_bytes: 500,
-                live: true,
-            },
-            store::ProjectUsage {
-                workspace_root: "stale".into(),
-                identities: 1,
-                action_bytes: 1000,
-                target_bytes: 500,
-                live: false,
-            },
-        ];
-        let sharing = SharingEstimate::from_projects(&projects, 120);
+    fn sharing_is_a_lower_bound() {
+        let sharing = SharingEstimate::from_live_projects(&[100, 100], 120);
         assert_eq!(sharing.live_workspaces, 2);
+        assert_eq!(sharing.independent_cache_bytes, 200);
         assert_eq!(sharing.duplicate_cache_bytes_avoided_lower_bound, 80);
         assert_eq!(
-            SharingEstimate::from_projects(&projects, 300)
+            SharingEstimate::from_live_projects(&[100, 100], 300)
                 .duplicate_cache_bytes_avoided_lower_bound,
             0
         );

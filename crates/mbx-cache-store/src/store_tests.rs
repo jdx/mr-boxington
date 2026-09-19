@@ -276,6 +276,123 @@ fn attributes_reachable_cache_bytes_to_a_workspace() {
     assert!(projects[0].live);
 }
 
+/// Publish an action whose output tree nests `deep` one directory down beside
+/// `shared` at the top.
+fn store_nested_result(store: &Path, shared: &CacheDigest, deep: &CacheDigest) -> CacheDigest {
+    let file = |digest: &CacheDigest, name: &str| CacheFileNode {
+        digest: digest.clone(),
+        executable: false,
+        mode: 0o644,
+        name: name.into(),
+    };
+    let child = store_object(
+        store,
+        &serde_json::to_vec(&CacheDirectory {
+            directories: Vec::new(),
+            files: vec![file(deep, "deep")],
+            symlinks: Vec::new(),
+            version: 1,
+        })
+        .unwrap(),
+    );
+    let output_root = store_object(
+        store,
+        &serde_json::to_vec(&CacheDirectory {
+            directories: vec![mbx_cache_core::CacheDirectoryNode {
+                digest: child,
+                mode: 0o755,
+                name: "nested".into(),
+            }],
+            files: vec![file(shared, "shared")],
+            symlinks: Vec::new(),
+            version: 1,
+        })
+        .unwrap(),
+    );
+    let action = store_object(store, b"nested");
+    LocalActionCache::new(store)
+        .store(&RemoteActionResult {
+            version: 1,
+            action: action.clone(),
+            metadata: None,
+            output_root: Some(output_root),
+        })
+        .unwrap();
+    action
+}
+
+#[test]
+fn a_workspace_counts_each_reachable_object_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    let whole = store.join("whole");
+    let partial = store.join("partial");
+    std::fs::create_dir_all(&whole).unwrap();
+    std::fs::create_dir_all(&partial).unwrap();
+    let shared = store_object(store, &[1; 1_000]);
+    let deep = store_object(store, &[2; 10_000]);
+    let nested = store_nested_result(store, &shared, &deep);
+    let flat = store_result(store, "flat", std::slice::from_ref(&shared));
+    // Two identities in one workspace reach `shared` through both actions.
+    record_build(store, &"a".repeat(64), &whole, &[nested]);
+    record_build(store, &"b".repeat(64), &whole, std::slice::from_ref(&flat));
+    record_build(
+        store,
+        &"c".repeat(64),
+        &partial,
+        std::slice::from_ref(&flat),
+    );
+    let cas = LocalCas::new(store);
+    let size = |path: PathBuf| std::fs::metadata(path).unwrap().len();
+    let flat_output_root = LocalActionCache::new(store)
+        .find(&flat)
+        .unwrap()
+        .unwrap()
+        .output_root
+        .unwrap();
+    let flat_bytes = size(LocalActionCache::new(store).path_for(&flat).unwrap())
+        + [&flat, &flat_output_root, &shared]
+            .into_iter()
+            .map(|digest| size(cas.path_for(digest).unwrap()))
+            .sum::<u64>();
+
+    let projects = projects(store).unwrap();
+    let bytes = |workspace: &Path| {
+        projects
+            .iter()
+            .find(|project| project.workspace_root == workspace)
+            .unwrap()
+            .action_bytes
+    };
+
+    assert_eq!(bytes(&whole), stats(store).unwrap().total_bytes());
+    assert_eq!(bytes(&partial), flat_bytes);
+}
+
+#[test]
+fn live_cache_bytes_leave_out_workspaces_that_are_gone() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    let live = store.join("live");
+    let gone = store.join("gone");
+    std::fs::create_dir_all(&live).unwrap();
+    std::fs::create_dir_all(&gone).unwrap();
+    let output = store_object(store, b"artifact");
+    let action = store_result(store, "compile", &[output]);
+    record_build(store, &"a".repeat(64), &live, std::slice::from_ref(&action));
+    record_build(store, &"b".repeat(64), &gone, &[action]);
+    std::fs::remove_dir(&gone).unwrap();
+
+    let live_bytes = projects(store)
+        .unwrap()
+        .into_iter()
+        .find(|project| project.workspace_root == live)
+        .unwrap()
+        .action_bytes;
+
+    assert_eq!(live_project_cache_bytes(store).unwrap(), vec![live_bytes]);
+}
+
 #[test]
 fn project_usage_excludes_expired_claims() {
     let directory = tempfile::tempdir().unwrap();

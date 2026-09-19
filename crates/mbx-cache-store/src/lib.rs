@@ -17,8 +17,9 @@ use mbx_cache_core::{
     TaskActionManifest, is_task_identity, merge_task_action_predictions, task_manifest_actions,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1236,6 +1237,23 @@ fn checkout_target_bytes(sizes: &mut BTreeMap<PathBuf, u64>, record: &CheckoutRe
 /// makes each row answer "how much keeps this workspace warm" without
 /// pretending shared storage can be divided exactly between projects.
 pub fn projects(store: &Path) -> Result<Vec<ProjectUsage>> {
+    project_usage(store, true)
+}
+
+/// The reusable cache bytes of each live workspace, as [`projects`] counts
+/// them.
+///
+/// Sizing target directories is most of what [`projects`] costs on a machine
+/// with many checkouts, and an estimate of cache sharing never looks at them.
+pub fn live_project_cache_bytes(store: &Path) -> Result<Vec<u64>> {
+    Ok(project_usage(store, false)?
+        .into_iter()
+        .filter(|project| project.live)
+        .map(|project| project.action_bytes)
+        .collect())
+}
+
+fn project_usage(store: &Path, size_targets: bool) -> Result<Vec<ProjectUsage>> {
     let mut projects: BTreeMap<PathBuf, (BTreeSet<String>, bool, u64)> = BTreeMap::new();
     let mut target_sizes = BTreeMap::new();
     let root = store.join(CHECKOUTS_DIR);
@@ -1253,27 +1271,24 @@ pub fn projects(store: &Path) -> Result<Vec<ProjectUsage>> {
                 project.0.insert(identity.clone());
                 project.1 = true;
             }
-            project.2 = project
-                .2
-                .max(checkout_target_bytes(&mut target_sizes, &record));
-        }
-    }
-    let action_cache = mbx_cache_core::LocalActionCache::new(store);
-    let mut usages = Vec::new();
-    for (workspace_root, (identities, live, target_bytes)) in projects {
-        let mut paths = rooted_objects(store, &identities)?;
-        for identity in &identities {
-            for action in task_manifest_actions(store, identity).unwrap_or_default() {
-                if let Ok(path) = action_cache.path_for(&action) {
-                    paths.insert(path);
-                }
+            if size_targets {
+                project.2 = project
+                    .2
+                    .max(checkout_target_bytes(&mut target_sizes, &record));
             }
         }
-        let action_bytes = paths
-            .iter()
-            .filter_map(|path| std::fs::metadata(path).ok())
-            .map(|metadata| metadata.len())
-            .sum();
+    }
+    let live = projects
+        .values()
+        .flat_map(|(identities, _, _)| identities.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let mut reachability = Reachability::new(store);
+    for_each_manifest(store, &live, |identity, actions| {
+        reachability.record(identity, &actions);
+    });
+    let mut usages = Vec::new();
+    for (workspace_root, (identities, live, target_bytes)) in projects {
+        let action_bytes = reachability.bytes(&identities);
         usages.push(ProjectUsage {
             workspace_root,
             identities: identities.len() as u64,
@@ -1290,6 +1305,215 @@ pub fn projects(store: &Path) -> Result<Vec<ProjectUsage>> {
             .then_with(|| left.workspace_root.cmp(&right.workspace_root))
     });
     Ok(usages)
+}
+
+/// Hand each identity's recorded actions to `consume` as its manifest is
+/// parsed.
+///
+/// Manifests are the one large input: a busy checkout's runs to tens of
+/// megabytes of JSON, and parsing hundreds of them one after another is most
+/// of what sizing every workspace costs. They are parsed in parallel but
+/// consumed one at a time through a short queue, so only a few parsed
+/// manifests are ever held at once rather than all of them.
+fn for_each_manifest(
+    store: &Path,
+    identities: &BTreeSet<String>,
+    mut consume: impl FnMut(&str, Vec<CacheDigest>),
+) {
+    const MAX_WORKERS: usize = 4;
+    let identities = identities.iter().collect::<Vec<_>>();
+    let workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(MAX_WORKERS)
+        .min(identities.len());
+    let next = AtomicUsize::new(0);
+    let (sender, receiver) = std::sync::mpsc::sync_channel(workers);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let sender = sender.clone();
+            let (identities, next) = (&identities, &next);
+            scope.spawn(move || {
+                while let Some(identity) = identities.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    // One manifest this build cannot read is not worth
+                    // abandoning the report over. It reaches nothing, which
+                    // can only understate sharing.
+                    let actions = task_manifest_actions(store, identity).unwrap_or_else(|error| {
+                        log::debug!("could not read the manifest for {identity}: {error}");
+                        Vec::new()
+                    });
+                    if sender.send((*identity, actions)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(sender);
+        for (identity, actions) in receiver {
+            consume(identity, actions);
+        }
+    });
+}
+
+/// The store paths each identity can reach, resolved once for every workspace.
+///
+/// Workspaces share identities, identities share most of their actions, and
+/// actions share output trees. Answering each workspace from scratch reread
+/// the same manifests, results, and trees, and stat-ed the same objects, once
+/// per workspace, which on a machine with a couple of hundred checkouts was
+/// most of the half minute `mbx stats` took. Here every file is read and
+/// stat-ed at most once, and a workspace's total is a union of indices already
+/// in memory.
+///
+/// What is reachable matches [`rooted_objects`] plus the action-result records
+/// themselves, and every read is as tolerant as it is there.
+struct Reachability {
+    store: PathBuf,
+    cas: LocalCas,
+    action_cache: mbx_cache_core::LocalActionCache,
+    indices: HashMap<PathBuf, usize>,
+    /// The size of each indexed path, or zero if it no longer exists.
+    sizes: Vec<u64>,
+    identities: HashMap<String, Rc<[Rc<[usize]>]>>,
+    actions: HashMap<CacheDigest, Rc<[usize]>>,
+    directories: HashMap<CacheDigest, Option<Rc<[CacheDigest]>>>,
+    /// Paths each directory names directly, filled alongside `directories`.
+    directory_paths: HashMap<CacheDigest, Rc<[usize]>>,
+    /// The workspace number that last counted each path.
+    counted: Vec<usize>,
+    workspaces: usize,
+}
+
+impl Reachability {
+    fn new(store: &Path) -> Self {
+        Self {
+            store: store.to_path_buf(),
+            cas: LocalCas::new(store),
+            action_cache: mbx_cache_core::LocalActionCache::new(store),
+            indices: HashMap::new(),
+            sizes: Vec::new(),
+            identities: HashMap::new(),
+            actions: HashMap::new(),
+            directories: HashMap::new(),
+            directory_paths: HashMap::new(),
+            counted: Vec::new(),
+            workspaces: 0,
+        }
+    }
+
+    /// Bytes reachable from any of `identities`, each path counted once.
+    ///
+    /// An identity that was never recorded reaches nothing.
+    fn bytes(&mut self, identities: &BTreeSet<String>) -> u64 {
+        let reachable = identities
+            .iter()
+            .filter_map(|identity| self.identities.get(identity).cloned())
+            .collect::<Vec<_>>();
+        self.workspaces += 1;
+        self.counted.resize(self.sizes.len(), 0);
+        let mut bytes = 0_u64;
+        for index in reachable
+            .iter()
+            .flat_map(|actions| actions.iter())
+            .flat_map(|paths| paths.iter())
+        {
+            if self.counted[*index] != self.workspaces {
+                self.counted[*index] = self.workspaces;
+                bytes = bytes.saturating_add(self.sizes[*index]);
+            }
+        }
+        bytes
+    }
+
+    /// Resolve what one identity's recorded actions reach.
+    fn record(&mut self, identity: &str, actions: &[CacheDigest]) {
+        let actions = actions
+            .iter()
+            .map(|action| self.action(action))
+            .collect::<Rc<[_]>>();
+        self.identities.insert(identity.to_string(), actions);
+    }
+
+    fn action(&mut self, action: &CacheDigest) -> Rc<[usize]> {
+        if let Some(paths) = self.actions.get(action) {
+            return paths.clone();
+        }
+        let mut paths = Vec::new();
+        if let Ok(path) = self.action_cache.path_for(action) {
+            paths.push(self.index(path));
+        }
+        if let Some(result) = read_action_result(&self.store, action) {
+            self.push_digest(&mut paths, &result.action);
+            if let Some(metadata) = &result.metadata {
+                self.push_digest(&mut paths, metadata);
+                if let Some(rustc) = read_rustc_metadata(&self.cas, metadata) {
+                    self.push_digest(&mut paths, &rustc.stdout);
+                    self.push_digest(&mut paths, &rustc.stderr);
+                }
+            }
+            if let Some(output_root) = &result.output_root {
+                self.push_digest(&mut paths, output_root);
+                let mut pending = vec![output_root.clone()];
+                let mut visited = HashSet::new();
+                while let Some(digest) = pending.pop() {
+                    if !visited.insert(digest.clone()) {
+                        continue;
+                    }
+                    let Some(children) = self.directory(&digest) else {
+                        continue;
+                    };
+                    paths.extend(self.directory_paths[&digest].iter().copied());
+                    pending.extend(children.iter().cloned());
+                }
+            }
+        }
+        paths.sort_unstable();
+        paths.dedup();
+        let paths = Rc::<[usize]>::from(paths);
+        self.actions.insert(action.clone(), paths.clone());
+        paths
+    }
+
+    /// The child directories of a tree blob, recording the paths it names.
+    fn directory(&mut self, digest: &CacheDigest) -> Option<Rc<[CacheDigest]>> {
+        if let Some(children) = self.directories.get(digest) {
+            return children.clone();
+        }
+        let children = read_directory(&self.cas, digest).map(|directory| {
+            let mut paths = Vec::new();
+            for file in &directory.files {
+                self.push_digest(&mut paths, &file.digest);
+            }
+            for child in &directory.directories {
+                self.push_digest(&mut paths, &child.digest);
+            }
+            self.directory_paths.insert(digest.clone(), Rc::from(paths));
+            directory
+                .directories
+                .into_iter()
+                .map(|child| child.digest)
+                .collect::<Rc<[_]>>()
+        });
+        self.directories.insert(digest.clone(), children.clone());
+        children
+    }
+
+    fn push_digest(&mut self, paths: &mut Vec<usize>, digest: &CacheDigest) {
+        if let Ok(path) = self.cas.path_for(digest) {
+            paths.push(self.index(path));
+        }
+    }
+
+    fn index(&mut self, path: PathBuf) -> usize {
+        if let Some(index) = self.indices.get(&path) {
+            return *index;
+        }
+        let size = std::fs::metadata(&path).map_or(0, |metadata| metadata.len());
+        let index = self.sizes.len();
+        self.sizes.push(size);
+        self.indices.insert(path, index);
+        index
+    }
 }
 
 /// Return the largest blobs and action-result records in descending order.
