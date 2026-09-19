@@ -126,11 +126,13 @@ mbx explain --last  # explain the last recorded build
 mbx cache stats     # inspect storage
 mbx gc --dry-run    # preview collection
 mbx clean          # remove this workspace's managed target
+mbx adopt -r ~/src  # move existing target directories under the managed root
 ```
 
 On a filesystem that supports reflinks, restored outputs share data blocks
 with the store until modified. Elsewhere, mbx copies bytes. An existing real
-`target/` is only replaced after you accept a prompt.
+`target/` is moved under the managed root only after you accept a prompt, or
+when you run `mbx adopt`; its outputs are kept either way.
 [Understand managed targets →](https://mr-boxington.jdx.dev/managed-targets)
 
 ## Find your next step

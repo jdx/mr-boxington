@@ -60,25 +60,67 @@ scales with the destination disk unless you set it explicitly.
 
 ## Existing target directories
 
-When an interactive mbx command finds an existing real `target/`, it offers to
-remove the old outputs and replace the directory with a managed link:
+A checkout that already has a real `target/` keeps its outputs when mbx takes
+it over. mbx renames the directory into the managed root and leaves the usual
+link at `target`. Cargo keeps addressing every artifact through that link, so
+a directory mbx has been building into stays fresh. Cargo keys the artifacts
+of a build that ran through mbx differently from those of a plain Cargo build,
+so outputs that never went through mbx are compiled once more by the first mbx
+build, adopted or not.
+
+Adopt one checkout, or search a directory tree for checkouts:
+
+```sh
+mbx adopt                            # the current checkout
+mbx adopt ~/src/project              # one checkout
+mbx adopt --recursive ~/src          # every checkout under a directory
+mbx adopt --recursive --dry-run ~/src
+```
+
+Each adopted checkout is reported with the logical size of the outputs it
+brought along, and a run over several checkouts ends with a total:
+
+```text
+adopted /home/me/src/project/target (2.4 GiB logical)
+adopted /home/me/src/other/target (912.0 MiB logical)
+adopted 2 target directories (3.3 GiB logical)
+```
+
+A recursive search looks for directories holding both `Cargo.toml` and a real
+`target/`. It does not enter hidden directories, target directories, or
+symbolic links. A checkout is left alone, with the reason printed, when:
+
+- `--target-dir`, `CARGO_TARGET_DIR`, or Cargo's `build.target-dir` names the
+  target directory;
+- it is a workspace member, whose outputs live in the workspace root's
+  `target/`;
+- managed targets are turned off for it;
+- its `target/` is not on the same filesystem as the managed root. A rename
+  cannot cross filesystems, and mbx does not copy target directories. Set
+  `target.root` to a location on the same disk, or remove the directory and let
+  the next build restore what the cache holds.
+
+An interactive mbx command that finds an existing real `target/` offers the
+same move:
 
 ```text
 Use a managed target directory?
-mbx can remove /path/to/project/target and replace it with a managed target that is pruned after this checkout is deleted.
+mbx can move /path/to/project/target under its managed root and leave a link in its place. The outputs are kept, and the directory is pruned after this checkout is deleted.
 ```
 
-“Keep it” is selected by default. Declining leaves every output untouched and
-the Cargo command continues normally. Non-interactive runs never prompt or
-remove the directory.
+“Move target/” is selected by default, since nothing is lost. When the
+directory cannot be moved because the managed root is on another filesystem,
+the prompt offers to remove it instead, with “Keep it” selected by default.
+Declining leaves every output untouched and the Cargo command continues
+normally. Non-interactive runs never prompt, move, or remove the directory.
 
-After acceptance, mbx temporarily moves the old directory aside. It removes
-those outputs only after the managed link and its collection record both
-succeed, then reports how much space the old outputs occupied. If placement
-fails, mbx restores the original directory.
+The directory is moved aside inside the checkout first, and put back if the
+managed link or its collection record cannot be created. Removal, when that is
+what was offered, happens only after both succeed, and mbx reports how much
+space the old outputs occupied.
 
-mbx does not offer removal for an explicitly configured target directory or a
-symlink it does not own.
+mbx does not offer to move or remove an explicitly configured target directory
+or a symlink it does not own.
 
 ## Collection
 
@@ -143,6 +185,7 @@ stop creating managed targets, see
 | `mbx gc --dry-run` | Preview collection under the configured budgets |
 | `mbx gc` | Collect eligible targets, cached objects, and learned incremental state |
 | `mbx clean` | Remove this workspace's managed target, link, and learned incremental state |
+| `mbx adopt [--recursive] [PATH]...` | Move existing real `target/` directories under the managed root, keeping their outputs |
 | `mbx cache remove /path/to/workspace` | Remove the target and incremental state, then forget that workspace's cache claims |
 
 `mbx clean` also accepts a workspace path. It keeps shared cached objects and

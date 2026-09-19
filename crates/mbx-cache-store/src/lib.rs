@@ -2068,6 +2068,18 @@ pub fn checkout_is_live(workspace_root: &Path) -> bool {
     checkout_is_live_on(parent, workspace_root)
 }
 
+/// Whether two existing paths sit on the same filesystem, so a rename can
+/// carry a directory from one to the other.
+///
+/// A path that cannot be inspected answers `false`: a move that cannot be
+/// checked is not one to attempt.
+pub fn same_filesystem_paths(a: &Path, b: &Path) -> bool {
+    let (Ok(a_metadata), Ok(b_metadata)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    same_filesystem(a, &a_metadata, b, &b_metadata)
+}
+
 #[cfg(unix)]
 fn same_filesystem(
     _a_path: &Path,

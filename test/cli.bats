@@ -274,3 +274,80 @@ JSON
   assert_output --partial '"automatically_pruned_bytes": 1073741824'
   assert_output --partial '"requested_removal_bytes": 1073741824'
 }
+
+@test "adopt moves an existing target directory under the managed root" {
+  cargo init --lib --vcs none adopted-project
+  mkdir -p adopted-project/target/debug
+  printf 'old output' >adopted-project/target/debug/artifact
+
+  run "$MBX_BIN" adopt adopted-project
+
+  assert_success
+  assert_output --partial "adopted $(pwd -P)/adopted-project/target"
+  assert_link_exists adopted-project/target
+  assert_file_exists adopted-project/target/debug/artifact
+  [[ "$(readlink adopted-project/target)" == "$MBX_CACHE_DIR/targets/v1/"* ]]
+  run "$MBX_BIN" cache stats
+  assert_success
+  assert_output --partial "target directories: 1"
+}
+
+@test "adopt --recursive finds every checkout and --dry-run moves nothing" {
+  cargo init --lib --vcs none projects/one
+  cargo init --lib --vcs none projects/two
+  mkdir -p projects/one/target/debug projects/two/target/debug
+  printf 'one' >projects/one/target/debug/artifact
+  printf 'two' >projects/two/target/debug/artifact
+
+  run "$MBX_BIN" adopt --recursive --dry-run projects
+
+  assert_success
+  assert_output --partial "would adopt $(pwd -P)/projects/one/target"
+  assert_output --partial "would adopt $(pwd -P)/projects/two/target"
+  assert_output --partial "would adopt 2 target directories"
+  [[ ! -L projects/one/target && -d projects/one/target ]]
+
+  run "$MBX_BIN" adopt -r projects
+
+  assert_success
+  assert_output --partial "adopted 2 target directories"
+  assert_link_exists projects/one/target
+  assert_link_exists projects/two/target
+  assert_file_exists projects/one/target/debug/artifact
+  assert_file_exists projects/two/target/debug/artifact
+}
+
+@test "adopt leaves a configured target directory alone" {
+  cargo init --lib --vcs none configured-project
+  mkdir -p configured-project/.cargo configured-project/target
+  printf '[build]\ntarget-dir = "target"\n' >configured-project/.cargo/config.toml
+
+  run "$MBX_BIN" adopt configured-project
+
+  assert_success
+  assert_output --partial "left $(pwd -P)/configured-project/target alone"
+  [[ ! -L configured-project/target && -d configured-project/target ]]
+}
+
+@test "an adopted target directory keeps its build fresh" {
+  cargo init --lib --vcs none fresh-project
+  cd fresh-project
+  # Non-interactive, so the real directory is built into rather than offered
+  # for adoption.
+  mkdir target
+  run "$MBX_BIN" build
+  assert_success
+  assert_output --partial "Compiling"
+  [[ ! -L target ]]
+
+  run "$MBX_BIN" adopt
+
+  assert_success
+  assert_link_exists target
+
+  run "$MBX_BIN" build
+
+  assert_success
+  refute_output --partial "Compiling"
+  assert_output --partial "Finished"
+}

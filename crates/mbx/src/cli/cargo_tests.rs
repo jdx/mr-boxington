@@ -422,10 +422,38 @@ fn accepting_the_target_prompt_requests_migration_without_removing_outputs() {
         target_dir_requested: false,
     };
 
-    let accepted = prompt_to_manage_existing_target_with(&config, &roots, |_| Ok(true)).unwrap();
+    let accepted = prompt_to_manage_existing_target_with(&config, &roots, |_, _| Ok(true)).unwrap();
 
-    assert!(accepted);
+    assert_eq!(accepted, Some(ExistingTarget::Adopt));
     assert!(target_dir.join("artifact").is_file());
+}
+
+#[test]
+fn the_target_prompt_offers_to_move_a_directory_the_managed_root_can_hold() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("project");
+    let target_dir = workspace.join("target");
+    std::fs::create_dir_all(&target_dir).unwrap();
+    let config = managed_target_config(directory.path());
+    let roots = Roots {
+        workspace_root: workspace,
+        target_dir: target_dir.clone(),
+        build_dir: None,
+        target_dir_requested: false,
+    };
+    let mut offered = None;
+
+    let accepted = prompt_to_manage_existing_target_with(&config, &roots, |asked, offer| {
+        assert_eq!(asked, target_dir);
+        offered = Some(offer);
+        Ok(false)
+    })
+    .unwrap();
+
+    // The temporary directory holds both the checkout and the managed root,
+    // so a rename between them is possible and that is what is offered.
+    assert_eq!(offered, Some(ExistingTarget::Adopt));
+    assert_eq!(accepted, None);
 }
 
 #[test]
@@ -443,8 +471,9 @@ fn declining_the_target_prompt_preserves_outputs() {
         target_dir_requested: false,
     };
 
-    let accepted = prompt_to_manage_existing_target_with(&config, &roots, |_| Ok(false)).unwrap();
+    let accepted =
+        prompt_to_manage_existing_target_with(&config, &roots, |_, _| Ok(false)).unwrap();
 
-    assert!(!accepted);
+    assert_eq!(accepted, None);
     assert!(target_dir.join("artifact").is_file());
 }

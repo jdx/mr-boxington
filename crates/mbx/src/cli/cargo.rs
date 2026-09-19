@@ -179,7 +179,7 @@ fn cargo_with_settings_bypass_log_and_roots(
             "CARGO_TARGET_DIR or build.target-dir",
         )?;
     }
-    let migrate_existing = prompt_to_manage_existing_target(config, &roots, arguments)?;
+    let existing_target = prompt_to_manage_existing_target(config, &roots, arguments)?;
     let default_target = roots.workspace_root.join("target");
     let placing_editor = roots.target_dir_requested
         && roots.target_dir == roots.workspace_root.join(super::RUST_ANALYZER_TARGET_DIR);
@@ -193,7 +193,7 @@ fn cargo_with_settings_bypass_log_and_roots(
             roots.target_dir_requested,
         )
     };
-    if migrate_existing || placement_candidate {
+    if existing_target.is_some() || placement_candidate {
         crate::storage::require_local(
             &config.target.root,
             "managed target directory",
@@ -208,22 +208,41 @@ fn cargo_with_settings_bypass_log_and_roots(
     // Placed before the session starts, because the target directory is what
     // the shim maps out of its cache keys and it has to be the one cargo will
     // actually write to.
-    let (placement, removed_target_bytes) = if migrate_existing {
-        let outcome = target::migrate_existing(
-            config,
-            &roots.workspace_root,
-            &roots.target_dir,
-            roots.target_dir_requested,
-        )?;
-        (
-            TargetViewPlacement {
-                directory: outcome.managed,
-                touch_path: roots.target_dir.clone(),
-            },
-            outcome.removed_bytes,
-        )
-    } else {
-        (place_target_view(config, &roots), None)
+    let (placement, removed_target_bytes, adopted_target_bytes) = match existing_target {
+        Some(ExistingTarget::Adopt) => {
+            let outcome = target::adopt_existing(
+                config,
+                &roots.workspace_root,
+                &roots.target_dir,
+                roots.target_dir_requested,
+            )?;
+            let adopted = outcome.managed.is_some().then_some(outcome.adopted_bytes);
+            (
+                TargetViewPlacement {
+                    directory: outcome.managed,
+                    touch_path: roots.target_dir.clone(),
+                },
+                None,
+                adopted,
+            )
+        }
+        Some(ExistingTarget::Remove) => {
+            let outcome = target::migrate_existing(
+                config,
+                &roots.workspace_root,
+                &roots.target_dir,
+                roots.target_dir_requested,
+            )?;
+            (
+                TargetViewPlacement {
+                    directory: outcome.managed,
+                    touch_path: roots.target_dir.clone(),
+                },
+                outcome.removed_bytes,
+                None,
+            )
+        }
+        None => (place_target_view(config, &roots), None, None),
     };
     crate::storage::require_local(
         &roots.target_dir,
@@ -238,6 +257,12 @@ fn cargo_with_settings_bypass_log_and_roots(
     if let Some(bytes) = removed_target_bytes {
         crate::session::note(&format!(
             "mbx[gc]: removed the existing target/ directory ({} logical)",
+            ByteSize::b(bytes).display().iec()
+        ));
+    }
+    if let Some(bytes) = adopted_target_bytes {
+        crate::session::note(&format!(
+            "mbx[cache]: moved the existing target/ directory under the managed root ({} logical)",
             ByteSize::b(bytes).display().iec()
         ));
     }
@@ -589,7 +614,17 @@ pub(super) fn join_clauses(clauses: &[String]) -> String {
     }
 }
 
-/// Offer to replace an existing default target directory with a managed one.
+/// What an interactive run may do with an existing default target directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExistingTarget {
+    /// Rename the directory under the managed root and keep its outputs.
+    Adopt,
+    /// Delete the outputs and start a managed directory in their place. Only
+    /// offered when the directory cannot be renamed into the managed root.
+    Remove,
+}
+
+/// Offer to bring an existing default target directory under management.
 ///
 /// A non-interactive run must never wait for input. Refusing or cancelling the
 /// prompt leaves cargo's directory alone and the build continues normally.
@@ -597,23 +632,39 @@ pub(super) fn prompt_to_manage_existing_target(
     config: &Config,
     roots: &Roots,
     arguments: &[String],
-) -> Result<bool> {
+) -> Result<Option<ExistingTarget>> {
     if cargo_help_requested(arguments)
         || !std::io::stdin().is_terminal()
         || !std::io::stderr().is_terminal()
     {
-        return Ok(false);
+        return Ok(None);
     }
-    prompt_to_manage_existing_target_with(config, roots, |directory| {
-        let description = format!(
-            "mbx can remove {} and replace it with a managed target that is pruned after this checkout is deleted.",
-            directory.display()
-        );
+    prompt_to_manage_existing_target_with(config, roots, |directory, offer| {
+        // Moving loses nothing, so it is the answer a hurried Enter gets.
+        // Removal deletes outputs, so it stays opt-in.
+        let (description, affirmative, selected) = match offer {
+            ExistingTarget::Adopt => (
+                format!(
+                    "mbx can move {} under its managed root and leave a link in its place. The outputs are kept, and the directory is pruned after this checkout is deleted.",
+                    directory.display()
+                ),
+                "Move target/",
+                true,
+            ),
+            ExistingTarget::Remove => (
+                format!(
+                    "mbx can remove {} and replace it with a managed target that is pruned after this checkout is deleted. It cannot be moved there: the managed root is on another filesystem.",
+                    directory.display()
+                ),
+                "Remove target/",
+                false,
+            ),
+        };
         match demand::Confirm::new("Use a managed target directory?")
             .description(&description)
-            .affirmative("Remove target/")
+            .affirmative(affirmative)
             .negative("Keep it")
-            .selected(false)
+            .selected(selected)
             .run()
         {
             Ok(answer) => Ok(answer),
@@ -630,20 +681,28 @@ pub(super) fn cargo_help_requested(arguments: &[String]) -> bool {
             .any(|argument| argument == "--help" || argument == "-h")
 }
 
+/// Decide what to offer for an existing target directory, then ask.
+///
+/// The prompt receives the offer so its wording can say what accepting does.
 pub(super) fn prompt_to_manage_existing_target_with(
     config: &Config,
     roots: &Roots,
-    prompt: impl FnOnce(&Path) -> Result<bool>,
-) -> Result<bool> {
+    prompt: impl FnOnce(&Path, ExistingTarget) -> Result<bool>,
+) -> Result<Option<ExistingTarget>> {
     if !target::can_remove_existing(
         config,
         &roots.workspace_root,
         &roots.target_dir,
         roots.target_dir_requested,
     ) {
-        return Ok(false);
+        return Ok(None);
     }
-    prompt(&roots.target_dir)
+    let offer = if target::can_move_existing(config, &roots.workspace_root, &roots.target_dir) {
+        ExistingTarget::Adopt
+    } else {
+        ExistingTarget::Remove
+    };
+    Ok(prompt(&roots.target_dir, offer)?.then_some(offer))
 }
 
 pub(super) fn run_cargo(

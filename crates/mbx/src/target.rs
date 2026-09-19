@@ -72,6 +72,16 @@ pub struct MigrationOutcome {
     pub removed_bytes: Option<u64>,
 }
 
+/// What adopting an existing target directory produced.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AdoptionOutcome {
+    /// The managed directory now holding the outputs; `None` when placement
+    /// declined and the directory was put back where it was.
+    pub managed: Option<PathBuf>,
+    /// Logical bytes the adopted outputs occupy.
+    pub adopted_bytes: u64,
+}
+
 /// Remove the managed target view owned by exactly one workspace.
 pub fn remove_workspace(root: &Path, workspace_root: &Path) -> Result<Option<u64>> {
     let record_path = view_record_path(root, workspace_root);
@@ -190,25 +200,7 @@ fn migrate_existing_with(
     }
 
     let managed = view_dir(&config.target.root, workspace_root);
-    let restore = (|| -> Result<()> {
-        match std::fs::symlink_metadata(target_dir) {
-            Ok(metadata)
-                if metadata.file_type().is_symlink()
-                    && std::fs::read_link(target_dir).is_ok_and(|link| link == managed) =>
-            {
-                remove_link(target_dir).wrap_err("could not remove the failed managed link")?;
-            }
-            Ok(_) => eyre::bail!(
-                "{} was occupied while restoring the old target directory",
-                target_dir.display()
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).wrap_err("could not inspect the failed migration"),
-        }
-        std::fs::rename(&backup, target_dir)
-            .wrap_err_with(|| format!("could not restore {}", target_dir.display()))
-    })();
-    if let Err(error) = restore {
+    if let Err(error) = restore_backup(target_dir, &managed, &backup) {
         let retained = backup_root.keep().join("target");
         return Err(error).wrap_err_with(|| {
             format!(
@@ -218,6 +210,169 @@ fn migrate_existing_with(
         });
     }
     Ok(MigrationOutcome::default())
+}
+
+/// Whether an existing target directory can be renamed into the managed root.
+///
+/// A rename cannot cross filesystems, and copying a target directory is not
+/// worth the disk and time it would take, so a checkout on a different volume
+/// from the managed root is offered removal instead of adoption. The nearest
+/// existing ancestor of the view stands in for a root not created yet.
+pub fn can_move_existing(config: &Config, workspace_root: &Path, target_dir: &Path) -> bool {
+    let managed = view_dir(&config.target.root, workspace_root);
+    managed
+        .ancestors()
+        .find(|ancestor| ancestor.exists())
+        .is_some_and(|existing| crate::store::same_filesystem_paths(target_dir, existing))
+}
+
+/// Move a confirmed existing target directory under the managed root, keeping
+/// its outputs.
+///
+/// The directory is first renamed into a temporary sibling, the link and
+/// record are placed exactly as for a checkout that had no target directory,
+/// and the sibling is then renamed into the empty view. Cargo keeps addressing
+/// the outputs through the `target` link, so nothing recompiles. If placement
+/// declines or the final move fails, the directory goes back where it was.
+pub fn adopt_existing(
+    config: &Config,
+    workspace_root: &Path,
+    target_dir: &Path,
+    requested: bool,
+) -> Result<AdoptionOutcome> {
+    adopt_existing_with(config, workspace_root, target_dir, requested, || {
+        place(config, workspace_root, target_dir, requested)
+    })
+}
+
+fn adopt_existing_with(
+    config: &Config,
+    workspace_root: &Path,
+    target_dir: &Path,
+    requested: bool,
+    place_target: impl FnOnce() -> Option<PathBuf>,
+) -> Result<AdoptionOutcome> {
+    if !std::fs::symlink_metadata(target_dir).is_ok_and(|metadata| metadata.is_dir()) {
+        eyre::bail!(
+            "{} is no longer a real target directory, so it was not adopted",
+            target_dir.display()
+        );
+    }
+    if !can_remove_existing(config, workspace_root, target_dir, requested) {
+        eyre::bail!("{} is not eligible for adoption", target_dir.display());
+    }
+    if !can_move_existing(config, workspace_root, target_dir) {
+        eyre::bail!(
+            "{} is not on the same filesystem as the managed target root {}, so it was not adopted",
+            target_dir.display(),
+            config.target.root.display()
+        );
+    }
+
+    let backup_root = tempfile::Builder::new()
+        .prefix(".mbx-target-backup-")
+        .tempdir_in(workspace_root)
+        .wrap_err("could not create a temporary target backup")?;
+    let backup = backup_root.path().join("target");
+    std::fs::rename(target_dir, &backup)
+        .wrap_err_with(|| format!("could not temporarily move {}", target_dir.display()))?;
+    let adopted_bytes = tree_bytes(&backup);
+
+    let managed = view_dir(&config.target.root, workspace_root);
+    let failure = match place_target() {
+        Some(placed) => match move_into_view(&backup, &placed) {
+            Ok(()) => {
+                return Ok(AdoptionOutcome {
+                    managed: Some(placed),
+                    adopted_bytes,
+                });
+            }
+            Err(error) => {
+                retire_placement(&config.target.root, workspace_root, &managed);
+                Some(error)
+            }
+        },
+        None => None,
+    };
+
+    let restore = restore_backup(target_dir, &managed, &backup);
+    match (restore, failure) {
+        (Ok(()), None) => Ok(AdoptionOutcome::default()),
+        (Ok(()), Some(error)) => Err(error),
+        (Err(restore_error), failure) => {
+            let retained = backup_root.keep().join("target");
+            let error = match failure {
+                Some(error) => error.wrap_err(restore_error),
+                None => restore_error,
+            };
+            Err(error.wrap_err(format!(
+                "the old target directory was retained at {}",
+                retained.display()
+            )))
+        }
+    }
+}
+
+/// Rename the backed-up outputs into the freshly placed, empty view.
+///
+/// A POSIX rename replaces an empty directory in one step. Windows refuses
+/// that, so the empty view is removed first; a view that is not empty was
+/// never this call's to replace, and the failure is reported.
+fn move_into_view(backup: &Path, managed: &Path) -> Result<()> {
+    if std::fs::rename(backup, managed).is_ok() {
+        return Ok(());
+    }
+    std::fs::remove_dir(managed).wrap_err_with(|| {
+        format!(
+            "could not replace the managed target directory {}",
+            managed.display()
+        )
+    })?;
+    std::fs::rename(backup, managed)
+        .wrap_err_with(|| format!("could not move the outputs into {}", managed.display()))
+}
+
+/// Undo the record and empty directory of a placement whose outputs never
+/// arrived, so nothing counts a view that holds nothing.
+fn retire_placement(root: &Path, workspace_root: &Path, managed: &Path) {
+    let record = view_record_path(root, workspace_root);
+    if let Err(error) = std::fs::remove_file(&record)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!(
+            "the target record {} was not retired: {error}",
+            record.display()
+        );
+    }
+    if let Err(error) = std::fs::remove_dir(managed)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!(
+            "the empty managed target directory {} was not retired: {error}",
+            managed.display()
+        );
+    }
+}
+
+/// Put a backed-up target directory back at its original path, removing the
+/// link a failed placement may have left there.
+fn restore_backup(target_dir: &Path, managed: &Path, backup: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(target_dir) {
+        Ok(metadata)
+            if metadata.file_type().is_symlink()
+                && std::fs::read_link(target_dir).is_ok_and(|link| link == managed) =>
+        {
+            remove_link(target_dir).wrap_err("could not remove the failed managed link")?;
+        }
+        Ok(_) => eyre::bail!(
+            "{} was occupied while restoring the old target directory",
+            target_dir.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).wrap_err("could not inspect the failed migration"),
+    }
+    std::fs::rename(backup, target_dir)
+        .wrap_err_with(|| format!("could not restore {}", target_dir.display()))
 }
 
 /// Whether placement could use the managed root, without changing any paths.
@@ -986,7 +1141,7 @@ fn view_key(workspace_root: &Path) -> String {
     CacheDigest::blake3(workspace_root.to_string_lossy().as_bytes()).hash
 }
 
-fn tree_bytes(directory: &Path) -> u64 {
+pub(crate) fn tree_bytes(directory: &Path) -> u64 {
     let mut total = 0;
     let mut pending = vec![directory.to_path_buf()];
     while let Some(next) = pending.pop() {

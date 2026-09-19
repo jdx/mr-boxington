@@ -12,6 +12,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+mod adopt;
 mod cache;
 mod cargo;
 mod cargo_invocation;
@@ -103,6 +104,10 @@ enum Commands {
     Cache(cache::CacheArgs),
     /// Remove this workspace's managed target, link, and learned incremental state.
     Clean(clean::CleanArgs),
+    /// Move existing target directories under the managed root, keeping their outputs.
+    ///
+    /// Each adopted checkout gets a `target` link to its managed directory, which is then pruned like any other once the checkout is deleted or goes unused.
+    Adopt(adopt::AdoptArgs),
     /// Watch cache activity across every build on this machine.
     Tui(tui::TuiArgs),
     /// Show lifetime savings, pruning totals, and estimated storage shared across workspaces.
@@ -145,6 +150,7 @@ fn compiles_nothing(command: &Commands) -> Option<&'static str> {
         Commands::Gc(_) => Some("gc"),
         Commands::Cache(_) => Some("cache"),
         Commands::Clean(_) => Some("clean"),
+        Commands::Adopt(_) => Some("adopt"),
         Commands::Tui(_) => Some("tui"),
         Commands::Stats(_) => Some("stats"),
         // Its whole subject is the C and C++ compiles of a build cargo is not
@@ -214,6 +220,7 @@ pub fn run() -> Result<ExitCode> {
         .map(|()| ExitCode::SUCCESS),
         Commands::Cache(args) => cache::run(&config, args.command),
         Commands::Clean(args) => clean::run(&config, &args),
+        Commands::Adopt(args) => adopt::run(&config, &args),
         Commands::Tui(args) => tui::run(
             &config,
             args,
@@ -288,6 +295,8 @@ fn strings(arguments: &[std::ffi::OsString]) -> Result<Vec<String>> {
         .collect()
 }
 
+#[cfg(test)]
+mod adopt_tests;
 #[cfg(test)]
 mod cache_tests;
 #[cfg(test)]
