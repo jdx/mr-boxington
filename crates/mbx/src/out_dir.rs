@@ -340,7 +340,6 @@ fn materialize(
         for directory in directories.iter().rev() {
             make_directory_read_only(&staging.join(directory))?;
         }
-        make_directory_read_only(&staging)?;
         Ok(())
     })();
     if let Err(error) = copied {
@@ -365,7 +364,11 @@ fn materialize(
         eyre::bail!("the build-script output changed while it was being copied");
     }
     match std::fs::rename(&staging, stable) {
-        Ok(()) => Ok(()),
+        // The top directory last, and after the move: macOS will not rename
+        // a directory it cannot write, since the move rewrites its parent
+        // entry.
+        Ok(()) => make_directory_read_only(stable)
+            .wrap_err_with(|| format!("failed to protect {}", stable.display())),
         Err(_) if stable.is_dir() => {
             let _ = remove_tree(&staging);
             Ok(())
