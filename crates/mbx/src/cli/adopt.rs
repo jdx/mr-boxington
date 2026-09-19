@@ -9,15 +9,14 @@ use std::process::ExitCode;
 
 #[derive(usage::Args)]
 pub(super) struct AdoptArgs {
-    /// Search each path for checkouts holding a target directory instead of
-    /// treating the path itself as a checkout. Hidden directories, target
-    /// directories, and symbolic links are not searched.
+    /// Search below each path for Cargo checkouts with a target directory.
+    /// Hidden directories, target directories, and symbolic links are skipped.
     #[usage(short = 'r', long)]
     pub(super) recursive: bool,
     /// Report what would be adopted without moving anything.
     #[usage(long)]
     pub(super) dry_run: bool,
-    /// Checkouts to adopt, or directories to search with --recursive.
+    /// Cargo checkouts to adopt, or directories to search with --recursive.
     /// Defaults to the current directory.
     #[usage(value_name = "PATH")]
     pub(super) paths: Vec<PathBuf>,

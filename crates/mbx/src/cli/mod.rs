@@ -104,9 +104,9 @@ enum Commands {
     Cache(cache::CacheArgs),
     /// Remove this workspace's managed target, link, and learned incremental state.
     Clean(clean::CleanArgs),
-    /// Move existing target directories under the managed root, keeping their outputs.
+    /// Bring existing Cargo target directories under mbx management without deleting their contents.
     ///
-    /// Each adopted checkout gets a `target` link to its managed directory, which is then pruned like any other once the checkout is deleted or goes unused.
+    /// mbx moves each directory under the managed root and leaves a `target` link in its place. The adopted directory then follows the usual managed-target collection policy.
     Adopt(adopt::AdoptArgs),
     /// Watch cache activity across every build on this machine.
     Tui(tui::TuiArgs),
