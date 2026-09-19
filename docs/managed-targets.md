@@ -114,10 +114,12 @@ the prompt offers to remove it instead, with “Keep it” selected by default.
 Declining leaves every output untouched and the Cargo command continues
 normally. Non-interactive runs never prompt, move, or remove the directory.
 
-The directory is moved aside inside the checkout first, and put back if the
-managed link or its collection record cannot be created. Removal, when that is
-what was offered, happens only after both succeed, and mbx reports how much
-space the old outputs occupied.
+A move first takes Cargo's build locks in the directory, so a build still
+writing there makes mbx refuse and say so; try again once it finishes. The
+directory is then renamed into the managed root before the link is created,
+and moved back if the link or its collection record cannot be made. Removal,
+when that is what was offered, happens only after both succeed, and mbx reports
+how much space the old outputs occupied.
 
 mbx does not offer to move or remove an explicitly configured target directory
 or a symlink it does not own.

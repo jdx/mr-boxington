@@ -338,16 +338,52 @@ fn a_declined_adoption_restores_existing_outputs() {
 }
 
 #[test]
-fn a_failed_move_restores_outputs_and_retires_the_placement() {
+fn adoption_refuses_a_directory_cargo_is_using() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    let target = workspace.join("target");
+    std::fs::create_dir_all(target.join("debug")).unwrap();
+    std::fs::write(target.join("debug/artifact"), b"old output").unwrap();
+    let lock_path = target.join("debug/.cargo-lock");
+    std::fs::write(&lock_path, b"").unwrap();
+    let mut build = fslock::LockFile::open(&lock_path).unwrap();
+    build.lock().unwrap();
+
+    let error = adopt_existing(&config, &workspace, &target, false).unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("Cargo is using"),
+        "unexpected error: {error:#}"
+    );
+    assert!(std::fs::symlink_metadata(&target).unwrap().is_dir());
+    assert_eq!(
+        std::fs::read(target.join("debug/artifact")).unwrap(),
+        b"old output"
+    );
+    assert!(!view_record_path(&config.target.root, &workspace).exists());
+    assert!(!view_dir(&config.target.root, &workspace).exists());
+    build.unlock().unwrap();
+
+    let outcome = adopt_existing(&config, &workspace, &target, false).unwrap();
+
+    assert!(outcome.managed.is_some());
+    assert_eq!(
+        std::fs::read(target.join("debug/artifact")).unwrap(),
+        b"old output"
+    );
+}
+
+#[test]
+fn an_occupied_view_leaves_the_outputs_where_they_are() {
     let directory = tempfile::tempdir().unwrap();
     let config = test_config(directory.path(), true);
     let workspace = checkout(directory.path(), "project");
     let target = workspace.join("target");
     std::fs::create_dir_all(&target).unwrap();
     std::fs::write(target.join("artifact"), b"old output").unwrap();
-    // A view with no record but with contents: placement reuses it and the
-    // move cannot replace it, so adoption must back out without touching
-    // either set of outputs.
+    // A view with no record but with contents is not this adoption's to
+    // replace, so it must back out before anything has moved.
     let managed = view_dir(&config.target.root, &workspace);
     std::fs::create_dir_all(&managed).unwrap();
     std::fs::write(managed.join("stranded"), b"unrecorded").unwrap();

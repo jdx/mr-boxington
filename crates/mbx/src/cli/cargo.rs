@@ -210,21 +210,31 @@ fn cargo_with_settings_bypass_log_and_roots(
     // actually write to.
     let (placement, removed_target_bytes, adopted_target_bytes) = match existing_target {
         Some(ExistingTarget::Adopt) => {
-            let outcome = target::adopt_existing(
+            match target::adopt_existing(
                 config,
                 &roots.workspace_root,
                 &roots.target_dir,
                 roots.target_dir_requested,
-            )?;
-            let adopted = outcome.managed.is_some().then_some(outcome.adopted_bytes);
-            (
-                TargetViewPlacement {
-                    directory: outcome.managed,
-                    touch_path: roots.target_dir.clone(),
-                },
-                None,
-                adopted,
-            )
+            ) {
+                Ok(outcome) => {
+                    let adopted = outcome.managed.is_some().then_some(outcome.adopted_bytes);
+                    (
+                        TargetViewPlacement {
+                            directory: outcome.managed,
+                            touch_path: roots.target_dir.clone(),
+                        },
+                        None,
+                        adopted,
+                    )
+                }
+                Err(error) => {
+                    // A move that could not happen left the outputs where
+                    // they were, so the build that was asked for still has
+                    // its target directory; the refusal is not its failure.
+                    log::warn!("{error:#}; the build continues in the existing target directory");
+                    (place_target_view(config, &roots), None, None)
+                }
+            }
         }
         Some(ExistingTarget::Remove) => {
             let outcome = target::migrate_existing(
