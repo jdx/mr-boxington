@@ -1,0 +1,7 @@
+[https://github.com/jdx/mr-boxington/pull/498/changes](https://github.com/jdx/mr-boxington/pull/498/changes)
+
+clean up pr title/desc and the docs changes. structure/content/prose
+
+---
+
+continue
