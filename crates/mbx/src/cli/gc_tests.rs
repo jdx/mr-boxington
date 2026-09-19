@@ -40,11 +40,18 @@ fn the_sweep_report_is_said_once() {
         take_sweep_report(store).is_empty(),
         "the second reader finds nothing"
     );
-    assert!(
-        std::fs::read_dir(store.join("gc/v1"))
-            .unwrap()
-            .next()
-            .is_none(),
+    let left = std::fs::read_dir(store.join("gc/v1"))
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("last-sweep-report")
+        })
+        .count();
+    assert_eq!(
+        left, 0,
         "neither the report nor its claimed copy is left behind"
     );
 }
@@ -102,4 +109,21 @@ fn sweep_reports_accumulate_until_a_build_says_them() {
     }
 
     assert_eq!(take_sweep_report(store), ["first", "second"]);
+}
+
+#[test]
+fn a_build_leaves_the_report_alone_while_a_collector_writes_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    crate::util::write_atomic(&store.join(SWEEP_REPORT), b"evicted 3 objects\n").unwrap();
+    let mut collector = collector_lock(store).unwrap();
+    assert!(collector.try_lock().unwrap());
+
+    assert!(
+        take_sweep_report(store).is_empty(),
+        "not while the collector holds it"
+    );
+
+    collector.unlock().unwrap();
+    assert_eq!(take_sweep_report(store), ["evicted 3 objects"]);
 }

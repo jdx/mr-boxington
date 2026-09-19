@@ -821,3 +821,20 @@ fn a_view_claimed_since_the_selection_is_kept() {
     assert_eq!(outcome.kept_active_views, 1);
     assert!(old.exists());
 }
+
+#[test]
+fn a_view_a_dead_collector_moved_aside_is_finished_off() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "kept");
+    let kept = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    let aside = views_root(&config.target.root).join("abc123.removing-4242");
+    std::fs::create_dir_all(aside.join("debug")).unwrap();
+    std::fs::write(aside.join("debug/artifact"), b"x").unwrap();
+
+    let outcome = collect(&config.target.root, None, None, false).unwrap();
+
+    assert!(!aside.exists(), "the leftover is removed");
+    assert!(kept.exists());
+    assert_eq!(outcome.removed_views, 0, "and is not counted as a view");
+}

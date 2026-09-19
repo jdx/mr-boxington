@@ -32,6 +32,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const VIEWS_DIR: &str = "v1";
+/// Marks a view moved aside for removal; never part of a view's own name,
+/// which is a bare hex digest.
+const REMOVAL_SUFFIX: &str = ".removing-";
 const VIEW_RECORD_VERSION: u8 = 1;
 
 /// Which checkout a managed target directory belongs to.
@@ -529,9 +532,9 @@ fn lock_replaced_view(
 
 /// Take every Cargo lock in a target directory, or report that one is held.
 ///
-/// `None` means a build is running there. The locks come back held, so the
-/// caller decides how long a build stays excluded; on Windows an open handle
-/// stops the file being deleted, so they are dropped before any removal.
+/// `None` means a build is running there. The locks come back held for the
+/// caller that needs them held, such as a migration that replaces the view;
+/// collection only asks and lets them go.
 fn cargo_locks(directory: &Path) -> Result<Option<Vec<fslock::LockFile>>> {
     let mut pending = vec![(directory.to_path_buf(), 0)];
     let mut locks = Vec::new();
@@ -801,6 +804,9 @@ fn collect_with(
     before_removal: impl FnOnce(),
 ) -> Result<CollectionOutcome> {
     let mut outcome = CollectionOutcome::default();
+    if !dry_run {
+        remove_abandoned_removals(root);
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
@@ -885,36 +891,38 @@ fn collect_with(
         // one of the selected checkouts while the earlier ones are still being
         // removed. Its placement refreshes the record, and Cargo holds its
         // lock for as long as it compiles, so either is grounds to leave the
-        // directory standing until the next sweep looks again. The locks are
-        // kept while the directory goes on Unix, so a build arriving in the
-        // middle of the removal waits on Cargo's lock and starts afterwards
-        // with nothing half-deleted under it.
+        // directory standing until the next sweep looks again.
         if live && !dry_run {
             let claimed_since =
                 read_view_record(&record_path).is_some_and(|record| record.updated_secs > updated);
-            let locks = match cargo_locks(&directory) {
-                Ok(locks) => locks,
+            let in_use = match cargo_locks(&directory) {
+                Ok(locks) => locks.is_none(),
                 Err(error) => {
                     log::warn!(
                         "could not tell whether {} is in use: {error}",
                         directory.display()
                     );
-                    None
+                    true
                 }
             };
-            let Some(locks) = locks.filter(|_| !claimed_since) else {
+            if claimed_since || in_use {
                 outcome.kept_active_views += 1;
+                remaining = remaining.saturating_add(bytes);
                 continue;
-            };
-            #[cfg(unix)]
-            let _held = locks;
-            #[cfg(not(unix))]
-            drop(locks);
+            }
         }
+        // Moved aside in one step before its files go. Holding Cargo's lock
+        // would not keep a build out: unlinking the lock file frees it, and
+        // Cargo simply creates another. A build that starts after the rename
+        // finds no directory and makes a fresh one, the same as it would after
+        // the removal finished; a tree that is half gone is never at the path
+        // a build can reach. Windows refuses the rename while anything inside
+        // is open, which is the same answer.
         let removal = if dry_run {
             Ok(())
         } else {
-            std::fs::remove_dir_all(&directory)
+            let aside = removal_path(&directory);
+            std::fs::rename(&directory, &aside).and_then(|()| std::fs::remove_dir_all(&aside))
         };
         match removal {
             Ok(()) => {
@@ -957,6 +965,33 @@ fn collect_with(
     outcome.remaining_bytes = remaining;
     outcome.remaining_views = total_views.saturating_sub(outcome.removed_views);
     Ok(outcome)
+}
+
+/// Where a view goes while its files are removed.
+fn removal_path(directory: &Path) -> PathBuf {
+    let name = directory
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    directory.with_file_name(format!("{name}{REMOVAL_SUFFIX}{}", std::process::id()))
+}
+
+/// Finish removing views a collector that died left moved aside.
+///
+/// They have no record, so nothing else lists or protects them; a collector
+/// still deleting one holds no lock either, but the removal is idempotent and
+/// two of them racing only means the files go sooner.
+fn remove_abandoned_removals(root: &Path) {
+    let Ok(listing) = std::fs::read_dir(views_root(root)) else {
+        return;
+    };
+    for entry in listing.flatten() {
+        if entry.file_name().to_string_lossy().contains(REMOVAL_SUFFIX)
+            && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// Every managed target directory under `root`, as record and directory.

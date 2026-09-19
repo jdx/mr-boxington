@@ -486,8 +486,18 @@ pub(super) fn run_automatic(config: &Config, retention: &RetentionSettings) -> R
 ///
 /// The report is claimed by renaming it away before it is read, so of two
 /// builds finishing at the same moment, the one whose rename succeeds prints
-/// it and the other finds nothing.
+/// it and the other finds nothing. The collector lock is held for the read,
+/// and is what a running collector holds while it appends.
 pub(super) fn take_sweep_report(store: &Path) -> Vec<String> {
+    // A collector appends while it holds the lock. Reading under it would
+    // catch a report half written; a held lock means the report keeps until
+    // the next build, which is when the collector would have been done anyway.
+    let Ok(mut collector) = collector_lock(store) else {
+        return Vec::new();
+    };
+    if !collector.try_lock().unwrap_or(false) {
+        return Vec::new();
+    }
     let path = store.join(SWEEP_REPORT);
     let claimed = claimed_report_path(&path);
     if std::fs::rename(&path, &claimed).is_err() {
