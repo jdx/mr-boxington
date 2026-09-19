@@ -357,3 +357,20 @@ fn a_bypassed_compilation_gets_cargos_out_dir_back_and_holds_no_lease() {
     );
     unsafe { std::env::remove_var("OUT_DIR") };
 }
+
+#[cfg(unix)]
+#[test]
+fn a_name_that_spells_like_a_path_keeps_cargos_out_dir() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("out-dirs");
+    let nested = directory.path().join("a/out");
+    let flat = directory.path().join("b/out");
+    // `sub/dir` in one tree, a file literally named `sub\dir` in the other:
+    // the same spelling with the separator replaced.
+    write_tree(&nested, &[("sub/dir", b"")]);
+    std::fs::create_dir_all(flat.join("sub")).unwrap();
+    std::fs::write(flat.join("sub\\dir"), b"").unwrap();
+
+    assert!(stabilize(&nested, &root).unwrap().is_some());
+    assert_eq!(stabilize(&flat, &root).unwrap(), None);
+}

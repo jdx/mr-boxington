@@ -270,6 +270,13 @@ fn describe_tree(
         let Some(name) = name.to_str() else {
             return Ok(false);
         };
+        // A backslash is a legal byte in a Unix file name and the separator
+        // on Windows; a name carrying one would spell the same as a nested
+        // path. Such a tree keeps Cargo's `OUT_DIR`, as does one with a
+        // newline, the record separator, in a name.
+        if name.contains('\\') || name.contains('\n') {
+            return Ok(false);
+        }
         let path = relative.join(name);
         let spelled = path.to_string_lossy().replace('\\', "/");
         let metadata = std::fs::symlink_metadata(entry.path())?;
@@ -277,6 +284,7 @@ fn describe_tree(
             return Ok(false);
         } else if metadata.is_dir() {
             manifest.extend_from_slice(b"d ");
+            manifest.extend_from_slice(format!("{}:", spelled.len()).as_bytes());
             manifest.extend_from_slice(spelled.as_bytes());
             manifest.push(b'\n');
             directories.push(path.clone());
@@ -289,6 +297,9 @@ fn describe_tree(
             manifest.extend_from_slice(if executable { b"x " } else { b"f " });
             manifest.extend_from_slice(digest.hash.as_bytes());
             manifest.push(b' ');
+            // Length-prefixed, so no spelling of one name can read as another
+            // name plus a separator.
+            manifest.extend_from_slice(format!("{}:", spelled.len()).as_bytes());
             manifest.extend_from_slice(spelled.as_bytes());
             manifest.push(b'\n');
             files.push((path, executable));

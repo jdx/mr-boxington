@@ -188,7 +188,9 @@ fn collect_generated(
         Ok(outcome) => outcome,
         Err(error) => {
             log::warn!("generated source trees were not collected: {error}");
-            crate::out_dir::PruneOutcome::default()
+            // Still on the disk, so still against the budget: measure what
+            // remains rather than let a failed walk count as empty space.
+            crate::out_dir::stats(&config.cache_dir.join(crate::out_dir::ROOT))
         }
     }
 }
