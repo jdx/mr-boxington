@@ -234,7 +234,8 @@ pub(super) fn cache_stats(config: &Config, json: bool) -> Result<()> {
     let stats = store::stats(&store)?;
     let views = target::stats(&config.target.root)?;
     let incremental = crate::incremental::stats(&config.cache_dir.join("incremental"))?;
-    let generated = crate::out_dir::stats(&config.cache_dir.join(crate::out_dir::ROOT));
+    let generated =
+        crate::out_dir::stats(&config.cache_dir.join(crate::out_dir::ROOT)).unwrap_or_default();
     let combined_total_bytes = stats
         .total_bytes()
         .saturating_add(views.bytes)

@@ -212,7 +212,7 @@ fn unused_trees_are_collected_by_age_and_used_ones_kept() {
     assert!(!old.exists());
     assert!(!old_marker.exists());
     assert!(recent.exists());
-    assert_eq!(stats(&root).remaining_directories, 1);
+    assert_eq!(stats(&root).unwrap().remaining_directories, 1);
 }
 
 #[test]
@@ -439,4 +439,18 @@ fn leases_of_a_tree_that_is_gone_are_swept() {
     collect(&root, None, None, false).unwrap();
 
     assert!(!leases_dir(&root, &digest).exists());
+}
+
+#[test]
+fn an_unlistable_root_measures_as_unknown_not_empty() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("out-dirs");
+    std::fs::write(&root, b"not a directory").unwrap();
+
+    assert_eq!(stats(&root), None);
+    assert_eq!(
+        stats(&directory.path().join("absent")),
+        Some(PruneOutcome::default()),
+        "a root that does not exist yet holds nothing"
+    );
 }

@@ -200,8 +200,19 @@ fn collect_generated(
         Err(error) => {
             log::warn!("generated source trees were not collected: {error}");
             // Still on the disk, so still against the budget: measure what
-            // remains rather than let a failed walk count as empty space.
-            crate::out_dir::stats(&config.cache_dir.join(crate::out_dir::ROOT))
+            // remains rather than let a failed walk count as empty space. A
+            // root that cannot be listed cannot be measured either, and the
+            // sweep goes on without the number rather than not at all, since
+            // one unreadable directory must not stop every other collection.
+            match crate::out_dir::stats(&config.cache_dir.join(crate::out_dir::ROOT)) {
+                Some(outcome) => outcome,
+                None => {
+                    log::warn!(
+                        "generated source trees could not be measured; this sweep's combined budget does not account for them"
+                    );
+                    crate::out_dir::PruneOutcome::default()
+                }
+            }
         }
     }
 }

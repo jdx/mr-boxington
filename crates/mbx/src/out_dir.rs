@@ -594,14 +594,11 @@ pub(crate) fn collect(
 
 /// Bytes and count of stable trees, for reports and budgets.
 ///
-/// A root that cannot be listed is measured as a plain tree instead, which
-/// tolerates what it cannot read: the bytes are on the disk whether or not
-/// they can be told apart, and a budget must not treat them as free space.
-pub(crate) fn stats(root: &Path) -> PruneOutcome {
-    collect(root, None, None, true).unwrap_or_else(|_| PruneOutcome {
-        remaining_bytes: tree_bytes(root),
-        ..PruneOutcome::default()
-    })
+/// `None` when the root cannot be listed: no walk can measure what it cannot
+/// read, and a caller sizing a budget must know it is missing a number rather
+/// than be handed a zero.
+pub(crate) fn stats(root: &Path) -> Option<PruneOutcome> {
+    collect(root, None, None, true).ok()
 }
 
 fn is_digest_name(name: &str) -> bool {
