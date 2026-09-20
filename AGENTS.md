@@ -50,7 +50,9 @@ hand-edit generated CLI documentation.
 
 `mise run ci` is the main gate. `mise run format` fixes formatting problems.
 The Bats suites require the git submodules under `test/`; the wasm end-to-end
-test requires `wasm32-unknown-unknown` for the repository's pinned toolchain.
+test requires `wasm32-unknown-unknown` for the toolchain you build with. CI
+builds on whatever Rust its runner image ships, so a lint or behavior change in
+a new stable shows up there.
 
 ## PR titles and descriptions are release-note inputs
 

@@ -184,5 +184,8 @@ aube = { version = "latest", lazy = true, lazy_bins = ["aube"] }
 communique = "latest"
 lychee = "0.24.2"
 node = "24"
-rust = "1.97.1"
+# Rust is deliberately absent: the toolchain floats to whatever the
+# runner image ships, so a new stable is caught by CI rather than by a
+# user. The benchmark workflows pin their own, because a measurement is
+# only comparable against the compiler that produced the baseline.
 usage = "6.5.0"
