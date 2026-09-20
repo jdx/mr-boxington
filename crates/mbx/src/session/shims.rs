@@ -174,15 +174,23 @@ pub(super) fn install_cc_shims(shims_dir: &Path) -> Result<Option<CcShims>> {
         return Ok(None);
     }
     let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
+    // Before anything resolves a compiler: the lookups below skip directories
+    // mbx owns, and this one qualifies as soon as a shim lands in it.
+    std::fs::create_dir_all(shims_dir)?;
+    mark_shim_directory(shims_dir);
     // Each language stands alone. An image with a C compiler and no C++ one is
     // ordinary, and it must not cost a C-only sys-crate its caching.
-    let real_cc = resolve_on_path(CcLanguage::C.default_driver());
-    let real_cxx = resolve_on_path(CcLanguage::Cxx.default_driver());
+    //
+    // Excluding rather than taking the first match on `PATH`: these two become
+    // `MBX_REAL_CC` and `MBX_REAL_CXX`, the compiler the installed shim runs.
+    // Another installation's shim recorded there is a shim standing in for a
+    // shim, which recurses until the machine runs out of processes.
+    let real_cc = resolve_on_path_excluding(CcLanguage::C.default_driver(), &executable, shims_dir);
+    let real_cxx =
+        resolve_on_path_excluding(CcLanguage::Cxx.default_driver(), &executable, shims_dir);
     // Wrapped first, because a cross image is entitled to ship the driver it
     // cross-compiles with and no host `cc` at all. Deciding there is nothing to
     // do before looking would leave exactly that build uncached.
-    std::fs::create_dir_all(shims_dir)?;
-    mark_shim_directory(shims_dir);
     let targeted = wrap_targeted_compilers(&executable, shims_dir)?;
     if real_cc.is_none() && real_cxx.is_none() && targeted.is_empty() {
         debug!("no C or C++ compiler was found on PATH; build script compiles are not cached");
@@ -272,8 +280,17 @@ pub(super) fn resolve_named_compiler(
 }
 
 pub(super) fn resolve_on_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
+    first_in_path(&std::env::var_os("PATH")?, name)
+}
+
+/// The first `name` on a `PATH` the caller supplies, skipping mbx's own
+/// directories.
+///
+/// Separated from the environment so a test can hand it one, for the reason
+/// [`resolve_in_path`] gives.
+pub(super) fn first_in_path(path: &OsStr, name: &str) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|directory| !is_shim_directory(directory))
         .map(|directory| directory.join(name))
         .find(|candidate| candidate.is_file())
 }

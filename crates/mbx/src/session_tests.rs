@@ -1,4 +1,4 @@
-use super::shims::mark_shim_directory;
+use super::shims::{first_in_path, mark_shim_directory};
 use super::*;
 use crate::config::SummaryStyle;
 
@@ -719,6 +719,33 @@ fn a_pin_naming_a_shim_falls_back_to_the_search() {
     assert!(!pin_names_a_compiler(&running, Some(&running)));
     // An ordinary pin is still used.
     assert!(pin_names_a_compiler(&real_dir.join("cc"), Some(&running)));
+}
+
+#[cfg(unix)]
+#[test]
+fn host_driver_lookup_skips_another_installations_shims() {
+    // `MBX_REAL_CC` and `MBX_REAL_CXX` are what the installed shim actually
+    // runs. A foreign shim recorded there is a shim standing in for a shim,
+    // which is the loop this marker exists to stop, so the plain first-match
+    // lookup has to skip marked directories too.
+    let directory = tempfile::tempdir().unwrap();
+    let theirs = directory.path().join("theirs");
+    let real_dir = directory.path().join("bin");
+    std::fs::create_dir(&theirs).unwrap();
+    std::fs::create_dir(&real_dir).unwrap();
+    let other_mbx = directory.path().join("other-mbx");
+    std::fs::write(&other_mbx, b"#!/bin/sh\n").unwrap();
+    std::os::unix::fs::symlink(&other_mbx, theirs.join("cc")).unwrap();
+    mark_shim_directory(&theirs);
+    let real_cc = real_dir.join("cc");
+    std::fs::write(&real_cc, b"#!/bin/sh\n").unwrap();
+
+    let path = std::env::join_paths([theirs.as_path(), real_dir.as_path()]).unwrap();
+    assert_eq!(
+        first_in_path(&path, "cc").map(|path| std::fs::canonicalize(path).unwrap()),
+        Some(std::fs::canonicalize(&real_cc).unwrap()),
+        "a host driver must never resolve to another install's shim"
+    );
 }
 
 #[cfg(unix)]
