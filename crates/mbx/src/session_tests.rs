@@ -1,4 +1,4 @@
-use super::shims::{first_in_path, mark_shim_directory};
+use super::shims::{first_in_path, is_shim_directory, mark_shim_directory};
 use super::*;
 use crate::config::SummaryStyle;
 
@@ -745,6 +745,31 @@ fn host_driver_lookup_skips_another_installations_shims() {
         first_in_path(&path, "cc").map(|path| std::fs::canonicalize(path).unwrap()),
         Some(std::fs::canonicalize(&real_cc).unwrap()),
         "a host driver must never resolve to another install's shim"
+    );
+}
+
+#[test]
+fn marking_a_directory_agrees_with_reading_it_back() {
+    let directory = tempfile::tempdir().unwrap();
+    let plain = directory.path().join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    assert!(!is_shim_directory(&plain));
+    mark_shim_directory(&plain);
+    assert!(is_shim_directory(&plain), "a marked directory reads back");
+    // Idempotent: a second call leaves the existing marker alone.
+    mark_shim_directory(&plain);
+    assert!(is_shim_directory(&plain));
+
+    // A `.mbx-shims` that is not a file is not a marker, and marking must not
+    // treat it as one and skip the write. It still cannot be written here, so
+    // what this pins is that the two helpers agree rather than drift.
+    let occupied = directory.path().join("occupied");
+    std::fs::create_dir(&occupied).unwrap();
+    std::fs::create_dir(occupied.join(".mbx-shims")).unwrap();
+    mark_shim_directory(&occupied);
+    assert!(
+        !is_shim_directory(&occupied),
+        "a directory named .mbx-shims must never count as a marker"
     );
 }
 

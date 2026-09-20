@@ -147,10 +147,13 @@ pub(crate) const SHIM_DIR_MARKER: &str = ".mbx-shims";
 /// identity checks doing what they did before, which is the behavior every
 /// release up to now shipped.
 pub(crate) fn mark_shim_directory(directory: &Path) {
-    let marker = directory.join(SHIM_DIR_MARKER);
-    if marker.exists() {
+    // The same predicate the readers use, rather than a second spelling of it:
+    // `exists` would count a `.mbx-shims` that is not a file as marked and skip
+    // the write, while every reader went on treating the directory as nobody's.
+    if is_shim_directory(directory) {
         return;
     }
+    let marker = directory.join(SHIM_DIR_MARKER);
     if let Err(error) = std::fs::write(&marker, b"") {
         debug!(
             "the shim directory {} was not marked: {error}",
