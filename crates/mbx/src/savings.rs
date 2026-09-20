@@ -380,9 +380,9 @@ fn iec(bytes: u64) -> String {
 
 /// A duration the way a person would say it: "6h 14m", "2m 51s", "45s".
 ///
-/// A brag is stated in whole units, so this rounds off the fraction a second
-/// carries: "45s", not "45.32s". Below a second there is nothing left to round
-/// away and the measurement itself is the friendliest thing to say.
+/// A brag is stated in whole units, so this rounds to the nearest second:
+/// "45s", not "45.32s". Below a second there is nothing left to round away and
+/// the measurement itself is the friendliest thing to say.
 pub(crate) fn nanos(nanoseconds: u64) -> String {
     let duration = Duration::from_nanos(nanoseconds);
     if duration.as_secs() == 0 && !duration.is_zero() {
