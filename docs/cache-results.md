@@ -197,9 +197,12 @@ The full summary reports real compiler time by outcome and an estimate of
 the compiler time avoided by cache hits:
 
 ```text
-mbx[cache]: compiler time: 252.90s estimated avoided; 38.20s spent (161 miss in 31.00s, 7 unconsulted in 7.20s)
+mbx[cache]: compiler time: 4m 12s estimated avoided; 38.20s spent (161 miss in 31.00s, 7 unconsulted in 7.20s)
 mbx[cache]: slowest uncached crates: syn 8.90s, regex-syntax 4.90s, serde_derive 3.90s
 ```
+
+Times of a minute or more are reported in whole units, as above; shorter ones
+keep their fraction.
 
 The estimate comes from the duration recorded with the successful compilation
 that populated the action prediction; older predictions without a timing hint
