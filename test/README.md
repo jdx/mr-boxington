@@ -10,11 +10,11 @@ Initialize the runner once after cloning:
 git submodule update --init --recursive
 ```
 
-Install the pinned toolchain with `mise install`, then add the target used by
-the WebAssembly test:
+Install the repository's tools with `mise install` and a Rust toolchain with
+[rustup](https://rustup.rs), then add the target used by the WebAssembly test:
 
 ```sh
-mise exec -- rustup target add wasm32-unknown-unknown
+rustup target add wasm32-unknown-unknown
 ```
 
 Run every Rust and behavioral test:

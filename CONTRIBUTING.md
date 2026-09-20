@@ -6,14 +6,20 @@ reporting process in [SECURITY.md](SECURITY.md).
 
 ## Set up the repository
 
-Install [mise](https://mise.jdx.dev), then run from the repository root:
+Install [mise](https://mise.jdx.dev) and a Rust toolchain through
+[rustup](https://rustup.rs), then run from the repository root:
 
 ```sh
 git submodule update --init --recursive
 mise install
-mise exec -- rustup target add wasm32-unknown-unknown
+rustup target add wasm32-unknown-unknown
 mise run build
 ```
+
+mise provides the repository's tools. Rust is not among them: the toolchain is
+whichever one rustup makes current, and any stable release from 1.91, the
+workspace's `rust-version`, builds it. CI builds on whatever Rust its runner
+image ships, so a new stable shows up there first.
 
 The submodules provide Bats and its assertion helpers. The WebAssembly target
 is required by the end-to-end tests. `mise run build` first builds a bootstrap
