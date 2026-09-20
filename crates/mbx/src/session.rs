@@ -48,7 +48,7 @@ use server::spawn_server;
 pub(crate) use shims::CC_CRATE_ENV;
 #[cfg(all(test, windows))]
 use shims::link_path_shim;
-use shims::{CcShims, install_cc_shims, install_session_shims};
+use shims::{CcShims, install_cc_shims, install_session_shims, is_shim_directory};
 pub use shims::{
     PathShims, ShimLink, install_path_shims, install_shim, install_shim_named, shim_file_name,
 };
@@ -1385,6 +1385,13 @@ fn real_compiler(language: CcLanguage) -> Result<OsString> {
     let current = std::env::current_exe().ok();
     let path = std::env::var_os("PATH").unwrap_or_default();
     for directory in std::env::split_paths(&path) {
+        // `mbx exec` puts its own shim directory first on `PATH`, so identity
+        // alone leaves two installations picking each other's shims and
+        // handing the compilation back and forth until the box runs out of
+        // processes. A marked directory holds shims whoever wrote it.
+        if is_shim_directory(&directory) {
+            continue;
+        }
         let candidate = directory.join(&name);
         if !candidate.is_file() || is_same_binary(&candidate, current.as_deref()) {
             continue;
@@ -1398,7 +1405,18 @@ fn real_compiler(language: CcLanguage) -> Result<OsString> {
 fn pinned_path_shim(name: &str) -> Option<PathBuf> {
     let pins = std::env::var(PATH_SHIMS_ENV).ok()?;
     let pins: BTreeMap<String, PathBuf> = serde_json::from_str(&pins).ok()?;
-    pins.get(name).cloned()
+    let compiler = pins.get(name)?;
+    pin_names_a_compiler(compiler, std::env::current_exe().ok().as_deref())
+        .then(|| compiler.clone())
+}
+
+/// Whether a recorded pin names something other than a shim.
+///
+/// An older mbx recorded these pins, or this one did before shim directories
+/// were marked. A pin naming a shim would make this shim stand in for itself,
+/// so the caller falls through to the `PATH` search rather than running it.
+fn pin_names_a_compiler(compiler: &Path, current: Option<&Path>) -> bool {
+    !is_same_binary(compiler, current) && !compiler.parent().is_some_and(is_shim_directory)
 }
 
 /// Whether `candidate` is the running mbx binary under another name.

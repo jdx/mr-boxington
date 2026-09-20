@@ -131,6 +131,39 @@ pub(super) fn is_target_triple(suffix: &str) -> bool {
 /// stands aside rather than redirecting it.
 pub(crate) const CC_CRATE_ENV: &[&str] = &["CC", "CXX", "HOST_CC", "HOST_CXX"];
 
+/// Name of the marker mbx leaves in every directory it installs shims into.
+///
+/// Excluding the *configured* shim directory by location is not enough once
+/// more than one mbx installation can be on `PATH`: a shim belonging to
+/// another install is a file mbx owns, but neither its location nor its device
+/// and inode match anything the running binary can compare against. A marker
+/// makes the directory self-describing, so any install recognizes any other
+/// install's shims.
+pub(crate) const SHIM_DIR_MARKER: &str = ".mbx-shims";
+
+/// Record that mbx owns `directory`, so other installs skip the shims in it.
+///
+/// Best effort. A marker that cannot be written leaves the location and
+/// identity checks doing what they did before, which is the behavior every
+/// release up to now shipped.
+pub(crate) fn mark_shim_directory(directory: &Path) {
+    let marker = directory.join(SHIM_DIR_MARKER);
+    if marker.exists() {
+        return;
+    }
+    if let Err(error) = std::fs::write(&marker, b"") {
+        debug!(
+            "the shim directory {} was not marked: {error}",
+            directory.display()
+        );
+    }
+}
+
+/// Whether mbx installed shims into `directory`.
+pub(crate) fn is_shim_directory(directory: &Path) -> bool {
+    directory.join(SHIM_DIR_MARKER).is_file()
+}
+
 /// Install the C and C++ shims, resolving the compilers they will run.
 ///
 /// Resolution happens here rather than in the shim so the whole build agrees on
@@ -149,6 +182,7 @@ pub(super) fn install_cc_shims(shims_dir: &Path) -> Result<Option<CcShims>> {
     // cross-compiles with and no host `cc` at all. Deciding there is nothing to
     // do before looking would leave exactly that build uncached.
     std::fs::create_dir_all(shims_dir)?;
+    mark_shim_directory(shims_dir);
     let targeted = wrap_targeted_compilers(&executable, shims_dir)?;
     if real_cc.is_none() && real_cxx.is_none() && targeted.is_empty() {
         debug!("no C or C++ compiler was found on PATH; build script compiles are not cached");
@@ -233,7 +267,7 @@ pub(super) fn resolve_named_compiler(
     // well as the binary catches the link that does not compare equal.
     let inside_shims = resolved
         .parent()
-        .is_some_and(|parent| canonical(parent) == canonical(shims));
+        .is_some_and(|parent| canonical(parent) == canonical(shims) || is_shim_directory(parent));
     (!inside_shims && !is_same_binary(&resolved, Some(executable))).then_some(resolved)
 }
 
@@ -271,6 +305,7 @@ pub fn install_path_shims(directory: &Path) -> Result<Option<PathShims>> {
     }
     let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
     std::fs::create_dir_all(directory)?;
+    mark_shim_directory(directory);
     let mut compilers = BTreeMap::new();
     for (name, _) in PATH_SHIM_NAMES {
         let destination = directory.join(name);
@@ -395,7 +430,7 @@ pub(super) fn resolve_in_path(
 ) -> Option<PathBuf> {
     let shims = canonical(shims);
     std::env::split_paths(path)
-        .filter(|directory| canonical(directory) != shims)
+        .filter(|directory| canonical(directory) != shims && !is_shim_directory(directory))
         .map(|directory| directory.join(name))
         .find(|candidate| candidate.is_file() && !is_same_binary(candidate, Some(this_binary)))
 }
@@ -411,6 +446,10 @@ pub(super) fn install_session_shims(
     let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
     let binary_shims = binary_shims_dir(persistent_shims, &executable)?;
     std::fs::create_dir_all(&binary_shims)?;
+    // Both levels: the root holds the C, C++ and CMake shims, and the
+    // per-binary directory holds the rustc one.
+    mark_shim_directory(persistent_shims);
+    mark_shim_directory(&binary_shims);
     let rustc = binary_shims.join(shim_file_name(RUSTC_SHIM_STEM));
     link_path_shim(&executable, &rustc)?;
     let rustdoc = install_shim_named(
