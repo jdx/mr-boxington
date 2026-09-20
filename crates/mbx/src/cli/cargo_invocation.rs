@@ -216,10 +216,10 @@ pub(super) fn resolve(cargo: &OsStr, arguments: &[OsString]) -> Option<Invocatio
             .ok()?;
         let listing = std::str::from_utf8(&output.stdout).ok()?;
         if !output.status.success()
-            || !listing
+            || listing
                 .lines()
                 .next()
-                .is_some_and(|line| line == "Installed Commands:")
+                .is_none_or(|line| line != "Installed Commands:")
         {
             return None;
         }

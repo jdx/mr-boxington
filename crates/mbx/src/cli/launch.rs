@@ -333,9 +333,9 @@ fn restore_launch_path(build: &OsStr, launch: &OsStr, original: &OsStr) -> Resul
 
 /// Capture Cargo's selected executable before normal mbx CLI dispatch.
 pub fn dispatch() -> Option<ExitCode> {
-    if !std::env::args_os()
+    if std::env::args_os()
         .next()
-        .is_some_and(|arg| Path::new(&arg).file_stem() == Some(OsStr::new(SHIM)))
+        .is_none_or(|arg| Path::new(&arg).file_stem() != Some(OsStr::new(SHIM)))
     {
         return None;
     }
