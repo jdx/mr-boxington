@@ -343,16 +343,6 @@ fn cargo_with_settings_bypass_log_and_roots(
                 path.display().to_string(),
             );
         }
-        if placement.directory.is_some() {
-            // Keep Cargo's public artifact paths anchored in the checkout.
-            // The target link still puts the bytes in the managed view, while
-            // debugger launch configurations survive collection and rebuilds
-            // instead of remembering mbx's private, disposable path.
-            environment.insert(
-                CARGO_TARGET_DIR_ENV.into(),
-                roots.target_dir.to_string_lossy().into_owned(),
-            );
-        }
         let run = session
             .begin(
                 &roots.workspace_root,
@@ -399,10 +389,20 @@ fn cargo_with_settings_bypass_log_and_roots(
             environment.insert("CARGO_TERM_PROGRESS_WHEN".into(), "never".into());
         }
         super::launch::record_overlay(&mut environment)?;
+        // Placement must affect this Cargo invocation, not the environment
+        // inherited by tests and build scripts. Their nested Cargo builds
+        // resolve their own targets, including any caller-specified setting.
+        let placed_arguments;
+        let cargo_arguments = if placement.directory.is_some() {
+            placed_arguments = placed_cargo_arguments(arguments, &roots.target_dir);
+            &placed_arguments
+        } else {
+            arguments
+        };
         let status = if !settings.plain_output && super::pretty::enabled(arguments) {
-            match super::pretty::run(&cargo, arguments, &environment, settings.pretty_inspect, || session.progress_stats()) {
+            match super::pretty::run(&cargo, cargo_arguments, &environment, settings.pretty_inspect, || session.progress_stats()) {
                 Ok(Some(status)) => Ok(status),
-                Ok(None) => run_cargo(&cargo, arguments, environment),
+                Ok(None) => run_cargo(&cargo, cargo_arguments, environment),
                 Err(error) => Err(error),
             }
         } else if super::plain_progress::eligible(arguments, std::env::var("CARGO_TERM_PROGRESS_WHEN").ok().as_deref())
@@ -410,9 +410,9 @@ fn cargo_with_settings_bypass_log_and_roots(
             && log::max_level() < log::LevelFilter::Debug
             && (settings.plain_output || !std::io::stderr().is_terminal())
         {
-            super::plain_progress::run(&cargo, arguments, environment, || session.progress_stats())
+            super::plain_progress::run(&cargo, cargo_arguments, environment, || session.progress_stats())
         } else {
-            run_cargo(&cargo, arguments, environment)
+            run_cargo(&cargo, cargo_arguments, environment)
         };
         // The shim records a prediction only after a compilation has either
         // been restored or published successfully. Preserve that completed
@@ -449,6 +449,28 @@ fn cargo_with_settings_bypass_log_and_roots(
         other => other,
     };
     account_session(config, settings, session_outcome, removed_target_bytes)
+}
+
+/// Anchor public artifact paths in the checkout, while the target link puts
+/// the bytes in the managed view. A command-line config value is scoped to
+/// Cargo itself; CARGO_TARGET_DIR would leak this choice into nested builds.
+pub(super) fn placed_cargo_arguments(arguments: &[String], target: &Path) -> Vec<String> {
+    let mut arguments = arguments.to_vec();
+    let index = arguments
+        .iter()
+        .take_while(|arg| arg.starts_with('+'))
+        .count();
+    arguments.splice(
+        index..index,
+        [
+            "--config".into(),
+            format!(
+                "build.target-dir={}",
+                toml::Value::String(target.to_string_lossy().into_owned())
+            ),
+        ],
+    );
+    arguments
 }
 
 pub(super) struct TargetViewPlacement {

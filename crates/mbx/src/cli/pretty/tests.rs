@@ -107,6 +107,14 @@ fn argument_injection_preserves_command_and_program_arguments() {
     let prefixed = vec!["+stable".into(), "test".into(), "--".into(), "works".into()];
     assert!(eligible(&prefixed));
     assert_eq!(cargo_verb(&prefixed), Some("test"));
+    let placed = vec![
+        "--config".into(),
+        "build.target-dir='checkout/target'".into(),
+        "test".into(),
+    ];
+    // Eligibility is checked before mbx adds its own placement config, but
+    // the renderer still needs the verb from the final Cargo arguments.
+    assert_eq!(cargo_verb(&placed), Some("test"));
     assert_eq!(
         cargo_arguments(&prefixed),
         [

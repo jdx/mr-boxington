@@ -1,6 +1,26 @@
 use super::*;
 
 #[test]
+fn placed_target_config_is_scoped_and_preserves_argument_boundaries() {
+    let original = [
+        "+nightly",
+        "run",
+        "--",
+        "--target-dir",
+        "application argument",
+    ]
+    .map(String::from);
+    let target = Path::new("directory with spaces/quote\"and\\slash");
+    let placed = cargo::placed_cargo_arguments(&original, target);
+    assert_eq!(placed[0], "+nightly");
+    assert_eq!(placed[1], "--config");
+    let config: toml::Value = toml::from_str(&placed[2]).unwrap();
+    assert_eq!(config["build"]["target-dir"].as_str(), target.to_str());
+    assert_eq!(&placed[3..], &original[1..]);
+    assert_eq!(super::launch::cargo_subcommand(&placed), Some("run"));
+}
+
+#[test]
 fn cargo_quiet_only_applies_before_the_argument_separator() {
     assert!(cargo_is_quiet(&["build".into(), "-q".into()]));
     assert!(cargo_is_quiet(&["test".into(), "--quiet".into()]));

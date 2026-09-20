@@ -65,6 +65,163 @@ fn mbx(root: &Path) -> Command {
     command
 }
 
+/// Separate fixtures keep a successful direct build from masking a nested
+/// build that writes its output into the parent's target directory.
+#[test]
+fn nested_test_builds_match_plain_cargo_target_directories() {
+    for setting in [
+        None,
+        Some("relative-target"),
+        Some("absolute"),
+        Some("flag"),
+    ] {
+        for managed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let root_path = root.path().canonicalize().unwrap();
+            project(
+                &root_path,
+                r#"
+fn main() {}
+#[test]
+fn nested_build() {
+    use std::{path::PathBuf, process::Command};
+    let guest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("guest");
+    let target = std::env::var_os("CARGO_TARGET_DIR");
+    let expected = std::env::var_os("EXPECTED_CALLER_TARGET");
+    let expected_dir = expected.clone().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("target"));
+    let artifact = guest.join(expected_dir).join("debug/libnested_guest.rlib");
+    // Force the child to produce the artifact even on a warm parent build.
+    if artifact.exists() { std::fs::remove_file(&artifact).unwrap(); }
+    for cargo in [std::ffi::OsString::from("cargo"), std::env::var_os("CARGO").unwrap()] {
+        let output = Command::new(cargo).args(["build", "--offline", "--manifest-path"])
+            .arg(guest.join("Cargo.toml")).current_dir(&guest).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(artifact.is_file(), "missing {}: {output:?}", artifact.display());
+        std::fs::remove_file(&artifact).unwrap();
+    }
+    assert_eq!(target, expected);
+}
+"#,
+            );
+            let guest = root_path.join("guest");
+            std::fs::create_dir_all(guest.join("src")).unwrap();
+            std::fs::write(
+                guest.join("Cargo.toml"),
+                "[package]\nname='nested-guest'\nversion='0.0.0'\nedition='2021'\n[workspace]\n",
+            )
+            .unwrap();
+            std::fs::write(guest.join("src/lib.rs"), "pub fn guest() {}\n").unwrap();
+            let caller_target = setting.filter(|value| *value != "flag").map(|value| {
+                if value == "absolute" {
+                    root_path.join("absolute-target")
+                } else {
+                    value.into()
+                }
+            });
+            for pass in 0..3 {
+                if pass == 2 {
+                    let target = root_path.join(if setting == Some("flag") {
+                        Path::new("flag-target")
+                    } else {
+                        caller_target.as_deref().unwrap_or(Path::new("target"))
+                    });
+                    std::fs::remove_dir_all(target.canonicalize().unwrap()).unwrap();
+                }
+                let mut command = mbx(&root_path);
+                // The same shim/environment is used for both cases; disabling
+                // mbx gives Cargo ownership of the entire plain control build.
+                command
+                    .env("MBX_CARGO_SHIM_MODE", "1")
+                    .env("MBX_DISABLE", if managed { "0" } else { "1" })
+                    .env("MBX_TARGET_ROOT", root_path.join("managed-targets"))
+                    .env("MBX_STATS_REPORT", root_path.join("stats.json"))
+                    .args(["test", "--offline"]);
+                if setting == Some("flag") {
+                    command.args(["--target-dir", "flag-target"]);
+                }
+                command.args(["--", "--nocapture"]);
+                if let Some(target) = &caller_target {
+                    command
+                        .env("CARGO_TARGET_DIR", target)
+                        .env("EXPECTED_CALLER_TARGET", target);
+                }
+                let output = command.output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "managed={managed}, target={caller_target:?}, pass={pass}:\n{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                if managed && pass == 2 {
+                    let report: serde_json::Value = serde_json::from_slice(
+                        &std::fs::read(root_path.join("stats.json")).unwrap(),
+                    )
+                    .unwrap();
+                    assert!(report["hits"].as_u64().unwrap() > 0, "{report}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn build_artifact_paths_and_run_keep_caller_target_settings() {
+    for explicit in [false, true] {
+        let root = tempfile::Builder::new()
+            .prefix("mbx target ")
+            .tempdir()
+            .unwrap();
+        let root = root.path().canonicalize().unwrap();
+        project(
+            &root,
+            r#"
+fn main() {
+    assert_eq!(std::env::var_os("CARGO_TARGET_DIR"), std::env::var_os("EXPECTED_TARGET"));
+    assert!(std::env::var_os("MBX_SOCKET").is_none());
+}
+"#,
+        );
+        let target = if explicit { "caller target" } else { "target" };
+        let command = || {
+            let mut command = mbx(&root);
+            if explicit {
+                command
+                    .env("CARGO_TARGET_DIR", target)
+                    .env("EXPECTED_TARGET", target);
+            }
+            command
+        };
+        for _ in 0..2 {
+            let output = command()
+                .args(["build", "--offline", "--message-format=json"])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let executable = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find_map(|value| value["executable"].as_str().map(std::path::PathBuf::from))
+                .unwrap();
+            assert!(
+                executable.starts_with(root.join(target)),
+                "{}",
+                executable.display()
+            );
+            assert!(executable.is_file());
+            let output = command().args(["run", "--offline"]).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}
+
 #[test]
 fn cargo_run_restores_settings_before_starting_application() {
     let root = tempfile::tempdir().unwrap();

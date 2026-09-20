@@ -42,11 +42,7 @@ pub(super) fn enabled(arguments: &[String]) -> bool {
 }
 
 fn cargo_verb(arguments: &[String]) -> Option<&str> {
-    arguments
-        .get(usize::from(
-            arguments.first().is_some_and(|arg| arg.starts_with('+')),
-        ))
-        .map(String::as_str)
+    super::launch::cargo_subcommand(arguments)
 }
 
 fn eligible(arguments: &[String]) -> bool {
