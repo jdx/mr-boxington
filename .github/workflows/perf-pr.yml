@@ -13,9 +13,9 @@ concurrency:
   cancel-in-progress: true
 env:
   CARGO_INCREMENTAL: "0"
-  # Rust 1.97.1 is part of the digest-pinned benchmark image.
-  MISE_DISABLE_TOOLS: rust
-  RUSTUP_TOOLCHAIN: 1.97.1
+  # The compiler is whichever one the digest-pinned benchmark image ships, so
+  # the workflow names no version of its own. The image digest is what holds a
+  # measurement comparable against the baseline that produced it.
   TAK_RUNNER: jdx-perf-v1-ubuntu24.04-x64-mr-boxington-rust1.97.1-img5263c143
 
 jobs:

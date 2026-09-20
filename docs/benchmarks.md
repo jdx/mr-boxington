@@ -78,9 +78,12 @@ oversubscribed it.
   while it downloads crates.
 - Every trial starts from a fresh clone, an empty store, and a new `target/`.
   Nothing carries over between tools or between runs.
-- The toolchain is pinned. hk does not pin one, and a runner-image Rust bump
-  would change every cache key at once and look like a cache that stopped
-  working.
+- The toolchain is the runner's, the same as any user's build, and the
+  `toolchain` field in `results.json` records which release produced the
+  numbers. Every trial in a run uses that one compiler, so the tools are
+  compared fairly against each other. A Rust bump between runs changes every
+  cache key at once, which reads as a cache that stopped working, so check that
+  field before treating a drop across runs as a regression.
 - `CARGO_INCREMENTAL=0` matches CI everywhere except the edit scenario. Any
   inherited `RUSTC_WRAPPER` is cleared, and the run fails if the Cargo
   baseline turns out to be an mbx shim.

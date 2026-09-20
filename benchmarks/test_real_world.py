@@ -312,6 +312,31 @@ class LocalEnvironmentTest(unittest.TestCase):
         self.assertNotIn("RUSTC_WRAPPER", environment)
 
 
+class ToolchainTest(unittest.TestCase):
+    def environment(self, subject: dict[str, object]) -> dict[str, str]:
+        runner = real_world.Runner(Path("/out"), Path("/cargo-home"), Path("/mbx"))
+        with mock.patch.dict(real_world.os.environ, {}, clear=False):
+            real_world.os.environ.pop("RUSTUP_TOOLCHAIN", None)
+            return runner.base_environment(subject, Path("/target"), local=False)
+
+    def test_a_subject_without_a_toolchain_builds_under_the_runners(self) -> None:
+        # The published numbers come from the compiler the runner ships, so the
+        # benchmark must not quietly select a different one.
+        self.assertNotIn("RUSTUP_TOOLCHAIN", self.environment({}))
+
+    def test_a_subject_that_names_a_toolchain_still_gets_it(self) -> None:
+        environment = self.environment({"toolchain": "1.91"})
+
+        self.assertEqual(environment["RUSTUP_TOOLCHAIN"], "1.91")
+
+    def test_the_recorded_release_comes_out_of_the_version_line(self) -> None:
+        self.assertEqual(
+            real_world.rust_release("rustc 1.97.1 (8bab26f4f 2026-07-14)"), "1.97.1"
+        )
+        self.assertIsNone(real_world.rust_release(None))
+        self.assertIsNone(real_world.rust_release("rustc"))
+
+
 class DiscardTest(unittest.TestCase):
     def test_removes_one_cell_without_touching_its_neighbours(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

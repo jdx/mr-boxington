@@ -40,9 +40,10 @@ SUBJECTS: dict[str, dict[str, object]] = {
         "url": "https://github.com/jdx/hk.git",
         "parent": "27bb615768b85c9ac88e2abf8895219b44462871",
         "child": "fc29ead1456ba7c1f62826c284126410a4014b00",
-        # hk does not pin a toolchain of its own, so the benchmark pins one.
-        # Without this the numbers stop being comparable across runner images.
-        "toolchain": "1.97.1",
+        # No toolchain: the build uses whichever compiler the runner provides,
+        # the way a user's build does. `toolchain` in the result records which
+        # one that was, so a comparison can check it before trusting a delta
+        # across runs.
         "args": ["build", "--locked"],
         # The edit scenario appends a comment here. Named per subject so a
         # moved pin fails instead of editing some other crate.
@@ -227,12 +228,24 @@ def available_memory_bytes() -> int | None:
     return None
 
 
+def rust_release(version: str | None) -> str | None:
+    """The bare release out of a `rustc 1.97.1 (8bab26f4f 2026-07-14)` line.
+
+    Nothing pins the compiler any more, so the published `toolchain` is read
+    back from the one that ran rather than written down in advance.
+    """
+    if version is None:
+        return None
+    parts = version.split()
+    return parts[1] if len(parts) > 1 else None
+
+
 def tool_version(command: str, toolchain: str | None = None) -> str | None:
     """What one tool calls itself, under the toolchain the builds used.
 
-    `cargo` and `rustc` are rustup shims, so asking them without pinning
-    reports the machine's default -- which is exactly the version the timed
-    builds did not use.
+    `cargo` and `rustc` are rustup shims. Asking them without a pin reports the
+    machine's default, which is what the timed builds use unless a subject names
+    a toolchain of its own.
     """
     executable = shutil.which(command)
     if executable is None:
@@ -295,9 +308,10 @@ class Runner:
                 # loop turns it on, because a developer's rebuild has it on.
                 "CARGO_INCREMENTAL": "1" if local else "0",
                 "CARGO_TERM_COLOR": "never",
-                "RUSTUP_TOOLCHAIN": str(subject["toolchain"]),
             }
         )
+        if subject.get("toolchain") is not None:
+            environment["RUSTUP_TOOLCHAIN"] = str(subject["toolchain"])
         # A wrapper inherited from the caller's shell would silently cache the
         # supposedly uncached baseline.
         for variable in ("RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"):
@@ -1173,7 +1187,11 @@ def main() -> int:
             env={
                 **os.environ,
                 "CARGO_HOME": str(cargo_home),
-                "RUSTUP_TOOLCHAIN": str(subject["toolchain"]),
+                **(
+                    {"RUSTUP_TOOLCHAIN": str(subject["toolchain"])}
+                    if subject.get("toolchain") is not None
+                    else {}
+                ),
             },
         )
 
@@ -1185,12 +1203,16 @@ def main() -> int:
             )
 
     failures = validate(scenarios)
+    pin = subject.get("toolchain")
+    pin = None if pin is None else str(pin)
+    cargo_version = tool_version("cargo", pin)
+    rustc_version = tool_version("rustc", pin)
     result: dict[str, object] = {
         # 2 added per-trial timings and named the published timing a median.
         "schema": 2,
         "subject": args.subject,
         "revision": subject["child"],
-        "toolchain": subject["toolchain"],
+        "toolchain": rust_release(rustc_version) or subject.get("toolchain"),
         "platform": platform.platform(),
         "runner": os.environ.get("RUNNER_NAME") or os.environ.get("HOSTNAME") or "local",
         "workflow_run": os.environ.get("GITHUB_RUN_ID"),
@@ -1204,8 +1226,8 @@ def main() -> int:
                 if mbx
                 else None
             ),
-            "cargo": tool_version("cargo", str(subject["toolchain"])),
-            "rustc": tool_version("rustc", str(subject["toolchain"])),
+            "cargo": cargo_version,
+            "rustc": rustc_version,
             "kache": tool_version("kache"),
         },
         "passed": not failures,

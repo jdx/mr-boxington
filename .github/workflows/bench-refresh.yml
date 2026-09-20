@@ -54,10 +54,8 @@ concurrency:
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
-  # Keep rustup's proxies on PATH so RUSTUP_TOOLCHAIN selects the pinned
-  # compiler the benchmark builds under.
-  MISE_DISABLE_TOOLS: rust
-  RUSTUP_TOOLCHAIN: 1.97.1
+  # The benchmark builds under whichever compiler its runner ships; nothing
+  # here selects one.
 
 jobs:
   # Only benchmark when the mbx that produced the published numbers is older
@@ -126,9 +124,7 @@ jobs:
         env:
           MISE_LOCKED: "1"
       - name: Install benchmark Rust tooling
-        run: |
-          rustup toolchain install --profile minimal 1.97.1
-          rustup component add --toolchain 1.97.1 clippy
+        run: rustup component add clippy
       # The comparison should track kache itself, not the version that happened
       # to be current when mise.lock was last updated. Install the newest stable
       # release explicitly, then keep its real path for builds that run outside
@@ -329,8 +325,6 @@ jobs:
         with:
           ref: ${{ inputs.small_edit_mbx_ref }}
           persist-credentials: false
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.97.1 --profile minimal --no-self-update
       - name: Build candidate
         run: cargo build --locked --release -p mbx
       - name: Stage candidate
@@ -367,8 +361,6 @@ jobs:
           repository: jdx/hk
           ref: 27bb615768b85c9ac88e2abf8895219b44462871
           persist-credentials: false
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.97.1 --profile minimal --no-self-update
       - name: Download candidate mbx
         if: inputs.small_edit_mbx_ref != '' && matrix.tool != 'rust-cache'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -394,13 +386,11 @@ jobs:
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
           save-on-workflow-dispatch: "true"
-          toolchain: 1.97.1
       - if: startsWith(matrix.tool, 'mbx-registry')
         uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.2.0
         with:
           backend: local
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
-          toolchain: 1.97.1
       - name: Seed parent build
         env:
           BUILD_DRIVER: "${{ matrix.tool == 'rust-cache' && 'cargo' || 'mbx' }}"
@@ -455,8 +445,6 @@ jobs:
           repository: jdx/hk
           ref: fc29ead1456ba7c1f62826c284126410a4014b00
           persist-credentials: false
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.97.1 --profile minimal --no-self-update
       - name: Download candidate mbx
         if: inputs.small_edit_mbx_ref != ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -488,13 +476,11 @@ jobs:
         with:
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
-          toolchain: 1.97.1
       - if: startsWith(matrix.tool, 'mbx-registry')
         uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.2.0
         with:
           backend: local
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
-          toolchain: 1.97.1
       # Restoring the bundle and importing it is the work that happens before a
       # compiler runs, so time the two apart instead of leaving them folded into
       # the restore-and-build total, where a few seconds sit under runner noise.
