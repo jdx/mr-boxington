@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.0](https://github.com/jdx/mr-boxington/compare/v1.14.0...v1.15.0) - 2026-09-20
+
+### Added
+
+- *(progress)* show friendlier build times and fewer updates on long builds ([#500](https://github.com/jdx/mr-boxington/pull/500))
+- *(target)* adopt existing target directories without deleting outputs ([#499](https://github.com/jdx/mr-boxington/pull/499))
+- *(cache)* reuse OUT_DIR compilations across checkouts ([#498](https://github.com/jdx/mr-boxington/pull/498))
+
+### Other
+
+- *(gc)* run the automatic store sweep after the build returns ([#497](https://github.com/jdx/mr-boxington/pull/497))
+- *(stats)* make mbx stats about 10x faster on machines with many checkouts ([#495](https://github.com/jdx/mr-boxington/pull/495))
+
 ## [1.14.0](https://github.com/jdx/mr-boxington/compare/v1.13.0...v1.14.0) - 2026-09-18
 
 ### Added

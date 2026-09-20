@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.17.0...mbx-cache-cc-v0.17.1) - 2026-09-20
+
+### Added
+
+- *(target)* adopt existing target directories without deleting outputs ([#499](https://github.com/jdx/mr-boxington/pull/499))
+
 ## [0.16.4](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.16.3...mbx-cache-cc-v0.16.4) - 2026-09-17
 
 ### Fixed

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.17.0...mbx-cache-rustc-v0.17.1) - 2026-09-20
+
+### Added
+
+- *(target)* adopt existing target directories without deleting outputs ([#499](https://github.com/jdx/mr-boxington/pull/499))
+
 ## [0.17.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.16.4...mbx-cache-rustc-v0.17.0) - 2026-09-18
 
 ### Added

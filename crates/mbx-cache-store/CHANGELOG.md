@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.29](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.28...mbx-cache-store-v0.1.29) - 2026-09-20
+
+### Added
+
+- *(target)* adopt existing target directories without deleting outputs ([#499](https://github.com/jdx/mr-boxington/pull/499))
+
+### Other
+
+- *(gc)* run the automatic store sweep after the build returns ([#497](https://github.com/jdx/mr-boxington/pull/497))
+- *(stats)* make mbx stats about 10x faster on machines with many checkouts ([#495](https://github.com/jdx/mr-boxington/pull/495))
+
 ## [0.1.28](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.27...mbx-cache-store-v0.1.28) - 2026-09-18
 
 ### Other
