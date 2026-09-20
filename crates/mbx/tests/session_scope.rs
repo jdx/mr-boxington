@@ -125,7 +125,9 @@ fn nested_build() {
                     } else {
                         caller_target.as_deref().unwrap_or(Path::new("target"))
                     });
-                    std::fs::remove_dir_all(target.canonicalize().unwrap()).unwrap();
+                    // Wipe compiled outputs without leaving a dangling Windows
+                    // junction at the managed target directory.
+                    std::fs::remove_dir_all(target.join("debug")).unwrap();
                 }
                 let mut command = mbx(&root_path);
                 // The same shim/environment is used for both cases; disabling
@@ -173,7 +175,13 @@ fn build_artifact_paths_and_run_keep_caller_target_settings() {
             .prefix("mbx target ")
             .tempdir()
             .unwrap();
-        let root = root.path().canonicalize().unwrap();
+        // Match Cargo's workspace spelling: resolve /var on macOS, but avoid
+        // introducing the verbatim \\?\ prefix Cargo omits on Windows.
+        let root = if cfg!(windows) {
+            root.path().to_path_buf()
+        } else {
+            root.path().canonicalize().unwrap()
+        };
         project(
             &root,
             r#"
