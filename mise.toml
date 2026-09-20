@@ -29,7 +29,12 @@ depends = ["test:cargo", "test:e2e", "test:release-diagnostics", "test:pretty"]
 
 [tasks."test:cargo"]
 description = "Run Rust tests"
-depends = ["bootstrap"]
+# After `build`, not beside it. Both write `target/debug/mbx`, and the
+# integration tests execute that path: a rebuild landing while a test spawns it
+# fails the test with "No such file or directory", or fails the build with
+# "Text file busy". A warm cache hid this by finishing `build` before the tests
+# got that far.
+depends = ["build"]
 run = "./target/mbx-bootstrap/mbx test --workspace"
 run_windows = "./target/mbx-bootstrap/mbx.exe test --workspace"
 
