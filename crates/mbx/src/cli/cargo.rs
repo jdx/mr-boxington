@@ -64,6 +64,9 @@ pub(crate) fn cargo_with_settings_and_bypass_log(
     cargo_with_settings_bypass_log_and_roots(config, settings, arguments, bypass_log, None)
 }
 
+/// Run Cargo with managed target placement and a cache session, reusing
+/// previously resolved roots when supplied. Scope placement to this invocation
+/// so tests and build scripts do not inherit an mbx-selected target directory.
 fn cargo_with_settings_bypass_log_and_roots(
     config: &Config,
     settings: &CliSettings,

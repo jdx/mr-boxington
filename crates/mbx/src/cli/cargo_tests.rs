@@ -1,5 +1,7 @@
 use super::*;
 
+/// Verify that placement escapes the target as TOML and preserves both the
+/// leading toolchain selector and application arguments after `--`.
 #[test]
 fn placed_target_config_is_scoped_and_preserves_argument_boundaries() {
     let original = [

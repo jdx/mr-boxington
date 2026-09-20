@@ -164,6 +164,8 @@ fn nested_build() {
     }
 }
 
+/// Check fresh and warm builds report checkout-local executable paths, and
+/// `cargo run` restores the caller's target setting before starting the program.
 #[test]
 fn build_artifact_paths_and_run_keep_caller_target_settings() {
     for explicit in [false, true] {

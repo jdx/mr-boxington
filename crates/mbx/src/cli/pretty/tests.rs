@@ -85,6 +85,8 @@ fn native_test_output_tracks_suites_and_failures_without_fabricated_times() {
     assert!(!model.test_line("custom harness output"));
 }
 
+/// Check that display options leave application arguments untouched and that
+/// toolchain selectors and placement configuration do not hide the Cargo verb.
 #[test]
 fn argument_injection_preserves_command_and_program_arguments() {
     let args = vec![
