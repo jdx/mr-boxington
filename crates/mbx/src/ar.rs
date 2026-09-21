@@ -84,6 +84,28 @@ pub(crate) fn normalizes(mode: ArDeterminism, profile: Option<&str>, already_set
     }
 }
 
+/// The `ZERO_AR_DATE` a build script will actually see.
+///
+/// This is what belongs in a build script's cache key, not whether mbx chose
+/// to set it. A cached result carries whatever archives the run that produced
+/// it happened to make, so a key that ignores the policy hands back timestamped
+/// archives after the policy is turned on -- and normalized ones after it is
+/// turned off -- until the store is cleared. Keying on the value the script
+/// sees makes each policy its own entry, so changing the setting takes effect
+/// on the next build rather than whenever the cache next misses for some other
+/// reason. An inherited value is reported as-is because that is what the script
+/// will read, whether or not mbx was the one to put it there.
+pub(crate) fn effective_zero_ar_date(
+    mode: ArDeterminism,
+    profile: Option<&str>,
+    inherited: Option<String>,
+) -> Option<String> {
+    match inherited {
+        Some(value) => Some(value),
+        None => normalizes(mode, profile, false).then(|| "1".to_owned()),
+    }
+}
+
 /// Whether this host's archive tools stamp a timestamp mbx would normalize.
 ///
 /// Answered by running the tools rather than by assuming from the platform:
@@ -201,6 +223,55 @@ mod tests {
         assert_eq!(ArDeterminism::parse("auto"), ArDeterminism::Auto);
         assert_eq!(ArDeterminism::parse("nonsense"), ArDeterminism::Auto);
         assert_eq!(ArDeterminism::default(), ArDeterminism::Auto);
+    }
+
+    #[test]
+    fn the_key_reflects_what_the_script_will_read() {
+        // mbx supplies the value.
+        assert_eq!(
+            effective_zero_ar_date(ArDeterminism::Auto, Some("debug"), None).as_deref(),
+            Some("1")
+        );
+        // Policy declines, so the script sees nothing.
+        assert_eq!(
+            effective_zero_ar_date(ArDeterminism::Auto, Some("release"), None),
+            None
+        );
+        assert_eq!(
+            effective_zero_ar_date(ArDeterminism::Off, Some("debug"), None),
+            None
+        );
+        assert_eq!(
+            effective_zero_ar_date(ArDeterminism::Always, Some("release"), None).as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn an_inherited_value_is_keyed_as_the_script_reads_it() {
+        // Including the value, not merely the fact that one was set: two
+        // developers with different settings must not share an entry.
+        for mode in [
+            ArDeterminism::Auto,
+            ArDeterminism::Always,
+            ArDeterminism::Off,
+        ] {
+            assert_eq!(
+                effective_zero_ar_date(mode, Some("debug"), Some("0".to_owned())).as_deref(),
+                Some("0")
+            );
+            assert_eq!(
+                effective_zero_ar_date(mode, Some("debug"), Some("1".to_owned())).as_deref(),
+                Some("1")
+            );
+        }
+    }
+
+    #[test]
+    fn turning_the_policy_on_or_off_changes_the_key() {
+        let on = effective_zero_ar_date(ArDeterminism::Auto, Some("debug"), None);
+        let off = effective_zero_ar_date(ArDeterminism::Off, Some("debug"), None);
+        assert_ne!(on, off);
     }
 
     #[test]

@@ -385,7 +385,10 @@ fn archive_check(config: &Config) -> Check {
             "archives",
             "the archive tools already produce identical bytes for identical input",
         ),
-        crate::ar::Probe::Unavailable(reason) => Check::pass(
+        // Warned rather than passed: the probe did not assess anything, and a
+        // green line would read as "archives are fine" when what happened is
+        // that nobody looked. The other probes here report the same way.
+        crate::ar::Probe::Unavailable(reason) => Check::warn(
             "archives",
             format!("archive determinism could not be probed ({reason})"),
         ),

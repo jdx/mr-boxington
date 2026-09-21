@@ -84,6 +84,27 @@ build_fresh() {
   [[ "$output" == *"probe PROFILE=debug ZERO_AR_DATE=0"* ]]
 }
 
+# The reason the policy belongs in the action key. A cached result carries the
+# archives of the run that made it, so without the key a warm store would hand
+# back a timestamped archive after the policy was turned on.
+@test "changing the policy takes effect against a warm cache" {
+  cd "$PROJECT"
+  build_fresh
+  [[ "$output" == *"probe PROFILE=debug ZERO_AR_DATE=1"* ]]
+
+  # Same store, same sources: only the policy changes.
+  rm -rf "$CARGO_TARGET_DIR"
+  MBX_AR_DETERMINISM=off run "$MBX_BIN" build
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"probe PROFILE=debug ZERO_AR_DATE=<unset>"* ]]
+
+  # And back again, to show neither direction is sticky.
+  rm -rf "$CARGO_TARGET_DIR"
+  run "$MBX_BIN" build
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"probe PROFILE=debug ZERO_AR_DATE=1"* ]]
+}
+
 @test "an archive built twice from unchanged objects keeps its digest" {
   if ! command -v ar >/dev/null 2>&1 || ! command -v ranlib >/dev/null 2>&1; then
     skip "no archiver is available"

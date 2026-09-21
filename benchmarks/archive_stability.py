@@ -98,14 +98,30 @@ def classify(paths: list[Path]) -> dict:
 
     representatives = [group[0] for group in by_digest.values()]
     sizes = sorted({path.stat().st_size for path in paths})
-    first, second = members(representatives[0]), members(representatives[1])
-    if first is None or second is None:
+    # Every variant, not just the first two: a group can hold several copies
+    # that differ only by timestamp and one that genuinely differs, and calling
+    # the whole group "timestamp" would point at ZERO_AR_DATE for a problem it
+    # cannot fix. "timestamp" has to mean every copy agrees on every payload.
+    baseline = members(representatives[0])
+    differing: set[str] | None = set()
+    cause = "timestamp"
+    if baseline is None:
         cause, differing = "unknown", None
-    elif set(first) != set(second):
-        cause, differing = "content", None
     else:
-        differing = sorted(name for name in first if first[name] != second[name])
-        cause = "content" if differing else "timestamp"
+        for representative in representatives[1:]:
+            other = members(representative)
+            if other is None:
+                cause, differing = "unknown", None
+                break
+            if set(other) != set(baseline):
+                cause, differing = "content", None
+                break
+            changed = {name for name in baseline if baseline[name] != other[name]}
+            if changed:
+                cause = "content"
+                differing |= changed
+    if differing is not None:
+        differing = sorted(differing)
     return {
         "stable": False,
         "copies": len(paths),

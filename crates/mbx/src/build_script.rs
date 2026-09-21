@@ -32,6 +32,9 @@ struct Invocation<'a> {
 
 #[derive(Debug, Serialize)]
 struct Action<'a> {
+    /// The `ZERO_AR_DATE` the script will read, so a change of archive policy
+    /// is a different entry instead of a stale restore. See [`crate::ar`].
+    archive_timestamps: Option<&'a str>,
     binary_action: &'a CacheDigest,
     cargo_environment: &'a BTreeMap<String, Option<String>>,
     environment: &'a BTreeMap<String, Option<String>>,
@@ -228,15 +231,30 @@ fn install_launcher(mbx: &Path, executable: &Path) -> std::io::Result<()> {
 /// an Apple target from Linux, and is inert for toolchains that do not know it.
 /// See [`crate::ar`] for why the timestamp matters to the cache.
 fn apply_ar_determinism(command: &mut Command) {
-    let mode = std::env::var(session::AR_DETERMINISM_ENV).map_or_else(
-        |_| ArDeterminism::default(),
-        |value| ArDeterminism::parse(&value),
-    );
-    let profile = std::env::var(crate::ar::PROFILE).ok();
-    let already_set = std::env::var_os(crate::ar::ZERO_AR_DATE).is_some();
-    if crate::ar::normalizes(mode, profile.as_deref(), already_set) {
+    let inherited = std::env::var_os(crate::ar::ZERO_AR_DATE).is_some();
+    if crate::ar::normalizes(ar_mode(), ar_profile().as_deref(), inherited) {
         command.env(crate::ar::ZERO_AR_DATE, "1");
     }
+}
+
+fn ar_mode() -> ArDeterminism {
+    std::env::var(session::AR_DETERMINISM_ENV).map_or_else(
+        |_| ArDeterminism::default(),
+        |value| ArDeterminism::parse(&value),
+    )
+}
+
+fn ar_profile() -> Option<String> {
+    std::env::var(crate::ar::PROFILE).ok()
+}
+
+/// The `ZERO_AR_DATE` this build script will see, for its cache key.
+fn archive_timestamp_key() -> Option<String> {
+    crate::ar::effective_zero_ar_date(
+        ar_mode(),
+        ar_profile().as_deref(),
+        std::env::var(crate::ar::ZERO_AR_DATE).ok(),
+    )
 }
 
 /// Run the preserved program without consulting the cache.
@@ -502,14 +520,18 @@ fn build_action(
     let out_dir = (!prediction.portable_out_dir)
         .then(|| std::env::var("OUT_DIR"))
         .transpose()?;
+    let archive_timestamps = archive_timestamp_key();
     let bytes = canonical_json(&Action {
+        archive_timestamps: archive_timestamps.as_deref(),
         binary_action,
         cargo_environment: &cargo_environment,
         environment: &environment,
         inputs: &inputs,
         kind: ADAPTER,
         out_dir: out_dir.as_deref(),
-        version: 2,
+        // Bumped with `archive_timestamps`: an entry stored before it cannot
+        // say which archive policy produced it, so it is not reused.
+        version: 3,
     })?;
     let digest = CacheDigest::blake3(&bytes);
     Ok((bytes, digest))
