@@ -18,6 +18,8 @@
 //! cause, and nothing here addresses it -- see the `archive-stability`
 //! benchmark for telling the two apart.
 
+use std::ffi::OsStr;
+
 /// The environment variable Apple's archive tools read.
 pub(crate) const ZERO_AR_DATE: &str = "ZERO_AR_DATE";
 
@@ -98,11 +100,35 @@ pub(crate) fn normalizes(mode: ArDeterminism, profile: Option<&str>, already_set
 pub(crate) fn effective_zero_ar_date(
     mode: ArDeterminism,
     profile: Option<&str>,
-    inherited: Option<String>,
+    inherited: Option<&OsStr>,
 ) -> Option<String> {
     match inherited {
-        Some(value) => Some(value),
-        None => normalizes(mode, profile, false).then(|| "1".to_owned()),
+        Some(value) => Some(key_for(value)),
+        None => normalizes(mode, profile, false).then(|| key_for(OsStr::new("1"))),
+    }
+}
+
+/// Spell one `ZERO_AR_DATE` value for a cache key.
+///
+/// Taken as an `OsStr` and tagged rather than passed through as a `String`,
+/// because the decision to leave an inherited value alone is made with
+/// `var_os`: a value that is not UTF-8 still reaches the build script, so
+/// reading it back with `var` and dropping it would key that build as though
+/// mbx had supplied its own "1", and the two would share an entry while their
+/// archives disagree. The tags keep a byte spelling from colliding with the
+/// text that happens to look like it.
+fn key_for(value: &OsStr) -> String {
+    use std::fmt::Write as _;
+
+    match value.to_str() {
+        Some(text) => format!("text:{text}"),
+        None => {
+            let mut key = String::from("bytes:");
+            for byte in value.as_encoded_bytes() {
+                let _ = write!(key, "{byte:02x}");
+            }
+            key
+        }
     }
 }
 
@@ -230,7 +256,7 @@ mod tests {
         // mbx supplies the value.
         assert_eq!(
             effective_zero_ar_date(ArDeterminism::Auto, Some("debug"), None).as_deref(),
-            Some("1")
+            Some("text:1")
         );
         // Policy declines, so the script sees nothing.
         assert_eq!(
@@ -243,7 +269,7 @@ mod tests {
         );
         assert_eq!(
             effective_zero_ar_date(ArDeterminism::Always, Some("release"), None).as_deref(),
-            Some("1")
+            Some("text:1")
         );
     }
 
@@ -257,14 +283,52 @@ mod tests {
             ArDeterminism::Off,
         ] {
             assert_eq!(
-                effective_zero_ar_date(mode, Some("debug"), Some("0".to_owned())).as_deref(),
-                Some("0")
+                effective_zero_ar_date(mode, Some("debug"), Some(OsStr::new("0"))).as_deref(),
+                Some("text:0")
             );
             assert_eq!(
-                effective_zero_ar_date(mode, Some("debug"), Some("1".to_owned())).as_deref(),
-                Some("1")
+                effective_zero_ar_date(mode, Some("debug"), Some(OsStr::new("1"))).as_deref(),
+                Some("text:1")
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_value_that_is_not_utf8_is_keyed_rather_than_dropped() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        // `apply_ar_determinism` leaves this value alone, so the key has to
+        // say so too. Keying it as absent would give this build the same entry
+        // as one where mbx supplied its own "1", and restore the wrong
+        // archives into it.
+        let inherited = OsStr::from_bytes(&[0x31, 0xff]);
+        let keyed = effective_zero_ar_date(ArDeterminism::Auto, Some("debug"), Some(inherited));
+        assert!(keyed.is_some());
+        assert_ne!(
+            keyed,
+            effective_zero_ar_date(ArDeterminism::Auto, Some("debug"), None)
+        );
+        assert_ne!(
+            keyed,
+            effective_zero_ar_date(ArDeterminism::Auto, Some("debug"), Some(OsStr::new("1")))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_text_value_cannot_spell_a_byte_value() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let bytes = effective_zero_ar_date(
+            ArDeterminism::Off,
+            Some("debug"),
+            Some(OsStr::from_bytes(&[0xc3, 0x28])),
+        );
+        let text =
+            effective_zero_ar_date(ArDeterminism::Off, Some("debug"), Some(OsStr::new("c328")));
+        assert!(bytes.is_some() && text.is_some());
+        assert_ne!(bytes, text);
     }
 
     #[test]

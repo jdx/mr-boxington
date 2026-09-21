@@ -250,11 +250,10 @@ fn ar_profile() -> Option<String> {
 
 /// The `ZERO_AR_DATE` this build script will see, for its cache key.
 fn archive_timestamp_key() -> Option<String> {
-    crate::ar::effective_zero_ar_date(
-        ar_mode(),
-        ar_profile().as_deref(),
-        std::env::var(crate::ar::ZERO_AR_DATE).ok(),
-    )
+    // `var_os`, matching `apply_ar_determinism`: the two have to agree about
+    // whether a value was inherited, including one that is not UTF-8.
+    let inherited = std::env::var_os(crate::ar::ZERO_AR_DATE);
+    crate::ar::effective_zero_ar_date(ar_mode(), ar_profile().as_deref(), inherited.as_deref())
 }
 
 /// Run the preserved program without consulting the cache.
