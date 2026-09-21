@@ -11,7 +11,13 @@ happened, separating the two causes that look identical from the outside:
               headers differ. `ZERO_AR_DATE` fixes this, and mbx sets it for
               build scripts (see the `ar_determinism` setting).
 
-  content     member payloads themselves differ between builds. A different
+  build path  member payloads differ only in the absolute path they were
+              built at, which objects carry in their debug information. Copies
+              made in different checkouts differ by design, and mbx already
+              keys such a build script to its path rather than sharing it.
+              Nothing is unstable, so `ZERO_AR_DATE` is beside the point.
+
+  content     member payloads differ for some other reason. A different
               problem with a different cause; `ZERO_AR_DATE` does nothing for
               it, and it needs diagnosing on its own.
 
@@ -29,6 +35,7 @@ import collections
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -55,8 +62,30 @@ def digest(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def members(path: Path) -> dict[str, str] | None:
-    """Digest every archive member payload, or None if it cannot be read."""
+# An absolute path as an object file carries it: the build directory recorded
+# in debug information. Matched generously because the point is only to tell
+# "these differ by where they were built" from "these differ in substance".
+BUILD_PATH = re.compile(rb"/[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+){2,}")
+
+# The archive's own symbol index, not a compilation output. `ranlib` rebuilds
+# it from the members, so it carries their offsets: change the length of a
+# path inside one object and this file differs too, for no reason of its own.
+# Judging substance by it would report every path difference as content.
+INDEX_MEMBERS = ("__.SYMDEF", "/", "//", "/SYM64/")
+
+
+def is_index(name: str) -> bool:
+    return name in INDEX_MEMBERS or name.startswith("__.SYMDEF")
+
+
+def members(path: Path) -> dict[str, tuple[str, str]] | None:
+    """Digest every archive member payload, raw and with paths normalized.
+
+    The second digest answers a question the first cannot: two objects built
+    from the same source at different paths are not the same bytes, but they
+    are the same compilation, and calling that "unstable" sends whoever reads
+    this report looking for a bug that is not there.
+    """
     with tempfile.TemporaryDirectory() as scratch:
         extracted = subprocess.run(
             ["ar", "x", str(path.resolve())],
@@ -65,12 +94,48 @@ def members(path: Path) -> dict[str, str] | None:
         )
         if extracted.returncode != 0:
             return None
-        out: dict[str, str] = {}
+        out: dict[str, tuple[str, str]] = {}
         for name in sorted(os.listdir(scratch)):
             member = Path(scratch, name)
             if member.is_file():
-                out[name] = digest(member)
+                raw = member.read_bytes()
+                out[name] = (
+                    hashlib.sha256(raw).hexdigest(),
+                    hashlib.sha256(BUILD_PATH.sub(b"<path>", raw)).hexdigest(),
+                )
         return out
+
+
+def embedded_paths(path: Path) -> set[bytes]:
+    """Absolute paths an archive's members carry, as debug information."""
+    with tempfile.TemporaryDirectory() as scratch:
+        extracted = subprocess.run(
+            ["ar", "x", str(path.resolve())], cwd=scratch, capture_output=True
+        )
+        if extracted.returncode != 0:
+            return set()
+        found: set[bytes] = set()
+        for name in os.listdir(scratch):
+            member = Path(scratch, name)
+            if member.is_file() and not is_index(name):
+                found |= set(BUILD_PATH.findall(member.read_bytes()))
+        return found
+
+
+def build_roots(paths: list[Path]) -> list[str]:
+    """One representative build directory per copy, where they disagree.
+
+    An object records the directory it was compiled in. Two copies built in
+    different checkouts therefore differ in bytes without anything being
+    unstable, and the only way to say so is to show the directories.
+    """
+    per_copy = [embedded_paths(path) for path in paths]
+    shared = set.intersection(*per_copy) if per_copy else set()
+    roots = []
+    for found in per_copy:
+        unique = sorted(found - shared, key=len)
+        roots.append(unique[0].decode("utf-8", "replace") if unique else "")
+    return roots
 
 
 def identity(path: Path, root: Path) -> tuple[str, str] | None:
@@ -116,18 +181,35 @@ def classify(paths: list[Path]) -> dict:
             if set(other) != set(baseline):
                 cause, differing = "content", None
                 break
-            changed = {name for name in baseline if baseline[name] != other[name]}
-            if changed:
-                cause = "content"
-                differing |= changed
+            changed = {name for name in baseline if baseline[name][0] != other[name][0]}
+            if not changed:
+                continue
+            differing |= changed
+            # Substance only where normalizing the build path still leaves a
+            # difference. "content" has to outrank "build path" once any member
+            # differs for a reason a path cannot explain.
+            substantive = {
+                name
+                for name in changed
+                if not is_index(name) and baseline[name][1] != other[name][1]
+            }
+            cause = "content" if substantive or cause == "content" else "build path"
     if differing is not None:
         differing = sorted(differing)
+    roots = build_roots(representatives) if cause in ("content", "build path") else []
+    distinct_roots = sorted({root for root in roots if root})
+    # Objects carrying different build directories explain a byte difference
+    # without anything being unstable, so say so rather than leaving "content"
+    # to be read as a defect.
+    if cause == "content" and len(distinct_roots) > 1:
+        cause = "build path"
     return {
         "stable": False,
         "copies": len(paths),
         "distinct_digests": len(by_digest),
         "sizes": sizes,
         "cause": cause,
+        "build_roots": distinct_roots,
         "members_differing": len(differing) if differing is not None else None,
         "example_members": (differing or [])[:5],
     }
@@ -164,6 +246,14 @@ def main() -> int:
         )
         if result["cause"] == "timestamp":
             print("    every member payload identical -> ZERO_AR_DATE addresses this")
+        elif result["cause"] == "build path":
+            print(
+                f"    {result['members_differing']} members differ, and the copies "
+                "record different build directories -> compiled at different paths, "
+                "not unstable; ZERO_AR_DATE is beside the point"
+            )
+            for root in result["build_roots"][:4]:
+                print(f"      built at: {root}")
         elif result["members_differing"]:
             print(
                 f"    {result['members_differing']} member payloads differ "
