@@ -11,15 +11,23 @@ happened, separating the two causes that look identical from the outside:
               headers differ. `ZERO_AR_DATE` fixes this, and mbx sets it for
               build scripts (see the `ar_determinism` setting).
 
-  build path  member payloads differ only in the absolute path they were
-              built at, which objects carry in their debug information. Copies
-              made in different checkouts differ by design, and mbx already
-              keys such a build script to its path rather than sharing it.
-              Nothing is unstable, so `ZERO_AR_DATE` is beside the point.
+  build path  payloads become identical once the absolute build path is
+              normalized. Objects carry the directory they were compiled in,
+              so copies made in different checkouts differ by design and
+              nothing is unstable. `ZERO_AR_DATE` is beside the point.
 
-  content     member payloads differ for some other reason. A different
+  content     payloads still differ with paths normalized, and the copies
+              share a build directory -- so no path explains it. A different
               problem with a different cause; `ZERO_AR_DATE` does nothing for
               it, and it needs diagnosing on its own.
+
+  undetermined
+              payloads still differ with paths normalized, but the copies were
+              built at different directories. A path that changes length also
+              moves the offsets inside an object, so normalizing its text
+              cannot prove the rest equal. This survey cannot separate the two
+              here; build the same dependency at two equal-length paths to
+              settle it. Reported rather than guessed in either direction.
 
 Archives are compared only against other copies of the same crate, profile and
 build hash, so a difference is never just two different configurations.
@@ -169,40 +177,55 @@ def classify(paths: list[Path]) -> dict:
     # cannot fix. "timestamp" has to mean every copy agrees on every payload.
     baseline = members(representatives[0])
     differing: set[str] | None = set()
-    cause = "timestamp"
+    unknown = False
+    members_disagree = False
+    substantive_found = False
+    changed_any = False
     if baseline is None:
-        cause, differing = "unknown", None
+        unknown, differing = True, None
     else:
         for representative in representatives[1:]:
             other = members(representative)
             if other is None:
-                cause, differing = "unknown", None
+                unknown, differing = True, None
                 break
+            # A different set of members is a different set of compilation
+            # units. No path can explain that, so it is never downgraded.
             if set(other) != set(baseline):
-                cause, differing = "content", None
+                members_disagree, differing = True, None
                 break
             changed = {name for name in baseline if baseline[name][0] != other[name][0]}
             if not changed:
                 continue
+            changed_any = True
             differing |= changed
-            # Substance only where normalizing the build path still leaves a
-            # difference. "content" has to outrank "build path" once any member
-            # differs for a reason a path cannot explain.
-            substantive = {
-                name
+            if any(
+                not is_index(name) and baseline[name][1] != other[name][1]
                 for name in changed
-                if not is_index(name) and baseline[name][1] != other[name][1]
-            }
-            cause = "content" if substantive or cause == "content" else "build path"
+            ):
+                substantive_found = True
     if differing is not None:
         differing = sorted(differing)
-    roots = build_roots(representatives) if cause in ("content", "build path") else []
+
+    roots = [] if unknown else build_roots(representatives)
     distinct_roots = sorted({root for root in roots if root})
-    # Objects carrying different build directories explain a byte difference
-    # without anything being unstable, so say so rather than leaving "content"
-    # to be read as a defect.
-    if cause == "content" and len(distinct_roots) > 1:
+
+    # Naming the cause is the whole job, so it must not claim more than the
+    # comparison supports in either direction. A substantive difference is
+    # only harmless when the copies share a build directory; when they do not,
+    # their differing path lengths also shift object layout, and this survey
+    # cannot separate that from real instability -- so it says so rather than
+    # calling it either a defect or a checkout difference.
+    if unknown:
+        cause = "unknown"
+    elif members_disagree:
+        cause = "content"
+    elif substantive_found:
+        cause = "undetermined" if len(distinct_roots) > 1 else "content"
+    elif changed_any:
         cause = "build path"
+    else:
+        cause = "timestamp"
     return {
         "stable": False,
         "copies": len(paths),
@@ -248,17 +271,26 @@ def main() -> int:
             print("    every member payload identical -> ZERO_AR_DATE addresses this")
         elif result["cause"] == "build path":
             print(
-                f"    {result['members_differing']} members differ, and the copies "
-                "record different build directories -> compiled at different paths, "
-                "not unstable; ZERO_AR_DATE is beside the point"
+                f"    {result['members_differing']} members differ only in the path "
+                "they were built at -> deterministic; ZERO_AR_DATE is beside the point"
             )
-            for root in result["build_roots"][:4]:
-                print(f"      built at: {root}")
+        elif result["cause"] == "undetermined":
+            print(
+                f"    {result['members_differing']} members still differ after "
+                "normalizing paths, but the copies were built at different "
+                "directories, whose differing lengths also move object layout"
+            )
+            print(
+                "    -> cannot tell a path difference from real instability here; "
+                "compare copies built at equal-length paths to settle it"
+            )
         elif result["members_differing"]:
             print(
                 f"    {result['members_differing']} member payloads differ "
                 f"-> not a timestamp; e.g. {', '.join(result['example_members'])}"
             )
+        for root in result["build_roots"][:4]:
+            print(f"      built at: {root}")
         if len(result["sizes"]) > 1:
             print(f"    sizes vary: {result['sizes']}")
 
