@@ -6,6 +6,20 @@ Read from, in ascending precedence — the last one that names a setting wins:
 - `<config directory>/mbx/config.toml` (global), toml
 
 
+### `ar_determinism`
+
+- **Type:** `string`
+- **Default:** `auto`
+- **Set with:** `MBX_AR_DETERMINISM`
+
+Set `ZERO_AR_DATE` for build scripts so native archives stop embedding a timestamp. Without it, tools like CMake's `ar` rewrite an archive's header on every build, moving its digest and missing every cached action downstream even when no member changed. Auto normalizes every profile except `release`, leaving published artifacts byte-for-byte as the host toolchain made them; always covers `release` too; off leaves the toolchain alone. A `ZERO_AR_DATE` you set yourself always wins.
+
+**Choices:**
+- `auto`
+- `always`
+- `off`
+
+
 ### `build_script_execution`
 
 - **Type:** `bool`

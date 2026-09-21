@@ -384,6 +384,10 @@ fn cargo_with_settings_bypass_log_and_roots(
             session::CACHE_LINKS_ENV.into(),
             if cache_links { "1" } else { "0" }.into(),
         );
+        environment.insert(
+            session::AR_DETERMINISM_ENV.into(),
+            config.ar_determinism.clone(),
+        );
 
         if let Some(launch) = &launch {
             launch.environment(&mut environment)?;

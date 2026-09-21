@@ -1,5 +1,6 @@
 //! Cache Cargo build-script execution after the script has declared its inputs.
 
+use crate::ar::ArDeterminism;
 use crate::materialize::{
     apply_file_mode, denormalize_output_text, file_mode, find_blobs, normalize_output_text,
     read_canonical_blob, read_verified_blob, record_action_hit, replay_bytes, staging_directory,
@@ -220,6 +221,24 @@ fn install_launcher(mbx: &Path, executable: &Path) -> std::io::Result<()> {
     std::fs::copy(mbx, executable).map(|_| ())
 }
 
+/// Apply mbx's archive-timestamp policy to a build script's environment.
+///
+/// Set on every host rather than only on macOS: the variable is read by Apple's
+/// archive tools wherever they run, which includes cctools cross-compiling to
+/// an Apple target from Linux, and is inert for toolchains that do not know it.
+/// See [`crate::ar`] for why the timestamp matters to the cache.
+fn apply_ar_determinism(command: &mut Command) {
+    let mode = std::env::var(session::AR_DETERMINISM_ENV).map_or_else(
+        |_| ArDeterminism::default(),
+        |value| ArDeterminism::parse(&value),
+    );
+    let profile = std::env::var(crate::ar::PROFILE).ok();
+    let already_set = std::env::var_os(crate::ar::ZERO_AR_DATE).is_some();
+    if crate::ar::normalizes(mode, profile.as_deref(), already_set) {
+        command.env(crate::ar::ZERO_AR_DATE, "1");
+    }
+}
+
 /// Run the preserved program without consulting the cache.
 pub(crate) fn run_real() -> ExitCode {
     let Some(invoked) = session::build_script_invocation_path() else {
@@ -232,6 +251,7 @@ pub(crate) fn run_real() -> ExitCode {
     let mut command = Command::new(real);
     command.args(std::env::args_os().skip(1));
     command.env_remove(session::BUILD_SCRIPT_SHIM_PATH_ENV);
+    apply_ar_determinism(&mut command);
     match command.status() {
         Ok(status) => crate::materialize::exit_code(status),
         Err(error) => {
@@ -271,6 +291,7 @@ pub(crate) fn run() -> Result<ExitCode> {
     let mut command = Command::new(&real);
     command.args(std::env::args_os().skip(1));
     command.env_remove(session::BUILD_SCRIPT_SHIM_PATH_ENV);
+    apply_ar_determinism(&mut command);
     let output = command
         .output()
         .wrap_err("failed to execute the build script")?;

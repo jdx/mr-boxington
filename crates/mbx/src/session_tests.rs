@@ -63,6 +63,7 @@ fn test_config(cache_dir: &Path) -> Config {
     Config {
         cache_dir: cache_dir.to_path_buf(),
         stats_report: None,
+        ar_determinism: "auto".into(),
         verify: false,
         verify_sample_rate: 0,
         incremental: false,

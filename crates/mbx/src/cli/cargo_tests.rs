@@ -382,6 +382,7 @@ pub(super) fn managed_target_config(root: &Path) -> Config {
     Config {
         cache_dir: root.join("cache"),
         stats_report: None,
+        ar_determinism: "auto".into(),
         verify: false,
         verify_sample_rate: 0,
         incremental: false,

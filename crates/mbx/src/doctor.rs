@@ -144,6 +144,7 @@ async fn check(config: &Config, toolchain: Option<&str>) -> Vec<Check> {
     for destination in restore_destinations(config, &cargo, toolchain) {
         checks.push(reflink_check(&config.cache_dir, &destination));
     }
+    checks.push(archive_check(config));
     checks.push(setup_check());
     checks.extend(remote_checks(config).await);
     checks
@@ -365,6 +366,59 @@ fn reflink_check_with(
                     "{layout}: {reason} ({error}); restores to this location may require copying"
                 ),
             )
+        }
+    }
+}
+
+/// Report whether native archives will carry a timestamp that moves their
+/// digest between otherwise identical builds.
+///
+/// A stamping toolchain is not itself a problem; it becomes one when mbx is not
+/// normalizing it, because then every rebuild of a CMake-style native
+/// dependency republishes the same archive under a new digest and misses every
+/// cached action downstream of it. So the probe's answer is only worth a
+/// warning when the configured policy leaves this build unnormalized.
+fn archive_check(config: &Config) -> Check {
+    let mode = crate::ar::ArDeterminism::parse(&config.ar_determinism);
+    match crate::ar::probe() {
+        crate::ar::Probe::Deterministic => Check::pass(
+            "archives",
+            "the archive tools already produce identical bytes for identical input",
+        ),
+        crate::ar::Probe::Unavailable(reason) => Check::pass(
+            "archives",
+            format!("archive determinism could not be probed ({reason})"),
+        ),
+        crate::ar::Probe::Stamps => {
+            // The probe says what the tools do; the policy says what mbx will
+            // do about it. `release` under `auto` is a deliberate choice rather
+            // than an oversight, so it is reported without alarm.
+            let normalized_here = crate::ar::normalizes(mode, Some("debug"), false);
+            let normalized_release = crate::ar::normalizes(mode, Some("release"), false);
+            if normalized_here {
+                let release = if normalized_release {
+                    "release included"
+                } else {
+                    "release left as the toolchain makes it"
+                };
+                Check::pass(
+                    "archives",
+                    format!(
+                        "the archive tools stamp a timestamp; mbx sets ZERO_AR_DATE for build \
+                         scripts ({release})"
+                    ),
+                )
+            } else {
+                Check::warn(
+                    "archives",
+                    format!(
+                        "the archive tools stamp a timestamp and ar_determinism is \"{}\"; \
+                         native archives may change digest between identical builds and miss \
+                         cached actions downstream",
+                        mode.as_str()
+                    ),
+                )
+            }
         }
     }
 }
@@ -738,6 +792,7 @@ mod tests {
         let mut config = Config {
             cache_dir: directory.path().to_path_buf(),
             stats_report: None,
+            ar_determinism: "auto".into(),
             verify: false,
             verify_sample_rate: 0,
             incremental: false,
@@ -781,6 +836,7 @@ mod tests {
         let mut config = Config {
             cache_dir: directory.path().to_path_buf(),
             stats_report: None,
+            ar_determinism: "auto".into(),
             verify: false,
             verify_sample_rate: 0,
             incremental: false,

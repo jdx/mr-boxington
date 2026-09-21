@@ -52,6 +52,7 @@ pub mod tui;
 #[doc(hidden)]
 pub mod util;
 
+mod ar;
 mod build_script;
 mod cc;
 mod digest_ledger;

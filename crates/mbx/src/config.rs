@@ -194,6 +194,19 @@ pub(crate) struct RawConfig {
     /// reused at another path. Existing entries may still be restored.
     #[usage(env = "MBX_CC_STORE_PATH_SPECIFIC", default = true)]
     cc_store_path_specific: bool,
+    /// Set `ZERO_AR_DATE` for build scripts so native archives stop embedding a
+    /// timestamp. Without it, tools like CMake's `ar` rewrite an archive's
+    /// header on every build, moving its digest and missing every cached action
+    /// downstream even when no member changed. Auto normalizes every profile
+    /// except `release`, leaving published artifacts byte-for-byte as the host
+    /// toolchain made them; always covers `release` too; off leaves the
+    /// toolchain alone. A `ZERO_AR_DATE` you set yourself always wins.
+    #[usage(
+        env = "MBX_AR_DETERMINISM",
+        default = "auto",
+        choices("auto", "always", "off")
+    )]
+    ar_determinism: String,
     /// Forward rustc's diagnostics and artifact notifications to Cargo as the
     /// compiler prints them, so Cargo can start a dependent against this
     /// crate's metadata while its code generation continues. Turn it off to
@@ -444,6 +457,8 @@ pub struct Config {
     pub cc: bool,
     /// Store path-specific C outputs for reuse at the same checkout path.
     pub cc_store_path_specific: bool,
+    /// When to normalize native archive timestamps for build scripts.
+    pub ar_determinism: String,
     /// Forward the compiler's diagnostics and artifact notifications as they
     /// arrive instead of after the result is stored.
     ///
@@ -505,6 +520,7 @@ impl Config {
             // should not have compiler shims installed underneath it.
             cc: false,
             cc_store_path_specific: true,
+            ar_determinism: "auto".into(),
             forward_compiler_notifications: true,
             remote: Default::default(),
             http: Default::default(),
@@ -1006,6 +1022,7 @@ impl Config {
             events: raw.events,
             cc: raw.cc,
             cc_store_path_specific: raw.cc_store_path_specific,
+            ar_determinism: raw.ar_determinism,
             forward_compiler_notifications: raw.forward_compiler_notifications,
             remote: RemoteSettings {
                 url: raw.remote.url,

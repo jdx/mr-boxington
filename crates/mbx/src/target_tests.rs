@@ -5,6 +5,7 @@ fn test_config(root: &Path, views: bool) -> Config {
     Config {
         cache_dir: root.join("cache"),
         stats_report: None,
+        ar_determinism: "auto".into(),
         verify: false,
         verify_sample_rate: 0,
         incremental: false,
