@@ -1008,6 +1008,6 @@ mod layout_tests {
         }
         let result = restore_check(cache.path(), target.path(), true);
         assert_eq!(result.severity, Severity::Warn);
-        assert!(result.detail.contains("copying"));
+        assert!(result.detail.contains("copied"), "{}", result.detail);
     }
 }
