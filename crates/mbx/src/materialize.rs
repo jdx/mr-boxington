@@ -304,11 +304,19 @@ fn readable_by_owner(mode: u32) -> bool {
 }
 
 /// Give a file the modification time a compiler writing it now would.
-///
-/// Opened for reading rather than writing, because a hard-linked output is
-/// read-only on purpose and a Unix owner may set times without write access.
 pub(crate) fn set_modified_now(path: &Path) -> Result<()> {
-    let times = std::fs::FileTimes::new().set_modified(std::time::SystemTime::now());
+    set_modified(path, std::time::SystemTime::now())
+}
+
+/// Stamp a file with a modification time.
+///
+/// Opened for reading rather than writing, because anything downstream of a
+/// restore may be looking at a hard link to the store's object, which is
+/// read-only on purpose. A Unix owner may set times without write access, so
+/// asking for none is both sufficient and the only thing that works on every
+/// file a restore can produce.
+pub(crate) fn set_modified(path: &Path, modified: std::time::SystemTime) -> Result<()> {
+    let times = std::fs::FileTimes::new().set_modified(modified);
     #[cfg(unix)]
     let file = std::fs::OpenOptions::new().read(true).open(path)?;
     #[cfg(windows)]

@@ -100,10 +100,11 @@ pub(crate) fn install(executable: &Path, binary_action: &CacheDigest) -> Result<
     let temporary = real.with_extension("mbx-real-new");
     let _ = std::fs::remove_file(&temporary);
     std::fs::copy(executable, &temporary).wrap_err("failed to preserve the build script")?;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&temporary)?
-        .set_times(std::fs::FileTimes::new().set_modified(modified))?;
+    // `copy` carries the source's mode, and a build script restored by hard
+    // link is the store's read-only object, so this copy of it cannot be
+    // opened for writing. The timestamp is set through a read-only handle,
+    // which an owner may do and which works whichever way the restore landed.
+    crate::materialize::set_modified(&temporary, modified)?;
     let _ = std::fs::remove_file(&real);
     std::fs::rename(&temporary, &real)?;
     std::fs::write(
