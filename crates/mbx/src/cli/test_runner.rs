@@ -20,6 +20,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 const SHIM: &str = "mbx-test-runner";
+/// Shortest run whose CPU use is worth remembering. Below this, start-up
+/// dominates the average, and a suite this quick barely holds its permit.
+const MIN_CPU_SAMPLE: std::time::Duration = std::time::Duration::from_secs(1);
 /// The [`Overlay`] the shim reads back.
 const RUNNERS: &str = "MBX_TEST_RUNNERS";
 
@@ -226,11 +229,26 @@ pub fn dispatch() -> Option<ExitCode> {
                     .admit(demand)
                     .map(|permit| (demand, permit))
             });
+        let started = std::time::Instant::now();
         let status = command
             .status()
             .wrap_err_with(|| format!("failed to run {}", Path::new(&executable).display()))?;
+        let wall = started.elapsed();
         if let Some((demand, permit)) = permit {
             crate::scheduler::record_compiler_memory(demand, &status);
+            // A run that exited on its own, failing tests included, ran the
+            // whole suite; one a signal stopped, or one narrowed to some of
+            // its tests, says little about what the suite costs.
+            if status.code().is_some()
+                && wall >= MIN_CPU_SAMPLE
+                && !narrows_suite(&rest)
+                && let Some(cpu) = crate::scheduler::child_cpu_time()
+            {
+                crate::scheduler::record_test_cpu(
+                    demand,
+                    crate::scheduler::average_cores(cpu, wall),
+                );
+            }
             drop(permit);
         }
         Ok(super::cargo::exit_code(status))
@@ -266,6 +284,26 @@ fn test_threads(arguments: &[OsString], environment: Option<&str>) -> Option<u64
         }
     }
     stated.or_else(|| environment?.parse().ok())
+}
+
+/// Whether the harness arguments run only part of the suite: a name filter,
+/// `--skip`, or `--ignored`.
+fn narrows_suite(arguments: &[OsString]) -> bool {
+    let mut arguments = arguments.iter().map(|arg| arg.to_string_lossy());
+    while let Some(argument) = arguments.next() {
+        match argument.as_ref() {
+            "--" => return arguments.next().is_some(),
+            "--skip" | "--ignored" => return true,
+            argument if argument.starts_with("--skip=") => return true,
+            // libtest's options that take a separate value.
+            "--test-threads" | "--format" | "--logfile" | "--color" | "--shuffle-seed" | "-Z" => {
+                arguments.next();
+            }
+            argument if !argument.starts_with('-') => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 fn lists_tests(arguments: &[OsString]) -> bool {
@@ -335,6 +373,23 @@ mod tests {
         assert_eq!(test_threads(&os(&["--test-threads=5"]), None), Some(5));
         assert_eq!(test_threads(&os(&["--", "--test-threads=5"]), None), None);
         assert_eq!(test_threads(&os(&[]), Some("many")), None);
+    }
+
+    #[test]
+    fn narrowed_runs_are_recognised() {
+        assert!(!narrows_suite(&os(&[])));
+        assert!(!narrows_suite(&os(&["--test-threads", "4", "--nocapture"])));
+        assert!(!narrows_suite(&os(&[
+            "--format",
+            "json",
+            "--include-ignored"
+        ])));
+        assert!(narrows_suite(&os(&["parser"])));
+        assert!(narrows_suite(&os(&["--exact", "parser::tokens"])));
+        assert!(narrows_suite(&os(&["--skip", "slow"])));
+        assert!(narrows_suite(&os(&["--skip=slow"])));
+        assert!(narrows_suite(&os(&["--ignored"])));
+        assert!(narrows_suite(&os(&["--", "parser"])));
     }
 
     #[test]

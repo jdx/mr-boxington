@@ -390,7 +390,8 @@ fn test_binaries_weigh_their_threads_and_their_own_history() {
     // The compile of `suite` measured light and the run measured heavy; each
     // is planned from its own entry.
     pool.record_peak("suite", 1500, false).unwrap();
-    pool.record_peak("suite [test]", 6500, false).unwrap();
+    pool.record_peak("suite [test, 1 threads]", 6500, false)
+        .unwrap();
     assert_eq!(pool.plan(&Demand::new("suite", false)), (2, Some(1500)));
     assert_eq!(
         pool.plan(&Demand::test("suite", Some(1))),
@@ -409,6 +410,50 @@ fn test_binaries_weigh_their_threads_and_their_own_history() {
         (1, None),
         "a demand never weighs nothing"
     );
+}
+
+/// A test binary's measured core count replaces the guess, is kept per thread
+/// setting, and is never lowered by a reading taken on a busier machine.
+#[test]
+fn test_binaries_are_weighed_by_the_cores_they_were_measured_using() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 8, 0);
+
+    pool.record_cpu("suite [test]", 2).unwrap();
+    assert_eq!(
+        pool.plan(&Demand::test("suite", None)),
+        (2, None),
+        "a measurement replaces half the pool, even without a memory budget"
+    );
+    assert_eq!(
+        pool.plan(&Demand::test("suite", Some(6))),
+        (6, None),
+        "a stated thread count has its own history"
+    );
+    assert_eq!(
+        pool.plan(&Demand::new("suite", false)),
+        (1, None),
+        "compilations are not measured for cores"
+    );
+
+    pool.record_cpu("suite [test]", 1).unwrap();
+    assert_eq!(pool.plan(&Demand::test("suite", None)), (2, None));
+    pool.record_cpu("suite [test]", 12).unwrap();
+    assert_eq!(
+        pool.plan(&Demand::test("suite", None)),
+        (8, None),
+        "a higher reading raises it, clamped to the capacity"
+    );
+}
+
+#[test]
+fn average_cores_round_to_the_nearest_core() {
+    let seconds = Duration::from_secs_f64;
+    assert_eq!(average_cores(seconds(0.01), seconds(2.0)), 1);
+    assert_eq!(average_cores(seconds(2.8), seconds(2.0)), 1);
+    assert_eq!(average_cores(seconds(3.2), seconds(2.0)), 2);
+    assert_eq!(average_cores(seconds(15.0), seconds(2.0)), 8);
+    assert_eq!(average_cores(seconds(1.0), Duration::ZERO), 1);
 }
 
 /// Every test binary is its own crate name, so a cold `cargo test --no-run`

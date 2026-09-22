@@ -532,6 +532,9 @@ fn scheduled_test_binaries_hold_a_permit_and_keep_the_configured_runner() {
 fn main() {}
 #[test]
 fn scheduled() {
+    // Long enough to be measured, and idle: the suite keeps one core busy
+    // at most, which the next default-width run is weighed by.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     assert_eq!(std::env::var("RUNNER_ARGUMENT").unwrap(), "runner arg");
     let leases = std::path::Path::new(&std::env::var_os("MBX_CACHE_DIR").unwrap())
         .join("scheduler/leases");
@@ -592,8 +595,11 @@ pub fn documented() {}
     .unwrap();
     for (tests, harness, expected) in [
         (Some("1"), &["--test-threads=3"][..], Some("3")),
+        // Half of the 8 permits until this binary has been measured,
         (Some("1"), &[][..], Some("4")),
         (None, &[][..], None),
+        // then the one core the idle suite was measured using.
+        (Some("1"), &[][..], Some("1")),
     ] {
         let mut command = mbx(root.path());
         command

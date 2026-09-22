@@ -73,15 +73,24 @@ MBX_SCHEDULER_TESTS=1 mbx test --workspace
 mbx becomes Cargo's target runner for `cargo test` and calls any runner you
 have configured. Each test binary waits for permits before it starts:
 
-- `--test-threads=N` or `RUST_TEST_THREADS=N` asks for `N` permits.
-- Otherwise the binary asks for half the pool, rounded up.
+- Once a binary has been measured, it asks for the average number of cores it
+  kept busy: CPU time divided by wall time, rounded to the nearest core.
+- Before that, `--test-threads=N` or `RUST_TEST_THREADS=N` asks for `N`
+  permits, and otherwise the binary asks for half the pool, rounded up.
 - A binary whose measured memory needs more permits takes that many instead.
+
+Only complete runs of at least a second are measured; a run narrowed by a test
+name, `--skip`, or `--ignored` is not. A recorded core count only goes up,
+because a suite measured on a busy machine gets fewer cores than it would use.
+A run with a stated thread count keeps separate history from the default width.
+CPU is measured on Unix only; on Windows the other rules apply.
 
 Builds a test starts, such as trybuild or compile-fail suites, are charged to
 the test's permits and run without taking permits of their own.
 
-Doctests, `cargo test --no-run`, commands with `--config` or a `+toolchain`
-override, and test runners other than `cargo test` run unscheduled.
+Doctests, `cargo test --no-run`, commands with `--config`, a `+toolchain`
+override, or a directory change (`-C`, `--directory`), and test runners other
+than `cargo test` run unscheduled.
 
 ## Choose the scope of a limit
 
