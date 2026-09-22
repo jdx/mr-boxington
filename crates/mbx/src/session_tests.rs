@@ -1,6 +1,6 @@
 #[cfg(unix)]
 use super::shims::remove_stranded_binary_shims;
-use super::shims::{binary_identity, installation_identity};
+use super::shims::{ShimLease, binary_identity, installation_identity};
 use super::shims::{first_in_path, is_shim_directory, mark_shim_directory};
 use super::*;
 use crate::config::SummaryStyle;
@@ -794,7 +794,8 @@ fn only_shim_directories_nothing_can_use_are_collected() {
         std::fs::create_dir_all(&per_binary).unwrap();
         mark_shim_directory(&per_binary);
         if let Some(target) = target {
-            std::os::unix::fs::symlink(target, per_binary.join("mbx-c")).unwrap();
+            let name = if kind == "rust" { "mbx-rustc" } else { "mbx-c" };
+            std::os::unix::fs::symlink(target, per_binary.join(name)).unwrap();
         }
         per_binary
     };
@@ -810,8 +811,9 @@ fn only_shim_directories_nothing_can_use_are_collected() {
     // so its links dangle here, but it built recently.
     let elsewhere = install("native", "elsewhere", Some(&gone));
     // The binary at a path was replaced in place. Its old rustc shims still
-    // resolve, and a session started before the upgrade may still use them.
+    // resolve, and a session started before the upgrade still uses them.
     let superseded = install("rust", "superseded", Some(&binary));
+    let _running = ShimLease::take(&superseded).unwrap();
     let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
     for unused in [
         &stranded,
@@ -841,12 +843,84 @@ fn only_shim_directories_nothing_can_use_are_collected() {
     assert!(own.exists(), "the running binary's directory must stay");
     assert!(
         superseded.exists(),
-        "shims that still resolve may belong to a running session"
+        "a superseded wrapper a running session holds must stay"
     );
     assert!(
         elsewhere.exists(),
         "a directory used recently must stay even when its links dangle here"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn superseded_rustc_shims_go_once_no_session_holds_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let shims = directory.path().join("shims");
+    let binary = directory.path().join("mbx");
+    std::fs::write(&binary, b"#!/bin/sh\n").unwrap();
+    let current = binary_identity(&binary).unwrap();
+    let install = |identity: &str, target: &Path| {
+        let per_binary = shims.join("rust").join(identity);
+        std::fs::create_dir_all(&per_binary).unwrap();
+        mark_shim_directory(&per_binary);
+        std::os::unix::fs::symlink(target, per_binary.join("mbx-rustc")).unwrap();
+        per_binary
+    };
+    // Every release that was upgraded in place at this path left one of
+    // these behind, and all of their links resolve to today's binary.
+    let abandoned = install("before-upgrade", &binary);
+    // A session started before the upgrade is still running.
+    let held = install("still-running", &binary);
+    let lease = ShimLease::take(&held).unwrap();
+    // A session that died without cleaning up leaves a lease nobody holds.
+    let crashed = install("crashed", &binary);
+    std::fs::create_dir_all(crashed.join(".mbx-leases")).unwrap();
+    std::fs::write(crashed.join(".mbx-leases/1-0-0.lease"), b"").unwrap();
+    // Upgraded recently: a session may start with it before noticing.
+    let recent = install("recent", &binary);
+    // The binary the path holds now, used by another installation's
+    // sessions, is not superseded however long it sits.
+    let installed = install(&current, &binary);
+    // Another container's binary, leased there, with links dangling here.
+    let elsewhere = install("elsewhere", &directory.path().join("gone/mbx"));
+    let _elsewhere = ShimLease::take(&elsewhere).unwrap();
+    let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    for unused in [&abandoned, &held, &crashed, &installed, &elsewhere] {
+        std::fs::File::options()
+            .write(true)
+            .open(unused.join(".mbx-shims"))
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+    }
+
+    remove_stranded_binary_shims(&shims, "own", "own", std::time::Duration::from_secs(60));
+
+    assert!(
+        !abandoned.exists(),
+        "a superseded wrapper nobody holds goes"
+    );
+    assert!(!crashed.exists(), "a dead session's lease holds nothing");
+    assert!(held.exists(), "a running session's wrapper must stay");
+    assert!(recent.exists(), "a recently used wrapper must stay");
+    assert!(
+        installed.exists(),
+        "the binary at the path is not superseded"
+    );
+    assert!(elsewhere.exists(), "a held lease keeps dangling links too");
+
+    // Once the session ends, its lease file goes with it and so does the
+    // directory on the next collection.
+    drop(lease);
+    assert!(
+        std::fs::read_dir(held.join(".mbx-leases"))
+            .unwrap()
+            .next()
+            .is_none(),
+        "a finished session removes its own lease"
+    );
+    remove_stranded_binary_shims(&shims, "own", "own", std::time::Duration::from_secs(60));
+    assert!(!held.exists(), "a finished session's wrapper goes");
 }
 
 #[test]

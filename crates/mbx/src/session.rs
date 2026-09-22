@@ -124,6 +124,8 @@ static SHIM_STAGING_NONCE: AtomicU64 = AtomicU64::new(0);
 pub struct CacheSession {
     socket: String,
     rustc_shim: PathBuf,
+    /// Held for the session's lifetime so collection keeps `rustc_shim`.
+    _rustc_shim_lease: shims::ShimLease,
     rustdoc_shim: PathBuf,
     cc_shims: Option<CcShims>,
     cmake_shims_dir: PathBuf,
@@ -213,6 +215,7 @@ impl CacheSession {
     ) -> Result<Self> {
         let session_shims = install_session_shims(session_dir, &config.shims_dir)?;
         let (shim, rustdoc_shim) = (session_shims.rustc, session_shims.rustdoc);
+        let rustc_shim_lease = session_shims.lease;
         let cc_shims = if config.cc {
             // Build systems such as CMake persist HOST_CC as an absolute
             // compiler path. Keep the C/C++ shims outside the temporary
@@ -270,6 +273,7 @@ impl CacheSession {
         Ok(Self {
             socket,
             rustc_shim: shim,
+            _rustc_shim_lease: rustc_shim_lease,
             rustdoc_shim,
             cc_shims,
             cmake_shims_dir: session_shims.native,

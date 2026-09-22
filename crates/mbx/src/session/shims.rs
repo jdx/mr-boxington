@@ -467,6 +467,9 @@ pub(super) struct SessionShims {
     pub(super) rustdoc: PathBuf,
     /// Directory for the C, C++ and CMake shims build scripts are pointed at.
     pub(super) native: PathBuf,
+    /// Keeps the `RUSTC_WRAPPER` directory from being collected while this
+    /// session can still hand it to a build.
+    pub(super) lease: ShimLease,
 }
 
 pub(super) fn install_session_shims(
@@ -485,7 +488,13 @@ pub(super) fn install_session_shims(
     };
     let binary_shims = persistent_shims.join("rust").join(&identity);
     let native = persistent_shims.join("native").join(&installation);
-    std::fs::create_dir_all(&binary_shims)?;
+    // Created and leased under the registrar, so a collector either removed
+    // the directory before this or finds the lease and keeps it.
+    let lease = {
+        let _registrar = shims_registrar(persistent_shims)?;
+        std::fs::create_dir_all(&binary_shims)?;
+        ShimLease::take(&binary_shims)?
+    };
     std::fs::create_dir_all(&native)?;
     // Every level: the root holds the `mbx exec` compiler shims, and each
     // per-binary directory holds the shims a session points its build at.
@@ -514,7 +523,89 @@ pub(super) fn install_session_shims(
         rustc,
         rustdoc,
         native,
+        lease,
     })
+}
+
+/// Directory in a per-binary shim directory where sessions record that they
+/// are using it.
+const SHIM_LEASES_DIR: &str = ".mbx-leases";
+
+/// Lock serializing lease creation against collection of `rust/` directories.
+const SHIM_REGISTRAR: &str = ".registrar";
+
+static SHIM_LEASE_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn shims_registrar(persistent_shims: &Path) -> Result<fslock::LockFile> {
+    let rust = persistent_shims.join("rust");
+    std::fs::create_dir_all(&rust)?;
+    let mut lock = fslock::LockFile::open(&rust.join(SHIM_REGISTRAR))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+/// A session's claim on a per-binary shim directory, held until it drops.
+///
+/// The session's `RUSTC_WRAPPER` points into that directory for as long as
+/// the session runs, however long ago it started, and once the binary at its
+/// path is upgraded no later session refreshes the directory's marker. The
+/// lease is what tells collection the directory is still in use: a lock file
+/// per session, so a lease that can be taken belongs to a session that is
+/// gone.
+pub(super) struct ShimLease {
+    path: PathBuf,
+    _lock: fslock::LockFile,
+}
+
+impl ShimLease {
+    pub(super) fn take(directory: &Path) -> Result<Self> {
+        let leases = directory.join(SHIM_LEASES_DIR);
+        std::fs::create_dir_all(&leases)?;
+        // The pid alone is not unique: sessions in one process each hold
+        // their own, and containers sharing the directory reuse pids.
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let path = leases.join(format!(
+            "{}-{started}-{}.lease",
+            std::process::id(),
+            SHIM_LEASE_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let mut lock = fslock::LockFile::open(&path)?;
+        if !lock.try_lock()? {
+            eyre::bail!("the shim lease {} is already held", path.display());
+        }
+        Ok(Self { path, _lock: lock })
+    }
+}
+
+impl Drop for ShimLease {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Whether a running session holds a lease on `directory`. Lease files left
+/// by sessions that are gone are removed along the way.
+#[cfg(unix)]
+fn leased(directory: &Path) -> bool {
+    let Ok(listing) = std::fs::read_dir(directory.join(SHIM_LEASES_DIR)) else {
+        return false;
+    };
+    for entry in listing.flatten() {
+        let Ok(mut lock) = fslock::LockFile::open(&entry.path()) else {
+            // Unreadable is not the same as free.
+            return true;
+        };
+        match lock.try_lock() {
+            Ok(true) => {
+                drop(lock);
+                let _ = std::fs::remove_file(entry.path());
+            }
+            _ => return true,
+        }
+    }
+    false
 }
 
 /// How long a per-binary shim directory must go unused before collection
@@ -549,6 +640,12 @@ fn touch_shim_directory(directory: &Path) {
 /// this process cannot see, and that container refreshes the directory each
 /// time it builds. Whatever it last used is recreated by its next session.
 ///
+/// A `rust/` directory is also done with once the binary at its path has been
+/// replaced, an upgrade in place: its links still resolve, but to a binary
+/// whose sessions use a directory of their own. A session that started before
+/// the upgrade can outlive `unused_for`, so these, and every other `rust/`
+/// directory, also go only when no running session holds a lease on them.
+///
 /// Windows shims are hard links or copies, which say nothing about whether
 /// their installation still exists, so they are left alone. Best effort: a
 /// failure only leaves the directory for a later session.
@@ -570,8 +667,26 @@ pub(super) fn remove_stranded_binary_shims(
             let directory = entry.path();
             if !entry.file_type().is_ok_and(|kind| kind.is_dir())
                 || !unused_for_at_least(&directory, unused_for)
-                || !every_link_dangles(&directory)
             {
+                continue;
+            }
+            // Judged and removed under the registrar, so no session can lease
+            // a directory between the check and the removal.
+            let _registrar = if kind == "rust" {
+                match shims_registrar(persistent_shims) {
+                    Ok(registrar) => Some(registrar),
+                    Err(_) => continue,
+                }
+            } else {
+                None
+            };
+            let finished = every_link_dangles(&directory)
+                || (kind == "rust"
+                    && entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| superseded_binary(&directory, name)));
+            if !finished || (kind == "rust" && leased(&directory)) {
                 continue;
             }
             if let Err(error) = std::fs::remove_dir_all(&directory) {
@@ -620,6 +735,16 @@ fn every_link_dangles(directory: &Path) -> bool {
         links += 1;
     }
     links > 0
+}
+
+/// Whether the rustc shim in `directory` now reaches a binary other than the
+/// one `identity` names.
+#[cfg(unix)]
+fn superseded_binary(directory: &Path, identity: &str) -> bool {
+    std::fs::read_link(directory.join(shim_file_name(RUSTC_SHIM_STEM)))
+        .ok()
+        .and_then(|binary| binary_identity(&binary).ok())
+        .is_some_and(|current| current != identity)
 }
 
 /// A stable name for one place mbx is installed.
