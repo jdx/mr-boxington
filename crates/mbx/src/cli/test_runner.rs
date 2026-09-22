@@ -35,6 +35,10 @@ struct Overlay {
     /// back to the test so a Cargo command it runs finds its own runners
     /// rather than a shim its `PATH` may no longer reach.
     restore: BTreeMap<String, Option<String>>,
+    /// The repository the tests belong to, as [`repository_identity`] names
+    /// it, so unrelated projects keep separate history.
+    #[serde(default)]
+    project: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +51,7 @@ pub(super) struct TestRunner {
     /// Runner environment keys, each paired with the triple it names.
     keys: Vec<(String, String)>,
     runners: BTreeMap<String, Option<Runner>>,
+    project: Option<String>,
     shim: PathBuf,
 }
 
@@ -56,6 +61,7 @@ impl TestRunner {
     pub(super) fn prepare(
         config: &crate::config::Config,
         arguments: &[String],
+        workspace_root: &Path,
         directory: &Path,
     ) -> Result<Option<Self>> {
         if !config.scheduler.enabled || !config.scheduler.tests || !wraps(arguments) {
@@ -103,6 +109,7 @@ impl TestRunner {
         Ok(Some(Self {
             keys,
             runners,
+            project: repository_identity(workspace_root),
             shim,
         }))
     }
@@ -129,6 +136,7 @@ impl TestRunner {
         let overlay = Overlay {
             runners: self.runners.clone(),
             restore,
+            project: self.project.clone(),
         };
         environment.insert(RUNNERS.into(), serde_json::to_string(&overlay)?);
         Ok(())
@@ -216,7 +224,11 @@ pub fn dispatch() -> Option<ExitCode> {
         // serialize a crate's doc examples behind half the pool apiece.
         let demand = test_binary_name(Path::new(&executable)).map(|name| {
             crate::scheduler::Demand::test(
-                &ledger_name(std::env::var("CARGO_PKG_NAME").ok().as_deref(), &name),
+                &ledger_name(
+                    overlay.project.as_deref(),
+                    std::env::var("CARGO_PKG_NAME").ok().as_deref(),
+                    &name,
+                ),
                 test_threads(&rest, std::env::var("RUST_TEST_THREADS").ok().as_deref()),
             )
         });
@@ -271,16 +283,47 @@ fn test_binary_name(executable: &Path) -> Option<String> {
 
 /// What a test binary's history is remembered under.
 ///
-/// The ledger is shared by every project on the machine, and integration test
-/// files are named generically -- `it`, `integration`, `common` -- so the
-/// package Cargo is testing is part of the name. Not the checkout path, which
-/// would keep a project's worktrees from sharing what one of them measured.
+/// The ledger is shared by every project on the machine, and both package and
+/// test names repeat across projects -- `server`, `tests/integration.rs` -- so
+/// the repository and the package Cargo is testing are part of the name.
 /// Neither a package name nor a binary name can hold a `/`.
-fn ledger_name(package: Option<&str>, binary: &str) -> String {
-    match package {
-        Some(package) if !package.is_empty() => format!("{package}/{binary}"),
-        _ => binary.to_owned(),
-    }
+fn ledger_name(project: Option<&str>, package: Option<&str>, binary: &str) -> String {
+    [project, package, Some(binary)]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// A short name for the Git repository `workspace_root` is in, the same for
+/// each of its worktrees and different for any other repository.
+///
+/// Not the checkout path, which would keep a project's worktrees from sharing
+/// what one of them measured: a linked worktree's `.git` file points into the
+/// main repository, whose directory every worktree shares. Read from the files
+/// rather than asked of `git`, which is not guaranteed to be installed.
+/// `None` outside Git, where history falls back to package and binary names.
+fn repository_identity(workspace_root: &Path) -> Option<String> {
+    use sha2::Digest as _;
+    let checkout = workspace_root
+        .ancestors()
+        .find(|directory| directory.join(".git").exists())?;
+    let dot_git = checkout.join(".git");
+    let common = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let pointer = std::fs::read_to_string(&dot_git).ok()?;
+        let git_dir = checkout.join(pointer.strip_prefix("gitdir:")?.trim());
+        match std::fs::read_to_string(git_dir.join("commondir")) {
+            Ok(common) => git_dir.join(common.trim()),
+            // A submodule's directory is its own repository.
+            Err(_) => git_dir,
+        }
+    };
+    let common = common.canonicalize().ok()?;
+    let digest = sha2::Sha256::digest(common.as_os_str().as_encoded_bytes());
+    Some(hex::encode(&digest[..6]))
 }
 
 /// The thread count libtest will use, when the command or environment says.
@@ -377,14 +420,58 @@ mod tests {
     }
 
     #[test]
-    fn history_is_kept_per_package() {
-        assert_eq!(ledger_name(Some("parser"), "it"), "parser/it");
-        assert_ne!(
-            ledger_name(Some("parser"), "it"),
-            ledger_name(Some("server"), "it")
+    fn history_is_kept_per_repository_and_package() {
+        assert_eq!(
+            ledger_name(Some("ab12"), Some("parser"), "it"),
+            "ab12/parser/it"
         );
-        assert_eq!(ledger_name(None, "it"), "it");
-        assert_eq!(ledger_name(Some(""), "it"), "it");
+        assert_ne!(
+            ledger_name(Some("ab12"), Some("server"), "it"),
+            ledger_name(Some("cd34"), Some("server"), "it")
+        );
+        assert_eq!(ledger_name(None, Some("parser"), "it"), "parser/it");
+        assert_eq!(ledger_name(None, None, "it"), "it");
+        assert_eq!(ledger_name(Some(""), Some(""), "it"), "it");
+    }
+
+    #[test]
+    fn worktrees_share_a_repository_identity_and_other_repositories_do_not() {
+        let root = tempfile::tempdir().unwrap();
+        let main = root.path().join("main");
+        std::fs::create_dir_all(main.join(".git/worktrees/feature")).unwrap();
+        std::fs::create_dir_all(main.join("crates/app")).unwrap();
+        std::fs::write(main.join(".git/worktrees/feature/commondir"), "../..\n").unwrap();
+        // Linked worktrees, pointing into the main repository relatively
+        // from one checkout and absolutely from another.
+        let feature = root.path().join("feature");
+        std::fs::create_dir_all(&feature).unwrap();
+        std::fs::write(
+            feature.join(".git"),
+            "gitdir: ../main/.git/worktrees/feature\n",
+        )
+        .unwrap();
+        let other_feature = root.path().join("other-feature");
+        std::fs::create_dir_all(&other_feature).unwrap();
+        std::fs::write(
+            other_feature.join(".git"),
+            format!(
+                "gitdir: {}\n",
+                main.join(".git/worktrees/feature").display()
+            ),
+        )
+        .unwrap();
+        let unrelated = root.path().join("unrelated");
+        std::fs::create_dir_all(unrelated.join(".git")).unwrap();
+
+        let identity = repository_identity(&main).expect("a repository has an identity");
+        assert_eq!(identity.len(), 12);
+        assert_eq!(
+            repository_identity(&main.join("crates/app")),
+            Some(identity.clone())
+        );
+        assert_eq!(repository_identity(&feature), Some(identity.clone()));
+        assert_eq!(repository_identity(&other_feature), Some(identity.clone()));
+        assert_ne!(repository_identity(&unrelated), Some(identity));
     }
 
     #[test]
