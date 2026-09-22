@@ -6,7 +6,8 @@
 //! coordinates what Cargo cannot -- a permit pool under the cache directory
 //! that real compilations draw from. Cache hits never touch it, and Cargo
 //! keeps its own dependency scheduling; only the processes that actually cost
-//! CPU and memory wait their turn.
+//! CPU and memory wait their turn. With `scheduler.tests`, the test binaries
+//! `cargo test` runs draw from the same pool (see `cli::test_runner`).
 //!
 //! The pool is a directory of *lease* files, one per admitted compilation,
 //! each held under an OS file lock for the life of the compile. The kernel
@@ -176,12 +177,19 @@ fn process_token() -> &'static str {
     TOKEN.get_or_init(|| crate::util::random_string(8))
 }
 
-/// What one compilation asks the pool for.
+/// What one compilation -- or one test binary -- asks the pool for.
 pub(crate) struct Demand {
     /// Compiler crate name, keying the peak-RSS ledger.
     name: String,
     /// Whether the invocation links a native program.
     links: bool,
+    /// Permits the process's threads need whatever its memory, or `None` for
+    /// half the pool: a test harness sized to the machine that has not said
+    /// how many threads it will really use.
+    threads: Option<u64>,
+    /// Whether the ledger's record of cores this process kept busy replaces
+    /// `threads`. Only test binaries are measured; a compiler is one thread.
+    learns_cpu: bool,
 }
 
 impl Demand {
@@ -189,6 +197,34 @@ impl Demand {
         Self {
             name: name.to_string(),
             links,
+            threads: Some(1),
+            learns_cpu: false,
+        }
+    }
+
+    /// A test binary, remembered apart from the crate that compiled it.
+    ///
+    /// Half the pool by default rather than all of it. libtest starts a
+    /// thread per CPU, but most suites spend much of their time waiting, and
+    /// a demand for the whole pool is admitted only once the pool is idle --
+    /// which a stream of other builds' compilations can postpone
+    /// indefinitely. Half still keeps two suites from each running at full
+    /// width beside a third build's compiles.
+    ///
+    /// A binary run with a stated thread count is remembered apart from the
+    /// same binary at its default width: the two keep different numbers of
+    /// cores busy.
+    pub(crate) fn test(name: &str, threads: Option<u64>) -> Self {
+        Self {
+            // The suffix cannot collide with a crate name, for the reason
+            // `ledger_key` gives.
+            name: match threads {
+                Some(threads) => format!("{name} [test, {threads} threads]"),
+                None => format!("{name} [test]"),
+            },
+            links: false,
+            threads,
+            learns_cpu: true,
         }
     }
 }
@@ -441,6 +477,9 @@ struct MemoryLedger {
     crates: BTreeMap<String, u64>,
     /// Recent link measurements, newest last, whatever crate they came from.
     link_peaks: Vec<u64>,
+    /// Average cores each test binary kept busy, by demand name.
+    #[serde(default)]
+    cpus: BTreeMap<String, u64>,
 }
 
 /// The machine-wide permit pool one process draws from.
@@ -567,6 +606,27 @@ pub(crate) fn record_compiler_memory(demand: &Demand, status: &ExitStatus) {
     pool.note_compilation(demand, status);
 }
 
+/// Record the average cores a test binary kept busy, for its next admission.
+pub(crate) fn record_test_cpu(demand: &Demand, cores: u64) {
+    let Some(pool) = pool() else {
+        return;
+    };
+    if let Err(error) = pool.record_cpu(&demand.name, cores) {
+        debug!("test CPU use was not recorded: {error:#}");
+    }
+}
+
+/// Cores kept busy on average: CPU time over the wall time it took, to the
+/// nearest whole core and never less than one. The nearest rather than the
+/// next, because a suite that averaged just over one core is a one-core suite
+/// with a helper thread, not a two-core one.
+pub(crate) fn average_cores(cpu: Duration, wall: Duration) -> u64 {
+    if wall.is_zero() {
+        return 1;
+    }
+    (cpu.as_secs_f64() / wall.as_secs_f64()).round().max(1.0) as u64
+}
+
 impl Pool {
     fn new(
         dir: PathBuf,
@@ -647,9 +707,28 @@ impl Pool {
 
     /// The permits this demand costs, and its predicted memory when known.
     fn plan(&self, demand: &Demand) -> (u64, Option<u64>) {
+        // What a test binary was measured using beats what it said or what
+        // its harness would default to: libtest starts a thread per CPU
+        // whether or not the tests keep them busy.
+        let learned = demand
+            .learns_cpu
+            .then(|| {
+                read_ledger(&self.ledger_path())
+                    .cpus
+                    .get(&demand.name)
+                    .copied()
+            })
+            .flatten();
+        let threads = learned
+            .or(demand.threads)
+            .unwrap_or_else(|| self.capacity.div_ceil(2))
+            .max(1);
         let link_floor = demand.links.then_some(LINK_WEIGHT);
         if self.bytes_per_permit == 0 {
-            return (link_floor.unwrap_or(1).min(self.capacity), None);
+            return (
+                link_floor.unwrap_or(1).max(threads).min(self.capacity),
+                None,
+            );
         }
         let ledger = read_ledger(&self.ledger_path());
         let recorded = ledger
@@ -686,8 +765,11 @@ impl Pool {
         // the link beside it, which is over-admission with a plausible number
         // attached to it.
         let predicted = recorded.or(link_bytes);
+        // Memory and threads are separate costs of the same process; it takes
+        // whichever share of the pool is larger.
         let weight = predicted
             .map_or(1, |bytes| bytes.div_ceil(self.bytes_per_permit))
+            .max(threads)
             .clamp(1, self.capacity);
         (weight, predicted)
     }
@@ -901,6 +983,39 @@ impl Pool {
     }
 }
 
+impl Pool {
+    /// Raise the recorded core count for one test binary, never lowering it.
+    ///
+    /// Never lowered for the reason memory is not, and one more: a suite
+    /// measured while the machine was busy got fewer cores than it would
+    /// have used, so the lower of two readings is the less trustworthy.
+    fn record_cpu(&self, name: &str, cores: u64) -> Result<()> {
+        std::fs::create_dir_all(&self.dir)
+            .wrap_err_with(|| format!("failed to create {}", self.dir.display()))?;
+        let mut lock = fslock::LockFile::open(&self.dir.join(LEDGER_LOCK))?;
+        lock.lock()?;
+        let path = self.ledger_path();
+        let mut ledger = read_ledger(&path);
+        if ledger.cpus.get(name).is_some_and(|known| *known >= cores) {
+            return Ok(());
+        }
+        ledger.version = LEDGER_VERSION;
+        ledger.cpus.insert(name.to_string(), cores);
+        while ledger.cpus.len() > MAX_LEDGER_ENTRIES {
+            let smallest = ledger
+                .cpus
+                .iter()
+                .min_by_key(|(_, cores)| **cores)
+                .map(|(name, _)| name.clone())
+                .expect("an overfull ledger has entries");
+            ledger.cpus.remove(&smallest);
+        }
+        let mut contents = serde_json::to_vec(&ledger)?;
+        contents.push(b'\n');
+        crate::util::write_advisory(&path, &contents)
+    }
+}
+
 /// What one crate's memory is remembered under.
 ///
 /// A link and a metadata-only compile of the same crate are different
@@ -1010,14 +1125,7 @@ fn ledger_peak(
 /// folded into its parent's children total when it is reaped, all the way up.
 #[cfg(unix)]
 fn child_peak_rss_bytes() -> Option<u64> {
-    // SAFETY: `getrusage` only writes into the zeroed struct it is given.
-    let usage = unsafe {
-        let mut usage = std::mem::zeroed::<libc::rusage>();
-        if libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) != 0 {
-            return None;
-        }
-        usage
-    };
+    let usage = children_usage()?;
     let maxrss = u64::try_from(usage.ru_maxrss).ok()?;
     // Apple counts bytes where everyone else counts kibibytes.
     let bytes = if cfg!(target_vendor = "apple") {
@@ -1031,6 +1139,37 @@ fn child_peak_rss_bytes() -> Option<u64> {
 #[cfg(not(unix))]
 fn child_peak_rss_bytes() -> Option<u64> {
     None
+}
+
+/// CPU time, user and system, of every child this process has reaped.
+///
+/// A test runner shim reaps one test binary, and the counter folds in
+/// whatever that binary ran in turn -- the builds a test starts are charged
+/// to it, as its permit is.
+#[cfg(unix)]
+pub(crate) fn child_cpu_time() -> Option<Duration> {
+    let usage = children_usage()?;
+    let time = |value: libc::timeval| {
+        Some(Duration::new(
+            u64::try_from(value.tv_sec).ok()?,
+            u32::try_from(value.tv_usec).ok()?.saturating_mul(1000),
+        ))
+    };
+    Some(time(usage.ru_utime)? + time(usage.ru_stime)?)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn child_cpu_time() -> Option<Duration> {
+    None
+}
+
+#[cfg(unix)]
+fn children_usage() -> Option<libc::rusage> {
+    // SAFETY: `getrusage` only writes into the zeroed struct it is given.
+    unsafe {
+        let mut usage = std::mem::zeroed::<libc::rusage>();
+        (libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) == 0).then_some(usage)
+    }
 }
 
 /// Whether the compiler died the way the Linux OOM killer kills.

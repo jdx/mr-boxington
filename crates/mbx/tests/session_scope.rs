@@ -520,3 +520,112 @@ fn main() { assert_eq!(std::env::var_os("OPAQUE").unwrap().as_bytes(), b"\xff");
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn scheduled_test_binaries_hold_a_permit_and_keep_the_configured_runner() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    project(
+        root.path(),
+        r#"
+fn main() {}
+#[test]
+fn scheduled() {
+    // Long enough to be measured, and idle: the suite keeps one core busy
+    // at most, which the next default-width run is weighed by.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert_eq!(std::env::var("RUNNER_ARGUMENT").unwrap(), "runner arg");
+    let leases = std::path::Path::new(&std::env::var_os("MBX_CACHE_DIR").unwrap())
+        .join("scheduler/leases");
+    let held: Vec<String> = std::fs::read_dir(&leases)
+        .map(|entries| {
+            entries
+                .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+                .collect()
+        })
+        .unwrap_or_default();
+    match std::env::var("EXPECTED_WEIGHT").ok() {
+        Some(weight) => {
+            assert_eq!(held.len(), 1, "only this test holds a permit: {held:?}");
+            assert!(held[0].contains(&format!("\"weight\":{weight},")), "{held:?}");
+            // Builds this test starts are charged to its permit, and find
+            // the caller's runners rather than the shim.
+            assert_eq!(std::env::var("MBX_SCHEDULER").unwrap(), "0");
+            assert_eq!(std::env::var("MBX_SCHED_DIR").unwrap(), "");
+            assert!(std::env::var_os("MBX_TEST_RUNNERS").is_none());
+            for (name, value) in std::env::vars() {
+                assert!(!value.contains("mbx-test-runner"), "{name}={value}");
+            }
+        }
+        None => {
+            assert!(held.is_empty(), "{held:?}");
+            assert!(std::env::var_os("MBX_SCHEDULER").is_none());
+        }
+    }
+}
+"#,
+    );
+    // Rustdoc runs doctests through the same runner; they hold no permit.
+    std::fs::write(
+        root.path().join("src/lib.rs"),
+        r#"
+/// ```
+/// let leases = std::path::Path::new(&std::env::var_os("MBX_CACHE_DIR").unwrap())
+///     .join("scheduler/leases");
+/// let held = std::fs::read_dir(&leases).map(|entries| entries.count()).unwrap_or(0);
+/// assert_eq!(held, 0, "a doctest holds no permit");
+/// ```
+pub fn documented() {}
+"#,
+    )
+    .unwrap();
+    let runner = root.path().join("caller-runner");
+    std::fs::write(
+        &runner,
+        "#!/bin/sh\nexport RUNNER_ARGUMENT=\"$1\"\nshift\nexec \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::create_dir(root.path().join(".cargo")).unwrap();
+    std::fs::write(
+        root.path().join(".cargo/config.toml"),
+        "[target.'cfg(unix)']\nrunner = ['./caller-runner', 'runner arg']\n",
+    )
+    .unwrap();
+    for (tests, harness, expected) in [
+        (Some("1"), &["--test-threads=3"][..], Some("3")),
+        // Half of the 8 permits until this binary has been measured,
+        (Some("1"), &[][..], Some("4")),
+        (None, &[][..], None),
+        // then the one core the idle suite was measured using.
+        (Some("1"), &[][..], Some("1")),
+    ] {
+        let mut command = mbx(root.path());
+        command
+            .env("MBX_SCHEDULER_CPUS", "8")
+            .env("MBX_SCHEDULER_MEMORY", "none")
+            .args(["test", "--offline", "--"])
+            .args(harness);
+        if let Some(tests) = tests {
+            command.env("MBX_SCHEDULER_TESTS", tests);
+        }
+        if let Some(expected) = expected {
+            command.env("EXPECTED_WEIGHT", expected);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{tests:?} {harness:?}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    // Cargo hands the test's package to the runner, and the measured history
+    // is kept under it rather than under the bare binary name.
+    let ledger = std::fs::read_to_string(root.path().join("cache/scheduler/memory.json")).unwrap();
+    assert!(
+        ledger.contains("scope-fixture/scope_fixture [test]\":1"),
+        "{ledger}"
+    );
+}
