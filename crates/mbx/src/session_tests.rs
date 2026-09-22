@@ -1,5 +1,5 @@
 #[cfg(unix)]
-use super::shims::remove_stranded_binary_shims;
+use super::shims::{binary_identity, installation_identity, remove_stranded_binary_shims};
 use super::shims::{first_in_path, is_shim_directory, mark_shim_directory};
 use super::*;
 use crate::config::SummaryStyle;
@@ -756,9 +756,32 @@ fn host_driver_lookup_skips_another_installations_shims() {
     );
 }
 
+#[test]
+fn an_upgrade_in_place_keeps_its_native_shim_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let binary = directory.path().join("mbx");
+    std::fs::write(&binary, b"release one").unwrap();
+    let before = (
+        binary_identity(&binary).unwrap(),
+        installation_identity(&binary).unwrap(),
+    );
+    std::fs::write(&binary, b"release two, a little longer").unwrap();
+    let after = (
+        binary_identity(&binary).unwrap(),
+        installation_identity(&binary).unwrap(),
+    );
+    assert_ne!(before.0, after.0, "rustc shims follow the binary");
+    assert_eq!(before.1, after.1, "native shims follow the installation");
+    assert_ne!(
+        installation_identity(&directory.path().join("other/mbx")).unwrap(),
+        after.1,
+        "another installation gets its own native shims"
+    );
+}
+
 #[cfg(unix)]
 #[test]
-fn only_shim_directories_of_removed_binaries_are_collected() {
+fn only_shim_directories_nothing_can_use_are_collected() {
     let directory = tempfile::tempdir().unwrap();
     let shims = directory.path().join("shims");
     let binary = directory.path().join("mbx");
@@ -784,8 +807,22 @@ fn only_shim_directories_of_removed_binaries_are_collected() {
     // Another container's binary lives on a path this process cannot see,
     // so its links dangle here, but it built recently.
     let elsewhere = install("native", "elsewhere", Some(&gone));
+    // The binary at a path was replaced in place: its old rustc shims still
+    // resolve, but to a binary whose sessions use another directory.
+    let superseded = install("rust", "superseded", Some(&binary));
+    std::fs::rename(superseded.join("mbx-c"), superseded.join("mbx-rustc")).unwrap();
+    let current = install("rust", &binary_identity(&binary).unwrap(), Some(&binary));
+    std::fs::rename(current.join("mbx-c"), current.join("mbx-rustc")).unwrap();
     let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
-    for unused in [&stranded, &stranded_rust, &live, &installing, &own] {
+    for unused in [
+        &stranded,
+        &stranded_rust,
+        &live,
+        &installing,
+        &own,
+        &superseded,
+        &current,
+    ] {
         std::fs::File::options()
             .write(true)
             .open(unused.join(".mbx-shims"))
@@ -794,7 +831,7 @@ fn only_shim_directories_of_removed_binaries_are_collected() {
             .unwrap();
     }
 
-    remove_stranded_binary_shims(&shims, "own", std::time::Duration::from_secs(60));
+    remove_stranded_binary_shims(&shims, "own", "own", std::time::Duration::from_secs(60));
 
     assert!(!stranded.exists(), "a removed binary's shims should go");
     assert!(!stranded_rust.exists(), "rustc shims are collected too");
@@ -804,6 +841,14 @@ fn only_shim_directories_of_removed_binaries_are_collected() {
         "a directory still being filled must stay"
     );
     assert!(own.exists(), "the running binary's directory must stay");
+    assert!(
+        !superseded.exists(),
+        "rustc shims for a binary replaced in place should go"
+    );
+    assert!(
+        current.exists(),
+        "rustc shims for the binary a path holds now must stay"
+    );
     assert!(
         elsewhere.exists(),
         "a directory used recently must stay even when its links dangle here"
