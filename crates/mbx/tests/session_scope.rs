@@ -621,4 +621,11 @@ pub fn documented() {}
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    // Cargo hands the test's package to the runner, and the measured history
+    // is kept under it rather than under the bare binary name.
+    let ledger = std::fs::read_to_string(root.path().join("cache/scheduler/memory.json")).unwrap();
+    assert!(
+        ledger.contains("scope-fixture/scope_fixture [test]\":1"),
+        "{ledger}"
+    );
 }
