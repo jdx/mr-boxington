@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v9.jsonl");
+const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v10.jsonl");
 
 fn digest() -> CacheDigest {
     CacheDigest {
@@ -31,6 +31,8 @@ fn restore() -> RestoreStats {
         output_bytes: 13,
         reflinked_output_bytes: 15,
         reflinked_output_files: 14,
+        hardlinked_output_bytes: 21,
+        hardlinked_output_files: 20,
         reused_output_files: 18,
         reused_output_bytes: 19,
     }
@@ -467,7 +469,7 @@ fn assert_fixture<T: Serialize>(expected: &mut BTreeMap<&str, &str>, name: &str,
 }
 
 #[test]
-fn agent_protocol_v9_shapes_match_the_conformance_fixture() {
+fn agent_protocol_v10_shapes_match_the_conformance_fixture() {
     let mut expected = fixture();
     for line in AGENT_FIXTURE.lines() {
         let (name, json) = line
@@ -545,7 +547,7 @@ fn agent_protocol_v9_shapes_match_the_conformance_fixture() {
 
 #[test]
 fn protocol_constants_match_the_contract() {
-    assert_eq!(AGENT_PROTOCOL_VERSION, 9);
+    assert_eq!(AGENT_PROTOCOL_VERSION, 10);
     assert_eq!(PROTOCOL_VERSION, 1);
     assert_eq!(
         ACTION_RESULT_MEDIA_TYPE,

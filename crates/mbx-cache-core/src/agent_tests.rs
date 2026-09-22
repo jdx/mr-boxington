@@ -953,6 +953,8 @@ async fn publishes_a_complete_action_result() {
                     output_bytes: 11,
                     reflinked_output_files: 1,
                     reflinked_output_bytes: 7,
+                    hardlinked_output_files: 0,
+                    hardlinked_output_bytes: 0,
                     copied_output_files: 1,
                     copied_output_bytes: 4,
                     reused_output_files: 1,

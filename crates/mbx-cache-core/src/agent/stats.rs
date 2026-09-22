@@ -119,6 +119,10 @@ pub struct AgentStats {
     pub reflinked_output_files: u64,
     /// Declared size of outputs materialized with filesystem reflinks.
     pub reflinked_output_bytes: u64,
+    /// Restored output files that share an inode with their CAS blob.
+    pub hardlinked_output_files: u64,
+    /// Declared size of restored outputs that share an inode with their blob.
+    pub hardlinked_output_bytes: u64,
     /// Number of restored output files materialized by copying their bytes.
     pub copied_output_files: u64,
     /// Declared size of outputs materialized by copying their bytes.
