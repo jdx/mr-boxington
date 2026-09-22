@@ -141,19 +141,34 @@ pub fn dispatch() -> Option<ExitCode> {
             Some("--build" | "--install" | "-E" | "-P" | "--version" | "--help")
         )
     }) {
+        let mut replacements = Vec::new();
         for (variable, launcher) in rewrite_compilers(&mut arguments, &read_map(COMPILERS)) {
             // Environment defaults preserve launchers chosen on the command
             // line, in an existing cache, or by the caller's environment.
-            if std::env::var_os(variable).is_none() {
-                command.env(
-                    variable,
-                    invoked
-                        .parent()
-                        .unwrap()
-                        .join(super::shim_file_name(launcher)),
-                );
+            if std::env::var_os(variable).is_some() {
+                continue;
+            }
+            let ours = invoked
+                .parent()
+                .unwrap()
+                .join(super::shim_file_name(launcher));
+            // Except a cache that recorded another mbx binary's launcher.
+            // The environment only seeds a fresh cache, and shims live per
+            // binary, so after an upgrade the old path would be used until
+            // its binary went away and then fail every compile.
+            if !defines(&arguments, variable)
+                && cached_launcher(&build_directory(&arguments), variable)
+                    .is_some_and(|cached| replaces_launcher(&cached, launcher, &cmake_path(&ours)))
+            {
+                replacements.push(OsString::from(format!(
+                    "-D{variable}:STRING={}",
+                    cmake_path(&ours)
+                )));
+            } else {
+                command.env(variable, ours);
             }
         }
+        arguments.extend(replacements);
     }
     let status = command.args(arguments).status();
     Some(match status {
@@ -163,6 +178,57 @@ pub fn dispatch() -> Option<ExitCode> {
             ExitCode::FAILURE
         }
     })
+}
+
+/// The build tree a configure invocation writes, as CMake chooses it.
+fn build_directory(arguments: &[OsString]) -> PathBuf {
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        if argument == "-B" {
+            if let Some(directory) = arguments.next() {
+                return PathBuf::from(directory);
+            }
+        } else if let Some(directory) = argument.to_str().and_then(|text| text.strip_prefix("-B")) {
+            return PathBuf::from(directory);
+        }
+    }
+    PathBuf::from(".")
+}
+
+/// Whether the command line sets `variable` itself.
+fn defines(arguments: &[OsString], variable: &str) -> bool {
+    let mut after_define = false;
+    arguments.iter().any(|argument| {
+        let text = argument.to_str().unwrap_or_default();
+        let definition = text.strip_prefix("-D").or(after_define.then_some(text));
+        after_define = text == "-D";
+        definition.is_some_and(|definition| {
+            definition
+                .split(['=', ':'])
+                .next()
+                .is_some_and(|name| name == variable)
+        })
+    })
+}
+
+/// The value an existing cache in `build` holds for `variable`.
+fn cached_launcher(build: &Path, variable: &str) -> Option<String> {
+    let cache = std::fs::read_to_string(build.join("CMakeCache.txt")).ok()?;
+    cache.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        (key.split(':').next()? == variable).then(|| value.to_string())
+    })
+}
+
+/// Whether a cached launcher is an mbx launcher other than this binary's.
+///
+/// Only one named like ours is replaced: a launcher the build chose for
+/// itself is the build's business.
+fn replaces_launcher(cached: &str, launcher: &str, ours: &str) -> bool {
+    cached != ours
+        && Path::new(cached)
+            .file_stem()
+            .is_some_and(|stem| stem == launcher)
 }
 
 fn rewrite_compilers(
@@ -256,6 +322,55 @@ mod tests {
                 ("CMAKE_C_COMPILER_LAUNCHER", C_LAUNCHER),
                 ("CMAKE_CXX_COMPILER_LAUNCHER", CXX_LAUNCHER),
             ]
+        );
+    }
+
+    #[test]
+    fn another_binarys_cached_launcher_is_replaced_and_a_users_is_kept() {
+        let build = tempfile::tempdir().unwrap();
+        std::fs::write(
+            build.path().join("CMakeCache.txt"),
+            "//comment\nCMAKE_C_COMPILER_LAUNCHER:STRING=/shims/native/old/mbx-cmake-launch-c\n\
+             CMAKE_CXX_COMPILER_LAUNCHER:STRING=/usr/bin/ccache\n",
+        )
+        .unwrap();
+        let arguments: Vec<OsString> = ["-S", "src", "-B"]
+            .into_iter()
+            .map(OsString::from)
+            .chain([build.path().as_os_str().to_owned()])
+            .collect();
+        let directory = build_directory(&arguments);
+        assert_eq!(directory, build.path());
+        let ours = "/shims/native/new/mbx-cmake-launch-c";
+        let cached = cached_launcher(&directory, "CMAKE_C_COMPILER_LAUNCHER").unwrap();
+        assert!(replaces_launcher(&cached, C_LAUNCHER, ours));
+        assert!(!replaces_launcher(ours, C_LAUNCHER, ours));
+        let users = cached_launcher(&directory, "CMAKE_CXX_COMPILER_LAUNCHER").unwrap();
+        assert!(!replaces_launcher(&users, CXX_LAUNCHER, ours));
+        assert_eq!(
+            cached_launcher(&directory, "CMAKE_ASM_COMPILER_LAUNCHER"),
+            None
+        );
+    }
+
+    #[test]
+    fn launchers_set_on_the_command_line_are_recognized() {
+        let arguments: Vec<OsString> = [
+            "-D",
+            "CMAKE_C_COMPILER_LAUNCHER=user",
+            "-DCMAKE_CXX_COMPILER_LAUNCHER:STRING=user",
+            "-DCMAKE_C_COMPILER_LAUNCHER_EXTRA=unrelated",
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+        assert!(defines(&arguments, "CMAKE_C_COMPILER_LAUNCHER"));
+        assert!(defines(&arguments, "CMAKE_CXX_COMPILER_LAUNCHER"));
+        assert!(!defines(&arguments[3..], "CMAKE_C_COMPILER_LAUNCHER"));
+        assert_eq!(build_directory(&arguments), PathBuf::from("."));
+        assert_eq!(
+            build_directory(&[OsString::from("-Bbuild dir")]),
+            PathBuf::from("build dir")
         );
     }
 

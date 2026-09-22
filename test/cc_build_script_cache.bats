@@ -74,8 +74,7 @@ object_in() {
   find "$1" -name hello.o -type f | head -n 1
 }
 
-cmake_transition() {
-  local plain_cargo="${1:-cargo}"
+cmake_fixture() {
   if ! command -v cmake >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
     skip "cmake and make are required"
   fi
@@ -136,6 +135,11 @@ EOF
   export CARGO_INCREMENTAL=0
   export MBX_INCREMENTAL=0 MBX_LEARNED_INCREMENTAL=0
   export RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER=
+}
+
+cmake_transition() {
+  local plain_cargo="${1:-cargo}"
+  cmake_fixture
   local step cache original_compilers
   for step in cargo-1 mbx-2 cargo-3 mbx-4; do
     if [[ "$step" == cargo-* ]]; then
@@ -194,6 +198,32 @@ EOF
   # At least the two native sources on all four runs; some CMake versions
   # also launch the compiler through this command during their initial probes.
   [ "${#lines[@]}" -ge 8 ]
+}
+
+@test "a CMake build configured by a removed mbx binary rebuilds through the current one" {
+  cmake_fixture
+  # Shims live per mbx binary, so an upgrade hands CMake new launcher paths.
+  # CMake takes a launcher from the environment only for a fresh cache, so
+  # without replacing the recorded one, the build would keep invoking the
+  # previous binary's launcher and fail once that binary was removed.
+  local previous="$BATS_TEST_TMPDIR/previous-install/mbx"
+  mkdir -p "$(dirname "$previous")"
+  cp "$MBX_BIN" "$previous"
+  run env RECONFIGURE=previous "$previous" build --offline --manifest-path "$PROJECT/Cargo.toml"
+  assert_success
+  local cache previous_launchers
+  cache="$(find "$CARGO_TARGET_DIR" -name CMakeCache.txt -type f)"
+  previous_launchers="$(grep -E '^CMAKE_(C|CXX)_COMPILER_LAUNCHER:' "$cache")"
+  [ -n "$previous_launchers" ]
+  rm -rf "$BATS_TEST_TMPDIR/previous-install"
+
+  run env RECONFIGURE=current MBX_STATS_REPORT="$BATS_TEST_TMPDIR/current.json" \
+    "$MBX_BIN" build --offline --manifest-path "$PROJECT/Cargo.toml"
+  assert_success
+  run grep -E '^CMAKE_(C|CXX)_COMPILER_LAUNCHER:' "$cache"
+  assert_success
+  [ "${#lines[@]}" -eq 2 ]
+  [ "$output" != "$previous_launchers" ]
 }
 
 @test "the installed Cargo shim can disable caching without changing CMake compiler identity" {
