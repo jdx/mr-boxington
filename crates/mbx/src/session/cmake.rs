@@ -160,7 +160,10 @@ pub fn dispatch() -> Option<ExitCode> {
                 command.env(variable, directory.join(super::shim_file_name(launcher)));
             }
         }
-        arguments.splice(0..0, scripts);
+        // After the caller's own initial-cache scripts: one that seeds a
+        // launcher without FORCE must find the entry still empty.
+        let position = after_initial_cache_scripts(&arguments);
+        arguments.splice(position..position, scripts);
     }
     let status = command.args(arguments).status();
     Some(match status {
@@ -231,6 +234,28 @@ fn write_launcher_script(
     std::fs::write(&staging, script)?;
     std::fs::rename(&staging, &destination)?;
     Ok(())
+}
+
+/// Where a `-C` script goes so it runs after every one the caller passed.
+fn after_initial_cache_scripts(arguments: &[OsString]) -> usize {
+    let mut position = 0;
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = arguments[index].to_str().unwrap_or_default();
+        if argument == "--" {
+            break;
+        }
+        if argument == "-C" {
+            index += 2;
+            position = index.min(arguments.len());
+            continue;
+        }
+        index += 1;
+        if argument.starts_with("-C") {
+            position = index;
+        }
+    }
+    position
 }
 
 /// Whether the command line sets `variable` itself.
@@ -346,6 +371,13 @@ mod tests {
     /// Run the generated script against a real cache holding `cached`, and
     /// return what the cache holds afterwards.
     fn launcher_after_script(cached: &str) -> Option<String> {
+        launcher_after_configure(Some(cached), &[])
+    }
+
+    /// Configure a real cache, seeded with `cached` when given, through the
+    /// arguments dispatch would hand CMake along with `caller` scripts, and
+    /// return the launcher it records.
+    fn launcher_after_configure(cached: Option<&str>, caller: &[&str]) -> Option<String> {
         let cmake = resolve_on_path(&super::super::shim_file_name("cmake"))?;
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source");
@@ -379,14 +411,27 @@ mod tests {
                 .unwrap();
             assert!(status.success());
         };
-        configure(&[format!("-DCMAKE_C_COMPILER_LAUNCHER:STRING={cached}").into()]);
-        configure(&[
-            "-C".into(),
-            directory
-                .path()
-                .join(launcher_script_name(C_LAUNCHER))
-                .into(),
-        ]);
+        if let Some(cached) = cached {
+            configure(&[format!("-DCMAKE_C_COMPILER_LAUNCHER:STRING={cached}").into()]);
+        }
+        let mut arguments = Vec::new();
+        for (index, script) in caller.iter().enumerate() {
+            let path = directory.path().join(format!("caller-{index}.cmake"));
+            std::fs::write(&path, script).unwrap();
+            arguments.extend([OsString::from("-C"), path.into_os_string()]);
+        }
+        let position = after_initial_cache_scripts(&arguments);
+        arguments.splice(
+            position..position,
+            [
+                OsString::from("-C"),
+                directory
+                    .path()
+                    .join(launcher_script_name(C_LAUNCHER))
+                    .into_os_string(),
+            ],
+        );
+        configure(&arguments);
         let cache = std::fs::read_to_string(build.join("CMakeCache.txt")).unwrap();
         let value = cache
             .lines()
@@ -413,6 +458,37 @@ mod tests {
             return;
         };
         assert_eq!(after, "/usr/bin/ccache", "a user's launcher must stay");
+    }
+
+    #[test]
+    fn a_callers_initial_cache_script_chooses_the_launcher_first() {
+        let Some(after) = launcher_after_configure(
+            None,
+            &["set(CMAKE_C_COMPILER_LAUNCHER \"/usr/bin/ccache\" CACHE STRING \"\")\n"],
+        ) else {
+            return;
+        };
+        assert_eq!(after, "/usr/bin/ccache");
+        let Some(after) = launcher_after_configure(None, &[]) else {
+            return;
+        };
+        assert_eq!(after, "ours", "a fresh cache gets this binary's launcher");
+    }
+
+    #[test]
+    fn mbx_scripts_follow_the_callers_and_precede_a_separator() {
+        let arguments =
+            |items: &[&str]| -> Vec<OsString> { items.iter().map(OsString::from).collect() };
+        assert_eq!(after_initial_cache_scripts(&arguments(&["-S", "src"])), 0);
+        assert_eq!(
+            after_initial_cache_scripts(&arguments(&["-C", "a.cmake", "-S", "src", "-Cb.cmake"])),
+            5
+        );
+        assert_eq!(
+            after_initial_cache_scripts(&arguments(&["-C", "a.cmake", "--", "-C", "x"])),
+            2
+        );
+        assert_eq!(after_initial_cache_scripts(&arguments(&["-C"])), 1);
     }
 
     #[test]
