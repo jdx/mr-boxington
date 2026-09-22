@@ -484,6 +484,7 @@ pub(super) fn install_session_shims(
     mark_shim_directory(persistent_shims);
     mark_shim_directory(&binary_shims);
     mark_shim_directory(&native);
+    remove_stranded_binary_shims(persistent_shims, &identity);
     let rustc = binary_shims.join(shim_file_name(RUSTC_SHIM_STEM));
     link_path_shim(&executable, &rustc)?;
     let rustdoc = install_shim_named(
@@ -497,6 +498,65 @@ pub(super) fn install_session_shims(
         rustdoc,
         native,
     })
+}
+
+/// Remove the per-binary shim directories of mbx binaries that are gone.
+///
+/// Keying shims by binary means an installation that lives only as long as a
+/// CI job leaves a directory behind for every job. Once the binary its
+/// symlinks name has been removed, nothing can run them: a build still
+/// holding one of those paths fails the same way whether the directory is
+/// there or not. A directory with no symlink in it yet may belong to a session
+/// that is still installing, so only one whose every link dangles goes.
+///
+/// Windows shims are hard links or copies, which say nothing about whether
+/// their installation still exists, so they are left alone. Best effort: a
+/// failure only leaves the directory for a later session.
+#[cfg(unix)]
+pub(super) fn remove_stranded_binary_shims(persistent_shims: &Path, own_identity: &str) {
+    for kind in ["rust", "native"] {
+        let Ok(listing) = std::fs::read_dir(persistent_shims.join(kind)) else {
+            continue;
+        };
+        for entry in listing.flatten() {
+            if entry.file_name() == own_identity {
+                continue;
+            }
+            let directory = entry.path();
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) || !every_link_dangles(&directory)
+            {
+                continue;
+            }
+            if let Err(error) = std::fs::remove_dir_all(&directory) {
+                debug!(
+                    "the stranded shim directory {} was not removed: {error}",
+                    directory.display()
+                );
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub(super) fn remove_stranded_binary_shims(_persistent_shims: &Path, _own_identity: &str) {}
+
+/// Whether `directory` holds at least one symlink and none that resolves.
+#[cfg(unix)]
+fn every_link_dangles(directory: &Path) -> bool {
+    let Ok(listing) = std::fs::read_dir(directory) else {
+        return false;
+    };
+    let mut links = 0;
+    for entry in listing.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
+            continue;
+        }
+        if entry.path().exists() {
+            return false;
+        }
+        links += 1;
+    }
+    links > 0
 }
 
 /// A stable name for exactly one installed mbx executable.

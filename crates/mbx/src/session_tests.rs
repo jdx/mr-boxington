@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use super::shims::remove_stranded_binary_shims;
 use super::shims::{first_in_path, is_shim_directory, mark_shim_directory};
 use super::*;
 use crate::config::SummaryStyle;
@@ -752,6 +754,43 @@ fn host_driver_lookup_skips_another_installations_shims() {
         Some(std::fs::canonicalize(&real_cc).unwrap()),
         "a host driver must never resolve to another install's shim"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn only_shim_directories_of_removed_binaries_are_collected() {
+    let directory = tempfile::tempdir().unwrap();
+    let shims = directory.path().join("shims");
+    let binary = directory.path().join("mbx");
+    std::fs::write(&binary, b"#!/bin/sh\n").unwrap();
+    let gone = directory.path().join("removed install/mbx");
+    let install = |kind: &str, identity: &str, target: Option<&Path>| {
+        let per_binary = shims.join(kind).join(identity);
+        std::fs::create_dir_all(&per_binary).unwrap();
+        mark_shim_directory(&per_binary);
+        if let Some(target) = target {
+            std::os::unix::fs::symlink(target, per_binary.join("mbx-c")).unwrap();
+        }
+        per_binary
+    };
+    let stranded = install("native", "stranded", Some(&gone));
+    let stranded_rust = install("rust", "stranded", Some(&gone));
+    let live = install("native", "live", Some(&binary));
+    // A concurrent session has created its directory but not linked yet.
+    let installing = install("native", "installing", None);
+    // The running binary's own directory is never judged, whatever it holds.
+    let own = install("native", "own", Some(&gone));
+
+    remove_stranded_binary_shims(&shims, "own");
+
+    assert!(!stranded.exists(), "a removed binary's shims should go");
+    assert!(!stranded_rust.exists(), "rustc shims are collected too");
+    assert!(live.exists(), "an installed binary's shims must stay");
+    assert!(
+        installing.exists(),
+        "a directory still being filled must stay"
+    );
+    assert!(own.exists(), "the running binary's directory must stay");
 }
 
 #[test]
