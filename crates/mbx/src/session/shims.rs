@@ -475,7 +475,14 @@ pub(super) fn install_session_shims(
 ) -> Result<SessionShims> {
     let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
     let identity = binary_identity(&executable)?;
-    let installation = installation_identity(&executable)?;
+    // Windows shims are copies or hard links that are never replaced in
+    // place, so an upgrade there needs a fresh directory to reach the new
+    // binary. Unix symlinks already follow the path to whatever it holds.
+    let installation = if cfg!(unix) {
+        installation_identity(&executable)?
+    } else {
+        identity.clone()
+    };
     let binary_shims = persistent_shims.join("rust").join(&identity);
     let native = persistent_shims.join("native").join(&installation);
     std::fs::create_dir_all(&binary_shims)?;
@@ -563,19 +570,8 @@ pub(super) fn remove_stranded_binary_shims(
             let directory = entry.path();
             if !entry.file_type().is_ok_and(|kind| kind.is_dir())
                 || !unused_for_at_least(&directory, unused_for)
+                || !every_link_dangles(&directory)
             {
-                continue;
-            }
-            // A rustc shim directory is also done with once the binary at its
-            // path has been replaced: that binary's sessions use a directory
-            // of their own, and nothing records a `RUSTC_WRAPPER` beyond the
-            // session that set it.
-            let superseded = kind == "rust"
-                && entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| superseded_binary(&directory, name));
-            if !superseded && !every_link_dangles(&directory) {
                 continue;
             }
             if let Err(error) = std::fs::remove_dir_all(&directory) {
@@ -626,16 +622,6 @@ fn every_link_dangles(directory: &Path) -> bool {
     links > 0
 }
 
-/// Whether the rustc shim in `directory` now reaches a binary other than the
-/// one `identity` names.
-#[cfg(unix)]
-fn superseded_binary(directory: &Path, identity: &str) -> bool {
-    std::fs::read_link(directory.join(RUSTC_SHIM_STEM))
-        .ok()
-        .and_then(|binary| binary_identity(&binary).ok())
-        .is_some_and(|current| current != identity)
-}
-
 /// A stable name for one place mbx is installed.
 ///
 /// The C, C++ and CMake shims are keyed by this. They are symlinks to the
@@ -649,7 +635,8 @@ fn superseded_binary(directory: &Path, identity: &str) -> bool {
 /// Unlike [`binary_identity`], an upgrade in place keeps the name. The links
 /// already resolve to whatever binary the path holds, and a new directory per
 /// release would be one that collection could never tell was finished with:
-/// its links still resolve.
+/// its links still resolve. Windows shims are copies, so there the binary
+/// keys them instead.
 pub(super) fn installation_identity(executable: &Path) -> Result<String> {
     let executable = std::path::absolute(executable)?;
     Ok(CacheDigest::blake3(executable.as_os_str().as_encoded_bytes()).hash)

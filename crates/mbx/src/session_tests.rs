@@ -1,5 +1,6 @@
 #[cfg(unix)]
-use super::shims::{binary_identity, installation_identity, remove_stranded_binary_shims};
+use super::shims::remove_stranded_binary_shims;
+use super::shims::{binary_identity, installation_identity};
 use super::shims::{first_in_path, is_shim_directory, mark_shim_directory};
 use super::*;
 use crate::config::SummaryStyle;
@@ -757,7 +758,7 @@ fn host_driver_lookup_skips_another_installations_shims() {
 }
 
 #[test]
-fn an_upgrade_in_place_keeps_its_native_shim_directory() {
+fn an_installation_keeps_its_identity_across_an_upgrade_in_place() {
     let directory = tempfile::tempdir().unwrap();
     let binary = directory.path().join("mbx");
     std::fs::write(&binary, b"release one").unwrap();
@@ -807,12 +808,9 @@ fn only_shim_directories_nothing_can_use_are_collected() {
     // Another container's binary lives on a path this process cannot see,
     // so its links dangle here, but it built recently.
     let elsewhere = install("native", "elsewhere", Some(&gone));
-    // The binary at a path was replaced in place: its old rustc shims still
-    // resolve, but to a binary whose sessions use another directory.
+    // The binary at a path was replaced in place. Its old rustc shims still
+    // resolve, and a session started before the upgrade may still use them.
     let superseded = install("rust", "superseded", Some(&binary));
-    std::fs::rename(superseded.join("mbx-c"), superseded.join("mbx-rustc")).unwrap();
-    let current = install("rust", &binary_identity(&binary).unwrap(), Some(&binary));
-    std::fs::rename(current.join("mbx-c"), current.join("mbx-rustc")).unwrap();
     let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
     for unused in [
         &stranded,
@@ -821,7 +819,6 @@ fn only_shim_directories_nothing_can_use_are_collected() {
         &installing,
         &own,
         &superseded,
-        &current,
     ] {
         std::fs::File::options()
             .write(true)
@@ -842,12 +839,8 @@ fn only_shim_directories_nothing_can_use_are_collected() {
     );
     assert!(own.exists(), "the running binary's directory must stay");
     assert!(
-        !superseded.exists(),
-        "rustc shims for a binary replaced in place should go"
-    );
-    assert!(
-        current.exists(),
-        "rustc shims for the binary a path holds now must stay"
+        superseded.exists(),
+        "shims that still resolve may belong to a running session"
     );
     assert!(
         elsewhere.exists(),
