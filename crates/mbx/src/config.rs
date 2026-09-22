@@ -8,7 +8,7 @@ use bytesize::ByteSize;
 use eyre::{Context, Result, bail};
 use mbx_cache_core::{RemoteCacheMode, S3ConditionalWrites};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 use usage_config::{EnvLayer, FileLayer, FileScope, Layers};
 
@@ -115,6 +115,12 @@ pub(crate) struct RawConfig {
     /// Cache root. NFS is unsupported for local build storage.
     #[usage(env = "MBX_CACHE_DIR", default_note = "platform cache directory")]
     cache_dir: Option<PathBuf>,
+    /// Persistent compiler shims. Containers sharing a cache should each use a
+    /// private, dedicated local directory that survives builds and contains no real compilers.
+    /// Relative paths use the cache root and cannot traverse above it with `..`
+    /// or normalize to an empty path.
+    #[usage(env = "MBX_SHIMS_DIR", default_note = "<cache_dir>/shims")]
+    shims_dir: Option<PathBuf>,
     /// Write a JSON build report to this path.
     #[usage(env = "MBX_STATS_REPORT")]
     stats_report: Option<PathBuf>,
@@ -412,6 +418,8 @@ struct RawHttp {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub cache_dir: PathBuf,
+    /// Persistent executable wrappers, separate from shared build artifacts.
+    pub shims_dir: PathBuf,
     pub stats_report: Option<PathBuf>,
     pub verify: bool,
     pub verify_sample_rate: u8,
@@ -508,6 +516,7 @@ impl Config {
     pub fn for_test(cache_dir: &std::path::Path) -> Self {
         Self {
             cache_dir: cache_dir.to_path_buf(),
+            shims_dir: cache_dir.join("shims"),
             stats_report: None,
             verify: false,
             verify_sample_rate: 0,
@@ -886,6 +895,30 @@ impl Config {
         let cache_dir = raw.cache_dir.or_else(default_cache_dir).ok_or_else(|| {
             eyre::eyre!("could not determine a cache directory; set MBX_CACHE_DIR")
         })?;
+        let shims_dir = match raw.shims_dir {
+            Some(directory) if directory.is_absolute() => directory,
+            Some(directory) => {
+                let mut relative = PathBuf::new();
+                for component in directory.components() {
+                    match component {
+                        Component::Normal(part) => relative.push(part),
+                        Component::CurDir => (),
+                        Component::ParentDir if relative.pop() => (),
+                        _ => bail!(
+                            "invalid shims_dir: relative paths must stay beneath cache_dir; \
+                             use an absolute path for a directory outside the cache"
+                        ),
+                    }
+                }
+                if relative.as_os_str().is_empty() {
+                    bail!(
+                        "invalid shims_dir: relative paths must name a directory beneath cache_dir"
+                    );
+                }
+                cache_dir.join(relative)
+            }
+            None => cache_dir.join("shims"),
+        };
         let target_root = match raw.target.root {
             Some(root) if root.is_absolute() => root,
             Some(root) => cache_dir.join(root),
@@ -1002,6 +1035,7 @@ impl Config {
         };
         let config = Self {
             cache_dir,
+            shims_dir,
             gc,
             target,
             scheduler,
@@ -1441,6 +1475,66 @@ mod tests {
     }
 
     #[test]
+    fn private_shims_resolve_relative_to_the_cache_and_environment_overrides_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = directory.path().join("cache");
+        let private = directory.path().join("private shims");
+        let cache_text = cache.to_str().unwrap();
+        let from_file = configured(
+            Some("shims_dir = 'worker/shims'"),
+            &[("MBX_CACHE_DIR", cache_text)],
+        )
+        .unwrap();
+        assert_eq!(from_file.shims_dir, cache.join("worker/shims"));
+        let from_environment = configured(
+            Some("shims_dir = 'worker/shims'"),
+            &[
+                ("MBX_CACHE_DIR", cache_text),
+                ("MBX_SHIMS_DIR", private.to_str().unwrap()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(from_environment.shims_dir, private);
+        assert_eq!(from_environment.store_dir(), cache.join("actions"));
+        let relative = configured(
+            None,
+            &[("MBX_CACHE_DIR", cache_text), ("MBX_SHIMS_DIR", "local")],
+        )
+        .unwrap();
+        assert_eq!(relative.shims_dir, cache.join("local"));
+    }
+
+    #[test]
+    fn relative_shims_cannot_traverse_above_the_cache_root() {
+        for path in ["../private", "worker/../../private", "../cache/private"] {
+            let error = configured(None, &[("MBX_SHIMS_DIR", path)]).unwrap_err();
+            assert!(error.to_string().contains("invalid shims_dir"), "{error}");
+            let file = format!("shims_dir = '{path}'");
+            assert!(configured(Some(&file), &[]).is_err());
+        }
+    }
+
+    #[test]
+    fn shims_reject_empty_and_empty_normalizing_paths() {
+        for path in ["", ".", "./", "a/.."] {
+            let file = format!("shims_dir = '{path}'");
+            for result in [
+                configured(None, &[("MBX_SHIMS_DIR", path)]),
+                configured(Some(&file), &[]),
+            ] {
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("invalid shims_dir"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn relative_shims_normalize_parent_components_within_the_cache_root() {
+        let config = configured(None, &[("MBX_SHIMS_DIR", "worker/../private/./shims")]).unwrap();
+        assert_eq!(config.shims_dir, config.cache_dir.join("private/shims"));
+    }
+
+    #[test]
     fn defaults_apply_without_configuration() {
         let (config, retention) = configured_retention(None, &[]).unwrap();
         assert_eq!(
@@ -1457,6 +1551,7 @@ mod tests {
         assert!(config.share_out_dir);
         assert!(config.build_script_execution);
         assert!(config.store_dir().ends_with("actions"));
+        assert_eq!(config.shims_dir, config.cache_dir.join("shims"));
         assert!(config.gc.auto, "collection runs until it is turned off");
         assert_eq!(config.gc.max_bytes, 20 * GIB, "5% of a 400GiB disk");
         assert_eq!(config.gc.interval, DEFAULT_GC_INTERVAL);

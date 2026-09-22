@@ -794,6 +794,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut config = Config {
             cache_dir: directory.path().to_path_buf(),
+            shims_dir: directory.path().join("shims"),
             stats_report: None,
             ar_determinism: "auto".into(),
             verify: false,
@@ -838,6 +839,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut config = Config {
             cache_dir: directory.path().to_path_buf(),
+            shims_dir: directory.path().join("shims"),
             stats_report: None,
             ar_determinism: "auto".into(),
             verify: false,

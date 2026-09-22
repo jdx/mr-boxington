@@ -814,3 +814,23 @@ fn help_inspection_cleanup_and_disabled_shim_remain_available() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn rejects_a_private_nfs_shim_directory_before_initializing_storage() {
+    for arguments in [vec!["build", "--offline"], vec!["exec", "cc", "--version"]] {
+        let fixture = Fixture::new();
+        let shims = fixture.nfs.join("private-shims");
+        rejected(
+            fixture
+                .command()
+                .env("MBX_SHIMS_DIR", &shims)
+                .args(arguments)
+                .output()
+                .unwrap(),
+            &shims,
+            "MBX_SHIMS_DIR",
+        );
+        assert!(!shims.exists());
+        assert!(!fixture.root.join("cache/actions").exists());
+    }
+}

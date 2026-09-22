@@ -423,6 +423,15 @@ Reuse Rust compilations across checkouts with matching build-script output by gi
 
 Remap the workspace root so rustc does not record which checkout a compilation ran in, which lets a crate rebuilt in a second checkout come out byte-identical so its dependents still share. Source paths in debug information and panic messages then name a placeholder. This may also be set in workspace `.mbx.toml`; the environment variable wins.
 
+### `shims_dir`
+
+- **Type:** `option<path>`
+- **Optional:** true
+- **Default:** <cache_dir>/shims
+- **Set with:** `MBX_SHIMS_DIR`
+
+Persistent compiler shims. Containers sharing a cache should each use a private, dedicated local directory that survives builds and contains no real compilers. Relative paths use the cache root and cannot traverse above it with `..` or normalize to an empty path.
+
 ### `stats_report`
 
 - **Type:** `option<path>`

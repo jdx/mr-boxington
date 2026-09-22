@@ -49,7 +49,7 @@ pub(super) fn run(config: &Config, settings: &CliSettings, args: &ExecArgs) -> R
         // Outside the session directory, and outside the store the collector
         // sweeps: a configure step records these paths and expects to find
         // them on the next build.
-        let Some(shims) = session::install_path_shims(&config.cache_dir.join("shims"))? else {
+        let Some(shims) = session::install_path_shims(&config.shims_dir)? else {
             log::warn!("no C or C++ compiler was found on PATH, so this command is not cached");
             return Ok((run_cargo(&program, arguments, BTreeMap::new()), None));
         };
