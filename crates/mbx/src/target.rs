@@ -42,6 +42,14 @@ const VIEW_RECORD_VERSION: u8 = 1;
 /// a record this fresh is a build starting, whatever the selection said.
 const RECENTLY_CLAIMED: u64 = 2;
 
+/// The clock records and collection share: whole seconds since the epoch.
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or_default()
+}
+
 /// Which checkout a managed target directory belongs to.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -980,17 +988,19 @@ pub(crate) fn collect(
     max_age: Option<Duration>,
     dry_run: bool,
 ) -> Result<CollectionOutcome> {
-    collect_with(root, max_bytes, max_age, dry_run, || {}, || {})
+    collect_with(root, max_bytes, max_age, dry_run, now_secs(), || {}, || {})
 }
 
-/// [`collect`] with hooks where a build can arrive: between selecting views
-/// and removing them, and between removing a directory and its record. Tests
-/// stand in for that build.
+/// [`collect`] with the sweep's clock, and with hooks where a build can
+/// arrive: between selecting views and removing them, and between removing a
+/// directory and its record. Tests stand in for that build, and pass a fixed
+/// `now` so the ages they set up do not shift while the sweep runs.
 fn collect_with(
     root: &Path,
     max_bytes: Option<u64>,
     max_age: Option<Duration>,
     dry_run: bool,
+    now: u64,
     before_removal: impl FnOnce(),
     mut after_removal: impl FnMut(),
 ) -> Result<CollectionOutcome> {
@@ -998,10 +1008,6 @@ fn collect_with(
     if !dry_run {
         remove_abandoned_removals(root);
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default();
     let mut entries = Vec::new();
     let mut total_views = 0_u64;
     let mut uncollectable_bytes = 0_u64;
@@ -1088,7 +1094,7 @@ fn collect_with(
         // start building it before its predecessor's directory is gone.
         if !dry_run {
             let claimed_since = read_view_record(&record_path)
-                .is_some_and(|record| recently_claimed(root, &record, updated));
+                .is_some_and(|record| recently_claimed(root, &record, updated, now));
             let in_use = match cargo_locks(&directory) {
                 Ok(locks) => locks.is_none(),
                 Err(error) => {
@@ -1155,7 +1161,7 @@ fn collect_with(
         // the directory invisible to every later collection.
         let superseded = !dry_run
             && (read_view_record(&record_path)
-                .is_some_and(|record| recently_claimed(root, &record, updated))
+                .is_some_and(|record| recently_claimed(root, &record, updated, now))
                 || directory.exists());
         if !dry_run
             && !superseded
@@ -1176,17 +1182,17 @@ fn collect_with(
 /// Whether a record read back during collection shows a build claiming the
 /// view since it was selected on `updated`.
 ///
+/// `now` is the sweep's own clock, the one the selection compared ages
+/// against, so how fresh a record counts as does not depend on how long the
+/// removals before this one took.
+///
 /// The grace for a same-second refresh applies only while the checkout
 /// exists: a record written moments ago for a checkout that is already gone
 /// is a test fixture or a deleted clone, not a build about to start.
-fn recently_claimed(root: &Path, record: &ViewRecord, updated: u64) -> bool {
+fn recently_claimed(root: &Path, record: &ViewRecord, updated: u64, now: u64) -> bool {
     if record.updated_secs > updated {
         return true;
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default();
     now.saturating_sub(record.updated_secs) <= RECENTLY_CLAIMED
         && crate::store::checkout_is_live_on(root, &record.workspace_root)
 }
@@ -1246,10 +1252,7 @@ fn record_view(root: &Path, workspace_root: &Path) -> Result<()> {
     let record = ViewRecord {
         version: VIEW_RECORD_VERSION,
         workspace_root: workspace_root.to_path_buf(),
-        updated_secs: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|since| since.as_secs())
-            .unwrap_or_default(),
+        updated_secs: now_secs(),
     };
     let mut contents = serde_json::to_vec(&record)?;
     contents.push(b'\n');
