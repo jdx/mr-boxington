@@ -304,6 +304,10 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     let mut command = Command::new(compiler);
     command.args(&compiler_arguments);
     command.args(invocation.dependency_arguments_for(&depfile, context.compiler.family));
+    // An earlier hit may have linked this object to the store's read-only
+    // copy of it, which the compiler cannot write over.
+    let object = invocation.output_in(&working_dir);
+    crate::materialize::clear_linked_outputs(std::iter::once(object.as_path()));
     let output = crate::phase_timing::measure("compiler", || command.output())
         .wrap_err_with(|| format!("failed to run {}", Path::new(compiler).display()))?;
     drop(permit);
@@ -1276,6 +1280,10 @@ fn restore_result(
             Materialization::Reflink => {
                 restore.reflinked_output_files = 1;
                 restore.reflinked_output_bytes = node.digest.size;
+            }
+            Materialization::Hardlink => {
+                restore.hardlinked_output_files = 1;
+                restore.hardlinked_output_bytes = node.digest.size;
             }
             Materialization::Copy => {
                 restore.copied_output_files = 1;

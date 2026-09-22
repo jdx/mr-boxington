@@ -25,7 +25,7 @@ the action store, managed targets, and learned incremental state currently held.
 | Pruned by mbx | Cumulative bytes collected from managed targets and the cache, including both automatic sweeps and explicit `mbx gc` runs. |
 | Automatically pruned | Bytes collected by automatic sweeps, with a separate start date. Older versions did not distinguish automatic from explicit GC, so their history is not guessed or backfilled. |
 | Requested removals | Bytes removed by confirmed migrations or explicit workspace removals, kept separate from pruning. |
-| Copying avoided | Cumulative output bytes materialized by reflink rather than copying. This is not the amount of disk space currently saved: files may later change or be deleted. |
+| Copying avoided | Cumulative output bytes materialized by reflink or hard link rather than copying. This is not the amount of disk space currently saved: files may later change or be deleted. |
 | With separate caches | Sum of logical cache bytes reachable by each live recorded workspace, counting shared content once for each workspace. |
 | Duplication avoided | A conservative lower-bound estimate: the separate-cache sum minus the entire shared store, floored at zero. Unclaimed objects in the store make this underestimate sharing. |
 

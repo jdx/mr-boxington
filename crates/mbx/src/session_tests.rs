@@ -69,6 +69,7 @@ fn test_config(cache_dir: &Path) -> Config {
         verify_sample_rate: 0,
         incremental: false,
         share_out_dir: false,
+        restore_hardlink: true,
         share_workspace_root: false,
         build_script_execution: false,
         events: false,

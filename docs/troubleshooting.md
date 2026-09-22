@@ -31,7 +31,7 @@ Example output (versions, paths, and budgets depend on your machine):
   ok  cache        /home/you/.cache/mbx is writable
   ok  session      Unix-domain listeners are available
   ok  config       50.0 GiB budget, automatic gc enabled, managed targets enabled at /home/you/.cache/mbx/targets
-  ok  reflink      supported by the cache filesystem
+  ok  restore      /home/you/.cache/mbx -> /home/you/code/app/target: cloning is supported
   ok  setup        mise Cargo wrapper is active and the fallback shim is current at /home/you/.local/share/mbx/bin/cargo
   ok  remote       not configured; using the local cache
 

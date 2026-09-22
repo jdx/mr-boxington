@@ -48,6 +48,7 @@ pub(crate) struct StagedOutputs {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Materialization {
     Reflink,
+    Hardlink,
     Copy,
 }
 
@@ -121,19 +122,34 @@ pub(crate) fn stage_verified_cached_output(
     source: &Path,
     node: &CacheFileNode,
 ) -> Result<(tempfile::TempPath, Materialization)> {
+    stage_verified_cached_output_with(directory, index, source, node, |source, destination| {
+        reflink_copy::reflink(source, destination)
+    })
+}
+
+/// [`stage_verified_cached_output`] with the clone spelled out, so a test can
+/// exercise what happens on a filesystem that has no clone support without
+/// needing one.
+pub(crate) fn stage_verified_cached_output_with(
+    directory: &Path,
+    index: usize,
+    source: &Path,
+    node: &CacheFileNode,
+    clone: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(tempfile::TempPath, Materialization)> {
     let temporary = directory.join(format!("output-{index}"));
-    let copied_bytes = reflink_copy::reflink_or_copy(source, &temporary)
+    let materialization = materialize_cached_output(source, &temporary, node, clone)
         .wrap_err_with(|| format!("failed to materialize cached output {}", node.name))?;
-    let materialization = match copied_bytes {
-        None => Materialization::Reflink,
-        Some(written) if written == node.digest.size => Materialization::Copy,
-        Some(_) => bail!(
-            "materialized cached output has the wrong size: {}",
-            node.name
-        ),
-    };
     let temporary = tempfile::TempPath::try_from_path(temporary)?;
-    make_owner_writable(&temporary)?;
+    // A hard link *is* the store's object, so its mode is the object's mode
+    // and cannot be adjusted for this one destination. It is deliberately left
+    // read-only: a compiler that would write over a restored output finds it
+    // unwritable and says so, instead of rewriting the bytes every other
+    // checkout linked to. `clear_linked_outputs` unlinks it before mbx runs a
+    // real compiler, which is how a rebuild through mbx still writes here.
+    if materialization != Materialization::Hardlink {
+        make_owner_writable(&temporary)?;
+    }
     // Deliberately not fsynced. These are build artifacts in a target
     // directory, and cargo does not sync its own outputs either, so syncing
     // here buys no durability the build relies on -- it only costs one fsync
@@ -150,17 +166,276 @@ pub(crate) fn stage_verified_cached_output(
             node.name
         );
     }
-    apply_file_mode(&temporary, node.mode, node.executable)?;
     // A cache hit stands in for work Cargo decided was stale. Reflinks and
     // some copy implementations preserve the CAS blob's older mtime, which
     // can leave this output older than the dependency that triggered the
     // invocation and make Cargo repeat it forever. A real compiler would have
     // produced the file now, so give the restored output the same ordering.
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&temporary)?
-        .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()))?;
+    //
+    // A hard link has no timestamp of its own, so this moves the store
+    // object's. That is the ordering every link of it wants -- an output is
+    // only restored because something intends to use it now -- but it does
+    // cost this session's remembered identity for that blob, which the agent
+    // re-establishes by reading it again if some later action asks for the
+    // same bytes. Output blobs are asked for about once per build, so the
+    // re-read is rare and a copy of every restored byte is not.
+    set_modified_now(&temporary)?;
+    // Last, because this is the step that can take away the access the ones
+    // above needed. A recorded mode carries no promise of read permission --
+    // nothing rejects `0o200` -- and a staged file that cannot be opened is
+    // one nothing else here could have finished with.
+    if materialization != Materialization::Hardlink {
+        apply_file_mode(&temporary, node.mode, node.executable)?;
+    }
     Ok((temporary, materialization))
+}
+
+/// Put the store's bytes at `destination`: share them where the filesystem
+/// can, copy them where it cannot.
+///
+/// A reflink comes first wherever it works. The restored file is then an
+/// independent inode that merely shares data blocks, so it carries its own
+/// mode and timestamps and a writer breaks the sharing rather than the store.
+///
+/// A hard link shares the object itself, which is why it is second and why the
+/// object is made read-only before a link to it exists. It is not a nicety on
+/// a filesystem with no clone support: ext4 is what most Linux CI and most
+/// Linux developer machines run, and there the alternative is copying every
+/// restored byte -- on a warm build of a mid-size workspace, gigabytes of
+/// them.
+fn materialize_cached_output(
+    source: &Path,
+    destination: &Path,
+    node: &CacheFileNode,
+    clone: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<Materialization> {
+    if clone(source, destination).is_ok() {
+        return Ok(Materialization::Reflink);
+    }
+    // A failed clone may still have created the destination, and a hard link
+    // will not replace an existing name. The staging path is this process's
+    // own, so removing it takes nothing from anybody.
+    let _ = std::fs::remove_file(destination);
+    if session::restore_hardlink_requested() && hard_link_cached_output(source, destination, node) {
+        return Ok(Materialization::Hardlink);
+    }
+    let written = std::fs::copy(source, destination)?;
+    if written != node.digest.size {
+        bail!(
+            "materialized cached output has the wrong size: {}",
+            node.name
+        );
+    }
+    Ok(Materialization::Copy)
+}
+
+/// Link the store's object into place, or report that this output cannot have
+/// one. Every failure here is answered by copying, so none of them is an
+/// error.
+#[cfg(unix)]
+fn hard_link_cached_output(source: &Path, destination: &Path, node: &CacheFileNode) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let wanted = linkable_mode(node);
+    if !readable_by_owner(wanted) {
+        return false;
+    }
+    // Inspected and relabelled through one open handle, so the object this
+    // decides about is the object it changes. Reading a path's mode and then
+    // setting the mode of that path are two lookups of a name, and a name can
+    // come to mean a different file between them -- the store republishes a
+    // blob it found torn by renaming a new one over it. The permissions would
+    // then land on bytes nothing here ever checked, which is how a rule about
+    // what may be relabelled stops being a rule.
+    let Ok(file) = std::fs::File::open(source) else {
+        return false;
+    };
+    // Held for the rest of this function, and the reason the mode is read
+    // after it rather than before.
+    //
+    // "Only ever take permissions away" is not a property a process can
+    // establish on its own, because it compares against a mode it read
+    // earlier. Two restores of one object can each read the same starting
+    // mode, each find its own target narrower than that, and apply them in
+    // an order where the second undoes the first: an output already linked
+    // and verified as owner-private is handed back the readership the other
+    // one wanted. Both followed the rule against the value they had; the
+    // value was stale.
+    //
+    // Reading under the lock makes the comparison mean what it says, since
+    // nothing else relabels an object without holding this. The lock is
+    // never waited on: two restores wanting the same object at the same
+    // instant is rare, and copying is a fine answer for the loser.
+    if !take_exclusive_lock(&file) {
+        return false;
+    }
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    let current = metadata.permissions().mode() & 0o7777;
+    // A link carries no mode of its own, so the object's mode is the mode of
+    // every path linked to it, and this restore cannot be the only one holding
+    // an opinion about it. Matching already is the ordinary case and the one
+    // that keeps this cheap: the same bytes restored into a second target
+    // directory want the mode the first one gave them.
+    //
+    // Otherwise the object is relabelled, under one rule: a relabel may only
+    // take readership away, and may never touch whether the object runs.
+    // Restores of the same digest race each other, so the mode has to be safe
+    // under whichever order they land in, and the way to get that is to let it
+    // move in one direction only.
+    //
+    // Readership tightens safely in any order: the worst outcome is an output
+    // less readable than its record asked for, and the owner running the build
+    // can still read it. Widening it is not safe -- it would publish another
+    // checkout's owner-private artifact to every local user who can reach that
+    // directory.
+    //
+    // The executable bit is neither. It is not a degree of access that can be
+    // given up harmlessly: taking it from a shared object stops every binary
+    // already linked to it from running at all, and a restore of these bytes
+    // as a non-executable output has no business deciding that. So it is not
+    // relabelled in either direction, and an output whose executability
+    // differs from the object's gets a private copy.
+    if current & 0o111 != wanted & 0o111 {
+        return false;
+    }
+    if current != wanted {
+        if wanted & !current != 0 {
+            return false;
+        }
+        if file
+            .set_permissions(std::fs::Permissions::from_mode(wanted))
+            .is_err()
+        {
+            return false;
+        }
+    }
+    if std::fs::hard_link(source, destination).is_err() {
+        return false;
+    }
+    // The link was made by name, so confirm it reached the object just
+    // inspected rather than one that replaced it in flight. A link to the
+    // wrong object is not wrong in its content -- a blob is its digest -- but
+    // its mode was never checked against this output, so it is unlinked and
+    // the caller copies instead.
+    let linked = std::fs::metadata(destination);
+    match linked {
+        Ok(linked)
+            if linked.ino() == metadata.ino() && linked.permissions().mode() & 0o7777 == wanted =>
+        {
+            true
+        }
+        _ => {
+            let _ = std::fs::remove_file(destination);
+            false
+        }
+    }
+}
+
+#[cfg(windows)]
+fn hard_link_cached_output(_source: &Path, _destination: &Path, _node: &CacheFileNode) -> bool {
+    // Windows hard links exist, but a read-only file there cannot be deleted
+    // until the attribute is cleared, which is exactly the protection the
+    // shared object relies on. Copying keeps the store unshared and the
+    // target directory ordinary.
+    false
+}
+
+/// The mode a store object must carry before anything links to it: the
+/// readership the compiler gave this output, executable where the output was,
+/// and writable by nobody.
+///
+/// Derived from the recorded mode rather than fixed at `0o444`, because an
+/// output a compiler restricted to its owner -- what a `0o077` umask
+/// produces -- must not become world-readable by being restored through a
+/// link into a directory other local users can traverse.
+#[cfg(unix)]
+fn linkable_mode(node: &CacheFileNode) -> u32 {
+    (node.mode & 0o444) | if node.executable { 0o111 } else { 0 }
+}
+
+/// Take the advisory lock that serializes relabelling one store object, or
+/// report that another restore holds it.
+///
+/// Advisory rather than mandatory, which is enough: the only code that changes
+/// a published object's mode is the caller of this, so every writer
+/// participates. Readers of the bytes do not take it and are not delayed by
+/// it.
+#[cfg(unix)]
+fn take_exclusive_lock(file: &std::fs::File) -> bool {
+    use std::os::unix::io::AsRawFd as _;
+    // SAFETY: `file` owns this descriptor for the whole call, and `flock`
+    // only reads it. The lock is released when the descriptor closes.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+}
+
+/// Whether a mode leaves the object readable by the user who owns the store.
+///
+/// A recorded mode with no read bits is valid -- nothing rejects `0o200` --
+/// and linking under one would set the store's own copy of those bytes to a
+/// mode that cannot be opened, which outlives this restore and takes the
+/// cache entry with it. Such an output gets a private copy.
+#[cfg(unix)]
+fn readable_by_owner(mode: u32) -> bool {
+    mode & 0o400 != 0
+}
+
+/// Give a file the modification time a compiler writing it now would.
+pub(crate) fn set_modified_now(path: &Path) -> Result<()> {
+    set_modified(path, std::time::SystemTime::now())
+}
+
+/// Stamp a file with a modification time.
+///
+/// Opened for reading rather than writing, because anything downstream of a
+/// restore may be looking at a hard link to the store's object, which is
+/// read-only on purpose. A Unix owner may set times without write access, so
+/// asking for none is both sufficient and the only thing that works on every
+/// file a restore can produce.
+pub(crate) fn set_modified(path: &Path, modified: std::time::SystemTime) -> Result<()> {
+    let times = std::fs::FileTimes::new().set_modified(modified);
+    #[cfg(unix)]
+    let file = std::fs::OpenOptions::new().read(true).open(path)?;
+    #[cfg(windows)]
+    let file = std::fs::OpenOptions::new().write(true).open(path)?;
+    file.set_times(times)?;
+    Ok(())
+}
+
+/// Unlink outputs a previous restore left that a compiler could not write.
+///
+/// A hard-linked restore shares the store's object, so it is read-only, and
+/// rustc refuses such a path outright: "output file ... is not writeable".
+/// That refusal is the point -- it is what stops a rebuild from rewriting the
+/// bytes every other checkout linked to -- but the compiler about to run here
+/// is going to replace these files anyway. Removing the link first leaves it
+/// the ordinary create it expects, and leaves every other link untouched.
+///
+/// Best effort by design: a path that cannot be removed is one the compiler
+/// will report on in its own words, and a restore that never linked anything
+/// leaves nothing here to find.
+pub(crate) fn clear_linked_outputs<'a>(paths: impl IntoIterator<Item = &'a Path>) {
+    for path in paths {
+        let Ok(metadata) = std::fs::symlink_metadata(path) else {
+            continue;
+        };
+        if !metadata.is_file() || owner_can_write(&metadata) {
+            continue;
+        }
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(unix)]
+fn owner_can_write(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    metadata.permissions().mode() & 0o200 != 0
+}
+
+#[cfg(windows)]
+fn owner_can_write(metadata: &std::fs::Metadata) -> bool {
+    !metadata.permissions().readonly()
 }
 
 /// Rename every staged output into place, rolling the whole set back if any one
@@ -607,5 +882,308 @@ mod verification_tests {
         );
         assert!(first.contains("rustc action"));
         assert!(first.contains("(example)"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod materialization_tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// A filesystem that cannot clone, so the fallback chain is what runs.
+    fn no_clone(_: &Path, _: &Path) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+
+    fn blob(directory: &Path, name: &str, contents: &[u8], mode: u32) -> PathBuf {
+        let path = directory.join(name);
+        std::fs::write(&path, contents).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    fn node(contents: &[u8], executable: bool) -> CacheFileNode {
+        // `mode` is what the adapter recorded for the output; callers that
+        // care override it.
+        CacheFileNode {
+            digest: CacheDigest::blake3(contents),
+            executable,
+            mode: 0o644,
+            name: "libdemo.rlib".into(),
+        }
+    }
+
+    #[test]
+    fn a_filesystem_without_clones_links_the_object_instead_of_copying_it() {
+        let root = tempfile::tempdir().unwrap();
+        let source = blob(root.path(), "blob", b"rlib", 0o644);
+        let before = std::fs::metadata(&source).unwrap();
+
+        let (staged, materialization) = stage_verified_cached_output_with(
+            root.path(),
+            0,
+            &source,
+            &node(b"rlib", false),
+            no_clone,
+        )
+        .unwrap();
+
+        assert_eq!(materialization, Materialization::Hardlink);
+        let after = std::fs::metadata(&staged).unwrap();
+        assert_eq!(after.ino(), before.ino(), "the link shares the object");
+        // Read-only on purpose: a writer here would be writing into the store.
+        assert_eq!(after.permissions().mode() & 0o777, 0o444);
+        assert_eq!(
+            std::fs::metadata(&source).unwrap().permissions().mode() & 0o777,
+            0o444,
+            "the object itself is what was made unwritable"
+        );
+        // Restored outputs still have to look freshly produced, or Cargo keeps
+        // the unit stale forever. A link has no timestamp but the object's.
+        assert!(after.modified().unwrap() > before.modified().unwrap());
+    }
+
+    #[test]
+    fn an_executable_output_keeps_its_executable_bit_through_a_link() {
+        let root = tempfile::tempdir().unwrap();
+        let source = blob(root.path(), "blob", b"binary", 0o755);
+
+        let (staged, materialization) = stage_verified_cached_output_with(
+            root.path(),
+            0,
+            &source,
+            &node(b"binary", true),
+            no_clone,
+        )
+        .unwrap();
+
+        assert_eq!(materialization, Materialization::Hardlink);
+        assert_eq!(
+            std::fs::metadata(&staged).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+    }
+
+    #[test]
+    fn an_object_that_would_have_to_gain_permissions_is_copied() {
+        let root = tempfile::tempdir().unwrap();
+        // What a blob fetched from a remote looks like: the right bytes under
+        // whatever mode the download happened to have. Linking would have to
+        // add the executable bit to an object other checkouts may hold.
+        let source = blob(root.path(), "blob", b"binary", 0o644);
+        let before = std::fs::metadata(&source).unwrap();
+
+        let (staged, materialization) = stage_verified_cached_output_with(
+            root.path(),
+            0,
+            &source,
+            &node(b"binary", true),
+            no_clone,
+        )
+        .unwrap();
+
+        assert_eq!(materialization, Materialization::Copy);
+        assert_ne!(std::fs::metadata(&staged).unwrap().ino(), before.ino());
+        assert_eq!(
+            std::fs::metadata(&source).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "an object nothing may widen keeps the mode it had"
+        );
+    }
+
+    #[test]
+    fn a_non_executable_output_never_takes_the_executable_bit_off_a_shared_object() {
+        let root = tempfile::tempdir().unwrap();
+        let source = blob(root.path(), "blob", b"program", 0o555);
+        // A binary in somebody else's target directory is already running off
+        // this object.
+        let theirs = root.path().join("their-binary");
+        std::fs::hard_link(&source, &theirs).unwrap();
+
+        let (staged, materialization) = stage_verified_cached_output_with(
+            root.path(),
+            0,
+            &source,
+            &node(b"program", false),
+            no_clone,
+        )
+        .unwrap();
+
+        // Readership can be given up harmlessly; the right to run cannot.
+        assert_eq!(materialization, Materialization::Copy);
+        assert_eq!(
+            std::fs::metadata(&staged).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert_eq!(
+            std::fs::metadata(&theirs).unwrap().permissions().mode() & 0o111,
+            0o111,
+            "their binary still runs"
+        );
+    }
+
+    #[test]
+    fn an_object_another_restore_is_relabelling_is_copied_rather_than_waited_on() {
+        let root = tempfile::tempdir().unwrap();
+        let source = blob(root.path(), "blob", b"contended", 0o644);
+        // Stand in for the other restore: hold the lock this one would need to
+        // read a mode it can trust.
+        let held = std::fs::File::open(&source).unwrap();
+        assert!(take_exclusive_lock(&held));
+
+        let (staged, materialization) = stage_verified_cached_output_with(
+            root.path(),
+            0,
+            &source,
+            &node(b"contended", false),
+            no_clone,
+        )
+        .unwrap();
+
+        assert_eq!(materialization, Materialization::Copy);
+        assert_eq!(
+            std::fs::metadata(&source).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "the object is left to whoever holds the lock"
+        );
+        assert_eq!(std::fs::read(&staged).unwrap(), b"contended");
+        drop(held);
+
+        // With the lock free, the same restore links as usual.
+        let (_, materialization) = stage_verified_cached_output_with(
+            root.path(),
+            1,
+            &source,
+            &node(b"contended", false),
+            no_clone,
+        )
+        .unwrap();
+        assert_eq!(materialization, Materialization::Hardlink);
+    }
+
+    #[test]
+    fn an_output_whose_recorded_mode_cannot_be_read_is_copied() {
+        let root = tempfile::tempdir().unwrap();
+        let source = blob(root.path(), "blob", b"write-only", 0o644);
+        let mut unreadable = node(b"write-only", false);
+        // Nothing rejects a recorded mode with no read bits. Linking under one
+        // would leave the store's own copy of these bytes unopenable.
+        unreadable.mode = 0o200;
+
+        let (_staged, materialization) =
+            stage_verified_cached_output_with(root.path(), 0, &source, &unreadable, no_clone)
+                .unwrap();
+
+        assert_eq!(materialization, Materialization::Copy);
+        assert_eq!(
+            std::fs::metadata(&source).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "the store's object stays readable for every later lookup"
+        );
+    }
+
+    #[test]
+    fn a_clone_is_preferred_over_a_link_and_stays_a_private_writable_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let source = blob(root.path(), "blob", b"rlib", 0o644);
+
+        let (staged, materialization) = stage_verified_cached_output_with(
+            root.path(),
+            0,
+            &source,
+            &node(b"rlib", false),
+            |source, destination| std::fs::copy(source, destination).map(|_| ()),
+        )
+        .unwrap();
+
+        assert_eq!(materialization, Materialization::Reflink);
+        assert_eq!(
+            std::fs::metadata(&staged).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    #[test]
+    fn an_owner_private_output_keeps_its_readership_through_a_link() {
+        let root = tempfile::tempdir().unwrap();
+        // What a compiler running under a 0o077 umask leaves behind.
+        let source = blob(root.path(), "blob", b"private", 0o600);
+        let mut private = node(b"private", false);
+        private.mode = 0o600;
+
+        let (staged, materialization) =
+            stage_verified_cached_output_with(root.path(), 0, &source, &private, no_clone).unwrap();
+
+        assert_eq!(materialization, Materialization::Hardlink);
+        assert_eq!(
+            std::fs::metadata(&staged).unwrap().permissions().mode() & 0o777,
+            0o400,
+            "a link must not publish bytes the compiler kept to its owner"
+        );
+    }
+
+    #[test]
+    fn relabelling_a_shared_object_may_only_take_permissions_away() {
+        let root = tempfile::tempdir().unwrap();
+        let source = blob(root.path(), "blob", b"shared", 0o444);
+        // Somebody else's target directory is already holding this object.
+        let theirs = root.path().join("their-output");
+        std::fs::hard_link(&source, &theirs).unwrap();
+        let mut private = node(b"shared", false);
+        private.mode = 0o600;
+
+        let (staged, materialization) =
+            stage_verified_cached_output_with(root.path(), 0, &source, &private, no_clone).unwrap();
+
+        // Two restores of one digest can read the link count in the same
+        // instant, so the rule has to hold whichever order they land in.
+        // Tightening does: their link ends up less readable than it was,
+        // never more, and its owner can still read it.
+        assert_eq!(materialization, Materialization::Hardlink);
+        assert_eq!(
+            std::fs::metadata(&staged).unwrap().permissions().mode() & 0o777,
+            0o400
+        );
+        assert_eq!(
+            std::fs::metadata(&theirs).unwrap().permissions().mode() & 0o777,
+            0o400
+        );
+    }
+
+    #[test]
+    fn an_output_already_in_place_can_be_marked_restored_while_read_only() {
+        let root = tempfile::tempdir().unwrap();
+        let source = blob(root.path(), "blob", b"rlib", 0o644);
+        let (staged, materialization) = stage_verified_cached_output_with(
+            root.path(),
+            0,
+            &source,
+            &node(b"rlib", false),
+            no_clone,
+        )
+        .unwrap();
+        assert_eq!(materialization, Materialization::Hardlink);
+        let before = std::fs::metadata(&staged).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // The next hit finds these bytes already here and only has to make
+        // them look freshly produced. A read-only link must not defeat that.
+        set_modified_now(&staged).expect("a linked output can be marked restored");
+
+        assert!(std::fs::metadata(&staged).unwrap().modified().unwrap() > before);
+    }
+
+    #[test]
+    fn linked_outputs_are_unlinked_before_a_compiler_writes_where_they_were() {
+        let root = tempfile::tempdir().unwrap();
+        let linked = blob(root.path(), "restored.rlib", b"restored", 0o444);
+        let written = blob(root.path(), "compiled.rlib", b"compiled", 0o644);
+        let missing = root.path().join("never-restored.rlib");
+
+        clear_linked_outputs([linked.as_path(), written.as_path(), missing.as_path()]);
+
+        assert!(!linked.exists(), "a read-only restore is removed");
+        assert!(written.exists(), "an ordinary output is left alone");
     }
 }

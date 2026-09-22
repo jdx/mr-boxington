@@ -493,6 +493,16 @@ pub(crate) fn compile(
         }
     }
     let forwarded = session::forward_compiler_notifications_requested();
+    // An earlier hit may have linked these very paths to the store's objects,
+    // which are read-only so that nothing rewrites them in place. rustc would
+    // refuse them rather than overwrite them.
+    crate::materialize::clear_linked_outputs(
+        outputs
+            .files
+            .iter()
+            .chain(std::iter::once(&outputs.dep_info))
+            .map(PathBuf::as_path),
+    );
     let output = crate::phase_timing::measure("compiler", || run_compiler(&mut command, forwarded))
         .wrap_err("failed to execute rustc")?;
     // Released before the outputs are read back and published: hashing and
@@ -886,6 +896,13 @@ fn compile_execution_only_build_script(
     let forwarded = session::forward_compiler_notifications_requested();
     let mut command = compiler_command(rustc, wrapper_argument);
     command.args(arguments).current_dir(working_dir);
+    crate::materialize::clear_linked_outputs(
+        outputs
+            .files
+            .iter()
+            .chain(std::iter::once(&outputs.dep_info))
+            .map(PathBuf::as_path),
+    );
     let output = run_compiler(&mut command, forwarded).wrap_err("failed to execute rustc")?;
     drop(permit);
     crate::scheduler::record_compiler_memory(&demand, &output.status);
@@ -2471,6 +2488,12 @@ fn restore_result(
                     .reflinked_output_bytes
                     .saturating_add(node.digest.size);
             }
+            Materialization::Hardlink => {
+                restore.hardlinked_output_files = restore.hardlinked_output_files.saturating_add(1);
+                restore.hardlinked_output_bytes = restore
+                    .hardlinked_output_bytes
+                    .saturating_add(node.digest.size);
+            }
             Materialization::Copy => {
                 restore.copied_output_files = restore.copied_output_files.saturating_add(1);
                 restore.copied_output_bytes =
@@ -2510,12 +2533,14 @@ fn restore_result(
     }))
 }
 
+/// Make an output already holding the cached bytes look freshly produced.
+///
+/// Through the same read-only open a restore uses: an output a previous hit
+/// hard linked is the store's object and carries its read-only mode, and
+/// demanding write access here would turn the cheapest kind of hit -- the
+/// bytes are already in place -- into a dropped restore and a real compile.
 fn mark_output_restored(path: &Path) -> Result<()> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(path)?
-        .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()))?;
-    Ok(())
+    crate::materialize::set_modified_now(path)
 }
 
 /// Whether the destination already holds exactly the bytes this hit would

@@ -78,7 +78,7 @@ fn cargo_metadata_changes_are_diffs_within_one_compilation_unit() {
         current.components["argument --codegen metadata"]
     );
 }
-use crate::materialize::{apply_file_mode, make_owner_writable};
+use crate::materialize::{apply_file_mode, make_owner_writable, stage_verified_cached_output_with};
 use std::sync::{Arc, Mutex};
 
 /// A forwarding destination a test can read back after the compiler exits.
@@ -676,7 +676,14 @@ fn restores_declared_executable_permissions() {
         name: "fixture.wasm".into(),
     };
 
-    let (staged, _) = stage_verified_cached_output(root.path(), 0, &source, &node).unwrap();
+    // Asked of the cloning path specifically: a restore that has to hard link
+    // cannot give one destination a mode of its own, and keeps the object's
+    // read-only one instead. That case is covered beside the link itself.
+    let (staged, _) =
+        stage_verified_cached_output_with(root.path(), 0, &source, &node, |source, destination| {
+            std::fs::copy(source, destination).map(|_| ())
+        })
+        .unwrap();
     assert_eq!(
         std::fs::metadata(staged).unwrap().permissions().mode() & 0o777,
         0o755
@@ -734,19 +741,80 @@ fn qualification_does_not_publish_cached_outputs() {
     assert!(!destination.exists());
 }
 
+/// Nothing a build does to a restored output can reach the object the cache
+/// kept, whichever way the output got there. A clone and a copy are private
+/// files that happen to have started as the object; a hard link is the object,
+/// and is read-only precisely so that the write is refused instead.
 #[test]
-fn materialized_outputs_are_independent_from_the_cas() {
+fn a_cloned_output_is_a_private_file_the_build_may_rewrite() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("cas-blob");
     std::fs::write(&source, b"artifact").unwrap();
     let staging = tempfile::tempdir_in(root.path()).unwrap();
     let node = test_file("artifact.rlib");
 
-    let (output, _) = stage_verified_cached_output(staging.path(), 0, &source, &node).unwrap();
+    let (output, _) = stage_verified_cached_output_with(
+        staging.path(),
+        0,
+        &source,
+        &node,
+        |source, destination| std::fs::copy(source, destination).map(|_| ()),
+    )
+    .unwrap();
     std::fs::write(&output, b"modified").unwrap();
 
     assert_eq!(std::fs::read(source).unwrap(), b"artifact");
     assert_eq!(std::fs::read(output).unwrap(), b"modified");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_output_refuses_the_write_rather_than_sharing_it() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("cas-blob");
+    std::fs::write(&source, b"artifact").unwrap();
+    let staging = tempfile::tempdir_in(root.path()).unwrap();
+    let node = test_file("artifact.rlib");
+
+    let (output, materialization) =
+        stage_verified_cached_output_with(staging.path(), 0, &source, &node, |_, _| {
+            Err(std::io::ErrorKind::Unsupported.into())
+        })
+        .unwrap();
+
+    assert_eq!(
+        materialization,
+        crate::materialize::Materialization::Hardlink
+    );
+    if write_permission_is_enforced(root.path()) {
+        assert_eq!(
+            std::fs::write(&output, b"modified").unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+    assert_eq!(std::fs::read(source).unwrap(), b"artifact");
+    assert_eq!(std::fs::read(output).unwrap(), b"artifact");
+}
+
+/// Whether a read-only file actually refuses a write here.
+///
+/// Asked by doing one rather than by checking who is running: root ignores the
+/// mode bits, and a suite run in a container as root would otherwise fail on
+/// the one protection it cannot observe. What the read-only mode is *for* is
+/// still asserted above wherever it is enforced.
+#[cfg(unix)]
+fn write_permission_is_enforced(directory: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    let probe = directory.join("write-permission-probe");
+    if std::fs::write(&probe, b"probe").is_err() {
+        return false;
+    }
+    if std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o444)).is_err() {
+        return false;
+    }
+    let refused = std::fs::write(&probe, b"again").is_err();
+    let _ = std::fs::remove_file(&probe);
+    refused
 }
 
 #[test]

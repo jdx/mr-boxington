@@ -25,6 +25,7 @@ fn a_stream_records_a_build_from_start_to_totals() {
             output_files: 2,
             output_bytes: 64,
             reflinked_output_bytes: 64,
+            hardlinked_output_bytes: 0,
             copied_output_bytes: 0,
         },
     );

@@ -361,3 +361,19 @@ class DiscardTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FilesystemTest(unittest.TestCase):
+    def test_describes_the_scratch_tree_without_raising(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            described = real_world.filesystem(Path(directory))
+        self.assertEqual(described["path"], directory)
+        self.assertIn("clones", described)
+
+    def test_clone_support_is_only_claimed_where_it_can_be_proven(self) -> None:
+        # macOS `cp -c` copies and exits zero when it cannot clone, so the
+        # probe must decline to answer rather than report support that is not
+        # there.
+        with mock.patch.object(real_world.sys, "platform", "darwin"):
+            with tempfile.TemporaryDirectory() as directory:
+                self.assertIsNone(real_world.clones_supported(Path(directory)))

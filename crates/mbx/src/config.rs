@@ -185,6 +185,17 @@ pub(crate) struct RawConfig {
     /// set in workspace `.mbx.toml`; the environment variable wins.
     #[usage(env = "MBX_SHARE_WORKSPACE_ROOT", default = false)]
     share_workspace_root: bool,
+    /// Restore cached outputs by hard link when the filesystem cannot clone
+    /// them, instead of copying their bytes. Filesystems with clone support
+    /// (APFS, Btrfs, XFS with reflink, ZFS) are unaffected: they clone either
+    /// way. Elsewhere -- ext4 above all -- this is the difference between a
+    /// restore that writes nothing and one that writes every cached byte.
+    /// A hard-linked output is the store's object, so it is read-only; mbx
+    /// unlinks it before a compiler rewrites it, but `cargo` run directly in
+    /// the same target directory reports that the output is not writeable.
+    /// Disable to give every restored output a file of its own.
+    #[usage(env = "MBX_RESTORE_HARDLINK", default = true)]
+    restore_hardlink: bool,
     /// Cache executions of build scripts using Cargo's freshness inputs. This may
     /// also be set in workspace `.mbx.toml`; the environment variable wins.
     #[usage(env = "MBX_BUILD_SCRIPT_EXECUTION", default = true)]
@@ -440,6 +451,16 @@ pub struct Config {
     /// Disabling this preserves Cargo's original `OUT_DIR` and literal paths,
     /// so Rust compilations that read `OUT_DIR` remain checkout-specific.
     pub share_out_dir: bool,
+    /// Restore cached outputs by hard link where the filesystem cannot clone
+    /// them.
+    ///
+    /// Reflinks are always preferred: a cloned output is its own inode and
+    /// behaves like a copy that happened to be cheap. A hard link is the store
+    /// object itself, so it is read-only and every checkout holding one shares
+    /// its modification time. That is a narrower guarantee, and on a
+    /// filesystem without clone support it is the only alternative to writing
+    /// every restored byte.
+    pub restore_hardlink: bool,
     /// Remap the workspace root so rustc does not record the checkout a
     /// compilation ran in.
     ///
@@ -522,6 +543,7 @@ impl Config {
             verify_sample_rate: 0,
             incremental: false,
             share_out_dir: false,
+            restore_hardlink: true,
             share_workspace_root: false,
             build_script_execution: false,
             events: false,
@@ -1051,6 +1073,7 @@ impl Config {
                 .ok_or_else(|| eyre::eyre!("invalid verify_sample_rate: expected 0–100"))?,
             incremental: raw.incremental,
             share_out_dir: raw.share_out_dir,
+            restore_hardlink: raw.restore_hardlink,
             share_workspace_root: raw.share_workspace_root,
             build_script_execution: raw.build_script_execution,
             events: raw.events,

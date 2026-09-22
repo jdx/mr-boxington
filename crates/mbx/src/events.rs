@@ -145,6 +145,7 @@ pub(crate) struct ActionDetail {
     pub output_files: u64,
     pub output_bytes: u64,
     pub reflinked_output_bytes: u64,
+    pub hardlinked_output_bytes: u64,
     pub copied_output_bytes: u64,
 }
 
