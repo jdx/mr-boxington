@@ -198,11 +198,18 @@ fn write_launcher_script(
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('$', "\\$");
-    let suffix = if cfg!(windows) { "\\\\.exe" } else { "" };
+    // Either separator: a launcher CMake seeded from the environment, or one
+    // an older mbx recorded, keeps Windows backslashes.
+    let separator = "[/\\\\]";
+    let suffix = if cfg!(windows) {
+        "\\\\.[Ee][Xx][Ee]"
+    } else {
+        ""
+    };
     let script = format!(
         "# Written by mbx: point this build at the running mbx's compiler launcher.\n\
          get_property(mbx_launcher CACHE {variable} PROPERTY VALUE)\n\
-         if(NOT mbx_launcher OR mbx_launcher MATCHES \"/{launcher}{suffix}$\")\n  \
+         if(NOT mbx_launcher OR mbx_launcher MATCHES \"{separator}{launcher}{suffix}$\")\n  \
          if(NOT \"$ENV{{{variable}}}\" STREQUAL \"\")\n    \
          set({variable} \"$ENV{{{variable}}}\" CACHE STRING \"Compiler launcher\" FORCE)\n  \
          else()\n    \
@@ -334,6 +341,78 @@ mod tests {
                 ("CMAKE_CXX_COMPILER_LAUNCHER", CXX_LAUNCHER),
             ]
         );
+    }
+
+    /// Run the generated script against a real cache holding `cached`, and
+    /// return what the cache holds afterwards.
+    fn launcher_after_script(cached: &str) -> Option<String> {
+        let cmake = resolve_on_path(&super::super::shim_file_name("cmake"))?;
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let build = directory.path().join("build");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("CMakeLists.txt"),
+            "cmake_minimum_required(VERSION 3.10)\nproject(probe NONE)\n",
+        )
+        .unwrap();
+        let installed = directory
+            .path()
+            .join(super::super::shim_file_name(C_LAUNCHER));
+        write_launcher_script(
+            directory.path(),
+            "CMAKE_C_COMPILER_LAUNCHER",
+            C_LAUNCHER,
+            &installed,
+        )
+        .unwrap();
+        let configure = |arguments: &[OsString]| {
+            let status = Command::new(&cmake)
+                .args(arguments)
+                .arg("-S")
+                .arg(&source)
+                .arg("-B")
+                .arg(&build)
+                .env_remove("CMAKE_C_COMPILER_LAUNCHER")
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        configure(&[format!("-DCMAKE_C_COMPILER_LAUNCHER:STRING={cached}").into()]);
+        configure(&[
+            "-C".into(),
+            directory
+                .path()
+                .join(launcher_script_name(C_LAUNCHER))
+                .into(),
+        ]);
+        let cache = std::fs::read_to_string(build.join("CMakeCache.txt")).unwrap();
+        let value = cache
+            .lines()
+            .find_map(|line| line.strip_prefix("CMAKE_C_COMPILER_LAUNCHER:STRING="))
+            .map(ToOwned::to_owned);
+        assert!(value.is_some(), "{cache}");
+        let ours = cmake_path(&installed);
+        value.map(|value| if value == ours { "ours".into() } else { value })
+    }
+
+    #[test]
+    fn a_stale_mbx_launcher_is_replaced_whichever_separator_it_uses() {
+        let name = super::super::shim_file_name(C_LAUNCHER);
+        for cached in [
+            format!("/old/shims/native/id/{name}"),
+            format!("C:\\old\\shims\\native\\id\\{name}"),
+        ] {
+            let Some(after) = launcher_after_script(&cached) else {
+                return;
+            };
+            assert_eq!(after, "ours", "{cached} should be replaced");
+        }
+        let Some(after) = launcher_after_script("/usr/bin/ccache") else {
+            return;
+        };
+        assert_eq!(after, "/usr/bin/ccache", "a user's launcher must stay");
     }
 
     #[test]
