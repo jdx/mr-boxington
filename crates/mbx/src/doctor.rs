@@ -1006,7 +1006,7 @@ mod layout_tests {
         if cache.path().metadata().unwrap().dev() == target.path().metadata().unwrap().dev() {
             return;
         }
-        let result = reflink_check(cache.path(), target.path());
+        let result = restore_check(cache.path(), target.path(), true);
         assert_eq!(result.severity, Severity::Warn);
         assert!(result.detail.contains("copying"));
     }

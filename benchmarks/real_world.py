@@ -252,27 +252,32 @@ def filesystem(path: Path) -> dict[str, object]:
     comparable, with nothing in the results saying so.
     """
     described: dict[str, object] = {"path": str(path)}
+    # Every probe below is best effort. This is a note about the run, not part
+    # of it, and a runner missing `findmnt` or `df` must not lose an hour of
+    # measurements to a description of where they happened.
     if sys.platform == "linux":
-        probe = subprocess.run(
-            ["findmnt", "--noheadings", "--target", str(path), "--output", "SOURCE,FSTYPE,OPTIONS"],
-            text=True,
-            capture_output=True,
-            check=False,
+        probe = describe_with(
+            ["findmnt", "--noheadings", "--target", str(path), "--output", "SOURCE,FSTYPE,OPTIONS"]
         )
-        if probe.returncode == 0 and probe.stdout.strip():
-            source, _, rest = probe.stdout.strip().partition(" ")
+        if probe:
+            source, _, rest = probe.partition(" ")
             fstype, _, options = rest.strip().partition(" ")
-            described.update(
-                {"source": source, "type": fstype, "options": options.strip()}
-            )
+            described.update({"source": source, "type": fstype, "options": options.strip()})
     else:
-        probe = subprocess.run(
-            ["df", "-P", str(path)], text=True, capture_output=True, check=False
-        )
-        if probe.returncode == 0 and probe.stdout.strip():
-            described["df"] = probe.stdout.strip().splitlines()[-1]
+        probe = describe_with(["df", "-P", str(path)])
+        if probe:
+            described["df"] = probe.splitlines()[-1]
     described["clones"] = clones_supported(path)
     return described
+
+
+def describe_with(command: list[str]) -> str | None:
+    """Run one description probe, or nothing when it cannot run."""
+    try:
+        probe = subprocess.run(command, text=True, capture_output=True, check=False)
+    except OSError:
+        return None
+    return probe.stdout.strip() if probe.returncode == 0 and probe.stdout.strip() else None
 
 
 def clones_supported(path: Path) -> bool | None:
@@ -302,6 +307,8 @@ def clones_supported(path: Path) -> bool | None:
             == 0
         )
     except OSError:
+        # No `cp`, or a directory that cannot be written. Either way this is a
+        # note about the run, not a reason to lose it.
         return None
     finally:
         shutil.rmtree(probe, ignore_errors=True)
@@ -632,14 +639,22 @@ class Runner:
         if tool in MBX_TOOLS:
             # One report per job; the batch's hits are their sum, since the
             # jobs shared a store and each one's hits are real restorations.
-            total = 0
+            # Summed across the batch rather than reported per job: the
+            # scenario's unit is the batch, and six jobs sharing one store
+            # restore between them whatever the batch restored. The
+            # materialization counters come along for the same reason they are
+            # published everywhere else -- six overlapping restores that copied
+            # every byte cost something a run should be able to say.
+            summed: dict[str, int] = {}
             for name, _ in CONTENTION_JOBS:
                 report = self.output / f"{cell}-{name}-stats.json"
-                if report.is_file():
-                    total += int(
-                        json.loads(report.read_text(encoding="utf-8")).get("hits", 0)
-                    )
-            result["stats"] = {"hits": total}
+                if not report.is_file():
+                    continue
+                job = json.loads(report.read_text(encoding="utf-8"))
+                for field in ("hits", *PUBLISHED_MATERIALIZATION):
+                    if field in job:
+                        summed[field] = summed.get(field, 0) + int(job[field])
+            result["stats"] = {"hits": 0, **summed}
         return result
 
 
@@ -647,6 +662,20 @@ class Runner:
 # report is in the run's own output directory; the published file is reviewed
 # by a person in a pull request, so it carries what a reader needs to judge the
 # timing beside it and nothing else.
+# How a restore put the bytes there. A warm scenario is almost entirely this,
+# and the three mechanisms do not cost remotely the same: a clone or a link
+# writes nothing, a copy writes every restored byte. Published because a run
+# that quietly copied looks exactly like one that did not, and the difference
+# is most of the number beside it.
+PUBLISHED_MATERIALIZATION = (
+    "reflinked_output_files",
+    "reflinked_output_bytes",
+    "hardlinked_output_files",
+    "hardlinked_output_bytes",
+    "copied_output_files",
+    "copied_output_bytes",
+)
+
 PUBLISHED_STATS = (
     "lookups",
     "hits",
@@ -655,17 +684,7 @@ PUBLISHED_STATS = (
     "predictions_loaded",
     "restored_output_files",
     "restored_output_bytes",
-    # How the restore put the bytes there. A warm scenario is almost entirely
-    # this, and the three mechanisms do not cost remotely the same: a clone or
-    # a link writes nothing, a copy writes every restored byte. Published
-    # because a run that quietly copied looks exactly like one that did not,
-    # and the difference is most of the number beside it.
-    "reflinked_output_files",
-    "reflinked_output_bytes",
-    "hardlinked_output_files",
-    "hardlinked_output_bytes",
-    "copied_output_files",
-    "copied_output_bytes",
+    *PUBLISHED_MATERIALIZATION,
 )
 
 # What a contention cell publishes beyond its timing: the machine measurements

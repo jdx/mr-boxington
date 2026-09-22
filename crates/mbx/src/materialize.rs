@@ -230,24 +230,32 @@ fn materialize_cached_output(
 /// error.
 #[cfg(unix)]
 fn hard_link_cached_output(source: &Path, destination: &Path, node: &CacheFileNode) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
     use std::os::unix::fs::PermissionsExt as _;
     let Ok(metadata) = std::fs::metadata(source) else {
         return false;
     };
     let current = metadata.permissions().mode() & 0o7777;
-    // A link carries no mode of its own, so the object's executable bit is the
-    // executable bit of every path linked to it. Where the store's object
-    // disagrees with what this output needs -- a blob fetched from a remote
-    // carries whatever mode its download had -- a copy is the only way to give
-    // this one destination the right mode without changing somebody else's.
-    if (current & 0o111 != 0) != node.executable {
-        return false;
-    }
     let wanted = linkable_mode(node);
-    if current != wanted
-        && std::fs::set_permissions(source, std::fs::Permissions::from_mode(wanted)).is_err()
-    {
-        return false;
+    // A link carries no mode of its own, so the object's mode is the mode of
+    // every path linked to it. Matching already is the ordinary case and the
+    // one that keeps this cheap: the same bytes restored into a second target
+    // directory want the same mode the first one gave them.
+    //
+    // Otherwise the object has to be relabelled, which is only this
+    // compilation's business to do while the store's own entry is the sole
+    // link. Once somebody else's target directory holds one, their outputs
+    // answer to this mode too, and the way to give this destination a
+    // different one is to copy. Reached by an output the compiler restricted
+    // to its owner whose bytes another crate published openly, and by a blob
+    // fetched from a remote under whatever mode its download had.
+    if current != wanted {
+        if metadata.nlink() != 1 {
+            return false;
+        }
+        if std::fs::set_permissions(source, std::fs::Permissions::from_mode(wanted)).is_err() {
+            return false;
+        }
     }
     std::fs::hard_link(source, destination).is_ok()
 }
@@ -261,18 +269,24 @@ fn hard_link_cached_output(_source: &Path, _destination: &Path, _node: &CacheFil
     false
 }
 
-/// The mode a store object must carry before anything links to it: readable,
-/// executable where the output was, and writable by nobody.
+/// The mode a store object must carry before anything links to it: the
+/// readership the compiler gave this output, executable where the output was,
+/// and writable by nobody.
+///
+/// Derived from the recorded mode rather than fixed at `0o444`, because an
+/// output a compiler restricted to its owner -- what a `0o077` umask
+/// produces -- must not become world-readable by being restored through a
+/// link into a directory other local users can traverse.
 #[cfg(unix)]
 fn linkable_mode(node: &CacheFileNode) -> u32 {
-    0o444 | if node.executable { 0o111 } else { 0 }
+    (node.mode & 0o444) | if node.executable { 0o111 } else { 0 }
 }
 
 /// Give a file the modification time a compiler writing it now would.
 ///
 /// Opened for reading rather than writing, because a hard-linked output is
 /// read-only on purpose and a Unix owner may set times without write access.
-fn set_modified_now(path: &Path) -> Result<()> {
+pub(crate) fn set_modified_now(path: &Path) -> Result<()> {
     let times = std::fs::FileTimes::new().set_modified(std::time::SystemTime::now());
     #[cfg(unix)]
     let file = std::fs::OpenOptions::new().read(true).open(path)?;
@@ -783,6 +797,8 @@ mod materialization_tests {
     }
 
     fn node(contents: &[u8], executable: bool) -> CacheFileNode {
+        // `mode` is what the adapter recorded for the output; callers that
+        // care override it.
         CacheFileNode {
             digest: CacheDigest::blake3(contents),
             executable,
@@ -843,7 +859,7 @@ mod materialization_tests {
     }
 
     #[test]
-    fn an_object_whose_executable_bit_disagrees_is_copied_rather_than_relabeled() {
+    fn an_object_nothing_else_links_is_relabelled_to_what_the_output_needs() {
         let root = tempfile::tempdir().unwrap();
         // What a blob fetched from a remote looks like: the right bytes under
         // whatever mode the download happened to have.
@@ -859,15 +875,12 @@ mod materialization_tests {
         )
         .unwrap();
 
-        assert_eq!(materialization, Materialization::Copy);
+        // The store's own entry was the only link, so giving the object the
+        // mode this output needs takes nothing from anybody.
+        assert_eq!(materialization, Materialization::Hardlink);
         let after = std::fs::metadata(&staged).unwrap();
-        assert_ne!(after.ino(), before.ino());
-        assert_eq!(after.permissions().mode() & 0o777, 0o755);
-        assert_eq!(
-            std::fs::metadata(&source).unwrap().permissions().mode() & 0o777,
-            0o644,
-            "an object nothing linked to keeps the mode it had"
-        );
+        assert_eq!(after.ino(), before.ino());
+        assert_eq!(after.permissions().mode() & 0o777, 0o555);
     }
 
     #[test]
@@ -889,6 +902,74 @@ mod materialization_tests {
             std::fs::metadata(&staged).unwrap().permissions().mode() & 0o777,
             0o644
         );
+    }
+
+    #[test]
+    fn an_owner_private_output_keeps_its_readership_through_a_link() {
+        let root = tempfile::tempdir().unwrap();
+        // What a compiler running under a 0o077 umask leaves behind.
+        let source = blob(root.path(), "blob", b"private", 0o600);
+        let mut private = node(b"private", false);
+        private.mode = 0o600;
+
+        let (staged, materialization) =
+            stage_verified_cached_output_with(root.path(), 0, &source, &private, no_clone).unwrap();
+
+        assert_eq!(materialization, Materialization::Hardlink);
+        assert_eq!(
+            std::fs::metadata(&staged).unwrap().permissions().mode() & 0o777,
+            0o400,
+            "a link must not publish bytes the compiler kept to its owner"
+        );
+    }
+
+    #[test]
+    fn an_object_another_checkout_already_links_is_copied_rather_than_relabelled() {
+        let root = tempfile::tempdir().unwrap();
+        let source = blob(root.path(), "blob", b"shared", 0o444);
+        // Somebody else's target directory is already holding this object at
+        // the mode its own output needed.
+        let theirs = root.path().join("their-output");
+        std::fs::hard_link(&source, &theirs).unwrap();
+        let mut private = node(b"shared", false);
+        private.mode = 0o600;
+
+        let (staged, materialization) =
+            stage_verified_cached_output_with(root.path(), 0, &source, &private, no_clone).unwrap();
+
+        assert_eq!(materialization, Materialization::Copy);
+        assert_eq!(
+            std::fs::metadata(&staged).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&theirs).unwrap().permissions().mode() & 0o777,
+            0o444,
+            "the mode their link answers to is left alone"
+        );
+    }
+
+    #[test]
+    fn an_output_already_in_place_can_be_marked_restored_while_read_only() {
+        let root = tempfile::tempdir().unwrap();
+        let source = blob(root.path(), "blob", b"rlib", 0o644);
+        let (staged, materialization) = stage_verified_cached_output_with(
+            root.path(),
+            0,
+            &source,
+            &node(b"rlib", false),
+            no_clone,
+        )
+        .unwrap();
+        assert_eq!(materialization, Materialization::Hardlink);
+        let before = std::fs::metadata(&staged).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // The next hit finds these bytes already here and only has to make
+        // them look freshly produced. A read-only link must not defeat that.
+        set_modified_now(&staged).expect("a linked output can be marked restored");
+
+        assert!(std::fs::metadata(&staged).unwrap().modified().unwrap() > before);
     }
 
     #[test]

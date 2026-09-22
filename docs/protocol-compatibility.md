@@ -25,7 +25,7 @@ the handshake and do not exchange cache requests. Adding, removing, or changing
 a request or response therefore requires incrementing `AGENT_PROTOCOL_VERSION`.
 
 `crates/mbx-cache-core/tests/agent_protocol.rs` exercises every request and
-response variant against `tests/fixtures/agent-protocol-v9.jsonl`. Its exhaustive
+response variant against `tests/fixtures/agent-protocol-v10.jsonl`. Its exhaustive
 matches make a newly added variant fail to compile until the fixture and the
 protocol-version decision are reviewed together.
 
@@ -44,6 +44,7 @@ including when different applications embed the client and agent.
 | v7 | `resolve_file_digests` coalesces simultaneous hashing requests |
 | v8 | `pins` on `store_executable_identity` validate cached compiler and linker probes |
 | v9 | `record_debug` and `debug_recorded` forward routine shim logs to the session logger |
+| v10 | Hard-linked output accounting on `record_action_hit` restore statistics |
 
 Routine debug logs retain their module target and do not consume the
 warning/error diagnostic allowance.

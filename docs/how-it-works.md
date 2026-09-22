@@ -127,10 +127,12 @@ the CAS object.
 
 Reflinks require support from the filesystem and generally require the cache
 and target directory to be on the same filesystem. Where cloning is
-unavailable, mbx hard links the cached object into place instead, and copies
-the bytes only when it cannot do either. ext4, which most Linux CI runners and
-many Linux developer machines use, has no clone support at all, so on those
-machines linking is what keeps a warm restore from writing every cached byte.
+unavailable and `restore_hardlink` is enabled, which it is by default, mbx
+hard links the cached object into place instead; it copies the bytes when the
+setting is off or when it can do neither. ext4, which most Linux CI runners
+and many Linux developer machines use, has no clone support at all, so on
+those machines linking is what keeps a warm restore from writing every cached
+byte.
 
 A hard link is the stored object rather than a copy of it, so mbx makes the
 object read-only before linking to it: a compiler that would overwrite a

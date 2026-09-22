@@ -2533,12 +2533,14 @@ fn restore_result(
     }))
 }
 
+/// Make an output already holding the cached bytes look freshly produced.
+///
+/// Through the same read-only open a restore uses: an output a previous hit
+/// hard linked is the store's object and carries its read-only mode, and
+/// demanding write access here would turn the cheapest kind of hit -- the
+/// bytes are already in place -- into a dropped restore and a real compile.
 fn mark_output_restored(path: &Path) -> Result<()> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(path)?
-        .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()))?;
-    Ok(())
+    crate::materialize::set_modified_now(path)
 }
 
 /// Whether the destination already holds exactly the bytes this hit would
