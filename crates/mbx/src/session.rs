@@ -211,13 +211,12 @@ impl CacheSession {
         cargo_jobs: Option<u64>,
         events_max_size: Option<u64>,
     ) -> Result<Self> {
-        let (shim, rustdoc_shim) =
-            install_session_shims(session_dir, &config.cache_dir.join("shims"))?;
+        let (shim, rustdoc_shim) = install_session_shims(session_dir, &config.shims_dir)?;
         let cc_shims = if config.cc {
             // Build systems such as CMake persist HOST_CC as an absolute
             // compiler path. Keep the C/C++ shims outside the temporary
             // session so that path remains executable on the next mbx run.
-            install_cc_shims(&config.cache_dir.join("shims"))?
+            install_cc_shims(&config.shims_dir)?
         } else {
             None
         };
@@ -270,7 +269,7 @@ impl CacheSession {
             rustc_shim: shim,
             rustdoc_shim,
             cc_shims,
-            cmake_shims_dir: config.cache_dir.join("shims"),
+            cmake_shims_dir: config.shims_dir.clone(),
             staging,
             verify: config.verify,
             verify_sample_rate: config.verify_sample_rate,

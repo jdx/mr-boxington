@@ -10,7 +10,6 @@ pub(crate) fn check_cache(config: &Config) -> Result<()> {
     for path in [
         config.cache_dir.clone(),
         config.store_dir(),
-        config.cache_dir.join("shims"),
         config.cache_dir.join("incremental"),
         config.cache_dir.join("scheduler"),
         config.cache_dir.join("cargo-roots"),
@@ -18,7 +17,7 @@ pub(crate) fn check_cache(config: &Config) -> Result<()> {
     ] {
         require_local(&path, "mbx cache directory", "MBX_CACHE_DIR")?;
     }
-    Ok(())
+    require_local(&config.shims_dir, "mbx shim directory", "MBX_SHIMS_DIR")
 }
 
 pub(crate) fn require_local(path: &Path, role: &str, setting: &str) -> Result<()> {
@@ -167,6 +166,20 @@ mod tests {
         require_local_with(&nfs.join("target/missing"), "target", "setting", probe).unwrap();
         symlink("loop", local.join("loop")).unwrap();
         assert!(require_local_with(&local.join("loop"), "target", "setting", probe).is_err());
+    }
+
+    #[test]
+    fn private_shims_are_checked_instead_of_the_unused_default_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = directory.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        std::fs::write(cache.join("shims"), "not a directory").unwrap();
+        let mut config = Config::for_test(&cache);
+        config.shims_dir = directory.path().join("private shims");
+        check_cache(&config).unwrap();
+        std::fs::write(&config.shims_dir, "not a directory").unwrap();
+        let error = check_cache(&config).unwrap_err();
+        assert!(format!("{error:#}").contains("mbx shim directory"));
     }
 
     #[test]

@@ -62,6 +62,7 @@ fn cargo_build_script_executable_names_are_recognized() {
 fn test_config(cache_dir: &Path) -> Config {
     Config {
         cache_dir: cache_dir.to_path_buf(),
+        shims_dir: cache_dir.join("shims"),
         stats_report: None,
         ar_determinism: "auto".into(),
         verify: false,
@@ -91,7 +92,10 @@ fn test_config(cache_dir: &Path) -> Config {
 async fn cmake_selection_uses_the_final_build_environment() {
     let cache = tempfile::tempdir().unwrap();
     let session_dir = tempfile::tempdir().unwrap();
-    let mut session = CacheSession::start(session_dir.path(), &test_config(cache.path()))
+    let private = tempfile::tempdir().unwrap();
+    let mut config = test_config(cache.path());
+    config.shims_dir = private.path().join("shims");
+    let mut session = CacheSession::start(session_dir.path(), &config)
         .await
         .unwrap();
     // Exercise CMake selection even on a runner with no native toolchain.
@@ -123,6 +127,7 @@ async fn cmake_selection_uses_the_final_build_environment() {
         serde_json::from_str(&environment["MBX_CMAKE_PROGRAMS"]).unwrap();
     for (variable, program) in selected {
         let shim = Path::new(&environment[&variable]);
+        assert!(shim.starts_with(&config.shims_dir));
         assert!(shim.is_file());
         assert_eq!(
             programs[shim.file_stem().unwrap().to_str().unwrap()],

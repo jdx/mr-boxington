@@ -121,7 +121,7 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
         (
             "request.hello",
             AgentRequest::Hello {
-                protocol: 9,
+                protocol: AGENT_PROTOCOL_VERSION,
                 client_version: "0.3.0".into(),
             },
         ),
@@ -305,7 +305,7 @@ fn responses() -> Vec<(&'static str, AgentResponse)> {
         (
             "response.hello",
             AgentResponse::Hello {
-                protocol: 9,
+                protocol: AGENT_PROTOCOL_VERSION,
                 agent_version: "0.3.0".into(),
             },
         ),

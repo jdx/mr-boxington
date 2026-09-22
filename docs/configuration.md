@@ -57,6 +57,37 @@ configuration does not copy the cache to the new disk; expect a cold cache.
 See [changing target placement](/managed-targets#change-target-placement) before
 moving managed targets to another disk.
 
+## Containers sharing a cache
+
+Compiler shims are executable wrappers, not cached build artifacts. By default
+both live under `cache_dir`. If containers share that directory but have private
+mbx installations, set `shims_dir` (`MBX_SHIMS_DIR`) to a private, dedicated local directory
+in each container:
+
+```sh
+MBX_CACHE_DIR=/shared/mbx MBX_SHIMS_DIR=/var/lib/worker/mbx-shims mbx build
+```
+
+The shim directory must survive subsequent builds: CMake and other build systems
+can record absolute compiler or launcher paths. Absolute values are used directly;
+relative values resolve beneath `cache_dir` and are rejected if `..` would traverse
+above it. Explicit empty values and relative values that normalize to an empty
+path (such as `.`, `./`, or `a/..`) are rejected. The default remains
+`<cache_dir>/shims`. This setting also covers `mbx exec` and CMake launchers;
+cached artifacts remain in the shared cache. It is a global or environment setting,
+not a workspace policy.
+
+Use a directory reserved for mbx shims, with no real compilers in it. mbx marks
+shim directories with `.mbx-shims` and excludes those directories when searching
+for real compilers.
+
+Changing this setting does not rewrite existing generated build configurations.
+If one still records an old shim path, reconfigure that build using the new setting
+(for example, `mbx exec cmake --fresh -S . -B build` for a CMake build,
+reapplying its original configure options). Do not
+remove a shim directory while a build uses it. Updating mbx during an active build
+retains the existing executable-replacement limitations.
+
 ## Disk-scaled defaults
 
 Three size budgets default to a share of the disk holding their data: 5% for
