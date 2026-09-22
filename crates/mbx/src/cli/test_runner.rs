@@ -76,11 +76,11 @@ impl TestRunner {
                 });
                 // A nested mbx sees the outer one's shim as the configured
                 // runner. Chaining to it would loop; chain to what it wraps.
-                let runner = match runner {
-                    Some(runner) if is_shim(&runner.path) => {
-                        inherited.get(&triple).cloned().flatten()
-                    }
-                    runner => runner,
+                // Only when there is an outer overlay for this target, though:
+                // otherwise the runner merely shares the shim's name.
+                let runner = match (runner, inherited.get(&triple)) {
+                    (Some(runner), Some(wrapped)) if is_shim(&runner.path) => wrapped.clone(),
+                    (runner, _) => runner,
                 };
                 keys.push((super::launch::runner_key(&target), triple.clone()));
                 runners.insert(triple, runner);
