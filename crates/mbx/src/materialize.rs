@@ -234,15 +234,26 @@ fn materialize_cached_output(
 /// error.
 #[cfg(unix)]
 fn hard_link_cached_output(source: &Path, destination: &Path, node: &CacheFileNode) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
     use std::os::unix::fs::PermissionsExt as _;
-    let Ok(metadata) = std::fs::metadata(source) else {
-        return false;
-    };
-    let current = metadata.permissions().mode() & 0o7777;
     let wanted = linkable_mode(node);
     if !readable_by_owner(wanted) {
         return false;
     }
+    // Inspected and relabelled through one open handle, so the object this
+    // decides about is the object it changes. Reading a path's mode and then
+    // setting the mode of that path are two lookups of a name, and a name can
+    // come to mean a different file between them -- the store republishes a
+    // blob it found torn by renaming a new one over it. The permissions would
+    // then land on bytes nothing here ever checked, which is how a rule about
+    // what may be relabelled stops being a rule.
+    let Ok(file) = std::fs::File::open(source) else {
+        return false;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    let current = metadata.permissions().mode() & 0o7777;
     // A link carries no mode of its own, so the object's mode is the mode of
     // every path linked to it, and this restore cannot be the only one holding
     // an opinion about it. Matching already is the ordinary case and the one
@@ -274,11 +285,33 @@ fn hard_link_cached_output(source: &Path, destination: &Path, node: &CacheFileNo
         if wanted & !current != 0 {
             return false;
         }
-        if std::fs::set_permissions(source, std::fs::Permissions::from_mode(wanted)).is_err() {
+        if file
+            .set_permissions(std::fs::Permissions::from_mode(wanted))
+            .is_err()
+        {
             return false;
         }
     }
-    std::fs::hard_link(source, destination).is_ok()
+    if std::fs::hard_link(source, destination).is_err() {
+        return false;
+    }
+    // The link was made by name, so confirm it reached the object just
+    // inspected rather than one that replaced it in flight. A link to the
+    // wrong object is not wrong in its content -- a blob is its digest -- but
+    // its mode was never checked against this output, so it is unlinked and
+    // the caller copies instead.
+    let linked = std::fs::metadata(destination);
+    match linked {
+        Ok(linked)
+            if linked.ino() == metadata.ino() && linked.permissions().mode() & 0o7777 == wanted =>
+        {
+            true
+        }
+        _ => {
+            let _ = std::fs::remove_file(destination);
+            false
+        }
+    }
 }
 
 #[cfg(windows)]
