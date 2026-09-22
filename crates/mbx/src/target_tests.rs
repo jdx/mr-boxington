@@ -1000,6 +1000,7 @@ fn a_view_claimed_since_the_selection_is_kept() {
         None,
         Some(Duration::from_secs(10)),
         false,
+        now_secs(),
         move || {
             let mut record: ViewRecord =
                 serde_json::from_slice(&std::fs::read(&refreshed).unwrap()).unwrap();
@@ -1049,6 +1050,7 @@ fn a_checkout_recreated_since_the_selection_is_kept() {
         None,
         None,
         false,
+        now_secs(),
         move || {
             // The clone's build: Cargo holds its lock in the same view.
             std::fs::create_dir_all(rebuilt.join("debug")).unwrap();
@@ -1077,11 +1079,23 @@ fn a_view_refreshed_within_the_last_seconds_is_kept() {
     let record_path = view_record_path(&config.target.root, &workspace);
     let mut record: ViewRecord =
         serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
-    // One second old: expired against a zero age, and just refreshed.
+    // One second old: expired against a zero age, and just refreshed. The
+    // sweep gets that same second as its clock, so what the ages mean here
+    // does not depend on how long the machine takes to reach the check.
     record.updated_secs -= 1;
+    let now = record.updated_secs + 1;
     std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
 
-    let outcome = collect(&config.target.root, None, Some(Duration::ZERO), false).unwrap();
+    let outcome = collect_with(
+        &config.target.root,
+        None,
+        Some(Duration::ZERO),
+        false,
+        now,
+        || {},
+        || {},
+    )
+    .unwrap();
 
     assert_eq!(outcome.kept_active_views, 1);
     assert!(view.exists());
@@ -1112,6 +1126,7 @@ fn a_record_rewritten_during_the_removal_is_kept() {
         None,
         None,
         false,
+        now_secs(),
         || {},
         move || {
             // The clone's placement: a fresh record, then a fresh directory.
