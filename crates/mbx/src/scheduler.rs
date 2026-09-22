@@ -6,7 +6,8 @@
 //! coordinates what Cargo cannot -- a permit pool under the cache directory
 //! that real compilations draw from. Cache hits never touch it, and Cargo
 //! keeps its own dependency scheduling; only the processes that actually cost
-//! CPU and memory wait their turn.
+//! CPU and memory wait their turn. With `scheduler.tests`, the test binaries
+//! `cargo test` runs draw from the same pool (see `cli::test_runner`).
 //!
 //! The pool is a directory of *lease* files, one per admitted compilation,
 //! each held under an OS file lock for the life of the compile. The kernel
@@ -176,12 +177,16 @@ fn process_token() -> &'static str {
     TOKEN.get_or_init(|| crate::util::random_string(8))
 }
 
-/// What one compilation asks the pool for.
+/// What one compilation -- or one test binary -- asks the pool for.
 pub(crate) struct Demand {
     /// Compiler crate name, keying the peak-RSS ledger.
     name: String,
     /// Whether the invocation links a native program.
     links: bool,
+    /// Permits the process's threads need whatever its memory, or `None` for
+    /// half the pool: a test harness sized to the machine that has not said
+    /// how many threads it will really use.
+    threads: Option<u64>,
 }
 
 impl Demand {
@@ -189,6 +194,25 @@ impl Demand {
         Self {
             name: name.to_string(),
             links,
+            threads: Some(1),
+        }
+    }
+
+    /// A test binary, remembered apart from the crate that compiled it.
+    ///
+    /// Half the pool by default rather than all of it. libtest starts a
+    /// thread per CPU, but most suites spend much of their time waiting, and
+    /// a demand for the whole pool is admitted only once the pool is idle --
+    /// which a stream of other builds' compilations can postpone
+    /// indefinitely. Half still keeps two suites from each running at full
+    /// width beside a third build's compiles.
+    pub(crate) fn test(name: &str, threads: Option<u64>) -> Self {
+        Self {
+            // The suffix cannot collide with a crate name, for the reason
+            // `ledger_key` gives.
+            name: format!("{name} [test]"),
+            links: false,
+            threads,
         }
     }
 }
@@ -647,9 +671,16 @@ impl Pool {
 
     /// The permits this demand costs, and its predicted memory when known.
     fn plan(&self, demand: &Demand) -> (u64, Option<u64>) {
+        let threads = demand
+            .threads
+            .unwrap_or_else(|| self.capacity.div_ceil(2))
+            .max(1);
         let link_floor = demand.links.then_some(LINK_WEIGHT);
         if self.bytes_per_permit == 0 {
-            return (link_floor.unwrap_or(1).min(self.capacity), None);
+            return (
+                link_floor.unwrap_or(1).max(threads).min(self.capacity),
+                None,
+            );
         }
         let ledger = read_ledger(&self.ledger_path());
         let recorded = ledger
@@ -686,8 +717,11 @@ impl Pool {
         // the link beside it, which is over-admission with a plausible number
         // attached to it.
         let predicted = recorded.or(link_bytes);
+        // Memory and threads are separate costs of the same process; it takes
+        // whichever share of the pool is larger.
         let weight = predicted
             .map_or(1, |bytes| bytes.div_ceil(self.bytes_per_permit))
+            .max(threads)
             .clamp(1, self.capacity);
         (weight, predicted)
     }

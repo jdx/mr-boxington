@@ -59,6 +59,30 @@ Use `scheduler.priority = "low"` (`MBX_SCHEDULER_PRIORITY=low`) for an editor's
 background check or CI on a shared machine. While normal-priority work is
 waiting, low-priority builds leave a quarter of the pool available for it.
 
+## Schedule test binaries
+
+Compile permits stop at the compiler. When several `cargo test` commands reach
+their test runs together, each libtest harness starts a thread per CPU. Set
+`scheduler.tests = true` (`MBX_SCHEDULER_TESTS=1`) to run test binaries through
+the same pool:
+
+```sh
+MBX_SCHEDULER_TESTS=1 mbx test --workspace
+```
+
+mbx becomes Cargo's target runner for `cargo test` and calls any runner you
+have configured. Each test binary waits for permits before it starts:
+
+- `--test-threads=N` or `RUST_TEST_THREADS=N` asks for `N` permits.
+- Otherwise the binary asks for half the pool, rounded up.
+- A binary whose measured memory needs more permits takes that many instead.
+
+Builds a test starts, such as trybuild or compile-fail suites, are charged to
+the test's permits and run without taking permits of their own.
+
+Doctests, `cargo test --no-run`, commands with `--config` or a `+toolchain`
+override, and test runners other than `cargo test` run unscheduled.
+
 ## Choose the scope of a limit
 
 | Limit | Affects |
@@ -67,6 +91,7 @@ waiting, low-priority builds leave a quarter of the pool available for it.
 | `scheduler.reserve_cpus` | Capacity left outside that pool |
 | Cargo `-j` or `CARGO_BUILD_JOBS` | How much of the pool one build may hold |
 | `scheduler.priority = "low"` | Whether a build yields to waiting normal-priority work |
+| `scheduler.tests = true` | Whether `cargo test` binaries take permits |
 
 A memory budget schedules work using measurements; it is not an operating-system
 memory limit. A compiler process can still exceed its estimate. For laptop

@@ -301,6 +301,9 @@ struct RawScheduler {
         choices("normal", "low")
     )]
     priority: String,
+    /// Run `cargo test` binaries under the same permit pool.
+    #[usage(env = "MBX_SCHEDULER_TESTS", default = false)]
+    tests: bool,
 }
 
 #[derive(Debug, usage::Config)]
@@ -557,6 +560,8 @@ pub struct SchedulerSettings {
     pub memory_bytes: Option<u64>,
     /// Priority of this build's compilations against other builds.
     pub priority: SchedulerPriority,
+    /// Whether `cargo test` binaries take permits too.
+    pub tests: bool,
 }
 
 impl SchedulerSettings {
@@ -581,6 +586,7 @@ impl Default for SchedulerSettings {
             reserve_cpus: 0,
             memory_bytes: None,
             priority: SchedulerPriority::Normal,
+            tests: false,
         }
     }
 }
@@ -1032,6 +1038,7 @@ impl Config {
                 .priority
                 .parse()
                 .wrap_err("invalid scheduler.priority")?,
+            tests: raw.scheduler.tests,
         };
         let config = Self {
             cache_dir,
@@ -1186,9 +1193,12 @@ impl Config {
                                 format!("invalid {}.{setting}", path.display())
                             })?;
                         }
-                        "enabled" | "cpus" | "reserve_cpus" | "memory" | "priority" => {}
+                        "tests" if !environment_contains("MBX_SCHEDULER_TESTS") => {
+                            self.scheduler.tests = workspace_bool(&path, &setting, value)?;
+                        }
+                        "enabled" | "cpus" | "reserve_cpus" | "memory" | "priority" | "tests" => {}
                         _ => bail!(
-                            "{} contains unsupported workspace setting {setting:?}; only scheduler.enabled, scheduler.cpus, scheduler.reserve_cpus, scheduler.memory, and scheduler.priority are allowed",
+                            "{} contains unsupported workspace setting {setting:?}; only scheduler.enabled, scheduler.cpus, scheduler.reserve_cpus, scheduler.memory, scheduler.priority, and scheduler.tests are allowed",
                             path.display()
                         ),
                     }
@@ -2046,7 +2056,7 @@ default = "rust-lld"
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(
             directory.path().join(".mbx.toml"),
-            "[scheduler]\nenabled = true\ncpus = 8\nreserve_cpus = 2\nmemory = \"6GiB\"\npriority = \"low\"\n",
+            "[scheduler]\nenabled = true\ncpus = 8\nreserve_cpus = 2\nmemory = \"6GiB\"\npriority = \"low\"\ntests = true\n",
         )
         .unwrap();
         let mut config = configured(None, &[("MBX_SCHEDULER", "false")]).unwrap();
@@ -2061,6 +2071,7 @@ default = "rust-lld"
         assert_eq!(config.scheduler.permits(), 6);
         assert_eq!(config.scheduler.memory_bytes, Some(6 * GIB));
         assert_eq!(config.scheduler.priority, SchedulerPriority::Low);
+        assert!(config.scheduler.tests);
     }
 
     #[test]

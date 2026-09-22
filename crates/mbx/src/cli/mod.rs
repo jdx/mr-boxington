@@ -29,6 +29,7 @@ mod pretty;
 mod setup;
 mod shim;
 mod stats;
+pub mod test_runner;
 mod tui;
 
 const CARGO_SHIM_TARGET_FILE: &str = "mbx-target";

@@ -407,6 +407,14 @@ Permit priority of this build's compilations.
 
 Logical CPUs to leave free for the rest of the machine.
 
+### `scheduler.tests`
+
+- **Type:** `bool`
+- **Default:** `false`
+- **Set with:** `MBX_SCHEDULER_TESTS`
+
+Run `cargo test` binaries under the same permit pool.
+
 ### `share_out_dir`
 
 - **Type:** `bool`

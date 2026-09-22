@@ -4,6 +4,9 @@ fn main() -> ExitCode {
     if let Some(code) = mbx::cli::launch::dispatch() {
         return code;
     }
+    if let Some(code) = mbx::cli::test_runner::dispatch() {
+        return code;
+    }
     mbx::phase_timing::initialize();
     if mbx::session::is_build_script_shim() {
         return mbx::session::run_build_script_shim();

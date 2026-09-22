@@ -367,6 +367,50 @@ fn plans_weigh_history_links_and_nothing() {
     );
 }
 
+/// A test binary is charged for its threads as well as its memory, and never
+/// shares a ledger entry with the crate compiled under the same name.
+#[test]
+fn test_binaries_weigh_their_threads_and_their_own_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let bytes_per_permit = 1000;
+    let pool = pool_at(directory.path(), 8, bytes_per_permit);
+
+    assert_eq!(
+        pool.plan(&Demand::test("suite", None)),
+        (4, None),
+        "an unstated thread count takes half the pool"
+    );
+    assert_eq!(pool.plan(&Demand::test("suite", Some(3))), (3, None));
+    assert_eq!(
+        pool.plan(&Demand::test("suite", Some(64))),
+        (8, None),
+        "threads clamp to the capacity"
+    );
+
+    // The compile of `suite` measured light and the run measured heavy; each
+    // is planned from its own entry.
+    pool.record_peak("suite", 1500, false).unwrap();
+    pool.record_peak("suite [test]", 6500, false).unwrap();
+    assert_eq!(pool.plan(&Demand::new("suite", false)), (2, Some(1500)));
+    assert_eq!(
+        pool.plan(&Demand::test("suite", Some(1))),
+        (7, Some(6500)),
+        "memory outweighs a single thread"
+    );
+
+    let odd = pool_at(directory.path(), 5, 0);
+    assert_eq!(
+        odd.plan(&Demand::test("suite", None)),
+        (3, None),
+        "half an odd pool rounds up"
+    );
+    assert_eq!(
+        pool_at(directory.path(), 1, 0).plan(&Demand::test("suite", Some(0))),
+        (1, None),
+        "a demand never weighs nothing"
+    );
+}
+
 /// Every test binary is its own crate name, so a cold `cargo test --no-run`
 /// never finds a per-crate entry for the link in front of it. What the machine
 /// has learned about links in general is what it has to go on instead.

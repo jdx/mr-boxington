@@ -115,6 +115,34 @@ pub(super) fn cargo_subcommand_at<T: AsRef<OsStr>>(arguments: &[T]) -> Option<(u
     None
 }
 
+/// The targets a Cargo command builds for: its `--target` flags, or else the
+/// configured or host target.
+pub(super) fn requested_targets(
+    config: &cargo_config2::Config,
+    arguments: &[String],
+) -> Result<Vec<cargo_config2::TargetTriple>> {
+    let mut targets = Vec::new();
+    let mut args = arguments.iter().take_while(|arg| arg.as_str() != "--");
+    while let Some(arg) = args.next() {
+        if arg == "--target" {
+            if let Some(target) = args.next() {
+                targets.push(target.clone());
+            }
+        } else if let Some(target) = arg.strip_prefix("--target=") {
+            targets.push(target.to_owned());
+        }
+    }
+    Ok(config.build_target_for_config(&targets)?)
+}
+
+/// The environment variable that overrides Cargo's runner for one target.
+pub(super) fn runner_key(target: &cargo_config2::TargetTriple) -> String {
+    format!(
+        "CARGO_TARGET_{}_RUNNER",
+        target.triple().replace(['-', '.'], "_").to_uppercase()
+    )
+}
+
 pub(super) fn lease(
     directory: &Path,
     environment: &mut BTreeMap<String, String>,
@@ -206,25 +234,11 @@ impl Launch {
             return Ok(None);
         }
         let config = cargo_config2::Config::load()?;
-        let mut targets = Vec::new();
-        let mut args = args.into_iter();
-        while let Some(arg) = args.next() {
-            if arg == "--target" {
-                if let Some(target) = args.next() {
-                    targets.push(target.clone());
-                }
-            } else if let Some(target) = arg.strip_prefix("--target=") {
-                targets.push(target.to_owned());
-            }
-        }
-        let targets = config.build_target_for_config(&targets)?;
+        let targets = requested_targets(&config, arguments)?;
         eyre::ensure!(targets.len() == 1, "cargo run requires exactly one target");
         let target = &targets[0];
         let runner = config.runner(target)?;
-        let runner_key = format!(
-            "CARGO_TARGET_{}_RUNNER",
-            target.triple().replace('-', "_").to_uppercase()
-        );
+        let runner_key = runner_key(target);
         let shim = crate::session::install_shim_named(
             &std::env::current_exe()?,
             directory,

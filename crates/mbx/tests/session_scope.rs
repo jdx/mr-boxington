@@ -520,3 +520,80 @@ fn main() { assert_eq!(std::env::var_os("OPAQUE").unwrap().as_bytes(), b"\xff");
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn scheduled_test_binaries_hold_a_permit_and_keep_the_configured_runner() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    project(
+        root.path(),
+        r#"
+fn main() {}
+#[test]
+fn scheduled() {
+    assert_eq!(std::env::var("RUNNER_ARGUMENT").unwrap(), "runner arg");
+    let leases = std::path::Path::new(&std::env::var_os("MBX_CACHE_DIR").unwrap())
+        .join("scheduler/leases");
+    let held: Vec<String> = std::fs::read_dir(&leases)
+        .map(|entries| {
+            entries
+                .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+                .collect()
+        })
+        .unwrap_or_default();
+    match std::env::var("EXPECTED_WEIGHT").ok() {
+        Some(weight) => {
+            assert_eq!(held.len(), 1, "only this test holds a permit: {held:?}");
+            assert!(held[0].contains(&format!("\"weight\":{weight},")), "{held:?}");
+            // Builds this test starts are charged to its permit.
+            assert_eq!(std::env::var("MBX_SCHEDULER").unwrap(), "0");
+            assert_eq!(std::env::var("MBX_SCHED_DIR").unwrap(), "");
+        }
+        None => {
+            assert!(held.is_empty(), "{held:?}");
+            assert!(std::env::var_os("MBX_SCHEDULER").is_none());
+        }
+    }
+}
+"#,
+    );
+    let runner = root.path().join("caller-runner");
+    std::fs::write(
+        &runner,
+        "#!/bin/sh\nexport RUNNER_ARGUMENT=\"$1\"\nshift\nexec \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::create_dir(root.path().join(".cargo")).unwrap();
+    std::fs::write(
+        root.path().join(".cargo/config.toml"),
+        "[target.'cfg(unix)']\nrunner = ['./caller-runner', 'runner arg']\n",
+    )
+    .unwrap();
+    for (tests, harness, expected) in [
+        (Some("1"), &["--test-threads=3"][..], Some("3")),
+        (Some("1"), &[][..], Some("4")),
+        (None, &[][..], None),
+    ] {
+        let mut command = mbx(root.path());
+        command
+            .env("MBX_SCHEDULER_CPUS", "8")
+            .env("MBX_SCHEDULER_MEMORY", "none")
+            .args(["test", "--offline", "--"])
+            .args(harness);
+        if let Some(tests) = tests {
+            command.env("MBX_SCHEDULER_TESTS", tests);
+        }
+        if let Some(expected) = expected {
+            command.env("EXPECTED_WEIGHT", expected);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{tests:?} {harness:?}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

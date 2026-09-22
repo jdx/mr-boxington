@@ -299,6 +299,8 @@ fn cargo_with_settings_bypass_log_and_roots(
 
     let session_dir = tempfile::Builder::new().prefix("mbx-session-").tempdir()?;
     let launch = super::launch::Launch::prepare(arguments, session_dir.path())?;
+    let test_runner =
+        super::test_runner::TestRunner::prepare(config, arguments, session_dir.path())?;
     let cargo_jobs = cargo_job_limit(arguments);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -391,6 +393,9 @@ fn cargo_with_settings_bypass_log_and_roots(
 
         if let Some(launch) = &launch {
             launch.environment(&mut environment)?;
+        }
+        if let Some(test_runner) = &test_runner {
+            test_runner.environment(&mut environment)?;
         }
         if settings.plain_output {
             environment.insert("CARGO_TERM_PROGRESS_WHEN".into(), "never".into());
