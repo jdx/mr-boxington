@@ -1,17 +1,17 @@
-request.hello	{"client_version":"0.3.0","protocol":9,"type":"hello"}
+request.hello	{"client_version":"0.3.0","protocol":10,"type":"hello"}
 request.begin_task	{"task":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","type":"begin_task"}
 request.commit_task	{"run":"task-run","type":"commit_task"}
 request.find_blob	{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"type":"find_blob"}
 request.find_blobs	{"digests":[{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7}],"type":"find_blobs"}
 request.store_blob	{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"source":"cache/blob","type":"store_blob"}
 request.find_action_result	{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"type":"find_action_result"}
-request.record_action_hit	{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"crate_name":"serde","restore":{"avoided_compiler_duration_ns":10,"copied_output_bytes":17,"copied_output_files":16,"duration_ns":11,"output_bytes":13,"output_files":12,"reflinked_output_bytes":15,"reflinked_output_files":14,"reused_output_bytes":19,"reused_output_files":18},"type":"record_action_hit"}
+request.record_action_hit	{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"crate_name":"serde","restore":{"avoided_compiler_duration_ns":10,"copied_output_bytes":17,"copied_output_files":16,"duration_ns":11,"hardlinked_output_bytes":21,"hardlinked_output_files":20,"output_bytes":13,"output_files":12,"reflinked_output_bytes":15,"reflinked_output_files":14,"reused_output_bytes":19,"reused_output_files":18},"type":"record_action_hit"}
 request.record_bypass	{"kind":"compiler-query","type":"record_bypass"}
 request.record_unconsulted	{"type":"record_unconsulted"}
 request.record_warning	{"message":"cc result was not restored: blob missing","type":"record_warning"}
 request.record_error	{"message":"compilation result was discarded","type":"record_error"}
 request.record_compiler_invocation	{"crate_name":"fixture","duration_ns":19,"outcome":"miss","type":"record_compiler_invocation"}
-request.record_action_verification	{"matched":true,"restore":{"avoided_compiler_duration_ns":10,"copied_output_bytes":17,"copied_output_files":16,"duration_ns":11,"output_bytes":13,"output_files":12,"reflinked_output_bytes":15,"reflinked_output_files":14,"reused_output_bytes":19,"reused_output_files":18},"type":"record_action_verification"}
+request.record_action_verification	{"matched":true,"restore":{"avoided_compiler_duration_ns":10,"copied_output_bytes":17,"copied_output_files":16,"duration_ns":11,"hardlinked_output_bytes":21,"hardlinked_output_files":20,"output_bytes":13,"output_files":12,"reflinked_output_bytes":15,"reflinked_output_files":14,"reused_output_bytes":19,"reused_output_files":18},"type":"record_action_verification"}
 request.store_action_result	{"result":{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"metadata":null,"output_root":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"version":1},"type":"store_action_result"}
 request.find_action_prediction	{"invocation":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"task":"task-id","type":"find_action_prediction"}
 request.record_action_prediction	{"prediction":{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"adapter":"rustc","invocation":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"payload":"{}"},"task":"task-id","type":"record_action_prediction"}
@@ -22,7 +22,7 @@ request.record_file_digests	{"entries":[{"digest":{"algorithm":"blake3","hash":"
 request.join_action_promise	{"adapter":"rustc","invocation":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"type":"join_action_promise"}
 request.complete_action_promise	{"claim":"claim-1","prediction":{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"adapter":"rustc","invocation":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"payload":"{}"},"type":"complete_action_promise"}
 request.resolve_file_digests	{"files":[{"changed":[1700000000,21],"len":7,"modified":{"nanos_since_epoch":2100,"secs_since_epoch":1700000000},"path":"target/debug/deps/libserde.rlib"},{"changed":[1700000000,21],"len":7,"modified":{"nanos_since_epoch":2100,"secs_since_epoch":1700000000},"object":{"device_major":8,"device_minor":1,"inode":99,"mount_id":42},"path":"target/debug/deps/libserde.rlib"}],"scope":"content","type":"resolve_file_digests"}
-response.hello	{"agent_version":"0.3.0","protocol":9,"type":"hello"}
+response.hello	{"agent_version":"0.3.0","protocol":10,"type":"hello"}
 response.task_begun	{"run":"task-run","type":"task_begun"}
 response.task_committed	{"type":"task_committed"}
 response.blob	{"path":"cache/blob","type":"blob"}

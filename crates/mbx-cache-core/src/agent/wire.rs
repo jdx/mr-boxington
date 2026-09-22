@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Wire protocol version used between an in-process cache agent and its shims.
-pub const AGENT_PROTOCOL_VERSION: u8 = 9;
+pub const AGENT_PROTOCOL_VERSION: u8 = 10;
 /// Largest single protocol request the agent will read.
 ///
 /// Requests are small JSON objects; the largest legitimate ones carry an output
@@ -374,6 +374,10 @@ pub struct RestoreStats {
     pub reflinked_output_files: u64,
     /// Declared size of restored outputs that share data blocks with the CAS.
     pub reflinked_output_bytes: u64,
+    /// Number of restored output files that share an inode with the CAS blob.
+    pub hardlinked_output_files: u64,
+    /// Declared size of restored outputs that share an inode with the CAS blob.
+    pub hardlinked_output_bytes: u64,
     /// Number of restored output files that required a byte-for-byte copy.
     pub copied_output_files: u64,
     /// Declared size of restored outputs that required a byte-for-byte copy.
