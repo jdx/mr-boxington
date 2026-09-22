@@ -206,8 +206,10 @@ cmake_upgrade() {
     # The preset, not the command line, chooses the build tree.
     cat >"$PROJECT/CMakePresets.json" <<'EOF'
 {
-  "version": 3,
-  "configurePresets": [{ "name": "mbx", "binaryDir": "$env{OUT_DIR}/build" }]
+  "version": 2,
+  "configurePresets": [
+    { "name": "mbx", "generator": "Unix Makefiles", "binaryDir": "$env{OUT_DIR}/build" }
+  ]
 }
 EOF
     sed -i.bak 's|.args(\["-S", ".", "-B"\]).arg(out.join("build"))|.args(["--preset", "mbx"])|' "$PROJECT/build.rs"
@@ -227,6 +229,9 @@ EOF
   previous_launchers="$(grep -E '^CMAKE_(C|CXX)_COMPILER_LAUNCHER:' "$cache")"
   [ -n "$previous_launchers" ]
   rm -rf "$BATS_TEST_TMPDIR/previous-install"
+  if [[ "${1:-}" == environment ]]; then
+    export CMAKE_C_COMPILER_LAUNCHER="$2" CMAKE_CXX_COMPILER_LAUNCHER="$2"
+  fi
 
   run env RECONFIGURE=current MBX_STATS_REPORT="$BATS_TEST_TMPDIR/current.json" \
     "$MBX_BIN" build --offline --manifest-path "$PROJECT/Cargo.toml"
@@ -243,6 +248,18 @@ EOF
 
 @test "a CMake preset's build tree is moved to the current mbx binary's launcher" {
   cmake_upgrade preset
+}
+
+@test "a launcher exported after an upgrade replaces the removed mbx binary's" {
+  local launcher="$BATS_TEST_TMPDIR/user-launcher"
+  printf '#!/bin/sh\necho called >> "%s"\nexec "$@"\n' "$BATS_TEST_TMPDIR/launcher.log" >"$launcher"
+  chmod +x "$launcher"
+  cmake_upgrade environment "$launcher"
+  local cache
+  cache="$(find "$CARGO_TARGET_DIR" -name CMakeCache.txt -type f)"
+  run grep -Fx "CMAKE_C_COMPILER_LAUNCHER:STRING=$launcher" "$cache"
+  assert_success
+  [ -s "$BATS_TEST_TMPDIR/launcher.log" ]
 }
 
 @test "the installed Cargo shim can disable caching without changing CMake compiler identity" {

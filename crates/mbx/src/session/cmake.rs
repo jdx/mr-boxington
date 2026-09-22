@@ -145,16 +145,18 @@ pub fn dispatch() -> Option<ExitCode> {
     }) {
         let mut scripts = Vec::new();
         for (variable, launcher) in rewrite_compilers(&mut arguments, &read_map(COMPILERS)) {
-            // A launcher the caller chose, in the environment or on the
-            // command line, is left to them.
-            if std::env::var_os(variable).is_some() || defines(&arguments, variable) {
+            // A launcher chosen on the command line is left to the caller.
+            // One exported in the environment still runs the script, which
+            // installs it in place of a stale mbx launcher: CMake itself would
+            // only have read it into a fresh cache.
+            if defines(&arguments, variable) {
                 continue;
             }
             let directory = invoked.parent().unwrap();
             let script = directory.join(launcher_script_name(launcher));
             if script.is_file() {
                 scripts.extend([OsString::from("-C"), script.into_os_string()]);
-            } else {
+            } else if std::env::var_os(variable).is_none() {
                 command.env(variable, directory.join(super::shim_file_name(launcher)));
             }
         }
@@ -184,7 +186,8 @@ fn launcher_script_name(launcher: &str) -> String {
 /// that binary was removed. The script runs against whichever cache CMake
 /// loads -- `-B`, the working directory, or a preset's `binaryDir` alike --
 /// and replaces only an empty entry or another mbx launcher, never one the
-/// build chose for itself.
+/// build chose for itself. A launcher the caller exports takes the place of
+/// ours, just as CMake would have seeded a fresh cache with it.
 fn write_launcher_script(
     directory: &Path,
     variable: &str,
@@ -200,7 +203,11 @@ fn write_launcher_script(
         "# Written by mbx: point this build at the running mbx's compiler launcher.\n\
          get_property(mbx_launcher CACHE {variable} PROPERTY VALUE)\n\
          if(NOT mbx_launcher OR mbx_launcher MATCHES \"/{launcher}{suffix}$\")\n  \
-         set({variable} \"{quoted}\" CACHE STRING \"Compiler launcher installed by mbx\" FORCE)\n\
+         if(NOT \"$ENV{{{variable}}}\" STREQUAL \"\")\n    \
+         set({variable} \"$ENV{{{variable}}}\" CACHE STRING \"Compiler launcher\" FORCE)\n  \
+         else()\n    \
+         set({variable} \"{quoted}\" CACHE STRING \"Compiler launcher installed by mbx\" FORCE)\n  \
+         endif()\n\
          endif()\n\
          unset(mbx_launcher)\n"
     );
