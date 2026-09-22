@@ -71,7 +71,7 @@ jobs:
 
       - name: Run release-plz
         id: release-plz
-        uses: release-plz/action@a80d79efe0a195618acb02a4089d55fe74d2505f # v0.5.136
+        uses: release-plz/action@d6c56271d640b6c1b61d1e00593641c400a9f4bd # v0.5.138
         with:
           command: release
         env:
@@ -237,7 +237,7 @@ jobs:
       # window where merging it drops the result. That is how v0.5.4 shipped
       # with a 0.5.3 reference: the PR was merged 37s after it opened, and the
       # render was still compiling dependencies at 57s.
-      - uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1.6.1
+      - uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1.7.0
         with:
           cache: rust
 
@@ -253,7 +253,7 @@ jobs:
 
       - name: Run release-plz
         id: release-plz
-        uses: release-plz/action@a80d79efe0a195618acb02a4089d55fe74d2505f # v0.5.136
+        uses: release-plz/action@d6c56271d640b6c1b61d1e00593641c400a9f4bd # v0.5.138
         with:
           command: release-pr
         env:
