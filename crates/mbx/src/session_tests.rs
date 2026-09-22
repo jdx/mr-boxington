@@ -781,7 +781,20 @@ fn only_shim_directories_of_removed_binaries_are_collected() {
     // The running binary's own directory is never judged, whatever it holds.
     let own = install("native", "own", Some(&gone));
 
-    remove_stranded_binary_shims(&shims, "own");
+    // Another container's binary lives on a path this process cannot see,
+    // so its links dangle here, but it built recently.
+    let elsewhere = install("native", "elsewhere", Some(&gone));
+    let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    for unused in [&stranded, &stranded_rust, &live, &installing, &own] {
+        std::fs::File::options()
+            .write(true)
+            .open(unused.join(".mbx-shims"))
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+    }
+
+    remove_stranded_binary_shims(&shims, "own", std::time::Duration::from_secs(60));
 
     assert!(!stranded.exists(), "a removed binary's shims should go");
     assert!(!stranded_rust.exists(), "rustc shims are collected too");
@@ -791,6 +804,10 @@ fn only_shim_directories_of_removed_binaries_are_collected() {
         "a directory still being filled must stay"
     );
     assert!(own.exists(), "the running binary's directory must stay");
+    assert!(
+        elsewhere.exists(),
+        "a directory used recently must stay even when its links dangle here"
+    );
 }
 
 #[test]

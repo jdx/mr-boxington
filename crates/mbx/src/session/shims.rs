@@ -484,7 +484,11 @@ pub(super) fn install_session_shims(
     mark_shim_directory(persistent_shims);
     mark_shim_directory(&binary_shims);
     mark_shim_directory(&native);
-    remove_stranded_binary_shims(persistent_shims, &identity);
+    // Refreshed every session, so collection can tell a directory some
+    // installation still uses from one nothing has used in a long time.
+    touch_shim_directory(&binary_shims);
+    touch_shim_directory(&native);
+    remove_stranded_binary_shims(persistent_shims, &identity, STRANDED_SHIMS_AGE);
     let rustc = binary_shims.join(shim_file_name(RUSTC_SHIM_STEM));
     link_path_shim(&executable, &rustc)?;
     let rustdoc = install_shim_named(
@@ -500,20 +504,47 @@ pub(super) fn install_session_shims(
     })
 }
 
+/// How long a per-binary shim directory must go unused before collection
+/// may take it.
+const STRANDED_SHIMS_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Record that a session of this binary is using `directory` now.
+///
+/// Best effort: a marker that cannot be refreshed only makes the directory
+/// look older, and collection still requires every link in it to dangle.
+fn touch_shim_directory(directory: &Path) {
+    let refreshed = std::fs::File::options()
+        .write(true)
+        .open(directory.join(SHIM_DIR_MARKER))
+        .and_then(|marker| marker.set_modified(std::time::SystemTime::now()));
+    if let Err(error) = refreshed {
+        debug!(
+            "the shim directory {} was not refreshed: {error}",
+            directory.display()
+        );
+    }
+}
+
 /// Remove the per-binary shim directories of mbx binaries that are gone.
 ///
 /// Keying shims by binary means an installation that lives only as long as a
-/// CI job leaves a directory behind for every job. Once the binary its
-/// symlinks name has been removed, nothing can run them: a build still
-/// holding one of those paths fails the same way whether the directory is
-/// there or not. A directory with no symlink in it yet may belong to a session
-/// that is still installing, so only one whose every link dangles goes.
+/// CI job leaves a directory behind for every job. Two things must hold before
+/// one goes. Every symlink in it must dangle, since a directory with no link
+/// yet may belong to a session still installing. And no session may have
+/// used it for `unused_for`: a link that dangles here can still resolve for
+/// another container sharing the cache, whose binary lives on a filesystem
+/// this process cannot see, and that container refreshes the directory each
+/// time it builds. Whatever it last used is recreated by its next session.
 ///
 /// Windows shims are hard links or copies, which say nothing about whether
 /// their installation still exists, so they are left alone. Best effort: a
 /// failure only leaves the directory for a later session.
 #[cfg(unix)]
-pub(super) fn remove_stranded_binary_shims(persistent_shims: &Path, own_identity: &str) {
+pub(super) fn remove_stranded_binary_shims(
+    persistent_shims: &Path,
+    own_identity: &str,
+    unused_for: std::time::Duration,
+) {
     for kind in ["rust", "native"] {
         let Ok(listing) = std::fs::read_dir(persistent_shims.join(kind)) else {
             continue;
@@ -523,7 +554,9 @@ pub(super) fn remove_stranded_binary_shims(persistent_shims: &Path, own_identity
                 continue;
             }
             let directory = entry.path();
-            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) || !every_link_dangles(&directory)
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir())
+                || !unused_for_at_least(&directory, unused_for)
+                || !every_link_dangles(&directory)
             {
                 continue;
             }
@@ -538,7 +571,22 @@ pub(super) fn remove_stranded_binary_shims(persistent_shims: &Path, own_identity
 }
 
 #[cfg(not(unix))]
-pub(super) fn remove_stranded_binary_shims(_persistent_shims: &Path, _own_identity: &str) {}
+pub(super) fn remove_stranded_binary_shims(
+    _persistent_shims: &Path,
+    _own_identity: &str,
+    _unused_for: std::time::Duration,
+) {
+}
+
+/// Whether no session has refreshed `directory` within `age`.
+#[cfg(unix)]
+fn unused_for_at_least(directory: &Path, age: std::time::Duration) -> bool {
+    std::fs::metadata(directory.join(SHIM_DIR_MARKER))
+        .and_then(|marker| marker.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|elapsed| elapsed >= age)
+}
 
 /// Whether `directory` holds at least one symlink and none that resolves.
 #[cfg(unix)]
