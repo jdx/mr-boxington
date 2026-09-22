@@ -57,8 +57,8 @@ so writes to a restored output never reach the cache object. Where the
 filesystem cannot clone -- ext4, most importantly -- mbx hard links the stored
 object instead, which is read-only so that a rewrite is refused rather than
 shared, and copies the bytes when it can do neither. Setting
-`restore_hardlink = false` asks it to copy rather than link, which keeps every
-restored output a private writable file at the cost of writing it.
+`restore_hardlink = false` asks it to copy rather than link, which gives every
+restored output a file of its own at the cost of writing it.
 
 mbx also manages the lifetime of target directories it creates and coordinates
 simultaneous builds through a shared compiler pool. These features address

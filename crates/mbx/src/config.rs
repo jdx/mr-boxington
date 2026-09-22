@@ -187,7 +187,7 @@ pub(crate) struct RawConfig {
     /// A hard-linked output is the store's object, so it is read-only; mbx
     /// unlinks it before a compiler rewrites it, but `cargo` run directly in
     /// the same target directory reports that the output is not writeable.
-    /// Disable to keep every restored output a private, writable copy.
+    /// Disable to give every restored output a file of its own.
     #[usage(env = "MBX_RESTORE_HARDLINK", default = true)]
     restore_hardlink: bool,
     /// Cache executions of build scripts using Cargo's freshness inputs. This may

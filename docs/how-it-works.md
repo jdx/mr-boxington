@@ -128,22 +128,34 @@ the CAS object.
 Reflinks require support from the filesystem and generally require the cache
 and target directory to be on the same filesystem. Where cloning is
 unavailable and `restore_hardlink` is enabled, which it is by default, mbx
-hard links the cached object into place instead; it copies the bytes when the
-setting is off or when it can do neither. ext4, which most Linux CI runners
-and many Linux developer machines use, has no clone support at all, so on
-those machines linking is what keeps a warm restore from writing every cached
-byte.
+hard links the cached object into place instead. It copies the bytes when the
+setting is off, when it can do neither, and when the mode this output needs
+is one the shared object cannot carry -- see below. ext4, which most Linux CI
+runners and many Linux developer machines use, has no clone support at all,
+so on those machines linking is what keeps a warm restore from writing every
+cached byte.
 
-A hard link is the stored object rather than a copy of it, so mbx makes the
-object read-only before linking to it: a compiler that would overwrite a
-restored output is refused by the filesystem instead of rewriting bytes every
-other checkout shares. mbx unlinks such an output before it runs a real
-compiler, so rebuilding through mbx is unaffected. Running `cargo` directly in
-a target directory mbx filled can report `output file ... is not writeable` for
-a unit it decides to rebuild; `mbx clean` or removing the file resolves it, and
-`restore_hardlink = false` avoids it by keeping every restored output a private
-writable copy. Reflinked outputs are private copies already and are made
-writable on restore, so this applies only where cloning is unavailable.
+A reflinked or copied output is a file of its own, carrying the mode its
+compilation recorded; writing to one never reaches the cache. A hard link is
+the stored object rather than a copy of it, so mbx makes the object read-only
+before linking to it: a compiler that would overwrite a restored output is
+refused by the filesystem instead of rewriting bytes every other checkout
+shares. mbx unlinks such an output before it runs a real compiler, so
+rebuilding through mbx is unaffected. Running `cargo` directly in a target
+directory mbx filled can report `output file ... is not writeable` for a unit
+it decides to rebuild; `mbx clean` or removing the file resolves it, and
+`restore_hardlink = false` avoids it by giving every restored output a file of
+its own. This applies only where cloning is unavailable, since a reflinked
+output is already one.
+
+Because the object's mode is the mode of every path linked to it, a link is
+only used where that mode can serve this output. An output is copied rather
+than linked when it is executable and the object is not, or the reverse; when
+it would need read permissions the object does not already carry, since
+granting them would widen every other link; and when its recorded mode is
+unreadable, which would leave the object itself unopenable. Restores of one
+object may take readership away -- the owner running the build still reads
+it -- but never add it, and never change whether the object may be run.
 
 The session summary reports the file count and logical size handled by each
 path; `MBX_STATS_REPORT` includes the same values as `reflinked_output_files`,
