@@ -73,11 +73,13 @@ pub(super) fn environment(
     for compiler in &compilers.targeted {
         pins.insert(cmake_path(&compiler.shim), compiler.real.clone());
     }
-    for launcher in [C_LAUNCHER, CXX_LAUNCHER] {
-        link_path_shim(
-            &executable,
-            &directory.join(super::shim_file_name(launcher)),
-        )?;
+    for (variable, launcher) in [
+        ("CMAKE_C_COMPILER_LAUNCHER", C_LAUNCHER),
+        ("CMAKE_CXX_COMPILER_LAUNCHER", CXX_LAUNCHER),
+    ] {
+        let installed = directory.join(super::shim_file_name(launcher));
+        link_path_shim(&executable, &installed)?;
+        write_launcher_script(directory, variable, launcher, &installed)?;
     }
     environment.insert(PROGRAMS.into(), serde_json::to_string(&programs)?);
     environment.insert(COMPILERS.into(), serde_json::to_string(&pins)?);
@@ -141,34 +143,22 @@ pub fn dispatch() -> Option<ExitCode> {
             Some("--build" | "--install" | "-E" | "-P" | "--version" | "--help")
         )
     }) {
-        let mut replacements = Vec::new();
+        let mut scripts = Vec::new();
         for (variable, launcher) in rewrite_compilers(&mut arguments, &read_map(COMPILERS)) {
-            // Environment defaults preserve launchers chosen on the command
-            // line, in an existing cache, or by the caller's environment.
-            if std::env::var_os(variable).is_some() {
+            // A launcher the caller chose, in the environment or on the
+            // command line, is left to them.
+            if std::env::var_os(variable).is_some() || defines(&arguments, variable) {
                 continue;
             }
-            let ours = invoked
-                .parent()
-                .unwrap()
-                .join(super::shim_file_name(launcher));
-            // Except a cache that recorded another mbx binary's launcher.
-            // The environment only seeds a fresh cache, and shims live per
-            // binary, so after an upgrade the old path would be used until
-            // its binary went away and then fail every compile.
-            if !defines(&arguments, variable)
-                && cached_launcher(&build_directory(&arguments), variable)
-                    .is_some_and(|cached| replaces_launcher(&cached, launcher, &cmake_path(&ours)))
-            {
-                replacements.push(OsString::from(format!(
-                    "-D{variable}:STRING={}",
-                    cmake_path(&ours)
-                )));
+            let directory = invoked.parent().unwrap();
+            let script = directory.join(launcher_script_name(launcher));
+            if script.is_file() {
+                scripts.extend([OsString::from("-C"), script.into_os_string()]);
             } else {
-                command.env(variable, ours);
+                command.env(variable, directory.join(super::shim_file_name(launcher)));
             }
         }
-        arguments.extend(replacements);
+        arguments.splice(0..0, scripts);
     }
     let status = command.args(arguments).status();
     Some(match status {
@@ -180,19 +170,53 @@ pub fn dispatch() -> Option<ExitCode> {
     })
 }
 
-/// The build tree a configure invocation writes, as CMake chooses it.
-fn build_directory(arguments: &[OsString]) -> PathBuf {
-    let mut arguments = arguments.iter();
-    while let Some(argument) = arguments.next() {
-        if argument == "-B" {
-            if let Some(directory) = arguments.next() {
-                return PathBuf::from(directory);
-            }
-        } else if let Some(directory) = argument.to_str().and_then(|text| text.strip_prefix("-B")) {
-            return PathBuf::from(directory);
-        }
+/// File name of the initial-cache script that installs `launcher`.
+fn launcher_script_name(launcher: &str) -> String {
+    format!("{launcher}.cmake")
+}
+
+/// Write the `-C` script that points a CMake cache at this binary's launcher.
+///
+/// The launcher cannot simply be offered through the environment: CMake reads
+/// `CMAKE_<LANG>_COMPILER_LAUNCHER` from there only for a fresh cache. Shims
+/// live per mbx binary, so a build tree configured before an upgrade would
+/// otherwise keep the previous binary's launcher, and fail every compile once
+/// that binary was removed. The script runs against whichever cache CMake
+/// loads -- `-B`, the working directory, or a preset's `binaryDir` alike --
+/// and replaces only an empty entry or another mbx launcher, never one the
+/// build chose for itself.
+fn write_launcher_script(
+    directory: &Path,
+    variable: &str,
+    launcher: &str,
+    installed: &Path,
+) -> Result<()> {
+    let quoted = cmake_path(installed)
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$");
+    let suffix = if cfg!(windows) { "\\\\.exe" } else { "" };
+    let script = format!(
+        "# Written by mbx: point this build at the running mbx's compiler launcher.\n\
+         get_property(mbx_launcher CACHE {variable} PROPERTY VALUE)\n\
+         if(NOT mbx_launcher OR mbx_launcher MATCHES \"/{launcher}{suffix}$\")\n  \
+         set({variable} \"{quoted}\" CACHE STRING \"Compiler launcher installed by mbx\" FORCE)\n\
+         endif()\n\
+         unset(mbx_launcher)\n"
+    );
+    let destination = directory.join(launcher_script_name(launcher));
+    if std::fs::read_to_string(&destination).is_ok_and(|existing| existing == script) {
+        return Ok(());
     }
-    PathBuf::from(".")
+    // Staged and renamed: a concurrent CMake run may be reading it.
+    let staging = directory.join(format!(
+        ".{}.{}",
+        launcher_script_name(launcher),
+        std::process::id()
+    ));
+    std::fs::write(&staging, script)?;
+    std::fs::rename(&staging, &destination)?;
+    Ok(())
 }
 
 /// Whether the command line sets `variable` itself.
@@ -209,26 +233,6 @@ fn defines(arguments: &[OsString], variable: &str) -> bool {
                 .is_some_and(|name| name == variable)
         })
     })
-}
-
-/// The value an existing cache in `build` holds for `variable`.
-fn cached_launcher(build: &Path, variable: &str) -> Option<String> {
-    let cache = std::fs::read_to_string(build.join("CMakeCache.txt")).ok()?;
-    cache.lines().find_map(|line| {
-        let (key, value) = line.split_once('=')?;
-        (key.split(':').next()? == variable).then(|| value.to_string())
-    })
-}
-
-/// Whether a cached launcher is an mbx launcher other than this binary's.
-///
-/// Only one named like ours is replaced: a launcher the build chose for
-/// itself is the build's business.
-fn replaces_launcher(cached: &str, launcher: &str, ours: &str) -> bool {
-    cached != ours
-        && Path::new(cached)
-            .file_stem()
-            .is_some_and(|stem| stem == launcher)
 }
 
 fn rewrite_compilers(
@@ -326,34 +330,6 @@ mod tests {
     }
 
     #[test]
-    fn another_binarys_cached_launcher_is_replaced_and_a_users_is_kept() {
-        let build = tempfile::tempdir().unwrap();
-        std::fs::write(
-            build.path().join("CMakeCache.txt"),
-            "//comment\nCMAKE_C_COMPILER_LAUNCHER:STRING=/shims/native/old/mbx-cmake-launch-c\n\
-             CMAKE_CXX_COMPILER_LAUNCHER:STRING=/usr/bin/ccache\n",
-        )
-        .unwrap();
-        let arguments: Vec<OsString> = ["-S", "src", "-B"]
-            .into_iter()
-            .map(OsString::from)
-            .chain([build.path().as_os_str().to_owned()])
-            .collect();
-        let directory = build_directory(&arguments);
-        assert_eq!(directory, build.path());
-        let ours = "/shims/native/new/mbx-cmake-launch-c";
-        let cached = cached_launcher(&directory, "CMAKE_C_COMPILER_LAUNCHER").unwrap();
-        assert!(replaces_launcher(&cached, C_LAUNCHER, ours));
-        assert!(!replaces_launcher(ours, C_LAUNCHER, ours));
-        let users = cached_launcher(&directory, "CMAKE_CXX_COMPILER_LAUNCHER").unwrap();
-        assert!(!replaces_launcher(&users, CXX_LAUNCHER, ours));
-        assert_eq!(
-            cached_launcher(&directory, "CMAKE_ASM_COMPILER_LAUNCHER"),
-            None
-        );
-    }
-
-    #[test]
     fn launchers_set_on_the_command_line_are_recognized() {
         let arguments: Vec<OsString> = [
             "-D",
@@ -367,11 +343,6 @@ mod tests {
         assert!(defines(&arguments, "CMAKE_C_COMPILER_LAUNCHER"));
         assert!(defines(&arguments, "CMAKE_CXX_COMPILER_LAUNCHER"));
         assert!(!defines(&arguments[3..], "CMAKE_C_COMPILER_LAUNCHER"));
-        assert_eq!(build_directory(&arguments), PathBuf::from("."));
-        assert_eq!(
-            build_directory(&[OsString::from("-Bbuild dir")]),
-            PathBuf::from("build dir")
-        );
     }
 
     #[test]

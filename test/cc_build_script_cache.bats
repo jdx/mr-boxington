@@ -200,8 +200,19 @@ EOF
   [ "${#lines[@]}" -ge 8 ]
 }
 
-@test "a CMake build configured by a removed mbx binary rebuilds through the current one" {
+cmake_upgrade() {
   cmake_fixture
+  if [[ "${1:-}" == preset ]]; then
+    # The preset, not the command line, chooses the build tree.
+    cat >"$PROJECT/CMakePresets.json" <<'EOF'
+{
+  "version": 3,
+  "configurePresets": [{ "name": "mbx", "binaryDir": "$env{OUT_DIR}/build" }]
+}
+EOF
+    sed -i.bak 's|.args(\["-S", ".", "-B"\]).arg(out.join("build"))|.args(["--preset", "mbx"])|' "$PROJECT/build.rs"
+    grep -q -- '--preset' "$PROJECT/build.rs"
+  fi
   # Shims live per mbx binary, so an upgrade hands CMake new launcher paths.
   # CMake takes a launcher from the environment only for a fresh cache, so
   # without replacing the recorded one, the build would keep invoking the
@@ -224,6 +235,14 @@ EOF
   assert_success
   [ "${#lines[@]}" -eq 2 ]
   [ "$output" != "$previous_launchers" ]
+}
+
+@test "a CMake build configured by a removed mbx binary rebuilds through the current one" {
+  cmake_upgrade
+}
+
+@test "a CMake preset's build tree is moved to the current mbx binary's launcher" {
+  cmake_upgrade preset
 }
 
 @test "the installed Cargo shim can disable caching without changing CMake compiler identity" {
