@@ -459,17 +459,31 @@ fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// The shims a session installs for itself.
+pub(super) struct SessionShims {
+    /// The persistent `RUSTC_WRAPPER`, private to the running binary.
+    pub(super) rustc: PathBuf,
+    /// The session-local `RUSTDOC`.
+    pub(super) rustdoc: PathBuf,
+    /// Directory for the C, C++ and CMake shims build scripts are pointed at.
+    pub(super) native: PathBuf,
+}
+
 pub(super) fn install_session_shims(
     session_dir: &Path,
     persistent_shims: &Path,
-) -> Result<(PathBuf, PathBuf)> {
+) -> Result<SessionShims> {
     let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
-    let binary_shims = binary_shims_dir(persistent_shims, &executable)?;
+    let identity = binary_identity(&executable)?;
+    let binary_shims = persistent_shims.join("rust").join(&identity);
+    let native = persistent_shims.join("native").join(&identity);
     std::fs::create_dir_all(&binary_shims)?;
-    // Both levels: the root holds the C, C++ and CMake shims, and the
-    // per-binary directory holds the rustc one.
+    std::fs::create_dir_all(&native)?;
+    // Every level: the root holds the `mbx exec` compiler shims, and each
+    // per-binary directory holds the shims a session points its build at.
     mark_shim_directory(persistent_shims);
     mark_shim_directory(&binary_shims);
+    mark_shim_directory(&native);
     let rustc = binary_shims.join(shim_file_name(RUSTC_SHIM_STEM));
     link_path_shim(&executable, &rustc)?;
     let rustdoc = install_shim_named(
@@ -478,17 +492,29 @@ pub(super) fn install_session_shims(
         RUSTDOC_SHIM_STEM,
         ShimLink::Tracking,
     )?;
-    Ok((rustc, rustdoc))
+    Ok(SessionShims {
+        rustc,
+        rustdoc,
+        native,
+    })
 }
 
-/// A stable shim directory for exactly one installed mbx executable.
+/// A stable name for exactly one installed mbx executable.
 ///
 /// Cargo keys its cached rustc probes by the wrapper path. A session-local
 /// wrapper makes every invocation look like a different compiler, while a
 /// single machine-wide name would conceal upgrades. The executable's path and
 /// file identity give repeated runs of one binary the same name and a replaced
 /// binary a new one without reading the whole executable at startup.
-fn binary_shims_dir(shims: &Path, executable: &Path) -> Result<PathBuf> {
+///
+/// The C, C++ and CMake shims need the same property for a different reason. They
+/// are symlinks to the binary that installed them, and a shim directory can be
+/// shared by installations that come and go -- concurrent CI jobs each with
+/// their own tool directory. Under one machine-wide name, whichever job
+/// started last owned `HOST_CC` for everyone, and once its binary was cleaned
+/// up every other build's C compiles failed on a dangling link. Keyed by
+/// binary, a shim only ever points at the binary whose sessions use it.
+fn binary_identity(executable: &Path) -> Result<String> {
     let executable = std::path::absolute(executable)?;
     let metadata = std::fs::metadata(&executable)?;
     let modified = metadata
@@ -508,8 +534,7 @@ fn binary_shims_dir(shims: &Path, executable: &Path) -> Result<PathBuf> {
             .map_or(0, |duration| duration.subsec_nanos())
             .to_le_bytes(),
     );
-    let digest = CacheDigest::blake3(&identity);
-    Ok(shims.join("rust").join(digest.hash))
+    Ok(CacheDigest::blake3(&identity).hash)
 }
 
 /// How an installed shim refers to the mbx binary behind it.

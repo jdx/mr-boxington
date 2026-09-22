@@ -5,7 +5,7 @@
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(unix)]
 use std::process::Stdio;
@@ -4148,7 +4148,7 @@ fn private_shims_warm_hits(settings: &[(&str, &str)]) -> u64 {
             warm_hits = count(&stats, "hits");
         }
         if !settings.contains(&("MBX_CC", "0")) {
-            let cc = shims.join(mbx::session::CC_SHIM_STEM);
+            let cc = native_shim(&shims, mbx::session::CC_SHIM_STEM);
             assert!(
                 cc.is_file(),
                 "the configured persistent compiler should exist"
@@ -4168,6 +4168,93 @@ fn private_shims_warm_hits(settings: &[(&str, &str)]) -> u64 {
         "the shared default must remain untouched"
     );
     warm_hits
+}
+
+/// The one native shim named `stem` a single mbx binary installed under
+/// `shims`.
+#[cfg(unix)]
+fn native_shim(shims: &Path, stem: &str) -> PathBuf {
+    let binaries: Vec<_> = std::fs::read_dir(shims.join("native"))
+        .expect("sessions should install native shims per binary")
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(binaries.len(), 1, "one binary built here: {binaries:?}");
+    binaries[0].join(stem)
+}
+
+/// Two mbx installations sharing one cache, as concurrent CI jobs on a
+/// self-hosted runner do, each with its own tool directory.
+///
+/// The C shim handed to build scripts used to be one machine-wide symlink,
+/// repointed at whichever binary started a session last. A job whose binary
+/// was then cleaned up left every other job's `HOST_CC` dangling, and their
+/// next C compile failed with `ToolNotFound`.
+#[cfg(unix)]
+#[test]
+fn another_installation_leaving_does_not_strand_the_c_shim() {
+    if !has_c_compiler() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let mut recorded = Vec::new();
+    for name in ["staying", "leaving"] {
+        let install = directory.path().join(format!("{name} install"));
+        std::fs::create_dir(&install).unwrap();
+        let executable = install.join("mbx");
+        std::fs::copy(env!("CARGO_BIN_EXE_mbx"), &executable).unwrap();
+        let project = directory.path().join(name);
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(project.join("src/lib.rs"), "").unwrap();
+        std::fs::write(
+            project.join("build.rs"),
+            r#"fn main() {
+    let compiler = std::env::var("HOST_CC").unwrap_or_default();
+    std::fs::write(std::env::var("HOST_CC_RECORD").unwrap(), compiler).unwrap();
+}
+"#,
+        )
+        .unwrap();
+        generate_lockfile(&project);
+        let record = directory.path().join(format!("{name}.host-cc"));
+        cargo_with_command(
+            isolated_command(&executable),
+            &project,
+            &cache,
+            &directory.path().join(format!("{name}.json")),
+            &["build", "--offline"],
+            &[
+                ("MBX_GC_AUTO", "0"),
+                ("MBX_BUILD_SCRIPT_EXECUTION", "0"),
+                ("HOST_CC_RECORD", record.to_str().unwrap()),
+            ],
+        );
+        let host_cc = PathBuf::from(std::fs::read_to_string(&record).unwrap());
+        assert!(
+            host_cc.starts_with(cache.join("shims")),
+            "{name} should build through a C shim: {}",
+            host_cc.display()
+        );
+        recorded.push(host_cc);
+    }
+    assert_ne!(recorded[0], recorded[1], "each installation owns its shim");
+    std::fs::remove_dir_all(directory.path().join("leaving install")).unwrap();
+
+    // The staying job's build is still running with the path it was handed.
+    let probe = isolated_command(&recorded[0])
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(
+        probe.status.success(),
+        "the shim a running build was handed must survive another install leaving: {}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
 }
 
 #[cfg(unix)]
