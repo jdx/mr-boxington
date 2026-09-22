@@ -216,7 +216,7 @@ pub fn dispatch() -> Option<ExitCode> {
         // serialize a crate's doc examples behind half the pool apiece.
         let demand = test_binary_name(Path::new(&executable)).map(|name| {
             crate::scheduler::Demand::test(
-                &name,
+                &ledger_name(std::env::var("CARGO_PKG_NAME").ok().as_deref(), &name),
                 test_threads(&rest, std::env::var("RUST_TEST_THREADS").ok().as_deref()),
             )
         });
@@ -267,6 +267,20 @@ fn test_binary_name(executable: &Path) -> Option<String> {
     let (name, hash) = stem.rsplit_once('-')?;
     (!name.is_empty() && hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .then(|| name.to_owned())
+}
+
+/// What a test binary's history is remembered under.
+///
+/// The ledger is shared by every project on the machine, and integration test
+/// files are named generically -- `it`, `integration`, `common` -- so the
+/// package Cargo is testing is part of the name. Not the checkout path, which
+/// would keep a project's worktrees from sharing what one of them measured.
+/// Neither a package name nor a binary name can hold a `/`.
+fn ledger_name(package: Option<&str>, binary: &str) -> String {
+    match package {
+        Some(package) if !package.is_empty() => format!("{package}/{binary}"),
+        _ => binary.to_owned(),
+    }
 }
 
 /// The thread count libtest will use, when the command or environment says.
@@ -360,6 +374,17 @@ mod tests {
             test_binary_name(Path::new("/tmp/rustdoctestAbC/rust_out")),
             None
         );
+    }
+
+    #[test]
+    fn history_is_kept_per_package() {
+        assert_eq!(ledger_name(Some("parser"), "it"), "parser/it");
+        assert_ne!(
+            ledger_name(Some("parser"), "it"),
+            ledger_name(Some("server"), "it")
+        );
+        assert_eq!(ledger_name(None, "it"), "it");
+        assert_eq!(ledger_name(Some(""), "it"), "it");
     }
 
     #[test]

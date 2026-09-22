@@ -82,7 +82,9 @@ have configured. Each test binary waits for permits before it starts:
 Only complete runs of at least a second are measured; a run narrowed by a test
 name, `--skip`, or `--ignored` is not. A recorded core count only goes up,
 because a suite measured on a busy machine gets fewer cores than it would use.
-A run with a stated thread count keeps separate history from the default width.
+History is kept per package and test binary, so worktrees of one project
+share it and unrelated projects with a `tests/it.rs` do not. A run with a stated
+thread count keeps separate history from the default width.
 CPU is measured on Unix only; on Windows the other rules apply.
 
 Builds a test starts, such as trybuild or compile-fail suites, are charged to
