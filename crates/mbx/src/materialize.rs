@@ -166,9 +166,6 @@ pub(crate) fn stage_verified_cached_output_with(
             node.name
         );
     }
-    if materialization != Materialization::Hardlink {
-        apply_file_mode(&temporary, node.mode, node.executable)?;
-    }
     // A cache hit stands in for work Cargo decided was stale. Reflinks and
     // some copy implementations preserve the CAS blob's older mtime, which
     // can leave this output older than the dependency that triggered the
@@ -183,6 +180,13 @@ pub(crate) fn stage_verified_cached_output_with(
     // same bytes. Output blobs are asked for about once per build, so the
     // re-read is rare and a copy of every restored byte is not.
     set_modified_now(&temporary)?;
+    // Last, because this is the step that can take away the access the ones
+    // above needed. A recorded mode carries no promise of read permission --
+    // nothing rejects `0o200` -- and a staged file that cannot be opened is
+    // one nothing else here could have finished with.
+    if materialization != Materialization::Hardlink {
+        apply_file_mode(&temporary, node.mode, node.executable)?;
+    }
     Ok((temporary, materialization))
 }
 
@@ -230,27 +234,33 @@ fn materialize_cached_output(
 /// error.
 #[cfg(unix)]
 fn hard_link_cached_output(source: &Path, destination: &Path, node: &CacheFileNode) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
     use std::os::unix::fs::PermissionsExt as _;
     let Ok(metadata) = std::fs::metadata(source) else {
         return false;
     };
     let current = metadata.permissions().mode() & 0o7777;
     let wanted = linkable_mode(node);
+    if !readable_by_owner(wanted) {
+        return false;
+    }
     // A link carries no mode of its own, so the object's mode is the mode of
-    // every path linked to it. Matching already is the ordinary case and the
-    // one that keeps this cheap: the same bytes restored into a second target
-    // directory want the same mode the first one gave them.
+    // every path linked to it, and this restore cannot be the only one holding
+    // an opinion about it. Matching already is the ordinary case and the one
+    // that keeps this cheap: the same bytes restored into a second target
+    // directory want the mode the first one gave them.
     //
-    // Otherwise the object has to be relabelled, which is only this
-    // compilation's business to do while the store's own entry is the sole
-    // link. Once somebody else's target directory holds one, their outputs
-    // answer to this mode too, and the way to give this destination a
-    // different one is to copy. Reached by an output the compiler restricted
-    // to its owner whose bytes another crate published openly, and by a blob
-    // fetched from a remote under whatever mode its download had.
+    // Otherwise the object is relabelled, under one rule: a relabel may only
+    // take permissions away. Restores of the same digest race each other --
+    // two can read this link count in the same instant -- so the mode has to
+    // be safe under whichever order they land in, and the way to get that is
+    // to make it move in one direction only. Tightening is safe in any order:
+    // the worst outcome is an output less readable than its record asked for,
+    // and the owner running the build can always read it. Widening is not: it
+    // would publish another checkout's owner-private artifact to every local
+    // user who can reach that directory. An output needing permissions this
+    // object does not already carry gets a private copy instead.
     if current != wanted {
-        if metadata.nlink() != 1 {
+        if wanted & !current != 0 {
             return false;
         }
         if std::fs::set_permissions(source, std::fs::Permissions::from_mode(wanted)).is_err() {
@@ -280,6 +290,17 @@ fn hard_link_cached_output(_source: &Path, _destination: &Path, _node: &CacheFil
 #[cfg(unix)]
 fn linkable_mode(node: &CacheFileNode) -> u32 {
     (node.mode & 0o444) | if node.executable { 0o111 } else { 0 }
+}
+
+/// Whether a mode leaves the object readable by the user who owns the store.
+///
+/// A recorded mode with no read bits is valid -- nothing rejects `0o200` --
+/// and linking under one would set the store's own copy of those bytes to a
+/// mode that cannot be opened, which outlives this restore and takes the
+/// cache entry with it. Such an output gets a private copy.
+#[cfg(unix)]
+fn readable_by_owner(mode: u32) -> bool {
+    mode & 0o400 != 0
 }
 
 /// Give a file the modification time a compiler writing it now would.
@@ -859,10 +880,11 @@ mod materialization_tests {
     }
 
     #[test]
-    fn an_object_nothing_else_links_is_relabelled_to_what_the_output_needs() {
+    fn an_object_that_would_have_to_gain_permissions_is_copied() {
         let root = tempfile::tempdir().unwrap();
         // What a blob fetched from a remote looks like: the right bytes under
-        // whatever mode the download happened to have.
+        // whatever mode the download happened to have. Linking would have to
+        // add the executable bit to an object other checkouts may hold.
         let source = blob(root.path(), "blob", b"binary", 0o644);
         let before = std::fs::metadata(&source).unwrap();
 
@@ -875,12 +897,34 @@ mod materialization_tests {
         )
         .unwrap();
 
-        // The store's own entry was the only link, so giving the object the
-        // mode this output needs takes nothing from anybody.
-        assert_eq!(materialization, Materialization::Hardlink);
-        let after = std::fs::metadata(&staged).unwrap();
-        assert_eq!(after.ino(), before.ino());
-        assert_eq!(after.permissions().mode() & 0o777, 0o555);
+        assert_eq!(materialization, Materialization::Copy);
+        assert_ne!(std::fs::metadata(&staged).unwrap().ino(), before.ino());
+        assert_eq!(
+            std::fs::metadata(&source).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "an object nothing may widen keeps the mode it had"
+        );
+    }
+
+    #[test]
+    fn an_output_whose_recorded_mode_cannot_be_read_is_copied() {
+        let root = tempfile::tempdir().unwrap();
+        let source = blob(root.path(), "blob", b"write-only", 0o644);
+        let mut unreadable = node(b"write-only", false);
+        // Nothing rejects a recorded mode with no read bits. Linking under one
+        // would leave the store's own copy of these bytes unopenable.
+        unreadable.mode = 0o200;
+
+        let (_staged, materialization) =
+            stage_verified_cached_output_with(root.path(), 0, &source, &unreadable, no_clone)
+                .unwrap();
+
+        assert_eq!(materialization, Materialization::Copy);
+        assert_eq!(
+            std::fs::metadata(&source).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "the store's object stays readable for every later lookup"
+        );
     }
 
     #[test]
@@ -924,11 +968,10 @@ mod materialization_tests {
     }
 
     #[test]
-    fn an_object_another_checkout_already_links_is_copied_rather_than_relabelled() {
+    fn relabelling_a_shared_object_may_only_take_permissions_away() {
         let root = tempfile::tempdir().unwrap();
         let source = blob(root.path(), "blob", b"shared", 0o444);
-        // Somebody else's target directory is already holding this object at
-        // the mode its own output needed.
+        // Somebody else's target directory is already holding this object.
         let theirs = root.path().join("their-output");
         std::fs::hard_link(&source, &theirs).unwrap();
         let mut private = node(b"shared", false);
@@ -937,15 +980,18 @@ mod materialization_tests {
         let (staged, materialization) =
             stage_verified_cached_output_with(root.path(), 0, &source, &private, no_clone).unwrap();
 
-        assert_eq!(materialization, Materialization::Copy);
+        // Two restores of one digest can read the link count in the same
+        // instant, so the rule has to hold whichever order they land in.
+        // Tightening does: their link ends up less readable than it was,
+        // never more, and its owner can still read it.
+        assert_eq!(materialization, Materialization::Hardlink);
         assert_eq!(
             std::fs::metadata(&staged).unwrap().permissions().mode() & 0o777,
-            0o600
+            0o400
         );
         assert_eq!(
             std::fs::metadata(&theirs).unwrap().permissions().mode() & 0o777,
-            0o444,
-            "the mode their link answers to is left alone"
+            0o400
         );
     }
 
