@@ -46,6 +46,38 @@ impl Check {
             detail: detail.into(),
         }
     }
+
+    /// Answer a failed clone probe with what a restore will fall back to.
+    ///
+    /// A hard link works wherever the store and the target directory share a
+    /// filesystem, which covers most machines that cannot clone at all --
+    /// notably every ext4 one. It is a narrower arrangement than a clone, so
+    /// the report says which of the two this location gets, and says plainly
+    /// when it gets neither.
+    fn and_then_link(self, cache_dir: &Path, target_dir: &Path, hardlink: bool) -> Self {
+        if self.severity == Severity::Pass {
+            return self;
+        }
+        let layout = format!("{} -> {}", cache_dir.display(), target_dir.display());
+        if !hardlink {
+            return Check::warn(
+                "restore",
+                format!(
+                    "{layout}: cannot clone and restore_hardlink is off; every restored byte is copied"
+                ),
+            );
+        }
+        if hardlink_probe(cache_dir, target_dir).severity == Severity::Pass {
+            return Check::pass(
+                "restore",
+                format!("{layout}: cannot clone; restores hard link the cached object instead"),
+            );
+        }
+        Check::warn(
+            "restore",
+            format!("{layout}: cannot clone or link; every restored byte is copied"),
+        )
+    }
 }
 
 /// Run all diagnostics and fail only when mbx cannot operate as configured.
@@ -142,7 +174,11 @@ async fn check(config: &Config, toolchain: Option<&str>) -> Vec<Check> {
         ),
     ));
     for destination in restore_destinations(config, &cargo, toolchain) {
-        checks.push(reflink_check(&config.cache_dir, &destination));
+        checks.push(restore_check(
+            &config.cache_dir,
+            &destination,
+            config.restore_hardlink,
+        ));
     }
     checks.push(archive_check(config));
     checks.push(setup_check());
@@ -317,9 +353,25 @@ fn restore_destinations(config: &Config, cargo: &OsStr, toolchain: Option<&str>)
     destinations
 }
 
-fn reflink_check(cache_dir: &Path, target_dir: &Path) -> Check {
+/// Say how a restore to this location will actually put bytes there.
+///
+/// The mechanism decides what a cache hit costs. A clone or a link writes
+/// nothing; a copy writes every restored byte, which on a warm build of a
+/// mid-size workspace is gigabytes. Which one applies is a property of the
+/// filesystem under the target directory and of whether it is the same
+/// filesystem the store is on, so it is worth probing rather than assuming --
+/// and worth reporting, because a run that quietly copies looks exactly like
+/// one that does not.
+fn restore_check(cache_dir: &Path, target_dir: &Path, hardlink: bool) -> Check {
     reflink_check_with(cache_dir, target_dir, |source, destination| {
         reflink_copy::reflink(source, destination)
+    })
+    .and_then_link(cache_dir, target_dir, hardlink)
+}
+
+fn hardlink_probe(cache_dir: &Path, target_dir: &Path) -> Check {
+    reflink_check_with(cache_dir, target_dir, |source, destination| {
+        std::fs::hard_link(source, destination)
     })
 }
 
@@ -352,7 +404,7 @@ fn reflink_check_with(
         clone(&source, &destination)
     };
     match probe() {
-        Ok(()) => Check::pass("reflink", format!("{layout}: cloning is supported")),
+        Ok(()) => Check::pass("restore", format!("{layout}: cloning is supported")),
         Err(error) => {
             let reason = match error.kind() {
                 std::io::ErrorKind::CrossesDevices => "different filesystems",
@@ -361,7 +413,7 @@ fn reflink_check_with(
                 _ => "clone probe failed",
             };
             Check::warn(
-                "reflink",
+                "restore",
                 format!(
                     "{layout}: {reason} ({error}); restores to this location may require copying"
                 ),
@@ -800,6 +852,7 @@ mod tests {
             verify_sample_rate: 0,
             incremental: false,
             share_out_dir: false,
+            restore_hardlink: true,
             share_workspace_root: false,
             build_script_execution: false,
             events: false,
@@ -844,6 +897,7 @@ mod tests {
             verify_sample_rate: 0,
             incremental: false,
             share_out_dir: false,
+            restore_hardlink: true,
             share_workspace_root: false,
             build_script_execution: false,
             events: false,

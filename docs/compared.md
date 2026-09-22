@@ -48,11 +48,14 @@ invocation together; mbx defers to an existing wrapper. Follow the
 content-addressed compiler results to share work across checkouts and support
 Rust plus C and C++ workflows. The projects do not share code.
 
-kache uses hardlinks for local output sharing and offers a persistent service.
-mbx starts an agent per command and tries to reflink outputs into place.
-Reflinks share data blocks until a file is modified; writes to a restored
-output do not modify the cache object. On filesystems without clone support,
-mbx copies the bytes, so the disk savings depend on the filesystem.
+kache offers a persistent service; mbx starts an agent per command. Both
+restore outputs without copying where they can. mbx prefers a reflink, whose
+data blocks are shared until a file is modified, so writes to a restored output
+never reach the cache object. Where the filesystem cannot clone -- ext4, most
+importantly -- both fall back to a hard link to the stored object, which is
+read-only so that a rewrite is refused rather than shared. mbx copies the bytes
+only when it can do neither, and `restore_hardlink = false` asks it to copy
+instead of linking.
 
 mbx also manages the lifetime of target directories it creates and coordinates
 simultaneous builds through a shared compiler pool. These features address

@@ -41,6 +41,8 @@ pub(super) struct StatsReport {
     restored_output_bytes: u64,
     reflinked_output_files: u64,
     reflinked_output_bytes: u64,
+    hardlinked_output_files: u64,
+    hardlinked_output_bytes: u64,
     copied_output_files: u64,
     copied_output_bytes: u64,
     reused_output_files: u64,
@@ -122,6 +124,8 @@ impl From<&AgentStats> for StatsReport {
             restored_output_bytes: stats.restored_output_bytes,
             reflinked_output_files: stats.reflinked_output_files,
             reflinked_output_bytes: stats.reflinked_output_bytes,
+            hardlinked_output_files: stats.hardlinked_output_files,
+            hardlinked_output_bytes: stats.hardlinked_output_bytes,
             copied_output_files: stats.copied_output_files,
             copied_output_bytes: stats.copied_output_bytes,
             reused_output_files: stats.reused_output_files,
@@ -301,9 +305,11 @@ pub(crate) fn display_stats(stats: &AgentStats, config: &Config, style: SummaryS
     }
     if stats.restored_output_files > 0 {
         note(&format!(
-            "mbx[cache]: materialization: {} outputs ({}) reflinked, {} outputs ({}) copied, {} outputs ({}) already in place",
+            "mbx[cache]: materialization: {} outputs ({}) reflinked, {} outputs ({}) hard linked, {} outputs ({}) copied, {} outputs ({}) already in place",
             stats.reflinked_output_files,
             ByteSize::b(stats.reflinked_output_bytes).display().iec(),
+            stats.hardlinked_output_files,
+            ByteSize::b(stats.hardlinked_output_bytes).display().iec(),
             stats.copied_output_files,
             ByteSize::b(stats.copied_output_bytes).display().iec(),
             stats.reused_output_files,

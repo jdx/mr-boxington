@@ -203,6 +203,8 @@ struct AtomicAgentStats {
     restored_output_bytes: AtomicU64,
     reflinked_output_files: AtomicU64,
     reflinked_output_bytes: AtomicU64,
+    hardlinked_output_files: AtomicU64,
+    hardlinked_output_bytes: AtomicU64,
     copied_output_files: AtomicU64,
     copied_output_bytes: AtomicU64,
     reused_output_files: AtomicU64,
@@ -1845,6 +1847,8 @@ impl CacheAgent {
             restored_output_bytes: self.stats.restored_output_bytes.load(Ordering::Relaxed),
             reflinked_output_files: self.stats.reflinked_output_files.load(Ordering::Relaxed),
             reflinked_output_bytes: self.stats.reflinked_output_bytes.load(Ordering::Relaxed),
+            hardlinked_output_files: self.stats.hardlinked_output_files.load(Ordering::Relaxed),
+            hardlinked_output_bytes: self.stats.hardlinked_output_bytes.load(Ordering::Relaxed),
             copied_output_files: self.stats.copied_output_files.load(Ordering::Relaxed),
             copied_output_bytes: self.stats.copied_output_bytes.load(Ordering::Relaxed),
             reused_output_files: self.stats.reused_output_files.load(Ordering::Relaxed),
@@ -2473,6 +2477,14 @@ impl CacheAgent {
         atomic_saturating_add(
             &self.stats.reflinked_output_bytes,
             restore.reflinked_output_bytes,
+        );
+        atomic_saturating_add(
+            &self.stats.hardlinked_output_files,
+            restore.hardlinked_output_files,
+        );
+        atomic_saturating_add(
+            &self.stats.hardlinked_output_bytes,
+            restore.hardlinked_output_bytes,
         );
         atomic_saturating_add(&self.stats.copied_output_files, restore.copied_output_files);
         atomic_saturating_add(&self.stats.copied_output_bytes, restore.copied_output_bytes);

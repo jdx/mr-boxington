@@ -114,7 +114,7 @@ crate's merge metadata and runs rustdoc's inexpensive finalization step after
 restoring them, so cached dependency documentation remains composable and the
 shared indexes do not depend on restore order.
 
-## Copy-on-write output restoration
+## Output restoration
 
 The cache agent verifies each local CAS blob against its digest before returning
 it to the rustc wrapper. The wrapper first tries to reflink that verified blob
@@ -126,11 +126,28 @@ all of its data after verification. Writes to a restored output cannot change
 the CAS object.
 
 Reflinks require support from the filesystem and generally require the cache
-and target directory to be on the same filesystem. When cloning is unavailable,
-mbx copies the bytes instead. The session summary reports the file count and
-logical size handled by each path; `MBX_STATS_REPORT` includes the same values
-as `reflinked_output_files`, `reflinked_output_bytes`, `copied_output_files`,
-and `copied_output_bytes`.
+and target directory to be on the same filesystem. Where cloning is
+unavailable, mbx hard links the cached object into place instead, and copies
+the bytes only when it cannot do either. ext4, which most Linux CI runners and
+many Linux developer machines use, has no clone support at all, so on those
+machines linking is what keeps a warm restore from writing every cached byte.
+
+A hard link is the stored object rather than a copy of it, so mbx makes the
+object read-only before linking to it: a compiler that would overwrite a
+restored output is refused by the filesystem instead of rewriting bytes every
+other checkout shares. mbx unlinks such an output before it runs a real
+compiler, so rebuilding through mbx is unaffected. Running `cargo` directly in
+a target directory mbx filled can report `output file ... is not writeable` for
+a unit it decides to rebuild; `mbx clean` or removing the file resolves it, and
+`restore_hardlink = false` avoids it by keeping every restored output a private
+writable copy. Reflinked outputs are private copies already and are made
+writable on restore, so this applies only where cloning is unavailable.
+
+The session summary reports the file count and logical size handled by each
+path; `MBX_STATS_REPORT` includes the same values as `reflinked_output_files`,
+`reflinked_output_bytes`, `hardlinked_output_files`, `hardlinked_output_bytes`,
+`copied_output_files`, and `copied_output_bytes`. `mbx doctor` reports which of
+the three a restore to a given target directory will use.
 
 This is filesystem copy-on-write, not a placeholder or userspace on-demand
 filesystem. Restored paths retain normal file semantics on every supported

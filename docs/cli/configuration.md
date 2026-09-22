@@ -346,6 +346,14 @@ File containing a bearer token.
 
 Remote cache URL.
 
+### `restore_hardlink`
+
+- **Type:** `bool`
+- **Default:** `true`
+- **Set with:** `MBX_RESTORE_HARDLINK`
+
+Restore cached outputs by hard link when the filesystem cannot clone them, instead of copying their bytes. Filesystems with clone support (APFS, Btrfs, XFS with reflink, ZFS) are unaffected: they clone either way. Elsewhere -- ext4 above all -- this is the difference between a restore that writes nothing and one that writes every cached byte. A hard-linked output is the store's object, so it is read-only; mbx unlinks it before a compiler rewrites it, but `cargo` run directly in the same target directory reports that the output is not writeable. Disable to keep every restored output a private, writable copy.
+
 ### `savings`
 
 - **Type:** `string`

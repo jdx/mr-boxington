@@ -41,6 +41,9 @@ pub(crate) struct Tally {
     pub builds: u64,
     pub cached_compilations: u64,
     pub avoided_compiler_ns: u64,
+    /// Output bytes shared with the store rather than copied, by reflink or
+    /// by hard link. Named for the mechanism that came first, because the
+    /// on-disk ledger persists under this key.
     pub reflinked_bytes: u64,
     /// Sum of removed file lengths; does not measure physical reclamation.
     pub freed_target_bytes: u64,
@@ -70,6 +73,9 @@ pub(crate) struct Delta {
     pub builds: u64,
     pub cached_compilations: u64,
     pub avoided_compiler_ns: u64,
+    /// Output bytes shared with the store rather than copied, by reflink or
+    /// by hard link. Named for the mechanism that came first, because the
+    /// on-disk ledger persists under this key.
     pub reflinked_bytes: u64,
     /// Sum of removed file lengths; does not measure physical reclamation.
     pub freed_target_bytes: u64,
@@ -304,16 +310,16 @@ fn facts_worth_telling(tally: &Tally, facts: &SessionFacts) -> Vec<Candidate> {
             cheeky: tellings![
                 "mbx[savings]: every checkout believes it owns {size} of outputs. the disk keeps one copy and says nothing.",
                 "mbx[savings]: {size} of outputs, one copy, several very confident checkouts.",
-                "mbx[savings]: reflinked {size} into place. copying is for people with disk to spare.",
+                "mbx[savings]: linked {size} into place. copying is for people with disk to spare.",
                 "mbx[savings]: {size} of outputs exist once and appear everywhere. do not tell the checkouts.",
                 "mbx[savings]: {size} of target/ is an elaborate illusion. the disk is in on it.",
                 "mbx[savings]: lent the same {size} to every checkout at once. none of them has checked.",
                 "mbx[savings]: {size} shared among checkouts that each believe they are an only child.",
                 "mbx[savings]: {size} on loan to every checkout simultaneously. the paperwork is an inode.",
-                "mbx[savings]: {size} of outputs materialized by reflink. the copy machine stays off.",
+                "mbx[savings]: {size} of outputs materialized without a copy. the copy machine stays off.",
                 "mbx[savings]: {size} in every checkout, {size} on disk. arithmetic declined to comment.",
             ],
-            plain: format!("mbx[savings]: {size} of outputs reflinked rather than copied"),
+            plain: format!("mbx[savings]: {size} of outputs shared rather than copied"),
         });
     }
     if tally.cached_compilations >= MIN_CACHED_COMPILATIONS {

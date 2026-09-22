@@ -95,6 +95,7 @@ pub(crate) const STAGING_ENV: &str = "MBX_STAGING_DIR";
 pub(crate) const BUILD_ENV: &str = "MBX_BUILD";
 pub(crate) const VERIFY_ENV: &str = "MBX_VERIFY";
 pub(crate) const SHARE_OUT_DIR_ENV: &str = "MBX_SHARE_OUT_DIR";
+pub(crate) const RESTORE_HARDLINK_ENV: &str = "MBX_RESTORE_HARDLINK";
 pub(crate) const SHARE_WORKSPACE_ROOT_ENV: &str = "MBX_SHARE_WORKSPACE_ROOT";
 pub(crate) const BUILD_SCRIPT_EXECUTION_ENV: &str = "MBX_BUILD_SCRIPT_EXECUTION";
 pub(crate) const FORWARD_COMPILER_NOTIFICATIONS_ENV: &str = "MBX_FORWARD_COMPILER_NOTIFICATIONS";
@@ -131,6 +132,7 @@ pub struct CacheSession {
     verify_sample_rate: u8,
     incremental: bool,
     share_out_dir: bool,
+    restore_hardlink: bool,
     share_workspace_root: bool,
     cc_store_path_specific: bool,
     build_script_execution: bool,
@@ -274,6 +276,7 @@ impl CacheSession {
             verify_sample_rate: config.verify_sample_rate,
             incremental: config.incremental,
             share_out_dir: config.share_out_dir,
+            restore_hardlink: config.restore_hardlink,
             share_workspace_root: config.share_workspace_root,
             cc_store_path_specific: config.cc_store_path_specific,
             build_script_execution: config.build_script_execution,
@@ -429,6 +432,10 @@ impl CacheSession {
         environment.insert(
             SHARE_OUT_DIR_ENV.into(),
             if self.share_out_dir { "1" } else { "0" }.into(),
+        );
+        environment.insert(
+            RESTORE_HARDLINK_ENV.into(),
+            if self.restore_hardlink { "1" } else { "0" }.into(),
         );
         environment.insert(
             SHARE_WORKSPACE_ROOT_ENV.into(),
@@ -816,6 +823,7 @@ impl AgentEventObserver for EventStream {
                         output_files: restore.output_files,
                         output_bytes: restore.output_bytes,
                         reflinked_output_bytes: restore.reflinked_output_bytes,
+                        hardlinked_output_bytes: restore.hardlinked_output_bytes,
                         copied_output_bytes: restore.copied_output_bytes,
                     },
                     diagnostic,
@@ -1866,6 +1874,14 @@ pub fn cache_links_supported() -> bool {
 pub(crate) fn cache_links_requested() -> bool {
     cache_links_supported()
         && std::env::var_os(CACHE_LINKS_ENV).is_none_or(|value| !value.is_empty() && value != "0")
+}
+
+/// Whether a restore may hard link the store's object into the target
+/// directory when the filesystem cannot clone it. Read the same way as verify
+/// mode, except that an absent value means yes: a shim started outside a
+/// session still restores, and a copy is the slower answer, not the safer one.
+pub(crate) fn restore_hardlink_requested() -> bool {
+    std::env::var_os(RESTORE_HARDLINK_ENV).is_none_or(|value| !value.is_empty() && value != "0")
 }
 
 /// Whether the shim may make a compilation independent of its `OUT_DIR` so two

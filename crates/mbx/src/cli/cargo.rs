@@ -561,7 +561,12 @@ pub(super) fn account_session(
         }
         delta.cached_compilations = stats.hits;
         delta.avoided_compiler_ns = stats.avoided_compiler_duration_ns;
-        delta.reflinked_bytes = stats.reflinked_output_bytes;
+        // Both mechanisms save the same thing: a second copy of bytes the
+        // store already holds. The ledger counts them together under the name
+        // it has always persisted under.
+        delta.reflinked_bytes = stats
+            .reflinked_output_bytes
+            .saturating_add(stats.hardlinked_output_bytes);
     }
     if let Some(line) =
         crate::savings::record_and_describe(&config.store_dir(), &delta, &facts, settings.savings)

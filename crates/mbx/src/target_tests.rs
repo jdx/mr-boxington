@@ -10,6 +10,7 @@ fn test_config(root: &Path, views: bool) -> Config {
         verify_sample_rate: 0,
         incremental: false,
         share_out_dir: false,
+        restore_hardlink: true,
         share_workspace_root: false,
         build_script_execution: false,
         events: false,

@@ -240,6 +240,73 @@ def rust_release(version: str | None) -> str | None:
     return parts[1] if len(parts) > 1 else None
 
 
+def filesystem(path: Path) -> dict[str, object]:
+    """The filesystem the timed builds run on, and whether it can clone.
+
+    Every store and every target directory in a run lives under one scratch
+    tree, so one answer describes them all. It is worth recording because a
+    cache hit costs whatever putting the bytes in place costs: on a filesystem
+    that can clone a reflink writes nothing, and on one that cannot the restore
+    either links the object or copies every byte. Two runs on the same runner
+    profile can land on different filesystems and produce numbers that are not
+    comparable, with nothing in the results saying so.
+    """
+    described: dict[str, object] = {"path": str(path)}
+    if sys.platform == "linux":
+        probe = subprocess.run(
+            ["findmnt", "--noheadings", "--target", str(path), "--output", "SOURCE,FSTYPE,OPTIONS"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if probe.returncode == 0 and probe.stdout.strip():
+            source, _, rest = probe.stdout.strip().partition(" ")
+            fstype, _, options = rest.strip().partition(" ")
+            described.update(
+                {"source": source, "type": fstype, "options": options.strip()}
+            )
+    else:
+        probe = subprocess.run(
+            ["df", "-P", str(path)], text=True, capture_output=True, check=False
+        )
+        if probe.returncode == 0 and probe.stdout.strip():
+            described["df"] = probe.stdout.strip().splitlines()[-1]
+    described["clones"] = clones_supported(path)
+    return described
+
+
+def clones_supported(path: Path) -> bool | None:
+    """Whether a copy-on-write clone works here, answered by doing one.
+
+    Asked of the filesystem rather than of the platform: a Linux runner may be
+    on ext4 or on XFS with reflink, and the same kernel gives opposite answers.
+
+    Linux only, and deliberately. `cp --reflink=always` fails when it cannot
+    clone, which is the whole question; macOS `cp -c` quietly copies instead
+    and still exits zero, so asking it there would report support that is not
+    there. A wrong answer in the published results is worse than none, and the
+    benchmark runs on Linux.
+    """
+    if sys.platform != "linux":
+        return None
+    probe = Path(tempfile.mkdtemp(dir=path))
+    try:
+        source = probe / "source"
+        source.write_bytes(b"clone probe")
+        return (
+            subprocess.run(
+                ["cp", "--reflink=always", str(source), str(probe / "destination")],
+                capture_output=True,
+                check=False,
+            ).returncode
+            == 0
+        )
+    except OSError:
+        return None
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+
+
 def tool_version(command: str, toolchain: str | None = None) -> str | None:
     """What one tool calls itself, under the toolchain the builds used.
 
@@ -588,6 +655,17 @@ PUBLISHED_STATS = (
     "predictions_loaded",
     "restored_output_files",
     "restored_output_bytes",
+    # How the restore put the bytes there. A warm scenario is almost entirely
+    # this, and the three mechanisms do not cost remotely the same: a clone or
+    # a link writes nothing, a copy writes every restored byte. Published
+    # because a run that quietly copied looks exactly like one that did not,
+    # and the difference is most of the number beside it.
+    "reflinked_output_files",
+    "reflinked_output_bytes",
+    "hardlinked_output_files",
+    "hardlinked_output_bytes",
+    "copied_output_files",
+    "copied_output_bytes",
 )
 
 # What a contention cell publishes beyond its timing: the machine measurements
@@ -1195,6 +1273,10 @@ def main() -> int:
             },
         )
 
+        # Described while the scratch tree still exists, since that is the
+        # filesystem every timed build ran on.
+        filesystem_described = filesystem(work)
+
         runner = Runner(output, cargo_home, mbx)
         scenarios = []
         for name, tools in plan:
@@ -1215,6 +1297,7 @@ def main() -> int:
         "toolchain": rust_release(rustc_version) or subject.get("toolchain"),
         "platform": platform.platform(),
         "runner": os.environ.get("RUNNER_NAME") or os.environ.get("HOSTNAME") or "local",
+        "filesystem": filesystem_described,
         "workflow_run": os.environ.get("GITHUB_RUN_ID"),
         "commit": os.environ.get("GITHUB_SHA"),
         "versions": {
