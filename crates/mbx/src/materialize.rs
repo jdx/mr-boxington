@@ -250,6 +250,25 @@ fn hard_link_cached_output(source: &Path, destination: &Path, node: &CacheFileNo
     let Ok(file) = std::fs::File::open(source) else {
         return false;
     };
+    // Held for the rest of this function, and the reason the mode is read
+    // after it rather than before.
+    //
+    // "Only ever take permissions away" is not a property a process can
+    // establish on its own, because it compares against a mode it read
+    // earlier. Two restores of one object can each read the same starting
+    // mode, each find its own target narrower than that, and apply them in
+    // an order where the second undoes the first: an output already linked
+    // and verified as owner-private is handed back the readership the other
+    // one wanted. Both followed the rule against the value they had; the
+    // value was stale.
+    //
+    // Reading under the lock makes the comparison mean what it says, since
+    // nothing else relabels an object without holding this. The lock is
+    // never waited on: two restores wanting the same object at the same
+    // instant is rare, and copying is a fine answer for the loser.
+    if !take_exclusive_lock(&file) {
+        return false;
+    }
     let Ok(metadata) = file.metadata() else {
         return false;
     };
@@ -334,6 +353,21 @@ fn hard_link_cached_output(_source: &Path, _destination: &Path, _node: &CacheFil
 #[cfg(unix)]
 fn linkable_mode(node: &CacheFileNode) -> u32 {
     (node.mode & 0o444) | if node.executable { 0o111 } else { 0 }
+}
+
+/// Take the advisory lock that serializes relabelling one store object, or
+/// report that another restore holds it.
+///
+/// Advisory rather than mandatory, which is enough: the only code that changes
+/// a published object's mode is the caller of this, so every writer
+/// participates. Readers of the bytes do not take it and are not delayed by
+/// it.
+#[cfg(unix)]
+fn take_exclusive_lock(file: &std::fs::File) -> bool {
+    use std::os::unix::io::AsRawFd as _;
+    // SAFETY: `file` owns this descriptor for the whole call, and `flock`
+    // only reads it. The lock is released when the descriptor closes.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
 
 /// Whether a mode leaves the object readable by the user who owns the store.
@@ -987,6 +1021,45 @@ mod materialization_tests {
             0o111,
             "their binary still runs"
         );
+    }
+
+    #[test]
+    fn an_object_another_restore_is_relabelling_is_copied_rather_than_waited_on() {
+        let root = tempfile::tempdir().unwrap();
+        let source = blob(root.path(), "blob", b"contended", 0o644);
+        // Stand in for the other restore: hold the lock this one would need to
+        // read a mode it can trust.
+        let held = std::fs::File::open(&source).unwrap();
+        assert!(take_exclusive_lock(&held));
+
+        let (staged, materialization) = stage_verified_cached_output_with(
+            root.path(),
+            0,
+            &source,
+            &node(b"contended", false),
+            no_clone,
+        )
+        .unwrap();
+
+        assert_eq!(materialization, Materialization::Copy);
+        assert_eq!(
+            std::fs::metadata(&source).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "the object is left to whoever holds the lock"
+        );
+        assert_eq!(std::fs::read(&staged).unwrap(), b"contended");
+        drop(held);
+
+        // With the lock free, the same restore links as usual.
+        let (_, materialization) = stage_verified_cached_output_with(
+            root.path(),
+            1,
+            &source,
+            &node(b"contended", false),
+            no_clone,
+        )
+        .unwrap();
+        assert_eq!(materialization, Materialization::Hardlink);
     }
 
     #[test]
