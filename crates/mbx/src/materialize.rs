@@ -250,15 +250,26 @@ fn hard_link_cached_output(source: &Path, destination: &Path, node: &CacheFileNo
     // directory want the mode the first one gave them.
     //
     // Otherwise the object is relabelled, under one rule: a relabel may only
-    // take permissions away. Restores of the same digest race each other --
-    // two can read this link count in the same instant -- so the mode has to
-    // be safe under whichever order they land in, and the way to get that is
-    // to make it move in one direction only. Tightening is safe in any order:
-    // the worst outcome is an output less readable than its record asked for,
-    // and the owner running the build can always read it. Widening is not: it
-    // would publish another checkout's owner-private artifact to every local
-    // user who can reach that directory. An output needing permissions this
-    // object does not already carry gets a private copy instead.
+    // take readership away, and may never touch whether the object runs.
+    // Restores of the same digest race each other, so the mode has to be safe
+    // under whichever order they land in, and the way to get that is to let it
+    // move in one direction only.
+    //
+    // Readership tightens safely in any order: the worst outcome is an output
+    // less readable than its record asked for, and the owner running the build
+    // can still read it. Widening it is not safe -- it would publish another
+    // checkout's owner-private artifact to every local user who can reach that
+    // directory.
+    //
+    // The executable bit is neither. It is not a degree of access that can be
+    // given up harmlessly: taking it from a shared object stops every binary
+    // already linked to it from running at all, and a restore of these bytes
+    // as a non-executable output has no business deciding that. So it is not
+    // relabelled in either direction, and an output whose executability
+    // differs from the object's gets a private copy.
+    if current & 0o111 != wanted & 0o111 {
+        return false;
+    }
     if current != wanted {
         if wanted & !current != 0 {
             return false;
@@ -911,6 +922,37 @@ mod materialization_tests {
             std::fs::metadata(&source).unwrap().permissions().mode() & 0o777,
             0o644,
             "an object nothing may widen keeps the mode it had"
+        );
+    }
+
+    #[test]
+    fn a_non_executable_output_never_takes_the_executable_bit_off_a_shared_object() {
+        let root = tempfile::tempdir().unwrap();
+        let source = blob(root.path(), "blob", b"program", 0o555);
+        // A binary in somebody else's target directory is already running off
+        // this object.
+        let theirs = root.path().join("their-binary");
+        std::fs::hard_link(&source, &theirs).unwrap();
+
+        let (staged, materialization) = stage_verified_cached_output_with(
+            root.path(),
+            0,
+            &source,
+            &node(b"program", false),
+            no_clone,
+        )
+        .unwrap();
+
+        // Readership can be given up harmlessly; the right to run cannot.
+        assert_eq!(materialization, Materialization::Copy);
+        assert_eq!(
+            std::fs::metadata(&staged).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert_eq!(
+            std::fs::metadata(&theirs).unwrap().permissions().mode() & 0o111,
+            0o111,
+            "their binary still runs"
         );
     }
 
