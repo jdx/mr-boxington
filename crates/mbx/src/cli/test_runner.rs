@@ -20,8 +20,19 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 const SHIM: &str = "mbx-test-runner";
-/// The runner each target had before this one, by target triple.
+/// The [`Overlay`] the shim reads back.
 const RUNNERS: &str = "MBX_TEST_RUNNERS";
+
+/// What the shim needs from the command that installed it.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Overlay {
+    /// The runner each target had before this one, by target triple.
+    runners: BTreeMap<String, Option<Runner>>,
+    /// The caller's value of each runner key this overlay replaced, handed
+    /// back to the test so a Cargo command it runs finds its own runners
+    /// rather than a shim its `PATH` may no longer reach.
+    restore: BTreeMap<String, Option<String>>,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Runner {
@@ -51,7 +62,7 @@ impl TestRunner {
         // mbx cannot read runs the tests unscheduled rather than failing.
         let resolved = (|| -> Result<_> {
             let cargo = cargo_config2::Config::load()?;
-            let inherited = inherited_runners();
+            let inherited = inherited_overlay().runners;
             let mut keys = Vec::new();
             let mut runners = BTreeMap::new();
             for target in super::launch::requested_targets(&cargo, arguments)? {
@@ -107,10 +118,16 @@ impl TestRunner {
                 .chain(std::env::split_paths(&path)),
         )?;
         environment.insert("PATH".into(), path.to_string_lossy().into_owned());
+        let mut restore = BTreeMap::new();
         for (key, triple) in &self.keys {
+            restore.insert(key.clone(), std::env::var(key).ok());
             environment.insert(key.clone(), format!("{SHIM} {triple}"));
         }
-        environment.insert(RUNNERS.into(), serde_json::to_string(&self.runners)?);
+        let overlay = Overlay {
+            runners: self.runners.clone(),
+            restore,
+        };
+        environment.insert(RUNNERS.into(), serde_json::to_string(&overlay)?);
         Ok(())
     }
 }
@@ -119,7 +136,9 @@ impl TestRunner {
 ///
 /// Configuration overrides on the command line are out of reach for the same
 /// reason as in `cargo run`'s launch: cargo-config2 cannot resolve them, and
-/// an unknown runner must never be replaced.
+/// an unknown runner must never be replaced. A directory change is one too:
+/// Cargo reads configuration from the new directory, cargo-config2 from this
+/// one.
 fn wraps(arguments: &[String]) -> bool {
     let args: Vec<_> = arguments
         .iter()
@@ -130,11 +149,13 @@ fn wraps(arguments: &[String]) -> bool {
         Some("test" | "t")
     ) && !args.iter().any(|arg| {
         arg.starts_with('+')
+            || arg.starts_with("-C")
             || matches!(
                 arg.as_str(),
-                "--config" | "-C" | "--help" | "-h" | "--no-run"
+                "--config" | "--directory" | "--help" | "-h" | "--no-run"
             )
             || arg.starts_with("--config=")
+            || arg.starts_with("--directory=")
     })
 }
 
@@ -142,7 +163,7 @@ fn is_shim(path: &Path) -> bool {
     path.file_stem() == Some(OsStr::new(SHIM))
 }
 
-fn inherited_runners() -> BTreeMap<String, Option<Runner>> {
+fn inherited_overlay() -> Overlay {
     std::env::var(RUNNERS)
         .ok()
         .and_then(|value| serde_json::from_str(&value).ok())
@@ -163,9 +184,8 @@ pub fn dispatch() -> Option<ExitCode> {
             .next()
             .ok_or_else(|| eyre::eyre!("Cargo supplied no test binary"))?;
         let rest: Vec<OsString> = arguments.collect();
-        let runner = inherited_runners()
-            .remove(&*triple.to_string_lossy())
-            .flatten();
+        let mut overlay = inherited_overlay();
+        let runner = overlay.runners.remove(&*triple.to_string_lossy()).flatten();
         let mut command = match &runner {
             Some(runner) => {
                 let mut command = Command::new(&runner.path);
@@ -179,24 +199,40 @@ pub fn dispatch() -> Option<ExitCode> {
             // Explicitly off for shims the test's own builds run, and for any
             // mbx command it starts: that work is charged to this permit.
             .env(crate::scheduler::SCHED_DIR_ENV, "")
-            .env("MBX_SCHEDULER", "0");
-        let demand = crate::scheduler::Demand::test(
-            &binary_name(Path::new(&executable)),
-            test_threads(&rest, std::env::var("RUST_TEST_THREADS").ok().as_deref()),
-        );
+            .env("MBX_SCHEDULER", "0")
+            .env_remove(RUNNERS);
+        for (key, value) in &overlay.restore {
+            match value {
+                Some(value) => command.env(key, value),
+                None => command.env_remove(key),
+            };
+        }
+        // Cargo names its test binaries with a metadata hash. Rustdoc runs
+        // each doctest through the same runner, from a temporary binary with
+        // no hash, and those run unscheduled: a permit per doctest would
+        // serialize a crate's doc examples behind half the pool apiece.
+        let demand = test_binary_name(Path::new(&executable)).map(|name| {
+            crate::scheduler::Demand::test(
+                &name,
+                test_threads(&rest, std::env::var("RUST_TEST_THREADS").ok().as_deref()),
+            )
+        });
         // Listing a suite starts no tests and costs nothing worth waiting for.
-        let permit = if lists_tests(&rest) {
-            None
-        } else {
-            crate::scheduler::pool().and_then(|pool| pool.admit(&demand))
-        };
+        let permit = demand
+            .as_ref()
+            .filter(|_| !lists_tests(&rest))
+            .and_then(|demand| {
+                crate::scheduler::pool()?
+                    .admit(demand)
+                    .map(|permit| (demand, permit))
+            });
         let status = command
             .status()
             .wrap_err_with(|| format!("failed to run {}", Path::new(&executable).display()))?;
-        if permit.is_some() {
-            crate::scheduler::record_compiler_memory(&demand, &status);
+        if let Some((demand, permit)) = permit {
+            crate::scheduler::record_compiler_memory(demand, &status);
+            drop(permit);
         }
-        drop(permit);
         Ok(super::cargo::exit_code(status))
     })();
     Some(result.unwrap_or_else(|error| {
@@ -205,23 +241,14 @@ pub fn dispatch() -> Option<ExitCode> {
     }))
 }
 
-/// A test binary's name without the metadata hash Cargo appends to it, so
-/// its memory history survives the hash changing.
-fn binary_name(executable: &Path) -> String {
-    let stem = executable
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    match stem.rsplit_once('-') {
-        Some((name, hash))
-            if !name.is_empty()
-                && hash.len() == 16
-                && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
-        {
-            name.to_owned()
-        }
-        _ => stem,
-    }
+/// A Cargo test binary's name without the metadata hash Cargo appends to it,
+/// so its memory history survives the hash changing. `None` for anything
+/// without that hash, which is not a binary Cargo built.
+fn test_binary_name(executable: &Path) -> Option<String> {
+    let stem = executable.file_stem()?.to_str()?;
+    let (name, hash) = stem.rsplit_once('-')?;
+    (!name.is_empty() && hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| name.to_owned())
 }
 
 /// The thread count libtest will use, when the command or environment says.
@@ -272,22 +299,28 @@ mod tests {
         assert!(!wraps(&strings(&["+nightly", "test"])));
         assert!(!wraps(&strings(&["test", "--config", "a.toml"])));
         assert!(!wraps(&strings(&["test", "--config=a.toml"])));
+        assert!(!wraps(&strings(&["-C", "other", "test"])));
+        assert!(!wraps(&strings(&["-Cother", "test"])));
+        assert!(!wraps(&strings(&["--directory", "other", "test"])));
+        assert!(!wraps(&strings(&["--directory=other", "test"])));
     }
 
     #[test]
-    fn binary_names_drop_only_cargo_s_hash() {
+    fn only_hashed_cargo_binaries_are_test_binaries() {
         assert_eq!(
-            binary_name(Path::new("target/debug/deps/mbx-0123456789abcdef")),
-            "mbx"
+            test_binary_name(Path::new("target/debug/deps/mbx-0123456789abcdef")).as_deref(),
+            Some("mbx")
         );
         assert_eq!(
-            binary_name(Path::new("deps/cache_tests-fedcba9876543210.exe")),
-            "cache_tests"
+            test_binary_name(Path::new("deps/cache_tests-fedcba9876543210.exe")).as_deref(),
+            Some("cache_tests")
         );
-        assert_eq!(binary_name(Path::new("deps/my-tool")), "my-tool");
+        assert_eq!(test_binary_name(Path::new("deps/my-tool")), None);
+        assert_eq!(test_binary_name(Path::new("deps/-0123456789abcdef")), None);
+        // Rustdoc's doctest binaries.
         assert_eq!(
-            binary_name(Path::new("deps/-0123456789abcdef")),
-            "-0123456789abcdef"
+            test_binary_name(Path::new("/tmp/rustdoctestAbC/rust_out")),
+            None
         );
     }
 

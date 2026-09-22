@@ -546,9 +546,14 @@ fn scheduled() {
         Some(weight) => {
             assert_eq!(held.len(), 1, "only this test holds a permit: {held:?}");
             assert!(held[0].contains(&format!("\"weight\":{weight},")), "{held:?}");
-            // Builds this test starts are charged to its permit.
+            // Builds this test starts are charged to its permit, and find
+            // the caller's runners rather than the shim.
             assert_eq!(std::env::var("MBX_SCHEDULER").unwrap(), "0");
             assert_eq!(std::env::var("MBX_SCHED_DIR").unwrap(), "");
+            assert!(std::env::var_os("MBX_TEST_RUNNERS").is_none());
+            for (name, value) in std::env::vars() {
+                assert!(!value.contains("mbx-test-runner"), "{name}={value}");
+            }
         }
         None => {
             assert!(held.is_empty(), "{held:?}");
@@ -558,6 +563,20 @@ fn scheduled() {
 }
 "#,
     );
+    // Rustdoc runs doctests through the same runner; they hold no permit.
+    std::fs::write(
+        root.path().join("src/lib.rs"),
+        r#"
+/// ```
+/// let leases = std::path::Path::new(&std::env::var_os("MBX_CACHE_DIR").unwrap())
+///     .join("scheduler/leases");
+/// let held = std::fs::read_dir(&leases).map(|entries| entries.count()).unwrap_or(0);
+/// assert_eq!(held, 0, "a doctest holds no permit");
+/// ```
+pub fn documented() {}
+"#,
+    )
+    .unwrap();
     let runner = root.path().join("caller-runner");
     std::fs::write(
         &runner,
