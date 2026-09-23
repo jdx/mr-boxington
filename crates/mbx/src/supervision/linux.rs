@@ -427,9 +427,12 @@ fn prune(state: &Path, group: &Path, current: &str) {
         if !clean_orphans(&entry.path(), &actions).is_ok_and(|live| live == 0) {
             continue;
         }
-        // The kernel refuses to remove a group that still has action groups.
+        // The kernel refuses to remove a group that still has action groups
+        // or, for the controller, a replacement watchdog that has not exited.
+        let controller = group.join(format!("controller-{generation}"));
         let _ = std::fs::remove_dir(&actions);
-        if !actions.exists() {
+        let _ = std::fs::remove_dir(&controller);
+        if !actions.exists() && !controller.exists() {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
@@ -505,18 +508,26 @@ fn control(
     if !pressure.valid {
         bail!("memory pressure probes unavailable");
     }
-    let mut ordered: Vec<_> = groups(actions)
-        .into_iter()
-        .filter_map(|path| {
-            let id = path.file_name()?.to_str()?.to_owned();
-            let started = read::<u64>(&registry.join(format!("{id}.json")))?;
-            Some((started, id, path))
-        })
-        .collect();
+    // Compilers finish without the registrar lock, so an action group can
+    // vanish at any point below. Skip it instead of failing the generation.
+    let mut ordered = Vec::new();
+    for path in groups(actions) {
+        let Some(id) = path.file_name().and_then(|s| s.to_str()).map(str::to_owned) else {
+            continue;
+        };
+        let Some(started) = read::<u64>(&registry.join(format!("{id}.json"))) else {
+            continue;
+        };
+        let frozen = match std::fs::read_to_string(path.join("cgroup.freeze")) {
+            Ok(value) => value.trim() == "1",
+            Err(_) if !path.exists() => continue,
+            Err(error) => return Err(error.into()),
+        };
+        ordered.push((started, id, path, frozen));
+    }
     ordered.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
-    let mut frozen = Vec::new();
-    for (_, id, path) in &ordered {
-        frozen.push(std::fs::read_to_string(path.join("cgroup.freeze"))?.trim() == "1");
+    let mut frozen: Vec<_> = ordered.iter().map(|action| action.3).collect();
+    for (_, id, path, _) in &ordered {
         let mut stats = read::<Stats>(&registry.join(format!("{id}.stats"))).unwrap_or_default();
         let memory = std::fs::read_to_string(path.join("memory.current"))
             .ok()
@@ -537,28 +548,16 @@ fn control(
             Change::Freeze(index) => (index, true),
             Change::Resume(index) => (index, false),
         };
-        let (_, id, path) = &ordered[index];
-        std::fs::write(path.join("cgroup.freeze"), if freeze { "1" } else { "0" })?;
-        frozen[index] = freeze;
-        let mut stats = read::<Stats>(&registry.join(format!("{id}.stats"))).unwrap_or_default();
-        if freeze {
-            stats.frozen_since = Some(now);
-            stats.freeze_count += 1;
+        let (_, id, path, _) = &ordered[index];
+        let written = std::fs::write(path.join("cgroup.freeze"), if freeze { "1" } else { "0" });
+        unless_gone(path, written)?;
+        // A compiler that already finished has nothing left to account for.
+        if path.exists() {
+            frozen[index] = freeze;
+            record(registry, id, now, freeze)?;
         } else {
-            stats.resume(now);
+            frozen[index] = false;
         }
-        write(&registry.join(format!("{id}.stats")), &stats)?;
-        // Machine-readable diagnostics survive detached helper lifetimes.
-        use std::io::Write;
-        let mut events = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(registry.join("events.jsonl"))?;
-        writeln!(
-            events,
-            "{}",
-            serde_json::json!({"time_ms":now,"action":id,"event":if freeze {"suspend"} else {"resume"},"suspended_ms":stats.suspended_ms})
-        )?;
     }
     let pending = pool.join("suspended");
     std::fs::create_dir_all(&pending)?;
@@ -569,6 +568,29 @@ fn control(
         let _ = std::fs::remove_file(marker);
     }
     Ok(true)
+}
+
+fn record(registry: &Path, id: &str, now: u64, freeze: bool) -> Result<()> {
+    let mut stats = read::<Stats>(&registry.join(format!("{id}.stats"))).unwrap_or_default();
+    if freeze {
+        stats.frozen_since = Some(now);
+        stats.freeze_count += 1;
+    } else {
+        stats.resume(now);
+    }
+    write(&registry.join(format!("{id}.stats")), &stats)?;
+    // Machine-readable diagnostics survive detached helper lifetimes.
+    use std::io::Write;
+    let mut events = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(registry.join("events.jsonl"))?;
+    writeln!(
+        events,
+        "{}",
+        serde_json::json!({"time_ms":now,"action":id,"event":if freeze {"suspend"} else {"resume"},"suspended_ms":stats.suspended_ms})
+    )?;
+    Ok(())
 }
 
 fn thaw_owned(registry: &Path, group: &Path) {

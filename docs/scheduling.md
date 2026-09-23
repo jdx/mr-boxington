@@ -145,11 +145,11 @@ recovers, suspended work resumes oldest first before new admissions. Frozen
 compilers retain their permits. Freezing stops execution but retains allocated
 memory; it cannot rescue a compilation that is too large to run alone.
 
-A supervisor and an independent watchdog stay outside the compiler cgroups. Losing the supervisor's heartbeat thaws its compiler groups.
-Losing the watchdog's heartbeat disables supervision for new compilers and
-starts a replacement watchdog for the compilers still running. The next
-supervisor removes cgroups and state left by earlier ones once their compilers
-have exited.
+A supervisor and an independent watchdog stay outside the compiler cgroups.
+Losing the supervisor's heartbeat thaws its compiler groups. Losing the
+watchdog's heartbeat starts a replacement watchdog for the compilers still
+running. The next supervisor removes cgroups and state left by earlier ones
+once their compilers have exited.
 Compiler cancellation thaws the owned group before terminating leftover
 processes. Custom compiler wrappers, build-script binaries, test binaries, and
 compilers nested inside a supervised compiler are not eligible.

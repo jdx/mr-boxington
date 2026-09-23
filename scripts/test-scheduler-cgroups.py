@@ -146,6 +146,7 @@ def lifecycle(mbx, root, failure):
                 successor.wait(timeout=10)
                 # The successor's idle shutdown removes the drained generation.
                 assert not registry.exists() and not actions.exists()
+                assert not (group / f"controller-{generation}").exists()
             print(f"PASS supervisor {failure}: compiler tree thawed", flush=True)
         finally:
             if worker.poll() is None:
@@ -209,7 +210,7 @@ def suspension(mbx, root):
                 leases.append(lease)
                 action = actions / identity
                 action.mkdir()
-                child = subprocess.Popen(["sh", "-c", f"echo $$ > {action}/cgroup.procs; exec sleep 120"])
+                child = subprocess.Popen(["sh", "-c", 'echo $$ > "$1/cgroup.procs"; exec sleep 120', "sh", str(action)])
                 children.append((child, action))
                 wait_for(lambda: (action / "cgroup.procs").read_text().strip())
                 (registry / (identity + ".json")).write_text(str(int(time.time() * 1000) + index))
