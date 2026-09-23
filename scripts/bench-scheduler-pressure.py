@@ -24,11 +24,13 @@ def full_stalls(scope):
 def run(args, work, mode):
     cache = work / (mode + "-cache")
     env = os.environ.copy()
-    env.update(MBX_CACHE_DIR=str(cache), MBX_GC_AUTO="0", MBX_REMOTE_MODE="off",
+    env.update(MBX_CACHE_DIR=str(cache), MBX_GC_AUTO="0",
                MBX_SCHEDULER_CPUS="4", MBX_SCHEDULER_PRESSURE="0" if mode == "baseline" else "1",
                MBX_SCHEDULER_SUSPEND="1" if mode == "suspension" else "0",
                MBX_SCHEDULER_CGROUP_ROOT=str(args.root), CARGO_INCREMENTAL="0")
     env.pop("MBX_DISABLE", None)
+    env.pop("MBX_REMOTE_URL", None)
+    env.pop("MBX_REMOTE_MODE", None)
     children, logs, targets = [], [], []
     start_stalls = full_stalls(args.scope)
     started = time.monotonic()
@@ -78,8 +80,9 @@ if __name__ == "__main__":
     parser.add_argument("--scope", type=Path, required=True)
     parser.add_argument("--functions", type=int, default=6000)
     parser.add_argument("--work", type=Path, required=True)
+    parser.add_argument("--mode", choices=("baseline", "admission", "suspension"))
     args = parser.parse_args()
     args.mbx = args.mbx.resolve()
     args.work.mkdir(parents=True, exist_ok=True)
-    results = [run(args, args.work, mode) for mode in ("baseline", "admission", "suspension")]
+    results = [run(args, args.work, mode) for mode in ([args.mode] if args.mode else ("baseline", "admission", "suspension"))]
     (args.work / "results.json").write_text(json.dumps(results, indent=2) + "\n")
