@@ -49,6 +49,40 @@ fn helper(
     Ok(command.spawn()?)
 }
 
+/// Compiler identity probing can recognize a wrapper's forwarded --version.
+/// Suspension is narrower: accept conventional native drivers, never scripts
+/// or arbitrarily named launchers that may own unrelated side effects.
+pub(super) fn direct_driver(program: &std::ffi::OsStr) -> bool {
+    use std::io::Read;
+    let Some(name) = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    let name = name
+        .rsplit_once('-')
+        .filter(|(_, version)| {
+            !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+        })
+        .map_or(name, |(name, _)| name);
+    let driver = name.rsplit('-').next().unwrap_or(name);
+    if !matches!(
+        driver,
+        "rustc" | "cc" | "c++" | "gcc" | "g++" | "clang" | "clang++"
+    ) {
+        return false;
+    }
+    let Ok(path) = which::which(program) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    std::fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut magic))
+        .is_ok()
+        && magic == *b"\x7fELF"
+}
+
 pub(super) fn prepare(command: &mut Command, pool: &Path, root: &Path) -> Result<Action> {
     if !root.is_absolute() {
         bail!("delegated cgroup root must be absolute");
@@ -514,4 +548,26 @@ fn control(
         let _ = std::fs::remove_file(marker);
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod eligibility_tests {
+    use super::*;
+    #[test]
+    fn native_drivers_are_distinguished_from_forwarding_scripts() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        for (name, bytes, accepted) in [
+            ("rustc", &b"\x7fELF"[..], true),
+            ("aarch64-linux-gnu-gcc-13", &b"\x7fELF"[..], true),
+            ("clang++-18", &b"\x7fELF"[..], true),
+            ("custom-launcher", &b"\x7fELF"[..], false),
+            ("gcc", &b"#!/bin/sh\nexec /usr/bin/gcc \"$@\""[..], false),
+        ] {
+            let path = directory.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(direct_driver(path.as_os_str()), accepted, "{name}");
+        }
+    }
 }

@@ -32,6 +32,9 @@ pub(crate) fn prepare(command: &mut Command, eligible: bool) -> Option<Action> {
     }
     #[cfg(target_os = "linux")]
     {
+        if !linux::direct_driver(command.get_program()) {
+            return None;
+        }
         let root = std::env::var_os("MBX_SCHED_CGROUP_ROOT")
             .map(std::path::PathBuf::from)
             .or(settings.cgroup_root);

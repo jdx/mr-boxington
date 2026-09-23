@@ -151,7 +151,7 @@ starts a replacement watchdog for the compilers still running. The next
 supervisor removes cgroups and state left by earlier ones once their compilers
 have exited.
 Compiler cancellation thaws the owned group before terminating leftover
-processes. Custom Rust wrappers, build-script binaries, test binaries, and
+processes. Custom compiler wrappers, build-script binaries, test binaries, and
 compilers nested inside a supervised compiler are not eligible.
 
 If delegation is unavailable or the platform is unsupported, mbx warns once per
