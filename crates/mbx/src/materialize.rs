@@ -1032,7 +1032,9 @@ mod materialization_tests {
         if let Some(source) = std::env::var_os(HOLD_RELABEL_LOCK_ENV) {
             let held = std::fs::File::open(source).unwrap();
             assert!(take_exclusive_lock(&held));
-            println!("locked");
+            // On stderr, which the harness leaves alone: its stdout puts
+            // `test <name> ... ` in front of whatever a serial run prints.
+            eprintln!("locked");
             // Held until the parent kills this process, or goes away itself
             // and closes the pipe.
             let _ = std::io::stdin().read_line(&mut String::new());
@@ -1055,12 +1057,13 @@ mod materialization_tests {
             ])
             .env(HOLD_RELABEL_LOCK_ENV, &source)
             .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        let stdout = std::io::BufReader::new(held.stdout.take().unwrap());
+        let stderr = std::io::BufReader::new(held.stderr.take().unwrap());
         assert!(
-            stdout
+            stderr
                 .lines()
                 .any(|line| line.is_ok_and(|line| line == "locked")),
             "the other restore never took the lock"
