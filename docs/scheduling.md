@@ -138,9 +138,14 @@ suspend = true
 cgroup_root = "/sys/fs/cgroup/my-delegated-builds"
 ```
 
-This stage establishes process supervision and recovery; automatic freezing is
-added separately. A supervisor and an independent watchdog stay outside the
-compiler cgroups. Losing the supervisor's heartbeat thaws its compiler groups.
+After pressure persists for two seconds, mbx can freeze the newest eligible
+compiler tree, at most one per second. The oldest eligible action keeps running;
+when it finishes its successor is resumed to preserve progress. After pressure
+recovers, suspended work resumes oldest first before new admissions. Frozen
+compilers retain their permits. Freezing stops execution but retains allocated
+memory; it cannot rescue a compilation that is too large to run alone.
+
+A supervisor and an independent watchdog stay outside the compiler cgroups. Losing the supervisor's heartbeat thaws its compiler groups.
 Losing the watchdog's heartbeat disables supervision for new compilers and
 starts a replacement watchdog for the compilers still running. The next
 supervisor removes cgroups and state left by earlier ones once their compilers
@@ -152,3 +157,10 @@ compilers nested inside a supervised compiler are not eligible.
 If delegation is unavailable or the platform is unsupported, mbx warns once per
 session and continues with admission scheduling. Enabling this option does not
 provision systemd units, grant permissions, or modify host cgroup limits.
+
+Suspension/resumption events and per-action memory and suspended-time statistics
+are recorded beneath `scheduler/supervision-*/` in the cache directory. Compiler
+completion reports time spent suspended. Probe failures or a lost watchdog
+heartbeat thaw the generation and stop its supervisor. Suspension never kills
+and retries a compilation; termination of orphaned descendants is cancellation
+cleanup only.

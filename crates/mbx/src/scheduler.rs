@@ -820,6 +820,13 @@ impl Pool {
         let mut pressure = (self.pressure && self.bytes_per_permit > 0)
             .then(|| crate::pressure::sample(&self.dir, now, self.pressure_probe).ok())
             .flatten();
+        if self.pressure
+            && self.bytes_per_permit > 0
+            && !live.is_empty()
+            && crate::supervision::resumes_pending(&self.dir, now)
+        {
+            return Ok(None);
+        }
         if !live.is_empty()
             && let Some(state) = &pressure
             && state.valid

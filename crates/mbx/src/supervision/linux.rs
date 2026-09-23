@@ -159,6 +159,16 @@ impl Action {
 impl Drop for Action {
     fn drop(&mut self) {
         let _ = thaw(&self.path);
+        if let Some(mut stats) = read::<Stats>(&self.registry.join(format!("{}.stats", self.id))) {
+            stats.resume(crate::pressure::now_ms());
+            let _ = write(&self.registry.join(format!("{}.stats", self.id)), &stats);
+            if stats.suspended_ms > 0 {
+                crate::session::report_shim_warning(&format!(
+                    "compiler resumed after {:.2}s suspended for memory pressure",
+                    stats.suspended_ms as f64 / 1_000.0
+                ));
+            }
+        }
         let _ = std::fs::remove_file(self.registry.join(format!("{}.json", self.id)));
         // All processes normally exited with the compiler. Cancellation may
         // leave descendants: thaw first, then terminate this owned tree only.
@@ -295,6 +305,8 @@ fn supervise(
 ) -> Result<()> {
     let mut idle = Instant::now();
     let mut respawned = Instant::now();
+    let mut policy = super::policy::Policy::default();
+    let mut monitored = Instant::now();
     loop {
         if !read::<u64>(&registry.join("watchdog.json")).is_some_and(fresh) {
             std::fs::write(registry.join("disabled"), "watchdog heartbeat lost")?;
@@ -330,6 +342,11 @@ fn supervise(
                 prune(state, group, generation);
                 return Ok(());
             }
+        }
+        if control(state, registry, actions, generation, &mut policy)? {
+            monitored = Instant::now();
+        } else if monitored.elapsed() >= Duration::from_millis(TIMEOUT) {
+            bail!("pressure sampling blocked by a stale registrar lock");
         }
         std::thread::sleep(TICK);
     }
@@ -386,4 +403,106 @@ fn watchdog(state: &Path, group: &Path, generation: &str) -> Result<()> {
         }
         std::thread::sleep(TICK);
     }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Stats {
+    suspended_ms: u64,
+    frozen_since: Option<u64>,
+    freeze_count: u64,
+    peak_memory: u64,
+}
+impl Stats {
+    fn resume(&mut self, now: u64) {
+        if let Some(start) = self.frozen_since.take() {
+            self.suspended_ms = self.suspended_ms.saturating_add(now.saturating_sub(start));
+        }
+    }
+}
+
+fn control(
+    state: &Path,
+    registry: &Path,
+    actions: &Path,
+    generation: &str,
+    policy: &mut super::policy::Policy,
+) -> Result<bool> {
+    use super::policy::Change;
+    let pool = state
+        .parent()
+        .ok_or_else(|| eyre::eyre!("missing scheduler pool"))?;
+    let now = crate::pressure::now_ms();
+    let mut registrar = fslock::LockFile::open(&pool.join("pool.lock"))?;
+    // Never block the control heartbeat behind an admission process.
+    if !registrar.try_lock()? {
+        return Ok(false);
+    }
+    let pressure = crate::pressure::sample(pool, now, crate::pressure::probe)?;
+    if !pressure.valid {
+        bail!("memory pressure probes unavailable");
+    }
+    let mut ordered: Vec<_> = groups(actions)
+        .into_iter()
+        .filter_map(|path| {
+            let id = path.file_name()?.to_str()?.to_owned();
+            let started = read::<u64>(&registry.join(format!("{id}.json")))?;
+            Some((started, id, path))
+        })
+        .collect();
+    ordered.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    let mut frozen = Vec::new();
+    for (_, id, path) in &ordered {
+        frozen.push(std::fs::read_to_string(path.join("cgroup.freeze"))?.trim() == "1");
+        let mut stats = read::<Stats>(&registry.join(format!("{id}.stats"))).unwrap_or_default();
+        let memory = std::fs::read_to_string(path.join("memory.current"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        stats.peak_memory = stats.peak_memory.max(memory);
+        write(&registry.join(format!("{id}.stats")), &stats)?;
+    }
+    if let Some(change) = policy.step(now, pressure.pressured, &frozen) {
+        // A watchdog can disable this generation without taking our locks.
+        if registry.join("disabled").exists() {
+            bail!("watchdog disabled suspension");
+        }
+        if !read::<u64>(&registry.join("watchdog.json")).is_some_and(fresh) {
+            bail!("watchdog heartbeat lost");
+        }
+        let (index, freeze) = match change {
+            Change::Freeze(index) => (index, true),
+            Change::Resume(index) => (index, false),
+        };
+        let (_, id, path) = &ordered[index];
+        std::fs::write(path.join("cgroup.freeze"), if freeze { "1" } else { "0" })?;
+        frozen[index] = freeze;
+        let mut stats = read::<Stats>(&registry.join(format!("{id}.stats"))).unwrap_or_default();
+        if freeze {
+            stats.frozen_since = Some(now);
+            stats.freeze_count += 1;
+        } else {
+            stats.resume(now);
+        }
+        write(&registry.join(format!("{id}.stats")), &stats)?;
+        // Machine-readable diagnostics survive detached helper lifetimes.
+        use std::io::Write;
+        let mut events = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(registry.join("events.jsonl"))?;
+        writeln!(
+            events,
+            "{}",
+            serde_json::json!({"time_ms":now,"action":id,"event":if freeze {"suspend"} else {"resume"},"suspended_ms":stats.suspended_ms})
+        )?;
+    }
+    let pending = pool.join("suspended");
+    std::fs::create_dir_all(&pending)?;
+    let marker = pending.join(generation);
+    if frozen.iter().any(|frozen| *frozen) {
+        crate::util::write_advisory(&marker, now.to_string().as_bytes())?;
+    } else {
+        let _ = std::fs::remove_file(marker);
+    }
+    Ok(true)
 }
