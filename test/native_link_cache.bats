@@ -42,9 +42,11 @@ EOF
   assert_success
 }
 
-# The test binary in `deps/`, which has no extension to match on.
+# The unit's test binary, which has no extension to match on. Cargo links it
+# into `deps/` before 1.100 and into `build/native_fixture/<hash>/out/` from
+# 1.100.
 test_binary() {
-  find "$1/debug/deps" -type f -name 'native_fixture-*' ! -name '*.d' | head -1
+  find "$1/debug/deps" "$1/debug/build" -type f -name 'native_fixture-*' ! -name '*.d' 2>/dev/null | head -1
 }
 
 @test "a linked test binary restores into a distinct target directory" {
