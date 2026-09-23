@@ -523,7 +523,10 @@ fn control(
     if !registrar.try_lock()? {
         return Ok(false);
     }
-    let pressure = crate::pressure::sample(pool, now, crate::pressure::probe)?;
+    // Keep this generation's own samples. Shims refresh the pool's shared
+    // state from outside the delegated tree, and mixing the two views would
+    // reset hysteresis and judge the delegated root by host readings.
+    let pressure = crate::pressure::sample(registry, now, crate::pressure::probe)?;
     if !pressure.valid {
         bail!("memory pressure probes unavailable");
     }

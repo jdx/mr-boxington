@@ -220,26 +220,32 @@ def suspension(mbx, root):
         stop = threading.Event()
         unhealthy = threading.Event()
         unhealthy.set()
-        def readings():
+        def readings(registry):
+            def publish(directory, pressured):
+                now = int(time.time() * 1000)
+                value = {"version": 1, "sampled_ms": now,
+                    "reading": {"total": 100, "available": 0 if pressured else 50, "stalls": {}},
+                    "bad_samples": 2, "healthy_since": None, "pressured": pressured,
+                    "valid": True, "recovered_ms": None, "last_admission_ms": None}
+                scratch = directory / "pressure.tmp"
+                scratch.write_text(json.dumps(value))
+                scratch.replace(directory / "pressure.json")
             while not stop.is_set():
                 with (pool / "pool.lock").open("w") as lock:
                     fcntl.flock(lock, fcntl.LOCK_EX)
-                    now = int(time.time() * 1000)
-                    value = {"version": 1, "sampled_ms": now,
-                        "reading": {"total": 100, "available": 0 if unhealthy.is_set() else 50, "stalls": {}},
-                        "bad_samples": 2, "healthy_since": None, "pressured": unhealthy.is_set(),
-                        "valid": True, "recovered_ms": None, "last_admission_ms": None}
-                    scratch = pool / "pressure.tmp"
-                    scratch.write_text(json.dumps(value))
-                    scratch.replace(pool / "pressure.json")
+                    # Shims sample the pool from outside the delegated tree;
+                    # the controller must judge only its own readings.
+                    publish(pool, False)
+                    publish(registry, unhealthy.is_set())
                 stop.wait(0.05)
-        sampler = threading.Thread(target=readings)
-        sampler.start()
+        sampler = None
         try:
             wait_for(lambda: load(state / "current.json"))
             generation = load(state / "current.json")["generation"]
             assert f"controller-{generation}" in Path(f"/proc/{worker.pid}/cgroup").read_text()
             registry, actions = state / generation, group / generation
+            sampler = threading.Thread(target=readings, args=(registry,))
+            sampler.start()
             for index in range(3):
                 identity = uuid.uuid4().hex[:24]
                 lease = (registry / (identity + ".lease")).open("w")
@@ -280,7 +286,8 @@ def suspension(mbx, root):
             print("PASS stale registrar: owned groups thawed and suspension disabled", flush=True)
         finally:
             stop.set()
-            sampler.join()
+            if sampler:
+                sampler.join()
             if worker.poll() is None:
                 worker.terminate()
                 worker.wait(timeout=8)
