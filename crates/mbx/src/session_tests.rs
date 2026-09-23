@@ -869,6 +869,10 @@ fn superseded_rustc_shims_go_once_no_session_holds_them() {
     // Every release that was upgraded in place at this path left one of
     // these behind, and all of their links resolve to today's binary.
     let abandoned = install("before-upgrade", &binary);
+    drop(ShimLease::take(&abandoned).unwrap());
+    // Installed by a binary from before leases: a session it started may
+    // still be running and has no way to say so.
+    let legacy = install("before-leases", &binary);
     // A session started before the upgrade is still running.
     let held = install("still-running", &binary);
     let lease = ShimLease::take(&held).unwrap();
@@ -885,7 +889,7 @@ fn superseded_rustc_shims_go_once_no_session_holds_them() {
     let elsewhere = install("elsewhere", &directory.path().join("gone/mbx"));
     let _elsewhere = ShimLease::take(&elsewhere).unwrap();
     let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
-    for unused in [&abandoned, &held, &crashed, &installed, &elsewhere] {
+    for unused in [&abandoned, &legacy, &held, &crashed, &installed, &elsewhere] {
         std::fs::File::options()
             .write(true)
             .open(unused.join(".mbx-shims"))
@@ -902,6 +906,10 @@ fn superseded_rustc_shims_go_once_no_session_holds_them() {
     );
     assert!(!crashed.exists(), "a dead session's lease holds nothing");
     assert!(held.exists(), "a running session's wrapper must stay");
+    assert!(
+        legacy.exists(),
+        "a wrapper no session ever leased must stay"
+    );
     assert!(recent.exists(), "a recently used wrapper must stay");
     assert!(
         installed.exists(),

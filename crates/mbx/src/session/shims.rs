@@ -554,7 +554,7 @@ fn shims_registrar(persistent_shims: &Path) -> Result<fslock::LockFile> {
 /// gone.
 pub(super) struct ShimLease {
     path: PathBuf,
-    _lock: fslock::LockFile,
+    lock: Option<fslock::LockFile>,
 }
 
 impl ShimLease {
@@ -575,12 +575,17 @@ impl ShimLease {
         if !lock.try_lock()? {
             eyre::bail!("the shim lease {} is already held", path.display());
         }
-        Ok(Self { path, _lock: lock })
+        Ok(Self {
+            path,
+            lock: Some(lock),
+        })
     }
 }
 
 impl Drop for ShimLease {
     fn drop(&mut self) {
+        // Unlocked first: Windows cannot delete a file that is still open.
+        self.lock.take();
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -645,6 +650,9 @@ fn touch_shim_directory(directory: &Path) {
 /// whose sessions use a directory of their own. A session that started before
 /// the upgrade can outlive `unused_for`, so these, and every other `rust/`
 /// directory, also go only when no running session holds a lease on them.
+/// Directories no session ever leased were installed by a binary older than
+/// leases, whose running sessions cannot be seen; they are never judged
+/// superseded.
 ///
 /// Windows shims are hard links or copies, which say nothing about whether
 /// their installation still exists, so they are left alone. Best effort: a
@@ -680,8 +688,12 @@ pub(super) fn remove_stranded_binary_shims(
             } else {
                 None
             };
+            // Only a directory some session has leased is judged superseded.
+            // A binary from before leases leaves none, so its sessions, which
+            // may still be running, cannot say they use the directory.
             let finished = every_link_dangles(&directory)
                 || (kind == "rust"
+                    && directory.join(SHIM_LEASES_DIR).is_dir()
                     && entry
                         .file_name()
                         .to_str()
