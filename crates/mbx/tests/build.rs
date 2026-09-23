@@ -137,6 +137,39 @@ fn generate_lockfile(directory: &Path) {
     assert!(status.success(), "the fixture should resolve offline");
 }
 
+/// Every file under `root` that `matches` accepts, in a stable order.
+///
+/// Cargo's build-dir layout decides where a unit's files land: before 1.100
+/// they are `deps/<name>-<hash>` and `build/<pkg>-<hash>/`, and from 1.100
+/// each unit owns `build/<pkg>/<hash>/`. Searching the whole tree lets a test
+/// name the file it needs rather than the layout that holds it.
+fn find_files(root: &Path, matches: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let entries = std::fs::read_dir(&directory)
+            .unwrap_or_else(|error| panic!("{} should be readable: {error}", directory.display()));
+        for entry in entries {
+            let entry = entry.unwrap();
+            let file_type = entry.file_type().unwrap();
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() && matches(&entry.path()) {
+                found.push(entry.path());
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Whether `path`'s file name satisfies `matches`.
+fn file_name_is(path: &Path, matches: impl FnOnce(&str) -> bool) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(matches)
+}
+
 #[cfg(unix)]
 #[test]
 fn a_fatal_rustc_shim_error_survives_an_unavailable_agent() {
@@ -341,39 +374,34 @@ fn a_mid_compilation_input_edit_discards_the_result() {
         "Cargo must not compile a dependent against the stale metadata: {stderr}"
     );
 
-    let mut fingerprint_replays = Vec::new();
-    let fingerprint_root = project.path().join("target/debug/.fingerprint");
-    for unit in std::fs::read_dir(&fingerprint_root).unwrap().flatten() {
-        let Ok(files) = std::fs::read_dir(unit.path()) else {
-            continue;
-        };
-        for file in files.flatten() {
-            let path = file.path();
-            if path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with("output-"))
-                && std::fs::read_to_string(&path)
-                    .is_ok_and(|output| output.contains("compilation result was discarded"))
-            {
-                fingerprint_replays.push(path);
-            }
-        }
-    }
+    // Cargo keeps a unit's fingerprint in `.fingerprint/<unit>/` before 1.100
+    // and in `build/<pkg>/<hash>/fingerprint/` from 1.100.
+    let target = project.path().join("target/debug");
+    let fingerprint_outputs = find_files(&target, |path| {
+        file_name_is(path, |name| name.starts_with("output-"))
+            && path.ancestors().nth(1).is_some_and(|unit| {
+                unit.file_name() == Some("fingerprint".as_ref())
+                    || unit.parent().and_then(Path::file_name) == Some(".fingerprint".as_ref())
+            })
+    });
+    let fingerprint_replays = fingerprint_outputs
+        .into_iter()
+        .filter(|path| {
+            std::fs::read_to_string(path)
+                .is_ok_and(|output| output.contains("compilation result was discarded"))
+        })
+        .collect::<Vec<_>>();
     assert!(
         fingerprint_replays.is_empty(),
         "the rejected-result diagnostic must not enter Cargo fingerprints: {fingerprint_replays:?}"
     );
 
-    let deps = project.path().join("target/debug/deps");
-    let stale_outputs = std::fs::read_dir(deps)
-        .unwrap()
-        .filter_map(Result::ok)
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| {
+    let stale_outputs = find_files(&target, |path| {
+        file_name_is(path, |name| {
             (name.starts_with("libbase-") && name.ends_with(".rmeta"))
                 || (name.starts_with("base-") && name.ends_with(".d"))
         })
-        .collect::<Vec<_>>();
+    });
     assert!(
         stale_outputs.is_empty(),
         "the stale compiler outputs should be removed: {stale_outputs:?}"
@@ -1834,38 +1862,28 @@ fn build_script_shim_does_not_redirty_its_compilation() {
         store.path(),
         &reports.path().join("first.json"),
     );
-    let helper = project
-        .path()
-        .join("target/debug/deps")
-        .read_dir()
-        .unwrap()
-        .find_map(|entry| {
-            let path = entry.ok()?.path();
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("libhelper-") && name.ends_with(".rlib"))
-                .then_some(path)
+    let helper = find_files(&project.path().join("target/debug"), |path| {
+        file_name_is(path, |name| {
+            name.starts_with("libhelper-") && name.ends_with(".rlib")
         })
-        .expect("the build dependency should have an rlib");
-    let build_script = project
-        .path()
-        .join("target/debug/build")
-        .read_dir()
-        .unwrap()
-        .find_map(|entry| {
-            let directory = entry.ok()?.path();
-            directory.read_dir().ok()?.find_map(|entry| {
-                let path = entry.ok()?.path();
-                let name = path.file_name()?.to_str()?;
-                (path.is_file()
-                    && name.starts_with("build_script_build-")
-                    && !name.ends_with(".d")
-                    && !name.ends_with(".pdb")
-                    && !name.contains(".mbx-real"))
-                .then_some(path)
-            })
+    })
+    .into_iter()
+    .next()
+    .expect("the build dependency should have an rlib");
+    // rustc links `build_script_build-<hash>` before Cargo 1.100 and an
+    // unhashed `build_script_build` from 1.100.
+    let build_script = find_files(&project.path().join("target/debug/build"), |path| {
+        file_name_is(path, |name| {
+            (name == format!("build_script_build{}", std::env::consts::EXE_SUFFIX)
+                || name.starts_with("build_script_build-"))
+                && !name.ends_with(".d")
+                && !name.ends_with(".pdb")
+                && !name.contains(".mbx-real")
         })
-        .expect("the compiled build script should exist");
+    })
+    .into_iter()
+    .next()
+    .expect("the compiled build script should exist");
 
     #[cfg(unix)]
     {
@@ -2007,29 +2025,23 @@ fn build_script_execution_and_out_dir_restore_across_checkouts() {
         !second.path().join("runs").exists(),
         "the second checkout ran its build script instead of restoring it: {warm}\n{stderr}"
     );
-    let header = second
-        .path()
-        .join("target/debug/build")
-        .read_dir()
-        .unwrap()
-        .find_map(|entry| {
-            let path = entry.ok()?.path().join("out/nested/header.h");
-            path.is_file().then_some(path)
-        })
+    let build = second.path().join("target/debug/build");
+    let header = find_files(&build, |path| path.ends_with("out/nested/header.h"))
+        .into_iter()
+        .next()
         .expect("nested OUT_DIR output should be restored");
     assert_eq!(std::fs::read_to_string(header).unwrap(), "first\n");
-    let replayed = second
-        .path()
-        .join("target/debug/build")
-        .read_dir()
-        .unwrap()
-        .find_map(|entry| {
-            let path = entry.ok()?.path().join("output");
-            path.is_file()
-                .then(|| std::fs::read_to_string(path).ok())
-                .flatten()
-        })
-        .expect("Cargo should retain the replayed build-script directives");
+    // Cargo records a run's stdout as `build/<pkg>-<hash>/output` before 1.100
+    // and as `build/<pkg>/<hash>/run/stdout` from 1.100.
+    let replayed = find_files(&build, |path| {
+        path.ends_with("run/stdout")
+            || (file_name_is(path, |name| name == "output")
+                && path.ancestors().nth(2) == Some(build.as_path()))
+    })
+    .into_iter()
+    .next()
+    .map(|path| std::fs::read_to_string(path).unwrap())
+    .expect("Cargo should retain the replayed build-script directives");
     assert!(
         replayed.contains(second.path().to_string_lossy().as_ref()),
         "replayed directives should name the restoring checkout: {replayed}"
@@ -3360,17 +3372,15 @@ fn build_into_target(
 
 /// Read the dep-info rustc wrote for the fixture's library.
 fn dep_info_contents(target: &Path) -> String {
-    let deps = target.join("debug/deps");
-    let entry = std::fs::read_dir(&deps)
-        .expect("deps directory should exist")
-        .filter_map(Result::ok)
-        .find(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
+    let path = find_files(&target.join("debug"), |path| {
+        file_name_is(path, |name| {
             name.starts_with("fixture-") && name.ends_with(".d")
         })
-        .expect("the library's dep-info should exist");
-    std::fs::read_to_string(entry.path()).expect("dep-info should be readable")
+    })
+    .into_iter()
+    .next()
+    .expect("the library's dep-info should exist");
+    std::fs::read_to_string(path).expect("dep-info should be readable")
 }
 
 /// A restored compilation must describe the checkout it was restored into.

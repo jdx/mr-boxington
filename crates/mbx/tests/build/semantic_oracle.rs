@@ -52,14 +52,20 @@ fn observe(library: &Path) -> String {
         .path()
         .join(format!("observe{}", std::env::consts::EXE_SUFFIX));
     std::fs::write(&source, "fn main() { print!(\"{}\", fixture::value()); }\n").unwrap();
-    succeeded(
-        Command::new("rustc")
-            .arg(&source)
-            .args(["--edition=2021", "--extern"])
-            .arg(format!("fixture={}", library.display()))
-            .arg("-o")
-            .arg(&executable),
-    );
+    let mut command = Command::new("rustc");
+    command
+        .arg(&source)
+        .args(["--edition=2021", "--extern"])
+        .arg(format!("fixture={}", library.display()));
+    // An rlib built with `-Zembed-metadata=no` is linkable only together with
+    // its rmeta, which Cargo passes as a second `--extern` for the same crate.
+    let metadata = library.with_extension("rmeta");
+    if metadata.is_file() {
+        command
+            .arg("--extern")
+            .arg(format!("fixture={}", metadata.display()));
+    }
+    succeeded(command.arg("-o").arg(&executable));
     String::from_utf8(succeeded(&mut Command::new(executable)).stdout).unwrap()
 }
 
@@ -123,7 +129,20 @@ fn cached(project: &Path, store: &Path, state: State) -> (String, serde_json::Va
             ("ORACLE_VALUE", state.environment),
         ],
     );
-    (observe(&target.join("debug/libfixture.rlib")), stats)
+    (observe(&unit_library(&target.join("debug"))), stats)
+}
+
+/// The fixture's rlib at its unit path, where its rmeta sits beside it. From
+/// Cargo 1.100 rlibs are built with `-Zembed-metadata=no`, so the copy Cargo
+/// uplifts to `libfixture.rlib` cannot be linked against on its own.
+fn unit_library(profile: &Path) -> PathBuf {
+    let libraries = find_files(profile, |path| {
+        file_name_is(path, |name| {
+            name.starts_with("libfixture-") && name.ends_with(".rlib")
+        })
+    });
+    assert_eq!(libraries.len(), 1, "one fixture unit: {libraries:?}");
+    libraries.into_iter().next().unwrap()
 }
 
 #[test]
