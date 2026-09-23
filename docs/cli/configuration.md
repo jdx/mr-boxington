@@ -394,6 +394,14 @@ Coordinate real compilations machine-wide through a permit pool.
 
 Memory budget the permits divide, or "none" for plain CPU permits.
 
+### `scheduler.pressure`
+
+- **Type:** `bool`
+- **Default:** `true`
+- **Set with:** `MBX_SCHEDULER_PRESSURE`
+
+Delay additional compilations while the machine is under memory pressure.
+
 ### `scheduler.priority`
 
 - **Type:** `string`

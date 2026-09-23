@@ -312,6 +312,9 @@ struct RawScheduler {
         choices("normal", "low")
     )]
     priority: String,
+    /// Delay additional compilations while the machine is under memory pressure.
+    #[usage(env = "MBX_SCHEDULER_PRESSURE", default = true)]
+    pressure: bool,
     /// Run `cargo test` binaries under the same permit pool.
     #[usage(env = "MBX_SCHEDULER_TESTS", default = false)]
     tests: bool,
@@ -584,6 +587,8 @@ pub struct SchedulerSettings {
     pub priority: SchedulerPriority,
     /// Whether `cargo test` binaries take permits too.
     pub tests: bool,
+    /// Gate new compilations on live memory pressure.
+    pub pressure: bool,
 }
 
 impl SchedulerSettings {
@@ -609,6 +614,7 @@ impl Default for SchedulerSettings {
             memory_bytes: None,
             priority: SchedulerPriority::Normal,
             tests: false,
+            pressure: false,
         }
     }
 }
@@ -1061,6 +1067,7 @@ impl Config {
                 .parse()
                 .wrap_err("invalid scheduler.priority")?,
             tests: raw.scheduler.tests,
+            pressure: raw.scheduler.pressure,
         };
         let config = Self {
             cache_dir,
@@ -1216,12 +1223,16 @@ impl Config {
                                 format!("invalid {}.{setting}", path.display())
                             })?;
                         }
+                        "pressure" if !environment_contains("MBX_SCHEDULER_PRESSURE") => {
+                            self.scheduler.pressure = workspace_bool(&path, &setting, value)?;
+                        }
                         "tests" if !environment_contains("MBX_SCHEDULER_TESTS") => {
                             self.scheduler.tests = workspace_bool(&path, &setting, value)?;
                         }
-                        "enabled" | "cpus" | "reserve_cpus" | "memory" | "priority" | "tests" => {}
+                        "enabled" | "cpus" | "reserve_cpus" | "memory" | "priority" | "tests"
+                        | "pressure" => {}
                         _ => bail!(
-                            "{} contains unsupported workspace setting {setting:?}; only scheduler.enabled, scheduler.cpus, scheduler.reserve_cpus, scheduler.memory, scheduler.priority, and scheduler.tests are allowed",
+                            "{} contains unsupported workspace setting {setting:?}; only scheduler.enabled, scheduler.cpus, scheduler.reserve_cpus, scheduler.memory, scheduler.priority, scheduler.pressure, and scheduler.tests are allowed",
                             path.display()
                         ),
                     }
@@ -1454,6 +1465,34 @@ mod tests {
             FileLayer::at(path, FileScope::Global)
         });
         Config::from_layers_measuring(&env, file.as_ref(), measure_disk, || Some(32 * GIB))
+    }
+
+    #[test]
+    fn pressure_setting_defaults_and_overrides() {
+        assert!(configured(None, &[]).unwrap().scheduler.pressure);
+        assert!(
+            !configured(Some("[scheduler]\npressure = false"), &[])
+                .unwrap()
+                .scheduler
+                .pressure
+        );
+        assert!(
+            !configured(None, &[("MBX_SCHEDULER_PRESSURE", "0")])
+                .unwrap()
+                .scheduler
+                .pressure
+        );
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join(".mbx.toml"),
+            "[scheduler]\npressure = false",
+        )
+        .unwrap();
+        let mut config = configured(None, &[]).unwrap();
+        config
+            .apply_workspace_policy_with(directory.path(), |_| false)
+            .unwrap();
+        assert!(!config.scheduler.pressure);
     }
 
     #[test]

@@ -55,6 +55,19 @@ Cache hits do not need compiler permits. If a process dies, the kernel releases
 its permits. For the weighting and recovery details, see
 [how it works](/how-it-works#machine-wide-scheduling).
 
+Live pressure control is enabled by default (`scheduler.pressure = true`). It
+pauses additional admissions, including compilations with no memory history,
+while memory headroom is low or Linux memory-stall measurements show sustained
+pressure. macOS uses available-memory headroom; it has no Linux PSI signal.
+At least one compilation can run when the pool is idle. After five healthy
+seconds, admissions resume gradually for five seconds. Running processes are
+not suspended by this setting.
+
+Set `scheduler.pressure = false` (`MBX_SCHEDULER_PRESSURE=0`) to retain the
+existing estimate-based admission policy. Disabling the scheduler or setting
+`scheduler.memory = "none"` also disables pressure control. If pressure probes
+fail, scheduling falls back to the existing permit and estimate checks.
+
 Use `scheduler.priority = "low"` (`MBX_SCHEDULER_PRIORITY=low`) for an editor's
 background check or CI on a shared machine. While normal-priority work is
 waiting, low-priority builds leave a quarter of the pool available for it.

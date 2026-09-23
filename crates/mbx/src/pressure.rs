@@ -128,6 +128,13 @@ impl State {
                 self.healthy_since = None;
             }
         }
+        // Recovery ramping is temporary, not a permanent two-compiles/sec cap.
+        if self
+            .recovered_ms
+            .is_some_and(|start| now.saturating_sub(start) >= 5_000)
+        {
+            self.recovered_ms = None;
+        }
         self.version = VERSION;
         self.sampled_ms = now;
         self.reading = reading;
