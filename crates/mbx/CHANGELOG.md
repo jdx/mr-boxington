@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.0](https://github.com/jdx/mr-boxington/compare/v1.15.0...v1.16.0) - 2026-09-23
+
+### Added
+
+- *(scheduler)* run cargo test binaries under the machine-wide permit pool ([#513](https://github.com/jdx/mr-boxington/pull/513))
+
+### Fixed
+
+- *(cc)* stop other mbx installations sharing a cache from breaking C builds ([#516](https://github.com/jdx/mr-boxington/pull/516))
+- *(target)* keep view collection's activity window on one clock ([#512](https://github.com/jdx/mr-boxington/pull/512))
+- *(cache)* allow private persistent compiler shim directories ([#501](https://github.com/jdx/mr-boxington/pull/501))
+- *(cache)* stop native archive timestamps from missing cached actions ([#506](https://github.com/jdx/mr-boxington/pull/506))
+- *(gc)* run automatic cleanup from cargo hardlink installations ([#505](https://github.com/jdx/mr-boxington/pull/505))
+- *(cc)* stop two mbx installations from picking each other's compiler shims ([#504](https://github.com/jdx/mr-boxington/pull/504))
+- *(cargo)* preserve target directories in nested builds ([#502](https://github.com/jdx/mr-boxington/pull/502))
+
+### Other
+
+- *(cache)* hard link cached outputs where the filesystem cannot clone them ([#511](https://github.com/jdx/mr-boxington/pull/511))
+
 ## [1.15.0](https://github.com/jdx/mr-boxington/compare/v1.14.0...v1.15.0) - 2026-09-20
 
 ### Added
