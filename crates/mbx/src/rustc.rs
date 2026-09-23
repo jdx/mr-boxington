@@ -174,8 +174,7 @@ pub(crate) fn compile(
         && !cache_native_links
         && session::compiles_only_a_binary(scanned)
         && session::crate_name_argument(scanned)
-            .zip(session::out_dir_argument(scanned))
-            .is_some_and(|(name, out_dir)| mbx_cache_rustc::is_build_script_unit(&name, &out_dir));
+            .is_some_and(|name| session::is_cargo_build_script(&name));
     let options =
         ParseOptions::caching_native_links(cache_native_links || execution_only_build_script)
             .with_custom_target_search(custom_target_may_resolve(rustc, scanned));
@@ -588,9 +587,7 @@ pub(crate) fn compile(
         // that key for its execution shim, and a changed input set needs it to
         // refresh the manifest.
         let current_manifest_inputs = if learned.engaged()
-            && outputs
-                .build_script_executable(invocation.crate_name())
-                .is_none()
+            && cargo_build_script_executable(&outputs, &invocation).is_none()
         {
             current_manifest_inputs(&compilation, &outputs)
         } else {
@@ -933,7 +930,7 @@ fn compile_execution_only_build_script(
         ));
     }
     if output.status.success()
-        && let Some(executable) = outputs.build_script_executable(invocation.crate_name())
+        && let Some(executable) = cargo_build_script_executable(outputs, invocation)
     {
         let installed = (|| -> Result<()> {
             // Prefer the modeled compilation action. Unlike linked executable
@@ -1089,6 +1086,17 @@ fn compiler_command(rustc: &OsStr, wrapper_argument: Option<&OsStr>) -> Command 
     command
 }
 
+/// The executable Cargo will run as a build script, when this compilation
+/// produced one; see [`session::is_cargo_build_script`].
+fn cargo_build_script_executable<'a>(
+    outputs: &'a RustcOutputs,
+    invocation: &RustcInvocation,
+) -> Option<&'a Path> {
+    outputs
+        .build_script_executable(invocation.crate_name())
+        .filter(|_| session::is_cargo_build_script(invocation.crate_name()))
+}
+
 fn install_build_script_shim(
     invocation: &RustcInvocation,
     outputs: &RustcOutputs,
@@ -1097,7 +1105,7 @@ fn install_build_script_shim(
     if !session::build_script_execution_requested() {
         return;
     }
-    let Some(executable) = outputs.build_script_executable(invocation.crate_name()) else {
+    let Some(executable) = cargo_build_script_executable(outputs, invocation) else {
         return;
     };
     if let Err(error) = crate::build_script::install(executable, binary_action) {

@@ -2103,6 +2103,47 @@ fn a_build_script_with_a_custom_path_restores_across_checkouts() {
 }
 
 #[test]
+fn a_binary_target_named_like_a_build_script_still_runs() {
+    // Cargo compiles a `[[bin]]` named `build-script-build` as crate
+    // `build_script_build`, the name it gives `build.rs`. Only a real build
+    // script may be replaced by the execution-cache launcher.
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join("src")).unwrap();
+    std::fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname = \"named-bin\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"build-script-build\"\npath = \"src/main.rs\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join("src/main.rs"),
+        "fn main() { println!(\"ordinary binary\"); }\n",
+    )
+    .unwrap();
+    generate_lockfile(project.path());
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("build.json"),
+    );
+
+    let output = Command::new(project.path().join(format!(
+        "target/debug/build-script-build{}",
+        std::env::consts::EXE_SUFFIX
+    )))
+    .env_remove("MBX_SOCKET")
+    .output()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ordinary binary\n");
+}
+
+#[test]
 fn a_library_sharing_the_build_script_prefix_keeps_its_compilation_cache() {
     // Without native-link caching a build script takes an execution-only
     // path that never restores or publishes the compilation. A library whose

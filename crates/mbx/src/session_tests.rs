@@ -64,21 +64,6 @@ fn cargo_build_script_executable_names_are_recognized() {
 }
 
 #[test]
-fn the_out_dir_argument_is_read_in_either_spelling() {
-    let separate: Vec<OsString> = vec!["--out-dir".into(), "/t/debug/build/pkg-1".into()];
-    let joined: Vec<OsString> = vec!["--out-dir=/t/debug/deps".into()];
-    assert_eq!(
-        out_dir_argument(&separate),
-        Some(PathBuf::from("/t/debug/build/pkg-1"))
-    );
-    assert_eq!(
-        out_dir_argument(&joined),
-        Some(PathBuf::from("/t/debug/deps"))
-    );
-    assert_eq!(out_dir_argument(&["src/lib.rs".into()]), None);
-}
-
-#[test]
 fn only_a_binary_crate_type_is_a_possible_build_script() {
     let arguments = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
     assert!(compiles_only_a_binary(&arguments(&["--crate-type", "bin"])));

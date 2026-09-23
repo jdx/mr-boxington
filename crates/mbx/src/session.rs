@@ -1785,20 +1785,14 @@ pub(crate) fn crate_name_argument(arguments: &[OsString]) -> Option<String> {
     None
 }
 
-/// The `--out-dir` rustc was given, found the same way as the crate name.
-pub(crate) fn out_dir_argument(arguments: &[OsString]) -> Option<PathBuf> {
-    let mut arguments = arguments.iter();
-    while let Some(argument) = arguments.next() {
-        if argument == "--out-dir" {
-            return arguments.next().map(PathBuf::from);
-        }
-        if let Some(argument) = argument.to_str()
-            && let Some(directory) = argument.strip_prefix("--out-dir=")
-        {
-            return Some(PathBuf::from(directory));
-        }
-    }
-    None
+/// Whether this rustc invocation compiles a Cargo build script named
+/// `crate_name`.
+///
+/// A `[[bin]]` target can share a build script's crate name, but Cargo sets
+/// `CARGO_BIN_NAME` for every binary target and never for a build script.
+pub(crate) fn is_cargo_build_script(crate_name: &str) -> bool {
+    mbx_cache_rustc::is_build_script_crate_name(crate_name)
+        && std::env::var_os("CARGO_BIN_NAME").is_none()
 }
 
 /// Whether every `--crate-type` rustc was given is `bin`, as Cargo gives a

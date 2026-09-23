@@ -2633,41 +2633,27 @@ fn portable_proc_macro_install_name_is_keyed_and_preserves_explicit_names() {
 }
 
 #[test]
-fn a_build_script_is_recognized_by_name_and_unit_directory() {
-    let outputs = |directory: &str, name: &str| RustcOutputs {
-        directory: PathBuf::from(directory),
-        files: vec![PathBuf::from(directory).join(name)],
-        dep_info: PathBuf::from(directory).join(format!("{name}.d")),
+fn a_build_script_is_recognized_by_its_crate_name() {
+    let outputs = |name: &str| RustcOutputs {
+        directory: PathBuf::from("/t/debug/build/pkg-1"),
+        files: vec![PathBuf::from("/t/debug/build/pkg-1").join(name)],
+        dep_info: PathBuf::from("/t/debug/build/pkg-1").join(format!("{name}.d")),
     };
 
-    let default = outputs("/t/debug/build/pkg-1", "build_script_build-1");
     assert!(
-        default
+        outputs("build_script_build-1")
             .build_script_executable("build_script_build")
             .is_some()
     );
-    let custom = outputs("/t/debug/build/pkg-1", "build_script_main-1");
     assert!(
-        custom
+        outputs("build_script_main-1")
             .build_script_executable("build_script_main")
             .is_some()
     );
-
-    // A binary that merely shares the prefix links into deps/, not build/.
-    let ordinary = outputs("/t/debug/deps", "build_script_main-1");
     assert!(
-        ordinary
-            .build_script_executable("build_script_main")
+        outputs("mylib-1")
+            .build_script_executable("mylib")
             .is_none()
     );
-    assert!(is_build_script_unit(
-        "build_script_build",
-        Path::new("/t/debug/deps")
-    ));
-    assert!(!is_build_script_unit(
-        "build_script_helper",
-        Path::new("/t/debug/deps")
-    ));
     assert!(!is_build_script_crate_name("build_script_"));
-    assert!(!is_build_script_crate_name("mylib"));
 }
