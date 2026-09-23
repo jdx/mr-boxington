@@ -255,12 +255,23 @@ pub(super) fn dispatch() -> Result<()> {
 
 fn supervisor(state: &Path, group: &Path) -> Result<()> {
     let mut election = fslock::LockFile::open(&state.join("supervisor.lock"))?;
-    // An idle predecessor holds the lock until its watchdog exits, briefly
+    // An exiting predecessor holds the lock until its watchdog exits, briefly
     // after it stops accepting registrations. Wait that out, within the
     // launcher's readiness timeout, rather than leave the compile unsupervised.
+    // A disabled predecessor that is still running keeps the lock until it
+    // drains, so give up at once and let the compile fall back.
+    let exiting = || {
+        read::<Heartbeat>(&state.join("current.json")).is_some_and(|h| {
+            let registry = state.join(&h.generation);
+            token(&h.generation)
+                && (registry.join("finished").exists()
+                    || std::fs::read_to_string(registry.join("disabled"))
+                        .is_ok_and(|r| r == "idle shutdown" || r == "supervisor exited"))
+        })
+    };
     let start = Instant::now();
     while !election.try_lock()? {
-        if start.elapsed() > Duration::from_millis(1_500) {
+        if !exiting() || start.elapsed() > Duration::from_millis(1_500) {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(20));
