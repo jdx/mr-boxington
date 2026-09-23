@@ -9,13 +9,14 @@ const crates = ["libc", "serde", "your-app"];
 <template>
   <section class="MbxDemo home-section" aria-labelledby="demo-title">
     <div class="demo-copy">
-      <p class="home-eyebrow">Build here. Reuse there.</p>
-      <h2 id="demo-title">A new worktree.<br />A head start.</h2>
+      <h2 id="demo-title">Reuse builds across worktrees</h2>
       <p>
-        Build once, then restore matching work from another checkout or CI.
+        When you build in a new worktree, Mr Boxington checks the shared cache
+        for matching compiler outputs before compiling. Configure a remote store
+        to share cached work with CI.
       </p>
       <a class="home-text-link" href="/how-it-works#portable-keys"
-        >How the cache travels <span aria-hidden="true">→</span></a
+        >How cache matching works <span aria-hidden="true">→</span></a
       >
     </div>
     <div class="terminal">
@@ -53,8 +54,8 @@ const crates = ["libc", "serde", "your-app"];
         <p class="result">
           {{
             warm
-              ? "Matching work, ready to use."
-              : "Freshly compiled. Safely tucked away."
+              ? "Matching compiler outputs restored from the cache."
+              : "Compiler outputs stored for reuse."
           }}
         </p>
       </div>
