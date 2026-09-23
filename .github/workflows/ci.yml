@@ -158,10 +158,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      RUSTUP_TOOLCHAIN: nightly-2026-08-02
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Install pinned nightly
+      - name: Install nightly
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -179,12 +179,44 @@ jobs:
           cargo fuzz run dep_info -- -runs=1000
           cargo fuzz run rustc_paths -- -runs=1000
 
+  # Cargo 1.100 moves every unit's outputs into `build/<pkg>/<hash>/`, and
+  # its nightly already does so unconditionally. The test binary is built with
+  # stable; the fixtures it drives build under the latest nightly, so upcoming
+  # Cargo changes reach mbx here before they reach a stable release.
+  nightly:
+    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install nightly
+        run: rustup toolchain install nightly --profile minimal
+      - uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1.7.0
+        with:
+          cache: rust
+      - name: Build the end-to-end tests
+        run: |
+          cargo test --locked --package mbx --test build --no-run --message-format=json \
+            | jq -r 'select(.profile.test == true and .target.name == "build") | .executable' \
+            > build-test-binary
+          test -s build-test-binary
+      # Run the binary directly: under `cargo test`, `CARGO` names stable
+      # Cargo and the fixtures would build with it. The skipped tests cover
+      # build-script shims that do not yet handle the new layout.
+      - name: Run the end-to-end tests under nightly Cargo
+        run: |
+          RUSTUP_TOOLCHAIN=nightly "$(cat build-test-binary)" \
+            --skip a_build_script_with_a_custom_path_restores_across_checkouts \
+            --skip build_script_shim_does_not_redirty_its_compilation
+
   final:
     permissions: {}
     needs:
       - compatibility
       - fuzz
       - linux
+      - nightly
       - test
     runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
     timeout-minutes: 1
@@ -197,6 +229,7 @@ jobs:
           needs.fuzz.result != 'success' ||
           needs.linux.result != 'success' ||
           needs.compatibility.result != 'success' ||
+          needs.nightly.result != 'success' ||
           needs.test.result != 'success'
         run: exit 1
       - run: echo "All CI jobs completed successfully"
