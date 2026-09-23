@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.18.0...mbx-cache-rustc-v0.18.1) - 2026-09-23
+
+### Fixed
+
+- *(cache)* only treat Cargo build scripts as build scripts ([#528](https://github.com/jdx/mr-boxington/pull/528))
+- *(cache)* replay build scripts declared with a custom path ([#526](https://github.com/jdx/mr-boxington/pull/526))
+
 ## [0.17.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.17.0...mbx-cache-rustc-v0.17.1) - 2026-09-20
 
 ### Added
