@@ -2103,6 +2103,95 @@ fn a_build_script_with_a_custom_path_restores_across_checkouts() {
 }
 
 #[test]
+fn a_binary_target_named_like_a_build_script_still_runs() {
+    // Cargo compiles a `[[bin]]` named `build-script-build` as crate
+    // `build_script_build`, the name it gives `build.rs`. Only a real build
+    // script may be replaced by the execution-cache launcher.
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join("src")).unwrap();
+    std::fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname = \"named-bin\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"build-script-build\"\npath = \"src/main.rs\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join("src/main.rs"),
+        "fn main() { println!(\"ordinary binary\"); }\n",
+    )
+    .unwrap();
+    generate_lockfile(project.path());
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("build.json"),
+    );
+
+    let output = Command::new(project.path().join(format!(
+        "target/debug/build-script-build{}",
+        std::env::consts::EXE_SUFFIX
+    )))
+    .env_remove("MBX_SOCKET")
+    .output()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ordinary binary\n");
+}
+
+#[test]
+fn a_library_sharing_the_build_script_prefix_keeps_its_compilation_cache() {
+    // Without native-link caching a build script takes an execution-only
+    // path that never restores or publishes the compilation. A library whose
+    // crate name merely starts with `build_script_` must not be sent there,
+    // including one named exactly like Cargo's default build script.
+    for package in ["build-script-helper", "build-script-build"] {
+        a_library_named_like_a_build_script_restores(package);
+    }
+}
+
+fn a_library_named_like_a_build_script_restores(package: &str) {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    for checkout in [first.path(), second.path()] {
+        std::fs::create_dir_all(checkout.join("src")).unwrap();
+        std::fs::write(
+            checkout.join("Cargo.toml"),
+            format!("[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        )
+        .unwrap();
+        std::fs::write(checkout.join("src/lib.rs"), "pub fn helper() {}\n").unwrap();
+        generate_lockfile(checkout);
+    }
+
+    let no_link_cache = [("MBX_CACHE_LINKS", "0")];
+    build_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+        &no_link_cache,
+    );
+    let (warm, stderr) = build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+        &no_link_cache,
+    );
+
+    assert_eq!(
+        count(&warm, "hits"),
+        1,
+        "{package} should restore like any library: {warm}\n{stderr}"
+    );
+}
+
+#[test]
 fn changed_declared_input_executes_build_script_again() {
     let store = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();

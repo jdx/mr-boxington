@@ -848,15 +848,12 @@ impl RustcOutputs {
     ///
     /// Cargo names a build script's crate `build_script_` plus the stem of its
     /// source: `build_script_build` for `build.rs`, `build_script_main` for
-    /// `build = "builder/main.rs"`. Any name but the default must also be
-    /// linked into a unit directory under Cargo's `build/`, so an ordinary
-    /// binary that happens to share the prefix is never taken for one.
+    /// `build = "builder/main.rs"`. A `[[bin]]` target can take the same name,
+    /// and Cargo's output directory does not tell them apart, so the caller
+    /// has to confirm from Cargo's environment that this is a build script:
+    /// Cargo sets `CARGO_BIN_NAME` for binary targets and never for one.
     pub fn build_script_executable(&self, crate_name: &str) -> Option<&Path> {
-        let build_script = crate_name == "build_script_build"
-            || (is_build_script_crate_name(crate_name)
-                && self.directory.parent().and_then(Path::file_name)
-                    == Some(std::ffi::OsStr::new("build")));
-        build_script
+        is_build_script_crate_name(crate_name)
             .then(|| self.files.iter().find(|path| self.is_executable(path)))
             .flatten()
             .map(PathBuf::as_path)

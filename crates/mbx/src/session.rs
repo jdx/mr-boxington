@@ -1799,6 +1799,37 @@ pub(crate) fn crate_name_argument(arguments: &[OsString]) -> Option<String> {
     None
 }
 
+/// Whether this rustc invocation compiles a Cargo build script named
+/// `crate_name`.
+///
+/// A `[[bin]]` target can share a build script's crate name, but Cargo sets
+/// `CARGO_BIN_NAME` for every binary target and never for a build script.
+pub(crate) fn is_cargo_build_script(crate_name: &str) -> bool {
+    mbx_cache_rustc::is_build_script_crate_name(crate_name)
+        && std::env::var_os("CARGO_BIN_NAME").is_none()
+}
+
+/// Whether every `--crate-type` rustc was given is `bin`, as Cargo gives a
+/// build script. A library can share a build script's crate name, but never
+/// its crate type.
+pub(crate) fn compiles_only_a_binary(arguments: &[OsString]) -> bool {
+    let mut types = Vec::new();
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        let value = if argument == "--crate-type" {
+            arguments.next().and_then(|value| value.to_str())
+        } else {
+            argument
+                .to_str()
+                .and_then(|argument| argument.strip_prefix("--crate-type="))
+        };
+        if let Some(value) = value {
+            types.extend(value.split(','));
+        }
+    }
+    !types.is_empty() && types.iter().all(|kind| *kind == "bin")
+}
+
 /// Whether the shim should verify cached results against a real compilation.
 ///
 /// An empty value or `0` is off, matching how the configuration reads it, so

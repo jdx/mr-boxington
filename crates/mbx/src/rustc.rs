@@ -162,24 +162,22 @@ pub(crate) fn compile(
     // has no parent session, so first parse just enough of the invocation to
     // learn its output directory and use that as the stable target mapping.
     let cache_native_links = session::cache_links_requested();
-    let execution_only_build_script = session::build_script_execution_requested()
-        && session::crate_name_argument(arguments)
-            .as_deref()
-            .is_some_and(mbx_cache_rustc::is_build_script_crate_name)
-        && !cache_native_links;
+    // Scanned after response-file expansion, so a `--target`, `--out-dir`, or
+    // crate type inside an `@argfile` is seen; an expansion the parser would
+    // refuse is left as is, since parsing fails on it below anyway.
+    let expanded = RustcInvocation::expand_arguments(arguments);
+    let scanned = expanded.as_deref().unwrap_or(arguments);
     // A platform without native-link action caching still needs to observe a
     // build-script executable so execution caching can key it by its exact
     // bytes. Parsing it is safe: the linked output itself is not published.
-    // Scanned after response-file expansion, so a `--target` inside an
-    // `@argfile` is seen; an expansion the parser would refuse is left as is,
-    // since parsing fails on it below anyway.
-    let expanded = RustcInvocation::expand_arguments(arguments);
+    let execution_only_build_script = session::build_script_execution_requested()
+        && !cache_native_links
+        && session::compiles_only_a_binary(scanned)
+        && session::crate_name_argument(scanned)
+            .is_some_and(|name| session::is_cargo_build_script(&name));
     let options =
         ParseOptions::caching_native_links(cache_native_links || execution_only_build_script)
-            .with_custom_target_search(custom_target_may_resolve(
-                rustc,
-                expanded.as_deref().unwrap_or(arguments),
-            ));
+            .with_custom_target_search(custom_target_may_resolve(rustc, scanned));
     // Appended before anything parses: the debug-map rule inside the parser is
     // exactly what this flag satisfies, so an invocation that would bypass
     // without it has to carry it going in.
@@ -595,9 +593,7 @@ pub(crate) fn compile(
         // that key for its execution shim, and a changed input set needs it to
         // refresh the manifest.
         let current_manifest_inputs = if learned.engaged()
-            && outputs
-                .build_script_executable(invocation.crate_name())
-                .is_none()
+            && cargo_build_script_executable(&outputs, &invocation).is_none()
         {
             current_manifest_inputs(&compilation, &outputs)
         } else {
@@ -946,7 +942,7 @@ fn compile_execution_only_build_script(
         ));
     }
     if output.status.success()
-        && let Some(executable) = outputs.build_script_executable(invocation.crate_name())
+        && let Some(executable) = cargo_build_script_executable(outputs, invocation)
     {
         let installed = (|| -> Result<()> {
             // Prefer the modeled compilation action. Unlike linked executable
@@ -1102,6 +1098,17 @@ fn compiler_command(rustc: &OsStr, wrapper_argument: Option<&OsStr>) -> Command 
     command
 }
 
+/// The executable Cargo will run as a build script, when this compilation
+/// produced one; see [`session::is_cargo_build_script`].
+fn cargo_build_script_executable<'a>(
+    outputs: &'a RustcOutputs,
+    invocation: &RustcInvocation,
+) -> Option<&'a Path> {
+    outputs
+        .build_script_executable(invocation.crate_name())
+        .filter(|_| session::is_cargo_build_script(invocation.crate_name()))
+}
+
 fn install_build_script_shim(
     invocation: &RustcInvocation,
     outputs: &RustcOutputs,
@@ -1110,7 +1117,7 @@ fn install_build_script_shim(
     if !session::build_script_execution_requested() {
         return;
     }
-    let Some(executable) = outputs.build_script_executable(invocation.crate_name()) else {
+    let Some(executable) = cargo_build_script_executable(outputs, invocation) else {
         return;
     };
     if let Err(error) = crate::build_script::install(executable, binary_action) {
