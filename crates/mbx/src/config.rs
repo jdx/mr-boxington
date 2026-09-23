@@ -315,6 +315,12 @@ struct RawScheduler {
     /// Delay additional compilations while the machine is under memory pressure.
     #[usage(env = "MBX_SCHEDULER_PRESSURE", default = true)]
     pressure: bool,
+    /// Experimentally suspend Linux compiler trees under memory pressure.
+    #[usage(env = "MBX_SCHEDULER_SUSPEND", default = false)]
+    suspend: bool,
+    /// Writable delegated cgroup v2 directory for compiler supervision.
+    #[usage(env = "MBX_SCHEDULER_CGROUP_ROOT")]
+    cgroup_root: Option<PathBuf>,
     /// Run `cargo test` binaries under the same permit pool.
     #[usage(env = "MBX_SCHEDULER_TESTS", default = false)]
     tests: bool,
@@ -589,6 +595,10 @@ pub struct SchedulerSettings {
     pub tests: bool,
     /// Gate new compilations on live memory pressure.
     pub pressure: bool,
+    /// Opt in to Linux compiler supervision and suspension.
+    pub suspend: bool,
+    /// An explicitly delegated cgroup v2 directory.
+    pub cgroup_root: Option<PathBuf>,
 }
 
 impl SchedulerSettings {
@@ -615,6 +625,8 @@ impl Default for SchedulerSettings {
             priority: SchedulerPriority::Normal,
             tests: false,
             pressure: false,
+            suspend: false,
+            cgroup_root: None,
         }
     }
 }
@@ -1068,6 +1080,8 @@ impl Config {
                 .wrap_err("invalid scheduler.priority")?,
             tests: raw.scheduler.tests,
             pressure: raw.scheduler.pressure,
+            suspend: raw.scheduler.suspend,
+            cgroup_root: raw.scheduler.cgroup_root,
         };
         let config = Self {
             cache_dir,
@@ -1223,6 +1237,15 @@ impl Config {
                                 format!("invalid {}.{setting}", path.display())
                             })?;
                         }
+                        "suspend" if !environment_contains("MBX_SCHEDULER_SUSPEND") => {
+                            self.scheduler.suspend = workspace_bool(&path, &setting, value)?;
+                        }
+                        "cgroup_root" if !environment_contains("MBX_SCHEDULER_CGROUP_ROOT") => {
+                            let root = value.as_str().ok_or_else(|| {
+                                eyre::eyre!("{}.{} must be a string", path.display(), setting)
+                            })?;
+                            self.scheduler.cgroup_root = Some(PathBuf::from(root));
+                        }
                         "pressure" if !environment_contains("MBX_SCHEDULER_PRESSURE") => {
                             self.scheduler.pressure = workspace_bool(&path, &setting, value)?;
                         }
@@ -1230,9 +1253,9 @@ impl Config {
                             self.scheduler.tests = workspace_bool(&path, &setting, value)?;
                         }
                         "enabled" | "cpus" | "reserve_cpus" | "memory" | "priority" | "tests"
-                        | "pressure" => {}
+                        | "pressure" | "suspend" | "cgroup_root" => {}
                         _ => bail!(
-                            "{} contains unsupported workspace setting {setting:?}; only scheduler.enabled, scheduler.cpus, scheduler.reserve_cpus, scheduler.memory, scheduler.priority, scheduler.pressure, and scheduler.tests are allowed",
+                            "{} contains unsupported workspace setting {setting:?}; only scheduler.enabled, scheduler.cpus, scheduler.reserve_cpus, scheduler.memory, scheduler.priority, scheduler.pressure, scheduler.suspend, scheduler.cgroup_root, and scheduler.tests are allowed",
                             path.display()
                         ),
                     }
@@ -1465,6 +1488,26 @@ mod tests {
             FileLayer::at(path, FileScope::Global)
         });
         Config::from_layers_measuring(&env, file.as_ref(), measure_disk, || Some(32 * GIB))
+    }
+
+    #[test]
+    fn suspension_requires_explicit_opt_in() {
+        let config = configured(None, &[]).unwrap();
+        assert!(!config.scheduler.suspend);
+        assert!(config.scheduler.cgroup_root.is_none());
+        let config = configured(
+            None,
+            &[
+                ("MBX_SCHEDULER_SUSPEND", "1"),
+                ("MBX_SCHEDULER_CGROUP_ROOT", "/delegated"),
+            ],
+        )
+        .unwrap();
+        assert!(config.scheduler.suspend);
+        assert_eq!(
+            config.scheduler.cgroup_root,
+            Some(PathBuf::from("/delegated"))
+        );
     }
 
     #[test]

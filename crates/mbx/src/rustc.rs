@@ -503,8 +503,14 @@ pub(crate) fn compile(
             .chain(std::iter::once(&outputs.dep_info))
             .map(PathBuf::as_path),
     );
-    let output = crate::phase_timing::measure("compiler", || run_compiler(&mut command, forwarded))
-        .wrap_err("failed to execute rustc")?;
+    let output = crate::phase_timing::measure("compiler", || {
+        run_compiler(
+            &mut command,
+            forwarded,
+            wrapper_argument.is_none() && !invocation.crate_name().starts_with("build_script_"),
+        )
+    })
+    .wrap_err("failed to execute rustc")?;
     // Released before the outputs are read back and published: hashing and
     // storing cost I/O, not the CPU and memory the permit stands for.
     drop(permit);
@@ -727,11 +733,12 @@ pub(crate) fn compile(
 /// start before this compilation ends and its result is published. The bytes
 /// are still captured whole, because a cache entry stores them for replay on a
 /// hit and a verification run compares them.
-fn run_compiler(command: &mut Command, forward: bool) -> std::io::Result<Output> {
+fn run_compiler(command: &mut Command, forward: bool, eligible: bool) -> std::io::Result<Output> {
     if !forward {
-        return command.output();
+        return crate::supervision::output(command, eligible);
     }
-    run_compiler_forwarding(command, std::io::stdout(), std::io::stderr())
+    let action = crate::supervision::prepare(command, eligible);
+    run_compiler_forwarding(command, std::io::stdout(), std::io::stderr(), action)
 }
 
 /// [`run_compiler`] with the forwarding destinations spelled out, so a test can
@@ -740,12 +747,16 @@ fn run_compiler_forwarding(
     command: &mut Command,
     stdout_sink: impl Write + Send + 'static,
     stderr_sink: impl Write,
+    mut action: Option<crate::supervision::Action>,
 ) -> std::io::Result<Output> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    if let Some(action) = &mut action {
+        action.started();
+    }
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
     // Standard error carries the diagnostics and the notifications, so it is
@@ -903,7 +914,8 @@ fn compile_execution_only_build_script(
             .chain(std::iter::once(&outputs.dep_info))
             .map(PathBuf::as_path),
     );
-    let output = run_compiler(&mut command, forwarded).wrap_err("failed to execute rustc")?;
+    let output =
+        run_compiler(&mut command, forwarded, false).wrap_err("failed to execute rustc")?;
     drop(permit);
     crate::scheduler::record_compiler_memory(&demand, &output.status);
     session::record_compiler_invocation(

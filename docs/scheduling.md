@@ -121,3 +121,28 @@ than `cargo test` run unscheduled.
 A memory budget schedules work using measurements; it is not an operating-system
 memory limit. A compiler process can still exceed its estimate. For laptop
 settings, see [Keep a laptop responsive](/cookbook/local-development#keep-a-laptop-responsive).
+
+## Experimental Linux compiler supervision
+
+`scheduler.suspend = true` (`MBX_SCHEDULER_SUSPEND=1`) opts compiler processes
+into cgroup supervision. Set `scheduler.cgroup_root` (`MBX_SCHEDULER_CGROUP_ROOT`)
+to an absolute path to a writable, delegated cgroup v2 directory. mbx creates
+its own descendants and does not change limits on the supplied directory.
+Pressure control and memory scheduling must also be enabled.
+
+```toml
+[scheduler]
+suspend = true
+cgroup_root = "/sys/fs/cgroup/my-delegated-builds"
+```
+
+This stage establishes process supervision and recovery; automatic freezing is
+added separately. A supervisor and an independent watchdog stay outside the
+compiler cgroups. Losing the supervisor's heartbeat thaws its compiler groups.
+Compiler cancellation thaws the owned group before terminating leftover
+processes. Custom Rust wrappers, build-script binaries, test binaries, and
+compilers nested inside a supervised compiler are not eligible.
+
+If delegation is unavailable or the platform is unsupported, mbx warns once per
+session and continues with admission scheduling. Enabling this option does not
+provision systemd units, grant permissions, or modify host cgroup limits.

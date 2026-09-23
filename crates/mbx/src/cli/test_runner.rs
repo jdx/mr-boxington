@@ -211,6 +211,7 @@ pub fn dispatch() -> Option<ExitCode> {
             // mbx command it starts: that work is charged to this permit.
             .env(crate::scheduler::SCHED_DIR_ENV, "")
             .env("MBX_SCHEDULER", "0")
+            .env("MBX_CONTROL_CHILD", "1")
             .env_remove(RUNNERS);
         for (key, value) in &overlay.restore {
             match value {

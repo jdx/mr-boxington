@@ -485,7 +485,7 @@ struct MemoryLedger {
 
 /// The machine-wide permit pool one process draws from.
 pub(crate) struct Pool {
-    dir: PathBuf,
+    pub(crate) dir: PathBuf,
     capacity: u64,
     /// A per-Cargo-build ceiling, separate from the machine-wide capacity.
     build: Option<(String, u64)>,
@@ -591,6 +591,18 @@ pub(crate) fn session_environment_with_jobs(
         (
             SCHED_PRIORITY_ENV.into(),
             scheduler.priority.as_str().into(),
+        ),
+        (
+            "MBX_SCHED_SUSPEND".into(),
+            u8::from(scheduler.suspend && scheduler.pressure && scheduler.memory_bytes.is_some())
+                .to_string(),
+        ),
+        (
+            "MBX_SCHED_CGROUP_ROOT".into(),
+            scheduler
+                .cgroup_root
+                .as_ref()
+                .map_or_else(String::new, |path| path.to_string_lossy().into_owned()),
         ),
         (SCHED_BUILD_ID_ENV.into(), crate::util::random_string(12)),
         (SCHED_BUILD_SLOTS_ENV.into(), build_permits.to_string()),
