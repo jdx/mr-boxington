@@ -2106,7 +2106,14 @@ fn a_build_script_with_a_custom_path_restores_across_checkouts() {
 fn a_library_sharing_the_build_script_prefix_keeps_its_compilation_cache() {
     // Without native-link caching a build script takes an execution-only
     // path that never restores or publishes the compilation. A library whose
-    // crate name merely starts with `build_script_` must not be sent there.
+    // crate name merely starts with `build_script_` must not be sent there,
+    // including one named exactly like Cargo's default build script.
+    for package in ["build-script-helper", "build-script-build"] {
+        a_library_named_like_a_build_script_restores(package);
+    }
+}
+
+fn a_library_named_like_a_build_script_restores(package: &str) {
     let store = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();
     let first = tempfile::tempdir().unwrap();
@@ -2115,7 +2122,7 @@ fn a_library_sharing_the_build_script_prefix_keeps_its_compilation_cache() {
         std::fs::create_dir_all(checkout.join("src")).unwrap();
         std::fs::write(
             checkout.join("Cargo.toml"),
-            "[package]\nname = \"build-script-helper\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            format!("[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
         )
         .unwrap();
         std::fs::write(checkout.join("src/lib.rs"), "pub fn helper() {}\n").unwrap();
@@ -2139,7 +2146,7 @@ fn a_library_sharing_the_build_script_prefix_keeps_its_compilation_cache() {
     assert_eq!(
         count(&warm, "hits"),
         1,
-        "build_script_helper should restore like any library: {warm}\n{stderr}"
+        "{package} should restore like any library: {warm}\n{stderr}"
     );
 }
 

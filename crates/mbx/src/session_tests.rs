@@ -79,6 +79,22 @@ fn the_out_dir_argument_is_read_in_either_spelling() {
 }
 
 #[test]
+fn only_a_binary_crate_type_is_a_possible_build_script() {
+    let arguments = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+    assert!(compiles_only_a_binary(&arguments(&["--crate-type", "bin"])));
+    assert!(compiles_only_a_binary(&arguments(&["--crate-type=bin"])));
+    assert!(!compiles_only_a_binary(&arguments(&[
+        "--crate-type",
+        "lib"
+    ])));
+    assert!(!compiles_only_a_binary(&arguments(&[
+        "--crate-type",
+        "bin,rlib"
+    ])));
+    assert!(!compiles_only_a_binary(&arguments(&["src/main.rs"])));
+}
+
+#[test]
 fn a_build_script_with_a_custom_path_is_recognized() {
     // `build = "builder/main.rs"` runs as `build-script-main`, compiled from
     // the crate `build_script_main`.

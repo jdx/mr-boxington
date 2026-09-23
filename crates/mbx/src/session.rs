@@ -1801,6 +1801,27 @@ pub(crate) fn out_dir_argument(arguments: &[OsString]) -> Option<PathBuf> {
     None
 }
 
+/// Whether every `--crate-type` rustc was given is `bin`, as Cargo gives a
+/// build script. A library can share a build script's crate name, but never
+/// its crate type.
+pub(crate) fn compiles_only_a_binary(arguments: &[OsString]) -> bool {
+    let mut types = Vec::new();
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        let value = if argument == "--crate-type" {
+            arguments.next().and_then(|value| value.to_str())
+        } else {
+            argument
+                .to_str()
+                .and_then(|argument| argument.strip_prefix("--crate-type="))
+        };
+        if let Some(value) = value {
+            types.extend(value.split(','));
+        }
+    }
+    !types.is_empty() && types.iter().all(|kind| *kind == "bin")
+}
+
 /// Whether the shim should verify cached results against a real compilation.
 ///
 /// An empty value or `0` is off, matching how the configuration reads it, so

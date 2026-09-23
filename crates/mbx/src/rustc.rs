@@ -164,6 +164,7 @@ pub(crate) fn compile(
     let cache_native_links = session::cache_links_requested();
     let execution_only_build_script = session::build_script_execution_requested()
         && !cache_native_links
+        && session::compiles_only_a_binary(arguments)
         && session::crate_name_argument(arguments)
             .zip(session::out_dir_argument(arguments))
             .is_some_and(|(name, out_dir)| mbx_cache_rustc::is_build_script_unit(&name, &out_dir));
