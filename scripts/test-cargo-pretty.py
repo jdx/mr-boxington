@@ -192,8 +192,7 @@ pub fn answer() -> u32 { dep::value() }
         assert result.returncode == 0 and b'mbx[progress]:' in result.stderr, result.stderr
         assert b'\x1b' not in result.stderr and b'\r' not in result.stderr
         assert not result.stdout
-        assert result.stderr.count(b'mr boxington') == 1, result.stderr
-        assert '◀◆▶'.encode() in result.stderr
+        assert b'mr boxington' not in result.stderr, result.stderr
         result = subprocess.run([str(BINARY), 'check', '--message-format=json'], cwd=agent, env=agent_env, capture_output=True, timeout=60)
         assert result.returncode == 0 and b'mbx[progress]:' not in result.stderr
         assert b'mr boxington' not in result.stderr

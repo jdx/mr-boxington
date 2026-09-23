@@ -45,7 +45,6 @@ pub(super) fn run(
     environment: BTreeMap<String, String>,
     stats: impl Fn() -> AgentStats + Sync,
 ) -> Result<ExitCode> {
-    crate::logging::note(&super::mascot::Mascot::plain());
     with_progress(
         cadence,
         stats,
