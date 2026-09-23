@@ -13,6 +13,11 @@ impl Policy {
     /// Actions are ordered oldest first. A frozen successor to a completed
     /// oldest action is resumed immediately, even while pressure persists.
     pub(super) fn step(&mut self, now: u64, pressured: bool, frozen: &[bool]) -> Option<Change> {
+        if self.last_change.is_some_and(|last| now < last)
+            || self.pressure_since.is_some_and(|start| now < start)
+        {
+            *self = Self::default();
+        }
         if pressured {
             self.pressure_since.get_or_insert(now);
         } else {
@@ -51,6 +56,19 @@ impl Policy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_clock_reversal_cannot_strand_suspended_work() {
+        let mut policy = Policy::default();
+        assert_eq!(
+            policy.step(5_000, false, &[false, true, true]),
+            Some(Change::Resume(1))
+        );
+        assert_eq!(
+            policy.step(1_000, false, &[false, false, true]),
+            Some(Change::Resume(2))
+        );
+    }
+
     #[test]
     fn newest_first_and_oldest_keeps_running() {
         let mut policy = Policy::default();
