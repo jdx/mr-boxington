@@ -292,7 +292,16 @@ fn supervisor(state: &Path, group: &Path) -> Result<()> {
     let _ = std::fs::write(registry.join("disabled"), "supervisor exited");
     thaw_all(&actions);
     let _ = std::fs::write(registry.join("finished"), "1");
-    let _ = watchdog.wait();
+    let deadline = Instant::now();
+    while watchdog.try_wait()?.is_none() {
+        if deadline.elapsed() >= Duration::from_secs(1) {
+            // The owned helper may itself be hung. Compilers are already thawed.
+            let _ = watchdog.kill();
+            let _ = watchdog.wait();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
     result
 }
 fn supervise(

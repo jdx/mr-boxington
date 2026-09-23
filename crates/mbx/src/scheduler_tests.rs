@@ -904,3 +904,21 @@ fn an_oversized_idle_grant_spaces_the_next_pools_admission() {
     assert!(wider.try_admit(1, None).unwrap().is_none());
     drop(first);
 }
+
+#[test]
+fn frozen_work_has_admission_priority_until_its_heartbeat_expires() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut pool = pool_at(directory.path(), 4, 100);
+    pool.pressure = true;
+    pool.pressure_probe = Default::default;
+    pool.clock = || 1_000;
+    let first = pool.try_admit(1, None).unwrap().unwrap();
+    let pending = directory.path().join("suspended");
+    std::fs::create_dir(&pending).unwrap();
+    std::fs::write(pending.join("generation"), "1000").unwrap();
+    assert!(pool.try_admit(1, None).unwrap().is_none());
+    // A dead supervisor cannot hold admissions closed indefinitely.
+    pool.clock = || 4_000;
+    assert!(pool.try_admit(1, None).unwrap().is_some());
+    drop(first);
+}
