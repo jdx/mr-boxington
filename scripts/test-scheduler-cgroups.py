@@ -52,6 +52,12 @@ def lifecycle(mbx, root, failure):
             generation = load(state / "current.json")["generation"]
             registry = state / generation
             actions = group / generation
+            launch = None
+            if failure == "registration":
+                launch = (state / "launch.lock").open("w")
+                fcntl.flock(launch, fcntl.LOCK_EX)
+                time.sleep(5.5)
+                assert worker.poll() is None, "idle exit raced a registration"
             for _ in range(2):
                 identity = uuid.uuid4().hex[:24]
                 lease = (registry / (identity + ".lease")).open("w")
@@ -69,6 +75,8 @@ def lifecycle(mbx, root, failure):
                 assert child.stdout.readline().strip() == "ready"
                 (registry / (identity + ".json")).write_text(str(int(time.time() * 1000)))
                 wait_for(lambda: len((action / "cgroup.procs").read_text().splitlines()) == 2)
+            if launch:
+                launch.close()
             target = children[-1][1]
             (target / "cgroup.freeze").write_text("1")
             wait_for(lambda: frozen(target))
@@ -77,7 +85,7 @@ def lifecycle(mbx, root, failure):
                 worker.wait()
             elif failure == "hang":
                 worker.send_signal(signal.SIGSTOP)
-            elif failure == "cancel":
+            elif failure in ("cancel", "registration"):
                 leases[-1].close()
             else:
                 raise AssertionError(failure)
@@ -88,7 +96,7 @@ def lifecycle(mbx, root, failure):
                 # Disabled supervision still cleans up if an owner disappears.
                 leases[-1].close()
                 wait_for(lambda: not target.exists())
-            if failure == "cancel":
+            if failure in ("cancel", "registration"):
                 wait_for(lambda: not target.exists())
             print(f"PASS supervisor {failure}: compiler tree thawed", flush=True)
         finally:
@@ -115,5 +123,5 @@ if __name__ == "__main__":
     parser.add_argument("--mbx", type=Path, required=True)
     parser.add_argument("--root", type=Path, required=True)
     args = parser.parse_args()
-    for failure in ("exit", "hang", "cancel"):
+    for failure in ("exit", "hang", "cancel", "registration"):
         lifecycle(args.mbx.resolve(), args.root.resolve(), failure)
