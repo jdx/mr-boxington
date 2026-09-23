@@ -8,8 +8,7 @@ const paused = ref(false);
 <template>
   <section class="MbxBuild" aria-labelledby="mbx-build-title">
     <div class="heading">
-      <p class="eyebrow">While Cargo does its work</p>
-      <h2 id="mbx-build-title">A little company for the compile.</h2>
+      <h2 id="mbx-build-title">Follow build progress</h2>
     </div>
     <figure>
       <picture>

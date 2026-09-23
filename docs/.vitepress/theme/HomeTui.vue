@@ -7,7 +7,7 @@ const screens = [
     name: "Live",
     image: "/screenshots/tui-live.png",
     alt: "mbx Live dashboard with build activity, hit and miss graphs, store capacity, and compilation savings",
-    description: "Follow every build, watch cache traffic, and spot the biggest wins.",
+    description: "View active builds, cache transfers, and storage usage in the dashboard.",
   },
   {
     name: "Insights",
@@ -28,8 +28,7 @@ const selected = ref(screens[0]);
 <template>
   <section class="MbxTui" aria-labelledby="mbx-tui-title">
     <div class="heading">
-      <p class="eyebrow">Your cache, in plain sight</p>
-      <h2 id="mbx-tui-title">Watch the work you don’t have to do.</h2>
+      <h2 id="mbx-tui-title">Inspect builds and cache usage</h2>
     </div>
     <div class="screen-picker" role="group" aria-label="Choose a dashboard screenshot">
       <button
