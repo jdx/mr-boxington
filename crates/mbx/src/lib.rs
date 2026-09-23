@@ -61,6 +61,7 @@ mod linker;
 mod managed_linker;
 mod materialize;
 mod out_dir;
+mod pressure;
 mod rustc;
 mod rustdoc;
 mod scheduler;

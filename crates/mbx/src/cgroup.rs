@@ -20,7 +20,27 @@ struct Domain {
     v2: bool,
 }
 
+/// PSI files for every visible v2 ancestor, including unlimited ancestors.
+pub(crate) fn pressure_files() -> Vec<PathBuf> {
+    visible_domains()
+        .into_iter()
+        .filter(|domain| domain.v2)
+        .flat_map(|domain| {
+            domain
+                .current
+                .ancestors()
+                .take_while(|path| path.starts_with(&domain.mount))
+                .map(|path| path.join("memory.pressure"))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 pub(crate) fn memory() -> Memory {
+    snapshot(&visible_domains())
+}
+
+fn visible_domains() -> Vec<Domain> {
     let domains = std::fs::read_to_string("/proc/self/cgroup")
         .ok()
         .zip(std::fs::read_to_string("/proc/self/mountinfo").ok())
@@ -28,7 +48,7 @@ pub(crate) fn memory() -> Memory {
         .unwrap_or_default();
     if domains.is_empty() {
         // Preserve detection in containers that hide proc membership or mounts.
-        return snapshot(&[
+        return vec![
             Domain {
                 mount: "/sys/fs/cgroup".into(),
                 current: "/sys/fs/cgroup".into(),
@@ -39,9 +59,9 @@ pub(crate) fn memory() -> Memory {
                 current: "/sys/fs/cgroup/memory".into(),
                 v2: false,
             },
-        ]);
+        ];
     }
-    snapshot(&domains)
+    domains
 }
 
 fn domains(groups: &str, mounts: &str) -> Vec<Domain> {
