@@ -96,7 +96,15 @@ impl State {
             .zip(reading.available)
             .map(|(total, available)| available as f64 / total as f64);
         if !comparable {
+            // A forward gap discards stale evidence but not recovery spacing,
+            // which expires on its own; a clock step back discards both.
+            let spacing = (self.version == VERSION && now > self.sampled_ms)
+                .then_some((self.recovered_ms, self.last_admission_ms));
             *self = Self::default();
+            if let Some((recovered_ms, last_admission_ms)) = spacing {
+                self.recovered_ms = recovered_ms;
+                self.last_admission_ms = last_admission_ms;
+            }
         }
         self.valid = headroom.is_some() || stall_percent.is_some();
         let bad = headroom.is_some_and(|v| v < 0.05) || stall_percent.is_some_and(|v| v >= 10.0);
@@ -199,6 +207,16 @@ mod tests {
         state.update(7_000, memory(11));
         assert!(!state.pressured);
         assert_eq!(state.recovered_ms, Some(7_000));
+        state.last_admission_ms = Some(7_000);
+        let mut gap = state.clone();
+        gap.update(10_100, memory(11));
+        assert_eq!(gap.recovered_ms, Some(7_000), "a stale gap keeps spacing");
+        assert_eq!(gap.last_admission_ms, Some(7_000));
+        gap.update(12_000, memory(11));
+        assert_eq!(gap.recovered_ms, None, "spacing still expires");
+        let mut back = state.clone();
+        back.update(6_000, memory(11));
+        assert_eq!(back.recovered_ms, None, "a clock step back resets spacing");
         state.update(7_500, memory(0));
         state.update(8_000, memory(0));
         assert!(state.pressured);
