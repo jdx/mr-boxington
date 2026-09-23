@@ -1,4 +1,4 @@
-//! The same terminal mascot for animated builds and append-only agent output.
+//! The terminal mascot drawn beside animated builds.
 
 pub(super) const WIDTH: usize = 18;
 pub(super) const HEIGHT: usize = 9;
@@ -103,22 +103,6 @@ impl Mascot {
             *cell = (ch, ink);
         }
     }
-
-    pub(super) fn plain() -> String {
-        Self::new(Pose::Sealed).0[2..]
-            .iter()
-            .enumerate()
-            .map(|(y, row)| {
-                let line: String = row.iter().map(|(ch, _)| ch).collect();
-                if y == 0 {
-                    format!("{}  mr boxington", line.trim_end())
-                } else {
-                    line.trim_end().to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
 }
 
 #[cfg(test)]
@@ -141,9 +125,5 @@ mod tests {
             assert_eq!(art.0[5][6].0, '•');
             assert_eq!(art.0[5][12].0, '◉');
         }
-        let plain = Mascot::plain();
-        assert_eq!(plain.lines().count(), 7);
-        assert!(!plain.contains(['\r', '\x1b']));
-        assert!(!plain.contains('▼'));
     }
 }
