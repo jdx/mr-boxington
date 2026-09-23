@@ -320,7 +320,7 @@ fn watchdog(state: &Path, group: &Path, generation: &str) -> Result<()> {
             thaw_all(&actions);
             let _ = clean_orphans(&registry, &actions);
             let mut election = fslock::LockFile::open(&state.join("supervisor.lock"))?;
-            if election.try_lock()? {
+            if election.try_lock()? && clean_orphans(&registry, &actions)? == 0 {
                 return Ok(());
             }
         }
