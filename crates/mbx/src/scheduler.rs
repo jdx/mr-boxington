@@ -782,6 +782,14 @@ impl Pool {
         let registrar_path = self.dir.join(POOL_LOCK);
         let mut registrar = fslock::LockFile::open(&registrar_path)?;
         registrar.lock()?;
+        // Observation only; admissions continue to use the existing budget.
+        if self.bytes_per_permit > 0 {
+            let _ = crate::pressure::sample(
+                &self.dir,
+                crate::pressure::now_ms(),
+                crate::pressure::probe,
+            );
+        }
         let live = scan_leases(&leases)?;
         let capacity = self.capacity - self.reserved();
         let used: u64 = live.iter().map(|lease| lease.weight).sum();

@@ -20,6 +20,24 @@ struct Domain {
     v2: bool,
 }
 
+/// PSI files for every visible v2 ancestor, including unlimited ancestors.
+pub(crate) fn pressure_files() -> Vec<PathBuf> {
+    let groups = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    let mounts = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    domains(&groups, &mounts)
+        .into_iter()
+        .filter(|domain| domain.v2)
+        .flat_map(|domain| {
+            domain
+                .current
+                .ancestors()
+                .take_while(|path| path.starts_with(&domain.mount))
+                .map(|path| path.join("memory.pressure"))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 pub(crate) fn memory() -> Memory {
     let domains = std::fs::read_to_string("/proc/self/cgroup")
         .ok()
