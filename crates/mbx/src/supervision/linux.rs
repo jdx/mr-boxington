@@ -565,6 +565,20 @@ fn control(
     Ok(true)
 }
 
+fn thaw_owned(registry: &Path, group: &Path) {
+    let now = crate::pressure::now_ms();
+    for path in groups(group) {
+        if thaw(&path).is_ok() {
+            let id = path.file_name().unwrap().to_string_lossy();
+            let file = registry.join(format!("{id}.stats"));
+            if let Some(mut stats) = read::<Stats>(&file) {
+                stats.resume(now);
+                let _ = write(&file, &stats);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod eligibility_tests {
     use super::*;
@@ -583,20 +597,6 @@ mod eligibility_tests {
             std::fs::write(&path, bytes).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             assert_eq!(direct_driver(path.as_os_str()), accepted, "{name}");
-        }
-    }
-}
-
-fn thaw_owned(registry: &Path, group: &Path) {
-    let now = crate::pressure::now_ms();
-    for path in groups(group) {
-        if thaw(&path).is_ok() {
-            let id = path.file_name().unwrap().to_string_lossy();
-            let file = registry.join(format!("{id}.stats"));
-            if let Some(mut stats) = read::<Stats>(&file) {
-                stats.resume(now);
-                let _ = write(&file, &stats);
-            }
         }
     }
 }
