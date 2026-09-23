@@ -141,6 +141,10 @@ cgroup_root = "/sys/fs/cgroup/my-delegated-builds"
 This stage establishes process supervision and recovery; automatic freezing is
 added separately. A supervisor and an independent watchdog stay outside the
 compiler cgroups. Losing the supervisor's heartbeat thaws its compiler groups.
+Losing the watchdog's heartbeat disables supervision for new compilers and
+starts a replacement watchdog for the compilers still running. The next
+supervisor removes cgroups and state left by earlier ones once their compilers
+have exited.
 Compiler cancellation thaws the owned group before terminating leftover
 processes. Custom Rust wrappers, build-script binaries, test binaries, and
 compilers nested inside a supervised compiler are not eligible.

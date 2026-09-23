@@ -39,16 +39,16 @@ def frozen(path):
         return False
 
 
-def watchdog_pid(state, generation):
-    wanted = [b"watchdog", str(state).encode(), generation.encode()]
-    for proc in Path("/proc").iterdir():
-        try:
-            args = (proc / "cmdline").read_bytes().split(b"\0")
-        except OSError:
-            continue
-        if all(arg in args for arg in wanted):
-            return int(proc.name)
-    return None
+def watchdogs(worker):
+    # Only signal directly observed children of this test's worker.
+    return [int(pid) for pid in Path(f"/proc/{worker.pid}/task/{worker.pid}/children").read_text().split()]
+
+
+def running(pid):
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except FileNotFoundError:
+        return False
 
 
 def lifecycle(mbx, root, failure):
@@ -101,8 +101,10 @@ def lifecycle(mbx, root, failure):
             elif failure in ("cancel", "registration"):
                 leases[-1].close()
             elif failure == "watchdog":
-                os.kill(watchdog_pid(state, generation), signal.SIGKILL)
+                [hung] = watchdogs(worker)
+                os.kill(hung, signal.SIGSTOP)
             elif failure == "replaced":
+                [orphaned] = watchdogs(worker)
                 worker.kill()
                 worker.wait()
             else:
@@ -117,12 +119,17 @@ def lifecycle(mbx, root, failure):
             if failure in ("cancel", "registration"):
                 wait_for(lambda: not target.exists())
             if failure == "watchdog":
-                assert (registry / "disabled").exists()
+                wait_for(lambda: (registry / "disabled").exists())
                 # A replacement watchdog cleans up even if the supervisor stalls.
-                wait_for(lambda: watchdog_pid(state, generation))
+                wait_for(lambda: watchdogs(worker) not in ([], [hung]))
                 worker.send_signal(signal.SIGSTOP)
                 leases[-1].close()
                 wait_for(lambda: not target.exists())
+                worker.send_signal(signal.SIGCONT)
+                for lease in leases:
+                    lease.close()
+                wait_for(lambda: all(not action.exists() for _, action in children))
+                worker.wait(timeout=10)
             if failure == "replaced":
                 successor = subprocess.Popen([str(mbx), "__mbx-control", "supervisor", str(state), str(group)])
                 wait_for(lambda: (load(state / "current.json") or {}).get("generation") != generation)
@@ -132,10 +139,12 @@ def lifecycle(mbx, root, failure):
                 fcntl.flock(launch, fcntl.LOCK_EX)
                 for lease in leases:
                     lease.close()
-                wait_for(lambda: watchdog_pid(state, generation) is None)
+                wait_for(lambda: not running(orphaned))
                 assert successor.poll() is None
                 launch.close()
                 successor.wait(timeout=10)
+                # The successor's idle shutdown removes the drained generation.
+                assert not registry.exists() and not actions.exists()
             print(f"PASS supervisor {failure}: compiler tree thawed", flush=True)
         finally:
             if worker.poll() is None:

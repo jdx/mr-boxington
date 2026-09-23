@@ -217,6 +217,11 @@ fn clean_orphans(registry: &Path, group: &Path) -> Result<usize> {
         unless_gone(&path, thaw(&path))?;
         if populated(&path) {
             unless_gone(&path, std::fs::write(path.join("cgroup.kill"), "1"))?;
+            // The kill is asynchronous and a populated group cannot be removed.
+            let start = Instant::now();
+            while populated(&path) && start.elapsed() < Duration::from_secs(1) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
         let _ = std::fs::remove_dir(&path);
         let _ = std::fs::remove_file(registry.join(format!("{id}.json")));
@@ -322,10 +327,30 @@ fn supervise(
             if launch.try_lock()? && clean_orphans(registry, actions)? == 0 {
                 // Publish shutdown while holding the same lock as registration.
                 std::fs::write(registry.join("disabled"), "idle shutdown")?;
+                prune(state, group, generation);
                 return Ok(());
             }
         }
         std::thread::sleep(TICK);
+    }
+}
+/// Remove earlier generations once none of their actions remain. The caller
+/// holds the election and launch locks, so nothing can register into them.
+fn prune(state: &Path, group: &Path, current: &str) {
+    for entry in std::fs::read_dir(state).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        let Some(generation) = name.to_str().filter(|s| token(s) && *s != current) else {
+            continue;
+        };
+        let actions = group.join(generation);
+        if !clean_orphans(&entry.path(), &actions).is_ok_and(|live| live == 0) {
+            continue;
+        }
+        // The kernel refuses to remove a group that still has action groups.
+        let _ = std::fs::remove_dir(&actions);
+        if !actions.exists() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
     }
 }
 fn watchdog(state: &Path, group: &Path, generation: &str) -> Result<()> {
