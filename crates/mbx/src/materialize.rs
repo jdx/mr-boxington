@@ -1023,14 +1023,51 @@ mod materialization_tests {
         );
     }
 
+    /// Set in the child that plays the other restore, to the object it locks.
+    const HOLD_RELABEL_LOCK_ENV: &str = "MBX_TEST_HOLD_RELABEL_LOCK";
+
     #[test]
     fn an_object_another_restore_is_relabelling_is_copied_rather_than_waited_on() {
+        use std::io::BufRead as _;
+        if let Some(source) = std::env::var_os(HOLD_RELABEL_LOCK_ENV) {
+            let held = std::fs::File::open(source).unwrap();
+            assert!(take_exclusive_lock(&held));
+            // On stderr, which the harness leaves alone: its stdout puts
+            // `test <name> ... ` in front of whatever a serial run prints.
+            eprintln!("locked");
+            // Held until the parent kills this process, or goes away itself
+            // and closes the pipe.
+            let _ = std::io::stdin().read_line(&mut String::new());
+            return;
+        }
+
         let root = tempfile::tempdir().unwrap();
         let source = blob(root.path(), "blob", b"contended", 0o644);
         // Stand in for the other restore: hold the lock this one would need to
         // read a mode it can trust.
-        let held = std::fs::File::open(&source).unwrap();
-        assert!(take_exclusive_lock(&held));
+        //
+        // From another process, as the other restore would be. A descriptor
+        // this process held would be copied into every child that another
+        // test forks while it is open, and the lock stays with that copy until
+        // the child execs, so dropping it here would not reliably free it.
+        let mut held = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "an_object_another_restore_is_relabelling_is_copied_rather_than_waited_on",
+                "--nocapture",
+            ])
+            .env(HOLD_RELABEL_LOCK_ENV, &source)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = std::io::BufReader::new(held.stderr.take().unwrap());
+        assert!(
+            stderr
+                .lines()
+                .any(|line| line.is_ok_and(|line| line == "locked")),
+            "the other restore never took the lock"
+        );
 
         let (staged, materialization) = stage_verified_cached_output_with(
             root.path(),
@@ -1048,7 +1085,9 @@ mod materialization_tests {
             "the object is left to whoever holds the lock"
         );
         assert_eq!(std::fs::read(&staged).unwrap(), b"contended");
-        drop(held);
+        // Reaped, so its descriptors are closed and the lock is free.
+        held.kill().unwrap();
+        held.wait().unwrap();
 
         // With the lock free, the same restore links as usual.
         let (_, materialization) = stage_verified_cached_output_with(
