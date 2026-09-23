@@ -162,25 +162,23 @@ pub(crate) fn compile(
     // has no parent session, so first parse just enough of the invocation to
     // learn its output directory and use that as the stable target mapping.
     let cache_native_links = session::cache_links_requested();
-    let execution_only_build_script = session::build_script_execution_requested()
-        && !cache_native_links
-        && session::compiles_only_a_binary(arguments)
-        && session::crate_name_argument(arguments)
-            .zip(session::out_dir_argument(arguments))
-            .is_some_and(|(name, out_dir)| mbx_cache_rustc::is_build_script_unit(&name, &out_dir));
+    // Scanned after response-file expansion, so a `--target`, `--out-dir`, or
+    // crate type inside an `@argfile` is seen; an expansion the parser would
+    // refuse is left as is, since parsing fails on it below anyway.
+    let expanded = RustcInvocation::expand_arguments(arguments);
+    let scanned = expanded.as_deref().unwrap_or(arguments);
     // A platform without native-link action caching still needs to observe a
     // build-script executable so execution caching can key it by its exact
     // bytes. Parsing it is safe: the linked output itself is not published.
-    // Scanned after response-file expansion, so a `--target` inside an
-    // `@argfile` is seen; an expansion the parser would refuse is left as is,
-    // since parsing fails on it below anyway.
-    let expanded = RustcInvocation::expand_arguments(arguments);
+    let execution_only_build_script = session::build_script_execution_requested()
+        && !cache_native_links
+        && session::compiles_only_a_binary(scanned)
+        && session::crate_name_argument(scanned)
+            .zip(session::out_dir_argument(scanned))
+            .is_some_and(|(name, out_dir)| mbx_cache_rustc::is_build_script_unit(&name, &out_dir));
     let options =
         ParseOptions::caching_native_links(cache_native_links || execution_only_build_script)
-            .with_custom_target_search(custom_target_may_resolve(
-                rustc,
-                expanded.as_deref().unwrap_or(arguments),
-            ));
+            .with_custom_target_search(custom_target_may_resolve(rustc, scanned));
     // Appended before anything parses: the debug-map rule inside the parser is
     // exactly what this flag satisfies, so an invocation that would bypass
     // without it has to carry it going in.
