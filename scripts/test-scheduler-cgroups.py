@@ -233,6 +233,9 @@ def suspension(mbx, root):
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 wait_for(lambda: (registry / "disabled").exists())
                 wait_for(lambda: not any(frozen(action) for _, action in children))
+            for lease in leases:
+                lease.close()
+            wait_for(lambda: all(not action.exists() for _, action in children))
             worker.wait(timeout=8)
             print("PASS stale registrar: owned groups thawed and suspension disabled", flush=True)
         finally:

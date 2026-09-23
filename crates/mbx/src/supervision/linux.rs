@@ -324,7 +324,7 @@ fn supervisor(state: &Path, group: &Path) -> Result<()> {
         &mut watchdog,
     );
     let _ = std::fs::write(registry.join("disabled"), "supervisor exited");
-    thaw_all(&actions);
+    thaw_owned(&registry, &actions);
     let _ = std::fs::write(registry.join("finished"), "1");
     let deadline = Instant::now();
     while watchdog.try_wait()?.is_none() {
@@ -386,10 +386,25 @@ fn supervise(
                 return Ok(());
             }
         }
-        if control(state, registry, actions, generation, &mut policy)? {
-            monitored = Instant::now();
-        } else if monitored.elapsed() >= Duration::from_millis(TIMEOUT) {
-            bail!("pressure sampling blocked by a stale registrar lock");
+        if !registry.join("disabled").exists() {
+            let failure = match control(state, registry, actions, generation, &mut policy) {
+                Ok(true) => {
+                    monitored = Instant::now();
+                    None
+                }
+                Ok(false) if monitored.elapsed() < Duration::from_millis(TIMEOUT) => None,
+                Ok(false) => Some("pressure sampling blocked by a stale registrar lock".to_owned()),
+                Err(error) => Some(format!("pressure monitoring failed: {error:#}")),
+            };
+            if let Some(reason) = failure {
+                std::fs::write(registry.join("disabled"), reason)?;
+            }
+        }
+        if registry.join("disabled").exists() {
+            thaw_owned(registry, actions);
+            if let Some(pool) = state.parent() {
+                let _ = std::fs::remove_file(pool.join("suspended").join(generation));
+            }
         }
         std::thread::sleep(TICK);
     }
@@ -425,14 +440,14 @@ fn watchdog(state: &Path, group: &Path, generation: &str) -> Result<()> {
             .as_ref()
             .is_some_and(|h| h.generation == generation && fresh(h.time));
         if registry.join("finished").exists() {
-            thaw_all(&actions);
+            thaw_owned(&registry, &actions);
             return Ok(());
         }
         if !healthy && start.elapsed() > Duration::from_millis(TIMEOUT) {
             std::fs::write(registry.join("disabled"), "supervisor heartbeat lost")?;
             // Repeat while a stalled supervisor might wake up in an actuation.
             // No election/registrar lock is needed to rescue a frozen action.
-            thaw_all(&actions);
+            thaw_owned(&registry, &actions);
             let _ = clean_orphans(&registry, &actions);
             // A successor's heartbeat also proves this generation's supervisor
             // is gone: it held the election lock for its whole life.
@@ -568,6 +583,20 @@ mod eligibility_tests {
             std::fs::write(&path, bytes).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             assert_eq!(direct_driver(path.as_os_str()), accepted, "{name}");
+        }
+    }
+}
+
+fn thaw_owned(registry: &Path, group: &Path) {
+    let now = crate::pressure::now_ms();
+    for path in groups(group) {
+        if thaw(&path).is_ok() {
+            let id = path.file_name().unwrap().to_string_lossy();
+            let file = registry.join(format!("{id}.stats"));
+            if let Some(mut stats) = read::<Stats>(&file) {
+                stats.resume(now);
+                let _ = write(&file, &stats);
+            }
         }
     }
 }

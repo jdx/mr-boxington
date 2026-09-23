@@ -161,6 +161,7 @@ provision systemd units, grant permissions, or modify host cgroup limits.
 Suspension/resumption events and per-action memory and suspended-time statistics
 are recorded beneath `scheduler/supervision-*/` in the cache directory. Compiler
 completion reports time spent suspended. Probe failures or a lost watchdog
-heartbeat thaw the generation and stop its supervisor. Suspension never kills
+heartbeat thaw the generation and disable further suspension. Ownership cleanup
+continues until the existing actions finish. Suspension never kills
 and retries a compilation; termination of orphaned descendants is cancellation
 cleanup only.
