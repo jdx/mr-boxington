@@ -1637,6 +1637,15 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
     command.args(&arguments);
     command.env_remove(PREVIOUS_RUSTC_WRAPPER_ENV);
     command.env_remove(PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV);
+    #[cfg(unix)]
+    let eligible = permit.is_some()
+        && std::env::var_os(PREVIOUS_RUSTC_WRAPPER_ENV).is_none()
+        && std::env::var_os(PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV).is_none()
+        && crate_name
+            .as_deref()
+            .is_some_and(|name| !name.starts_with("build_script_"));
+    #[cfg(unix)]
+    let mut action = crate::supervision::prepare(&mut command, eligible);
 
     #[cfg(unix)]
     {
@@ -1650,7 +1659,12 @@ fn run_transparent_rustc(rustc: OsString, arguments: Vec<OsString>) -> ExitCode 
         // A held permit must be released when the compiler finishes, and its
         // lease lock is close-on-exec, so this process has to outlive the
         // compiler rather than become it.
-        match command.status() {
+        match command.spawn().and_then(|mut child| {
+            if let Some(action) = &mut action {
+                action.started();
+            }
+            child.wait()
+        }) {
             Ok(status) => {
                 drop(permit);
                 if let Some(demand) = &demand {

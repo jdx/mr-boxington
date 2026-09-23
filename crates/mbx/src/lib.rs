@@ -66,4 +66,6 @@ mod rustc;
 mod rustdoc;
 mod scheduler;
 mod storage;
+#[doc(hidden)]
+pub mod supervision;
 mod workspace_state;

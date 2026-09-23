@@ -368,6 +368,14 @@ How the savings line after a build reads.
 - `off`
 
 
+### `scheduler.cgroup_root`
+
+- **Type:** `option<path>`
+- **Optional:** true
+- **Set with:** `MBX_SCHEDULER_CGROUP_ROOT`
+
+Writable delegated cgroup v2 directory for compiler supervision.
+
 ### `scheduler.cpus`
 
 - **Type:** `option<int>`
@@ -422,6 +430,14 @@ Permit priority of this build's compilations.
 - **Set with:** `MBX_SCHEDULER_RESERVE_CPUS`
 
 Logical CPUs to leave free for the rest of the machine.
+
+### `scheduler.suspend`
+
+- **Type:** `bool`
+- **Default:** `false`
+- **Set with:** `MBX_SCHEDULER_SUSPEND`
+
+Experimentally suspend Linux compiler trees under memory pressure.
 
 ### `scheduler.tests`
 

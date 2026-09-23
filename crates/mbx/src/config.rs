@@ -315,6 +315,12 @@ struct RawScheduler {
     /// Delay additional compilations while the machine is under memory pressure.
     #[usage(env = "MBX_SCHEDULER_PRESSURE", default = true)]
     pressure: bool,
+    /// Experimentally suspend Linux compiler trees under memory pressure.
+    #[usage(env = "MBX_SCHEDULER_SUSPEND", default = false)]
+    suspend: bool,
+    /// Writable delegated cgroup v2 directory for compiler supervision.
+    #[usage(env = "MBX_SCHEDULER_CGROUP_ROOT")]
+    cgroup_root: Option<PathBuf>,
     /// Run `cargo test` binaries under the same permit pool.
     #[usage(env = "MBX_SCHEDULER_TESTS", default = false)]
     tests: bool,
@@ -589,6 +595,10 @@ pub struct SchedulerSettings {
     pub tests: bool,
     /// Gate new compilations on live memory pressure.
     pub pressure: bool,
+    /// Opt in to Linux compiler supervision and suspension.
+    pub suspend: bool,
+    /// An explicitly delegated cgroup v2 directory.
+    pub cgroup_root: Option<PathBuf>,
 }
 
 impl SchedulerSettings {
@@ -615,6 +625,8 @@ impl Default for SchedulerSettings {
             priority: SchedulerPriority::Normal,
             tests: false,
             pressure: false,
+            suspend: false,
+            cgroup_root: None,
         }
     }
 }
@@ -1068,6 +1080,8 @@ impl Config {
                 .wrap_err("invalid scheduler.priority")?,
             tests: raw.scheduler.tests,
             pressure: raw.scheduler.pressure,
+            suspend: raw.scheduler.suspend,
+            cgroup_root: raw.scheduler.cgroup_root,
         };
         let config = Self {
             cache_dir,
@@ -1465,6 +1479,44 @@ mod tests {
             FileLayer::at(path, FileScope::Global)
         });
         Config::from_layers_measuring(&env, file.as_ref(), measure_disk, || Some(32 * GIB))
+    }
+
+    #[test]
+    fn repository_policy_cannot_opt_into_process_supervision() {
+        let directory = tempfile::tempdir().unwrap();
+        for policy in ["suspend = true", "cgroup_root = '/delegated'"] {
+            std::fs::write(
+                directory.path().join(".mbx.toml"),
+                format!("[scheduler]\n{policy}\n"),
+            )
+            .unwrap();
+            let mut config = configured(None, &[]).unwrap();
+            assert!(
+                config
+                    .apply_workspace_policy_with(directory.path(), |_| false)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn suspension_requires_explicit_opt_in() {
+        let config = configured(None, &[]).unwrap();
+        assert!(!config.scheduler.suspend);
+        assert!(config.scheduler.cgroup_root.is_none());
+        let config = configured(
+            None,
+            &[
+                ("MBX_SCHEDULER_SUSPEND", "1"),
+                ("MBX_SCHEDULER_CGROUP_ROOT", "/delegated"),
+            ],
+        )
+        .unwrap();
+        assert!(config.scheduler.suspend);
+        assert_eq!(
+            config.scheduler.cgroup_root,
+            Some(PathBuf::from("/delegated"))
+        );
     }
 
     #[test]

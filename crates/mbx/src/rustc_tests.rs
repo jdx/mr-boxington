@@ -166,7 +166,8 @@ fn a_forwarded_compiler_run_captures_what_it_forwards() {
     let stdout_sink = Sink::default();
     let stderr_sink = Sink::default();
     let output =
-        run_compiler_forwarding(&mut command, stdout_sink.clone(), stderr_sink.clone()).unwrap();
+        run_compiler_forwarding(&mut command, stdout_sink.clone(), stderr_sink.clone(), None)
+            .unwrap();
     assert_eq!(output.status.code(), Some(3));
     assert_eq!(
         output.stdout, b"out one\nout two\ntail without newline",
@@ -182,7 +183,7 @@ fn a_forwarded_compiler_run_captures_what_it_forwards() {
     // The plain path returns the same thing Cargo would have seen at the end.
     let mut command = Command::new("sh");
     command.arg("-c").arg(script);
-    let held = run_compiler(&mut command, false).unwrap();
+    let held = run_compiler(&mut command, false, false).unwrap();
     assert_eq!(held.stdout, output.stdout);
     assert_eq!(held.stderr, output.stderr);
     assert_eq!(held.status.code(), Some(3));
@@ -228,7 +229,7 @@ fn a_notification_is_forwarded_before_the_compiler_exits() {
     let (done, finished) = std::sync::mpsc::channel();
     let release_on_timeout = root.path().join("release");
     let worker = std::thread::spawn(move || {
-        let output = run_compiler_forwarding(&mut command, Sink::default(), sink);
+        let output = run_compiler_forwarding(&mut command, Sink::default(), sink, None);
         let _ = done.send(());
         output
     });

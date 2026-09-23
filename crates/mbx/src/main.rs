@@ -1,6 +1,9 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    if let Some(code) = mbx::supervision::dispatch() {
+        return code;
+    }
     if let Some(code) = mbx::cli::launch::dispatch() {
         return code;
     }

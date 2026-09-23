@@ -308,8 +308,10 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     // copy of it, which the compiler cannot write over.
     let object = invocation.output_in(&working_dir);
     crate::materialize::clear_linked_outputs(std::iter::once(object.as_path()));
-    let output = crate::phase_timing::measure("compiler", || command.output())
-        .wrap_err_with(|| format!("failed to run {}", Path::new(compiler).display()))?;
+    let output = crate::phase_timing::measure("compiler", || {
+        crate::supervision::output(&mut command, true)
+    })
+    .wrap_err_with(|| format!("failed to run {}", Path::new(compiler).display()))?;
     drop(permit);
     crate::scheduler::record_compiler_memory(&demand, &output.status);
     let duration_ns = duration_ns(started.elapsed());
