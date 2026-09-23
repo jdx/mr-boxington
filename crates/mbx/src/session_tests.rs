@@ -60,6 +60,40 @@ fn cargo_build_script_executable_names_are_recognized() {
     assert!(is_build_script_executable(Path::new("build-script-build")));
     assert!(is_build_script_executable(Path::new("build_script_build")));
     assert!(!is_build_script_executable(Path::new("build-script")));
+    assert!(!is_build_script_executable(Path::new("build-script-")));
+}
+
+#[test]
+fn a_build_script_with_a_custom_path_is_recognized() {
+    // `build = "builder/main.rs"` runs as `build-script-main`, compiled from
+    // the crate `build_script_main`.
+    assert!(is_build_script_executable(Path::new("build-script-main")));
+    assert_eq!(
+        build_script_crate_name(Path::new("build-script-my-build")).as_deref(),
+        Some("build_script_my_build")
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let invoked = directory
+        .path()
+        .join(format!("build-script-main{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(&invoked, "shim").unwrap();
+    // A sibling for some other script name must not be taken for this one.
+    let other = directory.path().join(format!(
+        "build_script_build-one{}{}",
+        std::env::consts::EXE_SUFFIX,
+        BUILD_SCRIPT_REAL_SUFFIX
+    ));
+    std::fs::write(&other, "other").unwrap();
+    assert_eq!(find_build_script_real_path(&invoked), None);
+
+    let real = directory.path().join(format!(
+        "build_script_main-one{}{}",
+        std::env::consts::EXE_SUFFIX,
+        BUILD_SCRIPT_REAL_SUFFIX
+    ));
+    std::fs::write(&real, "real").unwrap();
+    assert_eq!(find_build_script_real_path(&invoked), Some(real));
 }
 
 fn test_config(cache_dir: &Path) -> Config {

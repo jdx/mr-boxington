@@ -1181,10 +1181,20 @@ pub fn is_build_script_shim() -> bool {
     is_build_script_executable(&invoked) && find_build_script_real_path(&invoked).is_some()
 }
 
+/// Cargo runs a build script as `build-script-<stem>`, where `<stem>` names
+/// its source file: `build-script-build` for `build.rs`.
 fn is_build_script_executable(path: &Path) -> bool {
-    path.file_stem().is_some_and(|stem| {
-        stem == OsStr::new("build-script-build") || stem == OsStr::new("build_script_build")
-    })
+    build_script_crate_name(path).is_some()
+}
+
+/// The crate name rustc compiled a build-script executable under.
+fn build_script_crate_name(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    let target = stem
+        .strip_prefix("build-script-")
+        .or_else(|| stem.strip_prefix("build_script_"))
+        .filter(|target| !target.is_empty())?;
+    Some(format!("build_script_{}", target.replace('-', "_")))
 }
 
 pub(crate) fn build_script_invocation_path() -> Option<PathBuf> {
@@ -1212,6 +1222,7 @@ pub(crate) fn find_build_script_real_path(executable: &Path) -> Option<PathBuf> 
     if direct.is_file() {
         return Some(direct);
     }
+    let prefix = format!("{}-", build_script_crate_name(executable)?);
     let parent = executable.parent()?;
     let mut matches = std::fs::read_dir(parent)
         .ok()?
@@ -1223,8 +1234,7 @@ pub(crate) fn find_build_script_real_path(executable: &Path) -> Option<PathBuf> 
                     .file_name()
                     .and_then(OsStr::to_str)
                     .is_some_and(|name| {
-                        name.starts_with("build_script_build-")
-                            && name.ends_with(BUILD_SCRIPT_REAL_SUFFIX)
+                        name.starts_with(&prefix) && name.ends_with(BUILD_SCRIPT_REAL_SUFFIX)
                     })
         });
     let found = matches.next()?;

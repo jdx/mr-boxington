@@ -163,7 +163,9 @@ pub(crate) fn compile(
     // learn its output directory and use that as the stable target mapping.
     let cache_native_links = session::cache_links_requested();
     let execution_only_build_script = session::build_script_execution_requested()
-        && session::crate_name_argument(arguments).as_deref() == Some("build_script_build")
+        && session::crate_name_argument(arguments)
+            .as_deref()
+            .is_some_and(mbx_cache_rustc::is_build_script_crate_name)
         && !cache_native_links;
     // A platform without native-link action caching still needs to observe a
     // build-script executable so execution caching can key it by its exact

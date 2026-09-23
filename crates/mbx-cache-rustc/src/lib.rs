@@ -833,11 +833,30 @@ impl RustcInvocation {
     }
 }
 
+/// Whether a crate name has the form Cargo gives every build script.
+///
+/// The name alone is not proof: see [`RustcOutputs::build_script_executable`].
+pub fn is_build_script_crate_name(crate_name: &str) -> bool {
+    crate_name
+        .strip_prefix("build_script_")
+        .is_some_and(|stem| !stem.is_empty())
+}
+
 impl RustcOutputs {
     /// The linked executable Cargo will run as a build script, when this is a
     /// build-script compilation.
+    ///
+    /// Cargo names a build script's crate `build_script_` plus the stem of its
+    /// source: `build_script_build` for `build.rs`, `build_script_main` for
+    /// `build = "builder/main.rs"`. Any name but the default must also be
+    /// linked into a unit directory under Cargo's `build/`, so an ordinary
+    /// binary that happens to share the prefix is never taken for one.
     pub fn build_script_executable(&self, crate_name: &str) -> Option<&Path> {
-        (crate_name == "build_script_build")
+        let build_script = crate_name == "build_script_build"
+            || (is_build_script_crate_name(crate_name)
+                && self.directory.parent().and_then(Path::file_name)
+                    == Some(std::ffi::OsStr::new("build")));
+        build_script
             .then(|| self.files.iter().find(|path| self.is_executable(path)))
             .flatten()
             .map(PathBuf::as_path)
