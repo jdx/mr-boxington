@@ -170,6 +170,38 @@ def lifecycle(mbx, root, failure):
             group.rmdir()
 
 
+def handoff(mbx, root):
+    with tempfile.TemporaryDirectory() as temporary:
+        state = Path(temporary)
+        group = root / ("test-" + uuid.uuid4().hex)
+        group.mkdir()
+        workers = [subprocess.Popen([str(mbx), "__mbx-control", "supervisor", str(state), str(group)])]
+        try:
+            wait_for(lambda: load(state / "current.json"))
+            generation = load(state / "current.json")["generation"]
+            # Launch a successor as soon as the idle supervisor stops accepting
+            # registrations, while it still holds the election lock.
+            deadline = time.monotonic() + 10
+            while not (state / generation / "disabled").exists():
+                assert time.monotonic() < deadline, "no idle shutdown"
+                time.sleep(0.005)
+            assert workers[0].poll() is None, "missed the handoff window"
+            workers.append(subprocess.Popen([str(mbx), "__mbx-control", "supervisor", str(state), str(group)]))
+            wait_for(lambda: (load(state / "current.json") or {}).get("generation") != generation)
+            assert workers[1].poll() is None
+            print("PASS supervisor handoff: successor elected during idle shutdown", flush=True)
+        finally:
+            for worker in workers:
+                if worker.poll() is None:
+                    worker.terminate()
+                    worker.wait(timeout=8)
+            time.sleep(0.5)
+            for path in sorted(group.rglob("*"), reverse=True):
+                if path.is_dir():
+                    path.rmdir()
+            group.rmdir()
+
+
 def suspension(mbx, root):
     import threading
     with tempfile.TemporaryDirectory() as temporary:
@@ -269,5 +301,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     for failure in ("exit", "hang", "cancel", "registration", "watchdog", "replaced"):
         lifecycle(args.mbx.resolve(), args.root.resolve(), failure)
+    handoff(args.mbx.resolve(), args.root.resolve())
     if args.suspension:
         suspension(args.mbx.resolve(), args.root.resolve())

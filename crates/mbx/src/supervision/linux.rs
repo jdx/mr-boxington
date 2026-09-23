@@ -261,13 +261,14 @@ fn clean_orphans(registry: &Path, group: &Path) -> Result<usize> {
         unless_gone(&path, thaw(&path))?;
         if populated(&path) {
             unless_gone(&path, std::fs::write(path.join("cgroup.kill"), "1"))?;
-            // The kill is asynchronous and a populated group cannot be removed.
-            let start = Instant::now();
-            while populated(&path) && start.elapsed() < Duration::from_secs(1) {
-                std::thread::sleep(Duration::from_millis(10));
-            }
         }
-        let _ = std::fs::remove_dir(&path);
+        // The kill is asynchronous and a populated group cannot be removed.
+        // Count a draining group as live so the next scan removes it, without
+        // delaying this scan's heartbeat.
+        if std::fs::remove_dir(&path).is_err() && populated(&path) {
+            live += 1;
+            continue;
+        }
         let _ = std::fs::remove_file(registry.join(format!("{id}.json")));
         // Keep the locked inode until this scan finishes; action IDs never repeat.
         let _ = std::fs::remove_file(lease_path);
@@ -298,8 +299,15 @@ pub(super) fn dispatch() -> Result<()> {
 
 fn supervisor(state: &Path, group: &Path) -> Result<()> {
     let mut election = fslock::LockFile::open(&state.join("supervisor.lock"))?;
-    if !election.try_lock()? {
-        return Ok(());
+    // An idle predecessor holds the lock until its watchdog exits, briefly
+    // after it stops accepting registrations. Wait that out, within the
+    // launcher's readiness timeout, rather than leave the compile unsupervised.
+    let start = Instant::now();
+    while !election.try_lock()? {
+        if start.elapsed() > Duration::from_millis(1_500) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
     let generation = super::key(crate::util::random_string(32).as_bytes())[..24].to_owned();
     let registry = state.join(&generation);
