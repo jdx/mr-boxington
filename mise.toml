@@ -1,4 +1,4 @@
-min_version = "2026.9.2"
+min_version = "2026.9.7"
 
 [env]
 _.path = ["test/bats/bin"]
@@ -183,14 +183,14 @@ run = "tak run --record"
 [tools]
 # Perf jobs build the current source with the latest released mbx so the
 # appliance cache is usable without bootstrapping from the branch under test.
-mr-boxington = "1.14.0"
-"github:jdx/tak" = "0.0.9"
-aube = { version = "latest", lazy = true, lazy_bins = ["aube"] }
-communique = "latest"
+mr-boxington = { version = "latest", minimum_release_age = "0s" }
+tak = { version = "latest", minimum_release_age = "0s" }
+aube = { version = "latest", lazy = true, lazy_bins = ["aube"], minimum_release_age = "0s" }
+communique = { version = "latest", minimum_release_age = "0s" }
 lychee = "0.24.2"
 node = "24"
 # Rust is deliberately absent: the toolchain floats to whatever the
 # runner image ships, so a new stable is caught by CI rather than by a
 # user. The benchmark workflows pin their own, because a measurement is
 # only comparable against the compiler that produced the baseline.
-usage = "6.5.0"
+usage = { version = "latest", minimum_release_age = "0s" }
