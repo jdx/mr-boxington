@@ -308,6 +308,12 @@ fn supervisor(state: &Path, group: &Path) -> Result<()> {
     std::fs::create_dir_all(&actions)?;
     enable_memory(&actions)?;
     let mut watchdog = helper("watchdog", state, group, Some(&generation))?;
+    // Probe from a sibling of the action groups so delegated-root limits and
+    // PSI are visible even when that root is outside the caller's ancestry.
+    // Spawn the watchdog first: it retains the caller's original cgroup.
+    let controller = group.join(format!("controller-{generation}"));
+    std::fs::create_dir(&controller)?;
+    std::fs::write(controller.join("cgroup.procs"), "0")?;
     let start = Instant::now();
     while !read::<u64>(&registry.join("watchdog.json")).is_some_and(fresh) {
         if watchdog.try_wait()?.is_some() || start.elapsed() > Duration::from_secs(2) {

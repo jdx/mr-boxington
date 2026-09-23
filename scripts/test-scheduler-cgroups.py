@@ -63,6 +63,7 @@ def lifecycle(mbx, root, failure):
         try:
             wait_for(lambda: load(state / "current.json"))
             generation = load(state / "current.json")["generation"]
+            assert f"controller-{generation}" in Path(f"/proc/{worker.pid}/cgroup").read_text()
             registry = state / generation
             actions = group / generation
             launch = None
@@ -199,6 +200,7 @@ def suspension(mbx, root):
         try:
             wait_for(lambda: load(state / "current.json"))
             generation = load(state / "current.json")["generation"]
+            assert f"controller-{generation}" in Path(f"/proc/{worker.pid}/cgroup").read_text()
             registry, actions = state / generation, group / generation
             for index in range(3):
                 identity = uuid.uuid4().hex[:24]
