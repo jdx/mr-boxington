@@ -459,17 +459,49 @@ fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// The shims a session installs for itself.
+pub(super) struct SessionShims {
+    /// The persistent `RUSTC_WRAPPER`, private to the running binary.
+    pub(super) rustc: PathBuf,
+    /// The session-local `RUSTDOC`.
+    pub(super) rustdoc: PathBuf,
+    /// Directory for the C, C++ and CMake shims build scripts are pointed at.
+    pub(super) native: PathBuf,
+}
+
 pub(super) fn install_session_shims(
     session_dir: &Path,
     persistent_shims: &Path,
-) -> Result<(PathBuf, PathBuf)> {
+) -> Result<SessionShims> {
     let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
-    let binary_shims = binary_shims_dir(persistent_shims, &executable)?;
+    let identity = binary_identity(&executable)?;
+    // Windows shims are copies or hard links that are never replaced in
+    // place, so an upgrade there needs a fresh directory to reach the new
+    // binary. Unix symlinks already follow the path to whatever it holds.
+    let installation = if cfg!(unix) {
+        installation_identity(&executable)?
+    } else {
+        identity.clone()
+    };
+    let binary_shims = persistent_shims.join("rust").join(&identity);
+    let native = persistent_shims.join("native").join(&installation);
     std::fs::create_dir_all(&binary_shims)?;
-    // Both levels: the root holds the C, C++ and CMake shims, and the
-    // per-binary directory holds the rustc one.
+    std::fs::create_dir_all(&native)?;
+    // Every level: the root holds the `mbx exec` compiler shims, and each
+    // per-binary directory holds the shims a session points its build at.
     mark_shim_directory(persistent_shims);
     mark_shim_directory(&binary_shims);
+    mark_shim_directory(&native);
+    // Refreshed every session, so collection can tell a directory some
+    // installation still uses from one nothing has used in a long time.
+    touch_shim_directory(&binary_shims);
+    touch_shim_directory(&native);
+    remove_stranded_binary_shims(
+        persistent_shims,
+        &identity,
+        &installation,
+        STRANDED_SHIMS_AGE,
+    );
     let rustc = binary_shims.join(shim_file_name(RUSTC_SHIM_STEM));
     link_path_shim(&executable, &rustc)?;
     let rustdoc = install_shim_named(
@@ -478,17 +510,146 @@ pub(super) fn install_session_shims(
         RUSTDOC_SHIM_STEM,
         ShimLink::Tracking,
     )?;
-    Ok((rustc, rustdoc))
+    Ok(SessionShims {
+        rustc,
+        rustdoc,
+        native,
+    })
 }
 
-/// A stable shim directory for exactly one installed mbx executable.
+/// How long a per-binary shim directory must go unused before collection
+/// may take it.
+const STRANDED_SHIMS_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Record that a session of this binary is using `directory` now.
+///
+/// Best effort: a marker that cannot be refreshed only makes the directory
+/// look older, and collection still requires every link in it to dangle.
+fn touch_shim_directory(directory: &Path) {
+    let refreshed = std::fs::File::options()
+        .write(true)
+        .open(directory.join(SHIM_DIR_MARKER))
+        .and_then(|marker| marker.set_modified(std::time::SystemTime::now()));
+    if let Err(error) = refreshed {
+        debug!(
+            "the shim directory {} was not refreshed: {error}",
+            directory.display()
+        );
+    }
+}
+
+/// Remove the per-binary shim directories of mbx binaries that are gone.
+///
+/// Keying shims by binary means an installation that lives only as long as a
+/// CI job leaves a directory behind for every job. Two things must hold before
+/// one goes. Every symlink in it must dangle, since a directory with no link
+/// yet may belong to a session still installing. And no session may have
+/// used it for `unused_for`: a link that dangles here can still resolve for
+/// another container sharing the cache, whose binary lives on a filesystem
+/// this process cannot see, and that container refreshes the directory each
+/// time it builds. Whatever it last used is recreated by its next session.
+///
+/// Windows shims are hard links or copies, which say nothing about whether
+/// their installation still exists, so they are left alone. Best effort: a
+/// failure only leaves the directory for a later session.
+#[cfg(unix)]
+pub(super) fn remove_stranded_binary_shims(
+    persistent_shims: &Path,
+    own_binary: &str,
+    own_installation: &str,
+    unused_for: std::time::Duration,
+) {
+    for (kind, own) in [("rust", own_binary), ("native", own_installation)] {
+        let Ok(listing) = std::fs::read_dir(persistent_shims.join(kind)) else {
+            continue;
+        };
+        for entry in listing.flatten() {
+            if entry.file_name() == own {
+                continue;
+            }
+            let directory = entry.path();
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir())
+                || !unused_for_at_least(&directory, unused_for)
+                || !every_link_dangles(&directory)
+            {
+                continue;
+            }
+            if let Err(error) = std::fs::remove_dir_all(&directory) {
+                debug!(
+                    "the stranded shim directory {} was not removed: {error}",
+                    directory.display()
+                );
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub(super) fn remove_stranded_binary_shims(
+    _persistent_shims: &Path,
+    _own_binary: &str,
+    _own_installation: &str,
+    _unused_for: std::time::Duration,
+) {
+}
+
+/// Whether no session has refreshed `directory` within `age`.
+#[cfg(unix)]
+fn unused_for_at_least(directory: &Path, age: std::time::Duration) -> bool {
+    std::fs::metadata(directory.join(SHIM_DIR_MARKER))
+        .and_then(|marker| marker.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|elapsed| elapsed >= age)
+}
+
+/// Whether `directory` holds at least one symlink and none that resolves.
+#[cfg(unix)]
+fn every_link_dangles(directory: &Path) -> bool {
+    let Ok(listing) = std::fs::read_dir(directory) else {
+        return false;
+    };
+    let mut links = 0;
+    for entry in listing.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
+            continue;
+        }
+        if entry.path().exists() {
+            return false;
+        }
+        links += 1;
+    }
+    links > 0
+}
+
+/// A stable name for one place mbx is installed.
+///
+/// The C, C++ and CMake shims are keyed by this. They are symlinks to the
+/// binary that installed them, and a shim directory can be shared by
+/// installations that come and go -- concurrent CI jobs each with their own
+/// tool directory. Under one machine-wide name, whichever job started last
+/// owned `HOST_CC` for everyone, and once its binary was cleaned up every
+/// other build's C compiles failed on a dangling link. Keyed by installation,
+/// a shim only ever points at the path whose sessions use it.
+///
+/// Unlike [`binary_identity`], an upgrade in place keeps the name. The links
+/// already resolve to whatever binary the path holds, and a new directory per
+/// release would be one that collection could never tell was finished with:
+/// its links still resolve. Windows shims are copies, so there the binary
+/// keys them instead.
+pub(super) fn installation_identity(executable: &Path) -> Result<String> {
+    let executable = std::path::absolute(executable)?;
+    Ok(CacheDigest::blake3(executable.as_os_str().as_encoded_bytes()).hash)
+}
+
+/// A stable name for exactly one installed mbx executable.
 ///
 /// Cargo keys its cached rustc probes by the wrapper path. A session-local
 /// wrapper makes every invocation look like a different compiler, while a
 /// single machine-wide name would conceal upgrades. The executable's path and
 /// file identity give repeated runs of one binary the same name and a replaced
 /// binary a new one without reading the whole executable at startup.
-fn binary_shims_dir(shims: &Path, executable: &Path) -> Result<PathBuf> {
+pub(super) fn binary_identity(executable: &Path) -> Result<String> {
     let executable = std::path::absolute(executable)?;
     let metadata = std::fs::metadata(&executable)?;
     let modified = metadata
@@ -508,8 +669,7 @@ fn binary_shims_dir(shims: &Path, executable: &Path) -> Result<PathBuf> {
             .map_or(0, |duration| duration.subsec_nanos())
             .to_le_bytes(),
     );
-    let digest = CacheDigest::blake3(&identity);
-    Ok(shims.join("rust").join(digest.hash))
+    Ok(CacheDigest::blake3(&identity).hash)
 }
 
 /// How an installed shim refers to the mbx binary behind it.

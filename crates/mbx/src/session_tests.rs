@@ -1,3 +1,6 @@
+#[cfg(unix)]
+use super::shims::remove_stranded_binary_shims;
+use super::shims::{binary_identity, installation_identity};
 use super::shims::{first_in_path, is_shim_directory, mark_shim_directory};
 use super::*;
 use crate::config::SummaryStyle;
@@ -752,6 +755,97 @@ fn host_driver_lookup_skips_another_installations_shims() {
         first_in_path(&path, "cc").map(|path| std::fs::canonicalize(path).unwrap()),
         Some(std::fs::canonicalize(&real_cc).unwrap()),
         "a host driver must never resolve to another install's shim"
+    );
+}
+
+#[test]
+fn an_installation_keeps_its_identity_across_an_upgrade_in_place() {
+    let directory = tempfile::tempdir().unwrap();
+    let binary = directory.path().join("mbx");
+    std::fs::write(&binary, b"release one").unwrap();
+    let before = (
+        binary_identity(&binary).unwrap(),
+        installation_identity(&binary).unwrap(),
+    );
+    std::fs::write(&binary, b"release two, a little longer").unwrap();
+    let after = (
+        binary_identity(&binary).unwrap(),
+        installation_identity(&binary).unwrap(),
+    );
+    assert_ne!(before.0, after.0, "rustc shims follow the binary");
+    assert_eq!(before.1, after.1, "native shims follow the installation");
+    assert_ne!(
+        installation_identity(&directory.path().join("other/mbx")).unwrap(),
+        after.1,
+        "another installation gets its own native shims"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn only_shim_directories_nothing_can_use_are_collected() {
+    let directory = tempfile::tempdir().unwrap();
+    let shims = directory.path().join("shims");
+    let binary = directory.path().join("mbx");
+    std::fs::write(&binary, b"#!/bin/sh\n").unwrap();
+    let gone = directory.path().join("removed install/mbx");
+    let install = |kind: &str, identity: &str, target: Option<&Path>| {
+        let per_binary = shims.join(kind).join(identity);
+        std::fs::create_dir_all(&per_binary).unwrap();
+        mark_shim_directory(&per_binary);
+        if let Some(target) = target {
+            std::os::unix::fs::symlink(target, per_binary.join("mbx-c")).unwrap();
+        }
+        per_binary
+    };
+    let stranded = install("native", "stranded", Some(&gone));
+    let stranded_rust = install("rust", "stranded", Some(&gone));
+    let live = install("native", "live", Some(&binary));
+    // A concurrent session has created its directory but not linked yet.
+    let installing = install("native", "installing", None);
+    // The running binary's own directory is never judged, whatever it holds.
+    let own = install("native", "own", Some(&gone));
+
+    // Another container's binary lives on a path this process cannot see,
+    // so its links dangle here, but it built recently.
+    let elsewhere = install("native", "elsewhere", Some(&gone));
+    // The binary at a path was replaced in place. Its old rustc shims still
+    // resolve, and a session started before the upgrade may still use them.
+    let superseded = install("rust", "superseded", Some(&binary));
+    let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    for unused in [
+        &stranded,
+        &stranded_rust,
+        &live,
+        &installing,
+        &own,
+        &superseded,
+    ] {
+        std::fs::File::options()
+            .write(true)
+            .open(unused.join(".mbx-shims"))
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+    }
+
+    remove_stranded_binary_shims(&shims, "own", "own", std::time::Duration::from_secs(60));
+
+    assert!(!stranded.exists(), "a removed binary's shims should go");
+    assert!(!stranded_rust.exists(), "rustc shims are collected too");
+    assert!(live.exists(), "an installed binary's shims must stay");
+    assert!(
+        installing.exists(),
+        "a directory still being filled must stay"
+    );
+    assert!(own.exists(), "the running binary's directory must stay");
+    assert!(
+        superseded.exists(),
+        "shims that still resolve may belong to a running session"
+    );
+    assert!(
+        elsewhere.exists(),
+        "a directory used recently must stay even when its links dangle here"
     );
 }
 
