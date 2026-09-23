@@ -1785,6 +1785,22 @@ pub(crate) fn crate_name_argument(arguments: &[OsString]) -> Option<String> {
     None
 }
 
+/// The `--out-dir` rustc was given, found the same way as the crate name.
+pub(crate) fn out_dir_argument(arguments: &[OsString]) -> Option<PathBuf> {
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        if argument == "--out-dir" {
+            return arguments.next().map(PathBuf::from);
+        }
+        if let Some(argument) = argument.to_str()
+            && let Some(directory) = argument.strip_prefix("--out-dir=")
+        {
+            return Some(PathBuf::from(directory));
+        }
+    }
+    None
+}
+
 /// Whether the shim should verify cached results against a real compilation.
 ///
 /// An empty value or `0` is off, matching how the configuration reads it, so

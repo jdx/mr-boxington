@@ -2103,6 +2103,47 @@ fn a_build_script_with_a_custom_path_restores_across_checkouts() {
 }
 
 #[test]
+fn a_library_sharing_the_build_script_prefix_keeps_its_compilation_cache() {
+    // Without native-link caching a build script takes an execution-only
+    // path that never restores or publishes the compilation. A library whose
+    // crate name merely starts with `build_script_` must not be sent there.
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    for checkout in [first.path(), second.path()] {
+        std::fs::create_dir_all(checkout.join("src")).unwrap();
+        std::fs::write(
+            checkout.join("Cargo.toml"),
+            "[package]\nname = \"build-script-helper\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(checkout.join("src/lib.rs"), "pub fn helper() {}\n").unwrap();
+        generate_lockfile(checkout);
+    }
+
+    let no_link_cache = [("MBX_CACHE_LINKS", "0")];
+    build_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+        &no_link_cache,
+    );
+    let (warm, stderr) = build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+        &no_link_cache,
+    );
+
+    assert_eq!(
+        count(&warm, "hits"),
+        1,
+        "build_script_helper should restore like any library: {warm}\n{stderr}"
+    );
+}
+
+#[test]
 fn changed_declared_input_executes_build_script_again() {
     let store = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();

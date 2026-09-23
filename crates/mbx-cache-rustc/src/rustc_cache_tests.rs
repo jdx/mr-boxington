@@ -2660,6 +2660,14 @@ fn a_build_script_is_recognized_by_name_and_unit_directory() {
             .build_script_executable("build_script_main")
             .is_none()
     );
+    assert!(is_build_script_unit(
+        "build_script_build",
+        Path::new("/t/debug/deps")
+    ));
+    assert!(!is_build_script_unit(
+        "build_script_helper",
+        Path::new("/t/debug/deps")
+    ));
     assert!(!is_build_script_crate_name("build_script_"));
     assert!(!is_build_script_crate_name("mylib"));
 }

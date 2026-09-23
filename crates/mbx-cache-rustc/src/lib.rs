@@ -842,6 +842,18 @@ pub fn is_build_script_crate_name(crate_name: &str) -> bool {
         .is_some_and(|stem| !stem.is_empty())
 }
 
+/// Whether rustc is compiling a Cargo build script into `out_dir`.
+///
+/// `build_script_build` is taken on its name alone. Any other
+/// `build_script_<stem>` must also be written to a unit directory under
+/// Cargo's `build/`, so a library or binary that shares the prefix and
+/// builds into `deps/` keeps its ordinary compilation cache.
+pub fn is_build_script_unit(crate_name: &str, out_dir: &Path) -> bool {
+    crate_name == "build_script_build"
+        || (is_build_script_crate_name(crate_name)
+            && out_dir.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("build")))
+}
+
 impl RustcOutputs {
     /// The linked executable Cargo will run as a build script, when this is a
     /// build-script compilation.
@@ -852,11 +864,7 @@ impl RustcOutputs {
     /// linked into a unit directory under Cargo's `build/`, so an ordinary
     /// binary that happens to share the prefix is never taken for one.
     pub fn build_script_executable(&self, crate_name: &str) -> Option<&Path> {
-        let build_script = crate_name == "build_script_build"
-            || (is_build_script_crate_name(crate_name)
-                && self.directory.parent().and_then(Path::file_name)
-                    == Some(std::ffi::OsStr::new("build")));
-        build_script
+        is_build_script_unit(crate_name, &self.directory)
             .then(|| self.files.iter().find(|path| self.is_executable(path)))
             .flatten()
             .map(PathBuf::as_path)

@@ -64,6 +64,21 @@ fn cargo_build_script_executable_names_are_recognized() {
 }
 
 #[test]
+fn the_out_dir_argument_is_read_in_either_spelling() {
+    let separate: Vec<OsString> = vec!["--out-dir".into(), "/t/debug/build/pkg-1".into()];
+    let joined: Vec<OsString> = vec!["--out-dir=/t/debug/deps".into()];
+    assert_eq!(
+        out_dir_argument(&separate),
+        Some(PathBuf::from("/t/debug/build/pkg-1"))
+    );
+    assert_eq!(
+        out_dir_argument(&joined),
+        Some(PathBuf::from("/t/debug/deps"))
+    );
+    assert_eq!(out_dir_argument(&["src/lib.rs".into()]), None);
+}
+
+#[test]
 fn a_build_script_with_a_custom_path_is_recognized() {
     // `build = "builder/main.rs"` runs as `build-script-main`, compiled from
     // the crate `build_script_main`.
