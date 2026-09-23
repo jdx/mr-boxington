@@ -284,6 +284,134 @@ class RunScenarioTest(unittest.TestCase):
         self.assertIn("build failed", entry["skipped"][0])
 
 
+class TrialOrderTest(unittest.TestCase):
+    def test_trials_alternate_between_tools(self) -> None:
+        # A runner that slows partway through must slow every tool's later
+        # trials alike, not only whichever tool happened to run last.
+        order: list[str] = []
+
+        def trial(scenario, tool, cell, subject, runner, work):  # noqa: ANN001
+            order.append(cell)
+            return {"tool": tool, "wall_duration_ns": 1}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with contextlib.redirect_stderr(io.StringIO()):
+                with mock.patch.object(real_world, "one_trial", side_effect=trial):
+                    entry = real_world.run_scenario(
+                        "contention",
+                        ("mbx", "mbx-previous"),
+                        {},
+                        None,
+                        Path(temporary),
+                        real_world.Progress(4),
+                        2,
+                    )
+
+        self.assertEqual(
+            order,
+            [
+                "contention-mbx-1",
+                "contention-mbx-previous-1",
+                "contention-mbx-2",
+                "contention-mbx-previous-2",
+            ],
+        )
+        self.assertEqual([cell["tool"] for cell in entry["results"]], ["mbx", "mbx-previous"])
+
+    def test_a_skipped_tool_is_not_tried_again(self) -> None:
+        calls: list[str] = []
+
+        def trial(scenario, tool, cell, subject, runner, work):  # noqa: ANN001
+            calls.append(cell)
+            if tool == "mbx-previous":
+                raise real_world.Skipped("no mbx binary was given (--previous-mbx)")
+            return {"tool": tool, "wall_duration_ns": 1}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with contextlib.redirect_stderr(io.StringIO()):
+                with mock.patch.object(real_world, "one_trial", side_effect=trial):
+                    entry = real_world.run_scenario(
+                        "contention",
+                        ("mbx", "mbx-previous"),
+                        {},
+                        None,
+                        Path(temporary),
+                        real_world.Progress(4),
+                        2,
+                    )
+
+        self.assertEqual(calls.count("contention-mbx-previous-1"), 1)
+        self.assertNotIn("contention-mbx-previous-2", calls)
+        self.assertEqual([cell["tool"] for cell in entry["results"]], ["mbx"])
+        self.assertEqual(entry["skipped"], ["mbx-previous: no mbx binary was given (--previous-mbx)"])
+
+
+class PreviousReleaseTest(unittest.TestCase):
+    def test_the_previous_release_needs_its_own_binary(self) -> None:
+        runner = real_world.Runner(Path("/out"), Path("/cargo-home"), Path("/mbx"))
+        with self.assertRaisesRegex(real_world.Skipped, "--previous-mbx"):
+            runner.invocation(
+                tool="mbx-previous",
+                cell="contention-mbx-previous-1",
+                subject={"args": ["build"]},
+                target=Path("/target"),
+                store=Path("/store"),
+            )
+
+    def test_the_previous_release_runs_its_own_binary_scheduled(self) -> None:
+        runner = real_world.Runner(
+            Path("/out"), Path("/cargo-home"), Path("/mbx"), Path("/previous/mbx")
+        )
+        command, environment = runner.invocation(
+            tool="mbx-previous",
+            cell="contention-mbx-previous-1",
+            subject={"args": ["build"]},
+            target=Path("/target"),
+            store=Path("/store"),
+        )
+
+        self.assertEqual(command, ["/previous/mbx", "build"])
+        self.assertEqual(environment["MBX_SCHEDULER"], "1")
+
+    def test_the_summary_names_and_compares_the_previous_release(self) -> None:
+        cell = lambda tool, times: {  # noqa: E731
+            "tool": tool,
+            "wall_duration_ns": sorted(times)[len(times) // 2],
+            "wall_durations_ns": times,
+            "peak_compilers": 32,
+            "permits": 32,
+            "min_available_bytes": 60e9,
+            "stats": {"hits": 1},
+        }
+        result = {
+            "subject": "hk",
+            "toolchain": "1.94.0",
+            "versions": {"mbx": "1.17.0", "mbx-previous": "1.16.0"},
+            "failures": [],
+            "scenarios": [
+                {
+                    "scenario": "contention",
+                    "description": "six jobs",
+                    "kind": "contention",
+                    "skipped": [],
+                    "results": [
+                        cell("mbx", [32_500_000_000, 32_900_000_000, 35_200_000_000]),
+                        cell("mbx-previous", [33_600_000_000, 37_800_000_000, 38_900_000_000]),
+                    ],
+                }
+            ],
+        }
+
+        summary = real_world.summarize(result)
+
+        self.assertIn("| mbx 1.16.0 (previous release) | 37.8 s |", summary)
+        self.assertIn(
+            "On this runner, mbx 1.17.0 finished the scheduled batch 4.9 s sooner than "
+            "mbx 1.16.0 (trials 32.5-35.2 s against 33.6-38.9 s).",
+            summary,
+        )
+
+
 class LocalEnvironmentTest(unittest.TestCase):
     def environment(self, local: bool) -> dict[str, str]:
         runner = real_world.Runner(Path("/out"), Path("/cargo-home"), Path("/mbx"))

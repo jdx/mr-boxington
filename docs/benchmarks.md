@@ -84,6 +84,14 @@ oversubscribed it.
   compared fairly against each other. A Rust bump between runs changes every
   cache key at once, which reads as a cache that stopped working, so check that
   field before treating a drop across runs as a regression.
+- Trials alternate between tools: every tool's first trial runs, then every
+  tool's second. A runner that slows partway through a run slows all of them
+  alike.
+- The contention card also runs the scheduled batch under the previous mbx
+  release, on the same runner and in the same trials. Separate runs land on
+  different runner instances, and the same binary's batch has measured 25s on
+  one and 39s on another. Compare releases with that row, not with an earlier
+  run's numbers.
 - `CARGO_INCREMENTAL=0` matches CI everywhere except the edit scenario. Any
   inherited `RUSTC_WRAPPER` is cleared, and the run fails if the Cargo
   baseline turns out to be an mbx shim.

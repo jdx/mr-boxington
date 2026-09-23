@@ -161,6 +161,20 @@ const CONTENTION_LABELS: Record<string, { label: string; tag: string | null }> =
     mbx: { label: "parallel", tag: "mbx scheduler" },
   };
 
+// The previous release runs the scheduled batch on the same runner, so a
+// change between releases is read within one run rather than across two
+// runners that can differ by more than the change.
+const previousVersion = data?.versions?.["mbx-previous"] ?? null;
+
+function contentionLabel(tool: string) {
+  if (tool === "mbx-previous")
+    return {
+      label: "parallel",
+      tag: previousVersion ? `mbx ${previousVersion} scheduler` : "previous release",
+    };
+  return CONTENTION_LABELS[tool] ?? { label: tool, tag: null };
+}
+
 function seconds(ns: number) {
   const s = ns / 1e9;
   if (s < 60) return `${s.toFixed(1)}s`;
@@ -415,16 +429,15 @@ function contentionCard(scenario: BenchmarkScenario): {
   const scheduled = cells.find((c) => c.tool === "mbx") ?? null;
   const unscheduled = cells.find((c) => c.tool === "mbx-unscheduled") ?? null;
   const sequential = cells.find((c) => c.tool === "mbx-sequential") ?? null;
-  const fastest = byTime(cells)[0];
+  // The previous release is a reference for this one, not a way of running
+  // the jobs, so it never takes the fastest mark from the rows it is beside.
+  const fastest = byTime(cells.filter((c) => c.tool !== "mbx-previous"))[0];
   const decisive =
     scheduled && unscheduled ? separated(scheduled, unscheduled) : false;
 
   const rows: Row[] = cells.map((cell) => {
     const g = geometry(cell, max);
-    const labels = CONTENTION_LABELS[cell.tool] ?? {
-      label: cell.tool,
-      tag: null,
-    };
+    const labels = contentionLabel(cell.tool);
     const peak = cell.peak_compilers ?? 0;
     const compilers = cell.permits
       ? `${peak} of ${cell.permits} permits used`
@@ -476,15 +489,23 @@ function contentionCard(scenario: BenchmarkScenario): {
       "Cache hits over the batch: " +
         cells
           .map((c) => {
-            const l = CONTENTION_LABELS[c.tool];
-            const label = l
-              ? [l.label, l.tag].filter(Boolean).join(", ")
-              : c.tool;
+            const l = contentionLabel(c.tool);
+            const label = [l.label, l.tag].filter(Boolean).join(", ");
             return `${label} ${c.stats!.hits!.toLocaleString("en-US")}`;
           })
           .join("; ") +
         ". The scheduler holds identical compilations until the first finishes, so the other jobs hit the store instead of repeating the work.",
     );
+  }
+
+  const previous = cells.find((c) => c.tool === "mbx-previous") ?? null;
+  if (scheduled && previous && repeated(scheduled, previous)) {
+    const gap = previous.wall_duration_ns - scheduled.wall_duration_ns;
+    const release = previousVersion ? `mbx ${previousVersion}` : "the previous release";
+    const against = separated(scheduled, previous)
+      ? `On the same runner, this release finished the scheduled batch ${fine(Math.abs(gap))} ${gap > 0 ? "sooner" : "later"} than ${release}.`
+      : `On the same runner, this release and ${release} were level: ${fine(Math.abs(gap))} apart, inside their own ranges.`;
+    verdict = verdict ? `${verdict} ${against}` : against;
   }
 
   const tile: Tile | null = scheduled

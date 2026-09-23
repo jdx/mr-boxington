@@ -68,6 +68,12 @@ each tool has established its incremental state. The first edit's cost is also
 reported. Parallel jobs receive separate targets so Cargo's target lock does
 not serialize them.
 
+Trials alternate between tools, so drift in the runner's speed during a run
+lands on every tool alike. The contention batch also runs under the previous
+mbx release (`--previous-mbx`), because runner instances differ between runs by
+more than a release usually changes it. A release is judged against that row,
+not against an earlier run.
+
 Each trial starts from a fresh clone and empty store. The registry is fetched
 outside timed builds, the toolchain is pinned, inherited wrappers are cleared,
 and caches run locally. Validity checks reject runs that did not exercise the

@@ -51,13 +51,19 @@ SUBJECTS: dict[str, dict[str, object]] = {
     },
 }
 
-TOOLS = ("cargo", "mbx-sequential", "mbx-unscheduled", "mbx", "kache")
+TOOLS = ("cargo", "mbx-sequential", "mbx-unscheduled", "mbx", "mbx-previous", "kache")
 
-# All three run the same binary. The contention scenario separates the current
-# sequential lint shape, the proposed parallel shape, and a parallel control
-# with the machine-wide scheduler off. Everywhere else they would just measure
-# mbx repeatedly.
-MBX_TOOLS = ("mbx", "mbx-sequential", "mbx-unscheduled")
+# The first three run the same binary. The contention scenario separates the
+# current sequential lint shape, the proposed parallel shape, and a parallel
+# control with the machine-wide scheduler off. Everywhere else they would just
+# measure mbx repeatedly.
+#
+# `mbx-previous` is the scheduled parallel batch again under the previous mbx
+# release (--previous-mbx). Runner instances differ by more than a release
+# does: the same binary's batch has measured anywhere from 25s to 39s across
+# runs. Only a comparison made on one runner, trial beside trial, can say
+# whether a release made contention better or worse.
+MBX_TOOLS = ("mbx", "mbx-sequential", "mbx-unscheduled", "mbx-previous")
 
 # Overlapping compilation jobs from the check, lint, and test stages a Rust CI
 # pipeline commonly stacks on one large runner. Two Cargo processes barely
@@ -115,7 +121,7 @@ SCENARIOS: dict[str, dict[str, object]] = {
         "repeatable": True,
     },
     "contention": {
-        "tools": ("mbx-sequential", "mbx-unscheduled", "mbx"),
+        "tools": ("mbx-sequential", "mbx-unscheduled", "mbx", "mbx-previous"),
         "description": (
             "six overlapping check, Clippy, and test jobs -- sequential for context, "
             "then parallel with and without mbx's machine-wide compiler limit"
@@ -362,10 +368,17 @@ def clone(subject: dict[str, object], revision: str, destination: Path) -> None:
 class Runner:
     """Runs one build and reports what the cache did with it."""
 
-    def __init__(self, output: Path, cargo_home: Path, mbx: Path | None) -> None:
+    def __init__(
+        self,
+        output: Path,
+        cargo_home: Path,
+        mbx: Path | None,
+        previous_mbx: Path | None = None,
+    ) -> None:
         self.output = output
         self.cargo_home = cargo_home
         self.mbx = mbx
+        self.previous_mbx = previous_mbx
 
     def base_environment(
         self,
@@ -429,8 +442,10 @@ class Runner:
         if tool == "cargo":
             return ["cargo", *args], environment
         if tool in MBX_TOOLS:
-            if self.mbx is None:
-                raise Skipped("no mbx binary was given (--mbx)")
+            binary = self.previous_mbx if tool == "mbx-previous" else self.mbx
+            if binary is None:
+                flag = "--previous-mbx" if tool == "mbx-previous" else "--mbx"
+                raise Skipped(f"no mbx binary was given ({flag})")
             environment.update(
                 {
                     "MBX_CACHE_DIR": str(store),
@@ -442,7 +457,7 @@ class Runner:
             # inherited MBX_SCHEDULER would otherwise decide the comparison
             # the scenario exists to make.
             environment["MBX_SCHEDULER"] = "0" if tool == "mbx-unscheduled" else "1"
-            return [str(self.mbx), *args], environment
+            return [str(binary), *args], environment
         if tool == "kache":
             kache = shutil.which("kache")
             if kache is None:
@@ -979,17 +994,23 @@ def run_scenario(
     repeats = trials if SCENARIOS[scenario].get("repeatable") else 1
     results: list[dict[str, object]] = []
     notes: list[str] = []
-    for tool in tools:
-        measured: list[dict[str, object]] = []
-        for trial in range(1, repeats + 1):
+    measured: dict[str, list[dict[str, object]]] = {tool: [] for tool in tools}
+    dropped: set[str] = set()
+    # Trial by trial across tools rather than tool by tool: a runner that
+    # slows down partway through the run then slows every tool's later trials
+    # alike, instead of landing entirely on whichever tool ran last.
+    for trial in range(1, repeats + 1):
+        for tool in tools:
+            if tool in dropped:
+                continue
             cell = f"{scenario}-{tool}" if repeats == 1 else f"{scenario}-{tool}-{trial}"
             progress.start(cell)
             try:
-                measured.append(one_trial(scenario, tool, cell, subject, runner, work))
+                measured[tool].append(one_trial(scenario, tool, cell, subject, runner, work))
             except Skipped as skip:
                 notes.append(f"{tool}: {skip}")
                 progress.finish(cell, "skipped")
-                break
+                dropped.add(tool)
             except RuntimeError as failure:
                 # A tool we do not own failing is reported as unmeasured, the
                 # same as one that was not installed. mbx and the cargo
@@ -999,7 +1020,7 @@ def run_scenario(
                     raise
                 notes.append(f"{tool}: {failure}")
                 progress.finish(cell, "failed")
-                break
+                dropped.add(tool)
             else:
                 progress.finish(cell)
             finally:
@@ -1007,10 +1028,11 @@ def run_scenario(
                 # A tool that fails late in a big scenario would otherwise
                 # hold its target and store for every trial that follows it.
                 discard(work, cell)
+    for tool in tools:
         # All trials or none: a tool that dropped out partway must not publish
         # a median over the trials that happened to finish.
-        if len(measured) == repeats:
-            results.append(median_cell(measured))
+        if tool not in dropped and len(measured[tool]) == repeats:
+            results.append(median_cell(measured[tool]))
 
     entry: dict[str, object] = {
         "scenario": scenario,
@@ -1135,6 +1157,7 @@ def trial_range(cell: dict[str, object]) -> str:
 
 
 def summarize(result: dict[str, object]) -> str:
+    versions: dict[str, object] = result.get("versions") or {}  # type: ignore[assignment]
     lines = [
         f"## Real-world benchmark: {result['subject']}",
         "",
@@ -1165,10 +1188,14 @@ def summarize(result: dict[str, object]) -> str:
                 available = cell.get("min_available_bytes")
                 memory = "-" if available is None else f"{available / 1e9:.1f} GB"
                 lines.append(
-                    f"| {cell['tool']} | {cell['wall_duration_ns'] / 1e9:.1f} s | {peak} "
+                    f"| {tool_label(cell['tool'], versions)} | "
+                    f"{cell['wall_duration_ns'] / 1e9:.1f} s | {peak} "
                     f"| {memory} | {hits(cell)} |"
                 )
             lines.append("")
+            comparison = previous_release_comparison(scenario, versions)
+            if comparison:
+                lines += [comparison, ""]
             for note in scenario["skipped"]:
                 lines.append(f"- skipped {note}")
             if scenario["skipped"]:
@@ -1198,6 +1225,40 @@ def summarize(result: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def mbx_version(binary: Path | None) -> str | None:
+    """An mbx binary's bare version number, as `mbx --version` reports it."""
+    if binary is None:
+        return None
+    return subprocess.check_output([str(binary), "--version"], text=True).strip().split()[-1]
+
+
+def tool_label(tool: str, versions: dict[str, object]) -> str:
+    """How a tool is named in the job summary."""
+    if tool == "mbx-previous" and versions.get("mbx-previous"):
+        return f"mbx {versions['mbx-previous']} (previous release)"
+    return tool
+
+
+def previous_release_comparison(scenario: dict[str, object], versions: dict[str, object]) -> str | None:
+    """One sentence comparing this release's scheduled batch with the last one's."""
+    cells = {cell["tool"]: cell for cell in scenario["results"]}  # type: ignore[index]
+    current, previous = cells.get("mbx"), cells.get("mbx-previous")
+    if current is None or previous is None:
+        return None
+    def spread(cell: dict[str, object]) -> str:
+        durations = cell.get("wall_durations_ns") or [cell["wall_duration_ns"]]
+        low, high = min(durations) / 1e9, max(durations) / 1e9  # type: ignore[type-var]
+        return f"{low:.1f} s" if low == high else f"{low:.1f}-{high:.1f} s"
+
+    gap = (previous["wall_duration_ns"] - current["wall_duration_ns"]) / 1e9
+    direction = "sooner" if gap >= 0 else "later"
+    return (
+        f"On this runner, mbx {versions.get('mbx')} finished the scheduled batch "
+        f"{abs(gap):.1f} s {direction} than mbx {versions.get('mbx-previous')} "
+        f"(trials {spread(current)} against {spread(previous)})."
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--subject", default="hk", choices=sorted(SUBJECTS))
@@ -1213,6 +1274,14 @@ def main() -> int:
         ),
     )
     parser.add_argument("--mbx", type=Path)
+    parser.add_argument(
+        "--previous-mbx",
+        type=Path,
+        help=(
+            "the previous mbx release, measured beside --mbx in the contention "
+            "scenario so a change between releases is read on one runner"
+        ),
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--write-results",
@@ -1239,6 +1308,7 @@ def main() -> int:
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     mbx = args.mbx.resolve() if args.mbx else None
+    previous_mbx = args.previous_mbx.resolve() if args.previous_mbx else None
     plan = []
     for name in requested_scenarios:
         tools = tuple(
@@ -1296,7 +1366,7 @@ def main() -> int:
         # filesystem every timed build ran on.
         filesystem_described = filesystem(work)
 
-        runner = Runner(output, cargo_home, mbx)
+        runner = Runner(output, cargo_home, mbx, previous_mbx)
         scenarios = []
         for name, tools in plan:
             scenarios.append(
@@ -1323,11 +1393,8 @@ def main() -> int:
             # Bare version, no leading program name: CI compares this against
             # `cargo metadata` to decide whether the published numbers are
             # older than the mbx on main.
-            "mbx": (
-                subprocess.check_output([str(mbx), "--version"], text=True).strip().split()[-1]
-                if mbx
-                else None
-            ),
+            "mbx": mbx_version(mbx),
+            "mbx-previous": mbx_version(previous_mbx),
             "cargo": cargo_version,
             "rustc": rustc_version,
             "kache": tool_version("kache"),

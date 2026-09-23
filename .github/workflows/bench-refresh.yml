@@ -175,6 +175,45 @@ jobs:
             | (cd "$install_dir" && sha256sum --check --strict -)
           tar -xzf "$install_dir/$archive" -C "$install_dir"
           echo "MBX_BENCH_BINARY=$install_dir/mbx" >> "$GITHUB_ENV"
+      # The contention batch runs this release beside the measured mbx. Runner
+      # instances differ by more than a release does (the same binary's batch
+      # has measured 25s on one and 39s on another), so a change between
+      # releases is only readable within one run. A run from source compares
+      # against the latest release; a release compares against the one before.
+      - name: Install the previous mbx release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ needs.check.outputs.release }}
+          SOURCE: ${{ github.event_name == 'workflow_dispatch' && inputs.source }}
+        run: |
+          if [ "$SOURCE" = "true" ]; then
+            previous="v$RELEASE"
+          else
+            previous=$(
+              gh release list --exclude-drafts --exclude-pre-releases --limit 100 \
+                --json tagName --jq '.[].tagName' \
+                | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+                | { cat; echo "v$RELEASE"; } \
+                | sort -uV \
+                | grep -B1 -x "v$RELEASE" \
+                | grep -vx "v$RELEASE" || true
+            )
+          fi
+          if [ -z "$previous" ]; then
+            echo "::warning::No mbx release precedes v$RELEASE; the contention batch runs without a previous-release comparison"
+            exit 0
+          fi
+          archive=mbx-x86_64-unknown-linux-gnu.tar.gz
+          install_dir="$RUNNER_TEMP/mbx-previous"
+          mkdir -p "$install_dir"
+          gh release download "$previous" \
+            --pattern "$archive" \
+            --pattern SHA256SUMS \
+            --dir "$install_dir"
+          grep "  $archive$" "$install_dir/SHA256SUMS" \
+            | (cd "$install_dir" && sha256sum --check --strict -)
+          tar -xzf "$install_dir/$archive" -C "$install_dir"
+          echo "MBX_PREVIOUS_BINARY=$install_dir/mbx" >> "$GITHUB_ENV"
       - name: Refresh benchmarks
         env:
           MISE_LOCKED: "1"
@@ -182,6 +221,7 @@ jobs:
           PATH="$KACHE_INSTALL_DIR:$PATH" \
             python3 benchmarks/real_world.py \
             --mbx "$MBX_BENCH_BINARY" \
+            ${MBX_PREVIOUS_BINARY:+--previous-mbx "$MBX_PREVIOUS_BINARY"} \
             --scenarios warm,commit,edit,contention \
             --trials 3 \
             --output target/benchmarks \
