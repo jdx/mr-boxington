@@ -63,6 +63,7 @@ def lifecycle(mbx, root, failure):
         try:
             wait_for(lambda: load(state / "current.json"))
             generation = load(state / "current.json")["generation"]
+            assert f"controller-{generation}" in Path(f"/proc/{worker.pid}/cgroup").read_text()
             registry = state / generation
             actions = group / generation
             launch = None
@@ -150,6 +151,7 @@ def lifecycle(mbx, root, failure):
                 successor.wait(timeout=10)
                 # The successor's idle shutdown removes the drained generation.
                 assert not registry.exists() and not actions.exists()
+                assert not (group / f"controller-{generation}").exists()
             print(f"PASS supervisor {failure}: compiler tree thawed", flush=True)
         finally:
             if worker.poll() is None:
@@ -205,11 +207,112 @@ def handoff(mbx, root):
             group.rmdir()
 
 
+def suspension(mbx, root):
+    import threading
+    with tempfile.TemporaryDirectory() as temporary:
+        pool = Path(temporary)
+        state = pool / "supervision-test"
+        state.mkdir()
+        group = root / ("test-" + uuid.uuid4().hex)
+        group.mkdir()
+        worker = subprocess.Popen([str(mbx), "__mbx-control", "supervisor", str(state), str(group)])
+        children, leases = [], []
+        stop = threading.Event()
+        unhealthy = threading.Event()
+        unhealthy.set()
+        def readings(registry):
+            def publish(directory, pressured):
+                now = int(time.time() * 1000)
+                value = {"version": 1, "sampled_ms": now,
+                    "reading": {"total": 100, "available": 0 if pressured else 50, "stalls": {}},
+                    "bad_samples": 2, "healthy_since": None, "pressured": pressured,
+                    "valid": True, "recovered_ms": None, "last_admission_ms": None}
+                scratch = directory / "pressure.tmp"
+                scratch.write_text(json.dumps(value))
+                scratch.replace(directory / "pressure.json")
+            while not stop.is_set():
+                with (pool / "pool.lock").open("w") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    # Shims sample the pool from outside the delegated tree;
+                    # the controller must judge only its own readings.
+                    publish(pool, False)
+                    publish(registry, unhealthy.is_set())
+                stop.wait(0.05)
+        sampler = None
+        try:
+            wait_for(lambda: load(state / "current.json"))
+            generation = load(state / "current.json")["generation"]
+            assert f"controller-{generation}" in Path(f"/proc/{worker.pid}/cgroup").read_text()
+            registry, actions = state / generation, group / generation
+            sampler = threading.Thread(target=readings, args=(registry,))
+            sampler.start()
+            for index in range(3):
+                identity = uuid.uuid4().hex[:24]
+                lease = (registry / (identity + ".lease")).open("w")
+                fcntl.flock(lease, fcntl.LOCK_EX)
+                leases.append(lease)
+                action = actions / identity
+                action.mkdir()
+                child = subprocess.Popen(["sh", "-c", 'echo $$ > "$1/cgroup.procs"; exec sleep 120', "sh", str(action)])
+                children.append((child, action))
+                wait_for(lambda: (action / "cgroup.procs").read_text().strip())
+                (registry / (identity + ".json")).write_text(str(int(time.time() * 1000) + index))
+            wait_for(lambda: frozen(children[2][1]))
+            assert not frozen(children[0][1])
+            wait_for(lambda: frozen(children[1][1]))
+            assert not frozen(children[0][1])
+            assert any((pool / "suspended").iterdir())
+            unhealthy.clear()
+            wait_for(lambda: not frozen(children[1][1]))
+            wait_for(lambda: not frozen(children[2][1]))
+            events = [json.loads(line) for line in (registry / "events.jsonl").read_text().splitlines()]
+            assert [event["event"] for event in events] == ["suspend", "suspend", "resume", "resume"], events
+            assert events[1]["time_ms"] - events[0]["time_ms"] >= 1000
+            assert events[3]["time_ms"] - events[2]["time_ms"] >= 1000
+            print("PASS pressure trace: newest-first freeze and oldest-first resume", flush=True)
+            # Stale registrar: even a live supervisor must fail open if it cannot sample.
+            unhealthy.set()
+            wait_for(lambda: frozen(children[2][1]))
+            stop.set()
+            sampler.join()
+            with (pool / "pool.lock").open("w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                wait_for(lambda: (registry / "disabled").exists())
+                wait_for(lambda: not any(frozen(action) for _, action in children))
+            for lease in leases:
+                lease.close()
+            wait_for(lambda: all(not action.exists() for _, action in children))
+            worker.wait(timeout=8)
+            print("PASS stale registrar: owned groups thawed and suspension disabled", flush=True)
+        finally:
+            stop.set()
+            if sampler:
+                sampler.join()
+            if worker.poll() is None:
+                worker.terminate()
+                worker.wait(timeout=8)
+            for child, action in children:
+                if action.exists():
+                    (action / "cgroup.freeze").write_text("0")
+                    (action / "cgroup.kill").write_text("1")
+                child.wait(timeout=8)
+            for lease in leases:
+                lease.close()
+            wait_for(lambda: all(not action.exists() or not (action / "cgroup.procs").read_text().strip() for _, action in children))
+            for path in sorted(group.rglob("*"), reverse=True):
+                if path.is_dir():
+                    path.rmdir()
+            group.rmdir()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mbx", type=Path, required=True)
     parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--suspension", action="store_true")
     args = parser.parse_args()
     for failure in ("exit", "hang", "cancel", "registration", "watchdog", "replaced"):
         lifecycle(args.mbx.resolve(), args.root.resolve(), failure)
     handoff(args.mbx.resolve(), args.root.resolve())
+    if args.suspension:
+        suspension(args.mbx.resolve(), args.root.resolve())

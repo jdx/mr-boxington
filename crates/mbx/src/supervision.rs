@@ -5,6 +5,9 @@ use std::process::{Command, ExitCode};
 #[cfg(target_os = "linux")]
 #[path = "supervision/linux.rs"]
 mod linux;
+#[cfg(any(target_os = "linux", test))]
+#[path = "supervision/policy.rs"]
+mod policy;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::Action;
 #[cfg(not(target_os = "linux"))]
@@ -29,6 +32,9 @@ pub(crate) fn prepare(command: &mut Command, eligible: bool) -> Option<Action> {
     }
     #[cfg(target_os = "linux")]
     {
+        if !linux::direct_driver(command.get_program()) {
+            return None;
+        }
         let root = std::env::var_os("MBX_SCHED_CGROUP_ROOT")
             .map(std::path::PathBuf::from)
             .or(settings.cgroup_root);
@@ -110,4 +116,18 @@ fn key(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// A stale supervisor must never leave admission closed indefinitely.
+pub(crate) fn resumes_pending(pool: &std::path::Path, now: u64) -> bool {
+    std::fs::read_dir(pool.join("suspended"))
+        .into_iter()
+        .flatten()
+        .any(|entry| {
+            entry
+                .ok()
+                .and_then(|entry| std::fs::read_to_string(entry.path()).ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .is_some_and(|stamp| now.checked_sub(stamp).is_some_and(|age| age < 3_000))
+        })
 }

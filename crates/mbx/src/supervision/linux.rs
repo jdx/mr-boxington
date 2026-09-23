@@ -49,6 +49,40 @@ fn helper(
     Ok(command.spawn()?)
 }
 
+/// Compiler identity probing can recognize a wrapper's forwarded --version.
+/// Suspension is narrower: accept conventional native drivers, never scripts
+/// or arbitrarily named launchers that may own unrelated side effects.
+pub(super) fn direct_driver(program: &std::ffi::OsStr) -> bool {
+    use std::io::Read;
+    let Some(name) = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    let name = name
+        .rsplit_once('-')
+        .filter(|(_, version)| {
+            !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+        })
+        .map_or(name, |(name, _)| name);
+    let driver = name.rsplit('-').next().unwrap_or(name);
+    if !matches!(
+        driver,
+        "rustc" | "cc" | "c++" | "gcc" | "g++" | "clang" | "clang++"
+    ) {
+        return false;
+    }
+    let Ok(path) = which::which(program) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    std::fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut magic))
+        .is_ok()
+        && magic == *b"\x7fELF"
+}
+
 pub(super) fn prepare(command: &mut Command, pool: &Path, root: &Path) -> Result<Action> {
     if !root.is_absolute() {
         bail!("delegated cgroup root must be absolute");
@@ -159,6 +193,16 @@ impl Action {
 impl Drop for Action {
     fn drop(&mut self) {
         let _ = thaw(&self.path);
+        if let Some(mut stats) = read::<Stats>(&self.registry.join(format!("{}.stats", self.id))) {
+            stats.resume(crate::pressure::now_ms());
+            let _ = write(&self.registry.join(format!("{}.stats", self.id)), &stats);
+            if stats.suspended_ms > 0 {
+                crate::session::report_shim_warning(&format!(
+                    "compiler resumed after {:.2}s suspended for memory pressure",
+                    stats.suspended_ms as f64 / 1_000.0
+                ));
+            }
+        }
         let _ = std::fs::remove_file(self.registry.join(format!("{}.json", self.id)));
         // All processes normally exited with the compiler. Cancellation may
         // leave descendants: thaw first, then terminate this owned tree only.
@@ -283,6 +327,12 @@ fn supervisor(state: &Path, group: &Path) -> Result<()> {
     std::fs::create_dir_all(&actions)?;
     enable_memory(&actions)?;
     let mut watchdog = helper("watchdog", state, group, Some(&generation))?;
+    // Probe from a sibling of the action groups so delegated-root limits and
+    // PSI are visible even when that root is outside the caller's ancestry.
+    // Spawn the watchdog first: it retains the caller's original cgroup.
+    let controller = group.join(format!("controller-{generation}"));
+    std::fs::create_dir(&controller)?;
+    std::fs::write(controller.join("cgroup.procs"), "0")?;
     let start = Instant::now();
     while !read::<u64>(&registry.join("watchdog.json")).is_some_and(fresh) {
         if watchdog.try_wait()?.is_some() || start.elapsed() > Duration::from_secs(2) {
@@ -299,9 +349,18 @@ fn supervisor(state: &Path, group: &Path) -> Result<()> {
         &mut watchdog,
     );
     let _ = std::fs::write(registry.join("disabled"), "supervisor exited");
-    thaw_all(&actions);
+    thaw_owned(&registry, &actions);
     let _ = std::fs::write(registry.join("finished"), "1");
-    let _ = watchdog.wait();
+    let deadline = Instant::now();
+    while watchdog.try_wait()?.is_none() {
+        if deadline.elapsed() >= Duration::from_secs(1) {
+            // The owned helper may itself be hung. Compilers are already thawed.
+            let _ = watchdog.kill();
+            let _ = watchdog.wait();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
     result
 }
 fn supervise(
@@ -314,6 +373,8 @@ fn supervise(
 ) -> Result<()> {
     let mut idle = Instant::now();
     let mut respawned = Instant::now();
+    let mut policy = super::policy::Policy::default();
+    let mut monitored = Instant::now();
     loop {
         if !read::<u64>(&registry.join("watchdog.json")).is_some_and(fresh) {
             std::fs::write(registry.join("disabled"), "watchdog heartbeat lost")?;
@@ -350,6 +411,26 @@ fn supervise(
                 return Ok(());
             }
         }
+        if !registry.join("disabled").exists() {
+            let failure = match control(state, registry, actions, generation, &mut policy) {
+                Ok(true) => {
+                    monitored = Instant::now();
+                    None
+                }
+                Ok(false) if monitored.elapsed() < Duration::from_millis(TIMEOUT) => None,
+                Ok(false) => Some("pressure sampling blocked by a stale registrar lock".to_owned()),
+                Err(error) => Some(format!("pressure monitoring failed: {error:#}")),
+            };
+            if let Some(reason) = failure {
+                std::fs::write(registry.join("disabled"), reason)?;
+            }
+        }
+        if registry.join("disabled").exists() {
+            thaw_owned(registry, actions);
+            if let Some(pool) = state.parent() {
+                let _ = std::fs::remove_file(pool.join("suspended").join(generation));
+            }
+        }
         std::thread::sleep(TICK);
     }
 }
@@ -365,9 +446,12 @@ fn prune(state: &Path, group: &Path, current: &str) {
         if !clean_orphans(&entry.path(), &actions).is_ok_and(|live| live == 0) {
             continue;
         }
-        // The kernel refuses to remove a group that still has action groups.
+        // The kernel refuses to remove a group that still has action groups
+        // or, for the controller, a replacement watchdog that has not exited.
+        let controller = group.join(format!("controller-{generation}"));
         let _ = std::fs::remove_dir(&actions);
-        if !actions.exists() {
+        let _ = std::fs::remove_dir(&controller);
+        if !actions.exists() && !controller.exists() {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
@@ -384,14 +468,14 @@ fn watchdog(state: &Path, group: &Path, generation: &str) -> Result<()> {
             .as_ref()
             .is_some_and(|h| h.generation == generation && fresh(h.time));
         if registry.join("finished").exists() {
-            thaw_all(&actions);
+            thaw_owned(&registry, &actions);
             return Ok(());
         }
         if !healthy && start.elapsed() > Duration::from_millis(TIMEOUT) {
             std::fs::write(registry.join("disabled"), "supervisor heartbeat lost")?;
             // Repeat while a stalled supervisor might wake up in an actuation.
             // No election/registrar lock is needed to rescue a frozen action.
-            thaw_all(&actions);
+            thaw_owned(&registry, &actions);
             let _ = clean_orphans(&registry, &actions);
             // A successor's heartbeat also proves this generation's supervisor
             // is gone: it held the election lock for its whole life.
@@ -404,5 +488,165 @@ fn watchdog(state: &Path, group: &Path, generation: &str) -> Result<()> {
             }
         }
         std::thread::sleep(TICK);
+    }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Stats {
+    suspended_ms: u64,
+    frozen_since: Option<u64>,
+    freeze_count: u64,
+    peak_memory: u64,
+}
+impl Stats {
+    fn resume(&mut self, now: u64) {
+        if let Some(start) = self.frozen_since.take() {
+            self.suspended_ms = self.suspended_ms.saturating_add(now.saturating_sub(start));
+        }
+    }
+}
+
+fn control(
+    state: &Path,
+    registry: &Path,
+    actions: &Path,
+    generation: &str,
+    policy: &mut super::policy::Policy,
+) -> Result<bool> {
+    use super::policy::Change;
+    let pool = state
+        .parent()
+        .ok_or_else(|| eyre::eyre!("missing scheduler pool"))?;
+    let now = crate::pressure::now_ms();
+    let mut registrar = fslock::LockFile::open(&pool.join("pool.lock"))?;
+    // Never block the control heartbeat behind an admission process.
+    if !registrar.try_lock()? {
+        return Ok(false);
+    }
+    // Keep this generation's own samples. Shims refresh the pool's shared
+    // state from outside the delegated tree, and mixing the two views would
+    // reset hysteresis and judge the delegated root by host readings.
+    let pressure = crate::pressure::sample(registry, now, crate::pressure::probe)?;
+    if !pressure.valid {
+        bail!("memory pressure probes unavailable");
+    }
+    // Compilers finish without the registrar lock, so an action group can
+    // vanish at any point below. Skip it instead of failing the generation.
+    let mut ordered = Vec::new();
+    for path in groups(actions) {
+        let Some(id) = path.file_name().and_then(|s| s.to_str()).map(str::to_owned) else {
+            continue;
+        };
+        let Some(started) = read::<u64>(&registry.join(format!("{id}.json"))) else {
+            continue;
+        };
+        let frozen = match std::fs::read_to_string(path.join("cgroup.freeze")) {
+            Ok(value) => value.trim() == "1",
+            Err(_) if !path.exists() => continue,
+            Err(error) => return Err(error.into()),
+        };
+        ordered.push((started, id, path, frozen));
+    }
+    ordered.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    let mut frozen: Vec<_> = ordered.iter().map(|action| action.3).collect();
+    for (_, id, path, _) in &ordered {
+        let mut stats = read::<Stats>(&registry.join(format!("{id}.stats"))).unwrap_or_default();
+        let memory = std::fs::read_to_string(path.join("memory.current"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        stats.peak_memory = stats.peak_memory.max(memory);
+        write(&registry.join(format!("{id}.stats")), &stats)?;
+    }
+    if let Some(change) = policy.step(now, pressure.pressured, &frozen) {
+        // A watchdog can disable this generation without taking our locks.
+        if registry.join("disabled").exists() {
+            bail!("watchdog disabled suspension");
+        }
+        if !read::<u64>(&registry.join("watchdog.json")).is_some_and(fresh) {
+            bail!("watchdog heartbeat lost");
+        }
+        let (index, freeze) = match change {
+            Change::Freeze(index) => (index, true),
+            Change::Resume(index) => (index, false),
+        };
+        let (_, id, path, _) = &ordered[index];
+        let written = std::fs::write(path.join("cgroup.freeze"), if freeze { "1" } else { "0" });
+        unless_gone(path, written)?;
+        // A compiler that already finished has nothing left to account for.
+        if path.exists() {
+            frozen[index] = freeze;
+            record(registry, id, now, freeze)?;
+        } else {
+            frozen[index] = false;
+        }
+    }
+    let pending = pool.join("suspended");
+    std::fs::create_dir_all(&pending)?;
+    let marker = pending.join(generation);
+    if frozen.iter().any(|frozen| *frozen) {
+        crate::util::write_advisory(&marker, now.to_string().as_bytes())?;
+    } else {
+        let _ = std::fs::remove_file(marker);
+    }
+    Ok(true)
+}
+
+fn record(registry: &Path, id: &str, now: u64, freeze: bool) -> Result<()> {
+    let mut stats = read::<Stats>(&registry.join(format!("{id}.stats"))).unwrap_or_default();
+    if freeze {
+        stats.frozen_since = Some(now);
+        stats.freeze_count += 1;
+    } else {
+        stats.resume(now);
+    }
+    write(&registry.join(format!("{id}.stats")), &stats)?;
+    // Machine-readable diagnostics survive detached helper lifetimes.
+    use std::io::Write;
+    let mut events = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(registry.join("events.jsonl"))?;
+    writeln!(
+        events,
+        "{}",
+        serde_json::json!({"time_ms":now,"action":id,"event":if freeze {"suspend"} else {"resume"},"suspended_ms":stats.suspended_ms})
+    )?;
+    Ok(())
+}
+
+fn thaw_owned(registry: &Path, group: &Path) {
+    let now = crate::pressure::now_ms();
+    for path in groups(group) {
+        if thaw(&path).is_ok() {
+            let id = path.file_name().unwrap().to_string_lossy();
+            let file = registry.join(format!("{id}.stats"));
+            if let Some(mut stats) = read::<Stats>(&file) {
+                stats.resume(now);
+                let _ = write(&file, &stats);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod eligibility_tests {
+    use super::*;
+    #[test]
+    fn native_drivers_are_distinguished_from_forwarding_scripts() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        for (name, bytes, accepted) in [
+            ("rustc", &b"\x7fELF"[..], true),
+            ("aarch64-linux-gnu-gcc-13", &b"\x7fELF"[..], true),
+            ("clang++-18", &b"\x7fELF"[..], true),
+            ("custom-launcher", &b"\x7fELF"[..], false),
+            ("gcc", &b"#!/bin/sh\nexec /usr/bin/gcc \"$@\""[..], false),
+        ] {
+            let path = directory.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(direct_driver(path.as_os_str()), accepted, "{name}");
+        }
     }
 }
