@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.17.0](https://github.com/jdx/mr-boxington/compare/v1.16.0...v1.17.0) - 2026-09-23
+
+### Added
+
+- *(scheduler)* suspend opted-in compilers under memory pressure ([#525](https://github.com/jdx/mr-boxington/pull/525))
+- *(scheduler)* supervise compiler trees in delegated linux cgroups ([#523](https://github.com/jdx/mr-boxington/pull/523))
+- *(scheduler)* throttle new compilations under memory pressure ([#521](https://github.com/jdx/mr-boxington/pull/521))
+- *(scheduler)* sample live memory pressure ([#520](https://github.com/jdx/mr-boxington/pull/520))
+
+### Fixed
+
+- *(cache)* only treat Cargo build scripts as build scripts ([#528](https://github.com/jdx/mr-boxington/pull/528))
+- *(cache)* replay build scripts declared with a custom path ([#526](https://github.com/jdx/mr-boxington/pull/526))
+
+### Other
+
+- *(materialize)* stop the contended-lock restore test from failing under parallel tests ([#530](https://github.com/jdx/mr-boxington/pull/530))
+- *(build)* find cargo outputs under both build-dir layouts and run them on nightly ([#529](https://github.com/jdx/mr-boxington/pull/529))
+
 ## [1.16.0](https://github.com/jdx/mr-boxington/compare/v1.15.0...v1.16.0) - 2026-09-23
 
 ### Added
