@@ -2041,6 +2041,67 @@ fn build_script_execution_and_out_dir_restore_across_checkouts() {
     assert!(count(&warm, "hits") >= 1, "build script should hit: {warm}");
 }
 
+/// Move the fixture's build script to `builder/main.rs`, as aws-lc-sys does.
+/// Cargo then compiles it as `build_script_main` and runs `build-script-main`.
+fn rename_build_script(directory: &Path) {
+    std::fs::create_dir_all(directory.join("builder")).unwrap();
+    std::fs::rename(
+        directory.join("build.rs"),
+        directory.join("builder/main.rs"),
+    )
+    .unwrap();
+    let manifest = directory.join("Cargo.toml");
+    let contents = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        manifest,
+        contents.replace(
+            "edition = \"2021\"\n",
+            "edition = \"2021\"\nbuild = \"builder/main.rs\"\n",
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_build_script_with_a_custom_path_restores_across_checkouts() {
+    for (label, environment) in [
+        ("linked", &[][..]),
+        ("execution-only", &[("MBX_CACHE_LINKS", "0")][..]),
+    ] {
+        let store = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        for checkout in [first.path(), second.path()] {
+            write_execution_cached_project(checkout, true);
+            rename_build_script(checkout);
+        }
+
+        build_with(
+            first.path(),
+            store.path(),
+            &reports.path().join("first.json"),
+            environment,
+        );
+        let (warm, stderr) = build_with(
+            second.path(),
+            store.path(),
+            &reports.path().join("second.json"),
+            environment,
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(first.path().join("runs")).unwrap(),
+            "1",
+            "{label}"
+        );
+        assert!(
+            !second.path().join("runs").exists(),
+            "{label}: the second checkout ran builder/main.rs instead of restoring it: {warm}\n{stderr}"
+        );
+    }
+}
+
 #[test]
 fn changed_declared_input_executes_build_script_again() {
     let store = tempfile::tempdir().unwrap();
