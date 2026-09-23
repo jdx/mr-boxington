@@ -183,6 +183,11 @@ fn populated(group: &Path) -> bool {
 fn thaw(group: &Path) -> std::io::Result<()> {
     std::fs::write(group.join("cgroup.freeze"), "0")
 }
+/// An action that finishes normally removes its group without the scanner's
+/// lease; a write that lost that race has nothing left to act on.
+fn unless_gone(group: &Path, result: std::io::Result<()>) -> std::io::Result<()> {
+    result.or_else(|error| if group.exists() { Err(error) } else { Ok(()) })
+}
 fn groups(group: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(group)
         .into_iter()
@@ -209,9 +214,9 @@ fn clean_orphans(registry: &Path, group: &Path) -> Result<usize> {
             live += 1;
             continue;
         }
-        thaw(&path)?;
+        unless_gone(&path, thaw(&path))?;
         if populated(&path) {
-            std::fs::write(path.join("cgroup.kill"), "1")?;
+            unless_gone(&path, std::fs::write(path.join("cgroup.kill"), "1"))?;
         }
         let _ = std::fs::remove_dir(&path);
         let _ = std::fs::remove_file(registry.join(format!("{id}.json")));
@@ -261,18 +266,43 @@ fn supervisor(state: &Path, group: &Path) -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let result = supervise(state, &registry, &actions, &generation);
+    let result = supervise(
+        state,
+        group,
+        &registry,
+        &actions,
+        &generation,
+        &mut watchdog,
+    );
     let _ = std::fs::write(registry.join("disabled"), "supervisor exited");
     thaw_all(&actions);
     let _ = std::fs::write(registry.join("finished"), "1");
     let _ = watchdog.wait();
     result
 }
-fn supervise(state: &Path, registry: &Path, actions: &Path, generation: &str) -> Result<()> {
+fn supervise(
+    state: &Path,
+    group: &Path,
+    registry: &Path,
+    actions: &Path,
+    generation: &str,
+    watchdog: &mut std::process::Child,
+) -> Result<()> {
     let mut idle = Instant::now();
+    let mut respawned = Instant::now();
     loop {
         if !read::<u64>(&registry.join("watchdog.json")).is_some_and(fresh) {
             std::fs::write(registry.join("disabled"), "watchdog heartbeat lost")?;
+            // This generation still owns live actions. Replace the watchdog so
+            // their cleanup never depends on this process alone.
+            if respawned.elapsed() > Duration::from_millis(TIMEOUT) {
+                respawned = Instant::now();
+                let _ = watchdog.kill();
+                let _ = watchdog.wait();
+                if let Ok(child) = helper("watchdog", state, group, Some(generation)) {
+                    *watchdog = child;
+                }
+            }
         }
         if registry.join("disabled").exists() {
             // Keep ownership cleanup alive after suspension is disabled.
@@ -319,8 +349,13 @@ fn watchdog(state: &Path, group: &Path, generation: &str) -> Result<()> {
             // No election/registrar lock is needed to rescue a frozen action.
             thaw_all(&actions);
             let _ = clean_orphans(&registry, &actions);
+            // A successor's heartbeat also proves this generation's supervisor
+            // is gone: it held the election lock for its whole life.
+            let replaced = heartbeat
+                .as_ref()
+                .is_some_and(|h| h.generation != generation && fresh(h.time));
             let mut election = fslock::LockFile::open(&state.join("supervisor.lock"))?;
-            if election.try_lock()? && clean_orphans(&registry, &actions)? == 0 {
+            if (replaced || election.try_lock()?) && clean_orphans(&registry, &actions)? == 0 {
                 return Ok(());
             }
         }
