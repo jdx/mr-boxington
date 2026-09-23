@@ -833,19 +833,10 @@ impl Pool {
                 return Ok(None);
             }
         }
-        // A demand too heavy for what the pool will lend it can only ever run
-        // by itself, so on an idle pool it does, rather than waiting for room
-        // that nothing is going to make. Measured against the capacity left
-        // after the reserve, because that is what this build may actually
-        // take -- and conditioned on the demand rather than on the pool
-        // merely being idle, since idle is the ordinary state between two
-        // compilations and granting unconditionally there would let a
-        // low-priority build take the machine in exactly the gap the reserve
-        // exists to hold open.
-        if used == 0 && weight > capacity {
-            return self.grant(&leases, weight).map(Some);
-        }
-        if used.saturating_add(weight) > capacity {
+        // An oversized demand must still run alone, including when priority
+        // reserves reduce capacity. Every grant uses the common path below so
+        // other pools observe its recovery-ramp admission timestamp.
+        if used > 0 && used.saturating_add(weight) > capacity {
             return Ok(None);
         }
         // The permit arithmetic bounds what history predicted; this bounds it

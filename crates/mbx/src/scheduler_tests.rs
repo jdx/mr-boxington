@@ -867,3 +867,40 @@ fn recovery_spaces_admissions_and_probe_failure_fails_open() {
     assert!(pool.try_admit(1, None).unwrap().is_some());
     drop((first, second, third));
 }
+
+#[test]
+fn an_oversized_idle_grant_spaces_the_next_pools_admission() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut low = pool_at(directory.path(), 4, 100);
+    low.pressure = true;
+    low.priority = SchedulerPriority::Low;
+    low.clock = || 7_000;
+    std::fs::write(directory.path().join(PRIORITY_WAIT_STAMP), b"").unwrap();
+    // Establish a recovered state without granting a compilation in the ramp.
+    crate::pressure::sample(directory.path(), 1_000, || crate::pressure::Reading {
+        total: Some(100),
+        available: Some(0),
+        ..Default::default()
+    })
+    .unwrap();
+    crate::pressure::sample(directory.path(), 1_500, || crate::pressure::Reading {
+        total: Some(100),
+        available: Some(0),
+        ..Default::default()
+    })
+    .unwrap();
+    for now in (2_000..=7_000).step_by(500) {
+        crate::pressure::sample(directory.path(), now, || crate::pressure::Reading {
+            total: Some(100),
+            available: Some(50),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    let first = low.try_admit(4, None).unwrap().unwrap();
+    let mut wider = pool_at(directory.path(), 8, 100);
+    wider.pressure = true;
+    wider.clock = || 7_000;
+    assert!(wider.try_admit(1, None).unwrap().is_none());
+    drop(first);
+}
