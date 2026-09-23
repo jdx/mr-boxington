@@ -2,13 +2,18 @@
 //! Missing probes and stale state fail open; no sample is an OS memory limit.
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 pub(crate) const INTERVAL_MS: u64 = 500;
 const STALE_MS: u64 = 3_000;
 const VERSION: u8 = 1;
 
-#[derive(Default, Serialize, Deserialize)]
+/// The newest state this process sampled but could not save. Without it, a
+/// failing write would re-probe on every admission poll and reset hysteresis.
+static UNSAVED: Mutex<Option<(PathBuf, State)>> = Mutex::new(None);
+
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub(crate) struct Reading {
     pub total: Option<u64>,
     pub available: Option<u64>,
@@ -16,7 +21,7 @@ pub(crate) struct Reading {
     pub stalls: BTreeMap<String, u64>,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub(crate) struct State {
     version: u8,
     pub sampled_ms: u64,
@@ -135,6 +140,13 @@ pub(crate) fn sample(dir: &Path, now: u64, probe: fn() -> Reading) -> eyre::Resu
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
+    let mut unsaved = UNSAVED.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some((path, kept)) = unsaved.as_ref()
+        && path == dir
+        && (state.version != VERSION || kept.sampled_ms > state.sampled_ms)
+    {
+        state = kept.clone();
+    }
     if state.version == VERSION
         && now
             .checked_sub(state.sampled_ms)
@@ -143,8 +155,13 @@ pub(crate) fn sample(dir: &Path, now: u64, probe: fn() -> Reading) -> eyre::Resu
         return Ok(state);
     }
     state.update(now, probe());
-    save(dir, &state)?;
-    Ok(state)
+    let saved = save(dir, &state);
+    if saved.is_err() {
+        *unsaved = Some((dir.to_path_buf(), state.clone()));
+    } else if unsaved.as_ref().is_some_and(|(path, _)| path == dir) {
+        *unsaved = None;
+    }
+    saved.map(|()| state)
 }
 
 pub(crate) fn save(dir: &Path, state: &State) -> eyre::Result<()> {
@@ -217,6 +234,18 @@ mod tests {
         let state = sample(dir.path(), 1_500, || memory(0)).unwrap();
         assert!(state.pressured);
         let state = sample(dir.path(), 1_600, || panic!("shared state")).unwrap();
+        assert!(state.pressured);
+    }
+    #[test]
+    fn failed_saves_keep_rate_limit_and_hysteresis() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory in place of the file makes every atomic write fail.
+        std::fs::create_dir(dir.path().join("pressure.json")).unwrap();
+        assert!(sample(dir.path(), 1_000, || memory(0)).is_err());
+        let state = sample(dir.path(), 1_100, || panic!("too soon")).unwrap();
+        assert_eq!(state.sampled_ms, 1_000);
+        assert!(sample(dir.path(), 1_500, || memory(0)).is_err());
+        let state = sample(dir.path(), 1_600, || panic!("too soon")).unwrap();
         assert!(state.pressured);
     }
 }
