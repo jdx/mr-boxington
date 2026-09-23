@@ -1237,15 +1237,6 @@ impl Config {
                                 format!("invalid {}.{setting}", path.display())
                             })?;
                         }
-                        "suspend" if !environment_contains("MBX_SCHEDULER_SUSPEND") => {
-                            self.scheduler.suspend = workspace_bool(&path, &setting, value)?;
-                        }
-                        "cgroup_root" if !environment_contains("MBX_SCHEDULER_CGROUP_ROOT") => {
-                            let root = value.as_str().ok_or_else(|| {
-                                eyre::eyre!("{}.{} must be a string", path.display(), setting)
-                            })?;
-                            self.scheduler.cgroup_root = Some(PathBuf::from(root));
-                        }
                         "pressure" if !environment_contains("MBX_SCHEDULER_PRESSURE") => {
                             self.scheduler.pressure = workspace_bool(&path, &setting, value)?;
                         }
@@ -1253,9 +1244,9 @@ impl Config {
                             self.scheduler.tests = workspace_bool(&path, &setting, value)?;
                         }
                         "enabled" | "cpus" | "reserve_cpus" | "memory" | "priority" | "tests"
-                        | "pressure" | "suspend" | "cgroup_root" => {}
+                        | "pressure" => {}
                         _ => bail!(
-                            "{} contains unsupported workspace setting {setting:?}; only scheduler.enabled, scheduler.cpus, scheduler.reserve_cpus, scheduler.memory, scheduler.priority, scheduler.pressure, scheduler.suspend, scheduler.cgroup_root, and scheduler.tests are allowed",
+                            "{} contains unsupported workspace setting {setting:?}; only scheduler.enabled, scheduler.cpus, scheduler.reserve_cpus, scheduler.memory, scheduler.priority, scheduler.pressure, and scheduler.tests are allowed",
                             path.display()
                         ),
                     }
@@ -1488,6 +1479,24 @@ mod tests {
             FileLayer::at(path, FileScope::Global)
         });
         Config::from_layers_measuring(&env, file.as_ref(), measure_disk, || Some(32 * GIB))
+    }
+
+    #[test]
+    fn repository_policy_cannot_opt_into_process_supervision() {
+        let directory = tempfile::tempdir().unwrap();
+        for policy in ["suspend = true", "cgroup_root = '/delegated'"] {
+            std::fs::write(
+                directory.path().join(".mbx.toml"),
+                format!("[scheduler]\n{policy}\n"),
+            )
+            .unwrap();
+            let mut config = configured(None, &[]).unwrap();
+            assert!(
+                config
+                    .apply_workspace_policy_with(directory.path(), |_| false)
+                    .is_err()
+            );
+        }
     }
 
     #[test]

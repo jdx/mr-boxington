@@ -128,7 +128,9 @@ settings, see [Keep a laptop responsive](/cookbook/local-development#keep-a-lapt
 into cgroup supervision. Set `scheduler.cgroup_root` (`MBX_SCHEDULER_CGROUP_ROOT`)
 to an absolute path to a writable, delegated cgroup v2 directory. mbx creates
 its own descendants and does not change limits on the supplied directory.
-Pressure control and memory scheduling must also be enabled.
+Pressure control and memory scheduling must also be enabled. These two settings
+are user/environment configuration only; repository `.mbx.toml` policy cannot
+opt a contributor into supervision or choose their delegated directory.
 
 ```toml
 [scheduler]

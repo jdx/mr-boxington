@@ -101,7 +101,6 @@ pub(super) fn prepare(command: &mut Command, pool: &Path, root: &Path) -> Result
             std::thread::sleep(Duration::from_millis(20));
         }
     };
-    drop(launch);
     let registry = state.join(&heartbeat.generation);
     let id = super::key(crate::util::random_string(32).as_bytes())[..24].to_owned();
     let path = group.join(&heartbeat.generation).join(&id);
@@ -134,6 +133,7 @@ pub(super) fn prepare(command: &mut Command, pool: &Path, root: &Path) -> Result
             Ok(())
         });
     }
+    drop(launch);
     Ok(action)
 }
 
@@ -271,12 +271,12 @@ fn supervisor(state: &Path, group: &Path) -> Result<()> {
 fn supervise(state: &Path, registry: &Path, actions: &Path, generation: &str) -> Result<()> {
     let mut idle = Instant::now();
     loop {
-        if registry.join("disabled").exists() {
-            thaw_all(actions);
-            return Ok(());
-        }
         if !read::<u64>(&registry.join("watchdog.json")).is_some_and(fresh) {
-            bail!("watchdog heartbeat lost");
+            std::fs::write(registry.join("disabled"), "watchdog heartbeat lost")?;
+        }
+        if registry.join("disabled").exists() {
+            // Keep ownership cleanup alive after suspension is disabled.
+            thaw_all(actions);
         }
         write(
             &state.join("current.json"),
@@ -288,7 +288,12 @@ fn supervise(state: &Path, registry: &Path, actions: &Path, generation: &str) ->
         if clean_orphans(registry, actions)? > 0 {
             idle = Instant::now();
         } else if idle.elapsed() > Duration::from_secs(5) {
-            return Ok(());
+            let mut launch = fslock::LockFile::open(&state.join("launch.lock"))?;
+            if launch.try_lock()? && clean_orphans(registry, actions)? == 0 {
+                // Publish shutdown while holding the same lock as registration.
+                std::fs::write(registry.join("disabled"), "idle shutdown")?;
+                return Ok(());
+            }
         }
         std::thread::sleep(TICK);
     }

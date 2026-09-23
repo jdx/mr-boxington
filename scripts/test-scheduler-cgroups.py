@@ -85,7 +85,9 @@ def lifecycle(mbx, root, failure):
             if failure == "hang":
                 assert (registry / "disabled").exists()
                 worker.send_signal(signal.SIGCONT)
-                worker.wait(timeout=8)
+                # Disabled supervision still cleans up if an owner disappears.
+                leases[-1].close()
+                wait_for(lambda: not target.exists())
             if failure == "cancel":
                 wait_for(lambda: not target.exists())
             print(f"PASS supervisor {failure}: compiler tree thawed", flush=True)
