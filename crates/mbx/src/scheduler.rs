@@ -82,6 +82,7 @@ pub(crate) const SCHED_SLOT_BYTES_ENV: &str = "MBX_SCHED_SLOT_BYTES";
 /// Permit priority of this build's compilations.
 pub(crate) const SCHED_PRIORITY_ENV: &str = "MBX_SCHED_PRIORITY";
 /// Identity shared by every compiler shim in one Cargo build.
+const SCHED_PRESSURE_ENV: &str = "MBX_SCHED_PRESSURE";
 const SCHED_BUILD_ID_ENV: &str = "MBX_SCHED_BUILD_ID";
 /// Most weighted permits one Cargo build may hold at once.
 const SCHED_BUILD_SLOTS_ENV: &str = "MBX_SCHED_BUILD_SLOTS";
@@ -494,6 +495,9 @@ pub(crate) struct Pool {
     priority: SchedulerPriority,
     /// Probe for currently available memory, injectable for tests.
     available_memory: fn() -> Option<u64>,
+    pressure: bool,
+    pressure_probe: fn() -> crate::pressure::Reading,
+    clock: fn() -> u64,
 }
 
 /// The pool this process schedules against, or `None` when scheduling is off.
@@ -520,6 +524,7 @@ fn resolve_pool() -> Option<Pool> {
                     .and_then(|value| value.parse().ok())
                     .unwrap_or_default(),
             );
+            pool.pressure = env_number(SCHED_PRESSURE_ENV) == Some(1);
             pool.build = std::env::var(SCHED_BUILD_ID_ENV)
                 .ok()
                 .filter(|id| !id.is_empty())
@@ -575,6 +580,10 @@ pub(crate) fn session_environment_with_jobs(
                 .into_owned(),
         ),
         (SCHED_SLOTS_ENV.into(), permits.to_string()),
+        (
+            SCHED_PRESSURE_ENV.into(),
+            u8::from(scheduler.pressure).to_string(),
+        ),
         (
             SCHED_SLOT_BYTES_ENV.into(),
             bytes_per_permit(scheduler.memory_bytes, permits).to_string(),
@@ -641,6 +650,9 @@ impl Pool {
             bytes_per_permit,
             priority,
             available_memory: crate::util::memory_available_bytes,
+            pressure: true,
+            pressure_probe: crate::pressure::probe,
+            clock: crate::pressure::now_ms,
         }
     }
 
@@ -648,12 +660,14 @@ impl Pool {
         let scheduler = &config.scheduler;
         let permits = scheduler.permits();
         scheduler.enabled.then(|| {
-            Self::new(
+            let mut pool = Self::new(
                 config.cache_dir.join(SCHEDULER_DIR),
                 permits,
                 bytes_per_permit(scheduler.memory_bytes, permits),
                 scheduler.priority,
-            )
+            );
+            pool.pressure = scheduler.pressure;
+            pool
         })
     }
 
@@ -695,6 +709,12 @@ impl Pool {
             // permits are held by compilers that are really running.
             if !complained && started.elapsed() >= SLOW_WAIT_NOTICE {
                 complained = true;
+                if self.pressure && self.bytes_per_permit > 0 {
+                    debug!(
+                        "compiler admission may be waiting for memory pressure to recover ({})",
+                        demand.name
+                    );
+                }
                 debug!(
                     "waiting for {weight} of {} machine-wide compile permits ({})",
                     self.capacity, demand.name
@@ -782,15 +802,23 @@ impl Pool {
         let registrar_path = self.dir.join(POOL_LOCK);
         let mut registrar = fslock::LockFile::open(&registrar_path)?;
         registrar.lock()?;
-        // Observation only; admissions continue to use the existing budget.
-        if self.bytes_per_permit > 0 {
-            let _ = crate::pressure::sample(
-                &self.dir,
-                crate::pressure::now_ms(),
-                crate::pressure::probe,
-            );
-        }
         let live = scan_leases(&leases)?;
+        let now = (self.clock)();
+        // Broken sensing disables only this advisory gate, never CPU scheduling.
+        let mut pressure = (self.pressure && self.bytes_per_permit > 0)
+            .then(|| crate::pressure::sample(&self.dir, now, self.pressure_probe).ok())
+            .flatten();
+        if !live.is_empty()
+            && let Some(state) = &pressure
+            && state.valid
+            && (state.pressured
+                || (state.recovered_ms.is_some()
+                    && state.last_admission_ms.is_some_and(|last| {
+                        now.saturating_sub(last) < crate::pressure::INTERVAL_MS
+                    })))
+        {
+            return Ok(None);
+        }
         let capacity = self.capacity - self.reserved();
         let used: u64 = live.iter().map(|lease| lease.weight).sum();
         if let Some((build_id, build_capacity)) = &self.build {
@@ -805,19 +833,10 @@ impl Pool {
                 return Ok(None);
             }
         }
-        // A demand too heavy for what the pool will lend it can only ever run
-        // by itself, so on an idle pool it does, rather than waiting for room
-        // that nothing is going to make. Measured against the capacity left
-        // after the reserve, because that is what this build may actually
-        // take -- and conditioned on the demand rather than on the pool
-        // merely being idle, since idle is the ordinary state between two
-        // compilations and granting unconditionally there would let a
-        // low-priority build take the machine in exactly the gap the reserve
-        // exists to hold open.
-        if used == 0 && weight > capacity {
-            return self.grant(&leases, weight).map(Some);
-        }
-        if used.saturating_add(weight) > capacity {
+        // An oversized demand must still run alone, including when priority
+        // reserves reduce capacity. Every grant uses the common path below so
+        // other pools observe its recovery-ramp admission timestamp.
+        if used > 0 && used.saturating_add(weight) > capacity {
             return Ok(None);
         }
         // The permit arithmetic bounds what history predicted; this bounds it
@@ -836,7 +855,12 @@ impl Pool {
         {
             return Ok(None);
         }
-        self.grant(&leases, weight).map(Some)
+        let permit = self.grant(&leases, weight)?;
+        if let Some(state) = &mut pressure {
+            state.last_admission_ms = Some(now);
+            let _ = crate::pressure::save(&self.dir, state);
+        }
+        Ok(Some(permit))
     }
 
     /// Create and lock this process's lease. Runs under the registrar lock,

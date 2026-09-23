@@ -10,6 +10,7 @@ fn pool_at(dir: &Path, capacity: u64, bytes_per_permit: u64) -> Pool {
     // Tests must not depend on how much memory the machine running them has
     // free; anything that wants the gate closed injects its own probe.
     pool.available_memory = || None;
+    pool.pressure = false;
     pool
 }
 
@@ -803,4 +804,103 @@ fn session_environment_states_off_explicitly() {
     assert_eq!(value(SCHED_SLOTS_ENV), "6", "the machine pool stays global");
     assert_eq!(value(SCHED_SLOT_BYTES_ENV), "1333");
     assert_eq!(value(SCHED_BUILD_SLOTS_ENV), "3");
+}
+
+#[test]
+fn pressure_blocks_unknown_demands_but_keeps_idle_progress() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CLOCK: AtomicU64 = AtomicU64::new(1_000);
+    let dir = tempfile::tempdir().unwrap();
+    let mut pool = pool_at(dir.path(), 4, 100);
+    pool.pressure = true;
+    pool.clock = || CLOCK.load(Ordering::SeqCst);
+    pool.pressure_probe = || crate::pressure::Reading {
+        total: Some(100),
+        available: Some(0),
+        ..Default::default()
+    };
+    let first = pool.try_admit(1, None).unwrap().unwrap();
+    CLOCK.store(1_500, Ordering::SeqCst);
+    assert!(pool.try_admit(1, None).unwrap().is_none());
+    // Even a demand with no history, or an expired prediction gate, waits.
+    CLOCK.store(2_000, Ordering::SeqCst);
+    assert!(pool.try_admit(1, None).unwrap().is_none());
+    drop(first);
+    let first = pool.try_admit(1, None).unwrap().unwrap();
+    pool.pressure = false;
+    let second = pool.try_admit(1, None).unwrap().unwrap();
+    drop((first, second));
+}
+
+#[test]
+fn recovery_spaces_admissions_and_probe_failure_fails_open() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CLOCK: AtomicU64 = AtomicU64::new(1_000);
+    let dir = tempfile::tempdir().unwrap();
+    let mut pool = pool_at(dir.path(), 8, 100);
+    pool.pressure = true;
+    pool.clock = || CLOCK.load(Ordering::SeqCst);
+    pool.pressure_probe = || crate::pressure::Reading {
+        total: Some(100),
+        available: Some(0),
+        ..Default::default()
+    };
+    let first = pool.try_admit(1, None).unwrap().unwrap();
+    CLOCK.store(1_500, Ordering::SeqCst);
+    assert!(pool.try_admit(1, None).unwrap().is_none());
+    pool.pressure_probe = || crate::pressure::Reading {
+        total: Some(100),
+        available: Some(50),
+        ..Default::default()
+    };
+    for now in (2_000..7_000).step_by(500) {
+        CLOCK.store(now, Ordering::SeqCst);
+        assert!(pool.try_admit(1, None).unwrap().is_none());
+    }
+    CLOCK.store(7_000, Ordering::SeqCst);
+    let second = pool.try_admit(1, None).unwrap().unwrap();
+    assert!(pool.try_admit(1, None).unwrap().is_none());
+    CLOCK.store(7_500, Ordering::SeqCst);
+    let third = pool.try_admit(1, None).unwrap().unwrap();
+    pool.pressure_probe = Default::default;
+    CLOCK.store(8_000, Ordering::SeqCst);
+    assert!(pool.try_admit(1, None).unwrap().is_some());
+    drop((first, second, third));
+}
+
+#[test]
+fn an_oversized_idle_grant_spaces_the_next_pools_admission() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut low = pool_at(directory.path(), 4, 100);
+    low.pressure = true;
+    low.priority = SchedulerPriority::Low;
+    low.clock = || 7_000;
+    std::fs::write(directory.path().join(PRIORITY_WAIT_STAMP), b"").unwrap();
+    // Establish a recovered state without granting a compilation in the ramp.
+    crate::pressure::sample(directory.path(), 1_000, || crate::pressure::Reading {
+        total: Some(100),
+        available: Some(0),
+        ..Default::default()
+    })
+    .unwrap();
+    crate::pressure::sample(directory.path(), 1_500, || crate::pressure::Reading {
+        total: Some(100),
+        available: Some(0),
+        ..Default::default()
+    })
+    .unwrap();
+    for now in (2_000..=7_000).step_by(500) {
+        crate::pressure::sample(directory.path(), now, || crate::pressure::Reading {
+            total: Some(100),
+            available: Some(50),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    let first = low.try_admit(4, None).unwrap().unwrap();
+    let mut wider = pool_at(directory.path(), 8, 100);
+    wider.pressure = true;
+    wider.clock = || 7_000;
+    assert!(wider.try_admit(1, None).unwrap().is_none());
+    drop(first);
 }

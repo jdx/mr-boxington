@@ -531,7 +531,7 @@ pub fn memory_available_bytes() -> Option<u64> {
     let pages = u64::from(stats.free_count)
         .checked_add(u64::from(stats.inactive_count))?
         .checked_add(u64::from(stats.purgeable_count))?;
-    pages.checked_mul(page_size).filter(|bytes| *bytes > 0)
+    pages.checked_mul(page_size)
 }
 
 /// Fallback for hosts with no supported probe.
