@@ -121,6 +121,11 @@ def lifecycle(mbx, root, failure):
                 wait_for(lambda: not target.exists())
             if failure == "watchdog":
                 wait_for(lambda: (registry / "disabled").exists())
+                # A disabled but running supervisor keeps the election lock;
+                # a new launch must give up at once so compiles fall back.
+                started = time.monotonic()
+                subprocess.run([str(mbx), "__mbx-control", "supervisor", str(state), str(group)], timeout=5)
+                assert time.monotonic() - started < 1, "launch waited on a disabled supervisor"
                 # A replacement watchdog cleans up even if the supervisor stalls.
                 wait_for(lambda: watchdogs(worker) not in ([], [hung]))
                 worker.send_signal(signal.SIGSTOP)
