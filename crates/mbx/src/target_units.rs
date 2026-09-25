@@ -187,7 +187,7 @@ fn is_old_unit(directory: &Path) -> bool {
 /// The latest access or modification of anything directly in `directory`, or
 /// of the directory itself. A time that cannot be read counts as now, so a
 /// unit is never removed on a guess.
-fn last_use(directory: &Path) -> SystemTime {
+pub(crate) fn last_use(directory: &Path) -> SystemTime {
     let mut latest = modified(directory).unwrap_or_else(SystemTime::now);
     let Ok(listing) = std::fs::read_dir(directory) else {
         return SystemTime::now();

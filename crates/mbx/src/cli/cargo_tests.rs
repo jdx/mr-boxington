@@ -402,6 +402,7 @@ pub(super) fn managed_target_config(root: &Path) -> Config {
         linker: Default::default(),
         target: crate::config::TargetSettings {
             views: true,
+            seed: false,
             root: root.join("targets"),
         },
     }

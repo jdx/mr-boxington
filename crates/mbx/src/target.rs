@@ -1247,6 +1247,29 @@ fn collect_with(
     Ok(outcome)
 }
 
+/// Every other checkout's managed target directory, most recently used first,
+/// for [`crate::target_seed`] to copy units from.
+pub(crate) fn seed_donors(root: &Path, workspace_root: &Path) -> Vec<crate::target_seed::Donor> {
+    let Ok(views) = views(root) else {
+        return Vec::new();
+    };
+    let mut donors = views
+        .into_iter()
+        .filter_map(|(record_path, directory)| {
+            let record = read_view_record(&record_path)?;
+            (record.workspace_root != workspace_root && directory.is_dir()).then_some(
+                crate::target_seed::Donor {
+                    directory,
+                    workspace_root: record.workspace_root,
+                    updated_secs: record.updated_secs,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    donors.sort_by_key(|donor| std::cmp::Reverse(donor.updated_secs));
+    donors
+}
+
 /// Whether a record read back during collection shows a build claiming the
 /// view since it was selected on `updated`.
 ///
