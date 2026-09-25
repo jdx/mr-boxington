@@ -1542,6 +1542,7 @@ dependencies = [
  "libc",
  "log",
  "mbx-cache-protocol",
+ "memchr",
  "mockito",
  "rand 0.10.2",
  "reflink-copy",
