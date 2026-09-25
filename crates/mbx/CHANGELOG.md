@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.0](https://github.com/jdx/mr-boxington/compare/v1.17.0...v1.18.0) - 2026-09-25
+
+### Added
+
+- *(target)* start a new checkout's build from another checkout's registry units ([#550](https://github.com/jdx/mr-boxington/pull/550))
+- *(gc)* remove unused build units from live managed target directories ([#549](https://github.com/jdx/mr-boxington/pull/549))
+- *(target)* adopt an existing target/ on the first build without prompting ([#545](https://github.com/jdx/mr-boxington/pull/545))
+
+### Fixed
+
+- support Cargo 1.100's build layout and the Rust 1.99 toolchain ([#548](https://github.com/jdx/mr-boxington/pull/548))
+- *(out-dir)* keep OUT_DIR readers fresh on the build after they compile ([#551](https://github.com/jdx/mr-boxington/pull/551))
+- *(progress)* stop printing the mascot in plain build output ([#533](https://github.com/jdx/mr-boxington/pull/533))
+
 ## [1.17.0](https://github.com/jdx/mr-boxington/compare/v1.16.0...v1.17.0) - 2026-09-23
 
 ### Added
