@@ -183,6 +183,8 @@ let scoreToken = 0;
 let suspendTimer = 0;
 /** An idle suspend still settling; a start waits for it before resuming. */
 let suspending: Promise<void> | null = null;
+/** The context stopped a playing score on its own (a call, a device change). */
+let interrupted = false;
 let restartTimer = 0;
 const cleanups: (() => void)[] = [];
 
@@ -515,6 +517,7 @@ function toggleSound() {
 async function startScore(midPlay: boolean) {
   // Stop the old score now, so a seek never shows a frame on its clock.
   stopScore();
+  interrupted = false;
   const token = scoreToken;
   const a = ac;
   if (!a || !master) return;
@@ -571,10 +574,16 @@ function stopScore() {
 function onAudioState() {
   if (!ac) return;
   // An interrupted context (a call, a device change) loses its place; restart
-  // the score from the picture when it comes back.
+  // the score from the picture when it comes back. Only a score this listener
+  // cut off is restarted here: a resume that startScore() asked for fires this
+  // event too, and restarting then would pre-empt that start.
   if (ac.state !== "running") {
-    if (score) stopScore();
-  } else if (playing.value && soundOn.value && !score) {
+    if (score) {
+      interrupted = true;
+      stopScore();
+    }
+  } else if (interrupted && playing.value && soundOn.value && !score) {
+    interrupted = false;
     void startScore(true);
   }
 }
