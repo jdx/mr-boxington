@@ -233,8 +233,8 @@ fn cargo_with_settings_bypass_log_and_roots(
                 Err(error) => {
                     // A move that could not happen is not the build's
                     // failure, so the build goes on either way.
-                    match adoption_failure(config, &roots) {
-                        AdoptionFailure::AdoptedElsewhere => log::debug!("{error:#}"),
+                    match adoption_failure(&error, &roots) {
+                        AdoptionFailure::NotMoved => log::debug!("{error:#}"),
                         AdoptionFailure::LeftInPlace => log::warn!(
                             "{error:#}; the build continues in the existing target directory"
                         ),
@@ -676,25 +676,28 @@ pub(super) fn join_clauses(clauses: &[String]) -> String {
     }
 }
 
-/// Where a failed adoption left the checkout's `target`.
+/// What a failed adoption means for the build that attempted it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AdoptionFailure {
-    /// A concurrent build made the same move first, so nothing is wrong.
-    AdoptedElsewhere,
+    /// This build moved nothing, and `target` is no longer a real directory:
+    /// a concurrent build adopted it or is partway through doing so.
+    NotMoved,
     /// The outputs never moved and Cargo will build into them.
     LeftInPlace,
-    /// The outputs moved but could not be linked or put back.
+    /// This build moved the outputs but could not link them or put them back.
     Stranded,
 }
 
-pub(super) fn adoption_failure(config: &Config, roots: &Roots) -> AdoptionFailure {
-    let managed = target::view_dir(&config.target.root, &roots.workspace_root);
-    if std::fs::read_link(&roots.target_dir).is_ok_and(|link| link == managed) {
-        AdoptionFailure::AdoptedElsewhere
+/// Classify by what this build did rather than by what is at `target` now,
+/// because a concurrent adoption leaves the path briefly empty between its
+/// move and its link.
+pub(super) fn adoption_failure(error: &eyre::Report, roots: &Roots) -> AdoptionFailure {
+    if error.downcast_ref::<target::StrandedAdoption>().is_some() {
+        AdoptionFailure::Stranded
     } else if std::fs::symlink_metadata(&roots.target_dir).is_ok_and(|metadata| metadata.is_dir()) {
         AdoptionFailure::LeftInPlace
     } else {
-        AdoptionFailure::Stranded
+        AdoptionFailure::NotMoved
     }
 }
 
