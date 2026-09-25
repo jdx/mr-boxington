@@ -433,7 +433,7 @@ fn rust_analyzer_target_is_a_child_of_the_managed_view() {
 }
 
 #[test]
-fn accepting_the_target_prompt_requests_migration_without_removing_outputs() {
+fn an_existing_target_the_managed_root_can_hold_is_adopted_without_asking() {
     let directory = tempfile::tempdir().unwrap();
     let workspace = directory.path().join("project");
     let target_dir = workspace.join("target");
@@ -447,42 +447,56 @@ fn accepting_the_target_prompt_requests_migration_without_removing_outputs() {
         target_dir_requested: false,
     };
 
-    let accepted = prompt_to_manage_existing_target_with(&config, &roots, |_, _| Ok(true)).unwrap();
+    // The temporary directory holds both the checkout and the managed root,
+    // so a rename between them is possible and nothing is asked.
+    let decided = manage_existing_target_with(&config, &roots, |_| {
+        panic!("a move that keeps every output must not ask")
+    })
+    .unwrap();
 
-    assert_eq!(accepted, Some(ExistingTarget::Adopt));
+    assert_eq!(decided, Some(ExistingTarget::Adopt));
     assert!(target_dir.join("artifact").is_file());
 }
 
 #[test]
-fn the_target_prompt_offers_to_move_a_directory_the_managed_root_can_hold() {
+fn a_failed_adoption_warns_only_when_this_build_moved_or_kept_the_outputs() {
     let directory = tempfile::tempdir().unwrap();
     let workspace = directory.path().join("project");
     let target_dir = workspace.join("target");
-    std::fs::create_dir_all(&target_dir).unwrap();
-    let config = managed_target_config(directory.path());
+    std::fs::create_dir_all(&workspace).unwrap();
     let roots = Roots {
         workspace_root: workspace,
         target_dir: target_dir.clone(),
         build_dir: None,
         target_dir_requested: false,
     };
-    let mut offered = None;
+    let refused = || eyre::eyre!("refused");
 
-    let accepted = prompt_to_manage_existing_target_with(&config, &roots, |asked, offer| {
-        assert_eq!(asked, target_dir);
-        offered = Some(offer);
-        Ok(false)
-    })
-    .unwrap();
+    // Another build has moved the directory and not yet linked it.
+    assert_eq!(
+        adoption_failure(&refused(), &roots),
+        AdoptionFailure::NotMoved
+    );
 
-    // The temporary directory holds both the checkout and the managed root,
-    // so a rename between them is possible and that is what is offered.
-    assert_eq!(offered, Some(ExistingTarget::Adopt));
-    assert_eq!(accepted, None);
+    // This build moved the outputs and could not put them back. The path is
+    // just as empty, but the outputs are this build's to report.
+    let stranded = refused().wrap_err(crate::target::StrandedAdoption {
+        retained: directory.path().join("view"),
+    });
+    assert_eq!(
+        adoption_failure(&stranded, &roots),
+        AdoptionFailure::Stranded
+    );
+
+    std::fs::create_dir(&target_dir).unwrap();
+    assert_eq!(
+        adoption_failure(&refused(), &roots),
+        AdoptionFailure::LeftInPlace
+    );
 }
 
 #[test]
-fn declining_the_target_prompt_preserves_outputs() {
+fn a_configured_target_directory_is_neither_adopted_nor_asked_about() {
     let directory = tempfile::tempdir().unwrap();
     let workspace = directory.path().join("project");
     let target_dir = workspace.join("target");
@@ -493,12 +507,14 @@ fn declining_the_target_prompt_preserves_outputs() {
         workspace_root: workspace,
         target_dir: target_dir.clone(),
         build_dir: None,
-        target_dir_requested: false,
+        target_dir_requested: true,
     };
 
-    let accepted =
-        prompt_to_manage_existing_target_with(&config, &roots, |_, _| Ok(false)).unwrap();
+    let decided = manage_existing_target_with(&config, &roots, |_| {
+        panic!("a configured target directory must not be offered for removal")
+    })
+    .unwrap();
 
-    assert_eq!(accepted, None);
+    assert_eq!(decided, None);
     assert!(target_dir.join("artifact").is_file());
 }

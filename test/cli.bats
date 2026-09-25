@@ -346,10 +346,9 @@ JSON
 @test "an adopted target directory keeps its build fresh" {
   cargo init --lib --vcs none fresh-project
   cd fresh-project
-  # Non-interactive, so the real directory is built into rather than offered
-  # for adoption.
+  # Placement off, so the build fills a real directory for adopt to move.
   mkdir target
-  run "$MBX_BIN" build
+  MBX_TARGET_VIEWS=false run "$MBX_BIN" build
   assert_success
   assert_output --partial "Compiling"
   [[ ! -L target ]]
@@ -364,4 +363,21 @@ JSON
   assert_success
   refute_output --partial "Compiling"
   assert_output --partial "Finished"
+}
+
+@test "a build adopts an existing target directory without prompting" {
+  cargo init --lib --vcs none built-project
+  cd built-project
+  MBX_TARGET_VIEWS=false run "$MBX_BIN" build
+  assert_success
+  [[ ! -L target && -d target ]]
+
+  # Bats runs without a terminal, which is how an agent or script builds.
+  run env -u CI -u GITHUB_ACTIONS "$MBX_BIN" build
+
+  assert_success
+  assert_output --partial "moved the existing target/ directory under the managed root"
+  refute_output --partial "Compiling"
+  assert_link_exists target
+  [[ "$(readlink target)" == "$MBX_CACHE_DIR/targets/v1/"* ]]
 }

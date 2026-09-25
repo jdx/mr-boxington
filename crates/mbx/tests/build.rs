@@ -3394,13 +3394,11 @@ mod target_views {
     }
 
     #[test]
-    fn a_noninteractive_build_never_removes_a_real_target_directory() {
+    fn a_noninteractive_build_adopts_a_real_target_directory() {
         let store = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let reports = tempfile::tempdir().unwrap();
         write_project(project.path());
-        // Establish real outputs without a prompt. The next command captures
-        // its stdio, so it is non-interactive and must preserve them too.
         build_with(
             project.path(),
             store.path(),
@@ -3409,15 +3407,50 @@ mod target_views {
         );
         assert!(project.path().join("target").is_dir());
 
-        build(
+        // Captured stdio makes this non-interactive, as an agent's build is.
+        let (_, stderr) = build_with(
             project.path(),
             store.path(),
             &reports.path().join("warm.json"),
+            &[("CI", "0"), ("GITHUB_ACTIONS", "0")],
+        );
+
+        let link = std::fs::read_link(project.path().join("target"))
+            .expect("the existing target directory should be adopted");
+        assert!(
+            link.starts_with(store.path()),
+            "{} is not under the managed root",
+            link.display()
+        );
+        assert!(stderr.contains("moved the existing target/ directory"));
+        assert!(!stderr.contains("Compiling"), "adoption kept the outputs");
+        assert!(project.path().join("target/debug/libfixture.rlib").exists());
+    }
+
+    #[test]
+    fn a_ci_build_leaves_a_real_target_directory_in_place() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(project.path());
+        build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("cold.json"),
+            &[("MBX_TARGET_VIEWS", "0")],
+        );
+
+        // A CI cache step saves target/ itself and would save only a link.
+        build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("warm.json"),
+            &[("CI", "true")],
         );
 
         assert!(
             std::fs::read_link(project.path().join("target")).is_err(),
-            "existing build outputs are not ours to move"
+            "CI outputs stay where the cache step expects them"
         );
         assert!(project.path().join("target/debug/libfixture.rlib").exists());
     }

@@ -127,9 +127,9 @@ later builds and equivalent worktrees can reuse that work. If Cargo already
 has up-to-date outputs in `target/`, it skips those compilations entirely.
 That is normal and will not appear as mbx cache hits.
 
-For a checkout without an existing `target/`, mbx creates a managed target and
-leaves a `target` symlink in the workspace. An existing directory is replaced
-only after you accept the interactive prompt. See
+mbx creates a managed target and leaves a `target` symlink in the workspace.
+An existing `target/` is moved into the managed target with its outputs kept,
+except in CI. See
 [Managed target directories](/managed-targets) for placement and cleanup.
 
 The first build also prints the cache location and disk budgets chosen for your
