@@ -436,7 +436,7 @@ fn stamp_lid(canvas: &mut Canvas, rise: u8) {
     // Hinge the left end at the box. Each column drops by at most one pixel
     // when `rise` drops by one, so jumpy Cargo progress still reads as closing.
     let mut previous_y = LID.y + 1;
-    for x in 0..SIZE {
+    for (x, _) in LID.rows[1].bytes().enumerate() {
         let front_y = LID.y + 1 - usize::from(rise) * x / (SIZE - 1);
         canvas[front_y][x] = b'D';
         if front_y < previous_y {
