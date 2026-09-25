@@ -2352,6 +2352,38 @@ fn installed_build_script_wrapper_is_transparent_outside_an_mbx_session() {
 }
 
 /// Write a fixture whose build script generates code, used as `generated` says.
+#[test]
+fn a_second_build_of_an_out_dir_reader_compiles_nothing() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_generated_project(project.path(), Generated::Include);
+
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+    );
+    let (again, stderr) = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("again.json"),
+        &[],
+    );
+
+    // Cargo announces every unit it runs rustc for, including one mbx never
+    // looks up, so its own output is the complete answer.
+    assert!(
+        !stderr.contains("Compiling "),
+        "Cargo should find the OUT_DIR reader fresh: {stderr}"
+    );
+    assert_eq!(
+        count(&again, "hits") + count(&again, "misses") + count(&again, "unconsulted"),
+        0,
+        "{again}"
+    );
+}
+
 fn write_generated_project(directory: &Path, generated: Generated) {
     if matches!(generated, Generated::Dependent) {
         write_dependent_generated_project(directory);
