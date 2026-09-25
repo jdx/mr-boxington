@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitepress";
 import { tabsMarkdownPlugin } from "vitepress-plugin-tabs";
+import { showreelFiles } from "./showreel.data";
 import { socialCard, writeSocialCard } from "./social-images.mjs";
 
 const configDir = dirname(fileURLToPath(import.meta.url));
@@ -18,6 +19,22 @@ if (!versionMatch) {
 }
 const latestVersion = versionMatch[1];
 const siteUrl = "https://mr-boxington.jdx.dev";
+
+// Link previews that play video (Discord, iMessage, Telegram) use the rendered
+// showreel through og:video; X ignores og:video and keeps the large image card.
+// Builds without a render leave the tags out.
+function showreelVideoTags(): [string, Record<string, string>][] {
+  const showreel = showreelFiles();
+  if (!showreel) return [];
+  const url = `${siteUrl}${showreel.src}`;
+  return [
+    ["meta", { property: "og:video", content: url }],
+    ["meta", { property: "og:video:secure_url", content: url }],
+    ["meta", { property: "og:video:type", content: "video/mp4" }],
+    ["meta", { property: "og:video:width", content: "1920" }],
+    ["meta", { property: "og:video:height", content: "1080" }],
+  ];
+}
 
 export default defineConfig({
   title: "mr boxington",
@@ -199,11 +216,8 @@ gtag('config', 'G-0MDX8ZJYFY');`,
     ["link", { rel: "apple-touch-icon", href: "/favicon.png" }],
     ["link", { rel: "manifest", href: "/site.webmanifest" }],
     ["meta", { name: "theme-color", content: "#191713" }],
-    ["meta", { property: "og:type", content: "website" }],
     ["meta", { property: "og:site_name", content: "mr boxington" }],
     ["meta", { property: "og:locale", content: "en_US" }],
-    ["meta", { property: "og:image:width", content: "1200" }],
-    ["meta", { property: "og:image:height", content: "630" }],
     ["meta", { name: "twitter:card", content: "summary_large_image" }],
     ["meta", { name: "twitter:site", content: "@jdxcode" }],
   ],
@@ -217,11 +231,20 @@ gtag('config', 'G-0MDX8ZJYFY');`,
       pageData.relativePath.replace(/index\.md$/, "").replace(/\.md$/, ""),
       `${siteUrl}/`,
     ).toString();
+    const video = pageData.relativePath === "index.md" ? showreelVideoTags() : [];
 
     return [
+      [
+        "meta",
+        { property: "og:type", content: video.length ? "video.other" : "website" },
+      ],
+      ...video,
       ["link", { rel: "canonical", href: url }],
       ["meta", { property: "og:url", content: url }],
       ["meta", { property: "og:image", content: image }],
+      // Structured properties follow the image they describe (ogp.me).
+      ["meta", { property: "og:image:width", content: "1200" }],
+      ["meta", { property: "og:image:height", content: "630" }],
       ["meta", { property: "og:image:alt", content: imageAlt }],
       ["meta", { name: "twitter:image", content: image }],
       ["meta", { name: "twitter:image:alt", content: imageAlt }],

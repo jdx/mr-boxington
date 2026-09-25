@@ -1385,7 +1385,7 @@ function runner(
 // Counters under the receiving nodes: the scene's one fact, set large.
 
 const CNT_H = 52;
-/** Pill center below the node label's baseline: clear of the HUD timecode. */
+/** Pill center below the node label's baseline. */
 const CNT_DY = 40;
 const CNT_DIGITS = () => font(40, 700, MONO);
 const CNT_TOTAL = () => font(26, 500, MONO);

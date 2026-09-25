@@ -10,31 +10,16 @@ import { LOCKUP } from "./scenes/s3-type";
 import { drawText, font, MONO } from "./type";
 
 /**
- * The frame shown before playback and to reduced-motion viewers: the
- * kinetic-type lockup, which says what the reel is about without repeating
- * the landing page's hero.
+ * The video's poster frame: the kinetic-type lockup, which says what the reel
+ * is about without repeating the landing page's hero.
  */
 export const POSTER_TIME = LOCKUP;
-
-/** Per-frame HUD visibility, each multiplying the HUD's own fades (0..1). */
-export interface FrameOptions {
-  /** The whole HUD; a player drops it where the text would be too small to read. */
-  hud?: number;
-  /** Only the chapter label and timecode, which sit under a player's controls. */
-  hudBottom?: number;
-}
 
 export interface Reel {
   duration: number;
   chapters: { id: string; label: string; start: number; end: number }[];
   /** Draw the frame at `t` seconds into a canvas `pw` × `ph` device pixels. */
-  render(
-    ctx: CanvasRenderingContext2D,
-    t: number,
-    pw: number,
-    ph: number,
-    frame?: FrameOptions,
-  ): void;
+  render(ctx: CanvasRenderingContext2D, t: number, pw: number, ph: number): void;
 }
 
 function sceneAt(t: number): Scene {
@@ -44,19 +29,18 @@ function sceneAt(t: number): Scene {
 
 const pad = (n: number, w = 2) => String(Math.floor(n)).padStart(w, "0");
 
-/** Showreel chrome: title, bar counter, chapter label, and timecode. */
-function hud(ctx: CanvasRenderingContext2D, t: number, frame: FrameOptions): void {
+/** Showreel chrome: title with the chapter label, and the bar counter. */
+function hud(ctx: CanvasRenderingContext2D, t: number): void {
   const alpha =
-    progress(0.35, 0.8, t) *
-    (1 - progress(DURATION - 1.7, DURATION - 1.2, t)) *
-    clamp(frame.hud ?? 1);
+    progress(0.35, 0.8, t) * (1 - progress(DURATION - 1.7, DURATION - 1.2, t));
   if (alpha <= 0) return;
   ctx.save();
   ctx.globalAlpha = alpha;
   const m = 56;
   const small = font(15, 500, MONO);
 
-  drawText(ctx, "MR BOXINGTON  /  SHOWREEL", m, m + 12, {
+  const baseline = m + 12;
+  const title = drawText(ctx, "MR BOXINGTON  /  SHOWREEL  /  ", m, baseline, {
     font: small,
     tracking: 2.6,
     fill: rgba(PALETTE.paper, 0.5),
@@ -85,49 +69,34 @@ function hud(ctx: CanvasRenderingContext2D, t: number, frame: FrameOptions): voi
     }
   }
 
-  const bottom = clamp(frame.hudBottom ?? 1);
-  if (bottom <= 0) {
-    ctx.restore();
-    return;
-  }
-  ctx.globalAlpha = alpha * bottom;
-
-  // Chapter label rolls over on each bar line.
+  // The chapter label rolls over on each bar line. It sits in the title row,
+  // clear of the bottom edge, where a video player's controls go.
   const idx = CHAPTERS.findIndex((c) => t < c.end);
   const i = idx < 0 ? CHAPTERS.length - 1 : idx;
   const since = t - CHAPTERS[i].start;
   const roll = swiftOut(progress(0, 0.32, since));
-  const labelY = H - m;
+  const x = m + title.width;
   ctx.save();
   ctx.beginPath();
-  ctx.rect(m - 4, labelY - 30, 520, 42);
+  ctx.rect(x - 4, baseline - 22, 360, 30);
   ctx.clip();
   const drawChapter = (k: number, dy: number, a: number) => {
     if (k < 0 || a <= 0) return;
     const c = CHAPTERS[k];
-    drawText(ctx, pad(k + 1), m, labelY + dy, {
+    drawText(ctx, pad(k + 1), x, baseline + dy, {
       font: font(15, 600, MONO),
       tracking: 1,
       fill: rgba(PALETTE.amber, a),
     });
-    drawText(ctx, c.label.toUpperCase(), m + 44, labelY + dy, {
+    drawText(ctx, c.label.toUpperCase(), x + 36, baseline + dy, {
       font: small,
       tracking: 2.6,
       fill: rgba(PALETTE.paper, 0.72 * a),
     });
   };
-  drawChapter(i - 1, -34 * roll, 1 - roll);
-  drawChapter(i, 34 * (1 - roll), roll);
+  drawChapter(i - 1, -26 * roll, 1 - roll);
+  drawChapter(i, 26 * (1 - roll), roll);
   ctx.restore();
-
-  // SMPTE-style timecode at 24 frames per second.
-  const f = Math.floor((t % 1) * 24);
-  drawText(ctx, `00:00:${pad(t)}:${pad(f)}`, W - m, labelY, {
-    font: small,
-    tracking: 1.6,
-    align: "right",
-    fill: rgba(PALETTE.paper, 0.5),
-  });
   ctx.restore();
 }
 
@@ -140,7 +109,7 @@ export function createReel(facts: ReelFacts | null, options: ReelOptions = {}): 
   return {
     duration: DURATION,
     chapters: CHAPTERS,
-    render(ctx, time, pw, ph, frame = {}) {
+    render(ctx, time, pw, ph) {
       const t = clamp(time, 0, DURATION - 1e-6);
       ctx.setTransform(pw / W, 0, 0, ph / H, 0, 0);
       ctx.globalAlpha = 1;
@@ -154,7 +123,7 @@ export function createReel(facts: ReelFacts | null, options: ReelOptions = {}): 
       if (!options.raw) {
         vignette(ctx, W, H, 0.5);
         grain(ctx, W, H, t, 0.07);
-        hud(ctx, t, frame);
+        hud(ctx, t);
       }
       // Guard against a scene leaving the transform or blend mode dirty.
       ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -164,6 +133,6 @@ export function createReel(facts: ReelFacts | null, options: ReelOptions = {}): 
   };
 }
 
-// Re-exported for the player and export harness.
+// Re-exported for the video renderer.
 export { factsFromBenchmarks } from "./facts";
 export { resetTypeCache } from "./type";

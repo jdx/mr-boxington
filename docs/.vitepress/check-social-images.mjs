@@ -1,23 +1,34 @@
-// Verify the built HTML references real, page-specific PNG previews.
+// Verify the built HTML references real, page-specific PNG previews, and that
+// only the homepage offers the rendered showreel as og:video.
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { resolve, join, relative } from "node:path";
 
 const root = resolve(process.argv[2] || ".vitepress/dist");
-const meta = (html, key) => {
-  const tags = [...html.matchAll(/<meta\b[^>]*>/g)].map(([tag]) =>
+const metaTags = (html) =>
+  [...html.matchAll(/<meta\b[^>]*>/g)].map(([tag]) =>
     Object.fromEntries(
       [...tag.matchAll(/([\w:-]+)=(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g)].map(
         ([, name, quoted, single, bare]) => [name, quoted ?? single ?? bare],
       ),
     ),
   );
-  const matches = tags.filter(
+const meta = (html, key) => {
+  const matches = metaTags(html).filter(
     (tag) => tag.property === key || tag.name === key,
   );
   assert.equal(matches.length, 1, `Expected one ${key} tag`);
   return matches[0].content;
 };
+// Present only when `mise run render:showreel` ran before the build.
+const videoFile = join(root, "showreel.mp4");
+const video = existsSync(videoFile) ? readFileSync(videoFile) : null;
+if (video) {
+  // The landing page's player shows this until someone presses play.
+  const poster = readFileSync(join(root, "showreel-poster.jpg"));
+  assert.deepEqual([...poster.subarray(0, 3)], [0xff, 0xd8, 0xff]);
+}
 const walk = (dir) =>
   readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
     entry.isDirectory() ? walk(join(dir, entry.name)) : [join(dir, entry.name)],
@@ -38,6 +49,27 @@ for (const file of walk(root).filter((file) => file.endsWith(".html"))) {
   assert.equal(png.readUInt32BE(16), 1200);
   assert.equal(png.readUInt32BE(20), 630);
   images.add(image);
+
+  const videoTags = metaTags(html).filter((tag) =>
+    tag.property?.startsWith("og:video"),
+  );
+  if (video && relative(root, file) === "index.html") {
+    assert.equal(meta(html, "og:type"), "video.other");
+    const url = meta(html, "og:video");
+    assert.equal(meta(html, "og:video:secure_url"), url);
+    assert.equal(meta(html, "og:video:type"), "video/mp4");
+    assert.equal(meta(html, "og:video:width"), "1920");
+    assert.equal(meta(html, "og:video:height"), "1080");
+    assert.match(url, /^https:\/\//);
+    assert.equal(new URL(url).pathname, "/showreel.mp4");
+    // The version must change with the file, or previews keep a stale render.
+    const version = createHash("sha256").update(video).digest("hex");
+    assert.equal(new URL(url).searchParams.get("v"), version.slice(0, 12));
+    assert.equal(video.toString("latin1", 4, 8), "ftyp", "showreel.mp4 is not an MP4");
+  } else {
+    assert.equal(meta(html, "og:type"), "website");
+    assert.equal(videoTags.length, 0, `Unexpected og:video tags in ${file}`);
+  }
   posts++;
 }
 assert.ok(posts > 0, "No built pages found");
