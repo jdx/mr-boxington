@@ -443,19 +443,125 @@ fn mascot_keeps_progress_readable_and_stays_out_of_narrow_views() {
         assert!(block.size().0 <= width);
         assert_eq!(block.size().1, 27);
         let text = strip_ansi(&block.to_string());
-        assert_eq!(text.contains('▼'), width >= 96, "{text}");
+        // Only the mascot draws half blocks.
+        assert_eq!(text.contains('▀'), width >= 96, "{text}");
         if width >= 80 {
             assert!(text.contains("91/100 units"), "{text}");
         }
     }
+    // A compiler error shows the failure pose, and its monocle chain, before
+    // Cargo reports the build.
+    let chain = "189;125;35";
+    assert!(
+        !view::render(&mut model, None, 110, 27)
+            .to_string()
+            .contains(chain)
+    );
+    model
+        .errors
+        .push("error[E0425]: cannot find value `x` in this scope".into());
+    assert!(
+        view::render(&mut model, None, 110, 27)
+            .to_string()
+            .contains(chain)
+    );
+    // The tape's colour appears only on a sealed box.
+    let tape = "247;228;184";
     model.finished = Some((false, Duration::from_secs(1)));
-    let failed = strip_ansi(&view::render(&mut model, None, 110, 27).to_string());
-    assert!(failed.contains("Failed"));
-    assert!(!failed.contains('═'));
+    let failed = view::render(&mut model, None, 110, 27).to_string();
+    assert!(strip_ansi(&failed).contains("Failed"));
+    assert!(!failed.contains(tape));
     model.finished = Some((true, Duration::from_secs(1)));
     let done = view::render(&mut model, None, 110, 27);
     assert_eq!(done.size().1, 9);
-    let done = strip_ansi(&done.to_string());
-    assert!(done.contains("═══════"));
-    assert!(!done.contains('▼'));
+    // Each mascot cell reaches the terminal with its own glyph, fg and bg.
+    use crate::cli::mascot::{self, Pose};
+    use norimel::Color;
+    let paint =
+        |color: Option<mascot::Rgb>| color.map_or(Color::Reset, |(r, g, b)| Color::Rgb(r, g, b));
+    let mut painted = vec![Vec::new(); mascot::HEIGHT];
+    for (x, y, text, style) in done.runs() {
+        for (i, glyph) in text.chars().enumerate() {
+            if usize::from(x) + i < mascot::WIDTH {
+                painted[usize::from(y)].push((glyph, style.fg, style.bg));
+            }
+        }
+    }
+    let sealed = mascot::draw(Pose {
+        taped: true,
+        ..Pose::default()
+    });
+    let expected: Vec<Vec<_>> = sealed
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|cell| (cell.glyph, paint(cell.fg), paint(cell.bg)))
+                .collect()
+        })
+        .collect();
+    assert_eq!(painted, expected);
+    let done = done.to_string();
+    assert!(strip_ansi(&done).contains('▀'));
+    assert!(done.contains(tape));
+}
+
+/// Cargo's counts arrive in jumps: an incremental build's first progress line
+/// is already 97/98, and a burst of cache hits finishes many units between two
+/// frames. The drawn lid still comes down a pixel at a time and never rises,
+/// including through the test phase, whose suite counts restart per binary.
+#[test]
+fn mascot_lid_descends_a_pixel_per_frame_through_jumps_in_progress() {
+    use crate::cli::mascot::LID_MAX;
+    let replay = |lines: &[&str]| {
+        let mut model = Model::new(&["test".into()]);
+        let mut lids = vec![model.lid_shown];
+        let mut frame = |model: &mut Model| {
+            view::render(model, None, 110, 27);
+            lids.push(model.lid_shown);
+        };
+        frame(&mut model);
+        for line in lines {
+            // As the decoder routes lines: Cargo's until the build finishes.
+            if model.build_finished || !(model.cargo(line) || model.status(line)) {
+                model.test_line(line);
+            }
+            frame(&mut model);
+            frame(&mut model);
+        }
+        lids
+    };
+    let finished = r#"{"reason":"build-finished","success":true}"#;
+    for lines in [
+        &[
+            "    Building [=======================> ] 97/98: mbx(bin)",
+            finished,
+            "running 2 tests",
+            "test first ... ok",
+        ][..],
+        &[
+            "    Building [          ] 0/60",
+            "    Building [          ] 3/60",
+            "    Building [========> ] 58/60",
+            "    Building [========> ] 59/60",
+            finished,
+        ],
+        &[
+            "    Building [   ] 0/3",
+            "    Building [=> ] 3/3",
+            finished,
+            "running 0 tests",
+        ],
+    ] {
+        let lids = replay(lines);
+        assert_eq!(lids[0], LID_MAX);
+        // Each render holds the lid or lowers it by one pixel.
+        let steps = lids.windows(2).map(|pair| pair[0].checked_sub(pair[1]));
+        assert!(
+            steps.clone().all(|step| matches!(step, Some(0 | 1))),
+            "{lids:?}"
+        );
+        let moves = steps.filter(|step| *step == Some(1)).count();
+        assert_eq!(moves, usize::from(LID_MAX), "{lids:?}");
+        assert_eq!(lids.last(), Some(&0), "{lids:?}");
+    }
 }

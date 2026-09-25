@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/public/logo.svg" alt="Mr Boxington, a cache box wearing a monocle and bow tie" width="180">
+  <img src="docs/public/logo.svg" alt="Mr Boxington, a cardboard cache box with a monocle and a handlebar mustache" width="180">
 </p>
 
 <h1 align="center">mr boxington</h1>

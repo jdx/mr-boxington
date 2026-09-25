@@ -9,7 +9,7 @@ hero:
   tagline: Reuse matching compilation work across projects, worktrees, and CI. Mr Boxington manages the cache and prunes old entries while you keep using Cargo.
   image:
     src: /logo.svg
-    alt: Mr Boxington, a cardboard cache box wearing a monocle and bow tie
+    alt: Mr Boxington, a cardboard cache box with a monocle and a handlebar mustache
   actions:
     - theme: brand
       text: Get started

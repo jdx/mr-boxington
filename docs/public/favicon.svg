@@ -1,11 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <path d="M32 7 56 19 32 31 8 19Z" fill="#f6d693" stroke="#53350f" stroke-linejoin="round" stroke-width="3"/>
-  <path d="M8 19 32 31v26L8 45Z" fill="#dfa74c" stroke="#53350f" stroke-linejoin="round" stroke-width="3"/>
-  <path d="M56 19 32 31v26l24-12Z" fill="#a9691d" stroke="#53350f" stroke-linejoin="round" stroke-width="3"/>
-  <path d="M23 11.5 47 23.5l-6 3-24-12Z" fill="#efd8a4" stroke="#a5772b" stroke-linejoin="round" stroke-width="1.5"/>
-  <g transform="translate(20 38) matrix(1 .5 0 1 0 0)">
-    <path d="M-1.5 0-5.5 -2.9c-.7-.5-1.7.05-1.7 1v3.8c0 .95 1 1.5 1.7 1Z" fill="#35555c" stroke="#2a3f44" stroke-linejoin="round" stroke-width="1.3"/>
-    <path d="M1.5 0 5.5 -2.9c.7-.5 1.7.05 1.7 1v3.8c0 .95-1 1.5-1.7 1Z" fill="#35555c" stroke="#2a3f44" stroke-linejoin="round" stroke-width="1.3"/>
-    <rect x="-1.9" y="-2.2" width="3.8" height="4.4" rx="1" fill="#e9b650" stroke="#2a3f44" stroke-width="1.3"/>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges" role="img" aria-labelledby="mbx-favicon-title" aria-describedby="mbx-favicon-desc">
+  <title id="mbx-favicon-title">mr boxington</title>
+  <desc id="mbx-favicon-desc">Mr Boxington as a 16 by 16 pixel icon: a cardboard box taped shut, with a skeptical eye, a monocle, a handlebar mustache and rosy cheeks</desc>
+  <path fill="#e6ad54" d="M0 3h7v2h-7zM13 3h3v1h-3zM7 4h1v1h-1zM14 4h2v1h-2zM0 5h2v5h-2zM6 5h1v6h-1zM15 5h1v5h-1zM2 8h1v3h-1zM5 8h1v4h-1zM7 8h1v3h-1zM14 8h1v2h-1zM3 9h2v3h-2zM8 9h1v2h-1zM13 9h1v2h-1zM9 10h4v1h-4zM0 11h2v3h-2zM10 11h3v1h-3zM14 11h2v3h-2zM7 12h2v2h-2zM2 13h1v1h-1zM6 13h1v1h-1zM9 13h1v1h-1zM13 13h1v1h-1z"/>
+  <path fill="#20190e" d="M9 3h4v1h-4zM8 4h1v1h-1zM13 4h1v1h-1zM2 5h4v1h-4zM7 5h1v3h-1zM14 5h1v3h-1zM3 6h2v2h-2zM10 6h2v2h-2zM8 8h1v1h-1zM13 8h1v1h-1zM9 9h4v1h-4zM2 11h1v2h-1zM6 11h4v1h-4zM13 11h1v2h-1zM3 12h4v1h-4zM9 12h4v1h-4zM3 13h3v1h-3zM10 13h3v1h-3z"/>
+  <path fill="#cf8f35" d="M0 2h7v1h-7zM9 2h7v1h-7zM0 14h16v1h-16z"/>
+  <path fill="#d6e8e8" d="M9 4h4v1h-4zM8 5h1v3h-1zM10 5h4v1h-4zM9 6h1v3h-1zM12 6h2v2h-2zM10 8h3v1h-3z"/>
+  <path fill="#f2c479" d="M1 1h6v1h-6zM9 1h6v1h-6z"/>
+  <path fill="#f7e4b8" d="M7 1h2v3h-2z"/>
+  <path fill="#f5ead6" d="M2 6h1v2h-1zM5 6h1v2h-1zM3 8h2v1h-2z"/>
+  <path fill="#e47a68" d="M0 10h2v1h-2zM14 10h2v1h-2z"/>
+  <path fill="#ffffff" d="M9 5h1v1h-1z"/>
 </svg>

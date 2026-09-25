@@ -43,8 +43,27 @@ def render(screen, font, title_font, stage="mixed rebuild"):
     for y in range(ROWS):
         for x in range(COLS):
             char = screen.buffer[y][x]
-            draw.text((25 + x * cell, 65 + y * 19), char.data, font=font, fill=COLORS.get(char.fg, "#" + char.fg if re.fullmatch(r"[0-9a-fA-F]{6}", char.fg) else COLORS["default"]))
+            fill = cell_color(char.fg, COLORS["default"])
+            # Cell edges are rounded from shared boundaries so adjacent
+            # backgrounds and half blocks tile without seams, as terminals draw them.
+            left, right = round(25 + x * cell), round(25 + (x + 1) * cell)
+            top, bottom = 65 + y * 19, 65 + (y + 1) * 19
+            middle = top + 10
+            if char.bg != "default":
+                draw.rectangle((left, top, right - 1, bottom - 1), fill=cell_color(char.bg, None))
+            if char.data == "▀":
+                draw.rectangle((left, top, right - 1, middle - 1), fill=fill)
+            elif char.data == "▄":
+                draw.rectangle((left, middle, right - 1, bottom - 1), fill=fill)
+            else:
+                draw.text((25 + x * cell, top), char.data, font=font, fill=fill)
     return image
+
+
+def cell_color(value, default):
+    if re.fullmatch(r"[0-9a-fA-F]{6}", value):
+        return "#" + value
+    return COLORS.get(value, default)
 
 
 def main():
