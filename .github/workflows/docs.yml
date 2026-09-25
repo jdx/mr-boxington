@@ -55,9 +55,11 @@ jobs:
         if: github.ref == 'refs/heads/main'
       # The landing page plays the showreel as an MP4 at 120 or 60 fps, and the
       # 60 fps file is also its og:video. The render depends only on the reel
-      # and its renderer, the font, the benchmark numbers, and the locked tool
-      # versions, so it is cached on those and rendered again only when one of
-      # them changes. Reusing it also keeps its versioned URLs stable for link
+      # and its renderer, the font, the benchmark numbers, the logo and the
+      # terminal mascot it redraws, and the locked tool versions, so it is
+      # cached on those and rendered again only when one of them changes. A
+      # miss also installs the Chromium that the reel's logo and sprite tests
+      # need. Reusing it also keeps its versioned URLs stable for link
       # previews, because two renders of the same inputs are not byte-identical.
       - name: Restore the showreel video
         id: showreel
@@ -67,7 +69,7 @@ jobs:
             docs/public/showreel-120.mp4
             docs/public/showreel.mp4
             docs/public/showreel-poster.jpg
-          key: showreel-${{ runner.os }}-${{ hashFiles('docs/.vitepress/showreel-video.mjs', 'docs/.vitepress/theme/showreel/**', 'docs/.vitepress/fonts/SpaceGrotesk.ttf', 'benchmarks/results.json', 'docs/aube-lock.yaml') }}
+          key: showreel-${{ runner.os }}-${{ hashFiles('docs/.vitepress/showreel-video.mjs', 'docs/.vitepress/theme/showreel/**', 'docs/.vitepress/fonts/SpaceGrotesk.ttf', 'docs/public/logo.svg', 'crates/mbx/src/cli/mascot.rs', 'crates/mbx/src/cli/mascot_tests.rs', 'benchmarks/results.json', 'docs/aube-lock.yaml') }}
       - name: Render the showreel video
         if: steps.showreel.outputs.cache-hit != 'true'
         run: |
