@@ -199,6 +199,15 @@ Give me a concise results table, exact commands and tool versions, any
 failures or limitations, and a recommendation based on the measurements.
 Include cases where mbx is slower or the difference is within run-to-run
 variation. Do not infer a speedup from cache hit rate alone.
+
+If mbx is consistently slower beyond run-to-run variation, verify the setup
+and reproduce the result, then open an issue at
+https://github.com/jdx/mr-boxington/issues. Check for an existing report first.
+Include a minimal reproduction, exact commands, tool versions, OS/hardware,
+timings and memory measurements, and relevant cache diagnostics. Remove
+secrets and private project details; use a shareable example where possible.
+Link the issue in your report. If you cannot post it, provide a ready-to-submit
+issue instead.
 ```
 
 </details>
