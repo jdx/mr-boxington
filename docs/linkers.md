@@ -44,7 +44,9 @@ lock. `GITHUB_TOKEN` may authenticate GitHub API and download requests.
 Within a profile table, an exact target triple wins over `default`. The
 top-level `linker.default` applies when the active profile has no entry. Cargo's
 ordinary profile is `dev`, `--release` selects `release`, `cargo bench` selects
-`bench`, and `--profile <name>` selects that custom profile.
+`bench`, `cargo install` selects `release`, and `--profile <name>` selects that
+custom profile. The `debug` profile, which `cargo install --debug` uses from
+Cargo 1.99, uses the `dev` table when it has none of its own.
 
 ```toml
 [linker]

@@ -288,9 +288,17 @@ fn parse_action_diagnostic(
 }
 
 fn atomic_saturating_add(target: &AtomicU64, value: u64) {
-    let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-        Some(current.saturating_add(value))
-    });
+    // `fetch_update` is deprecated from Rust 1.99, and its replacement
+    // `try_update` is newer than the MSRV, so spell out the same loop.
+    let mut current = target.load(Ordering::Relaxed);
+    while let Err(actual) = target.compare_exchange_weak(
+        current,
+        current.saturating_add(value),
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    ) {
+        current = actual;
+    }
 }
 
 fn queue_prefetch_digest(

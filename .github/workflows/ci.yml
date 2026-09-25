@@ -202,13 +202,9 @@ jobs:
             > build-test-binary
           test -s build-test-binary
       # Run the binary directly: under `cargo test`, `CARGO` names stable
-      # Cargo and the fixtures would build with it. The skipped tests cover
-      # build-script shims that do not yet handle the new layout.
+      # Cargo and the fixtures would build with it.
       - name: Run the end-to-end tests under nightly Cargo
-        run: |
-          RUSTUP_TOOLCHAIN=nightly "$(cat build-test-binary)" \
-            --skip a_build_script_with_a_custom_path_restores_across_checkouts \
-            --skip build_script_shim_does_not_redirty_its_compilation
+        run: RUSTUP_TOOLCHAIN=nightly "$(cat build-test-binary)"
 
   final:
     permissions: {}

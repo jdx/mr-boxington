@@ -3098,15 +3098,17 @@ fn path_mappings_with_env(
     {
         add_mapping(&mut mappings, &mut roots, root, "rustup_home");
     }
-    if let Some(home) = home_roots.first() {
-        for (directory, placeholder) in [(".rustup", "rustup_home")] {
-            if !mappings
-                .iter()
-                .any(|mapping| mapping.placeholder == placeholder)
-            {
-                add_mapping(&mut mappings, &mut roots, home.join(directory), placeholder);
-            }
-        }
+    if let Some(home) = home_roots.first()
+        && !mappings
+            .iter()
+            .any(|mapping| mapping.placeholder == "rustup_home")
+    {
+        add_mapping(
+            &mut mappings,
+            &mut roots,
+            home.join(".rustup"),
+            "rustup_home",
+        );
     }
     // Without a session, recover Cargo's workspace root from the outermost
     // lockfile so member crates use the same placeholder as session mode.
@@ -3134,9 +3136,12 @@ fn path_mappings_with_env(
 
 /// Infer the profile subtree shared by rustc outputs and build-script output.
 ///
-/// Cargo normally writes compilations to `<target>/<profile>/deps` (or the
-/// same shape below a target-triple directory). Mapping the profile parent,
-/// rather than only `deps`, also covers generated inputs below `build/`.
+/// Before 1.100, Cargo writes compilations to `<target>/<profile>/deps` (or
+/// the same shape below a target-triple directory) and build scripts to
+/// `<profile>/build/<unit>`. From 1.100 every unit writes to
+/// `<profile>/build/<package>/<hash>/out`. Mapping the profile parent, rather
+/// than only the output directory, also covers the other units' outputs and
+/// generated inputs below `build/`.
 fn standalone_target_root(output: &Path, target: Option<&str>) -> PathBuf {
     let profile = if matches!(
         output.file_name().and_then(OsStr::to_str),
@@ -3145,6 +3150,10 @@ fn standalone_target_root(output: &Path, target: Option<&str>) -> PathBuf {
         output.parent()
     } else if output.parent().and_then(Path::file_name) == Some(OsStr::new("build")) {
         output.parent().and_then(Path::parent)
+    } else if output.file_name() == Some(OsStr::new("out"))
+        && output.ancestors().nth(3).and_then(Path::file_name) == Some(OsStr::new("build"))
+    {
+        output.ancestors().nth(4)
     } else {
         None
     };
