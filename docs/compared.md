@@ -183,8 +183,10 @@ including any shell or mise wrappers. Fetch dependencies before timing.
 Use the same source, Rust toolchain, features, and profile for both tools.
 Measure representative build and test commands in these situations:
 1. A first build with empty build outputs and an empty compiler cache.
-2. The same code in a second checkout, reusing the compiler cache but no
-   build outputs. Report cache-warming time separately.
+2. The same code in a second checkout with no build outputs. For mbx, first
+   build it in another checkout to warm this trial's store, then time only
+   the second checkout; report the warming build separately. Plain Cargo has
+   no cache to warm, so its second checkout builds from scratch.
 3. Small source edits in the same checkout. Keep normal local incremental
    behavior and report the first edit separately from later edits.
 4. Several concurrent builds/tests in separate checkouts, as if coding
