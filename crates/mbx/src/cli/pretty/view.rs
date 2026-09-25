@@ -70,10 +70,10 @@ pub(super) fn render(
                         .bg(paint(run[0].bg))
                 }),
         )
-    }))
-    .w(WIDTH as u16 + 2);
-    let content = render_content(model, None, width - WIDTH as u16 - 2, height);
-    rimel::row([art, content])
+    }));
+    let content_width = width - WIDTH as u16 - 2;
+    let content = render_content(model, None, content_width, height).w(content_width);
+    rimel::row([content, rimel::text("  "), art])
 }
 
 fn render_content(

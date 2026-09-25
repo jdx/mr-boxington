@@ -480,9 +480,10 @@ fn mascot_keeps_progress_readable_and_stays_out_of_narrow_views() {
     let paint =
         |color: Option<mascot::Rgb>| color.map_or(Color::Reset, |(r, g, b)| Color::Rgb(r, g, b));
     let mut painted = vec![Vec::new(); mascot::HEIGHT];
+    let mascot_x = done.size().0 - mascot::WIDTH as u16;
     for (x, y, text, style) in done.runs() {
         for (i, glyph) in text.chars().enumerate() {
-            if usize::from(x) + i < mascot::WIDTH {
+            if usize::from(x) + i >= usize::from(mascot_x) {
                 painted[usize::from(y)].push((glyph, style.fg, style.bg));
             }
         }
