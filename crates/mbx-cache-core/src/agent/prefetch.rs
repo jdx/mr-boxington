@@ -31,9 +31,12 @@ pub(crate) struct PrefetchCandidate {
 }
 
 fn prediction_priority(prediction: &ActionPrediction) -> u64 {
-    let recorded_duration = serde_json::from_str::<serde_json::Value>(&prediction.payload)
+    if !matches!(prediction.adapter.as_str(), "rustc" | "cc") {
+        return u64::MAX;
+    }
+    let recorded_duration = serde_json::from_str::<CompilerTiming>(&prediction.payload)
         .ok()
-        .and_then(|payload| payload.get("compiler_duration_ns")?.as_u64());
+        .and_then(|timing| timing.0);
     match (prediction.adapter.as_str(), recorded_duration) {
         ("rustc" | "cc", Some(duration)) => duration,
         ("rustc" | "cc", None) => 0,
@@ -41,6 +44,40 @@ fn prediction_priority(prediction: &ActionPrediction) -> u64 {
         // are few and often unlock many downstream compiler actions, so retain
         // them ahead of the capped compiler tail.
         _ => u64::MAX,
+    }
+}
+
+// Ranking only needs the timing field. The already-validated adapter payload
+// can contain thousands of input records; do not materialize that tree again.
+struct CompilerTiming(Option<u64>);
+
+impl<'de> serde::Deserialize<'de> for CompilerTiming {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct TimingVisitor;
+        impl<'de> serde::de::Visitor<'de> for TimingVisitor {
+            type Value = CompilerTiming;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a prediction object")
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<Self::Value, M::Error> {
+                let mut duration = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "compiler_duration_ns" {
+                        // Keep Value's numeric rules and last-key-wins behavior.
+                        duration = map.next_value::<serde_json::Value>()?.as_u64();
+                    } else {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                    }
+                }
+                Ok(CompilerTiming(duration))
+            }
+        }
+        deserializer.deserialize_map(TimingVisitor)
     }
 }
 
@@ -938,6 +975,42 @@ mod selection_tests {
     }
 
     #[test]
+    fn projected_priority_preserves_value_numeric_and_duplicate_key_rules() {
+        for payload in [
+            r#"{}"#,
+            r#"[]"#,
+            r#"null"#,
+            r#"17"#,
+            r#"{"compiler_duration_ns":0}"#,
+            r#"{"compiler_duration_ns":18446744073709551615}"#,
+            r#"{"compiler_duration_ns":18446744073709551616}"#,
+            r#"{"compiler_duration_ns":-1}"#,
+            r#"{"compiler_duration_ns":1.0}"#,
+            r#"{"compiler_duration_ns":"123"}"#,
+            r#"{"compiler_duration_ns":null}"#,
+            r#"{"compiler_duration_ns":[],"inputs":[{"nested":[1,true,null]}]}"#,
+            r#"{"compiler_duration_ns":10,"compiler_duration_ns":20}"#,
+            r#"{"compiler_duration_ns":10,"compiler_duration_ns":null}"#,
+            r#"{"compiler_duration_ns":10,"inputs":[}"#,
+            r#"{"compiler_duration_ns":10} trailing"#,
+            r#"{"inputs":{"compiler_duration_ns":99},"compiler_duration_ns":10}"#,
+            r#"{"compiler_duration_\u006es":10}"#,
+        ] {
+            let mut record = prediction(0, 0);
+            record.payload = payload.into();
+            let expected = serde_json::from_str::<serde_json::Value>(payload)
+                .ok()
+                .and_then(|value| value.get("compiler_duration_ns")?.as_u64())
+                .unwrap_or(0);
+            assert_eq!(prediction_priority(&record), expected, "{payload}");
+        }
+        let mut task = prediction(0, 0);
+        task.adapter = "task".into();
+        task.payload = "not json".into();
+        assert_eq!(prediction_priority(&task), u64::MAX);
+    }
+
+    #[test]
     fn prefetch_selection_keeps_the_most_expensive_predictions() {
         let predictions = (0..MAX_PREFETCH_ACTIONS + 8)
             .map(|index| prediction(index, index as u64))
@@ -1006,6 +1079,65 @@ mod selection_tests {
                 .collect::<Vec<_>>(),
             expected
         );
+    }
+}
+
+#[cfg(test)]
+mod priority_benchmark {
+    use super::*;
+    #[test]
+    #[ignore = "manual performance measurement; run in release mode"]
+    fn benchmark_prefetch_priority() {
+        let inputs: Vec<_> = (0_u64..256)
+            .map(|index| {
+                serde_json::json!({
+                    "path": format!("/workspace/include/header-{index}.h"),
+                    "digest": CacheDigest::blake3(&index.to_le_bytes()),
+                })
+            })
+            .collect();
+        for count in [1000_usize, 4096] {
+            // Build distinct records and allocate each payload outside timing.
+            let predictions: Vec<_> = (0..count)
+                .map(|index| ActionPrediction {
+                    invocation: CacheDigest::blake3(format!("invocation-{index}").as_bytes()),
+                    action: CacheDigest::blake3(format!("action-{index}").as_bytes()),
+                    adapter: "cc".into(),
+                    payload: serde_json::json!({
+                        "compiler_duration_ns": index as u64 + 1,
+                        "source": format!("/workspace/src/unit-{index}.c"),
+                        "inputs": inputs,
+                    })
+                    .to_string(),
+                })
+                .collect();
+            let expected: BTreeMap<_, _> = predictions
+                .iter()
+                .enumerate()
+                .rev()
+                .take(MAX_PREFETCH_ACTIONS)
+                .map(|(index, prediction)| (&prediction.action, index as u64 + 1))
+                .collect();
+            let mut samples = Vec::new();
+            for _ in 0..7 {
+                let start = std::time::Instant::now();
+                let selected = select_prefetch_actions(std::hint::black_box(&predictions).iter());
+                samples.push(start.elapsed().as_secs_f64() * 1e3);
+                assert_eq!(
+                    selected
+                        .iter()
+                        .map(|(action, candidate)| (action, candidate.priority))
+                        .collect::<BTreeMap<_, _>>(),
+                    expected
+                );
+                std::hint::black_box(selected);
+            }
+            samples.sort_by(f64::total_cmp);
+            eprintln!(
+                "select {count} distinct predictions, 256 inputs each: median {:.3} ms, range {:.3}..{:.3} ms",
+                samples[3], samples[0], samples[6]
+            );
+        }
     }
 }
 
