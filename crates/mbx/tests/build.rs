@@ -3395,6 +3395,200 @@ mod target_views {
         }
     }
 
+    /// A checkout depending on `seeded-dep` from a local Git repository,
+    /// which Cargo treats like any other non-path package.
+    #[cfg(unix)]
+    fn write_git_dependent_project(directory: &Path, repository: &Path) {
+        std::fs::create_dir_all(directory.join("src")).unwrap();
+        std::fs::write(
+            directory.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nseeded-dep = {{ git = \"file://{}\" }}\n",
+                repository.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("src/lib.rs"),
+            "pub fn flavor() -> &'static str {\n    seeded_dep::FLAVOR\n}\n",
+        )
+        .unwrap();
+    }
+
+    /// A Git repository holding a library whose build script writes the
+    /// source the library includes.
+    #[cfg(unix)]
+    fn write_seeded_dependency(repository: &Path) {
+        std::fs::create_dir_all(repository.join("src")).unwrap();
+        std::fs::write(
+            repository.join("Cargo.toml"),
+            "[package]\nname = \"seeded-dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repository.join("build.rs"),
+            r#"fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=SEEDED_FLAVOR");
+    let flavor = std::env::var("SEEDED_FLAVOR").unwrap_or_else(|_| "plain".into());
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    std::fs::write(out.join("flavor.rs"), format!("pub const FLAVOR: &str = {flavor:?};\n")).unwrap();
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            repository.join("src/lib.rs"),
+            "include!(concat!(env!(\"OUT_DIR\"), \"/flavor.rs\"));\n",
+        )
+        .unwrap();
+        for arguments in [
+            &["init", "-q"][..],
+            &["add", "."],
+            &[
+                "-c",
+                "user.name=mbx",
+                "-c",
+                "user.email=mbx@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "seeded",
+            ],
+        ] {
+            let status = Command::new("git")
+                .current_dir(repository)
+                .args(arguments)
+                .status()
+                .expect("git should run");
+            assert!(status.success(), "git {arguments:?} failed");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_checkout_starts_with_another_checkouts_registry_units() {
+        let store = tempfile::tempdir().unwrap();
+        let cargo_home = tempfile::tempdir().unwrap();
+        let repository = tempfile::tempdir().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let third = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_seeded_dependency(repository.path());
+        for checkout in [first.path(), second.path(), third.path()] {
+            write_git_dependent_project(checkout, repository.path());
+        }
+        let home = cargo_home.path().to_str().unwrap();
+        // Fetch once into a private Cargo home, so the offline builds below
+        // resolve the same Git checkout.
+        let status = Command::new(cargo())
+            .current_dir(first.path())
+            .args(["generate-lockfile"])
+            .env("CARGO_HOME", home)
+            .status()
+            .expect("cargo should run");
+        assert!(status.success(), "the fixture should resolve");
+        for checkout in [second.path(), third.path()] {
+            std::fs::copy(first.path().join("Cargo.lock"), checkout.join("Cargo.lock")).unwrap();
+        }
+        let settings = [("MBX_TARGET_VIEWS", "1"), ("CARGO_HOME", home)];
+
+        build_with(
+            first.path(),
+            store.path(),
+            &reports.path().join("first.json"),
+            &settings,
+        );
+        let cargo_1_100 = managed(first.path())
+            .join("debug/build/seeded-dep")
+            .read_dir()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|unit| unit.path().join("fingerprint").is_dir());
+        let (seeded, stderr) = build_with(
+            second.path(),
+            store.path(),
+            &reports.path().join("second.json"),
+            &settings,
+        );
+        let (unseeded, _) = build_with(
+            third.path(),
+            store.path(),
+            &reports.path().join("third.json"),
+            &[
+                ("MBX_TARGET_VIEWS", "1"),
+                ("CARGO_HOME", home),
+                ("MBX_TARGET_SEED", "0"),
+            ],
+        );
+        let compilations =
+            |stats: &serde_json::Value| count(stats, "hits") + count(stats, "misses");
+        if !cargo_1_100 {
+            assert!(
+                !stderr.contains("registry build units"),
+                "units are only copied from Cargo 1.100's layout: {stderr}"
+            );
+            return;
+        }
+        assert!(
+            stderr.contains("copied 3 registry build units from"),
+            "the new checkout should say what it copied: {stderr}"
+        );
+        assert!(
+            compilations(&seeded) < compilations(&unseeded),
+            "Cargo should skip the copied units: {seeded} against {unseeded}"
+        );
+
+        // A copied build script that has to run again execs the pinned mbx,
+        // and rewrites only this checkout's fingerprints and output.
+        let fingerprints = |checkout: &Path| {
+            find_files(&managed(checkout).join("debug/build/seeded-dep"), |path| {
+                path.parent().and_then(Path::file_name) == Some("fingerprint".as_ref())
+            })
+            .into_iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect::<Vec<_>>()
+        };
+        let donor_fingerprints = fingerprints(first.path());
+        build_with(
+            second.path(),
+            store.path(),
+            &reports.path().join("rerun.json"),
+            &[
+                ("MBX_TARGET_VIEWS", "1"),
+                ("CARGO_HOME", home),
+                ("SEEDED_FLAVOR", "spicy"),
+            ],
+        );
+        let flavors = |checkout: &Path| {
+            find_files(&managed(checkout).join("debug/build/seeded-dep"), |path| {
+                file_name_is(path, |name| name == "flavor.rs")
+            })
+            .into_iter()
+            .map(|path| std::fs::read_to_string(path).unwrap())
+            .collect::<Vec<_>>()
+        };
+        assert!(
+            flavors(second.path())
+                .iter()
+                .any(|flavor| flavor.contains("spicy")),
+            "the rerun build script should have written this checkout's output"
+        );
+        assert!(
+            flavors(first.path())
+                .iter()
+                .all(|flavor| flavor.contains("plain")),
+            "the other checkout's build-script output should be untouched"
+        );
+        assert_eq!(
+            fingerprints(first.path()),
+            donor_fingerprints,
+            "the other checkout's fingerprints should be untouched"
+        );
+    }
+
     #[test]
     fn a_store_sweep_failure_still_frees_managed_target_directories() {
         let store = tempfile::tempdir().unwrap();

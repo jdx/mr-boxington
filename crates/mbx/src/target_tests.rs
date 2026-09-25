@@ -25,6 +25,7 @@ fn test_config(root: &Path, views: bool) -> Config {
         linker: Default::default(),
         target: TargetSettings {
             views,
+            seed: false,
             root: root.join("targets"),
         },
     }

@@ -142,6 +142,36 @@ through mbx differently, so the first mbx build may compile artifacts that
 were produced without mbx. A target directory previously built through mbx
 remains fresh after adoption.
 
+## Start new checkouts from existing units
+
+With Cargo 1.100 or later, the first build of a profile in a new checkout
+copies the registry and Git dependency units that another checkout's managed
+target already built. Cargo treats the copies as fresh and skips those units,
+so the build compiles or restores only what differs:
+
+```text
+mbx[target]: copied 302 registry build units from /home/me/src/project
+```
+
+mbx copies from the most recently used managed target that has built the same
+profile, and only the units that checkout's latest build read. Copies are
+reflinks where the filesystem supports them. mbx skips this step when:
+
+- the profile already has a `build/` directory in this checkout;
+- a build holds the Cargo lock of either profile;
+- the other checkout was built by a Cargo release before 1.100.
+
+Path dependencies and workspace members are never copied. Cargo trusts their
+source modification times, so a copied unit could pass as fresh with another
+checkout's contents. Copied units this checkout does not use are removed by
+[collection](#unused-build-units). Turn copying off with `MBX_TARGET_SEED=0`
+or:
+
+```toml
+[target]
+seed = false
+```
+
 ## Collection
 
 mbx records the checkout associated with each target view. Collection runs

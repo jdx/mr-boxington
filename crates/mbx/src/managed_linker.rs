@@ -432,7 +432,7 @@ fn rust_lld(target: Option<&str>, cache_dir: &Path, cargo_arguments: &[String]) 
     Ok(shim)
 }
 
-fn cargo_profile(arguments: &[String]) -> String {
+pub(crate) fn cargo_profile(arguments: &[String]) -> String {
     let mut arguments = arguments
         .iter()
         .take_while(|argument| argument.as_str() != "--");
@@ -468,7 +468,7 @@ fn cargo_profile(arguments: &[String]) -> String {
 }
 
 /// Collect repeated Cargo target flags, stopping before program arguments.
-fn cargo_targets(arguments: &[String]) -> Vec<String> {
+pub(crate) fn cargo_targets(arguments: &[String]) -> Vec<String> {
     let mut targets = Vec::new();
     let mut arguments = arguments
         .iter()

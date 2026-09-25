@@ -285,6 +285,12 @@ fn cargo_with_settings_bypass_log_and_roots(
             ByteSize::b(bytes).display().iec()
         ));
     }
+    if config.target.seed
+        && !placing_editor
+        && let Some(view) = placement.directory.as_deref()
+    {
+        seed_target_view(config, &roots.workspace_root, view, arguments);
+    }
     if placement.directory.is_none() {
         // Placement declined, but an earlier one may have left a link this
         // build is about to write through. Keep that directory's record fresh
@@ -527,6 +533,31 @@ pub(super) fn place_target_view(config: &Config, roots: &Roots) -> TargetViewPla
             roots.target_dir_requested,
         ),
         touch_path: roots.target_dir.clone(),
+    }
+}
+
+/// Copy registry build units from another checkout into each profile this
+/// build writes that the checkout has not built yet.
+fn seed_target_view(config: &Config, workspace_root: &Path, view: &Path, arguments: &[String]) {
+    let profiles = crate::target_seed::profile_directories(arguments);
+    if profiles
+        .iter()
+        .all(|profile| view.join(profile).join("build").exists())
+    {
+        return;
+    }
+    let Ok(lockfile) = std::fs::read_to_string(workspace_root.join("Cargo.lock")) else {
+        return;
+    };
+    let packages = crate::target_seed::registry_packages(&lockfile);
+    let donors = target::seed_donors(&config.target.root, workspace_root);
+    let outcome = crate::target_seed::seed(view, &profiles, &packages, &donors);
+    if let Some(donor) = outcome.donor {
+        crate::session::note(&format!(
+            "mbx[target]: copied {} registry build units from {}",
+            outcome.units,
+            donor.display()
+        ));
     }
 }
 

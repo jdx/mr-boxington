@@ -522,6 +522,14 @@ Managed-target budget, or "none". Live views are collected oldest-first.
 
 Managed target root. NFS is unsupported for build outputs.
 
+### `target.seed`
+
+- **Type:** `bool`
+- **Default:** `true`
+- **Set with:** `MBX_TARGET_SEED`
+
+Copy registry build units from another checkout's managed target into a profile this checkout has not built yet (Cargo 1.100 or later).
+
 ### `target.views`
 
 - **Type:** `bool`

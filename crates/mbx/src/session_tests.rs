@@ -136,6 +136,7 @@ fn test_config(cache_dir: &Path) -> Config {
         linker: Default::default(),
         target: crate::config::TargetSettings {
             views: false,
+            seed: false,
             root: cache_dir.join("targets"),
         },
     }

@@ -375,6 +375,10 @@ struct RawTarget {
     /// Let mbx place eligible target directories under the managed root.
     #[usage(env = "MBX_TARGET_VIEWS", default = true)]
     views: bool,
+    /// Copy registry build units from another checkout's managed target into
+    /// a profile this checkout has not built yet (Cargo 1.100 or later).
+    #[usage(env = "MBX_TARGET_SEED", default = true)]
+    seed: bool,
     /// Managed target root. NFS is unsupported for build outputs.
     #[usage(env = "MBX_TARGET_ROOT", default_note = "<cache_dir>/targets")]
     root: Option<PathBuf>,
@@ -581,6 +585,7 @@ impl Config {
             gc: Default::default(),
             target: TargetSettings {
                 views: true,
+                seed: false,
                 root: cache_dir.join("targets"),
             },
             scheduler: Default::default(),
@@ -702,6 +707,7 @@ pub struct HttpSettings {
 #[derive(Debug, Clone)]
 pub struct TargetSettings {
     pub views: bool,
+    pub seed: bool,
     pub root: PathBuf,
 }
 
@@ -1053,6 +1059,7 @@ impl Config {
         };
         let target = TargetSettings {
             views: raw.target.views,
+            seed: raw.target.seed,
             root: target_root,
         };
         let scheduler_cpus = match raw.scheduler.cpus {
