@@ -13,10 +13,12 @@ interface Results {
 }
 
 const seconds = (ns: number) => ns / 1e9;
-/** A whole, nonnegative counter. */
-const count = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n >= 0;
+/** A whole, nonnegative counter small enough to be represented exactly. */
+const count = (n: unknown): n is number =>
+  typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
 /** A positive, finite wall-clock duration. */
-const duration = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n > 0;
+const duration = (n: unknown): n is number =>
+  typeof n === "number" && Number.isFinite(n) && n > 0;
 
 export function factsFromBenchmarks(data: Results | null | undefined): ReelFacts | null {
   // The loader casts parsed JSON, and this runs in every page's theme setup,
