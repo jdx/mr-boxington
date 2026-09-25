@@ -136,7 +136,7 @@ pub(super) fn merge_task_manifests(
     let base_predictions: BTreeMap<_, _> = base
         .predictions
         .iter()
-        .map(|prediction| (prediction.invocation.clone(), prediction.clone()))
+        .map(|prediction| (&prediction.invocation, prediction))
         .collect();
     let updates: Vec<_> = update
         .predictions
@@ -146,7 +146,7 @@ pub(super) fn merge_task_manifests(
                 || (fallbacks.contains(&prediction.invocation)
                     && base_predictions
                         .get(&prediction.invocation)
-                        .is_none_or(|base| base == *prediction))
+                        .is_none_or(|base| *base == *prediction))
         })
         .cloned()
         .collect();
@@ -159,12 +159,12 @@ pub(super) fn merge_task_manifests(
                 .map(|prediction| prediction.invocation.clone()),
         )
         .collect();
-    let predictions = update
+    let mut predictions: Vec<_> = update
         .predictions
         .into_iter()
         .filter(|prediction| !base_predictions.contains_key(&prediction.invocation))
-        .chain(base.predictions)
         .collect();
+    predictions.extend(base.predictions);
     let predictions = update_task_predictions_in_order(predictions, updates, &protected)?;
     let manifest = TaskActionManifest {
         version: TASK_ACTION_MANIFEST_VERSION,

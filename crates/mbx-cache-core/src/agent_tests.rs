@@ -7015,3 +7015,41 @@ async fn unit_outcomes_do_not_merge_equal_crate_names() {
         ["miss".into()].into()
     );
 }
+
+#[test]
+#[ignore = "manual performance measurement; run in release mode"]
+fn benchmark_manifest_merge() {
+    for count in [1024_usize, 16384] {
+        let task = "a".repeat(64);
+        let template = TaskActionManifest {
+            version: TASK_ACTION_MANIFEST_VERSION,
+            task: task.clone(),
+            predictions: (0..count)
+                .map(|index| ActionPrediction {
+                    invocation: CacheDigest::blake3(&index.to_le_bytes()),
+                    action: CacheDigest::blake3(b"action"),
+                    adapter: "rustc".into(),
+                    payload: format!("\"{}\"", "x".repeat(4096)),
+                })
+                .collect(),
+        };
+        let mut samples = Vec::new();
+        for _ in 0..9 {
+            // Snapshot setup is outside the timed merge, as in the agent.
+            let base = template.clone();
+            let update = template.clone();
+            let start = std::time::Instant::now();
+            let merged =
+                merge_task_manifests(&task, base, update, &BTreeSet::new(), &BTreeSet::new())
+                    .unwrap();
+            samples.push(start.elapsed().as_secs_f64() * 1e3);
+            assert_eq!(merged, template);
+            std::hint::black_box(merged);
+        }
+        samples.sort_by(f64::total_cmp);
+        eprintln!(
+            "{count} predictions, 4 KiB payload: median {:.3} ms, range {:.3}..{:.3} ms",
+            samples[4], samples[0], samples[8]
+        );
+    }
+}
