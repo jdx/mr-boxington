@@ -30,8 +30,8 @@ mbx handles both parts:
 
 - **Reuse completed work.** A second copy of a project can restore matching
   compilations instead of running them again.
-- **Clean up old build files.** mbx can manage those `target/` directories and
-  reclaim space when a copy of the project is deleted or storage limits are
+- **Clean up old build files.** mbx manages `target/` directories by default and
+  reclaims space when a copy of the project is deleted or storage limits are
   reached. See [Managed targets](/managed-targets).
 - **Run builds together.** When several builds run at once, mbx coordinates
   their CPU and memory use. See [Parallel builds](/scheduling).
