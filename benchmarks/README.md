@@ -25,6 +25,16 @@ Both tasks build the benchmark subject first. `perf:record` appends results to
 local `refs/notes/tak` history. CI compares against shared history when a
 baseline exists; an initial run seeds that history.
 
+## Assembler input scanning
+
+`cargo bench --locked -p mbx-cache-cc --bench assembler_scan` measures the
+safety scan for assembler-time include directives on preprocessed assembly.
+It uses synthetic 4 KiB, 64 KiB, and 4 MiB inputs with ordinary instructions
+and labels, plus a dot-heavy case. Each result reports the median and range
+of seven 150 ms samples, including file opening and reading from a warm OS
+cache. Run both revisions on the same idle machine; this measures scanning
+cost, not whole-build time.
+
 ## Cold, warm, and verified builds
 
 `measure_builds.py` builds this workspace with a cold target, recreates the same
