@@ -1,7 +1,8 @@
 // Kinetic type: the dive through the monocle, the hero line typing on, the
-// three slams of the lockup, and the names flying off to the flow scene.
-// The iris whomp and the three slams are its loudest moments; they sit about
-// 2 LU under the resolve so the end card stays the peak.
+// three slams of the lockup, and the names flying off to become the next
+// section's labels. The iris whomp and the three slams are its loudest
+// moments; they sit about 2 LU under the resolve so the end card stays the
+// peak.
 
 import { BEAT, type Section } from "../bible";
 import { rng } from "../math";
@@ -22,7 +23,8 @@ import {
 } from "../scenes/s3-type";
 import type { Part } from ".";
 import { ad, hz, line, type Mix, perc, swell, sweep } from "./mix";
-import { bassBar, grooveBar, knock, pad, ping, pop, thump, tick, whoosh } from "./sounds";
+import { BM, bassBars, drumBars } from "./grooves";
+import { knock, pad, ping, pop, thump, tick, whoosh } from "./sounds";
 
 function dive(m: Mix, t0: number, t1: number): void {
   m.duck(t1, 0.35, 0.15);
@@ -182,7 +184,8 @@ export const part: Part = {
     scatter(m, s.at(T_OUT));
     flyToNodes(m, s.at(T_OUT), s.at(T_LAND));
   },
-  drums: (m, s) => grooveBar(m, s.start, [0, 8], [4, 12]),
-  bass: (m, s) => bassBar(m, s.start, 35, 0.45), // Bm
+  // The drums thin out under the lockup's hold.
+  drums: (m, s) => drumBars(m, s, [[[0, 8], [4, 12]], [[0, 8], [12]]]),
+  bass: (m, s) => bassBars(m, s, [BM]),
   pads: (m, s) => pad(m, s.start, s.end, [47, 54, 57, 62, 64], 0.07, 1400),
 };

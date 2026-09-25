@@ -20,7 +20,8 @@ import {
 } from "../scenes/s6-world";
 import type { Part } from ".";
 import { ad, glide, hold, hz, line, type Mix, perc, swell, sweep } from "./mix";
-import { bassBar, grooveBar, pad, ping, thump, tick, whoosh } from "./sounds";
+import { A, bassBars, CHORD, chordBars, drumBars, G } from "./grooves";
+import { ping, thump, tick, whoosh } from "./sounds";
 
 /**
  * The grid draws out, the center cube stomps on b0.25 (s6 T_STOMP), and the
@@ -180,7 +181,7 @@ export const part: Part = {
     prune(m, s);
     keptHop(m, s.at(T_BEAM1), s.at(T_DISC));
   },
-  drums: (m, s) => grooveBar(m, s.start, [0, 8, 11], [4, 12], [7]),
-  bass: (m, s) => bassBar(m, s.start, 35, 0.5), // Bm
-  pads: (m, s) => pad(m, s.start, s.end, [47, 54, 57, 62, 73], 0.07, 1800),
+  drums: (m, s) => drumBars(m, s, [[[0, 8, 11], [4, 12], [7]]]),
+  bass: (m, s) => bassBars(m, s, [[35, 0.5], G, A]),
+  pads: (m, s) => chordBars(m, s, [[47, 54, 57, 62, 73], CHORD.G, CHORD.A], 1800),
 };

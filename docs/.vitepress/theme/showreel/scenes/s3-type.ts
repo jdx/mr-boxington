@@ -41,7 +41,7 @@ import {
 import { add, applyMatrix, type Camera, mul, type V3, View } from "../space";
 import { font, layout, MONO } from "../type";
 
-const S = sec("type");
+const S = sec("what");
 
 // Beat map, local seconds. The score (score/type.ts) is written to these.
 export const T_IRIS = beat(0.5); // the iris has filled the frame; the first key lands

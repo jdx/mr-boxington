@@ -17,7 +17,8 @@ import {
 } from "../scenes/s2-character";
 import type { Part } from ".";
 import { ad, hold, hz, line, type Mix, perc, type Pt, sweep } from "./mix";
-import { bassBar, blip, boing, clink, ding, flick, flutter, grooveBar, pad, pop, stamp, thump, whoosh } from "./sounds";
+import { bassBars, D, drumBars } from "./grooves";
+import { blip, boing, clink, ding, flick, flutter, pad, pop, stamp, thump, whoosh } from "./sounds";
 
 function creak(m: Mix, t0: number, t1: number): void {
   const r = rng(202);
@@ -114,7 +115,7 @@ export const part: Part = {
     blip(m, s.at(BLINK), hz(93), 0.12);
     blip(m, s.at(BLINK) + 0.07, hz(97), 0.08);
   },
-  drums: (m, s) => grooveBar(m, s.start, [0, 8], [4, 12]),
-  bass: (m, s) => bassBar(m, s.start, 38, 0.3), // D
+  drums: (m, s) => drumBars(m, s, [[[0, 8], [4, 12]]]),
+  bass: (m, s) => bassBars(m, s, [D]),
   pads: (m, s) => pad(m, s.start, s.end, [50, 57, 62, 64, 66], 0.07, 1500),
 };

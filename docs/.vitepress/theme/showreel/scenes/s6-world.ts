@@ -81,7 +81,7 @@ const SHOCK_EDGE = mixRGB(PALETTE.amberBright, PALETTE.paper, 0.6);
 /** Keeper glint: green pushed toward paper. */
 const GLINT = hex(mixRGB(PALETTE.green, PALETTE.paper, 0.6));
 
-const S = sec("world");
+const S = sec("pruned");
 
 // Beat-locked anchors, local seconds. The score (score/world.ts) is written
 // to these.

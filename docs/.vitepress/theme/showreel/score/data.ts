@@ -5,7 +5,8 @@ import type { Section } from "../bible";
 import { CARGO_DONE, mbxGrow, mbxLock, SETTLE, STEP_PLAN, T } from "../scenes/s5-data";
 import type { Part } from ".";
 import { ad, crossing, hold, hz, line, type Mix, onFrame, perc, type Pt, swell, sweep } from "./mix";
-import { bassBar, ding, grooveBar, knock, pad, ping, pop, thump, tick, whoosh } from "./sounds";
+import { A, bassBars, CHORD, chordBars, D, drumBars } from "./grooves";
+import { ding, knock, ping, pop, thump, tick, whoosh } from "./sounds";
 
 /**
  * Cargo lurches forward crate by crate (s5-data STEP_PLAN): steps on b0.5,
@@ -121,7 +122,8 @@ export const part: Part = {
     delta(m, s.at(T.delta), s.at(T.label), s.at(T.glint));
     extrude(m, s.at(T.clear), s.at(T.hit), s.at(SETTLE));
   },
-  drums: (m, s) => grooveBar(m, s.start, [0, 6, 8], [4, 12], [7, 15]),
-  bass: (m, s) => bassBar(m, s.start, 33, 0.75), // A
-  pads: (m, s) => pad(m, s.start, s.end, [45, 52, 59, 61, 64], 0.07, 1700),
+  // The drums thin out under the finished chart's hold.
+  drums: (m, s) => drumBars(m, s, [[[0, 6, 8], [4, 12], [7, 15]], [[0, 8], [4, 12]]]),
+  bass: (m, s) => bassBars(m, s, [A, D, A]),
+  pads: (m, s) => chordBars(m, s, [CHORD.A, CHORD.D, CHORD.A], 1700),
 };

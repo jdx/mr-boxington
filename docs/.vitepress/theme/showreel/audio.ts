@@ -192,7 +192,7 @@ export function playScore(ac: BaseAudioContext, dest: AudioNode, from: number, w
   dipCurve(m, drumDuck.gain, start, p.drums);
   dipCurve(m, musicDuck.gain, start, p.music);
   // The breath before the resolve: the room goes quiet with everything else.
-  const resolve = sec("logo").start;
+  const resolve = sec("end").start;
   m.set(verbGate.gain, [[GAP - 0.012, 1], [GAP + 0.01, 0.02, "exp"], [resolve - 0.004, 0.02], [resolve, 1]]);
   // Everything, reverb included, is silent before the last frame.
   const end = DURATION;

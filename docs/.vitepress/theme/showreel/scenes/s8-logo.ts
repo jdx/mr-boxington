@@ -48,7 +48,7 @@ import {
 import { applyMatrix, polygon, type Projected, View } from "../space";
 import { DISPLAY, drawText, font, layout, MONO } from "../type";
 
-const S = sec("logo");
+const S = sec("end");
 
 /** Local time of beat `n` of the section. */
 const b = (n: number): number => n * BEAT;

@@ -37,7 +37,7 @@ import {
   View,
 } from "../space";
 
-const S = sec("unfold");
+const S = sec("fold");
 
 // Beat map, local seconds. The score (score/unfold.ts) is written to these.
 const T_LAUNCH = beat(0.125); // the pens leave on the first 32nd

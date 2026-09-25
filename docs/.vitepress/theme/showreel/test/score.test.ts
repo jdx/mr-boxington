@@ -31,7 +31,7 @@ test("the score starts every source inside the reel, and sounds in every section
 });
 
 test("nothing starts in the breath before the end card's downbeat", () => {
-  const resolve = sec("logo").start;
+  const resolve = sec("end").start;
   const inGap = render()
     .starts()
     .filter(({ t }) => t - WHEN > GAP && t - WHEN < resolve - 0.01);

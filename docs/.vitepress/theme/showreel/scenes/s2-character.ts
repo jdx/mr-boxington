@@ -52,7 +52,7 @@ import {
   View,
 } from "../space";
 
-const S = sec("character");
+const S = sec("mr-boxington");
 
 // Accents in local time. The score (score/character.ts) is written to these.
 const at = (b: number) => b * BEAT;

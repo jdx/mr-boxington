@@ -55,3 +55,27 @@ test("one scene per section, in order, on its section's span", () => {
 test("every section has a part in the score", () => {
   assert.deepEqual(Object.keys(PARTS).sort(), SECTIONS.map((s) => s.id).sort());
 });
+
+test("the reel is the storyboard's fourteen sections: 35 bars, 65.625 s", () => {
+  assert.deepEqual(
+    SECTIONS.map(({ id, bars }) => `${id} ${bars}`),
+    [
+      "fold 1",
+      "mr-boxington 2",
+      "what 3",
+      "every-checkout 3",
+      "under-cargo-build 2",
+      "first-build 3",
+      "same-checkout 2",
+      "another-worktree 3",
+      "six-builds 3",
+      "ci 3",
+      "next-push 3",
+      "pruned 3",
+      "morph 1",
+      "end 3",
+    ],
+  );
+  assert.equal(DURATION, 65.625);
+  assert.equal(sec("another-worktree").start, 30);
+});

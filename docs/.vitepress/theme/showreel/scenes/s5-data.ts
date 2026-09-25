@@ -51,7 +51,7 @@ import {
 } from "../space";
 import { drawText, font, layout, MONO } from "../type";
 
-const S = sec("data");
+const S = sec("next-push");
 
 /** Local time of beat `n` of the section. */
 const b = (n: number): number => n * BEAT;
