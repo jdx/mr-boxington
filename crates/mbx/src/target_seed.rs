@@ -429,6 +429,19 @@ fn copy_tree(source: &Path, destination: &Path, links: &Links) -> std::io::Resul
 #[cfg(unix)]
 fn copy_symlink(from: &Path, to: &Path, links: &Links) -> std::io::Result<()> {
     let target = std::fs::read_link(from)?;
+    if target.is_relative() {
+        // Kept as written only when it resolves inside the unit, where the
+        // copy has the same shape. Climbing out of the unit resolves against
+        // this checkout's directories instead, which may be anyone's.
+        let resolved = from.parent().map(|parent| normalize(&parent.join(&target)));
+        if resolved.is_some_and(|resolved| resolved.starts_with(links.source)) {
+            return std::os::unix::fs::symlink(target, to);
+        }
+        return Err(std::io::Error::other(format!(
+            "{} links outside its unit",
+            from.display()
+        )));
+    }
     let inside = links
         .donor
         .respellings(links.source)
@@ -484,6 +497,22 @@ fn copy_file(from: &Path, to: &Path, metadata: &std::fs::Metadata) -> std::io::R
         std::fs::OpenOptions::new().write(true).open(to)?
     };
     file.set_times(times)
+}
+
+/// `path` with `.` and `..` resolved by name, without following links.
+#[cfg(unix)]
+fn normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other),
+        }
+    }
+    normalized
 }
 
 fn subdirectories(directory: &Path) -> Vec<PathBuf> {
