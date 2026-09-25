@@ -442,6 +442,9 @@ fn copy_symlink(from: &Path, to: &Path, links: &Links) -> std::io::Result<()> {
             from.display()
         )));
     }
+    // Resolved by name first, so `<unit>/out/../..` is judged by where it
+    // lands rather than by the unit prefix it starts with.
+    let target = normalize(&target);
     let inside = links
         .donor
         .respellings(links.source)

@@ -682,3 +682,39 @@ fn a_relative_link_out_of_its_unit_keeps_the_unit_out() {
             .exists()
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn an_absolute_link_is_judged_by_where_it_lands() {
+    let view = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let profile = view.path().join("debug");
+    let inside = unit(&profile, "serde", "0123456789abcdef");
+    std::os::unix::fs::symlink(inside.join("out/../out/x.d"), inside.join("out/alias.d")).unwrap();
+    let escaping = unit(&profile, "serde", "fedcba9876543210");
+    // Starts with the unit's own path, then climbs to a sibling unit.
+    std::os::unix::fs::symlink(
+        escaping.join("out/../../../tokio/0000000000000000/out/libx.rlib"),
+        escaping.join("out/shared.rlib"),
+    )
+    .unwrap();
+
+    let outcome = seed(
+        to.path(),
+        &[PathBuf::from("debug")],
+        &registry(),
+        &[donor(view.path())],
+    );
+
+    assert_eq!(outcome.units, 1);
+    let copied = to.path().join("debug/build/serde/0123456789abcdef");
+    assert_eq!(
+        std::fs::read_link(copied.join("out/alias.d")).unwrap(),
+        copied.join("out/x.d")
+    );
+    assert!(
+        !to.path()
+            .join("debug/build/serde/fedcba9876543210")
+            .exists()
+    );
+}
