@@ -348,7 +348,7 @@ pub(super) enum Eye {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum Gaze {
-    /// Right, toward the Compiling list.
+    /// Left, toward the Compiling list.
     List,
     /// Down, toward the progress bar.
     Bar,
@@ -362,8 +362,8 @@ impl Gaze {
     /// lens position keeps a pixel of glass between the pupil and the ring.
     fn pupils(self) -> [Layer; 2] {
         let [(x, y), (lens_x, lens_y)] = match self {
-            Self::List => [(5, 9), (12, 8)],
-            Self::Bar => [(4, 10), (12, 9)],
+            Self::List => [(3, 9), (10, 8)],
+            Self::Bar => [(4, 10), (11, 10)],
             Self::You => [(4, 9), (11, 9)],
         };
         [Layer::at(x, y, PUPIL), Layer::at(lens_x, lens_y, PUPIL)]
