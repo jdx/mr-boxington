@@ -1080,35 +1080,55 @@ mod priority_benchmark {
     #[test]
     #[ignore = "manual performance measurement; run in release mode"]
     fn benchmark_prefetch_priority() {
-        let payload = serde_json::json!({
-            "compiler_duration_ns": 123456789,
-            "inputs": (0_u64..256).map(|index| serde_json::json!({
-                "path": format!("/workspace/include/header-{index}.h"),
-                "digest": CacheDigest::blake3(&index.to_le_bytes()),
-            })).collect::<Vec<_>>(),
-        })
-        .to_string();
-        let prediction = ActionPrediction {
-            invocation: CacheDigest::blake3(b"invocation"),
-            action: CacheDigest::blake3(b"action"),
-            adapter: "cc".into(),
-            payload,
-        };
-        let mut samples = Vec::new();
-        for _ in 0..7 {
-            let start = std::time::Instant::now();
-            for _ in 0..1000 {
+        let inputs: Vec<_> = (0_u64..256)
+            .map(|index| {
+                serde_json::json!({
+                    "path": format!("/workspace/include/header-{index}.h"),
+                    "digest": CacheDigest::blake3(&index.to_le_bytes()),
+                })
+            })
+            .collect();
+        for count in [1000_usize, 4096] {
+            // Build distinct records and allocate each payload outside timing.
+            let predictions: Vec<_> = (0..count)
+                .map(|index| ActionPrediction {
+                    invocation: CacheDigest::blake3(format!("invocation-{index}").as_bytes()),
+                    action: CacheDigest::blake3(format!("action-{index}").as_bytes()),
+                    adapter: "cc".into(),
+                    payload: serde_json::json!({
+                        "compiler_duration_ns": index as u64 + 1,
+                        "source": format!("/workspace/src/unit-{index}.c"),
+                        "inputs": inputs,
+                    })
+                    .to_string(),
+                })
+                .collect();
+            let expected: BTreeMap<_, _> = predictions
+                .iter()
+                .enumerate()
+                .rev()
+                .take(MAX_PREFETCH_ACTIONS)
+                .map(|(index, prediction)| (&prediction.action, index as u64 + 1))
+                .collect();
+            let mut samples = Vec::new();
+            for _ in 0..7 {
+                let start = std::time::Instant::now();
+                let selected = select_prefetch_actions(std::hint::black_box(&predictions).iter());
+                samples.push(start.elapsed().as_secs_f64() * 1e3);
                 assert_eq!(
-                    prediction_priority(std::hint::black_box(&prediction)),
-                    123456789
+                    selected
+                        .iter()
+                        .map(|(action, candidate)| (action, candidate.priority))
+                        .collect::<BTreeMap<_, _>>(),
+                    expected
                 );
+                std::hint::black_box(selected);
             }
-            samples.push(start.elapsed().as_secs_f64() * 1e3);
+            samples.sort_by(f64::total_cmp);
+            eprintln!(
+                "select {count} distinct predictions, 256 inputs each: median {:.3} ms, range {:.3}..{:.3} ms",
+                samples[3], samples[0], samples[6]
+            );
         }
-        samples.sort_by(f64::total_cmp);
-        eprintln!(
-            "1000 priorities, 256 inputs each: median {:.3} ms, range {:.3}..{:.3} ms",
-            samples[3], samples[0], samples[6]
-        );
     }
 }
