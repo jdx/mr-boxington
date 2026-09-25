@@ -595,15 +595,17 @@ function onKey(e: KeyboardEvent) {
     case "Enter":
       // Buttons activate themselves on Space and Enter.
       if (onButton || (e.key === "Enter" && onRange)) return;
-      toggle();
+      // A held key toggles once; its auto-repeats are swallowed so Space
+      // still does not scroll the page.
+      if (!e.repeat) toggle();
       break;
     case "k":
     case "K":
-      toggle();
+      if (!e.repeat) toggle();
       break;
     case "m":
     case "M":
-      toggleSound();
+      if (!e.repeat) toggleSound();
       break;
     case "ArrowLeft":
       seek(now - 1);
