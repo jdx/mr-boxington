@@ -388,17 +388,22 @@ pub(crate) fn set_modified_now(path: &Path) -> Result<()> {
 
 /// Stamp a file with a modification time.
 ///
-/// Opened for reading rather than writing, because anything downstream of a
-/// restore may be looking at a hard link to the store's object, which is
-/// read-only on purpose. A Unix owner may set times without write access, so
-/// asking for none is both sufficient and the only thing that works on every
-/// file a restore can produce.
+/// Opened without write access, because anything downstream of a restore may
+/// be looking at a hard link to the store's object, which is read-only on
+/// purpose. A Unix owner may set times through a read-only handle. Windows
+/// refuses write access to a read-only file but grants the attribute-only
+/// access that setting times needs.
 pub(crate) fn set_modified(path: &Path, modified: std::time::SystemTime) -> Result<()> {
     let times = std::fs::FileTimes::new().set_modified(modified);
     #[cfg(unix)]
     let file = std::fs::OpenOptions::new().read(true).open(path)?;
     #[cfg(windows)]
-    let file = std::fs::OpenOptions::new().write(true).open(path)?;
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .access_mode(windows_sys::Win32::Storage::FileSystem::FILE_WRITE_ATTRIBUTES)
+            .open(path)?
+    };
     file.set_times(times)?;
     Ok(())
 }
