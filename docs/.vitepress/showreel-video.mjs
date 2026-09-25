@@ -11,7 +11,7 @@
 
 import { once } from "node:events";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,10 +20,13 @@ import { chromium } from "playwright-core";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const out = resolve(here, "../public/showreel.mp4");
+// Encoded beside the output and renamed over it only once ffmpeg succeeds, so
+// a failed or interrupted render never leaves a partial showreel.mp4 behind
+// for the build to advertise.
+const partial = resolve(here, "../public/showreel.partial.mp4");
 const WIDTH = 1280;
 const HEIGHT = 720;
 const FPS = 60;
-const DURATION = 15;
 // Rendered before the reel starts and trimmed, so the score's compressor
 // lookahead can place the first sounds exactly.
 const PRE_ROLL = 0.2;
@@ -72,7 +75,8 @@ try {
     `<canvas id="reel" width="${WIDTH}" height="${HEIGHT}"></canvas>`,
   );
   await page.addScriptTag({ content: bundle.outputFiles[0].text });
-  await page.evaluate(
+  // The reel's own length (bible.ts), so video and score follow its timing.
+  const duration = await page.evaluate(
     async ({ font, results }) => {
       const bytes = Uint8Array.from(atob(font), (c) => c.charCodeAt(0));
       const face = new FontFace("Space Grotesk", bytes, { weight: "300 700" });
@@ -82,6 +86,7 @@ try {
       const canvas = document.getElementById("reel");
       window.reel = Showreel.createReel(Showreel.factsFromBenchmarks(results));
       window.ctx = canvas.getContext("2d", { alpha: false });
+      return window.reel.duration;
     },
     {
       font: readFileSync(resolve(here, "fonts/SpaceGrotesk.ttf")).toString("base64"),
@@ -112,7 +117,7 @@ try {
       }
       return btoa(binary);
     },
-    { duration: DURATION, preRoll: PRE_ROLL, rate: SAMPLE_RATE },
+    { duration, preRoll: PRE_ROLL, rate: SAMPLE_RATE },
   );
   const samples = Buffer.from(pcm, "base64");
   const header = Buffer.alloc(44);
@@ -142,12 +147,12 @@ try {
       "-profile:v", "high", "-level:v", "4.0", "-pix_fmt", "yuv420p",
       "-c:a", "aac", "-b:a", "128k",
       "-movflags", "+faststart", "-shortest",
-      out,
+      partial,
     ],
     { stdio: ["pipe", "inherit", "inherit"] },
   );
   const exited = once(ffmpeg, "close");
-  for (let i = 0; i < FPS * DURATION; i++) {
+  for (let i = 0; i < Math.round(FPS * duration); i++) {
     const png = await page.evaluate(
       ({ t, w, h }) => {
         window.reel.render(window.ctx, t, w, h);
@@ -162,8 +167,10 @@ try {
   const [code] = await exited;
   if (pageError) throw pageError;
   if (code !== 0) throw new Error(`ffmpeg exited with ${code}`);
+  renameSync(partial, out);
   console.log(`Rendered ${out}`);
 } finally {
   await browser.close();
   rmSync(work, { recursive: true, force: true });
+  rmSync(partial, { force: true });
 }
