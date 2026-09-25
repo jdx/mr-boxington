@@ -434,3 +434,118 @@ fn symbolic_links_are_recreated_pointing_into_the_copy() {
         b"generated"
     );
 }
+
+/// Give `unit` a build script's recorded run: `OUT_DIR` and its stdout.
+fn run_output(unit: &Path, out_dir: &Path, stdout: &str) {
+    std::fs::create_dir_all(unit.join("run")).unwrap();
+    std::fs::write(
+        unit.join("run/root-output"),
+        out_dir.to_string_lossy().as_bytes(),
+    )
+    .unwrap();
+    std::fs::write(unit.join("run/stdout"), stdout).unwrap();
+}
+
+#[test]
+fn build_script_output_may_name_only_its_own_out_dir() {
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let profile = from.path().join("debug");
+    let own = unit(&profile, "serde", "0123456789abcdef");
+    run_output(
+        &own,
+        &own.join("out"),
+        &format!(
+            "cargo:rustc-link-search=native={}\n",
+            own.join("out").display()
+        ),
+    );
+    let foreign = unit(&profile, "serde", "fedcba9876543210");
+    run_output(
+        &foreign,
+        &foreign.join("out"),
+        &format!(
+            "cargo:rustc-link-search=native={}\n",
+            profile.join("build/other/0000000000000000/out").display()
+        ),
+    );
+
+    let outcome = seed(
+        to.path(),
+        &[PathBuf::from("debug")],
+        &registry(),
+        &[donor(from.path())],
+    );
+
+    assert_eq!(outcome.units, 1);
+    let copied = to.path().join("debug/build/serde");
+    assert!(
+        copied.join("0123456789abcdef").is_dir(),
+        "Cargo rewrites the recorded OUT_DIR itself"
+    );
+    assert!(
+        !copied.join("fedcba9876543210").exists(),
+        "any other path into the donor would keep pointing there"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_elsewhere_into_the_donor_keeps_the_unit_out() {
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let profile = from.path().join("debug");
+    let source = unit(&profile, "serde", "0123456789abcdef");
+    let sibling = unit(&profile, "tokio", "fedcba9876543210");
+    std::os::unix::fs::symlink(
+        sibling.join("out/libx.rlib"),
+        source.join("out/shared.rlib"),
+    )
+    .unwrap();
+
+    let outcome = seed(
+        to.path(),
+        &[PathBuf::from("debug")],
+        &registry(),
+        &[donor(from.path())],
+    );
+
+    assert_eq!(outcome, SeedOutcome::default());
+    assert!(
+        !to.path().join("debug/build").exists(),
+        "a unit that could not be copied leaves nothing that looks built"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_donor_whose_units_all_fail_to_copy_does_not_block_the_next() {
+    let failing = tempfile::tempdir().unwrap();
+    let working = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let profile = failing.path().join("debug");
+    let source = unit(&profile, "serde", "0123456789abcdef");
+    std::os::unix::fs::symlink(profile.join("elsewhere"), source.join("out/escape")).unwrap();
+    unit(&working.path().join("debug"), "serde", "fedcba9876543210");
+
+    let outcome = seed(
+        to.path(),
+        &[PathBuf::from("debug")],
+        &registry(),
+        &[donor(failing.path()), donor(working.path())],
+    );
+
+    assert_eq!(outcome.units, 1);
+    assert!(
+        to.path()
+            .join("debug/build/serde/fedcba9876543210")
+            .is_dir()
+    );
+    assert!(
+        std::fs::read_dir(to.path().join("debug"))
+            .unwrap()
+            .flatten()
+            .all(|entry| !entry.file_name().to_string_lossy().contains(STAGING_SUFFIX)),
+        "nothing staged is left behind"
+    );
+}

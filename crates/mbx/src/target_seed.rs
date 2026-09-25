@@ -157,7 +157,7 @@ pub(crate) fn seed(
             if !has_units(&source.join("build")) {
                 continue;
             }
-            match seed_profile(&source, &destination, packages) {
+            match seed_profile(&donor.directory, &source, &destination, packages) {
                 Ok(Copied::Units(0) | Copied::Busy) => {}
                 Ok(Copied::Units(units)) => {
                     outcome.units += units;
@@ -202,6 +202,7 @@ fn has_units(build: &Path) -> bool {
 /// Copy one profile's units, holding both profiles' Cargo locks so neither
 /// checkout builds meanwhile.
 fn seed_profile(
+    donor: &Path,
     source: &Path,
     destination: &Path,
     packages: &BTreeSet<String>,
@@ -217,6 +218,7 @@ fn seed_profile(
     if destination.join("build").exists() {
         return Ok(Copied::Built);
     }
+    remove_abandoned_staging(destination);
     // Only the units this profile's latest build read, when access times say
     // which those are: the ones read within a day of its most recent read. A
     // build of another profile or project in the donor does not move this.
@@ -242,7 +244,6 @@ fn seed_profile(
         if !packages.contains(name) {
             continue;
         }
-        let target = destination.join("build").join(name);
         for unit in subdirectories(&package) {
             let fingerprint = unit.join("fingerprint");
             if !fingerprint.is_dir()
@@ -254,7 +255,7 @@ fn seed_profile(
             let Some(hash) = unit.file_name() else {
                 continue;
             };
-            match copy_unit(&unit, &target, hash) {
+            match copy_unit(&unit, destination, name, hash, donor) {
                 Ok(()) => units += 1,
                 Err(error) => log::debug!("did not copy {}: {error}", unit.display()),
             }
@@ -269,7 +270,12 @@ fn seed_profile(
             std::process::id()
         ));
         let shims_destination = destination.join(".mbx-build-script-shims");
-        match copy_tree(&shims, &staging, (&shims, &shims_destination))
+        let links = Links {
+            source: &shims,
+            destination: &shims_destination,
+            donor,
+        };
+        match copy_tree(&shims, &staging, &links)
             .and_then(|()| std::fs::rename(&staging, &shims_destination))
         {
             Ok(()) => {}
@@ -287,24 +293,92 @@ fn try_lock(path: &Path) -> std::io::Result<Option<fslock::LockFile>> {
     Ok(lock.try_lock()?.then_some(lock))
 }
 
-/// Copy `unit` to `package/hash` by way of a staging directory beside it.
-fn copy_unit(unit: &Path, package: &Path, hash: &std::ffi::OsStr) -> std::io::Result<()> {
-    std::fs::create_dir_all(package)?;
-    let mut staging_name = hash.to_os_string();
-    staging_name.push(format!("{STAGING_SUFFIX}{}", std::process::id()));
-    let staging = package.join(staging_name);
-    let copied = copy_tree(unit, &staging, (unit, &package.join(hash)))
-        .and_then(|()| std::fs::rename(&staging, package.join(hash)));
+/// Copy `unit` to `build/<package>/<hash>` in `profile` by way of a staging
+/// directory beside the profile's `build/`. Nothing is created under `build/`
+/// until the unit is complete, since a `build/` directory is what tells the
+/// next donor this profile has been built.
+fn copy_unit(
+    unit: &Path,
+    profile: &Path,
+    package: &str,
+    hash: &std::ffi::OsStr,
+    donor: &Path,
+) -> std::io::Result<()> {
+    if let Some(path) = foreign_path_in_output(unit, donor) {
+        return Err(std::io::Error::other(format!(
+            "its build-script output names {path}"
+        )));
+    }
+    let final_path = profile.join("build").join(package).join(hash);
+    let staging = profile.join(format!(
+        ".{package}-{}{STAGING_SUFFIX}{}",
+        hash.to_string_lossy(),
+        std::process::id()
+    ));
+    let links = Links {
+        source: unit,
+        destination: &final_path,
+        donor,
+    };
+    let copied = copy_tree(unit, &staging, &links).and_then(|()| {
+        std::fs::create_dir_all(profile.join("build").join(package))?;
+        std::fs::rename(&staging, &final_path)
+    });
     if copied.is_err() {
         let _ = std::fs::remove_dir_all(&staging);
     }
     copied
 }
 
+/// A path into the donor's target directory in a build script's recorded
+/// output, other than its own `OUT_DIR`.
+///
+/// Cargo rewrites the `OUT_DIR` it recorded in `run/root-output` to the new
+/// one when it replays `run/stdout`, so `cargo:rustc-link-search` into the
+/// script's own output follows the copy. Any other path into the donor would
+/// keep pointing there, and the copied unit would depend on another checkout.
+fn foreign_path_in_output(unit: &Path, donor: &Path) -> Option<String> {
+    let stdout = std::fs::read(unit.join("run/stdout")).ok()?;
+    let stdout = String::from_utf8_lossy(&stdout);
+    let out_dir = std::fs::read_to_string(unit.join("run/root-output")).unwrap_or_default();
+    let remaining = if out_dir.trim().is_empty() {
+        stdout.into_owned()
+    } else {
+        stdout.replace(out_dir.trim(), "")
+    };
+    let donor = donor.to_string_lossy();
+    remaining
+        .contains(donor.as_ref())
+        .then(|| donor.into_owned())
+}
+
+/// Finish removing staging directories an interrupted seeding left.
+fn remove_abandoned_staging(profile: &Path) {
+    let Ok(listing) = std::fs::read_dir(profile) else {
+        return;
+    };
+    for entry in listing.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') && name.contains(STAGING_SUFFIX) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Where symbolic links in a copied tree may point.
+struct Links<'a> {
+    /// The tree being copied.
+    source: &'a Path,
+    /// Where the copy will finally live.
+    destination: &'a Path,
+    /// The donor's whole target directory.
+    donor: &'a Path,
+}
+
 /// Copy a directory tree, keeping every file's modification time and leaving
-/// the source's access times as they were. `roots` maps the tree being copied
-/// to where the copy will finally live, for symbolic links that point inside it.
-fn copy_tree(source: &Path, destination: &Path, roots: (&Path, &Path)) -> std::io::Result<()> {
+/// the source's access times as they were.
+fn copy_tree(source: &Path, destination: &Path, links: &Links) -> std::io::Result<()> {
     std::fs::create_dir(destination)?;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
@@ -312,11 +386,11 @@ fn copy_tree(source: &Path, destination: &Path, roots: (&Path, &Path)) -> std::i
         let to = destination.join(entry.file_name());
         let kind = entry.file_type()?;
         if kind.is_dir() {
-            copy_tree(&from, &to, roots)?;
+            copy_tree(&from, &to, links)?;
         } else if kind.is_file() {
             copy_file(&from, &to, &entry.metadata()?)?;
         } else if kind.is_symlink() {
-            copy_symlink(&from, &to, roots)?;
+            copy_symlink(&from, &to, links)?;
         } else {
             return Err(std::io::Error::other(format!(
                 "{} is neither a file, a directory, nor a link",
@@ -328,14 +402,21 @@ fn copy_tree(source: &Path, destination: &Path, roots: (&Path, &Path)) -> std::i
 }
 
 /// Recreate a symbolic link, such as one a build script left in `OUT_DIR`.
-/// A link to an absolute path inside the copied tree points into the copy,
-/// so this checkout never reads through it into the other checkout's files.
+/// A link to an absolute path inside the copied tree points into the copy.
+/// One to anywhere else in the donor's target directory would let this
+/// checkout read or write the other's outputs, so the tree is not copied.
 #[cfg(unix)]
-fn copy_symlink(from: &Path, to: &Path, roots: (&Path, &Path)) -> std::io::Result<()> {
+fn copy_symlink(from: &Path, to: &Path, links: &Links) -> std::io::Result<()> {
     let target = std::fs::read_link(from)?;
-    let target = match target.strip_prefix(roots.0) {
-        Ok(inside) if target.is_absolute() => roots.1.join(inside),
-        _ => target,
+    let target = if let Ok(inside) = target.strip_prefix(links.source) {
+        links.destination.join(inside)
+    } else if target.starts_with(links.donor) {
+        return Err(std::io::Error::other(format!(
+            "{} links into the other checkout's target directory",
+            from.display()
+        )));
+    } else {
+        target
     };
     std::os::unix::fs::symlink(target, to)
 }
@@ -343,7 +424,7 @@ fn copy_symlink(from: &Path, to: &Path, roots: (&Path, &Path)) -> std::io::Resul
 /// Windows needs privileges to create a symbolic link, so a unit holding one
 /// is left for the build to produce.
 #[cfg(not(unix))]
-fn copy_symlink(from: &Path, _to: &Path, _roots: (&Path, &Path)) -> std::io::Result<()> {
+fn copy_symlink(from: &Path, _to: &Path, _links: &Links) -> std::io::Result<()> {
     Err(std::io::Error::other(format!(
         "{} is a symbolic link",
         from.display()
