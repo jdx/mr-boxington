@@ -718,3 +718,29 @@ fn an_absolute_link_is_judged_by_where_it_lands() {
             .exists()
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_relative_link_that_climbs_out_and_back_keeps_the_unit_out() {
+    let view = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let profile = view.path().join("debug");
+    let source = unit(&profile, "serde", "0123456789abcdef");
+    // Leaves the unit by `..` and names the donor's own unit on the way back
+    // down: the same file here, but the donor's copy from any other checkout.
+    let view_name = view.path().file_name().unwrap().to_str().unwrap();
+    std::os::unix::fs::symlink(
+        format!("../../../../../../{view_name}/debug/build/serde/0123456789abcdef/out/x.d"),
+        source.join("out/roundabout.d"),
+    )
+    .unwrap();
+
+    let outcome = seed(
+        to.path(),
+        &[PathBuf::from("debug")],
+        &registry(),
+        &[donor(view.path())],
+    );
+
+    assert_eq!(outcome, SeedOutcome::default());
+}

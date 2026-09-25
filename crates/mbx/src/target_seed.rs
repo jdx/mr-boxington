@@ -430,11 +430,11 @@ fn copy_tree(source: &Path, destination: &Path, links: &Links) -> std::io::Resul
 fn copy_symlink(from: &Path, to: &Path, links: &Links) -> std::io::Result<()> {
     let target = std::fs::read_link(from)?;
     if target.is_relative() {
-        // Kept as written only when it resolves inside the unit, where the
-        // copy has the same shape. Climbing out of the unit resolves against
-        // this checkout's directories instead, which may be anyone's.
-        let resolved = from.parent().map(|parent| normalize(&parent.join(&target)));
-        if resolved.is_some_and(|resolved| resolved.starts_with(links.source)) {
+        // Kept as written only when every step of it stays inside the unit,
+        // whose shape the copy reproduces. A link that climbs above the unit,
+        // even one that comes back down into the same unit's path, resolves
+        // against this checkout's parents instead, and those lead elsewhere.
+        if stays_inside(from, &target, links.source) {
             return std::os::unix::fs::symlink(target, to);
         }
         return Err(std::io::Error::other(format!(
@@ -500,6 +500,32 @@ fn copy_file(from: &Path, to: &Path, metadata: &std::fs::Metadata) -> std::io::R
         std::fs::OpenOptions::new().write(true).open(to)?
     };
     file.set_times(times)
+}
+
+/// Whether the relative `target` of the link at `link` never climbs above
+/// `unit` on its way, judged by name.
+#[cfg(unix)]
+fn stays_inside(link: &Path, target: &Path, unit: &Path) -> bool {
+    let Some(depth) = link
+        .parent()
+        .and_then(|parent| parent.strip_prefix(unit).ok())
+        .map(|inside| inside.components().count())
+    else {
+        return false;
+    };
+    let mut depth = depth as isize;
+    for component in target.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => depth -= 1,
+            std::path::Component::Normal(_) => depth += 1,
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => return false,
+        }
+        if depth < 0 {
+            return false;
+        }
+    }
+    true
 }
 
 /// `path` with `.` and `..` resolved by name, without following links.
