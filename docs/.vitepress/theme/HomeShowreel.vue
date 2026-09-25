@@ -465,6 +465,18 @@ function loadAudio(): Promise<AudioModule> {
   return audioMod;
 }
 
+/** Fetch the score when the sound control is about to be used, not on every visit. */
+function warmAudio() {
+  void loadAudio().catch(() => {});
+}
+
+/** Sound could not start: show the control as off instead of claiming it is on. */
+function soundFailed(err: unknown) {
+  console.warn("showreel: sound is unavailable", err);
+  soundOn.value = false;
+  stopScore();
+}
+
 function toggleSound() {
   if (soundOn.value) {
     soundOn.value = false;
@@ -503,7 +515,8 @@ async function startScore(midPlay: boolean) {
     audio = await loadAudio();
     if (a.state !== "running") await a.resume();
   } catch (err) {
-    console.warn("showreel: sound is unavailable", err);
+    // A newer start or a stop has taken over; leave the control to it.
+    if (token === scoreToken) soundFailed(err);
     return;
   }
   if (disposed || token !== scoreToken || !playing.value || !soundOn.value) return;
@@ -516,7 +529,7 @@ async function startScore(midPlay: boolean) {
   try {
     score = { handle: audio.playScore(a, master, from, when), from, when };
   } catch (err) {
-    console.warn("showreel: the score failed to start", err);
+    soundFailed(err);
   }
 }
 
@@ -526,10 +539,13 @@ function stopScore() {
   window.clearTimeout(restartTimer);
   score?.handle.stop();
   score = null;
-  // With sound off, idle the context once the fade is done to save power.
+  // Idle the context once the fade is done whenever nothing is playing, so a
+  // paused or finished reel with sound on does not keep the audio thread busy.
+  // Playing again resumes it (startScore).
   window.clearTimeout(suspendTimer);
   suspendTimer = window.setTimeout(() => {
-    if (ac && !soundOn.value && ac.state === "running") void ac.suspend().catch(() => {});
+    const idle = !score && (!soundOn.value || !playing.value);
+    if (ac && idle && ac.state === "running") void ac.suspend().catch(() => {});
   }, 200);
 }
 
@@ -721,10 +737,6 @@ async function init() {
   snapHud();
   draw();
   maybeAutoplay();
-  // Warm the score in the background so the first sound toggle is instant.
-  const warm = () => void loadAudio().catch(() => {});
-  if ("requestIdleCallback" in window) window.requestIdleCallback(warm);
-  else setTimeout(warm, 2000);
 }
 
 onMounted(() => {
@@ -922,6 +934,8 @@ onUnmounted(() => {
             aria-keyshortcuts="M"
             title="Sound (M)"
             @click="toggleSound"
+            @pointerenter="warmAudio"
+            @focus="warmAudio"
           >
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M3.5 9.2v5.6h3.8l5 4.2V5L7.3 9.2z" />
