@@ -422,29 +422,31 @@ fn copy_tree(source: &Path, destination: &Path, links: &Links) -> std::io::Resul
 }
 
 /// Recreate a symbolic link, such as one a build script left in `OUT_DIR`.
-/// A link to an absolute path inside the copied tree points into the copy.
-/// One to anywhere else in the donor checkout, including its target directory
-/// through either spelling, would let this checkout read or write the other's
-/// files, so the tree is not copied.
+///
+/// A target with `..` in it is never copied: where `..` lands depends on
+/// every link along the way, in this checkout as well as the donor, and no
+/// reading of the name alone can say both agree. Without it the answer is
+/// plain. A relative link can only lead deeper into the unit, whose shape the
+/// copy reproduces, so it is kept. An absolute link into the unit points into
+/// the copy instead. One to anywhere else in the donor checkout, including its
+/// target directory through either spelling, would let this checkout read or
+/// write the other's files, so the unit is not copied. Any other absolute
+/// link is kept.
 #[cfg(unix)]
 fn copy_symlink(from: &Path, to: &Path, links: &Links) -> std::io::Result<()> {
     let target = std::fs::read_link(from)?;
-    if target.is_relative() {
-        // Kept as written only when every step of it stays inside the unit,
-        // whose shape the copy reproduces. A link that climbs above the unit,
-        // even one that comes back down into the same unit's path, resolves
-        // against this checkout's parents instead, and those lead elsewhere.
-        if stays_inside(from, &target, links.source) {
-            return std::os::unix::fs::symlink(target, to);
-        }
+    if target
+        .components()
+        .any(|component| component == std::path::Component::ParentDir)
+    {
         return Err(std::io::Error::other(format!(
-            "{} links outside its unit",
+            "{} links through `..`",
             from.display()
         )));
     }
-    // Resolved by name first, so `<unit>/out/../..` is judged by where it
-    // lands rather than by the unit prefix it starts with.
-    let target = normalize(&target);
+    if target.is_relative() {
+        return std::os::unix::fs::symlink(target, to);
+    }
     let inside = links
         .donor
         .respellings(links.source)
@@ -500,48 +502,6 @@ fn copy_file(from: &Path, to: &Path, metadata: &std::fs::Metadata) -> std::io::R
         std::fs::OpenOptions::new().write(true).open(to)?
     };
     file.set_times(times)
-}
-
-/// Whether the relative `target` of the link at `link` never climbs above
-/// `unit` on its way, judged by name.
-#[cfg(unix)]
-fn stays_inside(link: &Path, target: &Path, unit: &Path) -> bool {
-    let Some(depth) = link
-        .parent()
-        .and_then(|parent| parent.strip_prefix(unit).ok())
-        .map(|inside| inside.components().count())
-    else {
-        return false;
-    };
-    let mut depth = depth as isize;
-    for component in target.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => depth -= 1,
-            std::path::Component::Normal(_) => depth += 1,
-            std::path::Component::RootDir | std::path::Component::Prefix(_) => return false,
-        }
-        if depth < 0 {
-            return false;
-        }
-    }
-    true
-}
-
-/// `path` with `.` and `..` resolved by name, without following links.
-#[cfg(unix)]
-fn normalize(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other),
-        }
-    }
-    normalized
 }
 
 fn subdirectories(directory: &Path) -> Vec<PathBuf> {
