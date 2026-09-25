@@ -608,7 +608,7 @@ fn digest_reader(
             window.extend_from_slice(&chunk[..read]);
             found_timestamp_macro = TIMESTAMP_MACROS
                 .iter()
-                .any(|macro_name| contains_subslice(&window, macro_name));
+                .any(|macro_name| memchr::memmem::find(&window, macro_name).is_some());
             let keep = window.len().saturating_sub(longest_macro.saturating_sub(1));
             window.drain(..keep);
         }
@@ -688,14 +688,6 @@ fn metadata_matches_object(metadata: &std::fs::Metadata, object: &FileObjectIden
         && metadata.ino() == object.inode
 }
 
-fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty()
-        && haystack.len() >= needle.len()
-        && haystack
-            .windows(needle.len())
-            .any(|window| window == needle)
-}
-
 /// Recorded digests a session may consult instead of rehashing a file.
 ///
 /// The agent's file-digest ledger answers through this everywhere a caller
@@ -742,6 +734,49 @@ impl FileDigestCache for NoFileDigestCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timestamp_macros_are_detected_at_every_chunk_boundary_split() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("input.h");
+        for macro_name in TIMESTAMP_MACROS {
+            // Include a macro starting at the boundary and one ending there.
+            for split in 0..=macro_name.len() {
+                let mut bytes = vec![b'x'; DIGEST_BUFFER_BYTES - split];
+                bytes.extend_from_slice(macro_name);
+                std::fs::write(&path, &bytes).unwrap();
+                assert_eq!(
+                    digest_file(FileDigestScope::CcInput, &path).unwrap(),
+                    FileDigestResolution::EmbeddedTimestampMacro,
+                    "macro {macro_name:?}, split {split}"
+                );
+                // The same bytes remain hashable outside the C/C++ scope.
+                assert_eq!(
+                    digest_file(FileDigestScope::Content, &path).unwrap(),
+                    FileDigestResolution::Digest(CacheDigest::blake3(&bytes))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn timestamp_scan_accepts_empty_short_and_near_match_inputs() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("input.h");
+        for bytes in [
+            b"".as_slice(),
+            b"_",
+            b"__DATE_ __TIME_ __TIMESTAMP_",
+            b"__date__ __time__ __timestamp__",
+            &[0xff, 0, b'_', b'_'],
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(
+                digest_file(FileDigestScope::CcInput, &path).unwrap(),
+                FileDigestResolution::Digest(CacheDigest::blake3(bytes))
+            );
+        }
+    }
 
     /// rustc links a finished `.rmeta` into its incremental directory, which
     /// changes the file's metadata but not its bytes. A metadata snapshot

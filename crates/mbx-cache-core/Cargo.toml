@@ -23,6 +23,7 @@ fslock = "0.2"
 futures-util = "0.3"
 hex = "0.4"
 log = "0.4"
+memchr = "2"
 mbx-cache-protocol = { path = "../mbx-cache-protocol", version = "0.5.18" }
 rand = "0.10"
 reflink-copy = "0.1"
@@ -58,3 +59,7 @@ fuzzing = []
 native-tls = ["reqwest/native-tls"]
 rustls = ["reqwest/rustls"]
 rustls-native-roots = ["reqwest/rustls"]
+
+[[bench]]
+name = "file_digest"
+harness = false
