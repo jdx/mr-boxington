@@ -3304,6 +3304,11 @@ mod target_views {
             &[("MBX_TARGET_VIEWS", "1")],
         );
         let directory = managed(project.path());
+        // Collection only judges units where reads move access times, and
+        // skips them everywhere else, which a CI volume may be.
+        if !access_times_tracked(directory.parent().unwrap()) {
+            return;
+        }
 
         // As if the last build to use these units ran two months ago, which
         // is what the fingerprint access times say once a lockfile or
@@ -3376,6 +3381,20 @@ mod target_views {
             .is_empty(),
             "the unit's outputs should remain"
         );
+    }
+
+    /// Whether reading a file in `directory` moves its access time, checked
+    /// the way unit collection checks before it removes anything.
+    fn access_times_tracked(directory: &Path) -> bool {
+        let probe = directory.join(".access-time-probe");
+        std::fs::write(&probe, b"access time probe").unwrap();
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 60 * 60);
+        let time = filetime::FileTime::from_system_time(past);
+        filetime::set_file_times(&probe, time, time).unwrap();
+        std::fs::read(&probe).unwrap();
+        let accessed = std::fs::metadata(&probe).unwrap().accessed().unwrap();
+        std::fs::remove_file(&probe).unwrap();
+        accessed > past + std::time::Duration::from_secs(24 * 60 * 60)
     }
 
     /// Date everything below `directory` two months back, as if no build had
