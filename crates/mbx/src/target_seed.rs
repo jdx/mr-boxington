@@ -55,6 +55,26 @@ pub(crate) struct Donor {
     pub updated_secs: u64,
 }
 
+impl Donor {
+    /// Every path that reaches the donor's files. Cargo writes through the
+    /// checkout's `target` link, so paths it records spell the target
+    /// directory as `<checkout>/target` rather than the managed directory,
+    /// and the checkout itself may be named by a build script too.
+    fn spellings(&self) -> [&Path; 2] {
+        [self.directory.as_path(), self.workspace_root.as_path()]
+    }
+
+    /// `path`, inside the donor's managed directory, and the same place
+    /// spelled through the checkout's `target` link.
+    fn respellings(&self, path: &Path) -> Vec<PathBuf> {
+        let mut spellings = vec![path.to_path_buf()];
+        if let Ok(inside) = path.strip_prefix(&self.directory) {
+            spellings.push(self.workspace_root.join("target").join(inside));
+        }
+        spellings
+    }
+}
+
 /// Whether `cargo -V` output names Cargo 1.100 or later, the first release
 /// that keeps each unit in a directory of its own.
 pub(crate) fn keeps_units_in_directories(version: &str) -> bool {
@@ -157,7 +177,7 @@ pub(crate) fn seed(
             if !has_units(&source.join("build")) {
                 continue;
             }
-            match seed_profile(&donor.directory, &source, &destination, packages) {
+            match seed_profile(donor, &source, &destination, packages) {
                 Ok(Copied::Units(0) | Copied::Busy) => {}
                 Ok(Copied::Units(units)) => {
                     outcome.units += units;
@@ -202,7 +222,7 @@ fn has_units(build: &Path) -> bool {
 /// Copy one profile's units, holding both profiles' Cargo locks so neither
 /// checkout builds meanwhile.
 fn seed_profile(
-    donor: &Path,
+    donor: &Donor,
     source: &Path,
     destination: &Path,
     packages: &BTreeSet<String>,
@@ -302,7 +322,7 @@ fn copy_unit(
     profile: &Path,
     package: &str,
     hash: &std::ffi::OsStr,
-    donor: &Path,
+    donor: &Donor,
 ) -> std::io::Result<()> {
     if let Some(path) = foreign_path_in_output(unit, donor) {
         return Err(std::io::Error::other(format!(
@@ -337,7 +357,7 @@ fn copy_unit(
 /// one when it replays `run/stdout`, so `cargo:rustc-link-search` into the
 /// script's own output follows the copy. Any other path into the donor would
 /// keep pointing there, and the copied unit would depend on another checkout.
-fn foreign_path_in_output(unit: &Path, donor: &Path) -> Option<String> {
+fn foreign_path_in_output(unit: &Path, donor: &Donor) -> Option<String> {
     let stdout = std::fs::read(unit.join("run/stdout")).ok()?;
     let stdout = String::from_utf8_lossy(&stdout);
     let out_dir = std::fs::read_to_string(unit.join("run/root-output")).unwrap_or_default();
@@ -346,10 +366,11 @@ fn foreign_path_in_output(unit: &Path, donor: &Path) -> Option<String> {
     } else {
         stdout.replace(out_dir.trim(), "")
     };
-    let donor = donor.to_string_lossy();
-    remaining
-        .contains(donor.as_ref())
-        .then(|| donor.into_owned())
+    donor
+        .spellings()
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .find(|path| remaining.contains(path.as_str()))
 }
 
 /// Finish removing staging directories an interrupted seeding left.
@@ -372,8 +393,7 @@ struct Links<'a> {
     source: &'a Path,
     /// Where the copy will finally live.
     destination: &'a Path,
-    /// The donor's whole target directory.
-    donor: &'a Path,
+    donor: &'a Donor,
 }
 
 /// Copy a directory tree, keeping every file's modification time and leaving
@@ -403,14 +423,25 @@ fn copy_tree(source: &Path, destination: &Path, links: &Links) -> std::io::Resul
 
 /// Recreate a symbolic link, such as one a build script left in `OUT_DIR`.
 /// A link to an absolute path inside the copied tree points into the copy.
-/// One to anywhere else in the donor's target directory would let this
-/// checkout read or write the other's outputs, so the tree is not copied.
+/// One to anywhere else in the donor checkout, including its target directory
+/// through either spelling, would let this checkout read or write the other's
+/// files, so the tree is not copied.
 #[cfg(unix)]
 fn copy_symlink(from: &Path, to: &Path, links: &Links) -> std::io::Result<()> {
     let target = std::fs::read_link(from)?;
-    let target = if let Ok(inside) = target.strip_prefix(links.source) {
+    let inside = links
+        .donor
+        .respellings(links.source)
+        .into_iter()
+        .find_map(|source| target.strip_prefix(source).ok().map(Path::to_path_buf));
+    let target = if let Some(inside) = inside {
         links.destination.join(inside)
-    } else if target.starts_with(links.donor) {
+    } else if links
+        .donor
+        .spellings()
+        .iter()
+        .any(|spelling| target.starts_with(spelling))
+    {
         return Err(std::io::Error::other(format!(
             "{} links into the other checkout's target directory",
             from.display()

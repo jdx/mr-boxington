@@ -549,3 +549,99 @@ fn a_donor_whose_units_all_fail_to_copy_does_not_block_the_next() {
         "nothing staged is left behind"
     );
 }
+
+/// A donor whose checkout reaches its managed directory through `target`.
+fn linked_donor(view: &Path, checkout: &Path) -> Donor {
+    Donor {
+        directory: view.to_path_buf(),
+        workspace_root: checkout.to_path_buf(),
+        updated_secs: donor(view).updated_secs,
+    }
+}
+
+#[test]
+fn paths_spelled_through_the_donors_target_link_are_checked_too() {
+    let view = tempfile::tempdir().unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let profile = view.path().join("debug");
+    let linked = checkout.path().join("target/debug");
+    // Cargo records these through `<checkout>/target`, not the managed path.
+    let own = unit(&profile, "serde", "0123456789abcdef");
+    let own_out = linked.join("build/serde/0123456789abcdef/out");
+    run_output(
+        &own,
+        &own_out,
+        &format!("cargo:rustc-link-search=native={}\n", own_out.display()),
+    );
+    let foreign = unit(&profile, "serde", "fedcba9876543210");
+    run_output(
+        &foreign,
+        &linked.join("build/serde/fedcba9876543210/out"),
+        &format!(
+            "cargo:rustc-link-search=native={}\n",
+            linked.join("build/other/0000000000000000/out").display()
+        ),
+    );
+
+    let outcome = seed(
+        to.path(),
+        &[PathBuf::from("debug")],
+        &registry(),
+        &[linked_donor(view.path(), checkout.path())],
+    );
+
+    assert_eq!(outcome.units, 1);
+    assert!(
+        to.path()
+            .join("debug/build/serde/0123456789abcdef")
+            .is_dir()
+    );
+    assert!(
+        !to.path()
+            .join("debug/build/serde/fedcba9876543210")
+            .exists()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn links_spelled_through_the_donors_target_link_are_handled() {
+    let view = tempfile::tempdir().unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let profile = view.path().join("debug");
+    let linked = checkout.path().join("target/debug");
+    let inside = unit(&profile, "serde", "0123456789abcdef");
+    std::os::unix::fs::symlink(
+        linked.join("build/serde/0123456789abcdef/out/x.d"),
+        inside.join("out/alias.d"),
+    )
+    .unwrap();
+    let escaping = unit(&profile, "serde", "fedcba9876543210");
+    std::os::unix::fs::symlink(
+        linked.join("build/tokio/0000000000000000/out/libx.rlib"),
+        escaping.join("out/shared.rlib"),
+    )
+    .unwrap();
+
+    let outcome = seed(
+        to.path(),
+        &[PathBuf::from("debug")],
+        &registry(),
+        &[linked_donor(view.path(), checkout.path())],
+    );
+
+    assert_eq!(outcome.units, 1);
+    let copied = to.path().join("debug/build/serde/0123456789abcdef");
+    assert_eq!(
+        std::fs::read_link(copied.join("out/alias.d")).unwrap(),
+        copied.join("out/x.d"),
+        "a link into the unit through the checkout's target link points into the copy"
+    );
+    assert!(
+        !to.path()
+            .join("debug/build/serde/fedcba9876543210")
+            .exists()
+    );
+}
