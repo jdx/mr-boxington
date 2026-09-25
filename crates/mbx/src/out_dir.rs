@@ -370,6 +370,15 @@ fn materialize(
             let destination = staging.join(file);
             reflink_copy::reflink_or_copy(&source, &destination)
                 .wrap_err_with(|| format!("failed to copy {}", source.display()))?;
+            // Cargo compares every file in a unit's dep-info with the time it
+            // started the unit, and this copy is made after that, while rustc
+            // runs. Keeping the build script's time keeps the next build from
+            // taking the copy for a changed input and compiling the unit again.
+            let modified = std::fs::metadata(&source)?.modified()?;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&destination)?
+                .set_modified(modified)?;
             // Read-only: the tree is shared by every checkout whose generated
             // sources match, and a write through one compilation would leave
             // it disagreeing with its own name. A compilation that writes into
