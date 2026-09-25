@@ -91,8 +91,8 @@ const BODY: Layer = Layer::at(1, 6, &[
 ]);
 /// The open top of the box, drawn whenever the lid is not shut on it.
 const OPENING: Layer = Layer::at(1, 5, &["DHHHHHHHHHHHHHHD"]);
-/// The lid, shut. Drawn `lid` pixels higher while the build runs. Its front
-/// edge overhangs the box by a pixel on each side.
+/// The lid, shut. While the build runs, the left end stays hinged to the box
+/// and the right end rises by `lid` pixels. Its front edge overhangs the box.
 #[rustfmt::skip]
 const LID: Layer = Layer::at(0, 4, &[
     "..BBBBBBBBBBBBBB..",
@@ -152,6 +152,7 @@ const PUPIL: &[&str] = &[
     "KK",
     "KK",
 ];
+const PUPIL_DOWN: &[&str] = &["KK"];
 
 #[rustfmt::skip]
 const RING: Layer = Layer::at(8, 6, &[
@@ -166,6 +167,8 @@ const RING: Layer = Layer::at(8, 6, &[
 /// The one highlight that is always on: inside the lens a pixel in from the
 /// ring's top-left chamfer, with lens between it and the tape tab.
 const PARKED_GLINT: Layer = Layer::at(10, 8, &["G"]);
+/// While looking left, put the highlight across the lens from the pupil.
+const PARKED_GLINT_RIGHT: Layer = Layer::at(13, 8, &["G"]);
 /// The eye behind the monocle, blinking.
 const MONOCLE_SHUT: Layer = Layer::at(9, 9, &["KKKKKK"]);
 /// Failure only: popped out and hanging by its dotted chain against the box's
@@ -216,7 +219,7 @@ const STRAWBERRY: Layer = Layer::at(4, 0, &[
 ]);
 
 pub(super) const LID_MAX: u8 = 4;
-/// The drawn lid descends at most this far per drawn frame.
+/// The drawn lid's right edge descends at most this far per drawn frame.
 const LID_STEP_PX: u8 = 1;
 /// The Compiling list for [0, 4200), the progress bar for [4200, 5400), and
 /// you for [5400, 7000).
@@ -263,7 +266,7 @@ fn gaze_at(ms: u128) -> Gaze {
 /// in integers.
 ///
 /// 4 px at the start, then 3, 2 and 1 from 22.5%, 45% and 67.5%, and shut from
-/// 90%. An unknown or zero total hovers at 4 and never moves.
+/// 90%. An unknown or zero total holds the lid fully open.
 fn lid_offset(done: usize, total: Option<usize>) -> u8 {
     let Some(total) = total.filter(|total| *total > 0) else {
         return LID_MAX;
@@ -358,22 +361,21 @@ pub(super) enum Gaze {
 }
 
 impl Gaze {
-    /// The top-left pixels of the bare eye's pupil and the monocle's. Every
-    /// lens position keeps a pixel of glass between the pupil and the ring.
+    /// The bare eye's pupil and the monocle's. The downward glance uses a
+    /// shorter pupil so lens glass remains between it and the ring.
     fn pupils(self) -> [Layer; 2] {
-        let [(x, y), (lens_x, lens_y)] = match self {
-            Self::List => [(3, 9), (10, 9)],
-            Self::Bar => [(4, 10), (10, 9)],
-            Self::You => [(4, 9), (11, 9)],
-        };
-        [Layer::at(x, y, PUPIL), Layer::at(lens_x, lens_y, PUPIL)]
+        match self {
+            Self::List => [Layer::at(3, 9, PUPIL), Layer::at(10, 9, PUPIL)],
+            Self::Bar => [Layer::at(3, 10, PUPIL_DOWN), Layer::at(10, 10, PUPIL_DOWN)],
+            Self::You => [Layer::at(4, 9, PUPIL), Layer::at(11, 9, PUPIL)],
+        }
     }
 }
 
 /// What a frame shows. A finished failure is the default with `failed` set.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Pose {
-    /// Pixels the lid hovers above the box, 0 to `LID_MAX`.
+    /// Pixels the lid's right edge rises above its closed position.
     pub lid: u8,
     /// Tape over the shut lid, on success only.
     pub taped: bool,
@@ -426,6 +428,27 @@ fn stamp(canvas: &mut Canvas, layer: Layer) {
     }
 }
 
+fn stamp_lid(canvas: &mut Canvas, rise: u8) {
+    if rise == 0 {
+        stamp(canvas, LID);
+        return;
+    }
+    // Hinge the left end at the box. Each column drops by at most one pixel
+    // when `rise` drops by one, so jumpy Cargo progress still reads as closing.
+    let mut previous_y = LID.y + 1;
+    for x in 0..SIZE {
+        let front_y = LID.y + 1 - usize::from(rise) * x / (SIZE - 1);
+        canvas[front_y][x] = b'D';
+        if front_y < previous_y {
+            canvas[previous_y][x] = b'D';
+        }
+        if (2..SIZE - 2).contains(&x) {
+            canvas[front_y - 1][x] = b'B';
+        }
+        previous_y = front_y;
+    }
+}
+
 /// Turn the lens pixels on diagonals `2p + 1` and `2p + 2` into glint. Only
 /// pixels still showing lens light up: never the pupil, the ring or the shut
 /// line.
@@ -461,8 +484,7 @@ fn sprite(pose: Pose) -> Canvas {
     if pose.lid > 0 {
         stamp(&mut canvas, OPENING);
     }
-    let lid = Layer::at(LID.x, LID.y - usize::from(pose.lid), LID.rows);
-    stamp(&mut canvas, lid);
+    stamp_lid(&mut canvas, pose.lid);
     if pose.taped {
         stamp(&mut canvas, TAPE);
     }
@@ -484,7 +506,14 @@ fn sprite(pose: Pose) -> Canvas {
     stamp(&mut canvas, eyelid);
     stamp(&mut canvas, RING);
     stamp(&mut canvas, monocle);
-    stamp(&mut canvas, PARKED_GLINT);
+    stamp(
+        &mut canvas,
+        if matches!(pose.gaze, Gaze::List | Gaze::Bar) {
+            PARKED_GLINT_RIGHT
+        } else {
+            PARKED_GLINT
+        },
+    );
     if let Some(position) = pose.glint {
         light_band(&mut canvas, position);
     }

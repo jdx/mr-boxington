@@ -107,12 +107,32 @@ fn monocle_pupils_stay_clear_of_the_glint_and_ring() {
             let [_, pupil] = gaze.pupils();
             for (x, y, _) in pupil.pixels() {
                 assert_eq!(canvas[y][x], b'K', "{gaze:?} {glint:?} at ({x}, {y})");
-                if glint.is_none() && y == pupil.y + 1 {
+                if glint.is_none() && y == pupil.y + pupil.rows.len() - 1 {
                     assert_eq!(canvas[y + 1][x], b'L', "{gaze:?} at ({x}, {y})");
                 }
             }
-            assert_eq!(canvas[PARKED_GLINT.y][PARKED_GLINT.x], b'G');
+            let parked = if matches!(gaze, Gaze::List | Gaze::Bar) {
+                PARKED_GLINT_RIGHT
+            } else {
+                PARKED_GLINT
+            };
+            assert_eq!(canvas[parked.y][parked.x], b'G');
         }
+    }
+}
+
+#[test]
+fn both_pupils_follow_the_downward_left_glance() {
+    let [list_eye, list_lens] = Gaze::List.pupils();
+    let [bar_eye, bar_lens] = Gaze::Bar.pupils();
+    let [you_eye, you_lens] = Gaze::You.pupils();
+    for (list, bar, you) in [
+        (list_eye, bar_eye, you_eye),
+        (list_lens, bar_lens, you_lens),
+    ] {
+        assert!(list.x < you.x);
+        assert_eq!(bar.x, list.x);
+        assert_eq!(bar.y, list.y + 1);
     }
 }
 
@@ -373,15 +393,15 @@ fn golden_sprites() {
     assert_eq!(
         rows(&sprite(start)),
         [
-            "..BBBBBBBBBBBBBB..",
-            "DDDDDDDDDDDDDDDDDD",
             "..................",
-            "..................",
-            "..................",
-            ".DHHHHHHHHHHHHHHD.",
+            ".............BBB.D",
+            ".........BBBBDDDDD",
+            ".....BBBBDDDDD....",
+            "..BBBDDDDD........",
+            "DDDDDDHHHHHHHHHHD.",
             ".AAAAAAAAAKKKKAAA.",
             ".AAAAAAAAKLLLLKAA.",
-            ".AAKKKKAKLGLLLLKA.",
+            ".AAKKKKAKLLLLGLKA.",
             ".AAKKWWAKLKKLLLKA.",
             ".AAKKWWAKLKKLLLKA.",
             ".AAAWWAAAKLLLLKAA.",
@@ -410,15 +430,15 @@ fn golden_sprites() {
             "..................",
             "..................",
             "..................",
-            "..BBBBBBBBBBBBBB..",
+            "..................",
+            "..BBBBBBBBBBBBBB.D",
             "DDDDDDDDDDDDDDDDDD",
-            ".DHHHHHHHHHHHHHHD.",
             ".AAAAAAAAAKKKKAAA.",
             ".AAAAAAAAKLLGGKAA.",
-            ".AAAAAAAKLGGGLLKA.",
-            ".AAKKKKAKLKKLLLKA.",
-            ".AAWKKWAKGKKLLLKA.",
-            ".AAAKKAAAKLLLLKAA.",
+            ".AAAAAAAKLLGGGLKA.",
+            ".AAKKKKAKLGGLLLKA.",
+            ".AAKKWWAKGKKLLLKA.",
+            ".AAAWWAAAKLLLLKAA.",
             ".AAAAAAAAAKKKKAAA.",
             ".11AAAAAAAAAAAA11.",
             ".AAKAAAKKKKAAAKAA.",
