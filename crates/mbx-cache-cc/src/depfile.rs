@@ -195,6 +195,19 @@ fn join_continuations(contents: &str) -> Result<String, CcBypassReason> {
 /// Anything else escaped is a spelling this parser does not model, and a
 /// mis-parsed prerequisite would silently drop an input from the key.
 fn split_prerequisites(value: &str) -> Result<Vec<PathBuf>, CcBypassReason> {
+    // Most compiler paths contain no make escapes. Copy each whole UTF-8
+    // path once instead of growing a String one character at a time.
+    if memchr::memchr2(b'\\', b'$', value.as_bytes()).is_none() {
+        return Ok(value
+            .split([' ', '\t'])
+            .filter(|word| !word.is_empty())
+            .map(PathBuf::from)
+            .collect());
+    }
+    split_escaped_prerequisites(value)
+}
+
+fn split_escaped_prerequisites(value: &str) -> Result<Vec<PathBuf>, CcBypassReason> {
     let mut files = Vec::new();
     let mut current = String::new();
     let mut characters = value.chars().peekable();
@@ -913,3 +926,85 @@ pub(crate) fn contains_assembler_input_directive(path: &Path) -> Result<bool, Cc
 #[cfg(test)]
 #[path = "depfile_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod plain_depfile_tests {
+    use super::*;
+
+    #[test]
+    fn plain_paths_preserve_whitespace_unicode_and_make_escapes() {
+        for input in [
+            "",
+            " \t ",
+            "src/main.c include/header.h",
+            "\t路径/é.c  a#b.h\t",
+            "a\u{a0}b.h",
+            r"a\ b.h a\#b.h a$$b.h",
+            r"bad\q.h",
+            "bad$",
+            "bad\\",
+        ] {
+            let expected = split_escaped_prerequisites(input);
+            let actual = split_prerequisites(input);
+            match (actual, expected) {
+                (Ok(actual), Ok(expected)) => assert_eq!(actual, expected, "{input}"),
+                (Err(actual), Err(expected)) => {
+                    assert_eq!(format!("{actual:?}"), format!("{expected:?}"))
+                }
+                results => panic!("mismatched results for {input}: {results:?}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual performance measurement; run in release mode"]
+    fn benchmark_plain_depfile() {
+        for count in [256, 4096] {
+            for escaped in [false, true] {
+                let prerequisites = (0..count)
+                    .map(|index| {
+                        format!(
+                            " /workspace/{}/include/library-{index}/header-{index}.h",
+                            if escaped {
+                                r"some\ directory"
+                            } else {
+                                "some-directory"
+                            }
+                        )
+                    })
+                    .collect::<String>();
+                let mut before = Vec::new();
+                let mut after = Vec::new();
+                for round in 0..15 {
+                    for optimized in if round % 2 == 0 {
+                        [false, true]
+                    } else {
+                        [true, false]
+                    } {
+                        let start = std::time::Instant::now();
+                        for _ in 0..50 {
+                            let result = if optimized {
+                                split_prerequisites(std::hint::black_box(&prerequisites))
+                            } else {
+                                split_escaped_prerequisites(std::hint::black_box(&prerequisites))
+                            };
+                            std::hint::black_box(result.unwrap());
+                        }
+                        let sample = start.elapsed().as_secs_f64() * 1e6 / 50.0;
+                        if optimized {
+                            after.push(sample);
+                        } else {
+                            before.push(sample);
+                        }
+                    }
+                }
+                before.sort_by(f64::total_cmp);
+                after.sort_by(f64::total_cmp);
+                eprintln!(
+                    "{count} paths, escaped={escaped}: before {:.3} us, after {:.3} us",
+                    before[7], after[7]
+                );
+            }
+        }
+    }
+}
