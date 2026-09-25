@@ -502,7 +502,7 @@ Detail printed after a build. Auto uses an explanatory CI report in CI and one l
 - **Default:** `30d`
 - **Set with:** `MBX_TARGET_MAX_AGE`
 
-Collect live managed targets unused this long, or "none".
+Collect live managed targets, and build units inside them, unused this long, or "none".
 
 ### `target.max_size`
 

@@ -47,6 +47,7 @@ pub(crate) mod stats;
 pub mod store;
 #[doc(hidden)]
 pub mod target;
+mod target_units;
 #[doc(hidden)]
 pub mod tui;
 #[doc(hidden)]

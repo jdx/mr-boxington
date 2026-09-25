@@ -384,6 +384,9 @@ pub(super) struct GcActionStoreReport {
 pub(super) struct GcTargetReport {
     pub(super) removed_directories: u64,
     pub(super) removed_bytes: u64,
+    /// Unused build units removed from target directories that were kept.
+    pub(super) removed_units: u64,
+    pub(super) removed_unit_bytes: u64,
     pub(super) remaining_directories: u64,
     pub(super) remaining_bytes: u64,
 }

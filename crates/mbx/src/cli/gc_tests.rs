@@ -127,3 +127,28 @@ fn a_build_leaves_the_report_alone_while_a_collector_writes_it() {
     collector.unlock().unwrap();
     assert_eq!(take_sweep_report(store), ["evicted 3 objects"]);
 }
+
+#[test]
+fn leftovers_of_an_interrupted_collection_are_reported() {
+    let units = crate::target::CollectionOutcome {
+        removed_units: 3,
+        removed_unit_bytes: 2048,
+        ..Default::default()
+    };
+    let leftovers = crate::target::CollectionOutcome {
+        removed_unit_bytes: 2048,
+        ..Default::default()
+    };
+
+    assert_eq!(
+        target_removals(&units, false),
+        ["removed 3 unused build units from live target directories (2.0 KiB logical)"]
+    );
+    assert_eq!(
+        target_removals(&leftovers, true),
+        [
+            "would remove build units an interrupted collection left in live target directories (2.0 KiB logical)"
+        ]
+    );
+    assert!(target_removals(&crate::target::CollectionOutcome::default(), false).is_empty());
+}
