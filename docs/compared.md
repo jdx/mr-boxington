@@ -32,9 +32,11 @@ mbx brings these pieces together:
 
 - **Reuse completed work.** A second copy of a project can restore matching
   compilations instead of running them again.
-- **Clean up old build files.** mbx manages `target/` directories by default and
-  reclaims space when a copy of the project is deleted or storage limits are
-  reached. See [Managed targets](/managed-targets).
+- **Clean up old build files.** mbx manages new `target/` directories by
+  default and reclaims space when a copy of the project is deleted or storage
+  limits are reached. Run `mbx adopt` to manage a `target/` that already
+  exists. A target directory you set yourself, such as with
+  `CARGO_TARGET_DIR`, is left alone. See [Managed targets](/managed-targets).
 - **Keep concurrent builds under control.** mbx shares CPU and memory across
   builds and holds back new compilations when memory is running low. This is
   enabled by default.
@@ -69,8 +71,8 @@ MBX_SCHEDULER_TESTS=1 mbx test --workspace
 ```
 
 Test binaries then wait for room alongside compilations. mbx accounts for
-their parallelism and measured memory use; it does not simply force every
-suite to run its tests one at a time. For all your agents, enable
+their parallelism and, on Unix, their measured memory use; it does not simply
+force every suite to run its tests one at a time. For all your agents, enable
 `scheduler.tests = true` in your [configuration](/configuration).
 
 Scheduling reduces the risk of overload; it is not a hard memory limit.
@@ -92,8 +94,8 @@ compilation work.
 With kache, you run `kache init` once and continue using `cargo build`. With
 mbx, you use `mbx build` or enable the Cargo setup described above. Choose
 kache if you want a cache in your existing build setup; choose mbx if you also
-want its Cargo setup, build-directory cleanup, and coordination of builds
-and test runs across agents.
+want it to run your Cargo commands, place `target/` directories and remove them
+automatically, and coordinate builds and test runs across agents.
 
 Both tools support C and C++; kache also supports CUDA. See its
 [current feature list](https://github.com/kunobi-ninja/kache) for supported
@@ -112,9 +114,10 @@ compiling**. This is called distributed compilation. Sharing a remote cache
 helps when work has already been built; distributed compilation helps run new
 work elsewhere.
 
-If you already use sccache or kache, follow the
+If you already use sccache, follow the
 [migration guide](/cookbook/migrate#from-sccache) when switching to mbx.
-Leaving another Rust compiler cache enabled can cause mbx to defer to it.
+If the `RUSTC_WRAPPER` environment variable names another compiler cache, such
+as sccache or kache, mbx defers to it and the build is not cached.
 
 ## CI caches {#tarball-ci-caches}
 
