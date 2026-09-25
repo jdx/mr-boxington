@@ -289,7 +289,7 @@ fn cargo_with_settings_bypass_log_and_roots(
         && !placing_editor
         && let Some(view) = placement.directory.as_deref()
     {
-        seed_target_view(config, &roots.workspace_root, view, arguments);
+        seed_target_view(config, &cargo, &roots.workspace_root, view, arguments);
     }
     if placement.directory.is_none() {
         // Placement declined, but an earlier one may have left a link this
@@ -538,7 +538,13 @@ pub(super) fn place_target_view(config: &Config, roots: &Roots) -> TargetViewPla
 
 /// Copy registry build units from another checkout into each profile this
 /// build writes that the checkout has not built yet.
-fn seed_target_view(config: &Config, workspace_root: &Path, view: &Path, arguments: &[String]) {
+fn seed_target_view(
+    config: &Config,
+    cargo: &std::ffi::OsStr,
+    workspace_root: &Path,
+    view: &Path,
+    arguments: &[String],
+) {
     let profiles = crate::target_seed::profile_directories(arguments);
     if profiles
         .iter()
@@ -546,11 +552,37 @@ fn seed_target_view(config: &Config, workspace_root: &Path, view: &Path, argumen
     {
         return;
     }
+    let donors = target::seed_donors(&config.target.root, workspace_root);
+    if donors.is_empty() {
+        return;
+    }
     let Ok(lockfile) = std::fs::read_to_string(workspace_root.join("Cargo.lock")) else {
         return;
     };
     let packages = crate::target_seed::registry_packages(&lockfile);
-    let donors = target::seed_donors(&config.target.root, workspace_root);
+    if packages.is_empty() {
+        return;
+    }
+    // An older Cargo never reads units from their own directories, so copying
+    // them would only cost space. Asked only on a profile's first build with
+    // another checkout to copy from, and with this build's own toolchain.
+    let mut version = Command::new(cargo);
+    if let Some(toolchain) = arguments
+        .first()
+        .filter(|argument| argument.starts_with('+'))
+    {
+        version.arg(toolchain);
+    }
+    let supported = version
+        .arg("-V")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .is_some_and(|version| crate::target_seed::keeps_units_in_directories(&version));
+    if !supported {
+        return;
+    }
     let outcome = crate::target_seed::seed(view, &profiles, &packages, &donors);
     if let Some(donor) = outcome.donor {
         crate::session::note(&format!(

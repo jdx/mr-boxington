@@ -153,13 +153,17 @@ so the build compiles or restores only what differs:
 mbx[target]: copied 302 registry build units from /home/me/src/project
 ```
 
-mbx copies from the most recently used managed target that has built the same
-profile, and only the units that checkout's latest build read. Copies are
-reflinks where the filesystem supports them. mbx skips this step when:
+mbx tries other managed targets, most recently used first, and copies from the
+first one with units for this checkout's dependencies. It copies only the units
+that profile's latest build read. The same profile below each target triple
+the other checkout built is copied too, so a target chosen in Cargo
+configuration is covered. Copies are reflinks where the filesystem supports
+them. mbx skips this step when:
 
 - the profile already has a `build/` directory in this checkout;
+- the Cargo running this build is older than 1.100;
 - a build holds the Cargo lock of either profile;
-- the other checkout was built by a Cargo release before 1.100.
+- no other checkout was built by Cargo 1.100 or later.
 
 Path dependencies and workspace members are never copied. Cargo trusts their
 source modification times, so a copied unit could pass as fresh with another

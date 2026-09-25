@@ -33,8 +33,9 @@ use std::time::Duration;
 
 /// Where each unit is copied before it is renamed into place.
 const STAGING_SUFFIX: &str = ".mbx-seeding-";
-/// How long before a donor's last build a unit may have been read and still
-/// count as one that build used. `relatime` refreshes access times daily.
+/// How long before the most recent read in a donor's profile a unit may have
+/// been read and still count as used by that profile's latest build.
+/// `relatime` refreshes access times daily.
 const RECENT_USE: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -50,7 +51,24 @@ pub(crate) struct Donor {
     pub directory: PathBuf,
     pub workspace_root: PathBuf,
     /// When a build last claimed the directory, in seconds since the epoch.
+    /// Donors are tried most recent first.
     pub updated_secs: u64,
+}
+
+/// Whether `cargo -V` output names Cargo 1.100 or later, the first release
+/// that keeps each unit in a directory of its own.
+pub(crate) fn keeps_units_in_directories(version: &str) -> bool {
+    let Some(number) = version.split_whitespace().nth(1) else {
+        return false;
+    };
+    let mut parts = number.split(['.', '-']);
+    match (
+        parts.next().and_then(|part| part.parse::<u64>().ok()),
+        parts.next().and_then(|part| part.parse::<u64>().ok()),
+    ) {
+        (Some(major), Some(minor)) => major > 1 || (major == 1 && minor >= 100),
+        _ => false,
+    }
 }
 
 /// The profile directories, relative to the target directory, a Cargo
@@ -98,8 +116,12 @@ pub(crate) fn registry_packages(lockfile: &str) -> BTreeSet<String> {
     &registry - &path
 }
 
-/// Copy `packages`' units into each of `profiles`, relative to `view`, that
-/// has no `build/` directory yet, from the first donor that has built it.
+/// Copy `packages`' units into each profile directory, relative to `view`,
+/// that has no `build/` directory yet. `profiles` starts with the host
+/// profile; the same profile below any target triple a donor has built is
+/// seeded too, since a target chosen by Cargo configuration or `host-tuple`
+/// never appears as a directory name in the arguments. Each directory comes
+/// from the first donor, most recent first, that has usable units for it.
 pub(crate) fn seed(
     view: &Path,
     profiles: &[PathBuf],
@@ -107,40 +129,65 @@ pub(crate) fn seed(
     donors: &[Donor],
 ) -> SeedOutcome {
     let mut outcome = SeedOutcome::default();
+    let Some(host) = profiles.first() else {
+        return outcome;
+    };
     if packages.is_empty() {
         return outcome;
     }
-    for profile in profiles {
-        let destination = view.join(profile);
-        if destination.join("build").exists() {
-            continue;
-        }
-        for donor in donors {
-            let source = donor.directory.join(profile);
+    let mut settled = BTreeSet::new();
+    for donor in donors {
+        let mut candidates = profiles.to_vec();
+        candidates.extend(
+            subdirectories(&donor.directory)
+                .into_iter()
+                .filter_map(|triple| Some(Path::new(triple.file_name()?).join(host)))
+                .filter(|candidate| candidate != host),
+        );
+        for profile in candidates {
+            if settled.contains(&profile) {
+                continue;
+            }
+            let destination = view.join(&profile);
+            if destination.join("build").exists() {
+                settled.insert(profile);
+                continue;
+            }
+            let source = donor.directory.join(&profile);
             if !has_units(&source.join("build")) {
                 continue;
             }
-            match seed_profile(&source, &destination, packages, donor.updated_secs) {
-                Ok(Some(units)) => {
-                    if units > 0 {
-                        outcome.units += units;
-                        outcome.donor = Some(donor.workspace_root.clone());
-                    }
-                    break;
+            match seed_profile(&source, &destination, packages) {
+                Ok(Copied::Units(0) | Copied::Busy) => {}
+                Ok(Copied::Units(units)) => {
+                    outcome.units += units;
+                    outcome
+                        .donor
+                        .get_or_insert_with(|| donor.workspace_root.clone());
+                    settled.insert(profile);
                 }
-                // A build holds one of the two profiles; try the next donor.
-                Ok(None) => continue,
-                Err(error) => {
-                    log::debug!(
-                        "could not copy build units from {}: {error}",
-                        source.display()
-                    );
-                    continue;
+                Ok(Copied::Built) => {
+                    settled.insert(profile);
                 }
+                Err(error) => log::debug!(
+                    "could not copy build units from {}: {error}",
+                    source.display()
+                ),
             }
         }
     }
     outcome
+}
+
+/// What seeding one profile directory from one donor came to.
+enum Copied {
+    /// Units copied; none means the donor had nothing usable, and the next
+    /// donor is worth trying.
+    Units(u64),
+    /// A build holds one of the two profiles.
+    Busy,
+    /// A build in this checkout started the profile first.
+    Built,
 }
 
 /// Whether `build` holds any Cargo 1.100 unit, `<package>/<hash>/fingerprint`.
@@ -153,29 +200,40 @@ fn has_units(build: &Path) -> bool {
 }
 
 /// Copy one profile's units, holding both profiles' Cargo locks so neither
-/// checkout builds meanwhile. `None` when either is in use.
+/// checkout builds meanwhile.
 fn seed_profile(
     source: &Path,
     destination: &Path,
     packages: &BTreeSet<String>,
-    donor_updated_secs: u64,
-) -> std::io::Result<Option<u64>> {
+) -> std::io::Result<Copied> {
     let Some(_source_lock) = try_lock(&source.join(".cargo-lock"))? else {
-        return Ok(None);
+        return Ok(Copied::Busy);
     };
     std::fs::create_dir_all(destination)?;
     let Some(_destination_lock) = try_lock(&destination.join(".cargo-lock"))? else {
-        return Ok(None);
+        return Ok(Copied::Busy);
     };
     // A build that got the lock first may have started this profile.
     if destination.join("build").exists() {
-        return Ok(Some(0));
+        return Ok(Copied::Built);
     }
-    // Only the units the donor's latest build read, when access times say
-    // which those are. Without them every unit of the package is copied, and
-    // the ones this checkout does not use are collected later.
-    let used_since = crate::target_units::access_times_tracked(source)
-        .then(|| std::time::UNIX_EPOCH + Duration::from_secs(donor_updated_secs) - RECENT_USE);
+    // Only the units this profile's latest build read, when access times say
+    // which those are: the ones read within a day of its most recent read. A
+    // build of another profile or project in the donor does not move this.
+    // Without access times every unit of the package is copied, and the ones
+    // this checkout does not use are collected later.
+    let used_since = if crate::target_units::access_times_tracked(source) {
+        subdirectories(&source.join("build"))
+            .iter()
+            .flat_map(|package| subdirectories(package))
+            .map(|unit| unit.join("fingerprint"))
+            .filter(|fingerprint| fingerprint.is_dir())
+            .map(|fingerprint| crate::target_units::last_use(&fingerprint))
+            .max()
+            .and_then(|latest| latest.checked_sub(RECENT_USE))
+    } else {
+        None
+    };
     let mut units = 0;
     for package in subdirectories(&source.join("build")) {
         let Some(name) = package.file_name().and_then(|name| name.to_str()) else {
@@ -210,8 +268,9 @@ fn seed_profile(
             ".mbx-build-script-shims{STAGING_SUFFIX}{}",
             std::process::id()
         ));
-        match copy_tree(&shims, &staging)
-            .and_then(|()| std::fs::rename(&staging, destination.join(".mbx-build-script-shims")))
+        let shims_destination = destination.join(".mbx-build-script-shims");
+        match copy_tree(&shims, &staging, (&shims, &shims_destination))
+            .and_then(|()| std::fs::rename(&staging, &shims_destination))
         {
             Ok(()) => {}
             Err(error) => {
@@ -220,7 +279,7 @@ fn seed_profile(
             }
         }
     }
-    Ok(Some(units))
+    Ok(Copied::Units(units))
 }
 
 fn try_lock(path: &Path) -> std::io::Result<Option<fslock::LockFile>> {
@@ -234,8 +293,8 @@ fn copy_unit(unit: &Path, package: &Path, hash: &std::ffi::OsStr) -> std::io::Re
     let mut staging_name = hash.to_os_string();
     staging_name.push(format!("{STAGING_SUFFIX}{}", std::process::id()));
     let staging = package.join(staging_name);
-    let copied =
-        copy_tree(unit, &staging).and_then(|()| std::fs::rename(&staging, package.join(hash)));
+    let copied = copy_tree(unit, &staging, (unit, &package.join(hash)))
+        .and_then(|()| std::fs::rename(&staging, package.join(hash)));
     if copied.is_err() {
         let _ = std::fs::remove_dir_all(&staging);
     }
@@ -243,8 +302,9 @@ fn copy_unit(unit: &Path, package: &Path, hash: &std::ffi::OsStr) -> std::io::Re
 }
 
 /// Copy a directory tree, keeping every file's modification time and leaving
-/// the source's access times as they were.
-fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
+/// the source's access times as they were. `roots` maps the tree being copied
+/// to where the copy will finally live, for symbolic links that point inside it.
+fn copy_tree(source: &Path, destination: &Path, roots: (&Path, &Path)) -> std::io::Result<()> {
     std::fs::create_dir(destination)?;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
@@ -252,17 +312,42 @@ fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
         let to = destination.join(entry.file_name());
         let kind = entry.file_type()?;
         if kind.is_dir() {
-            copy_tree(&from, &to)?;
+            copy_tree(&from, &to, roots)?;
         } else if kind.is_file() {
             copy_file(&from, &to, &entry.metadata()?)?;
+        } else if kind.is_symlink() {
+            copy_symlink(&from, &to, roots)?;
         } else {
             return Err(std::io::Error::other(format!(
-                "{} is neither a file nor a directory",
+                "{} is neither a file, a directory, nor a link",
                 from.display()
             )));
         }
     }
     Ok(())
+}
+
+/// Recreate a symbolic link, such as one a build script left in `OUT_DIR`.
+/// A link to an absolute path inside the copied tree points into the copy,
+/// so this checkout never reads through it into the other checkout's files.
+#[cfg(unix)]
+fn copy_symlink(from: &Path, to: &Path, roots: (&Path, &Path)) -> std::io::Result<()> {
+    let target = std::fs::read_link(from)?;
+    let target = match target.strip_prefix(roots.0) {
+        Ok(inside) if target.is_absolute() => roots.1.join(inside),
+        _ => target,
+    };
+    std::os::unix::fs::symlink(target, to)
+}
+
+/// Windows needs privileges to create a symbolic link, so a unit holding one
+/// is left for the build to produce.
+#[cfg(not(unix))]
+fn copy_symlink(from: &Path, _to: &Path, _roots: (&Path, &Path)) -> std::io::Result<()> {
+    Err(std::io::Error::other(format!(
+        "{} is a symbolic link",
+        from.display()
+    )))
 }
 
 fn copy_file(from: &Path, to: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {

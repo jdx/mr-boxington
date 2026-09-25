@@ -315,3 +315,122 @@ fn only_units_the_donors_last_build_read_are_copied() {
             .exists()
     );
 }
+
+#[test]
+fn only_cargo_1_100_and_later_keep_units_in_directories() {
+    assert!(keeps_units_in_directories(
+        "cargo 1.100.0-nightly (98a09e7e7 2026-09-16)\n"
+    ));
+    assert!(keeps_units_in_directories("cargo 1.101.2 (abc 2027-01-01)"));
+    assert!(keeps_units_in_directories("cargo 2.0.0"));
+    assert!(!keeps_units_in_directories(
+        "cargo 1.99.0-beta.7 (5f94df478 2026-08-27)"
+    ));
+    assert!(!keeps_units_in_directories(
+        "cargo 1.98.1 (797e8a9bc 2026-08-05)"
+    ));
+    assert!(!keeps_units_in_directories("not cargo"));
+    assert!(!keeps_units_in_directories(""));
+}
+
+#[test]
+fn a_donor_with_nothing_usable_falls_through_to_the_next() {
+    let unrelated = tempfile::tempdir().unwrap();
+    let matching = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    unit(&unrelated.path().join("debug"), "tokio", "0123456789abcdef");
+    unit(&matching.path().join("debug"), "serde", "0123456789abcdef");
+
+    let outcome = seed(
+        to.path(),
+        &[PathBuf::from("debug")],
+        &registry(),
+        &[donor(unrelated.path()), donor(matching.path())],
+    );
+
+    assert_eq!(outcome.units, 1);
+    assert!(
+        to.path()
+            .join("debug/build/serde/0123456789abcdef")
+            .is_dir()
+    );
+    assert!(!to.path().join("debug/build/tokio").exists());
+}
+
+#[test]
+fn recency_follows_the_profiles_own_latest_build() {
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    unit(&from.path().join("debug"), "serde", "0123456789abcdef");
+    // A later build of another profile or project claimed the donor since.
+    let mut later = donor(from.path());
+    later.updated_secs += 10 * 24 * 60 * 60;
+
+    let outcome = seed(to.path(), &[PathBuf::from("debug")], &registry(), &[later]);
+
+    assert_eq!(outcome.units, 1);
+}
+
+#[test]
+fn a_target_triple_the_donor_built_is_seeded_too() {
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    unit(&from.path().join("debug"), "serde", "0123456789abcdef");
+    // Chosen by `build.target` or `--target host-tuple`, so the arguments
+    // never name it.
+    let triple = Path::new("aarch64-unknown-linux-gnu").join("debug");
+    unit(&from.path().join(&triple), "serde", "fedcba9876543210");
+
+    let outcome = seed(
+        to.path(),
+        &[PathBuf::from("debug")],
+        &registry(),
+        &[donor(from.path())],
+    );
+
+    assert_eq!(outcome.units, 2);
+    assert!(
+        to.path()
+            .join(&triple)
+            .join("build/serde/fedcba9876543210")
+            .is_dir()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symbolic_links_are_recreated_pointing_into_the_copy() {
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let source = unit(&from.path().join("debug"), "serde", "0123456789abcdef");
+    std::fs::write(source.join("out/generated.rs"), b"generated").unwrap();
+    std::os::unix::fs::symlink(
+        source.join("out/generated.rs"),
+        source.join("out/absolute.rs"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("generated.rs", source.join("out/relative.rs")).unwrap();
+
+    let outcome = seed(
+        to.path(),
+        &[PathBuf::from("debug")],
+        &registry(),
+        &[donor(from.path())],
+    );
+
+    assert_eq!(outcome.units, 1);
+    let copied = to.path().join("debug/build/serde/0123456789abcdef");
+    assert_eq!(
+        std::fs::read_link(copied.join("out/absolute.rs")).unwrap(),
+        copied.join("out/generated.rs"),
+        "a link into the unit should point into this checkout's copy"
+    );
+    assert_eq!(
+        std::fs::read_link(copied.join("out/relative.rs")).unwrap(),
+        Path::new("generated.rs")
+    );
+    assert_eq!(
+        std::fs::read(copied.join("out/absolute.rs")).unwrap(),
+        b"generated"
+    );
+}
