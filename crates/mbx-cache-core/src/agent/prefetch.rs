@@ -1,5 +1,29 @@
 use super::*;
 
+fn plan_blob_packs(
+    missing: &BTreeMap<CacheDigest, ()>,
+    limits: crate::BlobPackLimits,
+) -> Vec<Vec<CacheDigest>> {
+    let mut pack_candidates = missing.clone();
+    let mut pack_requests = Vec::new();
+    while !pack_candidates.is_empty() {
+        let candidates = match blob_pack_chunk(pack_candidates.keys(), limits) {
+            Ok(candidates) if !candidates.is_empty() => candidates,
+            Ok(_) => break,
+            Err(error) => {
+                warn!("remote cache blob pack skipped: {error}");
+                break;
+            }
+        };
+        for digest in &candidates {
+            pack_candidates.remove(digest);
+        }
+        pack_requests.push(candidates);
+    }
+
+    pack_requests
+}
+
 #[derive(Clone)]
 pub(crate) struct PrefetchCandidate {
     adapter: String,
@@ -546,24 +570,8 @@ impl CacheAgent {
                 None
             }
         };
-        let mut pack_candidates = missing.clone();
-        let mut pack_requests = Vec::new();
-        while let Some(limits) = pack_limits.filter(|_| !pack_candidates.is_empty()) {
-            let candidates =
-                match blob_pack_chunk(&pack_candidates.keys().cloned().collect::<Vec<_>>(), limits)
-                {
-                    Ok(candidates) if !candidates.is_empty() => candidates,
-                    Ok(_) => break,
-                    Err(error) => {
-                        warn!("remote cache blob pack skipped: {error}");
-                        break;
-                    }
-                };
-            for digest in &candidates {
-                pack_candidates.remove(digest);
-            }
-            pack_requests.push(candidates);
-        }
+        let pack_requests =
+            pack_limits.map_or_else(Vec::new, |limits| plan_blob_packs(&missing, limits));
 
         let mut packs = stream::iter(pack_requests)
             .map(|requested| async move {
@@ -998,5 +1006,68 @@ mod selection_tests {
                 .collect::<Vec<_>>(),
             expected
         );
+    }
+}
+
+#[cfg(test)]
+mod pack_planning_tests {
+    use super::*;
+    #[test]
+    fn pack_planning_keeps_order_and_limits_while_leaving_large_blobs_for_single_gets() {
+        let mut missing = BTreeMap::new();
+        for index in 0_usize..23 {
+            let mut digest = CacheDigest::blake3(&index.to_le_bytes());
+            digest.size = if index % 3 == 0 { 200 } else { 30 };
+            missing.insert(digest, ());
+        }
+        for max_items in [1, 3, 10] {
+            let packs = plan_blob_packs(
+                &missing,
+                crate::BlobPackLimits {
+                    max_items,
+                    max_bytes: 100,
+                },
+            );
+            assert!(packs.iter().all(|pack| !pack.is_empty()
+                && pack.len() <= max_items
+                && pack.iter().map(|d| d.size).sum::<u64>() <= 100));
+            assert_eq!(
+                packs.iter().flatten().collect::<Vec<_>>(),
+                missing.keys().filter(|d| d.size <= 100).collect::<Vec<_>>()
+            );
+        }
+        let limits = crate::BlobPackLimits {
+            max_items: 10,
+            max_bytes: 1,
+        };
+        assert!(plan_blob_packs(&missing, limits).is_empty());
+        assert!(plan_blob_packs(&BTreeMap::new(), limits).is_empty());
+    }
+
+    #[test]
+    #[ignore = "manual performance measurement; run in release mode"]
+    fn benchmark_pack_planning() {
+        for count in [1000_usize, 10000] {
+            let missing: BTreeMap<_, _> = (0..count)
+                .map(|index| (CacheDigest::blake3(&index.to_le_bytes()), ()))
+                .collect();
+            let limits = crate::BlobPackLimits {
+                max_items: 100,
+                max_bytes: 1024 * 1024,
+            };
+            let mut samples = Vec::new();
+            for _ in 0..7 {
+                let start = std::time::Instant::now();
+                let packs = plan_blob_packs(&missing, limits);
+                samples.push(start.elapsed().as_secs_f64() * 1e3);
+                assert_eq!(packs.iter().map(Vec::len).sum::<usize>(), count);
+                std::hint::black_box(packs);
+            }
+            samples.sort_by(f64::total_cmp);
+            eprintln!(
+                "{count} candidates, 100 per pack: median {:.3} ms, range {:.3}..{:.3} ms",
+                samples[3], samples[0], samples[6]
+            );
+        }
     }
 }
