@@ -83,7 +83,9 @@ pub(crate) struct CollectionOutcome {
     /// Units no build had used for the age limit, removed from target
     /// directories that were kept.
     pub removed_units: u64,
-    /// Logical bytes of those units, not counted in `removed_bytes`.
+    /// Logical bytes of those units, not counted in `removed_bytes`, plus any
+    /// an interrupted collection had already moved aside. The latter adds
+    /// bytes without adding units.
     pub removed_unit_bytes: u64,
     pub remaining_bytes: u64,
     pub remaining_views: u64,
