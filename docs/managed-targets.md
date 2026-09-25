@@ -164,6 +164,29 @@ A target directory is removed when any of these is true:
 
 Cached compilations shared with a live checkout remain protected throughout.
 
+### Unused build units
+
+A checkout in regular use keeps its target directory, but Cargo leaves the
+previous build units behind whenever a lockfile update, feature change, or
+toolchain update moves its builds on to new ones. Collection also removes
+those units once no build has used them for `target.max_age` plus a day:
+
+- With Cargo 1.100 or later, each unit is its own directory,
+  `<profile>/build/<package>/<hash>/`, and each is removed on its own.
+- Earlier Cargo versions spread units across `deps/`, `.fingerprint/`, and
+  `build/`. mbx removes that layout as a whole once no build has used any of
+  it, which happens after a checkout moves to Cargo 1.100.
+
+Cargo reads the fingerprint of every unit a build uses, even when there is
+nothing to compile, and mbx judges use by that read's access time. The extra
+day covers Linux's default `relatime`, which refreshes an access time at most
+daily. mbx skips this step when the filesystem does not record access times,
+as under `noatime`, and leaves a target directory alone while a build holds
+its Cargo lock. The next build that needs a removed unit restores it from the
+cache or compiles it again. Unused units go before the size budget is weighed,
+so they are removed ahead of whole target directories. `target.max_age =
+"none"` keeps them.
+
 ### Budgets scale with the disk
 
 All three budgets scale with the disk that holds the data. By default, targets,

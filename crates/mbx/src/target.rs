@@ -80,8 +80,20 @@ pub(crate) struct CollectionOutcome {
     /// Selected for removal, then found in use by a build that started after
     /// the selection was made.
     pub kept_active_views: u64,
+    /// Units no build had used for the age limit, removed from target
+    /// directories that were kept.
+    pub removed_units: u64,
+    /// Logical bytes of those units, not counted in `removed_bytes`.
+    pub removed_unit_bytes: u64,
     pub remaining_bytes: u64,
     pub remaining_views: u64,
+}
+
+impl CollectionOutcome {
+    /// Logical bytes removed, whole directories and units together.
+    pub(crate) fn freed_bytes(&self) -> u64 {
+        self.removed_bytes.saturating_add(self.removed_unit_bytes)
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -1043,14 +1055,53 @@ fn collect_with(
             crate::store::checkout_is_live_on(root, &record.workspace_root),
         ));
     }
+    let expired =
+        |updated: u64| max_age.is_some_and(|age| now.saturating_sub(updated) > age.as_secs());
+    // Before the budget is weighed, so a checkout's unused units go ahead of
+    // a whole directory somebody may still be using.
+    if let Some(max_age) = max_age
+        && entries.iter().any(|entry| entry.4 && !expired(entry.2))
+        && crate::target_units::access_times_tracked(&views_root(root))
+    {
+        for (_, directory, updated, bytes, live) in &mut entries {
+            if !*live || expired(*updated) {
+                continue;
+            }
+            // Held while units go, so a build that starts meanwhile waits
+            // rather than reading a fingerprint whose outputs are leaving.
+            let _locks = if dry_run {
+                None
+            } else {
+                match cargo_locks(directory) {
+                    Ok(Some(locks)) => Some(locks),
+                    Ok(None) => continue,
+                    Err(error) => {
+                        log::warn!(
+                            "could not tell whether {} is in use: {error}",
+                            directory.display()
+                        );
+                        continue;
+                    }
+                }
+            };
+            let units = crate::target_units::prune(
+                directory,
+                max_age,
+                UNIX_EPOCH + Duration::from_secs(now),
+                dry_run,
+            );
+            *bytes = bytes.saturating_sub(units.removed_bytes);
+            outcome.removed_units += units.removed_units;
+            outcome.removed_unit_bytes += units.removed_bytes;
+        }
+    }
     let mut remaining = entries
         .iter()
         .map(|entry| entry.3)
         .fold(uncollectable_bytes, u64::saturating_add);
     let mut selected = HashSet::new();
     for (record_path, _, updated, bytes, live) in &entries {
-        let expired = max_age.is_some_and(|age| now.saturating_sub(*updated) > age.as_secs());
-        if !live || expired {
+        if !live || expired(*updated) {
             selected.insert(record_path.clone());
             remaining = remaining.saturating_sub(*bytes);
         }

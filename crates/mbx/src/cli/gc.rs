@@ -132,9 +132,11 @@ pub(super) fn run(
                 Ok(pruned) => {
                     // Credit what the targets gave back even though the store
                     // sweep failed: those bytes are gone from the disk either way.
-                    freed_bytes = freed_bytes.saturating_add(pruned.removed_bytes);
-                    if !json && pruned.removed_views > 0 {
-                        println!("{}", target_removals(&pruned, dry_run));
+                    freed_bytes = freed_bytes.saturating_add(pruned.freed_bytes());
+                    if !json {
+                        for line in target_removals(&pruned, dry_run) {
+                            println!("{line}");
+                        }
                     }
                 }
                 Err(prune_error) => {
@@ -152,7 +154,9 @@ pub(super) fn run(
     record_collection(
         &store,
         outcome.removed_bytes,
-        pruned.as_ref().map_or(0, |pruned| pruned.removed_bytes)
+        pruned
+            .as_ref()
+            .map_or(0, target::CollectionOutcome::freed_bytes)
             + incremental.removed_bytes
             + generated.removed_bytes,
         dry_run,
@@ -178,6 +182,8 @@ pub(super) fn run(
             targets: GcTargetReport {
                 removed_directories: pruned.removed_views,
                 removed_bytes: pruned.removed_bytes,
+                removed_units: pruned.removed_units,
+                removed_unit_bytes: pruned.removed_unit_bytes,
                 remaining_directories: pruned.remaining_views,
                 remaining_bytes: pruned.remaining_bytes,
             },
@@ -203,8 +209,8 @@ pub(super) fn run(
         print_incremental_removals(&incremental, dry_run);
         print_generated_removals(&generated, dry_run);
         let pruned = pruned?;
-        if pruned.removed_views > 0 {
-            println!("{}", target_removals(&pruned, dry_run));
+        for line in target_removals(&pruned, dry_run) {
+            println!("{line}");
         }
     }
     Ok(())
@@ -328,9 +334,11 @@ pub(super) fn print_gc_store_outcome(outcome: &store::GcOutcome, dry_run: bool) 
     }
 }
 
-/// One line describing the target directories a sweep freed.
-pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool) -> String {
+/// The lines describing the target directories and unused build units a
+/// sweep freed; none when it freed neither.
+pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool) -> Vec<String> {
     let verb = if dry_run { "would remove" } else { "removed" };
+    let mut lines = Vec::new();
     let kept = if outcome.kept_active_views > 0 {
         format!(
             ", {} kept for builds that started meanwhile",
@@ -339,14 +347,24 @@ pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool
     } else {
         String::new()
     };
-    format!(
-        "{verb} {} target directories ({} logical, {} abandoned and {} live{kept}); {} logical remain",
-        outcome.removed_views,
-        ByteSize::b(outcome.removed_bytes).display().iec(),
-        outcome.removed_stale_views,
-        outcome.removed_live_views,
-        ByteSize::b(outcome.remaining_bytes).display().iec(),
-    )
+    if outcome.removed_views > 0 {
+        lines.push(format!(
+            "{verb} {} target directories ({} logical, {} abandoned and {} live{kept}); {} logical remain",
+            outcome.removed_views,
+            ByteSize::b(outcome.removed_bytes).display().iec(),
+            outcome.removed_stale_views,
+            outcome.removed_live_views,
+            ByteSize::b(outcome.remaining_bytes).display().iec(),
+        ));
+    }
+    if outcome.removed_units > 0 {
+        lines.push(format!(
+            "{verb} {} unused build units from live target directories ({} logical)",
+            outcome.removed_units,
+            ByteSize::b(outcome.removed_unit_bytes).display().iec(),
+        ));
+    }
+    lines
 }
 
 /// One line describing what a sweep evicted.
@@ -610,8 +628,8 @@ pub(super) struct PruneReport {
     /// knows to measure rather than assume.
     remaining_bytes: Option<u64>,
     freed_bytes: u64,
-    /// The line describing removed target directories, when any were.
-    removals: Option<String>,
+    /// The lines describing removed target directories and units.
+    removals: Vec<String>,
 }
 
 /// Collect target views as the other half of a due automatic sweep.
@@ -669,8 +687,8 @@ pub(super) fn prune_targets(
             );
             PruneReport {
                 remaining_bytes: Some(pruned.remaining_bytes.saturating_add(incremental_remaining)),
-                freed_bytes: pruned.removed_bytes.saturating_add(incremental_bytes),
-                removals: (pruned.removed_views > 0).then(|| target_removals(&pruned, false)),
+                freed_bytes: pruned.freed_bytes().saturating_add(incremental_bytes),
+                removals: target_removals(&pruned, false),
             }
         }
         Err(error) => {
@@ -678,7 +696,7 @@ pub(super) fn prune_targets(
             PruneReport {
                 remaining_bytes: None,
                 freed_bytes: incremental_bytes,
-                removals: None,
+                removals: Vec::new(),
             }
         }
     }

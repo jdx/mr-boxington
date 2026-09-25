@@ -384,7 +384,8 @@ struct RawTarget {
         default_note = "10% of the cache disk, from 10GiB to 100GiB"
     )]
     max_size: Option<String>,
-    /// Collect live managed targets unused this long, or "none".
+    /// Collect live managed targets, and build units inside them, unused this
+    /// long, or "none".
     #[usage(env = "MBX_TARGET_MAX_AGE", default = "30d", ty = "duration")]
     max_age: String,
 }

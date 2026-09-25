@@ -3292,6 +3292,110 @@ mod target_views {
     }
 
     #[test]
+    fn gc_removes_units_no_build_has_used_from_a_live_target_directory() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(project.path());
+        build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("cold.json"),
+            &[("MBX_TARGET_VIEWS", "1")],
+        );
+        let directory = managed(project.path());
+
+        // As if the last build to use these units ran two months ago, which
+        // is what the fingerprint access times say once a lockfile or
+        // toolchain change moves every build on to other units.
+        age_tree(&directory.join("debug"));
+        let output = mbx(store.path(), &["gc", "--max-size", "20GiB"]);
+
+        assert!(
+            output.contains("unused build units from live target directories"),
+            "gc should remove and report the unused units: {output}"
+        );
+        assert!(
+            find_files(&directory.join("debug"), |path| {
+                file_name_is(path, |name| {
+                    name.starts_with("libfixture-") && name.ends_with(".rlib")
+                })
+            })
+            .is_empty(),
+            "the unit's outputs should be gone"
+        );
+        assert!(directory.is_dir(), "the live target directory stays");
+
+        let (rebuilt, _) = build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("rebuilt.json"),
+            &[("MBX_TARGET_VIEWS", "1")],
+        );
+        assert!(
+            count(&rebuilt, "hits") > 0,
+            "the next build should restore the removed unit: {rebuilt}"
+        );
+    }
+
+    #[test]
+    fn gc_keeps_units_a_fresh_build_still_uses() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(project.path());
+        build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("cold.json"),
+            &[("MBX_TARGET_VIEWS", "1")],
+        );
+        let directory = managed(project.path());
+        age_tree(&directory.join("debug"));
+
+        // Nothing to compile, so nothing is written; Cargo still reads every
+        // unit's fingerprint, and that read is what marks the unit as used.
+        build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("fresh.json"),
+            &[("MBX_TARGET_VIEWS", "1")],
+        );
+        let output = mbx(store.path(), &["gc", "--max-size", "20GiB"]);
+
+        assert!(
+            !output.contains("unused build units"),
+            "a unit the last build used should stay: {output}"
+        );
+        assert!(
+            !find_files(&directory.join("debug"), |path| {
+                file_name_is(path, |name| {
+                    name.starts_with("libfixture-") && name.ends_with(".rlib")
+                })
+            })
+            .is_empty(),
+            "the unit's outputs should remain"
+        );
+    }
+
+    /// Date everything below `directory` two months back, as if no build had
+    /// read or written it since.
+    fn age_tree(directory: &Path) {
+        let past = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(60 * 24 * 60 * 60),
+        );
+        let mut pending = vec![directory.to_path_buf()];
+        while let Some(next) = pending.pop() {
+            for entry in std::fs::read_dir(&next).unwrap().flatten() {
+                if entry.file_type().unwrap().is_dir() {
+                    pending.push(entry.path());
+                }
+                filetime::set_file_times(entry.path(), past, past).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn a_store_sweep_failure_still_frees_managed_target_directories() {
         let store = tempfile::tempdir().unwrap();
         let gone = tempfile::tempdir().unwrap();
