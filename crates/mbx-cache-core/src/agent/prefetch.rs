@@ -84,33 +84,43 @@ impl<'de> serde::Deserialize<'de> for CompilerTiming {
 pub(crate) fn select_prefetch_actions<'a>(
     predictions: impl Iterator<Item = &'a ActionPrediction>,
 ) -> BTreeMap<CacheDigest, PrefetchCandidate> {
-    let mut actions = BTreeMap::<CacheDigest, PrefetchCandidate>::new();
+    // Keep borrowed keys and adapters until the cap has discarded the tail.
+    let mut actions = BTreeMap::<&CacheDigest, (&str, u64)>::new();
     for prediction in predictions {
         let priority = prediction_priority(prediction);
-        let candidate =
-            actions
-                .entry(prediction.action.clone())
-                .or_insert_with(|| PrefetchCandidate {
-                    adapter: prediction.adapter.clone(),
-                    priority,
-                });
-        if priority > candidate.priority {
-            candidate.adapter.clone_from(&prediction.adapter);
-            candidate.priority = priority;
+        let candidate = actions
+            .entry(&prediction.action)
+            .or_insert((prediction.adapter.as_str(), priority));
+        if priority > candidate.1 {
+            *candidate = (prediction.adapter.as_str(), priority);
         }
     }
-    if actions.len() <= MAX_PREFETCH_ACTIONS {
-        return actions;
-    }
     let mut ranked = actions.into_iter().collect::<Vec<_>>();
-    ranked.sort_unstable_by(|(left_action, left), (right_action, right)| {
-        right
-            .priority
-            .cmp(&left.priority)
-            .then_with(|| left_action.cmp(right_action))
-    });
-    ranked.truncate(MAX_PREFETCH_ACTIONS);
-    ranked.into_iter().collect()
+    if ranked.len() > MAX_PREFETCH_ACTIONS {
+        // The result is a map, so only membership, not rank order, is needed.
+        ranked.select_nth_unstable_by(
+            MAX_PREFETCH_ACTIONS,
+            |(left_action, left), (right_action, right)| {
+                right
+                    .1
+                    .cmp(&left.1)
+                    .then_with(|| left_action.cmp(right_action))
+            },
+        );
+        ranked.truncate(MAX_PREFETCH_ACTIONS);
+    }
+    ranked
+        .into_iter()
+        .map(|(action, (adapter, priority))| {
+            (
+                action.clone(),
+                PrefetchCandidate {
+                    adapter: adapter.to_owned(),
+                    priority,
+                },
+            )
+        })
+        .collect()
 }
 
 fn ranked_prefetch_actions(
@@ -1199,6 +1209,124 @@ mod pack_planning_tests {
             eprintln!(
                 "{count} candidates, 100 per pack: median {:.3} ms, range {:.3}..{:.3} ms",
                 samples[3], samples[0], samples[6]
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod selection_index_tests {
+    use super::*;
+    fn reference_selection<'a>(
+        predictions: impl Iterator<Item = &'a ActionPrediction>,
+    ) -> BTreeMap<CacheDigest, PrefetchCandidate> {
+        let mut actions = BTreeMap::<CacheDigest, PrefetchCandidate>::new();
+        for prediction in predictions {
+            let priority = prediction_priority(prediction);
+            let candidate =
+                actions
+                    .entry(prediction.action.clone())
+                    .or_insert_with(|| PrefetchCandidate {
+                        adapter: prediction.adapter.clone(),
+                        priority,
+                    });
+            if priority > candidate.priority {
+                candidate.adapter.clone_from(&prediction.adapter);
+                candidate.priority = priority;
+            }
+        }
+        if actions.len() <= MAX_PREFETCH_ACTIONS {
+            return actions;
+        }
+        let mut ranked = actions.into_iter().collect::<Vec<_>>();
+        ranked.sort_unstable_by(|(left_action, left), (right_action, right)| {
+            right
+                .priority
+                .cmp(&left.priority)
+                .then_with(|| left_action.cmp(right_action))
+        });
+        ranked.truncate(MAX_PREFETCH_ACTIONS);
+        ranked.into_iter().collect()
+    }
+
+    fn fixture(count: usize) -> Vec<ActionPrediction> {
+        (0..count)
+            .map(|index| ActionPrediction {
+                invocation: CacheDigest::blake3(format!("invocation-{index}").as_bytes()),
+                action: CacheDigest::blake3(
+                    format!("action-{}", index % (count / 2 + 1)).as_bytes(),
+                ),
+                adapter: if index % 7 == 0 {
+                    "task"
+                } else if index % 3 == 0 {
+                    "cc"
+                } else {
+                    "rustc"
+                }
+                .into(),
+                payload: format!(r#"{{"compiler_duration_ns":{}}}"#, index % 31),
+            })
+            .collect()
+    }
+
+    fn comparable(
+        actions: &BTreeMap<CacheDigest, PrefetchCandidate>,
+    ) -> Vec<(&CacheDigest, &str, u64)> {
+        actions
+            .iter()
+            .map(|(action, candidate)| (action, candidate.adapter.as_str(), candidate.priority))
+            .collect()
+    }
+
+    #[test]
+    fn borrowed_selection_preserves_duplicate_winners_and_cap_ties() {
+        for count in [0, 1, 1024, 2046, 2048, 4096, 16384] {
+            let mut predictions = fixture(count);
+            for _ in 0..2 {
+                assert_eq!(
+                    comparable(&select_prefetch_actions(predictions.iter())),
+                    comparable(&reference_selection(predictions.iter()))
+                );
+                predictions.reverse();
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual performance measurement; run in release mode"]
+    fn benchmark_selection_index() {
+        for count in [1024, 4096, 16384] {
+            let predictions = fixture(count);
+            let mut before = Vec::new();
+            let mut after = Vec::new();
+            for round in 0..15 {
+                for optimized in if round % 2 == 0 {
+                    [false, true]
+                } else {
+                    [true, false]
+                } {
+                    let start = std::time::Instant::now();
+                    for _ in 0..20 {
+                        let selected = if optimized {
+                            select_prefetch_actions(std::hint::black_box(&predictions).iter())
+                        } else {
+                            reference_selection(std::hint::black_box(&predictions).iter())
+                        };
+                        std::hint::black_box(selected);
+                    }
+                    let sample = start.elapsed().as_secs_f64() * 1e3 / 20.0;
+                    if optimized {
+                        after.push(sample);
+                    } else {
+                        before.push(sample);
+                    }
+                }
+            }
+            before.sort_by(f64::total_cmp);
+            after.sort_by(f64::total_cmp);
+            eprintln!(
+                "{count} predictions with duplicate actions: before {:.3} ms, after {:.3} ms",
+                before[7], after[7]
             );
         }
     }
