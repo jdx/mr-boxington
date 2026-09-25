@@ -13,7 +13,10 @@ interface Results {
 }
 
 const seconds = (ns: number) => ns / 1e9;
-const finite = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
+/** A whole, nonnegative counter. */
+const count = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n >= 0;
+/** A positive, finite wall-clock duration. */
+const duration = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n > 0;
 
 export function factsFromBenchmarks(data: Results | null | undefined): ReelFacts | null {
   // The loader casts parsed JSON, and this runs in every page's theme setup,
@@ -31,11 +34,16 @@ export function factsFromBenchmarks(data: Results | null | undefined): ReelFacts
   return {
     subject: typeof data.subject === "string" ? data.subject : "",
     warm:
-      warm && finite(hits) && finite(lookups) && lookups > 0 && finite(warm.wall_duration_ns)
+      warm &&
+      count(hits) &&
+      count(lookups) &&
+      lookups > 0 &&
+      hits <= lookups &&
+      duration(warm.wall_duration_ns)
         ? { hits, lookups, seconds: seconds(warm.wall_duration_ns) }
         : null,
     commit:
-      finite(cargo?.wall_duration_ns) && finite(mbx?.wall_duration_ns)
+      duration(cargo?.wall_duration_ns) && duration(mbx?.wall_duration_ns)
         ? { cargo: seconds(cargo.wall_duration_ns), mbx: seconds(mbx.wall_duration_ns) }
         : null,
   };
