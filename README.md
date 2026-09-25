@@ -132,7 +132,7 @@ mbx adopt -r ~/src  # adopt existing target directories without deleting outputs
 On a filesystem that supports reflinks, restored outputs share data blocks
 with the store until modified. Elsewhere, mbx copies bytes. Run `mbx adopt` to
 bring existing `target/` directories under the same storage policy without
-deleting their contents; interactive builds can offer the same migration.
+deleting their contents; a build outside CI does the same for its own checkout.
 [Understand managed targets →](https://mr-boxington.jdx.dev/managed-targets)
 
 ## Find your next step

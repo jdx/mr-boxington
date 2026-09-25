@@ -119,11 +119,15 @@ impl Digest {
         if self.size != bytes.len() as u64 {
             return Ok(false);
         }
-        let hash = match self.algorithm_kind()? {
-            DigestAlgorithm::Blake3 => blake3::hash(bytes).to_hex().to_string(),
-            DigestAlgorithm::Sha256 => hex::encode(sha2::Sha256::digest(bytes)),
-        };
-        Ok(self.hash == hash)
+        match self.algorithm_kind()? {
+            DigestAlgorithm::Blake3 => Ok(self.hash == blake3::hash(bytes).to_hex().as_str()),
+            DigestAlgorithm::Sha256 => {
+                let mut encoded = [0; 64];
+                hex::encode_to_slice(sha2::Sha256::digest(bytes), &mut encoded)
+                    .expect("a SHA-256 digest always encodes into 64 bytes");
+                Ok(self.hash.as_bytes() == encoded)
+            }
+        }
     }
 
     /// Stream a file and return whether it has this digest and length.
@@ -688,6 +692,40 @@ impl Capabilities {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_verification_checks_both_algorithms_lengths_and_invalid_digests() {
+        for bytes in [b"".as_slice(), b"small record", &[0, 255, 128]] {
+            for digest in [
+                Digest::blake3(bytes),
+                Digest {
+                    algorithm: "sha256".into(),
+                    hash: hex::encode(sha2::Sha256::digest(bytes)),
+                    size: bytes.len() as u64,
+                },
+            ] {
+                assert!(digest.matches_bytes(bytes).unwrap());
+                let mut wrong_hash = digest.clone();
+                wrong_hash.hash.replace_range(
+                    ..1,
+                    if digest.hash.starts_with('0') {
+                        "1"
+                    } else {
+                        "0"
+                    },
+                );
+                assert!(!wrong_hash.matches_bytes(bytes).unwrap());
+                let mut wrong_size = digest.clone();
+                wrong_size.size += 1;
+                assert!(!wrong_size.matches_bytes(bytes).unwrap());
+                let mut invalid = digest.clone();
+                invalid.hash.replace_range(..1, "G");
+                assert!(invalid.matches_bytes(bytes).is_err());
+                invalid.algorithm = "unknown".into();
+                assert!(invalid.matches_bytes(bytes).is_err());
+            }
+        }
+    }
 
     #[test]
     fn digest_validation_is_exact() {

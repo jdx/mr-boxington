@@ -1146,8 +1146,8 @@ async fn error_for_status_with_body(mut response: reqwest::Response) -> Result<r
     Err(eyre::Report::new(status_error).wrap_err(message))
 }
 
-pub(crate) fn blob_pack_chunk(
-    digests: &[CacheDigest],
+pub(crate) fn blob_pack_chunk<'a>(
+    digests: impl IntoIterator<Item = &'a CacheDigest>,
     limits: BlobPackLimits,
 ) -> Result<Vec<CacheDigest>> {
     let mut seen = BTreeSet::new();
@@ -1155,7 +1155,7 @@ pub(crate) fn blob_pack_chunk(
     let mut chunk_bytes = 0_u64;
     for digest in digests {
         digest.validate()?;
-        if !seen.insert(digest.clone()) || digest.size > limits.max_bytes {
+        if !seen.insert(digest) || digest.size > limits.max_bytes {
             continue;
         }
         if chunk.len() == limits.max_items

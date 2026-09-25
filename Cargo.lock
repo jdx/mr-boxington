@@ -1519,6 +1519,7 @@ name = "mbx-cache-cc"
 version = "0.18.1"
 dependencies = [
  "mbx-cache-core",
+ "memchr",
  "serde",
  "serde_json",
  "strum",
@@ -1541,6 +1542,7 @@ dependencies = [
  "libc",
  "log",
  "mbx-cache-protocol",
+ "memchr",
  "mockito",
  "rand 0.10.2",
  "reflink-copy",

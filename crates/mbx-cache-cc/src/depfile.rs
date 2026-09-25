@@ -195,6 +195,19 @@ fn join_continuations(contents: &str) -> Result<String, CcBypassReason> {
 /// Anything else escaped is a spelling this parser does not model, and a
 /// mis-parsed prerequisite would silently drop an input from the key.
 fn split_prerequisites(value: &str) -> Result<Vec<PathBuf>, CcBypassReason> {
+    // Most compiler paths contain no make escapes. Copy each whole UTF-8
+    // path once instead of growing a String one character at a time.
+    if memchr::memchr2(b'\\', b'$', value.as_bytes()).is_none() {
+        return Ok(value
+            .split([' ', '\t'])
+            .filter(|word| !word.is_empty())
+            .map(PathBuf::from)
+            .collect());
+    }
+    split_escaped_prerequisites(value)
+}
+
+fn split_escaped_prerequisites(value: &str) -> Result<Vec<PathBuf>, CcBypassReason> {
     let mut files = Vec::new();
     let mut current = String::new();
     let mut characters = value.chars().peekable();
@@ -867,10 +880,7 @@ mod manifest_memo {
 /// directive would publish an object whose complete inputs are absent from the
 /// key; bypassing an otherwise cacheable object is the safe outcome instead.
 pub(crate) fn contains_assembler_input_directive(path: &Path) -> Result<bool, CcBypassReason> {
-    contains_any(path, ASSEMBLER_INPUT_DIRECTIVES)
-}
-
-fn contains_any(path: &Path, needles: &[&[u8]]) -> Result<bool, CcBypassReason> {
+    let needles = ASSEMBLER_INPUT_DIRECTIVES;
     let file = std::fs::File::open(path).map_err(|error| CcBypassReason::InputRead {
         path: path.to_path_buf(),
         message: error.to_string(),
@@ -894,10 +904,18 @@ fn contains_any(path: &Path, needles: &[&[u8]]) -> Result<bool, CcBypassReason> 
             return Ok(false);
         }
         window.extend_from_slice(&chunk[..read]);
-        if needles
-            .iter()
-            .any(|needle| contains_subslice_ascii_case_insensitive(&window, needle))
-        {
+        // Every directive begins with a dot and an ASCII letter. Search for
+        // that letter in either case, then check the dot and complete token.
+        // Searching for the letter also skips runs of dots in assembly labels.
+        if needles.iter().any(|needle| {
+            memchr::memchr2_iter(needle[1], needle[1].to_ascii_uppercase(), &window).any(|offset| {
+                offset.checked_sub(1).is_some_and(|start| {
+                    window[start..]
+                        .get(..needle.len())
+                        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(needle))
+                })
+            })
+        }) {
             return Ok(true);
         }
         let keep = window.len().saturating_sub(longest.saturating_sub(1));
@@ -905,18 +923,88 @@ fn contains_any(path: &Path, needles: &[&[u8]]) -> Result<bool, CcBypassReason> 
     }
 }
 
-fn contains_subslice_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return false;
-    }
-    haystack.windows(needle.len()).any(|window| {
-        window
-            .iter()
-            .zip(needle)
-            .all(|(left, right)| left.eq_ignore_ascii_case(right))
-    })
-}
-
 #[cfg(test)]
 #[path = "depfile_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod plain_depfile_tests {
+    use super::*;
+
+    #[test]
+    fn plain_paths_preserve_whitespace_unicode_and_make_escapes() {
+        for input in [
+            "",
+            " \t ",
+            "src/main.c include/header.h",
+            "\t路径/é.c  a#b.h\t",
+            "a\u{a0}b.h",
+            r"a\ b.h a\#b.h a$$b.h",
+            r"bad\q.h",
+            "bad$",
+            "bad\\",
+        ] {
+            let expected = split_escaped_prerequisites(input);
+            let actual = split_prerequisites(input);
+            match (actual, expected) {
+                (Ok(actual), Ok(expected)) => assert_eq!(actual, expected, "{input}"),
+                (Err(actual), Err(expected)) => {
+                    assert_eq!(format!("{actual:?}"), format!("{expected:?}"))
+                }
+                results => panic!("mismatched results for {input}: {results:?}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual performance measurement; run in release mode"]
+    fn benchmark_plain_depfile() {
+        for count in [256, 4096] {
+            for escaped in [false, true] {
+                let prerequisites = (0..count)
+                    .map(|index| {
+                        format!(
+                            " /workspace/{}/include/library-{index}/header-{index}.h",
+                            if escaped {
+                                r"some\ directory"
+                            } else {
+                                "some-directory"
+                            }
+                        )
+                    })
+                    .collect::<String>();
+                let mut before = Vec::new();
+                let mut after = Vec::new();
+                for round in 0..15 {
+                    for optimized in if round % 2 == 0 {
+                        [false, true]
+                    } else {
+                        [true, false]
+                    } {
+                        let start = std::time::Instant::now();
+                        for _ in 0..50 {
+                            let result = if optimized {
+                                split_prerequisites(std::hint::black_box(&prerequisites))
+                            } else {
+                                split_escaped_prerequisites(std::hint::black_box(&prerequisites))
+                            };
+                            std::hint::black_box(result.unwrap());
+                        }
+                        let sample = start.elapsed().as_secs_f64() * 1e6 / 50.0;
+                        if optimized {
+                            after.push(sample);
+                        } else {
+                            before.push(sample);
+                        }
+                    }
+                }
+                before.sort_by(f64::total_cmp);
+                after.sort_by(f64::total_cmp);
+                eprintln!(
+                    "{count} paths, escaped={escaped}: before {:.3} us, after {:.3} us",
+                    before[7], after[7]
+                );
+            }
+        }
+    }
+}

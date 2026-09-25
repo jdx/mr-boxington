@@ -25,6 +25,30 @@ Both tasks build the benchmark subject first. `perf:record` appends results to
 local `refs/notes/tak` history. CI compares against shared history when a
 baseline exists; an initial run seeds that history.
 
+## C/C++ input hashing
+
+```sh
+cargo bench --locked -p mbx-cache-core --bench file_digest
+```
+
+This microbenchmark compares content-only hashing with hashing plus the
+C/C++ timestamp-macro scan on 4 KiB, 64 KiB, and 4 MiB synthetic headers.
+The headers include underscore-heavy identifiers but no timestamp macros.
+It checks that both paths return the same digest and reports the median and
+range of seven 150 ms samples. Files stay warm in the OS cache, and each
+iteration includes opening and reading the file. Compare both revisions on
+the same idle machine; these timings do not measure total build time.
+
+## Assembler input scanning
+
+`cargo bench --locked -p mbx-cache-cc --bench assembler_scan` measures the
+safety scan for assembler-time include directives on preprocessed assembly.
+It uses synthetic 4 KiB, 64 KiB, and 4 MiB inputs with ordinary instructions
+and labels, plus a dot-heavy case. Each result reports the median and range
+of seven 150 ms samples, including file opening and reading from a warm OS
+cache. Run both revisions on the same idle machine; this measures scanning
+cost, not whole-build time.
+
 ## Cold, warm, and verified builds
 
 `measure_builds.py` builds this workspace with a cold target, recreates the same

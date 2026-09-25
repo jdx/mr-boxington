@@ -7,8 +7,7 @@ Cargo normally writes build outputs to `<workspace>/target`. Deleting a
 worktree deletes useful outputs, while abandoning a checkout leaves gigabytes
 behind indefinitely.
 
-Managed targets are enabled by default. For a checkout without an existing
-`target/`, the first build is enough:
+Managed targets are enabled by default. The first build is enough:
 
 ```sh
 mbx build
@@ -20,6 +19,10 @@ mbx places the target directory under its cache root and leaves a symlink at
 ```text
 target -> <cache root>/targets/v1/<checkout digest>
 ```
+
+A checkout that already has a real `target/` has it moved there on its first
+mbx build, with its outputs kept. See
+[Adoption during a build](#adoption-during-a-build).
 
 Cargo continues to report artifacts through the workspace's `target` path, so
 debugger launch configurations do not capture the private managed path that
@@ -93,22 +96,23 @@ directories, or symbolic links.
 
 ### Adoption during a build
 
-An interactive mbx build that finds an existing real `target/` offers the same
-move:
+A build that finds an existing real `target/` moves it under the managed root
+the same way and keeps its outputs:
 
 ```text
-Use a managed target directory?
-mbx can move /path/to/project/target under its managed root and leave a link in its place. The outputs are kept, and the directory is pruned after this checkout is deleted.
+mbx[cache]: moved the existing target/ directory under the managed root (2.4 GiB logical)
 ```
 
-“Move target/” is selected by default. Declining leaves every output untouched
-and continues the Cargo command normally. Non-interactive builds never prompt,
-move, or remove a directory.
+This happens with or without a terminal, so builds run by agents and scripts
+adopt too. CI builds leave `target/` in place, because a CI cache step that
+saves `target/` would save only the link. If Cargo is still writing to the
+directory, the build continues in it and a later build moves it. Set
+`target.views = false` to keep every `target/` where Cargo puts it.
 
 If the managed root is on another filesystem, mbx cannot rename the directory
-into it. In that case, the build-time prompt retains the previous option to
-remove the old outputs, with “Keep it” selected by default. The `mbx adopt`
-command never deletes or copies a target directory.
+into it. An interactive build then offers to remove the old outputs instead,
+with “Keep it” selected by default. Non-interactive builds never remove a
+directory, and the `mbx adopt` command never deletes or copies one.
 
 ### Eligibility and recovery
 
@@ -125,10 +129,10 @@ mbx leaves a checkout unchanged and explains why when:
 
 Set `target.root` to a location on the same filesystem when you want to adopt
 a directory that would otherwise be skipped. Before moving one, mbx takes its
-Cargo build locks; if a build is still writing there, mbx refuses the move and
-asks you to try again later. It then renames the directory into the managed
-root before creating the link. If the link or collection record cannot be
-created, mbx moves the directory back. When a user accepts the build-time
+Cargo build locks; if a build is still writing there, `mbx adopt` refuses the
+move and asks you to try again later. It then renames the directory into the
+managed root before creating the link. If the link or collection record cannot
+be created, mbx moves the directory back. When a user accepts the build-time
 removal option, mbx deletes the old outputs only after their managed
 replacement is ready.
 

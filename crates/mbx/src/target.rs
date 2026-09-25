@@ -101,6 +101,24 @@ pub struct AdoptionOutcome {
     pub adopted_bytes: u64,
 }
 
+/// An adoption that moved the outputs but could neither link them nor put them
+/// back. Every other adoption failure leaves the outputs where they were.
+#[derive(Debug)]
+pub struct StrandedAdoption {
+    /// Where the outputs now are.
+    pub retained: PathBuf,
+}
+
+impl std::fmt::Display for StrandedAdoption {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "the old target directory was retained at {}",
+            self.retained.display()
+        )
+    }
+}
+
 /// Remove the managed target view owned by exactly one workspace.
 pub fn remove_workspace(root: &Path, workspace_root: &Path) -> Result<Option<u64>> {
     let record_path = view_record_path(root, workspace_root);
@@ -343,10 +361,7 @@ fn adopt_existing_with(
     })();
     match restore {
         Ok(()) => Ok(AdoptionOutcome::default()),
-        Err(error) => Err(error.wrap_err(format!(
-            "the old target directory was retained at {}",
-            managed.display()
-        ))),
+        Err(error) => Err(error.wrap_err(StrandedAdoption { retained: managed })),
     }
 }
 

@@ -10,6 +10,59 @@ matching compilations and runs the compiler for everything else.
 You need an existing Rust toolchain and a Cargo project. No cache server or
 configuration file is required.
 
+## Set up with your AI agent
+
+Want your coding agent to handle setup? Open it in your project and paste the
+prompt below. It asks the agent to install mbx, adapt it to your existing
+setup, and verify that a build actually reuses cached work.
+
+<details>
+<summary>Copy a setup prompt</summary>
+
+```text
+Set up mbx (mr-boxington) for this project and verify that it works.
+
+Read the current installation and setup guides:
+https://mr-boxington.jdx.dev/installation
+https://mr-boxington.jdx.dev/setup
+https://mr-boxington.jdx.dev/cache-results#measure-cache-reuse
+
+Inspect my OS, shell, Rust toolchain, build commands, and existing mise,
+Cargo, and compiler-cache configuration. Use my existing tool manager where
+appropriate, and preserve Rust version pins and unrelated settings. Install
+mbx if needed; do not upgrade Rust just to enable it.
+
+Prefer project-scoped setup. With a compatible mise installation, enable its
+native mbx integration while preserving the existing Rust tool options.
+Otherwise, get explicit mbx commands working first. Ask before changing my
+global shell/editor configuration or replacing another compiler wrapper.
+Do not delete existing build outputs or caches, or change CI configuration.
+
+Run mbx doctor and a representative build for this project. With native mise
+integration, doctor can warn that the standalone Cargo shim is missing or
+inactive even when wrapping works. Verify activation through actual builds
+and cache hits; do not change PATH solely to clear that setup warning.
+Use your own command environment, since an agent may use a different PATH
+than my terminal. Installing mbx alone is not proof that cargo uses it.
+
+Demonstrate reuse with the same source, toolchain, profile, and features in
+two fresh temporary target directories, using the same mbx cache. If you
+configured plain cargo commands to use mbx, run this check through that route.
+Check the second build for real cache hits. Do not count Cargo skipping
+up-to-date outputs as a cache hit. If there are no hits, use mbx explain --last to
+investigate and report any remaining blocker. Remove only the temporary
+target directories you created for this check when finished.
+
+Summarize what you changed, the verification results, how I should run builds
+and tests from this agent and my terminal, and how to undo the setup. Explain
+which benefits are enabled by default. If I run multiple agents or test suites,
+mention the optional scheduler.tests setting and ask whether I want it enabled.
+```
+
+</details>
+
+To set up mbx yourself, follow the steps below.
+
 ## Install
 
 With [mise](https://mise.jdx.dev):
@@ -74,9 +127,9 @@ later builds and equivalent worktrees can reuse that work. If Cargo already
 has up-to-date outputs in `target/`, it skips those compilations entirely.
 That is normal and will not appear as mbx cache hits.
 
-For a checkout without an existing `target/`, mbx creates a managed target and
-leaves a `target` symlink in the workspace. An existing directory is replaced
-only after you accept the interactive prompt. See
+mbx creates a managed target and leaves a `target` symlink in the workspace.
+An existing `target/` is moved into the managed target with its outputs kept,
+except in CI. See
 [Managed target directories](/managed-targets) for placement and cleanup.
 
 The first build also prints the cache location and disk budgets chosen for your
