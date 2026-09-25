@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.19](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.5.18...mbx-cache-protocol-v0.5.19) - 2026-09-25
+
+### Added
+
+- *(target)* adopt an existing target/ on the first build without prompting ([#545](https://github.com/jdx/mr-boxington/pull/545))
+
+### Other
+
+- *(protocol)* verify byte digests without allocating hex strings ([#544](https://github.com/jdx/mr-boxington/pull/544))
+
 ## [0.5.18](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.5.17...mbx-cache-protocol-v0.5.18) - 2026-09-20
 
 ### Added

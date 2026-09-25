@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.32](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.31...mbx-cache-store-v0.1.32) - 2026-09-25
+
+### Added
+
+- *(target)* adopt an existing target/ on the first build without prompting ([#545](https://github.com/jdx/mr-boxington/pull/545))
+
 ## [0.1.31](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.30...mbx-cache-store-v0.1.31) - 2026-09-23
 
 ### Other
