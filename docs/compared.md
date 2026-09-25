@@ -152,4 +152,55 @@ code, a small source edit, and a fresh CI job benefit from different kinds of
 reuse. Our [benchmarks](/benchmarks) show the tested workloads and tool versions.
 Use them as a starting point, then compare the tools on your own builds.
 
-To try mbx, follow [Get started](/getting-started).
+### Ask your AI agent to try it
+
+Paste this into your coding agent while working in your project. It asks for
+measurements from your actual build, including the many-agents case.
+
+<details>
+<summary>Copy a benchmark prompt</summary>
+
+```text
+Benchmark mbx against plain Cargo on this project and tell me whether it
+would improve my workflow. Run the experiments, not just a proposed plan.
+
+Read https://mr-boxington.jdx.dev/benchmarks and
+https://mr-boxington.jdx.dev/scheduling for the measurement method and setup.
+Inspect this project's build/test commands and existing cache configuration.
+If mbx is missing, install it in a temporary location.
+
+Work in disposable copies. Leave my source changes, normal build outputs,
+existing caches, and global configuration alone. Use separate temporary
+build directories and cache stores for each tool and trial; share the mbx
+store only within a trial where reuse is intended. Disable remote caches.
+Verify that the plain Cargo baseline bypasses mbx and other compiler caches,
+including any shell or mise wrappers. Fetch dependencies before timing.
+
+Use the same source, Rust toolchain, features, and profile for both tools.
+Measure representative build and test commands in these situations:
+1. A first build with empty build outputs and an empty compiler cache.
+2. The same code in a second checkout, reusing the compiler cache but no
+   build outputs. Report cache-warming time separately.
+3. Small source edits in the same checkout. Keep normal local incremental
+   behavior and report the first edit separately from later edits.
+4. Several concurrent builds/tests in separate checkouts, as if coding
+   agents were working together. Pick a reasonable job count for this
+   machine. Compare plain Cargo, default mbx, and mbx with test scheduling
+   enabled (MBX_SCHEDULER_TESTS=1). Do not deliberately exhaust memory.
+
+Repeat each scenario at least three times, reset its starting state between
+trials, and vary tool order. Report median elapsed time and the range, total
+batch time for concurrent jobs, and memory use/pressure where measurable.
+State exactly how memory was measured; mark unavailable measurements as such.
+Verify builds/tests succeed and that the warm-cache case actually restores
+work. Investigate unexpected misses with mbx explain --last.
+
+Give me a concise results table, exact commands and tool versions, any
+failures or limitations, and a recommendation based on the measurements.
+Include cases where mbx is slower or the difference is within run-to-run
+variation. Do not infer a speedup from cache hit rate alone.
+```
+
+</details>
+
+To try mbx directly, follow [Get started](/getting-started).
