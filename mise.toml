@@ -103,6 +103,14 @@ depends = ["render:docs"]
 dir = "docs"
 run = "aube install && exec aube run docs:build"
 
+# The homepage offers this as og:video for link previews that play video. It
+# needs ffmpeg and Playwright's Chromium headless shell; builds without the
+# file omit the video tags.
+[tasks."render:showreel"]
+description = "Render the landing-page showreel to docs/public/showreel.mp4"
+dir = "docs"
+run = "aube install && exec aube run showreel:video"
+
 [tasks."render:docs"]
 description = "Generate reference documentation from the usage spec"
 depends = ["bootstrap"]

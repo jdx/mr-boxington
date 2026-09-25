@@ -37,6 +37,14 @@ jobs:
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
         if: github.ref == 'refs/heads/main'
+      # The homepage offers the showreel as og:video for link previews, so the
+      # deploy renders it fresh from the current reel and benchmark numbers.
+      - name: Render the showreel video
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ffmpeg
+          (cd docs && aube install && aube exec playwright-core install --with-deps chromium-headless-shell)
+          mise run render:showreel
       - name: Build with VitePress
         env:
           GITHUB_TOKEN: ${{ github.token }}

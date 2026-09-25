@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitepress";
@@ -18,6 +19,28 @@ if (!versionMatch) {
 }
 const latestVersion = versionMatch[1];
 const siteUrl = "https://mr-boxington.jdx.dev";
+
+// The showreel rendered to video by `mise run render:showreel`, which the docs
+// deploy runs before building. Link previews that play video (Discord,
+// iMessage, Telegram) use og:video; X ignores it and keeps the large image
+// card. Builds without the file leave the tags out.
+function showreelVideoTags(): [string, Record<string, string>][] {
+  const file = resolve(configDir, "../public/showreel.mp4");
+  if (!existsSync(file)) return [];
+  // Versioned so previews that cached an earlier render fetch the new one.
+  const version = createHash("sha256")
+    .update(readFileSync(file))
+    .digest("hex")
+    .slice(0, 12);
+  const url = `${siteUrl}/showreel.mp4?v=${version}`;
+  return [
+    ["meta", { property: "og:video", content: url }],
+    ["meta", { property: "og:video:secure_url", content: url }],
+    ["meta", { property: "og:video:type", content: "video/mp4" }],
+    ["meta", { property: "og:video:width", content: "1280" }],
+    ["meta", { property: "og:video:height", content: "720" }],
+  ];
+}
 
 export default defineConfig({
   title: "mr boxington",
@@ -199,7 +222,6 @@ gtag('config', 'G-0MDX8ZJYFY');`,
     ["link", { rel: "apple-touch-icon", href: "/favicon.png" }],
     ["link", { rel: "manifest", href: "/site.webmanifest" }],
     ["meta", { name: "theme-color", content: "#191713" }],
-    ["meta", { property: "og:type", content: "website" }],
     ["meta", { property: "og:site_name", content: "mr boxington" }],
     ["meta", { property: "og:locale", content: "en_US" }],
     ["meta", { property: "og:image:width", content: "1200" }],
@@ -217,8 +239,14 @@ gtag('config', 'G-0MDX8ZJYFY');`,
       pageData.relativePath.replace(/index\.md$/, "").replace(/\.md$/, ""),
       `${siteUrl}/`,
     ).toString();
+    const video = pageData.relativePath === "index.md" ? showreelVideoTags() : [];
 
     return [
+      [
+        "meta",
+        { property: "og:type", content: video.length ? "video.other" : "website" },
+      ],
+      ...video,
       ["link", { rel: "canonical", href: url }],
       ["meta", { property: "og:url", content: url }],
       ["meta", { property: "og:image", content: image }],
