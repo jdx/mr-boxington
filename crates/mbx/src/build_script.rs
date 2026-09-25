@@ -134,9 +134,10 @@ pub(crate) fn install(executable: &Path, binary_action: &CacheDigest) -> Result<
 
 #[cfg(unix)]
 fn install_launcher(mbx: &Path, executable: &Path) -> std::io::Result<()> {
+    let depth = profile_depth(executable);
     let profile = executable
         .ancestors()
-        .nth(3)
+        .nth(depth)
         .ok_or_else(|| std::io::Error::other("build-script path has no Cargo profile directory"))?;
     let metadata = std::fs::metadata(mbx)?;
     let modified = metadata
@@ -149,9 +150,9 @@ fn install_launcher(mbx: &Path, executable: &Path) -> std::io::Result<()> {
     identity.extend_from_slice(&metadata.len().to_le_bytes());
     identity.extend_from_slice(&modified.map_or(0, |time| time.as_nanos()).to_le_bytes());
     let identity = CacheDigest::blake3(&identity);
-    // Build-script executables always sit at `<profile>/build/<unit>/<name>`;
-    // put the pinned binary under that profile so the launcher stays portable
-    // when a target directory moves between checkouts or CI runners.
+    // Put the pinned binary under the profile, which every build script of
+    // that profile shares, so the launcher stays portable when a target
+    // directory moves between checkouts or CI runners.
     let relative = PathBuf::from(".mbx-build-script-shims")
         .join(&identity.hash)
         .join("mbx");
@@ -159,12 +160,26 @@ fn install_launcher(mbx: &Path, executable: &Path) -> std::io::Result<()> {
     install_pinned_binary(mbx, &pinned)?;
 
     let launcher = format!(
-        "#!/bin/sh\n{}=\"$0\" exec \"$(dirname \"$0\")/../../{}\" \"$@\"\n",
+        "#!/bin/sh\n{}=\"$0\" exec \"$(dirname \"$0\")/{}{}\" \"$@\"\n",
         session::BUILD_SCRIPT_SHIM_PATH_ENV,
+        "../".repeat(depth - 1),
         relative.to_string_lossy(),
     );
     std::fs::write(executable, launcher)?;
     std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755))
+}
+
+/// How many levels a build-script executable sits below its Cargo profile
+/// directory: `<profile>/build/<unit>/<name>` before Cargo 1.100, and
+/// `<profile>/build/<package>/<hash>/out/<name>` from it. An old-layout unit
+/// directory is `<package>-<hash>`, so it is never named `out`.
+#[cfg(unix)]
+fn profile_depth(executable: &Path) -> usize {
+    if executable.parent().and_then(Path::file_name) == Some("out".as_ref()) {
+        5
+    } else {
+        3
+    }
 }
 
 #[cfg(unix)]
@@ -1017,6 +1032,38 @@ fn restore_symlink(_: &str, _: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::time::{Duration, SystemTime};
+
+    #[cfg(unix)]
+    #[test]
+    fn build_script_shims_pin_one_binary_per_profile_in_either_layout() {
+        for unit in [
+            "build/fixture-0123456789abcdef/build-script-build",
+            "build/fixture/0123456789abcdef/out/build_script_build",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let profile = directory.path().join("target/debug");
+            let executable = profile.join(unit);
+            std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            std::fs::write(&executable, b"compiled build script").unwrap();
+
+            install(&executable, &CacheDigest::blake3(b"action")).unwrap();
+
+            assert!(
+                profile.join(".mbx-build-script-shims").is_dir(),
+                "{unit} should pin mbx beside its profile"
+            );
+            let launcher = std::fs::read_to_string(&executable).unwrap();
+            let pinned = launcher
+                .split("exec \"$(dirname \"$0\")/")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap();
+            assert!(
+                executable.parent().unwrap().join(pinned).is_file(),
+                "{unit} launcher should reach the pinned binary"
+            );
+        }
+    }
 
     #[test]
     fn build_script_shim_keeps_the_compiled_binary_mtime() {

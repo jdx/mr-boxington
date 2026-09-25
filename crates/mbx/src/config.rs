@@ -534,11 +534,21 @@ impl Default for LinkerSettings {
 
 impl LinkerSettings {
     pub(crate) fn for_build(&self, profile: &str, target: Option<&str>) -> Option<String> {
-        let selections = self.profiles.get(profile)?;
+        let selections = self.selections(profile)?;
         target
             .and_then(|target| selections.get(target))
             .or_else(|| selections.get("default"))
             .cloned()
+    }
+
+    /// The profile's selector table. Cargo 1.99's built-in `debug` profile
+    /// inherits `dev`, so it uses the `dev` table unless it has its own.
+    pub(crate) fn selections(&self, profile: &str) -> Option<&BTreeMap<String, String>> {
+        self.profiles.get(profile).or_else(|| {
+            (profile == "debug")
+                .then(|| self.profiles.get("dev"))
+                .flatten()
+        })
     }
 }
 
@@ -2083,6 +2093,13 @@ default = "rust-lld"
             Some("rust-lld".into())
         );
         assert_eq!(config.linker.for_build("bench", None), None);
+        assert_eq!(
+            config
+                .linker
+                .for_build("debug", Some("x86_64-unknown-linux-gnu")),
+            Some("wild@0.10.0".into()),
+            "Cargo's debug profile inherits dev"
+        );
     }
 
     #[test]

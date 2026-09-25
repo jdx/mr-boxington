@@ -596,6 +596,31 @@ fn standalone_target_mapping_covers_the_profile_tree() {
         ),
         Path::new("/tmp/target")
     );
+    // Cargo 1.100 gives every unit its own directory below `build/`.
+    assert_eq!(
+        standalone_target_root(
+            Path::new("/tmp/target/debug/build/widget/0123456789abcdef/out"),
+            None,
+        ),
+        Path::new("/tmp/target")
+    );
+    assert_eq!(
+        standalone_target_root(
+            Path::new(
+                "/tmp/target/x86_64-unknown-linux-gnu/debug/build/widget/0123456789abcdef/out"
+            ),
+            Some("x86_64-unknown-linux-gnu"),
+        ),
+        Path::new("/tmp/target")
+    );
+    // A pre-1.100 build script's OUT_DIR is not a unit output directory.
+    assert_eq!(
+        standalone_target_root(
+            Path::new("/tmp/target/debug/build/widget-0123456789abcdef/out"),
+            None,
+        ),
+        Path::new("/tmp/target/debug/build/widget-0123456789abcdef/out")
+    );
 }
 
 #[test]

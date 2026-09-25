@@ -59,7 +59,7 @@ pub(crate) fn resolve(
         }
         return Ok((!selections.is_empty()).then_some(Selection::Targets(selections)));
     }
-    let target = if environment.is_none() && settings.profiles.contains_key(&profile) {
+    let target = if environment.is_none() && settings.selections(&profile).is_some() {
         host_target(cargo_arguments)
     } else {
         None
@@ -438,9 +438,12 @@ fn cargo_profile(arguments: &[String]) -> String {
         .take_while(|argument| argument.as_str() != "--");
     let mut subcommand = None;
     let mut profile = None;
+    let mut debug = false;
     while let Some(argument) = arguments.next() {
         if argument == "--release" {
             profile = Some("release".to_owned());
+        } else if argument == "--debug" {
+            debug = true;
         } else if argument == "--profile" {
             profile = arguments.next().cloned();
         } else if let Some(value) = argument.strip_prefix("--profile=") {
@@ -452,10 +455,13 @@ fn cargo_profile(arguments: &[String]) -> String {
         }
     }
     profile.unwrap_or_else(|| {
-        if subcommand == Some("bench") {
-            "bench"
-        } else {
-            "dev"
+        match subcommand {
+            Some("bench") => "bench",
+            // `cargo install` builds with `release`. Its `--debug` selects the
+            // `debug` profile from Cargo 1.99, which inherits `dev`.
+            Some("install") if debug => "debug",
+            Some("install") => "release",
+            _ => "dev",
         }
         .into()
     })
@@ -568,6 +574,18 @@ mod tests {
         );
         assert_eq!(
             cargo_profile(&["run".into(), "--".into(), "--profile=ignored".into()]),
+            "dev"
+        );
+        assert_eq!(
+            cargo_profile(&["install".into(), "ripgrep".into()]),
+            "release"
+        );
+        assert_eq!(
+            cargo_profile(&["install".into(), "--debug".into(), "ripgrep".into()]),
+            "debug"
+        );
+        assert_eq!(
+            cargo_profile(&["run".into(), "--".into(), "--debug".into()]),
             "dev"
         );
     }
