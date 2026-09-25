@@ -1,6 +1,8 @@
-// A small 3D camera for the reel. The logo is an orthographic view with the
-// viewer at 45° azimuth and 30° elevation, so the same camera draws the logo
-// pose exactly and can also fly, tilt, or add perspective between shots.
+// A small 3D camera for the reel. The logo is a one-point perspective from
+// straight ahead (box.ts logoCam: yaw 0, pitch 0, the eye 5.5 box widths out
+// and 0.75 above the lid); the isometric world is an orthographic view from
+// 45° azimuth and 30° elevation. mixCamera flies between the two, and either
+// can tilt or change perspective between shots.
 
 import { mix } from "./color";
 import { lerp, remap } from "./math";
@@ -151,7 +153,8 @@ export class View {
   /**
    * Canvas transform mapping a planar local 2D frame into screen space:
    * local (x, y) lands at `origin + x * xAxis + y * yAxis` in the world.
-   * Exact for orthographic cameras, linearized at `origin` for perspective.
+   * Exact for orthographic cameras and for planes facing a perspective
+   * camera square on (the logo's front); otherwise linearized at `origin`.
    */
   planeMatrix(origin: V3, xAxis: V3, yAxis: V3): DOMMatrix2D {
     const o = this.project(origin);
@@ -184,21 +187,55 @@ export function applyMatrix(ctx: CanvasRenderingContext2D, m: DOMMatrix2D): void
 
 // Lighting: a key light fixed in camera space (upper left, in front), so the
 // top face reads lightest, the left panel mid, and the right panel darkest in
-// the logo pose, and faces keep that relationship as objects turn.
+// the isometric view, and faces keep that relationship as objects turn.
 const LIGHT: V3 = norm([-0.35, 0.8, 0.5]);
 
-/** Tone of a surface from 0 (right panel) to 1 (top face), logo-calibrated. */
+/** Tone of a surface, 0 (the isometric right panel) to 1 (a top face). */
 export function tone(view: View, normal: V3): number {
   const n = view.toCamera(normal);
   return remap(dot(n, LIGHT), -0.25, 0.95, 0, 1);
 }
 
-// Cardboard gradient stops from the logo: [light corner, dark corner].
+// Cardboard gradient stops from the old isometric logo: [light corner, dark
+// corner].
 const RAMP: [number, string, string][] = [
   [0, "#bd7f26", "#955c19"],
   [0.45, "#e2ab51", "#c4862c"],
   [1, "#f6d693", "#e8b95f"],
 ];
+
+// The logo character's flat material: one colour per face, no gradient, from
+// the same key light. Seen from straight ahead, as in the logo, the front
+// lands exactly on the logo's #e6ad54 and the top on #f2c479, and a band
+// FLAT_BAND darker (the lid's edge, the base) on #cf8f35. Faces turned from
+// that view shade continuously, so a turning box still reads as a solid.
+const AHEAD = new View({ cx: 0, cy: 0, scale: 1, yaw: 0, pitch: 0 });
+const TONE_FRONT = tone(AHEAD, [0, 0, 1]);
+const TONE_TOP = tone(AHEAD, [0, 1, 0]);
+/** How much darker a deep band is than the face it is painted on. */
+export const FLAT_BAND = 0.25;
+const FLAT: [number, string][] = [
+  [TONE_FRONT - 2 * FLAT_BAND, "#bd7d23"],
+  [TONE_FRONT - FLAT_BAND, "#cf8f35"],
+  [TONE_FRONT, "#e6ad54"],
+  [TONE_TOP, "#f2c479"],
+  [TONE_TOP + FLAT_BAND, "#f8dca6"],
+];
+
+/** The flat logo colour of a face of the given tone (see tone()). */
+export function flatCard(t: number): string {
+  if (t <= FLAT[0][0]) return FLAT[0][1];
+  for (let i = 1; i < FLAT.length; i++) {
+    const [t1, c1] = FLAT[i];
+    // Exact at the stops, so the logo's colours come out as written.
+    if (t === t1) return c1;
+    if (t < t1) {
+      const [t0, c0] = FLAT[i - 1];
+      return mix(c0, c1, (t - t0) / (t1 - t0));
+    }
+  }
+  return FLAT[FLAT.length - 1][1];
+}
 
 /** Two gradient colors for a cardboard face of the given tone. */
 export function cardboard(t: number): [string, string] {
