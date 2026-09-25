@@ -6,7 +6,6 @@
 // of the page as the cube that opens the isometric world.
 
 import {
-  bar,
   BEAT,
   CUBE,
   drawStagedBox,
@@ -14,6 +13,7 @@ import {
   PALETTE,
   type ReelFacts,
   type Scene,
+  sec,
   WHIP,
   WORLD_CAM,
 } from "../bible";
@@ -51,20 +51,23 @@ import {
 } from "../space";
 import { drawText, font, layout, MONO } from "../type";
 
-/** Local time of global beat `n` (this scene starts on beat 16). */
-const b = (n: number): number => (n - 16) * BEAT;
+const S = sec("data");
+
+/** Local time of beat `n` of the section. */
+const b = (n: number): number => n * BEAT;
 const FRAME = 1 / 60;
 
-const T = {
-  cargo: b(16.5),
-  mbx: b(17),
-  cargoLand: b(17.75),
-  delta: b(18),
-  label: b(18.25),
-  glint: b(18.5),
-  clear: b(19),
-  hit: b(19.25),
-  end: b(20),
+/** Beat map, local seconds. The score (score/data.ts) is written to these. */
+export const T = {
+  cargo: b(0.5),
+  mbx: b(1),
+  cargoLand: b(1.75),
+  delta: b(2),
+  label: b(2.25),
+  glint: b(2.5),
+  clear: b(3),
+  hit: b(3.25),
+  end: S.len,
 };
 
 // Layout in chart px, which equal screen px while the camera faces the chart.
@@ -116,18 +119,18 @@ function niceStep(raw: number): number {
 const MEET = -1;
 
 // Cargo lurches forward crate by crate on the sixteenths. Its third step
-// comes to rest on mbx's mark just before mbx locks there on b17.25, so at
+// comes to rest on mbx's mark just before mbx locks there on b1.25, so at
 // the lock both tips are flush: mbx is done, cargo is halfway. Then a bigger
-// step and a last grind that clunks home on b17.75. [start, end, fraction].
-const STEP_PLAN: readonly (readonly [number, number, number])[] = [
-  [b(16.5), b(16.5) + 6 * FRAME, 0.13],
-  [b(16.75), b(16.75) + 6 * FRAME, 0.28],
-  [b(17), b(17) + 6 * FRAME, MEET],
-  [b(17.25) + 2 * FRAME, b(17.25) + 8 * FRAME, 0.725],
+// step and a last grind that clunks home on b1.75. [start, end, fraction].
+export const STEP_PLAN: readonly (readonly [number, number, number])[] = [
+  [b(0.5), b(0.5) + 6 * FRAME, 0.13],
+  [b(0.75), b(0.75) + 6 * FRAME, 0.28],
+  [b(1), b(1) + 6 * FRAME, MEET],
+  [b(1.25) + 2 * FRAME, b(1.25) + 8 * FRAME, 0.725],
   // Ends half a frame early so the frame nearest the beat shows it home.
-  [b(17.25) + 8 * FRAME, T.cargoLand - FRAME / 2, 1],
+  [b(1.25) + 8 * FRAME, T.cargoLand - FRAME / 2, 1],
 ];
-const CARGO_DONE = T.cargoLand - FRAME / 2;
+export const CARGO_DONE = T.cargoLand - FRAME / 2;
 /** The last step starts slow and arrives at speed, so it stops with a clunk. */
 const grind = cubicBezier(0.4, 0, 0.8, 0.8);
 
@@ -213,12 +216,12 @@ function cargoGrow(steps: readonly number[], t: number, quick = 1): number {
 }
 
 /**
- * mbx launches with speed, reaches its mark on the frame nearest b17.25 (a
+ * mbx launches with speed, reaches its mark on the frame nearest b1.25 (a
  * hair early, so that frame shows the tips flush), and overshoots by about 7%
  * before settling. The launch is tuned so the figure counts up evenly, one or
  * two units a frame: 1.3, 3.0, 4.8, 6.4, 7.7, 8.6, then 9.2 on the beat.
  */
-const mbxGrow = (t: number): number => spring(t - T.mbx, 3.7, 0.66, 7.75);
+export const mbxGrow = (t: number): number => spring(t - T.mbx, 3.7, 0.66, 7.75);
 let mbxCross = -1;
 /** When the mbx bar first reaches its value. */
 function mbxCrossing(): number {
@@ -241,7 +244,7 @@ function mbxCrossing(): number {
   return hi;
 }
 /** The readout locks half a frame before the bar's crossing, so the lock frame is crisp. */
-const mbxLock = (): number => mbxCrossing() - FRAME / 2;
+export const mbxLock = (): number => mbxCrossing() - FRAME / 2;
 
 // Whip layers. The title leads; the plot and then the row labels trail it
 // with more overshoot and a longer, dragging settle.
@@ -839,16 +842,16 @@ function frontCam(m: Model, t: number): Camera {
   };
 }
 
-// b19 to b20: the page falls back while the bar compacts on b19.25, the
+// b3 to b4: the page falls back while the bar compacts on b3.25, the
 // camera orbits in perspective while the square extrudes, then the lens
-// flattens and dollies back to the world view. Everything starts on b19, the
+// flattens and dollies back to the world view. Everything starts on b3, the
 // score's swipe, and the page keeps falling until the cube settles.
 const ROT = [T.clear, T.end - 0.07] as const;
 const MOVE = [T.clear, T.end - 0.1] as const;
 const DOLLY = [T.hit + 0.02, T.end - 0.045] as const;
 const EXTRUDE = [T.hit - 0.02, T.end - 0.075] as const;
 /** The cube settles into the world view here (the score's soft seat). */
-const SETTLE = DOLLY[1];
+export const SETTLE = DOLLY[1];
 // Weighted late, so the swing and the pull-back are still visibly braking
 // through the last frames rather than parked a tenth of a second early.
 const rotEase = cubicBezier(0.45, 0, 0.4, 1);
@@ -858,7 +861,7 @@ const T_REST = T.end - 0.03;
 /** Viewer distance, world units, at the orbit's widest lens. */
 const PERSP = 7;
 
-/** Perspective opening on b19: a kick on the first frame, full by +0.16 s. */
+/** Perspective opening on b3: a kick on the first frame, full by +0.16 s. */
 const lensIn = (t: number): number => outCubic(progress(T.clear, T.clear + 0.16, t));
 
 function camAt(m: Model, t: number): Camera {
@@ -1257,7 +1260,7 @@ function drawCargo(ctx: CanvasRenderingContext2D, P: Plane, m: Model, t: number,
     // Leading-edge light while a crate is moving.
     const v = cargoTip(m, t) - cargoTip(m, t - FRAME);
     tipLight(ctx, P, tip, ROW_CARGO, clamp(v / 70) * 0.8, PALETTE.tealLight);
-    // A short, muted flare when the last crate lands on b17.75.
+    // A short, muted flare when the last crate lands on b1.75.
     landFlare(ctx, P, tip, ROW_CARGO, flash(t, CARGO_DONE, 0.04) * 0.6, PALETTE.tealLight);
   }
   // The readout rides the tip.
@@ -1319,7 +1322,7 @@ function drawMbxFx(ctx: CanvasRenderingContext2D, P: Plane, m: Model, t: number)
   landFlare(ctx, P, tip, ROW_MBX, flash(t, mbxLock(), 0.04), PALETTE.amberBright);
   const pf = flash(t, mbxLock(), 0.016);
   if (m.mbx < m.cargo && pf > 0.25) photoFinish(ctx, P, mbxEnd(m), pf);
-  // A light sweep across the bar, entering it on b18.5. Cream laid over the
+  // A light sweep across the bar, entering it on b2.5. Cream laid over the
   // amber, never added, so no channel clips and the hue stays amber.
   const gp = progress(T.glint - 0.04, T.glint + 0.22, t);
   if (gp > 0 && gp < 1) {
@@ -1341,7 +1344,7 @@ function drawMbxFx(ctx: CanvasRenderingContext2D, P: Plane, m: Model, t: number)
   }
 }
 
-// The delta figure pops on b18.25: launched two frames early on a stiff
+// The delta figure pops on b2.25: launched two frames early on a stiff
 // spring so it is at full size on the beat, then overshoots.
 const DELTA_POP = (t: number): number => spring(t - (T.label - 2 * FRAME), 5, 0.45, 40);
 
@@ -1375,7 +1378,7 @@ function drawDelta(ctx: CanvasRenderingContext2D, P: Plane, m: Model, t: number,
   }
 
   // Extension lines rise from each bar's end, then the dimension line spans
-  // them. On b19 they draw back up into the dimension line and leave with the
+  // them. On b3 they draw back up into the dimension line and leave with the
   // words, so nothing points at the bar once it has gone.
   if (fade.text > 0) {
     ctx.save();
@@ -1440,7 +1443,7 @@ function drawDelta(ctx: CanvasRenderingContext2D, P: Plane, m: Model, t: number,
 const crouchAt = keys([
   [T.clear - 0.11, 0],
   [T.clear, 1, swiftOut],
-  // The release snaps on b19, with the swipe.
+  // The release snaps on b3, with the swipe.
   [T.hit - 0.02, 0, outCubic],
 ]);
 const CROUCH = 0.11;
@@ -1478,7 +1481,7 @@ function drawMbxBox(ctx: CanvasRenderingContext2D, view: View, m: Model, t: numb
 
 /**
  * Where the collapsing bar's zero end is, chart px: a latch-release jolt on
- * b19 (visible on its first frame), then the rush into b19.25.
+ * b3 (visible on its first frame), then the rush into b3.25.
  */
 function collapseLeft(m: Model, t: number): number {
   const c =
@@ -1488,7 +1491,7 @@ function collapseLeft(m: Model, t: number): number {
 }
 
 /**
- * The zero end covers most of its travel in the two frames before b19.25, so
+ * The zero end covers most of its travel in the two frames before b3.25, so
  * it drags a smear of the ground it just crossed, and on impact that smear
  * breaks into three speed ticks that are reeled in behind the square.
  */
@@ -1551,9 +1554,9 @@ function collapseTrail(
 }
 
 export const scene: Scene = {
-  id: "data",
-  start: bar(4),
-  end: bar(5),
+  id: S.id,
+  start: S.start,
+  end: S.end,
   draw(ctx, lt, env) {
     const t = lt;
     ctx.fillStyle = PALETTE.bg;

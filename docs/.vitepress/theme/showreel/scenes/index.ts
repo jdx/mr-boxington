@@ -8,4 +8,5 @@ import { scene as world } from "./s6-world";
 import { scene as morph } from "./s7-morph";
 import { scene as logo } from "./s8-logo";
 
+/** One scene per section, in the timeline's order (bible.ts SECTIONS). */
 export const scenes: Scene[] = [unfold, character, type, flow, data, world, morph, logo];

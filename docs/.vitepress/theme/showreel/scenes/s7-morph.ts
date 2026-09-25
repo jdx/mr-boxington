@@ -3,7 +3,7 @@
 // real implicit field (summed compact kernels) sampled on a coarse grid,
 // contoured with marching squares, resampled, and drawn as a smooth path.
 
-import { bar, beat, END_CAM, END_POSE, keptDiscs, PALETTE, type Scene } from "../bible";
+import { beat, END_CAM, END_POSE, keptDiscs, PALETTE, type Scene, sec } from "../bible";
 import { boxSilhouette } from "../box";
 import { mix, rgba } from "../color";
 import { glow } from "../fx";
@@ -23,19 +23,17 @@ import {
 } from "../math";
 import { View } from "../space";
 
-const T0 = bar(6);
-/** Local time of global beat `n`. */
-const at = (n: number): number => beat(n) - T0;
+const S = sec("morph");
 
-// Anchors, local seconds.
-const PULL = at(24.5);
-const FIRST = at(25);
-const SECOND = at(25.5);
-const MERGE = at(26);
-const SNAP = at(26.25);
-const INHALE = at(26.5);
-const MORPH = at(26.75);
-const LAND = at(27.5);
+// Anchors, local seconds. The score (score/morph.ts) is written to these.
+export const PULL = beat(0.5);
+export const FIRST = beat(1);
+export const SECOND = beat(1.5);
+export const MERGE = beat(2);
+export const SNAP = beat(2.25);
+export const INHALE = beat(2.5);
+export const MORPH = beat(2.75);
+export const LAND = beat(3.5);
 /** Every residual wobble is gone by here, so the last frames are exact. */
 const SETTLED = LAND + 0.2;
 
@@ -137,9 +135,9 @@ function layout(): Layout {
 // Pull schedule for the six outer discs (KEEP order 1..6). They join in
 // point-symmetric pairs through the core, so the blob grows as a bar the
 // swirl turns into a pinwheel, never as lobes on one side. Each pair joins
-// with its own gesture: the first pair reaches for the core (b25), the core
-// throws out arms and yanks the second pair in (b25.5), and the sides slam
-// in on b26 hard enough to throw up a drop.
+// with its own gesture: the first pair reaches for the core (b1), the core
+// throws out arms and yanks the second pair in (b1.5), and the sides slam
+// in on b2 hard enough to throw up a drop.
 type Gesture = "reach" | "grab" | "slam";
 interface Pull {
   gesture: Gesture;
@@ -170,7 +168,7 @@ const PULLS: Record<number, Pull> = {
  * long after the bridge they would reach full length (tuned so the bridge
  * lands on the beat while the arm is still travelling).
  */
-const ARM = { out: 0.22, r: 15, lead: 0.1223 };
+export const ARM = { out: 0.22, r: 15, lead: 0.1223 };
 /** Ring radius the absorbed discs churn on inside the blob. */
 const REST = 20;
 /**
@@ -235,9 +233,9 @@ function discAngle(i: number, t: number): number {
 }
 
 /**
- * Camera push about the blob. It creeps in with the pull, lands on the b26
+ * Camera push about the blob. It creeps in with the pull, lands on the b2
  * slam and holds while the blob breathes and starts to set, then snaps back
- * out and stops dead on b27.5, so the silhouette's rebound reads as impact.
+ * out and stops dead on b3.5, so the silhouette's rebound reads as impact.
  */
 const zoom = keys([
   [0, 1],
@@ -246,9 +244,9 @@ const zoom = keys([
   [LAND, 1, cubicBezier(0.5, 0, 0.75, 0.5)],
 ]);
 
-// The drop the b26 slam throws up. It rises inside the blob, breaks the
-// surface as a ball on a thread that thins until it snaps on b26.25, flies
-// a ballistic arc, and plops back in on b26.5 as the blob inhales to meet
+// The drop the b2 slam throws up. It rises inside the blob, breaks the
+// surface as a ball on a thread that thins until it snaps on b2.25, flies
+// a ballistic arc, and plops back in on b2.5 as the blob inhales to meet
 // it. Positions are relative to the blob center, along `dir`.
 const DROP = {
   r: 25,
@@ -287,12 +285,12 @@ function dropAt(t: number): Pt {
   return { x: ux * d, y: uy * d + 0.5 * D.g * s * s };
 }
 
-/** The b26 slam squeezes the blob from the sides: a vertical stretch that springs back. */
+/** The b2 slam squeezes the blob from the sides: a vertical stretch that springs back. */
 const slam = (t: number): number => 0.085 * wobble(t, MERGE, 3.4, 7);
 
 /**
- * The breath, as extra vertical stretch: in on b26.5 (rising to catch the
- * drop), out into a squat on b26.75, and the morph springs up out of it.
+ * The breath, as extra vertical stretch: in on b2.5 (rising to catch the
+ * drop), out into a squat on b2.75, and the morph springs up out of it.
  */
 const breath = keys([
   [MERGE + 0.12, 0],
@@ -356,7 +354,7 @@ function motion(t: number): Frame {
   const segs: Seg[] = [];
   const h = 1 / 240;
   L.discs.forEach((d, i) => {
-    // Jelly: the b24 impulse rings each disc's 2- and 3-lobe modes. One
+    // Jelly: the b0 impulse rings each disc's 2- and 3-lobe modes. One
     // shared sideways splat axis, so the group reads as a single landing.
     const delay = i === 0 ? 0 : 0.03 * hash(i, 3);
     const f2 = 3.3 + 0.4 * hash(i, 5);
@@ -764,13 +762,15 @@ function rayDist(loop: Pt[], c: Pt, th: number): number {
  * carries on shrinking a little and squashes down, then springs back up
  * past rest and settles. Starts from rest, gone by SETTLED.
  */
+/** The landing's ring-down: exp(-decay d) sin(2 pi f d). */
+export const RING = { f: 4.2, decay: 10 };
 function jellyHex(t: number): Pt[] {
   const L = layout();
   const d = t - LAND;
-  const env = Math.exp(-d * 10) * (1 - smoothstep(LAND + 0.1, SETTLED, t));
-  const s = 1 - 0.03 * env * Math.sin(TAU * 4.2 * d);
+  const env = Math.exp(-d * RING.decay) * (1 - smoothstep(LAND + 0.1, SETTLED, t));
+  const s = 1 - 0.03 * env * Math.sin(TAU * RING.f * d);
   const e = -0.032 * env * Math.sin(TAU * 4.8 * d);
-  const rot = 0.02 * env * Math.sin(TAU * 4.2 * d);
+  const rot = 0.02 * env * Math.sin(TAU * RING.f * d);
   const sx = s / (1 + e);
   const sy = s * (1 + e);
   const c = Math.cos(rot);
@@ -897,7 +897,7 @@ function morphLoop(blob: Pt[], t: number, m: number): Pt[] {
   return out.reverse();
 }
 
-/** Morph weight: builds out of the exhale and lands on b27.5. */
+/** Morph weight: builds out of the exhale and lands on b3.5. */
 const morphWeight = (t: number): number => (t <= MORPH ? 0 : progress(MORPH, LAND, t) ** 1.6);
 
 // Drawing.
@@ -1209,9 +1209,9 @@ function drawLiquid(
 }
 
 export const scene: Scene = {
-  id: "morph",
-  start: bar(6),
-  end: bar(7),
+  id: S.id,
+  start: S.start,
+  end: S.end,
   draw(ctx, lt, env) {
     const t = lt;
     const L = layout();

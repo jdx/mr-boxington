@@ -5,7 +5,6 @@
 // three node names falls away and the names fly to the flow scene's labels.
 
 import {
-  bar,
   beat,
   drawNodeLabel,
   drawStagedBox,
@@ -16,6 +15,7 @@ import {
   NODES,
   PALETTE,
   type Scene,
+  sec,
   W,
 } from "../bible";
 import { boxFrame, CREAM, faceToScreen, INK, panelMatrix } from "../box";
@@ -41,25 +41,29 @@ import {
 import { add, applyMatrix, type Camera, mul, type V3, View } from "../space";
 import { font, layout, MONO } from "../type";
 
-// Beat map, local seconds. The score (audio.ts) is written to these.
-const T_IRIS = beat(0.5); // the iris has filled the frame; the first key lands
+const S = sec("type");
+
+// Beat map, local seconds. The score (score/type.ts) is written to these.
+export const T_IRIS = beat(0.5); // the iris has filled the frame; the first key lands
 const T_TYPED = beat(0.9); // hero line fully typed
-const T_P = beat(1); // "projects," lands
-const T_MAIN = beat(1.25); // main draws out under it, commit to commit
-const T_BRANCH = beat(1.75); // a git branch leaves the main line...
-const T_W = beat(2); // ...and lands on its commit: "worktrees," locks
-const T_AND = beat(2.25); // "and" glides in on the sixteenth pickup
-const T_CI = beat(2.5); // "CI." stamps in giant
-const T_SNAP = T_CI + 0.05; // ...holds three frames, then snaps down
-const T_OUT = beat(3); // breakup: extras fall, names fly
+export const T_P = beat(1); // "projects," lands
+export const T_MAIN = beat(1.25); // main draws out under it, commit to commit
+export const T_BRANCH = beat(1.75); // a git branch leaves the main line...
+export const T_W = beat(2); // ...and lands on its commit: "worktrees," locks
+export const T_AND = beat(2.25); // "and" glides in on the sixteenth pickup
+export const T_CI = beat(2.5); // "CI." stamps in giant
+export const T_SNAP = T_CI + 0.05; // ...holds three frames, then snaps down
+export const T_OUT = beat(3); // breakup: extras fall, names fly
+/** Main's second commit pops just before the branch forks. */
+export const MAIN_TIP = T_BRANCH - 0.03;
 
 /** Global time of the finished lockup's last frame before the breakup; the reel's poster. */
-export const LOCKUP = bar(2) + T_OUT - 0.06;
-// The names reach their labels a frame before b12, as the score's name
-// whooshes peak: from here on the frame is exactly handoff 3 -> 4.
-const T_LAND = bar(1) - 0.0175;
+export const LOCKUP = S.start + T_OUT - 0.06;
+// The names reach their labels a frame before the section ends, as the
+// score's name whooshes peak: from here on the frame is exactly handoff 3 -> 4.
+export const T_LAND = S.len - 0.0175;
 
-const HERO = "Reuse matching compilation work across";
+export const HERO = "Reuse matching compilation work across";
 const WL = 940; // lockup width; every display line is justified to it
 const LX = (W - WL) / 2;
 const EM = NODE_LABEL.size;
@@ -268,9 +272,9 @@ function glyph(
   ctx.restore();
 }
 
-// Key times for the hero line. The score ticks the same weights over the
-// same window, so every visible key has its click.
-const KEY_T: number[] = (() => {
+// Key times for the hero line. The score ticks these, so every visible key
+// has its click.
+export const KEY_T: readonly number[] = (() => {
   const w: number[] = [];
   for (let i = 0; i < HERO.length; i++) {
     w.push(0.6 + hash(i, 41) * 0.8 + (HERO[i - 1] === " " ? 0.5 : 0));
@@ -503,8 +507,9 @@ interface Flyer {
 }
 
 // The names are under way two frames after the break and keep real speed
-// into the last frames: about 90% of the way at 5.50 and 97% at 5.55, so
-// they arrive with the score's whooshes on b12 instead of creeping in.
+// into the last frames: about 90% of the way at 1.75 s and 97% at 1.80 s,
+// so they arrive with the score's whooshes at the section's end instead of
+// creeping in.
 const FLY = cubicBezier(0.3, 0.05, 0.55, 1);
 const LAG = 0.0012;
 // Motion blur as a 180° shutter: trailing samples over half a frame.
@@ -1049,7 +1054,7 @@ function drawBranch(
     }
     if (mainP < 1) penTip(ctx, sx(c, m1), sy(c, br.ay), c.z, 0.8);
   }
-  const tipAt = T_BRANCH - 0.03;
+  const tipAt = MAIN_TIP;
   const tip = outBack(2.6)(progress(tipAt - 0.01, tipAt + 0.08, lt)) * gone;
   const tipHot = 0.8 * pulse(lt, tipAt, 0.004, 0.06);
   commit(ctx, sx(c, br.x1), sy(c, br.ay), 11 * c.z * tip, lw, tipHot, bg, dim);
@@ -1142,9 +1147,9 @@ function drawCI(
 }
 
 export const scene: Scene = {
-  id: "type",
-  start: bar(2),
-  end: bar(3),
+  id: S.id,
+  start: S.start,
+  end: S.end,
   draw(ctx, lt) {
     ctx.save();
     ctx.textAlign = "left";

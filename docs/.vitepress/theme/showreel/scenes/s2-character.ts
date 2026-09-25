@@ -3,7 +3,7 @@
 // and then the face assembles one feature per sixteenth under a push-in,
 // until it wears the logo pose for the monocle dive.
 
-import { BEAT, bar, H1_POSE, HERO_CAM, PALETTE, type Scene } from "../bible";
+import { BEAT, H1_POSE, HERO_CAM, PALETTE, type Scene, sec } from "../bible";
 import {
   type BoxFrame,
   type BoxPose,
@@ -52,25 +52,27 @@ import {
   View,
 } from "../space";
 
-// Accents in local time (scene start is global beat 4).
+const S = sec("character");
+
+// Accents in local time. The score (score/character.ts) is written to these.
 const at = (b: number) => b * BEAT;
-const LAUNCH = at(0.5);
+export const LAUNCH = at(0.5);
 const APEX = at(1);
-const LAND = at(1.5);
-const EYES = at(2);
-const BROWS = at(2.25);
-const MUST = at(2.5);
-const LABEL = at(2.75);
-const MONO = at(3);
-const GLINT = at(3.25);
-const TIE = at(3.5);
-const BLINK = at(3.75);
+export const LAND = at(1.5);
+export const EYES = at(2);
+export const BROWS = at(2.25);
+export const MUST = at(2.5);
+export const LABEL = at(2.75);
+export const MONO = at(3);
+export const GLINT = at(3.25);
+export const TIE = at(3.5);
+export const BLINK = at(3.75);
 
 /** Pops start one frame early with a kick, so the anchor frame already reads. */
 const LEAD = 1 / 60;
 /** Every residual wobble is blended to rest over this window before the handoff. */
-const FIN0 = 1.78;
-const FIN1 = 1.852;
+const FIN0 = S.len - 0.095;
+const FIN1 = S.len - 0.023;
 
 const FLOOR = H1_POSE.pos[1];
 const IMPACT = 0.045;
@@ -350,7 +352,8 @@ function faceAt(lt: number): FaceParams {
 // seat, turning into the face plane.
 
 const MONO_TOP = MONO - 0.14;
-const MONO_UP = MONO_TOP - 0.05;
+/** The monocle is flicked up from behind the lid. */
+export const MONO_UP = MONO_TOP - 0.05;
 const MONO_SWITCH = MONO + 0.08;
 /** Arc relative to the seat, in px at HERO_CAM scale. */
 const ARC_X = 125;
@@ -944,9 +947,9 @@ function clinkRipple(ctx: CanvasRenderingContext2D, m: DOMMatrix2D, lt: number) 
 const LAND_HALF = 0.5 / Math.sqrt(0.78);
 
 export const scene: Scene = {
-  id: "character",
-  start: bar(1),
-  end: bar(2),
+  id: S.id,
+  start: S.start,
+  end: S.end,
   draw(ctx, lt, env) {
     ctx.fillStyle = PALETTE.bg;
     ctx.fillRect(0, 0, env.W, env.H);

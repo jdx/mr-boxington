@@ -1,5 +1,6 @@
-// The reel's shared contract: tempo, palette, cameras, and the exact frame
-// each scene hands to the next. Scenes own everything between handoffs.
+// The reel's shared contract: tempo, the timeline, palette, cameras, and the
+// exact frame each scene hands to the next. Scenes own everything between
+// handoffs.
 
 import { type BoxPose, drawBox, drawShadow, FACE_FULL, HERO_POSE } from "./box";
 import { DEG } from "./math";
@@ -10,13 +11,80 @@ import { drawText, font } from "./type";
 export const W = 1920;
 export const H = 1080;
 
-/** 128 BPM puts eight 4/4 bars in exactly fifteen seconds. */
+/** 128 BPM puts a 4/4 bar in exactly 1.875 seconds. */
 export const BPM = 128;
 export const BEAT = 60 / BPM;
 export const BAR = BEAT * 4;
-export const DURATION = BAR * 8;
 export const beat = (n: number): number => n * BEAT;
 export const bar = (n: number): number => n * BAR;
+
+/**
+ * The timeline: every section in order, in whole bars. The reel's length,
+ * the chapters, each scene's span, and where the score places its cues all
+ * come from here, so lengthening or inserting a section moves everything
+ * after it. Labels name the craft on show, as on a reel.
+ */
+export const SECTIONS = [
+  { id: "unfold", label: "Line & fold", bars: 1 },
+  { id: "character", label: "Character", bars: 1 },
+  { id: "type", label: "Kinetic type", bars: 1 },
+  { id: "flow", label: "Particles", bars: 1 },
+  { id: "data", label: "Data", bars: 1 },
+  { id: "world", label: "Isometric", bars: 1 },
+  { id: "morph", label: "Liquid morph", bars: 1 },
+  { id: "logo", label: "Logo resolve", bars: 1 },
+] as const satisfies readonly { id: string; label: string; bars: number }[];
+
+export type SectionId = (typeof SECTIONS)[number]["id"];
+
+/** One section on the reel's clock. Times are global seconds. */
+export interface Section {
+  id: SectionId;
+  label: string;
+  bars: number;
+  start: number;
+  /** The frame at `end` belongs to the next section. */
+  end: number;
+  /** Length in seconds. */
+  len: number;
+  /** Global time of local time `lt`, seconds into the section. */
+  at(lt: number): number;
+  /** Global time of beat `n` of the section; beat 0 is its first downbeat. */
+  beat(n: number): number;
+  /** Global time of bar `n` of the section. */
+  bar(n: number): number;
+}
+
+const TIMELINE = new Map<SectionId, Section>();
+{
+  // Counted in whole bars and beats, so every boundary is exact.
+  let first = 0;
+  for (const { id, label, bars } of SECTIONS) {
+    const b0 = first;
+    TIMELINE.set(id, {
+      id,
+      label,
+      bars,
+      start: bar(b0),
+      end: bar(b0 + bars),
+      len: bar(bars),
+      at: (lt) => bar(b0) + lt,
+      beat: (n) => beat(b0 * 4 + n),
+      bar: (n) => bar(b0 + n),
+    });
+    first += bars;
+  }
+}
+
+/** Where section `id` sits on the reel's clock. */
+export function sec(id: SectionId): Section {
+  const s = TIMELINE.get(id);
+  if (!s) throw new Error(`no section "${id}"`);
+  return s;
+}
+
+/** The whole reel: every section, end to end. */
+export const DURATION = bar(SECTIONS.reduce((n, s) => n + s.bars, 0));
 
 export const PALETTE = {
   /** Deepest background, used behind the fold and the end card. */
@@ -59,31 +127,28 @@ export interface SceneEnv {
 }
 
 export interface Scene {
-  id: string;
-  /** Global start and end, seconds. The frame at `end` belongs to the next scene. */
+  id: SectionId;
+  /**
+   * Global start and end, seconds: its section's, from `sec(id)`. The frame
+   * at `end` belongs to the next scene.
+   */
   start: number;
   end: number;
   /** Draw one frame. `lt` is local time, `t - start`. Paint the whole frame. */
   draw(ctx: CanvasRenderingContext2D, lt: number, env: SceneEnv): void;
 }
 
-/** Each scene is one bar. Labels name the craft on show, as on a reel. */
-export const CHAPTERS = [
-  { id: "unfold", label: "Line & fold" },
-  { id: "character", label: "Character" },
-  { id: "type", label: "Kinetic type" },
-  { id: "flow", label: "Particles" },
-  { id: "data", label: "Data" },
-  { id: "world", label: "Isometric" },
-  { id: "morph", label: "Liquid morph" },
-  { id: "logo", label: "Logo resolve" },
-].map((c, i) => ({ ...c, start: bar(i), end: bar(i + 1) }));
+/** One chapter per section, for the HUD and for players. */
+export const CHAPTERS = SECTIONS.map(({ id }) => {
+  const { label, start, end } = sec(id);
+  return { id, label, start, end };
+});
 
 export const iso = { yaw: 45 * DEG, pitch: 30 * DEG };
 
-// Handoff 1 → 2 at bar 1 and 2 → 3 at bar 2: Mr Boxington centered in the
-// logo pose. At bar 1 the box is closed and taped with no face or label; by
-// bar 2 it wears HERO_POSE.
+// Handoffs unfold → character and character → type: Mr Boxington centered
+// in the logo pose. At the first the box is closed and taped with no face or
+// label; by the second it wears HERO_POSE.
 
 export const HERO_CAM: Camera = { cx: 960, cy: 540, scale: 280, ...iso, target: [0, 0, 0] };
 /** A box standing on the floor: its contact shadow, then the box. */
@@ -100,7 +165,7 @@ export function drawStagedBox(
 export const H1_POSE: BoxPose = { ...HERO_POSE, label: 0, face: null };
 export const H2_POSE: BoxPose = { ...HERO_POSE, face: { ...FACE_FULL } };
 
-// Handoff 3 → 4 at bar 3: only three labels on the background, exactly as
+// Handoff type → flow: only three labels on the background, exactly as
 // drawn by drawNodeLabel, at the node positions the flow scene builds on.
 
 export const NODES = {
@@ -129,13 +194,13 @@ export function drawNodeLabel(
   ctx.restore();
 }
 
-// Handoff 4 → 5 at bar 4: a whip pan. The flow scene's content leaves to the
+// Handoff flow → data: a whip pan. The flow scene's content leaves to the
 // left over its last 0.14 s using fx.smear; the data scene's content arrives
 // from the right over its first 0.14 s the same way. The background is
 // PALETTE.bg on both sides.
 export const WHIP = 0.14;
 
-// Handoff 5 → 6 at bar 5: one plain cube (no face, tape, or label) at the
+// Handoff data → world: one plain cube (no face, tape, or label) at the
 // center cell of the world grid under WORLD_CAM, with no floor grid yet.
 
 export const WORLD_CAM: Camera = { cx: 960, cy: 600, scale: 70, ...iso, target: [0, 0, 0] };
@@ -149,7 +214,7 @@ export const cellPose = (x: number, z: number, extra: Partial<BoxPose> = {}): Bo
 });
 export const H5_POSE: BoxPose = cellPose(0, 0);
 
-// Handoff 6 → 7 at bar 6: the boxes that survive pruning, each shown as a
+// Handoff world → morph: the boxes that survive pruning, each shown as a
 // flat PALETTE.amber disc (keptDiscs) on PALETTE.bg, nothing else.
 
 export const KEEP: readonly [number, number][] = [
@@ -170,7 +235,7 @@ export function keptDiscs(): { x: number; y: number; r: number }[] {
   });
 }
 
-// Handoff 7 → 8 at bar 7: the silhouette of END_POSE under END_CAM
+// Handoff morph → logo: the silhouette of END_POSE under END_CAM
 // (boxSilhouette) filled flat with PALETTE.amber on PALETTE.night.
 
 export const END_CAM: Camera = { cx: 960, cy: 410, scale: 185, ...iso, target: [0, 0, 0] };

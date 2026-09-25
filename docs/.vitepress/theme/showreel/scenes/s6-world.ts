@@ -4,7 +4,6 @@
 // survivors turn into the flat amber discs the liquid-morph scene picks up.
 
 import {
-  bar,
   BEAT,
   beat,
   CUBE,
@@ -16,6 +15,7 @@ import {
   keptDiscs,
   PALETTE,
   type Scene,
+  sec,
   WORLD_CAM,
 } from "../bible";
 import {
@@ -81,39 +81,42 @@ const SHOCK_EDGE = mixRGB(PALETTE.amberBright, PALETTE.paper, 0.6);
 /** Keeper glint: green pushed toward paper. */
 const GLINT = hex(mixRGB(PALETTE.green, PALETTE.paper, 0.6));
 
-// Beat-locked anchors, local seconds (the scene starts on b20).
-const T_STOMP = beat(0.25); // center cube stomps, the ripple leaves
-const T_LAND0 = beat(0.5); // b20.5: first ring touches down
-const T_LAND1 = beat(1.5); // b21.5: the rim lands
-const T_BEAM0 = beat(2); // b22: beam ignites at the back corner
-const T_BEAM1 = beat(3); // b23: prune done, kept cubes glow and hop
-const T_DISC = beat(4) - 0.02; // exact discs for the final frames
+const S = sec("world");
+
+// Beat-locked anchors, local seconds. The score (score/world.ts) is written
+// to these.
+export const T_STOMP = beat(0.25); // center cube stomps, the ripple leaves
+export const T_LAND0 = beat(0.5); // b0.5: first ring touches down
+export const T_LAND1 = beat(1.5); // b1.5: the rim lands
+export const T_BEAM0 = beat(2); // b2: beam ignites at the back corner
+export const T_BEAM1 = beat(3); // b3: prune done, kept cubes glow and hop
+export const T_DISC = S.len - 0.02; // exact discs for the final frames
 
 const HALF = CUBE / 2;
 const EDGE = GRID_R + 0.5;
 // The folding carton matches drawBox's outline weight and tape proportions.
 const LW = OUTLINE_RATIO * CUBE; // drawBox's outline, in world units
 /** The outermost occupied ring (the four corner cells stay empty). */
-const DLAST = Math.hypot(GRID_R, GRID_R - 1);
+export const DLAST = Math.hypot(GRID_R, GRID_R - 1);
 
 // The rain: every cube pops into being at rest above its cell and drops
 // under one gravity. The stomp's shock ring passes under the first ring
 // three frames after the hit, pops it into being just above the floor, and
-// it lands on b20.5.
-const T_POP0 = T_STOMP + 0.05;
+// it lands on b0.5.
+export const T_POP0 = T_STOMP + 0.05;
 const POP = 0.06;
 const DROP0 = 0.45;
 const DROP1 = 3.4;
 const G = (2 * DROP0) / (T_LAND0 - T_POP0) ** 2;
 const popScale = outBack(2.2);
 
-// The beam sweeps the diagonal x + z = c from the back corner (-9) on b22,
+// The beam sweeps the diagonal x + z = c from the back corner (-9) on b2,
 // crossing one row per 1/64 bar, so it touches the kept rows (-4, 0, 4) on
-// b22.25, b22.5, and b22.75. After the last keeper it accelerates out of the
-// front corner, so every carton is flat by b23.
+// b2.25, b2.5, and b2.75. After the last keeper it accelerates out of the
+// front corner, so every carton is flat by b3.
 const V_BEAM = 16 / BEAT;
-const T_FAST = T_BEAM0 + 0.75 * BEAT;
-const T_BEAMEND = T_BEAM0 + (7 / 8) * BEAT;
+export const T_FAST = T_BEAM0 + 0.75 * BEAT;
+export const T_BEAMEND = T_BEAM0 + (7 / 8) * BEAT;
 const C_FAST = -9 + V_BEAM * (T_FAST - T_BEAM0);
 const K_BEAM = (9 - C_FAST - V_BEAM * (T_BEAMEND - T_FAST)) / (T_BEAMEND - T_FAST) ** 2;
 function beamPos(t: number): number {
@@ -122,7 +125,7 @@ function beamPos(t: number): number {
   return C_FAST + V_BEAM * u + K_BEAM * u * u;
 }
 /** When the beam reaches a row: one unit early, as it meets the cubes' back corners. */
-function beamAt(rank: number): number {
+export function beamAt(rank: number): number {
   const c = rank - 1;
   if (c <= C_FAST) return T_BEAM0 + (c + 9) / V_BEAM;
   const d = c - C_FAST;
@@ -132,10 +135,12 @@ function beamAt(rank: number): number {
 interface Cell {
   x: number;
   z: number;
+  /** Distance from the center cell; each ring of equal distance lands together. */
+  d: number;
   rank: number;
   keep: boolean;
   center: boolean;
-  /** First ring: lands on b20.5 with the camera bump. */
+  /** First ring: lands on b0.5 with the camera bump. */
   first: boolean;
   /** Pop-in and touchdown times, and the drop height between them. */
   spawn: number;
@@ -157,7 +162,8 @@ interface Cell {
 }
 
 let cells: Cell[] | null = null;
-function world(): Cell[] {
+/** The city: every cell that gets a carton, the center cube included. */
+export function world(): Cell[] {
   if (cells) return cells;
   const key = (x: number, z: number) => `${x},${z}`;
   const keep = new Set(KEEP.map(([x, z]) => key(x, z)));
@@ -177,7 +183,7 @@ function world(): Cell[] {
       const land = center ? -1 : lerp(T_LAND0, T_LAND1, f);
       const vary = d > 1 ? lerp(0.88, 1.12, hash(seed, 13)) : 1;
       let drop = center ? 0 : lerp(DROP0, DROP1, f) * vary;
-      // Nothing behind the first ring may pop in before it lands on b20.5,
+      // Nothing behind the first ring may pop in before it lands on b0.5,
       // so that landing is the one that sets off the next wave.
       if (d > 1) drop = Math.min(drop, 0.5 * G * (land - T_LAND0) ** 2);
       const yaw = center || k ? 0 : (hash(seed, 31) - 0.5) * 8 * DEG;
@@ -189,6 +195,7 @@ function world(): Cell[] {
       out.push({
         x,
         z,
+        d,
         rank: x + z,
         keep: k,
         center,
@@ -256,7 +263,7 @@ function floorMatrix(ctx: CanvasRenderingContext2D, view: View, x: number, z: nu
   applyMatrix(ctx, view.planeMatrix([x, 0, z], [1, 0, 0], [0, 0, 1]));
 }
 
-/** b23: the floor flashes as the carpet drops through it. */
+/** b3: the floor flashes as the carpet drops through it. */
 const floorFlash = (t: number): number => (t >= T_BEAM1 ? Math.exp(-(t - T_BEAM1) / 0.08) : 0);
 
 /** The flash's wash, laid over the carpet and under everything standing. */
@@ -382,7 +389,7 @@ const stompSquash = keys([
   [0.085, 1, inOutSine],
   [T_STOMP, 1.08, inQuad],
 ]);
-/** Kept cubes hop on b23 and land as discs on the bar line. */
+/** Kept cubes hop on b3 and land as discs on the bar line. */
 const HOP = 1.05;
 const hopSquash = keys([
   [T_BEAM1, 0.8],
@@ -399,7 +406,7 @@ function standing(c: Cell, t: number): Standing | null {
   let tiltZ = 0;
   let flare = 0;
   if (c.center) {
-    // Wind up, hop, and stomp on b20.25: the hit that sends the ripple.
+    // Wind up, hop, and stomp on b0.25: the hit that sends the ripple.
     if (t < T_STOMP) {
       squash = stompSquash(t);
       const s = progress(0.035, T_STOMP, t);
@@ -437,7 +444,7 @@ function standing(c: Cell, t: number): Standing | null {
       const u = t - c.hit;
       squash *= 1 + 0.14 * Math.exp(-9 * u) * Math.sin(TAU * 3.6 * u);
     }
-    // Wind up under the last of the beam, then hop on b23.
+    // Wind up under the last of the beam, then hop on b3.
     if (t < T_BEAM1) squash *= lerp(1, 0.8, inOutSine(progress(T_BEAM1 - 0.1, T_BEAM1, t)));
     else {
       const s = progress(T_BEAM1, T_DISC, t);
@@ -502,9 +509,10 @@ function drawSmear(ctx: CanvasRenderingContext2D, view: View, st: Standing): voi
 // A pruned carton gets knocked flat: it darkens as the beam reaches it,
 // rocks toward the viewer, falls back onto the cleared row, and slaps down
 // with a bounce. The flattened cartons lie behind the beam as a carpet until
-// b23, when the whole carpet drops through the floor at once.
+// b3, when the whole carpet drops through the floor at once.
 const ROCK = 0.025;
-const SLAP = 0.07;
+/** A carton slaps flat this long after the beam reaches it, in its fold time. */
+export const SLAP = 0.07;
 const SETTLE = 0.1;
 function foldAngle(u: number): number {
   if (u < ROCK) return -0.12 * outQuad(u / ROCK);
@@ -515,7 +523,7 @@ function foldAngle(u: number): number {
 const foldU = (c: Cell, t: number): number => (t - c.hit) / c.fs;
 const isFlat = (c: Cell, t: number): boolean => !c.keep && foldU(c, t) >= SLAP;
 
-// The b23 drop: every flat carton slides straight down into its own
+// The b3 drop: every flat carton slides straight down into its own
 // footprint, as if through a trapdoor, and is gone in about five frames.
 const SINK_DEPTH = 0.75;
 const sinkDur = (c: Cell): number => 0.055 + 0.025 * hash(c.seed, 41);
@@ -645,7 +653,7 @@ function drawFold(ctx: CanvasRenderingContext2D, view: View, c: Cell, t: number)
 // Dust where a carton slaps down: air squeezed out from under it throws a
 // few soft kraft-grey puffs out along the floor, flat in the floor plane,
 // from its long sides and far end. Drawn in the floor pass, over the carpet
-// and under everything standing, and gone by the b23 drop.
+// and under everything standing, and gone by the b3 drop.
 let dustSprite: HTMLCanvasElement | null = null;
 const DUST_TINT = mixRGB(PALETTE.amber, PALETTE.text2, 0.55);
 const DUST = 0.13;
@@ -787,7 +795,7 @@ function curtainSprite(): HTMLCanvasElement {
   return curtain;
 }
 
-/** 1 on each keeper sixteenth (b22.25, b22.5, b22.75), gone in about two frames. */
+/** 1 on each keeper sixteenth (b2.25, b2.5, b2.75), gone in about two frames. */
 function beamPulse(t: number): number {
   let p = 0;
   for (let k = 1; k <= 3; k++) {
@@ -893,8 +901,8 @@ function drawBeamBar(ctx: CanvasRenderingContext2D, view: View, t: number): void
 
 // During the hold the scanner arms: two pen tips race around the grid's
 // border from the front corner, trailing comet tails, and meet at the back
-// corner on b22, where the beam ignites.
-const ARM0 = 0.66;
+// corner on b2, where the beam ignites.
+export const ARM0 = 0.66;
 const LEG = 2 * EDGE;
 const F_CORNER: V3 = [EDGE, 0, EDGE];
 const B_CORNER: V3 = [-EDGE, 0, -EDGE];
@@ -1061,7 +1069,7 @@ function rayHull(
   return best === Infinity ? 0 : best;
 }
 
-/** 0..1 the kept state (green mark and reticle), from the beam's touch to b23. */
+/** 0..1 the kept state (green mark and reticle), from the beam's touch to b3. */
 function keptTag(c: Cell, t: number): number {
   return smoothstep(c.hit - 0.002, c.hit + 0.01, t) * (1 - smoothstep(T_BEAM1, T_BEAM1 + 0.08, t));
 }
@@ -1123,7 +1131,7 @@ function drawKept(
     ctx.fill();
   }
 
-  // Kept state: the top face marked green from the beam's touch until b23.
+  // Kept state: the top face marked green from the beam's touch until b3.
   const tag = keptTag(c, t);
   if (tag > 0.01) {
     const f = boxFrame(pose);
@@ -1148,7 +1156,7 @@ function drawKept(
 }
 
 // Scanner lock: corner brackets that snap onto a kept cube when the beam
-// touches it, hold through the wind-up, and burst off on b23.
+// touches it, hold through the wind-up, and burst off on b3.
 function drawReticle(
   ctx: CanvasRenderingContext2D,
   view: View,
@@ -1282,9 +1290,9 @@ function drawDiscs(ctx: CanvasRenderingContext2D): void {
 }
 
 export const scene: Scene = {
-  id: "world",
-  start: bar(5),
-  end: bar(6),
+  id: S.id,
+  start: S.start,
+  end: S.end,
   draw(ctx, lt, env) {
     const t = lt;
     ctx.fillStyle = PALETTE.bg;

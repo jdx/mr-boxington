@@ -6,9 +6,7 @@
 // drawn on its own.
 
 import {
-  BAR,
   BEAT,
-  bar,
   drawNodeLabel,
   H,
   HERO_CAM,
@@ -17,6 +15,7 @@ import {
   PALETTE,
   type ReelFacts,
   type Scene,
+  sec,
   W,
   WHIP,
 } from "../bible";
@@ -58,19 +57,24 @@ type XY = { x: number; y: number };
 type NodeKey = keyof typeof NODES;
 type Receiver = "worktree" | "ci";
 
-// Beat grid in local time: b12 is 0.
+const S = sec("flow");
+
+// Beat grid in local time: the section's first downbeat is 0. The score
+// (score/flow.ts) is written to these.
 const B = (n: number): number => n * BEAT;
-const T_POP = B(0.5);
-const GULPS = [B(1), B(1.25), B(1.5), B(1.75)] as const;
+export const T_POP = B(0.5);
+export const GULPS = [B(1), B(1.25), B(1.5), B(1.75)] as const;
 /** The coil before the send starts right after the last swallow. */
-const T_CHARGE = GULPS[3] + 0.012;
+export const T_CHARGE = GULPS[3] + 0.012;
 const T_SEND = B(2);
-const BURSTS = [B(2), B(2.5), B(3)] as const;
-const T_DONE = B(3.5);
+export const BURSTS = [B(2), B(2.5), B(3)] as const;
+export const T_DONE = B(3.5);
+/** Mr Boxington's monocle twinkles just after the last restore lands. */
+export const T_TWINKLE = T_DONE + 0.03;
 /** The project's build prints Finished right after the last swallow. */
 const T_FINISHED = GULPS[3] + 0.04;
-const T_WHIP = BAR - WHIP;
-const LAST = BAR - 1 / 60;
+const T_WHIP = S.len - WHIP;
+const LAST = S.len - 1 / 60;
 
 /** Screen gravity shared by every thrown particle, px/s². */
 const G = 9000;
@@ -409,7 +413,7 @@ function getPlan(): Plan {
     const feasible = GULPS.filter((g) => g - e >= 0.1 && g - e <= 0.46);
     const pick = r() < 0.6 ? 0 : Math.min(1, feasible.length - 1);
     let slot: number = feasible.length ? feasible[pick] : GULPS[3];
-    // The first few are flat, fast shots so the b13 gulp has a mouthful.
+    // The first few are flat, fast shots so the b1 gulp has a mouthful.
     if (i < 6) slot = GULPS[0];
     const a = slot - 0.004 - r() * 0.018;
     const l = landing(0.3 + 0.4 * r());
@@ -427,7 +431,7 @@ function getPlan(): Plan {
   compiled.sort((p, q) => p[0] - q[0]);
 
   // Outbound: three volleys per receiver. The last volley's arrivals spread
-  // out as they near b15.5, so the counters tick down into the lock, and the
+  // out as they near b3.5, so the counters tick down into the lock, and the
   // final artifact lands exactly on it.
   const outbound: Flight[] = [];
   const arrivals: Record<Receiver, number[]> = { worktree: [], ci: [] };
@@ -592,7 +596,7 @@ function gather(ctx: CanvasRenderingContext2D, lt: number) {
   }
 }
 
-// The pop: a shockwave that leads the box and embers that burn out before b13.
+// The pop: a shockwave that leads the box and embers that burn out before b1.
 
 function screenRing(
   ctx: CanvasRenderingContext2D,
@@ -624,7 +628,7 @@ function popBehind(ctx: CanvasRenderingContext2D, lt: number) {
  * Debris from the pop: sparks and flecks of cardboard on random headings and
  * speeds under drag and gravity. Sparks are streaks whose length follows their
  * speed; flecks tumble. They sit behind the box and outrun its growth, so they
- * spray out from its silhouette, and all of it is gone before b13.
+ * spray out from its silhouette, and all of it is gone before b1.
  */
 function popDebris(ctx: CanvasRenderingContext2D, lt: number) {
   const d = lt - T_POP;
@@ -730,12 +734,12 @@ const blinkK = keys([
 // A twinkle on the rim, gone before the whip.
 const glintK = keys([
   [T_DONE, 0],
-  [T_DONE + 0.03, 0.5, outCubic],
+  [T_TWINKLE, 0.5, outCubic],
   [T_DONE + 0.13, 0, inOutSine],
 ]);
 
 function boxState(lt: number): BoxState {
-  // Full size three frames after the pop, a 30% overshoot, settled by b13.
+  // Full size three frames after the pop, a 30% overshoot, settled by b1.
   const s = lt < T_POP ? 0 : spring(lt - T_POP, 4, 0.45, 20);
   // Stretch leads the growth; the squash lands as the overshoot recovers.
   let squash = 1 + 0.25 * wobble(lt, T_POP, 5, 7);
@@ -1787,9 +1791,9 @@ function speedLines(ctx: CanvasRenderingContext2D, lt: number, x: number, v: num
 }
 
 export const scene: Scene = {
-  id: "flow",
-  start: bar(3),
-  end: bar(4),
+  id: S.id,
+  start: S.start,
+  end: S.end,
   draw(ctx, lt, env) {
     ctx.fillStyle = PALETTE.bg;
     ctx.fillRect(0, 0, env.W, env.H);

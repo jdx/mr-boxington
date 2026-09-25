@@ -46,13 +46,15 @@ function hud(ctx: CanvasRenderingContext2D, t: number): void {
     fill: rgba(PALETTE.paper, 0.5),
   });
 
-  // Eight bar cells; the current one pulses on every beat.
+  // One cell per chapter; the current one pulses on every beat.
+  const idx = CHAPTERS.findIndex((c) => t < c.end);
+  const current = idx < 0 ? CHAPTERS.length - 1 : idx;
+  const cells = CHAPTERS.length;
   const cell = 11;
   const gap = 7;
-  const x0 = W - m - 8 * cell - 7 * gap;
-  const current = Math.min(7, Math.floor(t / (BEAT * 4)));
+  const x0 = W - m - cells * cell - (cells - 1) * gap;
   const beatPulse = 1 - (t / BEAT - Math.floor(t / BEAT));
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < cells; i++) {
     const x = x0 + i * (cell + gap);
     const y = m + 1;
     if (i < current) {
@@ -69,11 +71,9 @@ function hud(ctx: CanvasRenderingContext2D, t: number): void {
     }
   }
 
-  // The chapter label rolls over on each bar line. It sits in the title row,
-  // clear of the bottom edge, where a video player's controls go.
-  const idx = CHAPTERS.findIndex((c) => t < c.end);
-  const i = idx < 0 ? CHAPTERS.length - 1 : idx;
-  const since = t - CHAPTERS[i].start;
+  // The chapter label rolls over as each section starts. It sits in the
+  // title row, clear of the bottom edge, where a video player's controls go.
+  const since = t - CHAPTERS[current].start;
   const roll = swiftOut(progress(0, 0.32, since));
   const x = m + title.width;
   ctx.save();
@@ -94,8 +94,8 @@ function hud(ctx: CanvasRenderingContext2D, t: number): void {
       fill: rgba(PALETTE.paper, 0.72 * a),
     });
   };
-  drawChapter(i - 1, -26 * roll, 1 - roll);
-  drawChapter(i, 26 * (1 - roll), roll);
+  drawChapter(current - 1, -26 * roll, 1 - roll);
+  drawChapter(current, 26 * (1 - roll), roll);
   ctx.restore();
   ctx.restore();
 }

@@ -1,9 +1,9 @@
 // Scene 8, "Logo resolve": the flat amber silhouette from the morph inflates
 // into the shaded box on the downbeat, the camera pushes into a close-up of
-// the face while it assembles on sixteenths, snaps back on b29 as the
+// the face while it assembles on sixteenths, snaps back on b1 as the
 // wordmark lockup rises in below, and the card settles into the poster frame.
 
-import { BEAT, bar, END_CAM, END_POSE, PALETTE, type Scene } from "../bible";
+import { BEAT, END_CAM, END_POSE, PALETTE, type Scene, sec } from "../bible";
 import {
   type BoxPose,
   boxFrame,
@@ -48,23 +48,25 @@ import {
 import { applyMatrix, polygon, type Projected, View } from "../space";
 import { DISPLAY, drawText, font, layout, MONO } from "../type";
 
-/** Local time of beat `n` of this bar (b28 is 0). */
+const S = sec("logo");
+
+/** Local time of beat `n` of the section. */
 const b = (n: number): number => n * BEAT;
 
-// Accents, local seconds. The soundtrack is written to these.
-const T_BROWS = b(0.5);
+// Accents, local seconds. The score (score/logo.ts) is written to these.
+export const T_BROWS = b(0.5);
 const T_EYES = b(0.75);
 const T_MUST = b(1);
 const T_MONO = b(1.25);
 const T_BOW = b(1.5);
-const T_TAPE = b(1.75);
+export const T_TAPE = b(1.75);
 const T_LABEL = b(2);
-const T_BLINK = b(2.5);
-const T_WORD = b(1);
-const T_TAG = b(1.5);
-const T_URL = b(1.75);
-const T_GLINT = b(3);
-const END = bar(1);
+export const T_BLINK = b(2.5);
+export const T_WORD = b(1);
+export const T_TAG = b(1.5);
+export const T_URL = b(1.75);
+export const T_GLINT = b(3);
+const END = S.len;
 
 // The box sits where END_CAM puts it; the lockup is centered below.
 const CX = 960;
@@ -82,7 +84,7 @@ const URL_FONT = font(22, 500, MONO);
 const URL_TRACK = 1.5;
 
 // Camera: a close-up on the face for the brows and eyes, then a snap back on
-// b29 that reveals the lockup. Under the orthographic END_CAM a zoom is a 2D
+// b1 that reveals the lockup. Under the orthographic END_CAM a zoom is a 2D
 // scale, so the move is a canvas transform that carries the point between
 // the eyes from where END_CAM draws it to frame center at LEAN_Z. The snap is
 // front-loaded so the box has shrunk clear of the wordmark before the first
@@ -92,7 +94,8 @@ const LEAN_AT: readonly [number, number] = [960, 540];
 const FOCUS: readonly [number, number] = [-4, -28];
 const PUSH = cubicBezier(0.45, 0, 0.1, 1);
 const PULL = cubicBezier(0.05, 0.75, 0.15, 1);
-const T_PULL = T_MUST - 0.004;
+/** The close-up snaps back from just before its beat. */
+export const T_PULL = T_MUST - 0.004;
 const PULL_DUR = 0.58;
 function leanAt(lt: number): number {
   // A quick push after the hit, then a slow creep so the close-up never parks.
@@ -129,7 +132,7 @@ function squashAt(lt: number): number {
   return s;
 }
 
-/** Hold breath: rises from rest at b31 to the top of a breath on the last frame. */
+/** Hold breath: rises from rest at b3 to the top of a breath on the last frame. */
 function floatAt(lt: number): number {
   if (lt <= T_GLINT) return 0;
   const k = (lt - T_GLINT) / (END - T_GLINT);
@@ -191,7 +194,7 @@ function faceAt(lt: number): FaceParams {
       2.6 * (spring(lt - MONO_SEAT, 5, 0.55) - spring(lt - MONO_SEAT - 0.2, 2.4, 0.8)) +
       0.9 * pulse(lt, T_GLINT - 0.02, 0.06, 0.18),
     eyes: popEyes(lt, T_EYES),
-    // Lids shut on the first blip of b30.5 and are opening on the second.
+    // Lids shut on the first blip of b2.5 and are opening on the second.
     blink: blinkAt(lt),
     look: [2.5 * glance, 3.2 * glance],
     mustache: popMustache(lt, T_MUST),
@@ -219,8 +222,10 @@ const blinkAt = keys([
 
 // Tape: the swipe's fastest stretch ends on the cue frame, then it wraps down
 // the right panel on a long soft landing.
+/** The tape starts across the top this long before its cue. */
+export const TAPE_LEAD = 0.025;
 const tapeAt = keys([
-  [T_TAPE - 0.025, 0],
+  [T_TAPE - TAPE_LEAD, 0],
   [T_TAPE + 0.2, 1, swiftOut],
 ]);
 
@@ -371,7 +376,7 @@ function drawHero(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose, lt: 
 // chain swings through. drawBox's own monocle path travels out of the face
 // panel without depth, so this scene draws it (same paths and strokes as
 // box.ts) until the chain has settled, then hands back to drawBox exactly.
-const MONO_SEAT = T_MONO - 0.004;
+export const MONO_SEAT = T_MONO - 0.004;
 const MONO_FALL = 0.075;
 const MONO_OUT = 0.5;
 /** Where the chain meets the ring: the monocle turns about it and the chain hangs from it. */
@@ -485,7 +490,7 @@ function drawClink(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose, lt:
 // box.ts) so it can hang over the panel with a soft shadow, slam flat on the
 // cue frame, and throw a puff of dust, then hands back to drawBox once the
 // rebound has died out.
-const LABEL_HIT = T_LABEL - 0.004;
+export const LABEL_HIT = T_LABEL - 0.004;
 const LABEL_HOVER = 0.055;
 const LABEL_OUT = 0.4;
 const LABEL_C: readonly [number, number] = [53, 56];
@@ -936,9 +941,9 @@ function drawUrl(ctx: CanvasRenderingContext2D, lt: number): void {
 }
 
 export const scene: Scene = {
-  id: "logo",
-  start: bar(7),
-  end: bar(8),
+  id: S.id,
+  start: S.start,
+  end: S.end,
   draw(ctx, lt, env) {
     ctx.fillStyle = PALETTE.night;
     ctx.fillRect(0, 0, env.W, env.H);

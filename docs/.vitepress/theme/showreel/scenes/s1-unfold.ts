@@ -6,7 +6,7 @@
 // same camera and outline as drawBox, so the switch to drawBox once the lid
 // is shut is invisible.
 
-import { bar, beat, drawStagedBox, H1_POSE, HERO_CAM, PALETTE, type Scene } from "../bible";
+import { beat, drawStagedBox, H1_POSE, HERO_CAM, PALETTE, type Scene, sec } from "../bible";
 import { boxFrame, boxPoint, drawShadow, OUTLINE, OUTLINE_RATIO, sparkle } from "../box";
 import { mix, mixRGB, type RGB, rgba } from "../color";
 import { glow, makeCanvas, shake } from "../fx";
@@ -37,15 +37,17 @@ import {
   View,
 } from "../space";
 
-// Beat map (local seconds; scene 1 starts at 0).
+const S = sec("unfold");
+
+// Beat map, local seconds. The score (score/unfold.ts) is written to these.
 const T_LAUNCH = beat(0.125); // the pens leave on the first 32nd
-const T_CLOSE = beat(1); // the pens meet and the outline closes
+export const T_CLOSE = beat(1); // the pens meet and the outline closes
 const T_FLOODED = 0.8; // every panel has turned to card
-const T_CROUCH = beat(1.75); // the walls wind up together
-const FOLDS = [beat(2), beat(2.25), beat(2.5), beat(2.75)];
-const T_SLAM = beat(3);
-const T_TAPE0 = beat(3.25);
-const T_TAPE1 = beat(3.75);
+export const T_CROUCH = beat(1.75); // the walls wind up together
+export const FOLDS = [beat(2), beat(2.25), beat(2.5), beat(2.75)];
+export const T_SLAM = beat(3);
+export const T_TAPE0 = beat(3.25);
+export const T_TAPE1 = beat(3.75);
 /** From here the box is closed and drawBox renders it. */
 const T_BOXED = 1.515;
 const CAM_END = 1.72;
@@ -76,7 +78,8 @@ const IGNITE: V3 = onFloor(PATH_A[0]);
 const CLOSE_AT: XZ = PATH_A[7];
 const PEN_GAMMA = 1.45;
 const penS = (lt: number) => 7 * progress(T_LAUNCH, T_CLOSE, lt) ** PEN_GAMMA;
-const penT = (s: number) => T_LAUNCH + (T_CLOSE - T_LAUNCH) * (s / 7) ** (1 / PEN_GAMMA);
+/** When the pens have drawn `s` of their seven edges. */
+export const penT = (s: number) => T_LAUNCH + (T_CLOSE - T_LAUNCH) * (s / 7) ** (1 / PEN_GAMMA);
 
 function pathAt(path: XZ[], s: number): XZ {
   const i = Math.min(Math.floor(s), path.length - 2);
@@ -186,10 +189,12 @@ function hermite(frames: readonly HKey[], t: number): number {
 
 // The lid lags back as its wall swings up, eases into the peak just after
 // the wall lands, hangs, then whips over and slams on b3.
+/** The lid hangs at the top of its lag here, then whips over. */
+export const LID_HANG = 1.305;
 const LID: HKey[] = [
   [FOLDS[3] - LEAD, 0, 0],
   [1.26, -16, -200],
-  [1.305, -25, 0],
+  [LID_HANG, -25, 0],
   [T_SLAM, 90, 2700],
 ];
 function lidAngle(lt: number): number {
@@ -1079,11 +1084,13 @@ function cameraAt(lt: number): Camera {
   };
 }
 
-const TAPE_PULL = cubicBezier(0.3, 0, 0.25, 1);
+/** The tape's pull across the lid, which reaches the corner at TAPE_KNEE of its time. */
+export const TAPE_PULL = cubicBezier(0.3, 0, 0.25, 1);
+export const TAPE_KNEE = 0.7;
 /** Tape: a smooth pull across the lid, then a quick press down the side. */
 function tapeAt(lt: number): number {
   const u = progress(T_TAPE0, T_TAPE1, lt);
-  const knee = 0.7;
+  const knee = TAPE_KNEE;
   if (u < knee) return 0.8 * TAPE_PULL(u / knee);
   return 0.8 + 0.2 * outCubic((u - knee) / (1 - knee));
 }
@@ -1407,9 +1414,9 @@ function drawDust(ctx: CanvasRenderingContext2D, view: View, lt: number): void {
 }
 
 export const scene: Scene = {
-  id: "unfold",
-  start: bar(0),
-  end: bar(1),
+  id: S.id,
+  start: S.start,
+  end: S.end,
   draw(ctx, lt, env) {
     ctx.fillStyle = mix(PALETTE.night, PALETTE.bg, smoothstep(0.5, 1.4, lt));
     ctx.fillRect(0, 0, env.W, env.H);
