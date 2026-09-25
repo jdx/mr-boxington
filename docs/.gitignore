@@ -1,6 +1,7 @@
 .vitepress/cache
 .vitepress/dist
 node_modules
-# Rendered by `mise run render:showreel`; the docs deploy renders it fresh.
+# Rendered by `mise run render:showreel`; the docs deploy renders them fresh.
 public/showreel.mp4
-public/showreel.partial.mp4
+public/showreel-poster.jpg
+public/showreel*.partial.*

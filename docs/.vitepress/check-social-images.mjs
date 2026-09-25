@@ -24,6 +24,11 @@ const meta = (html, key) => {
 // Present only when `mise run render:showreel` ran before the build.
 const videoFile = join(root, "showreel.mp4");
 const video = existsSync(videoFile) ? readFileSync(videoFile) : null;
+if (video) {
+  // The landing page's player shows this until someone presses play.
+  const poster = readFileSync(join(root, "showreel-poster.jpg"));
+  assert.deepEqual([...poster.subarray(0, 3)], [0xff, 0xd8, 0xff]);
+}
 const walk = (dir) =>
   readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
     entry.isDirectory() ? walk(join(dir, entry.name)) : [join(dir, entry.name)],
@@ -53,8 +58,8 @@ for (const file of walk(root).filter((file) => file.endsWith(".html"))) {
     const url = meta(html, "og:video");
     assert.equal(meta(html, "og:video:secure_url"), url);
     assert.equal(meta(html, "og:video:type"), "video/mp4");
-    assert.equal(meta(html, "og:video:width"), "1280");
-    assert.equal(meta(html, "og:video:height"), "720");
+    assert.equal(meta(html, "og:video:width"), "1920");
+    assert.equal(meta(html, "og:video:height"), "1080");
     assert.match(url, /^https:\/\//);
     assert.equal(new URL(url).pathname, "/showreel.mp4");
     // The version must change with the file, or previews keep a stale render.

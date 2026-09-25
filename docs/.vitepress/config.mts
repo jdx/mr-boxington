@@ -1,9 +1,9 @@
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitepress";
 import { tabsMarkdownPlugin } from "vitepress-plugin-tabs";
+import { showreelFiles } from "./showreel.data";
 import { socialCard, writeSocialCard } from "./social-images.mjs";
 
 const configDir = dirname(fileURLToPath(import.meta.url));
@@ -20,25 +20,19 @@ if (!versionMatch) {
 const latestVersion = versionMatch[1];
 const siteUrl = "https://mr-boxington.jdx.dev";
 
-// The showreel rendered to video by `mise run render:showreel`, which the docs
-// deploy runs before building. Link previews that play video (Discord,
-// iMessage, Telegram) use og:video; X ignores it and keeps the large image
-// card. Builds without the file leave the tags out.
+// Link previews that play video (Discord, iMessage, Telegram) use the rendered
+// showreel through og:video; X ignores og:video and keeps the large image card.
+// Builds without a render leave the tags out.
 function showreelVideoTags(): [string, Record<string, string>][] {
-  const file = resolve(configDir, "../public/showreel.mp4");
-  if (!existsSync(file)) return [];
-  // Versioned so previews that cached an earlier render fetch the new one.
-  const version = createHash("sha256")
-    .update(readFileSync(file))
-    .digest("hex")
-    .slice(0, 12);
-  const url = `${siteUrl}/showreel.mp4?v=${version}`;
+  const showreel = showreelFiles();
+  if (!showreel) return [];
+  const url = `${siteUrl}${showreel.src}`;
   return [
     ["meta", { property: "og:video", content: url }],
     ["meta", { property: "og:video:secure_url", content: url }],
     ["meta", { property: "og:video:type", content: "video/mp4" }],
-    ["meta", { property: "og:video:width", content: "1280" }],
-    ["meta", { property: "og:video:height", content: "720" }],
+    ["meta", { property: "og:video:width", content: "1920" }],
+    ["meta", { property: "og:video:height", content: "1080" }],
   ];
 }
 

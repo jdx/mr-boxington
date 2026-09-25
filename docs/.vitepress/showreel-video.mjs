@@ -1,9 +1,10 @@
-// Renders the landing-page showreel to docs/public/showreel.mp4, which the
-// homepage offers as og:video so link previews that play video (Discord,
-// iMessage, Telegram) can play the reel. Every frame is a pure function of
-// time, so this is the picture the page draws, with the score rendered
-// offline. The docs deploy runs this before building; local builds skip the
-// video unless it has been rendered.
+// Renders the showreel to docs/public/showreel.mp4, with its poster frame in
+// docs/public/showreel-poster.jpg. The landing page plays the MP4 in a video
+// player, and the homepage offers it as og:video so link previews that play
+// video (Discord, iMessage, Telegram) can play it too. Every frame of the reel
+// is a pure function of time; the score is rendered offline. The docs deploy
+// runs this before building; local builds leave the showreel out unless it
+// has been rendered.
 //
 // Needs ffmpeg on PATH and Playwright's Chromium headless shell
 // (`aube exec playwright-core install chromium-headless-shell`), or a
@@ -20,12 +21,14 @@ import { chromium } from "playwright-core";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const out = resolve(here, "../public/showreel.mp4");
-// Encoded beside the output and renamed over it only once ffmpeg succeeds, so
-// a failed or interrupted render never leaves a partial showreel.mp4 behind
-// for the build to advertise.
+const poster = resolve(here, "../public/showreel-poster.jpg");
+// Written beside the outputs and renamed over them only once ffmpeg succeeds,
+// so a failed or interrupted render never leaves a partial video behind for
+// the build to publish.
 const partial = resolve(here, "../public/showreel.partial.mp4");
-const WIDTH = 1280;
-const HEIGHT = 720;
+const posterPartial = resolve(here, "../public/showreel-poster.partial.jpg");
+const WIDTH = 1920;
+const HEIGHT = 1080;
 const FPS = 60;
 // Rendered before the reel starts and trimmed, so the score's compressor
 // lookahead can place the first sounds exactly.
@@ -48,7 +51,7 @@ function benchmarkResults() {
 
 const bundle = await build({
   stdin: {
-    contents: `export { createReel, factsFromBenchmarks, resetTypeCache } from "./theme/showreel/reel.ts";
+    contents: `export { createReel, factsFromBenchmarks, POSTER_TIME, resetTypeCache } from "./theme/showreel/reel.ts";
 export { playScore } from "./theme/showreel/audio.ts";`,
     resolveDir: here,
     loader: "ts",
@@ -135,8 +138,8 @@ try {
   header.writeUInt32LE(samples.length, 40);
   writeFileSync(wav, Buffer.concat([header, samples]));
 
-  // 720p60 H.264 High with AAC and the index up front: small (about 2 MB)
-  // and playable by every link preview that plays video.
+  // 1080p60 H.264 High with AAC and the index up front (about 3.5 MB): sharp
+  // on the landing page and playable by every link preview that plays video.
   const ffmpeg = spawn(
     "ffmpeg",
     [
@@ -144,7 +147,7 @@ try {
       "-f", "image2pipe", "-framerate", String(FPS), "-c:v", "png", "-i", "pipe:0",
       "-i", wav,
       "-c:v", "libx264", "-preset", "slow", "-crf", "23",
-      "-profile:v", "high", "-level:v", "4.0", "-pix_fmt", "yuv420p",
+      "-profile:v", "high", "-level:v", "4.2", "-pix_fmt", "yuv420p",
       "-c:a", "aac", "-b:a", "128k",
       "-movflags", "+faststart", "-shortest",
       partial,
@@ -167,10 +170,23 @@ try {
   const [code] = await exited;
   if (pageError) throw pageError;
   if (code !== 0) throw new Error(`ffmpeg exited with ${code}`);
+
+  // The poster the player shows until someone presses play.
+  const jpeg = await page.evaluate(
+    ({ w, h }) => {
+      window.reel.render(window.ctx, Showreel.POSTER_TIME, w, h);
+      return document.getElementById("reel").toDataURL("image/jpeg", 0.9);
+    },
+    { w: WIDTH, h: HEIGHT },
+  );
+  writeFileSync(posterPartial, Buffer.from(jpeg.slice(jpeg.indexOf(",") + 1), "base64"));
+  if (pageError) throw pageError;
   renameSync(partial, out);
-  console.log(`Rendered ${out}`);
+  renameSync(posterPartial, poster);
+  console.log(`Rendered ${out} and ${poster}`);
 } finally {
   await browser.close();
   rmSync(work, { recursive: true, force: true });
   rmSync(partial, { force: true });
+  rmSync(posterPartial, { force: true });
 }
