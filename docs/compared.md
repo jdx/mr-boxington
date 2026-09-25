@@ -117,7 +117,8 @@ work elsewhere.
 If you already use sccache, follow the
 [migration guide](/cookbook/migrate#from-sccache) when switching to mbx.
 If the `RUSTC_WRAPPER` environment variable names another compiler cache, such
-as sccache or kache, mbx defers to it and the build is not cached.
+as sccache or kache, mbx passes compilations to that cache and does not cache
+them itself.
 
 ## CI caches {#tarball-ci-caches}
 
