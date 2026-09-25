@@ -9,12 +9,13 @@ compile the same dependencies again. Build caches save that work so another
 build can reuse it.
 
 mbx, kache, and sccache all help with this. **mbx also manages the Cargo build
-around the cache**, including where build files live and when old ones are
-cleaned up.
+around the cache**: it cleans up old build files and coordinates builds from
+multiple agents or terminals so they share the machine's resources.
 
 | What you want | Where to start |
 | --- | --- |
 | Reuse builds and clean up build files from multiple copies of a Rust project | [mbx](#what-mbx-adds) |
+| Run several coding agents on one machine without overwhelming it | [mbx scheduling](#several-agents-one-machine) |
 | Add a build cache to your existing Cargo setup | [kache](#kache) |
 | Cache work from a wider range of compilers, or compile on other machines | [sccache](#sccache) |
 | Save and restore build files between GitHub Actions runs | [CI caches](#tarball-ci-caches) |
@@ -26,21 +27,48 @@ Suppose you keep several copies of a project to work on different branches.
 A compiler cache helps them reuse work, but each copy can still leave a large
 `target/` directory behind. That's the directory where Cargo puts build files.
 
-mbx handles both parts:
+mbx brings these pieces together:
 
 - **Reuse completed work.** A second copy of a project can restore matching
   compilations instead of running them again.
 - **Clean up old build files.** mbx manages `target/` directories by default and
   reclaims space when a copy of the project is deleted or storage limits are
   reached. See [Managed targets](/managed-targets).
-- **Run builds together.** When several builds run at once, mbx coordinates
-  their CPU and memory use. See [Parallel builds](/scheduling).
+- **Keep concurrent builds under control.** mbx shares CPU and memory across
+  builds and holds back new compilations when memory is running low. This is
+  enabled by default.
 - **Explain the build.** Progress and [cache results](/cache-results) appear
   together, so you can see what was reused and what still needed compiling.
 
 You can start with `mbx build` in place of `cargo build`. After
 [setup](/setup), you can keep typing `cargo build` and have it run through mbx.
 No cache server is needed to get started.
+
+### Several agents, one machine
+
+When several coding agents each run `cargo build` or `cargo test`, their work
+adds up. Each Cargo process chooses its own parallelism, and each test suite
+can start a thread per CPU. Together, they can exhaust memory even when each
+command runs comfortably on its own.
+
+mbx coordinates builds through a shared CPU and memory budget. It learns how
+much memory compilations use and watches live memory pressure, delaying new
+compilations when the machine is short on memory. That helps reduce
+out-of-memory failures as agents work in parallel.
+
+To include the test runs themselves in that budget, enable test scheduling:
+
+```sh
+MBX_SCHEDULER_TESTS=1 mbx test --workspace
+```
+
+Test binaries then wait for room alongside compilations. mbx accounts for
+their parallelism and measured memory use; it does not simply force every
+suite to run its tests one at a time. For all your agents, enable
+`scheduler.tests = true` in your [configuration](/configuration).
+
+Scheduling reduces the risk of overload; it is not a hard memory limit.
+See [Parallel builds](/scheduling) for setup and test-runner limitations.
 
 ## kache
 
@@ -58,7 +86,8 @@ compilation work.
 With kache, you run `kache init` once and continue using `cargo build`. With
 mbx, you use `mbx build` or enable the Cargo setup described above. Choose
 kache if you want a cache in your existing build setup; choose mbx if you also
-want its Cargo setup and build-directory cleanup.
+want its Cargo setup, build-directory cleanup, and coordination of builds
+and test runs across agents.
 
 kache also works with C/C++ and CUDA builds. See its
 [current feature list](https://github.com/kunobi-ninja/kache) for supported
