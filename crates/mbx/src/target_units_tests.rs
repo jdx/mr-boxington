@@ -207,9 +207,54 @@ fn finishes_a_removal_an_interrupted_collection_left() {
     let abandoned = profile.join(format!("{REMOVAL_PREFIX}1/0"));
     unit(&abandoned, NEW_UNIT, DAY);
 
-    prune(view.path(), 30 * DAY, now(), false);
+    let outcome = prune(view.path(), 30 * DAY, now(), false);
 
     assert!(!profile.join(format!("{REMOVAL_PREFIX}1")).exists());
+    assert!(
+        outcome.removed_bytes > 0,
+        "the leftover's bytes were counted in the view's size, so they count as freed"
+    );
+}
+
+#[test]
+fn finishes_a_pre_1_100_layout_an_interrupted_collection_left() {
+    let view = tempfile::tempdir().unwrap();
+    let profile = profile(view.path());
+    // `.fingerprint/` went first; the outputs it vouched for did not follow.
+    unit(
+        &profile.join("deps"),
+        &["libwidget-0123456789abcdef.rlib"],
+        DAY,
+    );
+    unit(
+        &profile.join("build/widget-fedcba9876543210"),
+        &["build-script-build"],
+        DAY,
+    );
+    let current = profile.join("build/widget/0123456789abcdef");
+    unit(&current, NEW_UNIT, DAY);
+
+    let outcome = prune(view.path(), 30 * DAY, now(), false);
+
+    assert!(outcome.removed_bytes > 0);
+    assert!(!profile.join("deps").exists());
+    assert!(!profile.join("build/widget-fedcba9876543210").exists());
+    assert!(
+        current
+            .join("out/libwidget-0123456789abcdef.rlib")
+            .is_file()
+    );
+}
+
+#[test]
+fn finds_an_editors_profile_below_its_own_target_triple() {
+    let view = tempfile::tempdir().unwrap();
+    let nested = profile(&view.path().join("rust-analyzer/aarch64-unknown-linux-gnu"));
+    let stale = nested.join("build/widget/0123456789abcdef");
+    unit(&stale, NEW_UNIT, 40 * DAY);
+
+    assert_eq!(prune(view.path(), 30 * DAY, now(), false).removed_units, 1);
+    assert!(!stale.exists());
 }
 
 #[test]
