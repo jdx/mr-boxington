@@ -9,6 +9,7 @@ import EndevFooter from "./EndevFooter.vue";
 import EndevSponsors from "./EndevSponsors.vue";
 import HomeBuild from "./HomeBuild.vue";
 import HomeQuickStart from "./HomeQuickStart.vue";
+import HomeShowreel from "./HomeShowreel.vue";
 import HomeTerminal from "./HomeTerminal.vue";
 import HomeTui from "./HomeTui.vue";
 import { initBanner } from "./banner";
@@ -19,7 +20,7 @@ export default {
   Layout() {
     return h(DefaultTheme.Layout, null, {
       "home-hero-actions-after": () => h(HomeQuickStart),
-      "home-hero-after": () => h(HomeTerminal),
+      "home-hero-after": () => [h(HomeShowreel), h(HomeTerminal)],
       "home-features-after": () => [h(HomeBuild), h(HomeTui)],
       "layout-bottom": () => [h(EndevSponsors), h(EndevFooter)],
     });
