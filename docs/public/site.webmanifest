@@ -1,7 +1,10 @@
 {
   "name": "mr boxington",
   "short_name": "mbx",
-  "icons": [{ "src": "/favicon.png", "sizes": "64x64", "type": "image/png" }],
+  "icons": [
+    { "src": "/favicon.png", "sizes": "64x64", "type": "image/png" },
+    { "src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png" }
+  ],
   "theme_color": "#d69b42",
   "background_color": "#111111",
   "display": "standalone"

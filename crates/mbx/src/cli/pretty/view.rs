@@ -31,31 +31,45 @@ pub(super) fn render(
     height: u16,
 ) -> Block {
     use super::norimel::Color;
-    use crate::cli::mascot::{HEIGHT, Ink, Mascot, Pose, WIDTH};
+    use crate::cli::mascot::{self, HEIGHT, Inputs, Rgb, WIDTH};
     if browser.is_some() || width < 96 || height < HEIGHT as u16 {
         return render_content(model, browser, width, height);
     }
+    // The first compiler error settles the outcome, though Cargo still finishes
+    // the jobs in flight before it reports the build.
     let ok = model.finished.map(|(ok, _)| ok).or_else(|| {
-        if model.build_ok == Some(false) || model.tests_failed > 0 {
+        if model.build_ok == Some(false) || !model.errors.is_empty() || model.tests_failed > 0 {
             Some(false)
         } else {
             None
         }
     });
-    let (done, total) = if model.testing {
-        (model.suite_done, Some(model.suite_total))
-    } else {
-        (model.units_done, model.units_total)
-    };
-    let mascot = Mascot::new(Pose::for_progress(done, total, ok));
-    let art = rimel::col(mascot.0.into_iter().map(|row| {
-        rimel::row(row.into_iter().map(|(ch, ink)| {
-            rimel::text(ch.to_string()).fg(match ink {
-                Ink::Box => Color::Rgb(226, 171, 81),
-                Ink::Face => Color::Rgb(112, 215, 203),
-                Ink::Tape => Color::Rgb(246, 214, 147),
-            })
-        }))
+    // The lid follows Cargo's units while testing too. The Model stops
+    // counting them when the build finishes, so the lid holds through the tests.
+    let pose = mascot::pose_at(Inputs {
+        ms: model.started.elapsed().as_millis(),
+        since_hit_ms: model.last_hit.map(|at| at.elapsed().as_millis()),
+        done: model.units_done,
+        total: model.units_total,
+        lid_shown: model.lid_shown,
+        hits: model.mix.hits,
+        misses: model.mix.misses,
+        testing: model.testing,
+        ok,
+    });
+    if ok.is_none() {
+        model.lid_shown = pose.lid;
+    }
+    let paint = |color: Option<Rgb>| color.map_or(Color::Reset, |(r, g, b)| Color::Rgb(r, g, b));
+    let art = rimel::col(mascot::draw(pose).into_iter().map(|row| {
+        rimel::row(
+            row.chunk_by(|a, b| (a.fg, a.bg) == (b.fg, b.bg))
+                .map(|run| {
+                    rimel::text(run.iter().map(|cell| cell.glyph).collect::<String>())
+                        .fg(paint(run[0].fg))
+                        .bg(paint(run[0].bg))
+                }),
+        )
     }))
     .w(WIDTH as u16 + 2);
     let content = render_content(model, None, width - WIDTH as u16 - 2, height);

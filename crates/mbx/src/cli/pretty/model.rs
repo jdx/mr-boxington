@@ -82,6 +82,10 @@ pub(super) struct Model {
     pub failures: Vec<(String, String)>,
     pub mix: CacheMix,
     pub finished: Option<(bool, Duration)>,
+    /// When the hit count last rose. The mascot's monocle glints after a hit.
+    pub last_hit: Option<Instant>,
+    /// The lid the last drawn mascot frame showed. It descends a pixel per frame.
+    pub lid_shown: u8,
     failure_capture: Option<usize>,
     failure_section: bool,
     suite_before: [usize; 3],
@@ -114,6 +118,8 @@ impl Model {
             failures: Vec::new(),
             mix: CacheMix::default(),
             finished: None,
+            last_hit: None,
+            lid_shown: crate::cli::mascot::LID_MAX,
             failure_capture: None,
             failure_section: false,
             suite_before: [0; 3],
@@ -138,7 +144,11 @@ impl Model {
 
     pub fn update_stats(&mut self, stats: AgentStats) {
         self.outcomes = stats.unit_outcomes.clone();
-        self.mix = stats.into();
+        let mix = CacheMix::from(stats);
+        if mix.hits > self.mix.hits {
+            self.last_hit = Some(Instant::now());
+        }
+        self.mix = mix;
     }
 
     fn row(&mut self, row: Row) {
