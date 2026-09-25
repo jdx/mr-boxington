@@ -458,6 +458,43 @@ fn an_existing_target_the_managed_root_can_hold_is_adopted_without_asking() {
     assert!(target_dir.join("artifact").is_file());
 }
 
+#[cfg(unix)]
+#[test]
+fn a_failed_adoption_is_quiet_only_when_another_build_adopted_the_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("project");
+    let target_dir = workspace.join("target");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let config = managed_target_config(directory.path());
+    let roots = Roots {
+        workspace_root: workspace.clone(),
+        target_dir: target_dir.clone(),
+        build_dir: None,
+        target_dir_requested: false,
+    };
+
+    // Moved, then neither linked nor put back.
+    assert_eq!(adoption_failure(&config, &roots), AdoptionFailure::Stranded);
+
+    std::fs::create_dir(&target_dir).unwrap();
+    assert_eq!(
+        adoption_failure(&config, &roots),
+        AdoptionFailure::LeftInPlace
+    );
+
+    std::fs::remove_dir(&target_dir).unwrap();
+    std::os::unix::fs::symlink(directory.path().join("elsewhere"), &target_dir).unwrap();
+    assert_eq!(adoption_failure(&config, &roots), AdoptionFailure::Stranded);
+
+    std::fs::remove_file(&target_dir).unwrap();
+    let managed = crate::target::view_dir(&config.target.root, &workspace);
+    std::os::unix::fs::symlink(&managed, &target_dir).unwrap();
+    assert_eq!(
+        adoption_failure(&config, &roots),
+        AdoptionFailure::AdoptedElsewhere
+    );
+}
+
 #[test]
 fn a_configured_target_directory_is_neither_adopted_nor_asked_about() {
     let directory = tempfile::tempdir().unwrap();

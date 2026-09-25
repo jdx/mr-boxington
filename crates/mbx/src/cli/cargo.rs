@@ -231,19 +231,15 @@ fn cargo_with_settings_bypass_log_and_roots(
                     )
                 }
                 Err(error) => {
-                    // A move that could not happen left the outputs where
-                    // they were, so the build that was asked for still has
-                    // its target directory; the refusal is not its failure.
-                    // A concurrent build may have made the same move first,
-                    // which leaves nothing to report.
-                    if std::fs::symlink_metadata(&roots.target_dir)
-                        .is_ok_and(|metadata| metadata.is_dir())
-                    {
-                        log::warn!(
+                    // A move that could not happen is not the build's
+                    // failure, so the build goes on either way.
+                    match adoption_failure(config, &roots) {
+                        AdoptionFailure::AdoptedElsewhere => log::debug!("{error:#}"),
+                        AdoptionFailure::LeftInPlace => log::warn!(
                             "{error:#}; the build continues in the existing target directory"
-                        );
-                    } else {
-                        log::debug!("{error:#}");
+                        ),
+                        // The error names where the outputs were retained.
+                        AdoptionFailure::Stranded => log::warn!("{error:#}"),
                     }
                     (place_target_view(config, &roots), None, None)
                 }
@@ -677,6 +673,28 @@ pub(super) fn join_clauses(clauses: &[String]) -> String {
         [only] => only.clone(),
         [first, second] => format!("{first} or {second}"),
         [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
+    }
+}
+
+/// Where a failed adoption left the checkout's `target`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AdoptionFailure {
+    /// A concurrent build made the same move first, so nothing is wrong.
+    AdoptedElsewhere,
+    /// The outputs never moved and Cargo will build into them.
+    LeftInPlace,
+    /// The outputs moved but could not be linked or put back.
+    Stranded,
+}
+
+pub(super) fn adoption_failure(config: &Config, roots: &Roots) -> AdoptionFailure {
+    let managed = target::view_dir(&config.target.root, &roots.workspace_root);
+    if std::fs::read_link(&roots.target_dir).is_ok_and(|link| link == managed) {
+        AdoptionFailure::AdoptedElsewhere
+    } else if std::fs::symlink_metadata(&roots.target_dir).is_ok_and(|metadata| metadata.is_dir()) {
+        AdoptionFailure::LeftInPlace
+    } else {
+        AdoptionFailure::Stranded
     }
 }
 
