@@ -38,15 +38,18 @@ Otherwise, get explicit mbx commands working first. Ask before changing my
 global shell/editor configuration or replacing another compiler wrapper.
 Do not delete existing build outputs or caches, or change CI configuration.
 
-Run mbx doctor and a representative build for this project. Verify activation
-from your own command environment, since an agent may use a different PATH
-than my terminal. If you configure plain cargo commands to use mbx, verify
-that route too; installing mbx alone is not proof that cargo uses it.
+Run mbx doctor and a representative build for this project. With native mise
+integration, doctor can warn that the standalone Cargo shim is missing or
+inactive even when wrapping works. Verify activation through actual builds
+and cache hits; do not change PATH solely to clear that setup warning.
+Use your own command environment, since an agent may use a different PATH
+than my terminal. Installing mbx alone is not proof that cargo uses it.
 
 Demonstrate reuse with the same source, toolchain, profile, and features in
-two fresh temporary target directories, using the same mbx cache. Check the
-second build for real cache hits. Do not count Cargo skipping up-to-date
-outputs as a cache hit. If there are no hits, use mbx explain --last to
+two fresh temporary target directories, using the same mbx cache. If you
+configured plain cargo commands to use mbx, run this check through that route.
+Check the second build for real cache hits. Do not count Cargo skipping
+up-to-date outputs as a cache hit. If there are no hits, use mbx explain --last to
 investigate and report any remaining blocker. Remove only the temporary
 target directories you created for this check when finished.
 
