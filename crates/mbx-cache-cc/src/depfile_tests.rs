@@ -4,6 +4,55 @@ use mbx_cache_core::NoFileDigestCache;
 use std::collections::BTreeSet;
 
 #[test]
+fn assembler_directives_are_found_across_every_chunk_boundary_split() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("input.S");
+    for directive in ASSEMBLER_INPUT_DIRECTIVES {
+        for uppercase in [false, true] {
+            let directive = if uppercase {
+                directive.to_ascii_uppercase()
+            } else {
+                directive.to_vec()
+            };
+            for split in 0..=directive.len() {
+                let mut bytes = vec![b'x'; SCAN_CHUNK_BYTES - split];
+                bytes.extend_from_slice(&directive);
+                std::fs::write(&path, bytes).unwrap();
+                assert!(contains_assembler_input_directive(&path).unwrap());
+            }
+        }
+    }
+}
+
+#[test]
+fn assembler_scan_preserves_conservative_matches_and_near_misses() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("input.S");
+    for bytes in [
+        b"".as_slice(),
+        b".",
+        b".incl .incbi .sinclud",
+        b".Lloop: nop",
+        &[0xff, 0, b'.'],
+    ] {
+        std::fs::write(&path, bytes).unwrap();
+        assert!(!contains_assembler_input_directive(&path).unwrap());
+    }
+    for bytes in [
+        b"/* .iNcLuDe */".as_slice(),
+        b"prefix.INCBINsuffix",
+        b"...sINCLUDE",
+    ] {
+        std::fs::write(&path, bytes).unwrap();
+        assert!(contains_assembler_input_directive(&path).unwrap());
+    }
+    // Keep the candidate-byte optimization tied to the directive list.
+    assert!(ASSEMBLER_INPUT_DIRECTIVES.iter().all(
+        |needle| needle.starts_with(b".") && needle.get(1).is_some_and(u8::is_ascii_lowercase)
+    ));
+}
+
+#[test]
 fn parses_gnu_depfiles_with_continuations_escaped_spaces_and_dollar_signs() {
     let depfile = "entropy.o: lib/entropy.c \\\n  lib/entropy.h \\\n  /usr/include/stdio.h\n";
     let parsed = CcDepfile::parse(depfile).expect("depfile should parse");

@@ -867,10 +867,7 @@ mod manifest_memo {
 /// directive would publish an object whose complete inputs are absent from the
 /// key; bypassing an otherwise cacheable object is the safe outcome instead.
 pub(crate) fn contains_assembler_input_directive(path: &Path) -> Result<bool, CcBypassReason> {
-    contains_any(path, ASSEMBLER_INPUT_DIRECTIVES)
-}
-
-fn contains_any(path: &Path, needles: &[&[u8]]) -> Result<bool, CcBypassReason> {
+    let needles = ASSEMBLER_INPUT_DIRECTIVES;
     let file = std::fs::File::open(path).map_err(|error| CcBypassReason::InputRead {
         path: path.to_path_buf(),
         message: error.to_string(),
@@ -894,27 +891,23 @@ fn contains_any(path: &Path, needles: &[&[u8]]) -> Result<bool, CcBypassReason> 
             return Ok(false);
         }
         window.extend_from_slice(&chunk[..read]);
-        if needles
-            .iter()
-            .any(|needle| contains_subslice_ascii_case_insensitive(&window, needle))
-        {
+        // Every directive begins with a dot and an ASCII letter. Search for
+        // that letter in either case, then check the dot and complete token.
+        // Searching for the letter also skips runs of dots in assembly labels.
+        if needles.iter().any(|needle| {
+            memchr::memchr2_iter(needle[1], needle[1].to_ascii_uppercase(), &window).any(|offset| {
+                offset.checked_sub(1).is_some_and(|start| {
+                    window[start..]
+                        .get(..needle.len())
+                        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(needle))
+                })
+            })
+        }) {
             return Ok(true);
         }
         let keep = window.len().saturating_sub(longest.saturating_sub(1));
         window.drain(..keep);
     }
-}
-
-fn contains_subslice_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return false;
-    }
-    haystack.windows(needle.len()).any(|window| {
-        window
-            .iter()
-            .zip(needle)
-            .all(|(left, right)| left.eq_ignore_ascii_case(right))
-    })
 }
 
 #[cfg(test)]
