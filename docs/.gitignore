@@ -2,5 +2,6 @@
 .vitepress/dist
 node_modules
 # Rendered by `mise run render:showreel`; the docs deploy renders them fresh.
+public/showreel-120.mp4
 public/showreel.mp4
 public/showreel-poster.jpg

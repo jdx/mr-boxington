@@ -1,5 +1,6 @@
-// Verify the built HTML references real, page-specific PNG previews, and that
-// only the homepage offers the rendered showreel as og:video.
+// Verify the built HTML references real, page-specific PNG previews, that only
+// the homepage offers the rendered showreel as og:video, and that its player
+// plays the files deployed with it.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -24,6 +25,12 @@ const meta = (html, key) => {
 // Present only when `mise run render:showreel` ran before the build.
 const videoFile = join(root, "showreel.mp4");
 const video = existsSync(videoFile) ? readFileSync(videoFile) : null;
+const video120File = join(root, "showreel-120.mp4");
+const video120 = existsSync(video120File) ? readFileSync(video120File) : null;
+// The version must change with the file, or players and previews keep a
+// stale render.
+const version = (file) =>
+  createHash("sha256").update(file).digest("hex").slice(0, 12);
 if (video) {
   // The landing page's player shows this until someone presses play.
   const poster = readFileSync(join(root, "showreel-poster.jpg"));
@@ -62,10 +69,11 @@ for (const file of walk(root).filter((file) => file.endsWith(".html"))) {
     assert.equal(meta(html, "og:video:height"), "1080");
     assert.match(url, /^https:\/\//);
     assert.equal(new URL(url).pathname, "/showreel.mp4");
-    // The version must change with the file, or previews keep a stale render.
-    const version = createHash("sha256").update(video).digest("hex");
-    assert.equal(new URL(url).searchParams.get("v"), version.slice(0, 12));
+    assert.equal(new URL(url).searchParams.get("v"), version(video));
     assert.equal(video.toString("latin1", 4, 8), "ftyp", "showreel.mp4 is not an MP4");
+    // The player starts on the same 60 fps file.
+    const player = html.match(/<video\b[^>]*\ssrc="([^"]*)"/);
+    assert.equal(player?.[1], `/showreel.mp4?v=${version(video)}`);
   } else {
     assert.equal(meta(html, "og:type"), "website");
     assert.equal(videoTags.length, 0, `Unexpected og:video tags in ${file}`);
@@ -74,6 +82,16 @@ for (const file of walk(root).filter((file) => file.endsWith(".html"))) {
 }
 assert.ok(posts > 0, "No built pages found");
 assert.ok(images.size > 1, "Pages should have distinct images");
+if (video && video120) {
+  // The player's script switches to the 120 fps file where it decodes well.
+  assert.equal(video120.toString("latin1", 4, 8), "ftyp", "showreel-120.mp4 is not an MP4");
+  const src = `/showreel-120.mp4?v=${version(video120)}`;
+  const scripts = walk(root).filter((file) => file.endsWith(".js"));
+  assert.ok(
+    scripts.some((file) => readFileSync(file, "utf8").includes(src)),
+    `No script plays ${src}`,
+  );
+}
 console.log(
   `Checked images and social metadata for ${posts} documentation pages.`,
 );

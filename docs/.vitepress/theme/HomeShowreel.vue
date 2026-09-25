@@ -1,14 +1,15 @@
 <script setup lang="ts">
 import { withBase } from "vitepress";
+import { onMounted, ref } from "vue";
 import { data } from "../benchmarks.data";
 import { data as showreel } from "../showreel.data";
 import type { ReelFacts } from "./showreel/bible";
 import { factsFromBenchmarks } from "./showreel/facts";
 import { SECTIONS, type SectionId } from "./showreel/timeline";
 
-// The reel is rendered to an MP4 by `mise run render:showreel` (the docs deploy
-// runs it), so this is a plain video player. Builds without a render leave the
-// section out.
+// The reel is rendered to MP4 files by `mise run render:showreel` (the docs
+// deploy runs it), so this is a plain video player. Builds without a render
+// leave the section out.
 
 const facts = factsFromBenchmarks(data);
 const secs = (n: number) => `${n.toFixed(1)} seconds`;
@@ -55,6 +56,36 @@ function describeChapters(f: ReelFacts | null) {
 }
 
 const described = describeChapters(facts);
+
+// The page is served with the 60 fps file, which plays everywhere. Once it is
+// mounted, and before anyone presses play, it switches to the 120 fps file if
+// the browser says it decodes that smoothly and power-efficiently (in
+// practice, in hardware). This tests the decoder, not the display, so a
+// capable 60 Hz screen gets the larger file too. Nothing downloads until play.
+const player = ref<HTMLVideoElement>();
+const src = ref(showreel?.src ?? "");
+onMounted(async () => {
+  const video120 = showreel?.video120;
+  if (!video120 || !navigator.mediaCapabilities) return;
+  try {
+    const { smooth, powerEfficient } = await navigator.mediaCapabilities.decodingInfo({
+      type: "file",
+      video: {
+        // H.264 High at level 5.1, as the renderer encodes it.
+        contentType: 'video/mp4; codecs="avc1.640033"',
+        width: 1920,
+        height: 1080,
+        framerate: 120,
+        bitrate: video120.bitrate,
+      },
+    });
+    // Someone who already pressed play keeps the file that is playing.
+    const idle = player.value?.paused && player.value.readyState === HTMLMediaElement.HAVE_NOTHING;
+    if (smooth && powerEfficient && idle) src.value = video120.src;
+  } catch {
+    // Older browsers reject the query; they keep the 60 fps file.
+  }
+});
 </script>
 
 <template>
@@ -62,7 +93,8 @@ const described = describeChapters(facts);
     <figure>
       <!-- No autoplay, and nothing downloads until someone presses play. -->
       <video
-        :src="withBase(showreel.src)"
+        ref="player"
+        :src="withBase(src)"
         :poster="withBase(showreel.poster)"
         width="1920"
         height="1080"
