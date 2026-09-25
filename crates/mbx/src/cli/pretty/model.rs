@@ -359,15 +359,24 @@ impl Model {
 
 pub(super) fn strip_ansi(text: &str) -> String {
     let mut output = String::new();
-    let mut chars = text.chars();
+    let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            if chars.next() == Some('[') {
-                for next in chars.by_ref() {
-                    if ('@'..='~').contains(&next) {
-                        break;
+            match chars.next() {
+                Some('[') => {
+                    for next in chars.by_ref() {
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
                     }
                 }
+                // Intermediates from ' ' to '/', then one final character.
+                // libtest resets its colours on xterm with `ESC ( B ESC [ m`.
+                Some(' '..='/') => {
+                    while chars.next_if(|next| (' '..='/').contains(next)).is_some() {}
+                    chars.next();
+                }
+                _ => {}
             }
         } else if c != '\r' {
             output.push(c);

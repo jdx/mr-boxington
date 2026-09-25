@@ -85,6 +85,25 @@ fn native_test_output_tracks_suites_and_failures_without_fabricated_times() {
     assert!(!model.test_line("custom harness output"));
 }
 
+/// On a terminal, libtest colours each result and resets with the terminal's
+/// sgr0, which on xterm starts with a charset escape.
+#[test]
+fn coloured_test_results_count_as_they_arrive() {
+    assert_eq!(strip_ansi("a\x1b(Bb\x1b=c\x1b[1;31md\x1b"), "abcd");
+    let mut model = Model::new(&["test".into()]);
+    assert!(model.test_line("running 2 tests"));
+    for line in [
+        "test a ... \x1b[31mFAILED\x1b(B\x1b[m",
+        "test b ... \x1b[32mok\x1b(B\x1b[m",
+    ] {
+        assert!(model.test_line(&strip_ansi(line)), "{line:?}");
+    }
+    assert_eq!(
+        (model.tests_failed, model.tests_passed, model.suite_done),
+        (1, 1, 2)
+    );
+}
+
 /// Check that display options leave application arguments untouched and that
 /// toolchain selectors and placement configuration do not hide the Cargo verb.
 #[test]
