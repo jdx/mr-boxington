@@ -34,7 +34,7 @@ env:
   MBX_BACKEND: >-
     ${{ github.event_name == 'pull_request'
         && github.event.pull_request.head.repo.full_name != github.repository
-        && 'github' || 'server' }}
+        && 'github' || 'remote' }}
 
 jobs:
   test:
@@ -53,7 +53,7 @@ jobs:
       - uses: jdx/mr-boxington-action@v1
         with:
           backend: ${{ env.MBX_BACKEND }}
-          server-url: https://cache.example.com
+          remote-url: https://cache.example.com
           namespace: acme/backend
           oidc-audience: mbx-cache
       - run: mbx test --workspace
