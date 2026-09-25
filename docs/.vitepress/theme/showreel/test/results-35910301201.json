@@ -1,0 +1,255 @@
+{
+  "schema": 2,
+  "subject": "hk",
+  "revision": "fc29ead1456ba7c1f62826c284126410a4014b00",
+  "toolchain": "1.94.0",
+  "platform": "Linux-7.1.4-x86_64-with-glibc2.39",
+  "runner": "nsc-runner-da58b12ru280a",
+  "filesystem": {
+    "path": "/tmp/mbx-real-world-8cdbmfen",
+    "source": "overlay",
+    "type": "overlay",
+    "options": "rw,relatime,lowerdir=/disk/extra0,upperdir=/namespace/containers/rootfs/skv4acs5kvvli/fs,workdir=/namespace/containers/rootfs/skv4acs5kvvli/work,uuid=on",
+    "clones": false
+  },
+  "workflow_run": "35910301201",
+  "commit": "ce7be66415169e32578ec6dd27fcdd98af1f2967",
+  "versions": {
+    "mbx": "1.17.0",
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "kache": "kache 0.26.3"
+  },
+  "passed": true,
+  "failures": [],
+  "scenarios": [
+    {
+      "scenario": "warm",
+      "description": "warm store, fresh target -- CI restoring the same commit; plain Cargo has no cache to restore",
+      "kind": "build",
+      "results": [
+        {
+          "tool": "mbx",
+          "wall_duration_ns": 1254526143,
+          "trials": 3,
+          "wall_durations_ns": [
+            1344075613,
+            1250729363,
+            1254526143
+          ],
+          "stats": {
+            "lookups": 354,
+            "hits": 354,
+            "misses": 0,
+            "unconsulted": 0,
+            "predictions_loaded": 933,
+            "restored_output_files": 1665,
+            "restored_output_bytes": 1340948359,
+            "reflinked_output_files": 0,
+            "reflinked_output_bytes": 0,
+            "hardlinked_output_files": 567,
+            "hardlinked_output_bytes": 1283065651,
+            "copied_output_files": 1098,
+            "copied_output_bytes": 58399272
+          }
+        },
+        {
+          "tool": "kache",
+          "wall_duration_ns": 1193357230,
+          "trials": 3,
+          "wall_durations_ns": [
+            1213655295,
+            1193357230,
+            1063000717
+          ]
+        }
+      ],
+      "skipped": []
+    },
+    {
+      "scenario": "commit",
+      "description": "cache tools warmed at the parent commit, build the child -- Cargo is the uncached push-to-push baseline",
+      "kind": "build",
+      "results": [
+        {
+          "tool": "cargo",
+          "wall_duration_ns": 18876873681,
+          "trials": 3,
+          "wall_durations_ns": [
+            19137816630,
+            18279490596,
+            18876873681
+          ]
+        },
+        {
+          "tool": "mbx",
+          "wall_duration_ns": 9229066562,
+          "trials": 3,
+          "wall_durations_ns": [
+            9313478745,
+            8463068971,
+            9229066562
+          ],
+          "stats": {
+            "lookups": 354,
+            "hits": 353,
+            "misses": 1,
+            "unconsulted": 0,
+            "predictions_loaded": 933,
+            "restored_output_files": 1663,
+            "restored_output_bytes": 1184566551,
+            "reflinked_output_files": 0,
+            "reflinked_output_bytes": 0,
+            "hardlinked_output_files": 566,
+            "hardlinked_output_bytes": 1126692267,
+            "copied_output_files": 1097,
+            "copied_output_bytes": 58390810
+          }
+        },
+        {
+          "tool": "kache",
+          "wall_duration_ns": 9578189837,
+          "trials": 3,
+          "wall_durations_ns": [
+            9919707027,
+            9578189837,
+            8633364918
+          ]
+        }
+      ],
+      "skipped": [],
+      "baseline": "uncached baseline"
+    },
+    {
+      "scenario": "edit",
+      "description": "one line changed and rebuilt in place, incremental on -- the local edit loop in its steady state, where Cargo is the thing to beat",
+      "kind": "build",
+      "results": [
+        {
+          "tool": "cargo",
+          "wall_duration_ns": 2427332144,
+          "trials": 3,
+          "wall_durations_ns": [
+            2533589662,
+            2427332144,
+            2291186453
+          ],
+          "warmup_wall_duration_ns": 2239737529
+        },
+        {
+          "tool": "mbx",
+          "wall_duration_ns": 2360601510,
+          "trials": 3,
+          "wall_durations_ns": [
+            2360601510,
+            2236855291,
+            2590779639
+          ],
+          "warmup_wall_duration_ns": 9084354400,
+          "stats": {
+            "lookups": 2,
+            "hits": 2,
+            "misses": 0,
+            "unconsulted": 0,
+            "predictions_loaded": 933,
+            "restored_output_files": 7,
+            "restored_output_bytes": 9172484,
+            "reflinked_output_files": 0,
+            "reflinked_output_bytes": 0,
+            "hardlinked_output_files": 1,
+            "hardlinked_output_bytes": 9117560,
+            "copied_output_files": 5,
+            "copied_output_bytes": 54659
+          }
+        },
+        {
+          "tool": "kache",
+          "wall_duration_ns": 2285561722,
+          "trials": 3,
+          "wall_durations_ns": [
+            2285561722,
+            2247452693,
+            2714277922
+          ],
+          "warmup_wall_duration_ns": 9336177197
+        }
+      ],
+      "skipped": [],
+      "baseline": "incremental rebuild"
+    },
+    {
+      "scenario": "contention",
+      "description": "six overlapping check, Clippy, and test jobs -- sequential for context, then parallel with and without mbx's machine-wide compiler limit",
+      "kind": "contention",
+      "results": [
+        {
+          "tool": "mbx-sequential",
+          "wall_duration_ns": 50680034718,
+          "peak_compilers": 32,
+          "min_available_bytes": 62509035520,
+          "permits": null,
+          "trials": 3,
+          "wall_durations_ns": [
+            46929744500,
+            50680034718,
+            51272198642
+          ],
+          "stats": {
+            "hits": 49,
+            "reflinked_output_files": 0,
+            "reflinked_output_bytes": 0,
+            "hardlinked_output_files": 10,
+            "hardlinked_output_bytes": 23441920,
+            "copied_output_files": 15,
+            "copied_output_bytes": 163977
+          }
+        },
+        {
+          "tool": "mbx-unscheduled",
+          "wall_duration_ns": 48189379187,
+          "peak_compilers": 162,
+          "min_available_bytes": 53271658496,
+          "permits": null,
+          "trials": 3,
+          "wall_durations_ns": [
+            46086461687,
+            48189379187,
+            50228148006
+          ],
+          "stats": {
+            "hits": 12,
+            "reflinked_output_files": 0,
+            "reflinked_output_bytes": 0,
+            "hardlinked_output_files": 0,
+            "hardlinked_output_bytes": 0,
+            "copied_output_files": 0,
+            "copied_output_bytes": 0
+          }
+        },
+        {
+          "tool": "mbx",
+          "wall_duration_ns": 39167488349,
+          "peak_compilers": 32,
+          "min_available_bytes": 61637386240,
+          "permits": 32,
+          "trials": 3,
+          "wall_durations_ns": [
+            39302048175,
+            39167488349,
+            37003390789
+          ],
+          "stats": {
+            "hits": 3402,
+            "reflinked_output_files": 0,
+            "reflinked_output_bytes": 0,
+            "hardlinked_output_files": 3824,
+            "hardlinked_output_bytes": 3624569276,
+            "copied_output_files": 1400,
+            "copied_output_bytes": 7510025
+          }
+        }
+      ],
+      "skipped": []
+    }
+  ]
+}
