@@ -96,6 +96,27 @@ fn every_cell_shows_its_two_pixels_with_half_blocks() {
 }
 
 #[test]
+fn monocle_pupils_stay_clear_of_the_glint_and_ring() {
+    for gaze in [Gaze::List, Gaze::Bar, Gaze::You] {
+        for glint in [None, Some(0), Some(1), Some(2), Some(3)] {
+            let canvas = sprite(Pose {
+                gaze,
+                glint,
+                ..Pose::default()
+            });
+            let [_, pupil] = gaze.pupils();
+            for (x, y, _) in pupil.pixels() {
+                assert_eq!(canvas[y][x], b'K', "{gaze:?} {glint:?} at ({x}, {y})");
+                if glint.is_none() && y == pupil.y + 1 {
+                    assert_eq!(canvas[y + 1][x], b'L', "{gaze:?} at ({x}, {y})");
+                }
+            }
+            assert_eq!(canvas[PARKED_GLINT.y][PARKED_GLINT.x], b'G');
+        }
+    }
+}
+
+#[test]
 fn finished_frames_ignore_the_clock_and_the_previous_lid() {
     for ok in [true, false] {
         let finished = Inputs {
@@ -360,9 +381,9 @@ fn golden_sprites() {
             ".DHHHHHHHHHHHHHHD.",
             ".AAAAAAAAAKKKKAAA.",
             ".AAAAAAAAKLLLLKAA.",
-            ".AAKKKKAKLGKLLLKA.",
+            ".AAKKKKAKLGLLLLKA.",
             ".AAKKWWAKLKKLLLKA.",
-            ".AAKKWWAKLLLLLLKA.",
+            ".AAKKWWAKLKKLLLKA.",
             ".AAAWWAAAKLLLLKAA.",
             ".AAAAAAAAAKKKKAAA.",
             ".AAAAAAAAAAAAAAAA.",
@@ -395,9 +416,9 @@ fn golden_sprites() {
             ".AAAAAAAAAKKKKAAA.",
             ".AAAAAAAAKLLGGKAA.",
             ".AAAAAAAKLGGGLLKA.",
-            ".AAKKKKAKLGGLLLKA.",
-            ".AAWKKWAKGGKKLLKA.",
-            ".AAAKKAAAKLKKLKAA.",
+            ".AAKKKKAKLKKLLLKA.",
+            ".AAWKKWAKGKKLLLKA.",
+            ".AAAKKAAAKLLLLKAA.",
             ".AAAAAAAAAKKKKAAA.",
             ".11AAAAAAAAAAAA11.",
             ".AAKAAAKKKKAAAKAA.",

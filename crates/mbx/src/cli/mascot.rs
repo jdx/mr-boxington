@@ -362,8 +362,8 @@ impl Gaze {
     /// lens position keeps a pixel of glass between the pupil and the ring.
     fn pupils(self) -> [Layer; 2] {
         let [(x, y), (lens_x, lens_y)] = match self {
-            Self::List => [(3, 9), (10, 8)],
-            Self::Bar => [(4, 10), (11, 10)],
+            Self::List => [(3, 9), (10, 9)],
+            Self::Bar => [(4, 10), (10, 9)],
             Self::You => [(4, 9), (11, 9)],
         };
         [Layer::at(x, y, PUPIL), Layer::at(lens_x, lens_y, PUPIL)]
