@@ -2371,10 +2371,16 @@ fn a_second_build_of_an_out_dir_reader_compiles_nothing() {
         &[],
     );
 
+    // Cargo announces every unit it runs rustc for, including one mbx never
+    // looks up, so its own output is the complete answer.
+    assert!(
+        !stderr.contains("Compiling "),
+        "Cargo should find the OUT_DIR reader fresh: {stderr}"
+    );
     assert_eq!(
-        count(&again, "hits") + count(&again, "misses"),
+        count(&again, "hits") + count(&again, "misses") + count(&again, "unconsulted"),
         0,
-        "Cargo should find the OUT_DIR reader fresh: {again}\n{stderr}"
+        "{again}"
     );
 }
 

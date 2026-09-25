@@ -374,11 +374,10 @@ fn materialize(
             // started the unit, and this copy is made after that, while rustc
             // runs. Keeping the build script's time keeps the next build from
             // taking the copy for a changed input and compiling the unit again.
+            // Through a read-only handle, since a build script may have made
+            // the file read-only and the copy keeps its mode.
             let modified = std::fs::metadata(&source)?.modified()?;
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(&destination)?
-                .set_modified(modified)?;
+            crate::materialize::set_modified(&destination, modified)?;
             // Read-only: the tree is shared by every checkout whose generated
             // sources match, and a write through one compilation would leave
             // it disagreeing with its own name. A compilation that writes into
