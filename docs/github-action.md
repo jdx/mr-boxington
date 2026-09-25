@@ -5,7 +5,8 @@ description: Add mbx to GitHub Actions, choose a cache transport, run parallel b
 
 [`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action)
 installs or reuses mbx and configures caching for the job. Start with the default
-GitHub backend; use a server when you need object sharing across runners.
+GitHub backend; use a cache server or bucket when you need object sharing across
+runners.
 The [action repository](https://github.com/jdx/mr-boxington-action) owns the
 complete input reference.
 
@@ -232,8 +233,8 @@ steps:
   - uses: actions/checkout@v7
   - uses: jdx/mr-boxington-action@v1
     with:
-      backend: server
-      server-url: https://cache.example.com
+      backend: remote
+      remote-url: https://cache.example.com
       namespace: acme/backend
       oidc-audience: mbx-cache
   - run: mbx build --workspace --all-features
@@ -256,27 +257,24 @@ permissions:
   contents: read
   id-token: write
 
-env:
-  MBX_REMOTE_URL: s3://acme-build-cache
-  MBX_REMOTE_NAMESPACE: acme/backend
-
 steps:
   - uses: actions/checkout@v7
-  - uses: aws-actions/configure-aws-credentials@v5
+  - uses: aws-actions/configure-aws-credentials@v6
     with:
       role-to-assume: arn:aws:iam::111122223333:role/mbx-cache
       aws-region: us-west-2
-  - uses: jdx/mise-action@v4
+  - uses: jdx/mr-boxington-action@v1
     with:
-      cache: false
-      install_args: mr-boxington
+      backend: remote
+      remote-url: s3://acme-build-cache
+      namespace: acme/backend
   - run: mbx build --workspace --all-features
 ```
 
-This example installs mbx with `jdx/mise-action` instead of
-[`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action),
-because the action's GitHub Actions cache backend would store the same actions
-a second time. Use one or the other.
+The `remote` backend keeps any `MBX_REMOTE_*` setting an earlier step exported
+and has no input for, so a step that already points mbx at a bucket needs only
+`backend: remote`. It fails the step when mbx finds no remote configured
+anywhere, which catches a configuring step that runs too late.
 
 mbx still refuses to publish from a pull request. A bucket has no server to
 authorize anything, so make IAM agree: scope the role's trust policy to the
