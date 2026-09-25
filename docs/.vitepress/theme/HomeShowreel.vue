@@ -461,7 +461,13 @@ function seekChapter(dir: 1 | -1) {
 // Sound
 
 function loadAudio(): Promise<AudioModule> {
-  audioMod ??= import("./showreel/audio");
+  audioMod ??= import("./showreel/audio").catch((err) => {
+    // Forget a failed load, so a hover prefetch that failed does not decide
+    // the next toggle. Whether a retry refetches is up to the browser:
+    // Chromium keeps a failed module fetch for the life of the page.
+    audioMod = null;
+    throw err;
+  });
   return audioMod;
 }
 
