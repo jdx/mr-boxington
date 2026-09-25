@@ -32,11 +32,11 @@ mbx brings these pieces together:
 
 - **Reuse completed work.** A second copy of a project can restore matching
   compilations instead of running them again.
-- **Clean up old build files.** mbx manages new `target/` directories by
-  default and reclaims space when a copy of the project is deleted or storage
-  limits are reached. Run `mbx adopt` to manage a `target/` that already
-  exists. A target directory you set yourself, such as with
-  `CARGO_TARGET_DIR`, is left alone. See [Managed targets](/managed-targets).
+- **Clean up old build files.** mbx manages each checkout's `target/` by
+  default, including one that already exists, and reclaims the space when a
+  copy of the project is deleted or storage limits are reached. A target
+  directory you set yourself, such as with `CARGO_TARGET_DIR`, is left alone.
+  See [Managed targets](/managed-targets).
 - **Keep concurrent builds under control.** mbx shares CPU and memory across
   builds and holds back new compilations when memory is running low. This is
   enabled by default.
