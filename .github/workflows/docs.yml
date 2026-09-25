@@ -34,9 +34,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Read-only: this job also runs pull request code. configure-pages only
+    # reads the site's settings; publishing needs write access, which only the
+    # deploy job below has, and it runs only on main.
     permissions:
       contents: read
-      pages: write
+      pages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
