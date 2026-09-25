@@ -5,7 +5,7 @@
 Pull request titles must use
 `<type>[optional scope][optional !]: <description>`; intermediate commit
 subjects should use the same format. Start descriptions with a lowercase
-character and keep them concise and imperative. Use `!` for a breaking change and explain it with a
+character or an acronym such as `CLI`, and keep them concise and imperative. Use `!` for a breaking change and explain it with a
 `BREAKING CHANGE:` footer.
 
 Breaking markers are commit-wide; a Conventional Commit scope does not limit
@@ -22,7 +22,7 @@ Allowed types are `bench`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`,
 
 CI validates the pull request title and re-runs when it is edited. Intermediate
 commit subjects are not checked because pull requests are squash-merged. CI
-mechanically checks the allowed type, syntax, and lowercase-leading description;
+mechanically checks the allowed type, syntax, and lowercase- or acronym-leading description;
 imperative mood and breaking-change details remain review rules.
 
 ## Versions
