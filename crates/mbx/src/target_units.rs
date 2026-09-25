@@ -70,9 +70,9 @@ pub(crate) fn prune(view: &Path, max_age: Duration, now: SystemTime, dry_run: bo
         return outcome;
     };
     for profile in profiles(view) {
-        if !dry_run {
-            remove_abandoned_removals(&profile);
-        }
+        // Counted, because the caller measured the view before this pass and
+        // would otherwise weigh bytes already gone against the budget.
+        outcome.removed_bytes += remove_abandoned_removals(&profile, dry_run);
         let (units, doomed) = unused(&profile, cutoff);
         if doomed.is_empty() {
             continue;
@@ -95,19 +95,25 @@ pub(crate) fn prune(view: &Path, max_age: Duration, now: SystemTime, dry_run: bo
 }
 
 /// The profile directories in `view`: those Cargo keeps a `.cargo-lock` in,
-/// either directly below the view or below a target-triple directory.
+/// up to three levels down. That covers `<profile>`, `<triple>/<profile>`,
+/// and an editor's `rust-analyzer/<triple>/<profile>`, the same depth the
+/// build-lock scan in [`crate::target`] looks.
 fn profiles(view: &Path) -> Vec<PathBuf> {
     let mut profiles = Vec::new();
-    for child in subdirectories(view) {
-        if child.join(".cargo-lock").is_file() {
-            profiles.push(child);
-            continue;
+    let mut pending = subdirectories(view)
+        .into_iter()
+        .map(|directory| (directory, 1))
+        .collect::<Vec<_>>();
+    while let Some((directory, depth)) = pending.pop() {
+        if directory.join(".cargo-lock").is_file() {
+            profiles.push(directory);
+        } else if depth < 3 {
+            pending.extend(
+                subdirectories(&directory)
+                    .into_iter()
+                    .map(|child| (child, depth + 1)),
+            );
         }
-        profiles.extend(
-            subdirectories(&child)
-                .into_iter()
-                .filter(|grandchild| grandchild.join(".cargo-lock").is_file()),
-        );
     }
     profiles
 }
@@ -130,6 +136,19 @@ fn unused(profile: &Path, cutoff: SystemTime) -> (u64, Vec<PathBuf>) {
         doomed.push(fingerprints);
         let deps = profile.join("deps");
         if deps.is_dir() {
+            doomed.push(deps);
+        }
+        doomed.extend(
+            subdirectories(&profile.join("build"))
+                .into_iter()
+                .filter(|directory| is_old_unit(directory)),
+        );
+    } else if !fingerprints.exists() {
+        // Every pre-1.100 build creates `.fingerprint/` beside `deps/`, and
+        // it is removed first, so outputs without it are what an interrupted
+        // removal left. No Cargo can use them without their fingerprints.
+        let deps = profile.join("deps");
+        if std::fs::read_dir(&deps).is_ok_and(|mut entries| entries.next().is_some()) {
             doomed.push(deps);
         }
         doomed.extend(
@@ -214,19 +233,25 @@ fn remove(profile: &Path, doomed: &[PathBuf]) -> std::io::Result<()> {
 }
 
 /// Finish deleting what an interrupted collection moved aside in `profile`.
-fn remove_abandoned_removals(profile: &Path) {
+/// Returns the bytes those leftovers held; a dry run only counts them.
+fn remove_abandoned_removals(profile: &Path, dry_run: bool) -> u64 {
     let Ok(listing) = std::fs::read_dir(profile) else {
-        return;
+        return 0;
     };
+    let mut bytes = 0;
     for entry in listing.flatten() {
         if entry
             .file_name()
             .to_string_lossy()
             .starts_with(REMOVAL_PREFIX)
         {
-            let _ = std::fs::remove_dir_all(entry.path());
+            let size = crate::target::tree_bytes(&entry.path());
+            if dry_run || std::fs::remove_dir_all(entry.path()).is_ok() {
+                bytes += size;
+            }
         }
     }
+    bytes
 }
 
 fn subdirectories(directory: &Path) -> Vec<PathBuf> {
