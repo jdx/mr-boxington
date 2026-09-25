@@ -182,7 +182,7 @@ fn cargo_with_settings_bypass_log_and_roots(
             "CARGO_TARGET_DIR or build.target-dir",
         )?;
     }
-    let existing_target = prompt_to_manage_existing_target(config, &roots, arguments)?;
+    let existing_target = manage_existing_target(config, &roots, arguments)?;
     let default_target = roots.workspace_root.join("target");
     let placing_editor = roots.target_dir_requested
         && roots.target_dir == roots.workspace_root.join(super::RUST_ANALYZER_TARGET_DIR);
@@ -234,7 +234,17 @@ fn cargo_with_settings_bypass_log_and_roots(
                     // A move that could not happen left the outputs where
                     // they were, so the build that was asked for still has
                     // its target directory; the refusal is not its failure.
-                    log::warn!("{error:#}; the build continues in the existing target directory");
+                    // A concurrent build may have made the same move first,
+                    // which leaves nothing to report.
+                    if std::fs::symlink_metadata(&roots.target_dir)
+                        .is_ok_and(|metadata| metadata.is_dir())
+                    {
+                        log::warn!(
+                            "{error:#}; the build continues in the existing target directory"
+                        );
+                    } else {
+                        log::debug!("{error:#}");
+                    }
                     (place_target_view(config, &roots), None, None)
                 }
             }
@@ -670,7 +680,7 @@ pub(super) fn join_clauses(clauses: &[String]) -> String {
     }
 }
 
-/// What an interactive run may do with an existing default target directory.
+/// What a build does with an existing default target directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ExistingTarget {
     /// Rename the directory under the managed root and keep its outputs.
@@ -680,47 +690,36 @@ pub(super) enum ExistingTarget {
     Remove,
 }
 
-/// Offer to bring an existing default target directory under management.
+/// Bring an existing default target directory under management.
 ///
-/// A non-interactive run must never wait for input. Refusing or cancelling the
-/// prompt leaves cargo's directory alone and the build continues normally.
-pub(super) fn prompt_to_manage_existing_target(
+/// A rename keeps every output, so it needs nobody's agreement and happens
+/// whether or not anyone is at a terminal: a refusal typed into one would
+/// otherwise be undone by the next build an agent runs. CI is left alone,
+/// because a job's cache step saves and restores `target/` itself and would
+/// save only the link. Removal loses outputs, so it is only ever asked, and a
+/// non-interactive run must never wait for input.
+pub(super) fn manage_existing_target(
     config: &Config,
     roots: &Roots,
     arguments: &[String],
 ) -> Result<Option<ExistingTarget>> {
-    if cargo_help_requested(arguments)
-        || !std::io::stdin().is_terminal()
-        || !std::io::stderr().is_terminal()
-    {
+    if cargo_help_requested(arguments) || policy::is_ci() {
         return Ok(None);
     }
-    prompt_to_manage_existing_target_with(config, roots, |directory, offer| {
-        // Moving loses nothing, so it is the answer a hurried Enter gets.
-        // Removal deletes outputs, so it stays opt-in.
-        let (description, affirmative, selected) = match offer {
-            ExistingTarget::Adopt => (
-                format!(
-                    "mbx can move {} under its managed root and leave a link in its place. The outputs are kept, and the directory is pruned after this checkout is deleted.",
-                    directory.display()
-                ),
-                "Move target/",
-                true,
-            ),
-            ExistingTarget::Remove => (
-                format!(
-                    "mbx can remove {} and replace it with a managed target that is pruned after this checkout is deleted. It cannot be moved there: the managed root is on another filesystem.",
-                    directory.display()
-                ),
-                "Remove target/",
-                false,
-            ),
-        };
+    manage_existing_target_with(config, roots, |directory| {
+        if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+            return Ok(false);
+        }
+        let description = format!(
+            "mbx can remove {} and replace it with a managed target that is pruned after this checkout is deleted. It cannot be moved there: the managed root is on another filesystem.",
+            directory.display()
+        );
+        // Removal deletes outputs, so a hurried Enter keeps them.
         match demand::Confirm::new("Use a managed target directory?")
             .description(&description)
-            .affirmative(affirmative)
+            .affirmative("Remove target/")
             .negative("Keep it")
-            .selected(selected)
+            .selected(false)
             .run()
         {
             Ok(answer) => Ok(answer),
@@ -737,13 +736,12 @@ pub(super) fn cargo_help_requested(arguments: &[String]) -> bool {
             .any(|argument| argument == "--help" || argument == "-h")
 }
 
-/// Decide what to offer for an existing target directory, then ask.
-///
-/// The prompt receives the offer so its wording can say what accepting does.
-pub(super) fn prompt_to_manage_existing_target_with(
+/// Decide what to do with an existing target directory: move it when a
+/// rename can, and otherwise ask whether to remove it.
+pub(super) fn manage_existing_target_with(
     config: &Config,
     roots: &Roots,
-    prompt: impl FnOnce(&Path, ExistingTarget) -> Result<bool>,
+    ask_to_remove: impl FnOnce(&Path) -> Result<bool>,
 ) -> Result<Option<ExistingTarget>> {
     if !target::can_remove_existing(
         config,
@@ -753,12 +751,10 @@ pub(super) fn prompt_to_manage_existing_target_with(
     ) {
         return Ok(None);
     }
-    let offer = if target::can_move_existing(config, &roots.workspace_root, &roots.target_dir) {
-        ExistingTarget::Adopt
-    } else {
-        ExistingTarget::Remove
-    };
-    Ok(prompt(&roots.target_dir, offer)?.then_some(offer))
+    if target::can_move_existing(config, &roots.workspace_root, &roots.target_dir) {
+        return Ok(Some(ExistingTarget::Adopt));
+    }
+    Ok(ask_to_remove(&roots.target_dir)?.then_some(ExistingTarget::Remove))
 }
 
 pub(super) fn run_cargo(
