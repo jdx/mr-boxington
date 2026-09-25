@@ -438,14 +438,20 @@ fn golden_sprites() {
     );
 }
 
-/// The favicon: the key pose's 16 box columns, centred vertically, with one
-/// merged `<path>` per colour.
+/// Favicon pixel `(x, y)`'s palette key: sprite pixel `(x + 1, y + 3)`, the key
+/// pose's 16 box columns centred vertically. The last favicon row falls below
+/// the canvas and stays transparent.
+fn favicon_key(canvas: &Canvas, x: usize, y: usize) -> u8 {
+    canvas.get(y + 3).map_or(b'.', |row| row[x + 1])
+}
+
+const FAVICON: usize = 16;
+
+/// The favicon, with one merged `<path>` per colour.
 fn favicon_svg() -> String {
-    const N: usize = 16;
+    const N: usize = FAVICON;
     let canvas = sprite(key_pose());
-    // Sprite pixel (x + 1, y + 3) is favicon pixel (x, y). The last favicon
-    // row falls below the canvas and stays transparent.
-    let key = |x: usize, y: usize| canvas.get(y + 3).map_or(b'.', |row| row[x + 1]);
+    let key = |x: usize, y: usize| favicon_key(&canvas, x, y);
     // Most-used colour first; ties keep the order they are first met in.
     let mut keys: Vec<(u8, usize)> = Vec::new();
     for y in 0..N {
@@ -502,8 +508,129 @@ fn favicon_svg() -> String {
     svg
 }
 
+/// The PNG icons: the favicon scaled up by whole pixels and centred on a
+/// square, over a backdrop or left transparent.
+const PNG_ICONS: [(&str, usize, usize, Option<Rgb>); 2] = [
+    ("favicon.png", 64, 4, None),
+    // iOS fills transparency with black, so the touch icon sits on the site's background.
+    ("apple-touch-icon.png", 180, 10, Some((0x19, 0x17, 0x13))),
+];
+
+fn icon_rgba(side: usize, scale: usize, backdrop: Option<Rgb>) -> Vec<u8> {
+    let canvas = sprite(key_pose());
+    let inset = (side - FAVICON * scale) / 2;
+    let mut rgba = Vec::with_capacity(side * side * 4);
+    for y in 0..side {
+        for x in 0..side {
+            let inside = |at: usize| at.checked_sub(inset).filter(|at| *at < FAVICON * scale);
+            let key = match (inside(x), inside(y)) {
+                (Some(x), Some(y)) => favicon_key(&canvas, x / scale, y / scale),
+                _ => b'.',
+            };
+            match color(key).or(backdrop) {
+                Some((r, g, b)) => rgba.extend([r, g, b, 255]),
+                None => rgba.extend([0; 4]),
+            }
+        }
+    }
+    rgba
+}
+
+/// An 8-bit RGBA PNG with unfiltered rows.
+fn encode_png(side: usize, rgba: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut rows = Vec::new();
+    for row in rgba.chunks(side * 4) {
+        rows.push(0);
+        rows.extend_from_slice(row);
+    }
+    let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    zlib.write_all(&rows).unwrap();
+    let side = u32::try_from(side).unwrap().to_be_bytes();
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    for (kind, data) in [
+        (b"IHDR", [&side[..], &side, &[8, 6, 0, 0, 0]].concat()),
+        (b"IDAT", zlib.finish().unwrap()),
+        (b"IEND", Vec::new()),
+    ] {
+        let mut crc = flate2::Crc::new();
+        crc.update(kind);
+        crc.update(&data);
+        png.extend(u32::try_from(data.len()).unwrap().to_be_bytes());
+        png.extend(kind);
+        png.extend(&data);
+        png.extend(crc.sum().to_be_bytes());
+    }
+    png
+}
+
+/// The pixels of an 8-bit RGBA PNG as `(side, rgba)`, whatever filters an
+/// optimiser chose, with every fully transparent pixel as zeroes. `None` for
+/// anything else, which the check then reports as a mismatch.
+fn decode_png(png: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    use std::io::Read as _;
+    let mut chunks = png.strip_prefix(b"\x89PNG\r\n\x1a\n")?;
+    let (mut width, mut height, mut compressed) = (0, 0, Vec::new());
+    while let Some(len) = chunks.get(..4) {
+        let len = u32::from_be_bytes(len.try_into().ok()?) as usize;
+        let data = chunks.get(8..8 + len)?;
+        match chunks.get(4..8)? {
+            b"IHDR" if data.get(8..)? == [8, 6, 0, 0, 0] => {
+                width = u32::from_be_bytes(data[..4].try_into().ok()?) as usize;
+                height = u32::from_be_bytes(data[4..8].try_into().ok()?) as usize;
+            }
+            b"IHDR" => return None,
+            b"IDAT" => compressed.extend_from_slice(data),
+            _ => {}
+        }
+        chunks = chunks.get(12 + len..)?;
+    }
+    let mut rows = Vec::new();
+    flate2::read::ZlibDecoder::new(&compressed[..])
+        .read_to_end(&mut rows)
+        .ok()?;
+    let stride = width * 4;
+    let mut rgba = vec![0u8; stride * height];
+    for y in 0..height {
+        let row = rows.get(y * (stride + 1)..(y + 1) * (stride + 1))?;
+        for i in 0..stride {
+            let at = y * stride + i;
+            let left = if i >= 4 { rgba[at - 4] } else { 0 };
+            let up = if y > 0 { rgba[at - stride] } else { 0 };
+            let corner = if y > 0 && i >= 4 {
+                rgba[at - stride - 4]
+            } else {
+                0
+            };
+            let predicted = match row[0] {
+                0 => 0,
+                1 => left,
+                2 => up,
+                3 => ((u16::from(left) + u16::from(up)) / 2) as u8,
+                4 => {
+                    let estimate = i16::from(left) + i16::from(up) - i16::from(corner);
+                    let [a, b, c] = [left, up, corner].map(|v| (estimate - i16::from(v)).abs());
+                    if a <= b && a <= c {
+                        left
+                    } else if b <= c {
+                        up
+                    } else {
+                        corner
+                    }
+                }
+                _ => return None,
+            };
+            rgba[at] = row[1 + i].wrapping_add(predicted);
+        }
+    }
+    for pixel in rgba.chunks_mut(4).filter(|pixel| pixel[3] == 0) {
+        pixel.fill(0);
+    }
+    Some((width, height, rgba))
+}
+
 /// The browser tab and the terminal show the same drawing: the committed
-/// favicon is generated from the sprite.
+/// favicon and the PNG icons are generated from the sprite.
 #[test]
 fn favicon_is_drawn_from_the_sprite() {
     // Read at run time: env! would put this checkout's path in the cache key.
@@ -515,20 +642,27 @@ fn favicon_is_drawn_from_the_sprite() {
     if !public.is_dir() {
         return;
     }
-    let path = public.join("favicon.svg");
     let svg = favicon_svg();
-    if std::env::var_os("MBX_WRITE_FAVICON").is_some_and(|value| value == "1") {
-        std::fs::write(&path, svg).unwrap();
-        return;
+    let write = std::env::var_os("MBX_WRITE_FAVICON").is_some_and(|value| value == "1");
+    if write {
+        std::fs::write(public.join("favicon.svg"), &svg).unwrap();
     }
+    let hint = "does not match the sprite's key pose; run this test with \
+                MBX_WRITE_FAVICON=1 to regenerate the favicon and icons";
     // A Windows checkout may convert line endings.
-    let committed = std::fs::read_to_string(&path)
+    let committed = std::fs::read_to_string(public.join("favicon.svg"))
         .unwrap_or_default()
         .replace("\r\n", "\n");
-    assert!(
-        committed == svg,
-        "docs/public/favicon.svg does not match the sprite's key pose; \
-         run this test with MBX_WRITE_FAVICON=1 to regenerate it, then \
-         re-render favicon.png and apple-touch-icon.png from it\n\n{svg}"
-    );
+    assert!(committed == svg, "docs/public/favicon.svg {hint}\n\n{svg}");
+    for (name, side, scale, backdrop) in PNG_ICONS {
+        let rgba = icon_rgba(side, scale, backdrop);
+        if write {
+            std::fs::write(public.join(name), encode_png(side, &rgba)).unwrap();
+        }
+        let committed = std::fs::read(public.join(name)).unwrap_or_default();
+        assert!(
+            decode_png(&committed) == Some((side, side, rgba)),
+            "docs/public/{name} {hint}"
+        );
+    }
 }

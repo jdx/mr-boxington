@@ -9,9 +9,8 @@
 //! whole milliseconds and counts. The only state carried between frames is the
 //! lid the previous frame showed, because the lid descends at most one pixel
 //! per drawn frame. `docs/public/favicon.svg` is the key pose, and a test keeps
-//! it in step with this sprite. `favicon.png` (that SVG scaled 4x
-//! nearest-neighbour, 64 px, transparent) and `apple-touch-icon.png` (10x,
-//! centred on a 180 px `#191713` square) are rendered from it by hand.
+//! it and the `favicon.png` and `apple-touch-icon.png` drawn from it in step
+//! with this sprite; `MBX_WRITE_FAVICON=1` makes that test rewrite all three.
 
 pub(super) const WIDTH: usize = 18;
 pub(super) const HEIGHT: usize = 9;
