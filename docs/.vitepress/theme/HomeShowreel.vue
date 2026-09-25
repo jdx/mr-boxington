@@ -77,10 +77,9 @@ const described = describeChapters(facts);
         controls
         playsinline
         preload="none"
-        aria-label="Showreel: Mr Boxington, a cardboard box with a monocle and bow tie, folds into shape and shows matching Cargo build outputs being reused across projects, worktrees, and CI. Chapters are listed below."
-        aria-describedby="mbx-showreel-chapters"
+        aria-label="Mr Boxington, a cardboard box with a monocle and bow tie, folds into shape and shows matching Cargo build outputs being reused across projects, worktrees, and CI. Chapters are listed below."
       />
-      <ol id="mbx-showreel-chapters" class="sr-only">
+      <ol class="sr-only" aria-label="Showreel chapters">
         <li v-for="c in described" :key="c.label">{{ c.label }}: {{ c.text }}</li>
       </ol>
       <figcaption>

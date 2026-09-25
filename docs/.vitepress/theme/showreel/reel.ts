@@ -133,6 +133,6 @@ export function createReel(facts: ReelFacts | null, options: ReelOptions = {}): 
   };
 }
 
-// Re-exported for the player and export harness.
+// Re-exported for the video renderer.
 export { factsFromBenchmarks } from "./facts";
 export { resetTypeCache } from "./type";

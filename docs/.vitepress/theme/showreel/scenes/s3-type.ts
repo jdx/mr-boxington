@@ -707,12 +707,11 @@ function fall(p: Pick<Piece, "vx" | "vy" | "spin" | "gravity" | "hold" | "life">
   };
 }
 
-// HUD corners from the brief, padded: the grid stays out of them.
+// The HUD, padded: the title row with its rolling chapter label at top left
+// and the bar counter at top right. The grid stays out of them.
 const HUD_RECTS: [number, number, number, number][] = [
-  [36, 20, 444, 100],
+  [36, 20, 660, 104],
   [1716, 30, 1884, 95],
-  [36, 980, 544, 1065],
-  [1616, 980, 1884, 1065],
 ];
 
 const GRID = 40;

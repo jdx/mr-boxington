@@ -11,6 +11,17 @@ on:
       - "crates/mbx/**"
       - "mise.toml"
       - ".github/workflows/docs.yml"
+  # Pull requests run the same build, showreel render included, as a dry run;
+  # only main uploads and deploys.
+  pull_request:
+    paths:
+      - "docs/**"
+      - "benchmarks/results.json"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/mbx/**"
+      - "mise.toml"
+      - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions: {}
@@ -21,8 +32,8 @@ concurrency:
 
 jobs:
   build:
-    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
-    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       pages: write
@@ -31,15 +42,30 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1.7.0
+      # check:docs builds the mbx bootstrap to regenerate the CLI reference.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          cache: rust
+          workspaces: ". -> target/mbx-bootstrap-build"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
         if: github.ref == 'refs/heads/main'
-      # The landing page plays the showreel as an MP4 (also its og:video), so
-      # the deploy renders it fresh from the current reel and benchmark numbers.
+      # The landing page plays the showreel as an MP4 (also its og:video). The
+      # render depends only on the reel and its renderer, the font, the
+      # benchmark numbers, and the locked tool versions, so it is cached on
+      # those and rendered again only when one of them changes. Reusing it also
+      # keeps its versioned URL stable for link previews, because two renders
+      # of the same inputs are not byte-identical.
+      - name: Restore the showreel video
+        id: showreel
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            docs/public/showreel.mp4
+            docs/public/showreel-poster.jpg
+          key: showreel-${{ runner.os }}-${{ hashFiles('docs/.vitepress/showreel-video.mjs', 'docs/.vitepress/theme/showreel/**', 'docs/.vitepress/fonts/SpaceGrotesk.ttf', 'benchmarks/results.json', 'docs/aube-lock.yaml') }}
       - name: Render the showreel video
+        if: steps.showreel.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q ffmpeg
@@ -66,7 +92,7 @@ jobs:
       pages: write
       id-token: write
     needs: build
-    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Deploy to GitHub Pages

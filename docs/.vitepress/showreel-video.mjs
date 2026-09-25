@@ -12,7 +12,7 @@
 
 import { once } from "node:events";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,11 +22,13 @@ import { chromium } from "playwright-core";
 const here = dirname(fileURLToPath(import.meta.url));
 const out = resolve(here, "../public/showreel.mp4");
 const poster = resolve(here, "../public/showreel-poster.jpg");
-// Written beside the outputs and renamed over them only once ffmpeg succeeds,
-// so a failed or interrupted render never leaves a partial video behind for
-// the build to publish.
-const partial = resolve(here, "../public/showreel.partial.mp4");
-const posterPartial = resolve(here, "../public/showreel-poster.partial.jpg");
+// Written outside public/ and renamed over the outputs only once ffmpeg
+// succeeds, so a failed or interrupted render never leaves a partial file
+// for the build to publish. The cache directory is on the same filesystem
+// (so the rename is atomic) and is never deployed.
+const staging = resolve(here, "cache/showreel");
+const partial = join(staging, "showreel.mp4");
+const posterPartial = join(staging, "showreel-poster.jpg");
 const WIDTH = 1920;
 const HEIGHT = 1080;
 const FPS = 60;
@@ -64,6 +66,7 @@ export { playScore } from "./theme/showreel/audio.ts";`,
   logLevel: "error",
 });
 
+mkdirSync(staging, { recursive: true });
 const browser = await chromium.launch({
   executablePath: process.env.CHROME_PATH || undefined,
 });
@@ -154,7 +157,16 @@ try {
     ],
     { stdio: ["pipe", "inherit", "inherit"] },
   );
+  // Fail here, inside the try, if ffmpeg cannot start at all (not on PATH).
+  await once(ffmpeg, "spawn");
   const exited = once(ffmpeg, "close");
+  // If ffmpeg dies mid-stream, the next frame rethrows its broken pipe; keep
+  // that error and the pending close from escaping the try as unhandled.
+  exited.catch(() => {});
+  let pipeError = null;
+  ffmpeg.stdin.on("error", (err) => {
+    pipeError ??= err;
+  });
   for (let i = 0; i < Math.round(FPS * duration); i++) {
     const png = await page.evaluate(
       ({ t, w, h }) => {
@@ -164,6 +176,7 @@ try {
       { t: i / FPS, w: WIDTH, h: HEIGHT },
     );
     const frame = Buffer.from(png.slice(png.indexOf(",") + 1), "base64");
+    if (pipeError) throw pipeError;
     if (!ffmpeg.stdin.write(frame)) await once(ffmpeg.stdin, "drain");
   }
   ffmpeg.stdin.end();

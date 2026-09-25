@@ -4,4 +4,3 @@ node_modules
 # Rendered by `mise run render:showreel`; the docs deploy renders them fresh.
 public/showreel.mp4
 public/showreel-poster.jpg
-public/showreel*.partial.*
