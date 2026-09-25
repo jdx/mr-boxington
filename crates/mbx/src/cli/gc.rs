@@ -363,6 +363,13 @@ pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool
             outcome.removed_units,
             ByteSize::b(outcome.removed_unit_bytes).display().iec(),
         ));
+    } else if outcome.removed_unit_bytes > 0 {
+        // Only what an interrupted collection left: no units to count, but
+        // space freed all the same.
+        lines.push(format!(
+            "{verb} build units an interrupted collection left in live target directories ({} logical)",
+            ByteSize::b(outcome.removed_unit_bytes).display().iec(),
+        ));
     }
     lines
 }
