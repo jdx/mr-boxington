@@ -181,6 +181,8 @@ let master: GainNode | null = null;
 let score: { handle: ScoreHandle; from: number; when: number } | null = null;
 let scoreToken = 0;
 let suspendTimer = 0;
+/** An idle suspend still settling; a start waits for it before resuming. */
+let suspending: Promise<void> | null = null;
 let restartTimer = 0;
 const cleanups: (() => void)[] = [];
 
@@ -519,6 +521,9 @@ async function startScore(midPlay: boolean) {
   let audio: AudioModule;
   try {
     audio = await loadAudio();
+    // The context reads "running" until a pending suspend lands, which would
+    // then silence the new score. Let it land, then resume.
+    if (suspending) await suspending;
     if (a.state !== "running") await a.resume();
   } catch (err) {
     // A newer start or a stop has taken over; leave the control to it.
@@ -551,7 +556,15 @@ function stopScore() {
   window.clearTimeout(suspendTimer);
   suspendTimer = window.setTimeout(() => {
     const idle = !score && (!soundOn.value || !playing.value);
-    if (ac && idle && ac.state === "running") void ac.suspend().catch(() => {});
+    if (ac && idle && ac.state === "running") {
+      const done: Promise<void> = ac
+        .suspend()
+        .catch(() => {})
+        .finally(() => {
+          if (suspending === done) suspending = null;
+        });
+      suspending = done;
+    }
   }, 200);
 }
 
