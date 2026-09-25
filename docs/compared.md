@@ -8,9 +8,10 @@ start a second copy of the project, or build on a fresh CI runner, and you may
 compile the same dependencies again. Build caches save that work so another
 build can reuse it.
 
-mbx, kache, and sccache all help with this. **mbx also manages the Cargo build
-around the cache**: it cleans up old build files and coordinates builds from
-multiple agents or terminals so they share the machine's resources.
+mbx, kache, and sccache all cache **Rust, C, and C++** compilations.
+**mbx also manages the Cargo build around the cache**: it cleans up old build
+files and coordinates builds from multiple agents or terminals so they share
+the machine's resources.
 
 | What you want | Where to start |
 | --- | --- |
@@ -43,6 +44,11 @@ mbx brings these pieces together:
 You can start with `mbx build` in place of `cargo build`. After
 [setup](/setup), you can keep typing `cargo build` and have it run through mbx.
 No cache server is needed to get started.
+
+mbx caches supported C and C++ compilations from Cargo build scripts by
+default too. For C/C++ projects outside Cargo, run the build through
+`mbx exec`, such as `mbx exec make -j8`. See
+[C and C++ builds](/standalone-builds) for make and CMake examples.
 
 ### Several agents, one machine
 
@@ -77,9 +83,9 @@ reuse builds across copies of a project, save disk space, and share cached
 work with other machines. Both also coordinate simultaneous compilations and
 provide tools to explain cache hits and misses.
 
-**The main difference is that mbx wraps Cargo, while kache wraps the
-compiler.** Cargo organizes a Rust build and calls the compiler to do the work.
-kache steps in when Cargo calls the compiler. mbx starts Cargo too, which lets
+**For Rust builds, mbx wraps Cargo as well as the compiler; kache wraps
+the compiler.** Cargo organizes a Rust build and calls the compiler to do the
+work. kache steps in when Cargo calls the compiler. mbx starts Cargo too, which lets
 it set up the build and manage its build directories as well as cache the
 compilation work.
 
@@ -89,7 +95,7 @@ kache if you want a cache in your existing build setup; choose mbx if you also
 want its Cargo setup, build-directory cleanup, and coordination of builds
 and test runs across agents.
 
-kache also works with C/C++ and CUDA builds. See its
+Both tools support C and C++; kache also supports CUDA. See its
 [current feature list](https://github.com/kunobi-ninja/kache) for supported
 workloads and its [architecture guide](https://ninja.kunobi.com/docs/kache/how-it-works/architecture)
 for the implementation details.
@@ -98,7 +104,7 @@ This comparison was checked against its documentation on September 25, 2026.
 ## sccache
 
 [sccache](https://github.com/mozilla/sccache) is an established compiler cache
-for Rust and several other languages and compilers. Like kache, it works when
+for Rust, C, C++, and other languages and compilers. Like kache, it works when
 the build calls the compiler.
 
 It is also worth considering if you want **other machines to do the
