@@ -593,7 +593,7 @@ impl CacheSession {
         &self,
         project_root: &Path,
         command: &[String],
-        shims: &PathShims,
+        shims: Option<&PathShims>,
         environment: &mut BTreeMap<String, String>,
     ) -> Option<ActionRun> {
         let identity = exec_identity(project_root, command);
@@ -661,6 +661,9 @@ impl CacheSession {
         for (name, value) in &self.scheduler_env {
             environment.insert(name.clone(), value.clone());
         }
+        let Some(shims) = shims else {
+            return action_run;
+        };
         if let Ok(pins) = serde_json::to_string(&shims.compilers) {
             environment.insert(PATH_SHIMS_ENV.into(), pins);
         }
@@ -672,6 +675,23 @@ impl CacheSession {
             environment.insert("PATH".into(), joined.to_string_lossy().into_owned());
         }
         action_run
+    }
+
+    /// Add the compiler launchers to a CMake configure `mbx exec` runs.
+    ///
+    /// They live beside this binary's own native shims, which a CMake cache
+    /// may record, rather than in the shared `PATH` shim directory.
+    pub fn prepare_exec_cmake(
+        &self,
+        program: &OsStr,
+        arguments: &mut Vec<OsString>,
+        environment: &mut BTreeMap<String, String>,
+    ) {
+        if let Err(error) =
+            cmake::exec_arguments(&self.cmake_shims_dir, program, arguments, environment)
+        {
+            warn!("CMake compiler launchers are unavailable: {error:#}");
+        }
     }
 
     /// Warm the recorded actions for a Cargo command without running Cargo.

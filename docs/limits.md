@@ -190,7 +190,9 @@ Neither are cross compilations the build did not name a compiler for: a Cargo
 build installs the shims as `HOST_CC` and `HOST_CXX`, which the `cc` crate
 consults only when host and target agree, and `mbx exec` shims only `cc`,
 `c++`, `gcc`, `g++`, `clang`, and `clang++` on Unix, plus `cl.exe` on Windows,
-leaving a versioned toolchain to the build that chose it.
+leaving a versioned toolchain to the build that chose it. A CMake configure run
+directly by `mbx exec` is the exception: its compiler launchers cache whichever
+C and C++ compiler CMake uses.
 
 A cross compile is cached when the build names its own compiler through
 `CC_<target>`, `CXX_<target>`, `TARGET_CC`, or `TARGET_CXX`: mbx wraps what was
