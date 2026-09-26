@@ -1,23 +1,25 @@
-// Kinetic type: the dive through the monocle, the hero line typing on, the
-// three slams of the lockup, and the names flying off to become the next
-// section's labels. The iris whomp and the three slams are its loudest
-// moments; they sit about 2 LU under the resolve so the end card stays the
-// peak.
+// What mbx does: the dive through the monocle, the glint peeling off to
+// become the caret, the lead typing on, the three slams of the lockup, the
+// hold, and the names flying off to become the next section's labels. The
+// iris whomp and the three slams are its loudest moments; they sit about
+// 2 LU under the resolve so the end card stays the peak.
 
-import { BEAT, type Section } from "../bible";
+import type { Section } from "../bible";
 import { rng } from "../math";
 import {
-  HERO,
-  KEY_T,
+  DROP_STAG,
+  KEYS,
   MAIN_TIP,
   T_AND,
   T_BRANCH,
+  T_CARET,
   T_CI,
   T_IRIS,
   T_LAND,
   T_MAIN,
   T_OUT,
   T_P,
+  T_PEEL,
   T_SNAP,
   T_W,
 } from "../scenes/s3-type";
@@ -26,12 +28,17 @@ import { ad, hz, line, type Mix, perc, swell, sweep } from "./mix";
 import { BM, bassBars, drumBars } from "./grooves";
 import { knock, pad, ping, pop, thump, tick, whoosh } from "./sounds";
 
+/**
+ * The dive, from the bar line to the lens (s3 T_IRIS). mr-boxington's part
+ * breathes in as the push starts a sixteenth earlier; this whoosh picks up
+ * where that breath leaves off, at its level and pitch, and rushes on.
+ */
 function dive(m: Mix, t0: number, t1: number): void {
   m.duck(t1, 0.35, 0.15);
   // The lens catches the light as the camera dives in.
   ping(m, t0, hz(98), 0.07, 0.25, { pan: 0.25, send: 0.35 });
   tick(m, t0, 3000, 0.12, 0.25);
-  whoosh(m, swell(t0, t0 + 0.05, 0.03, t1 - 0.012, 0.36, t1 + 0.07), sweep(t0, 300, t1, 4200), 1.3, { send: 0.2 });
+  whoosh(m, swell(t0 - 0.01, t0 + 0.02, 0.09, t1 - 0.012, 0.36, t1 + 0.07), sweep(t0, 1400, t1, 4200), 1.3, { send: 0.2 });
   // Glass rising an octave as the lens fills the frame.
   const g = m.voice(swell(t0, t0 + 0.05, 0.01, t1 - 0.012, 0.07, t1 + 0.05), { send: 0.3, hold: true });
   if (g) g.osc("sine", sweep(t0, hz(74), t1, hz(86)));
@@ -43,19 +50,36 @@ function dive(m: Mix, t0: number, t1: number): void {
   }
 }
 
-/** The hero line types on with scene 3's own uneven key rhythm (s3 KEY_T). */
+/**
+ * The glint arc lets go of the glass (s3 T_PEEL) and swings down to seat
+ * as the caret (s3 T_CARET): a glassy tone sliding down, and a click.
+ */
+function peel(m: Mix, t0: number, t1: number): void {
+  const v = m.voice(ad(t0, t0 + 0.03, 0.08, t1 + 0.06), { pan: line(t0, -0.35, t1, -0.2), send: 0.35, hold: true });
+  if (v) {
+    v.osc("sine", sweep(t0, hz(105), t1, hz(93)));
+    v.osc("sine", sweep(t0, hz(105) * 2.76, t1, hz(93) * 2.76), perc(t0, 0.3, 0.001, 0.08));
+  }
+  tick(m, t1, 2600, 0.34, -0.2, 0.12);
+  ping(m, t1, hz(93), 0.05, 0.3, { pan: -0.2, send: 0.3 });
+}
+
+/** The lead types on with the scene's own uneven key rhythm (s3 KEYS); the return is a heavier key. */
 function typing(m: Mix, s: Section): void {
-  const text = HERO;
   const r = rng(303);
-  for (let i = 0; i < text.length; i++) {
-    const t = s.at(KEY_T[i]);
+  KEYS.forEach((k, i) => {
+    const t = s.at(k.t);
     const f = 1900 + 700 * r();
     const pan = (r() - 0.5) * 0.3;
+    if (k.ch === "\n") {
+      knock(m, t, hz(69), 0.12, 0.2, 0.08);
+      tick(m, t, 1500, 0.3, 0.2);
+      return;
+    }
     // Every other key, plus each word's first: a fast, even patter.
-    const wordStart = i === 0 || text[i - 1] === " ";
-    if (i % 2 && !wordStart) continue;
-    tick(m, t, f, wordStart ? 0.4 : 0.24, pan);
-  }
+    if (i % 2 && !k.word) return;
+    tick(m, t, f, k.word ? 0.4 : 0.24, pan);
+  });
 }
 
 /** Slam 1, "projects,": a woody boom, then the other letters knock in. */
@@ -68,8 +92,8 @@ function slamDrop(m: Mix, t: number): void {
     v.osc("triangle", hz(50), 1, lp);
     v.noise("white", perc(t, 0.7, 0.0005, 0.05), lp, 1, t + 0.08);
   }
-  // The other letters land on the scene's 1/128-bar stagger.
-  const stag = BEAT / 32;
+  // The other letters land on the scene's stagger.
+  const stag = DROP_STAG;
   const climb = [0, 2, 4, 7, 9, 12, 14, 16];
   for (let k = 1; k <= 8; k++) {
     knock(m, t + k * stag, hz(62 + climb[k - 1]), 0.11 * (1 - k / 12), (k % 2 ? -1 : 1) * 0.3, 0.1);
@@ -77,9 +101,9 @@ function slamDrop(m: Mix, t: number): void {
 }
 
 /**
- * The git graph under the lockup (s3 T_MAIN): main's first commit pops on
- * b1.25 as "projects," settles, and the line draws out left to right to its
- * second commit just before the branch forks on b1.75 (s3 MAIN_TIP).
+ * The git graph under the lockup (s3 T_MAIN): main's first commit pops as
+ * "projects," settles, and the line draws out left to right to its second
+ * commit just before the branch forks (s3 MAIN_TIP).
  */
 function gitMain(m: Mix, t: number, tip: number): void {
   pop(m, t, hz(74), 0.13, -0.35, 0.2);
@@ -163,7 +187,7 @@ function scatter(m: Mix, t: number): void {
 
 /** The three names fly on arcs; their whooshes peak as they reach the labels (s3 T_LAND), a frame before the cut. */
 function flyToNodes(m: Mix, t0: number, land: number): void {
-  [-0.65, 0.6, 0.7].forEach((pan, k) => {
+  [-0.65, 0, 0.7].forEach((pan, k) => {
     const s = t0 + 0.1 + k * 0.03;
     whoosh(m, ad(s, land, 0.09, land + 0.07), sweep(s, 600, land, 2600 + 400 * k), 2, {
       pan: line(s, 0, land, pan),
@@ -175,6 +199,7 @@ function flyToNodes(m: Mix, t0: number, land: number): void {
 export const part: Part = {
   cues(m, s) {
     dive(m, s.start, s.at(T_IRIS));
+    peel(m, s.at(T_PEEL), s.at(T_CARET));
     typing(m, s);
     slamDrop(m, s.at(T_P));
     gitMain(m, s.at(T_MAIN), s.at(MAIN_TIP));
@@ -184,8 +209,9 @@ export const part: Part = {
     scatter(m, s.at(T_OUT));
     flyToNodes(m, s.at(T_OUT), s.at(T_LAND));
   },
-  // The drums thin out under the lockup's hold.
-  drums: (m, s) => drumBars(m, s, [[[0, 8], [4, 12]], [[0, 8], [12]]]),
+  // The lockup lands over the groove; the drums thin to a kick and a clap
+  // under the hold, and the last clap falls on the break (b11).
+  drums: (m, s) => drumBars(m, s, [[[0, 8], [4, 12]], [[0], [8]], [[0], [12]]]),
   bass: (m, s) => bassBars(m, s, [BM]),
   pads: (m, s) => pad(m, s.start, s.end, [47, 54, 57, 62, 64], 0.07, 1400),
 };

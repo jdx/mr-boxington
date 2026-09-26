@@ -1,16 +1,21 @@
-// Scene 3, "Kinetic type". The camera dives through Mr Boxington's monocle;
-// his pupil dilates into an iris that opens on a type world, and the eye's
-// highlight becomes the caret that types the hero line. The line builds into
-// a justified lockup with one treatment per word, then everything but the
-// three node names falls away and the names fly to the flow scene's labels.
+// Scene 3, "What mbx does". The monocle dive that mr-boxington started
+// (bible.ts diveCam) punches through the lens; his pupil opens on a type
+// world, and the glint arc peels off the glass to become the caret that
+// types the lead. The lockup lands under it with one treatment per word,
+// the whole sentence holds long enough to read, then everything but the
+// three node names falls away and the names fly to every-checkout's labels.
 
 import {
+  BEAT,
   beat,
+  DIVE0,
+  DIVE1,
+  DIVE_ZOOM,
+  diveCam,
+  drawLogoBox,
   drawNodeLabel,
-  drawStagedBox,
   H,
   H2_POSE,
-  HERO_CAM,
   NODE_LABEL,
   NODES,
   PALETTE,
@@ -18,13 +23,12 @@ import {
   sec,
   W,
 } from "../bible";
-import { boxFrame, CREAM, faceToScreen, INK, panelMatrix } from "../box";
+import { faceToScreen, LOGO_FACE, LOGO_INK, logoCam } from "../box";
 import { mix, rgba } from "../color";
-import { flash, glow, ring, roundedRect, shake } from "../fx";
+import { flash, glow, ring, shake } from "../fx";
 import {
   clamp,
   cubicBezier,
-  DEG,
   hash,
   inQuad,
   lerp,
@@ -38,42 +42,54 @@ import {
   TAU,
   wobble,
 } from "../math";
-import { add, applyMatrix, type Camera, mul, type V3, View } from "../space";
-import { font, layout, MONO } from "../type";
+import { type Camera, View } from "../space";
+import { font, layout } from "../type";
 
 const S = sec("what");
 
 // Beat map, local seconds. The score (score/type.ts) is written to these.
-export const T_IRIS = beat(0.5); // the iris has filled the frame; the first key lands
-const T_TYPED = beat(0.9); // hero line fully typed
-export const T_P = beat(1); // "projects," lands
-export const T_MAIN = beat(1.25); // main draws out under it, commit to commit
-export const T_BRANCH = beat(1.75); // a git branch leaves the main line...
-export const T_W = beat(2); // ...and lands on its commit: "worktrees," locks
-export const T_AND = beat(2.25); // "and" glides in on the sixteenth pickup
-export const T_CI = beat(2.5); // "CI." stamps in giant
+/** b0.5: the lens covers the frame and the pupil opens on the type world. */
+export const T_IRIS = DIVE1 - S.start;
+/** The glint arc lets go of the lens and swings down toward the caret. */
+export const T_PEEL = beat(0.3);
+/** It has become the caret; the first key follows. */
+export const T_CARET = beat(0.85);
+/** The lead's last key. */
+const T_TYPED = beat(1.9);
+export const T_P = beat(2.25); // "projects," cascades in, first letter first
+export const T_MAIN = beat(2.5); // main draws out under it, commit to commit
+export const T_BRANCH = beat(2.75); // a git branch leaves the main line...
+export const T_W = beat(3); // ...and lands on its commit: "worktrees," locks
+export const T_AND = beat(3.75); // "and" glides in on the sixteenth pickup
+export const T_CI = beat(4); // "CI." stamps in giant
 export const T_SNAP = T_CI + 0.05; // ...holds three frames, then snaps down
-export const T_OUT = beat(3); // breakup: extras fall, names fly
+/** b4.5: the sentence is complete and settled; it holds to T_OUT. */
+export const T_DONE = beat(4.5);
+export const T_OUT = beat(11); // breakup: extras fall, names fly
+/** "projects," lands a letter at a time, one per 1/128 note. */
+export const DROP_STAG = beat(1 / 32);
 /** Main's second commit pops just before the branch forks. */
 export const MAIN_TIP = T_BRANCH - 0.03;
-
-/** Global time of the finished lockup's last frame before the breakup; the reel's poster. */
-export const LOCKUP = S.start + T_OUT - 0.06;
 // The names reach their labels a frame before the section ends, as the
-// score's name whooshes peak: from here on the frame is exactly handoff 3 -> 4.
+// score's name whooshes peak: from here on the frame is exactly handoff
+// what → every-checkout.
 export const T_LAND = S.len - 0.0175;
+/** Global time of the lockup's caret-on hold: the storyboard's fallback poster. */
+export const LOCKUP = S.beat(8);
 
-export const HERO = "Reuse matching compilation work across";
-const WL = 940; // lockup width; every display line is justified to it
-const LX = (W - WL) / 2;
+/** The lead, typed in two lines; the display lockup below it finishes the sentence. */
+export const LEAD = ["mbx reuses Cargo", "compiler work across"] as const;
+const LEAD_SIZE = 80;
+const LEAD_SPEC = font(LEAD_SIZE, 600);
+/** Baseline to baseline. */
+const LEAD_PITCH = 94;
 const EM = NODE_LABEL.size;
 // Display glyphs are always drawn at the label's own font and scaled, so a
 // word in flight has the same outlines as the label it lands as.
 const SPEC = font(EM, NODE_LABEL.weight);
 const SPEC_LIGHT = font(EM, 300);
-const SPEC_MONO = font(28, 500, MONO);
 const TRACK = -0.04 * EM;
-const Z0 = 2; // camera zoom on the typed line
+const Z0 = 1.75; // camera zoom on the lead while it types
 const Z1 = 1.12; // ...with the first display line
 const Z2 = 1.05; // ...with two
 
@@ -86,20 +102,24 @@ interface Glyph {
 }
 
 interface Lockup {
+  /** The lead's lines, their glyphs, and baselines. */
+  lead: Glyph[][];
+  yl: number[];
+  /** Left edge and width of the block: the lead's second line sets both. */
+  lx: number;
+  wl: number;
   k1: number;
   k2: number;
   k3: number;
-  ym: number;
   y1: number;
   y2: number;
   y3: number;
-  mono: Glyph[];
-  monoW: number;
   proj: Glyph[];
   work: Glyph[];
   and: Glyph[];
   ci: Glyph[];
   /** Camera centers while the lockup is still building. */
+  c0: number;
   c1: number;
   c2: number;
 }
@@ -122,39 +142,82 @@ function row(
 // Rebuilt every frame from type.ts's cache, which is reset once web fonts
 // load, so the lockup never keeps fallback-font metrics.
 function lockup(ctx: CanvasRenderingContext2D): Lockup {
+  const wl = layout(ctx, LEAD[1], LEAD_SPEC).width;
+  const lx = (W - wl) / 2;
   const width = (s: string) => layout(ctx, s, SPEC, TRACK).width;
-  const k1 = WL / width("projects,");
-  const k2 = WL / width("worktrees,");
-  const k3 = WL / width("and CI.");
+  // Every display line is justified to the lead's second line.
+  const k1 = wl / width("projects,");
+  const k2 = wl / width("worktrees,");
+  const k3 = wl / width("and CI.");
   // Baselines from the font's ascender (0.72 em) and descender (0.21 em).
-  const ym = 20;
-  const y1 = ym + 44 + 0.72 * EM * k1;
-  const y2 = y1 + 0.21 * EM * k1 + 12 + 0.72 * EM * k2;
-  const y3 = y2 + 58 + 0.7 * EM * k3;
+  const yl0 = 0.72 * LEAD_SIZE;
+  const yl1 = yl0 + LEAD_PITCH;
+  const y1 = yl1 + 0.21 * LEAD_SIZE + 40 + 0.72 * EM * k1;
+  const y2 = y1 + 0.21 * EM * k1 + 10 + 0.72 * EM * k2;
+  const y3 = y2 + 54 + 0.7 * EM * k3;
+  // Centered on the frame, a little high: the block's weight is at its foot.
   const dy = 532 - y3 / 2;
   const ciRow = row(ctx, "CI.", SPEC, TRACK, 0, k3);
-  const mono = row(ctx, HERO, SPEC_MONO, 0, LX, 1);
   const lk: Lockup = {
+    lead: LEAD.map((l) => row(ctx, l, LEAD_SPEC, 0, lx, 1).glyphs),
+    yl: [yl0 + dy, yl1 + dy],
+    lx,
+    wl,
     k1,
     k2,
     k3,
-    ym: ym + dy,
     y1: y1 + dy,
     y2: y2 + dy,
     y3: y3 + dy,
-    mono: mono.glyphs,
-    monoW: mono.width,
-    proj: row(ctx, "projects,", SPEC, TRACK, LX, k1).glyphs,
-    work: row(ctx, "worktrees,", SPEC, TRACK, LX, k2).glyphs,
-    and: row(ctx, "and", SPEC_LIGHT, TRACK, LX, k3).glyphs,
-    ci: ciRow.glyphs.map((g) => ({ ...g, x: g.x + LX + WL - ciRow.width })),
+    proj: row(ctx, "projects,", SPEC, TRACK, lx, k1).glyphs,
+    work: row(ctx, "worktrees,", SPEC, TRACK, lx, k2).glyphs,
+    and: row(ctx, "and", SPEC_LIGHT, TRACK, lx, k3).glyphs,
+    ci: ciRow.glyphs.map((g) => ({ ...g, x: g.x + lx + wl - ciRow.width })),
+    c0: 0,
     c1: 0,
     c2: 0,
   };
-  lk.c1 = (lk.ym - 22 + lk.y1 + 0.21 * EM * k1) / 2;
-  lk.c2 = (lk.ym - 22 + lk.y2 + 40) / 2;
+  const top = dy;
+  lk.c0 = (top + lk.yl[1] + 0.21 * LEAD_SIZE) / 2;
+  lk.c1 = (top + lk.y1 + 0.21 * EM * k1) / 2;
+  lk.c2 = (top + lk.y2 + 30) / 2;
   return lk;
 }
+
+// --- The keys ----------------------------------------------------------------
+
+/** One key of the lead: a glyph on a line, or the return between the lines. */
+export interface Key {
+  ch: string;
+  /** Local time it lands. */
+  t: number;
+  /** Line and glyph index; the return has glyph -1. */
+  line: number;
+  i: number;
+  /** A word's first letter: the score ticks these harder. */
+  word: boolean;
+}
+
+// The keys land on an uneven hand's rhythm, with a breath after each word
+// and a longer one for the return. The score ticks every key it plays from
+// this list, so each visible key has its click.
+export const KEYS: readonly Key[] = (() => {
+  const keys: Omit<Key, "t">[] = [];
+  LEAD.forEach((text, line) => {
+    if (line > 0) keys.push({ ch: "\n", line, i: -1, word: false });
+    Array.from(text).forEach((ch, i) => keys.push({ ch, line, i, word: i === 0 || text[i - 1] === " " }));
+  });
+  const w = keys.map((k, n) => (k.ch === "\n" ? 2.2 : 0.6 + hash(n, 41) * 0.8 + (k.word ? 0.5 : 0)));
+  const total = w.reduce((s, v) => s + v, 0) - w[w.length - 1];
+  let acc = 0;
+  return keys.map((k, n) => {
+    const t = T_CARET + 0.03 + (acc / total) * (T_TYPED - T_CARET - 0.03);
+    acc += w[n];
+    return { ...k, t };
+  });
+})();
+
+// --- The type world's camera -------------------------------------------------
 
 /** The type world's camera: frames the lockup as it grows, shakes on hits. */
 interface WorldCam {
@@ -165,28 +228,44 @@ interface WorldCam {
   oy: number;
 }
 
-/** Inhale before the breakup: builds over three frames, released by the break. */
+/** The inhale before the breakup: a few frames, so the hold keeps its reading time. */
+export const INHALE = 0.04;
+
+/** The camera's inhale: builds over INHALE, released by the break. */
 function swell(lt: number): number {
-  return inQuad(progress(T_OUT - 0.055, T_OUT, lt)) * (1 - outCubic(progress(T_OUT, T_OUT + 0.14, lt)));
+  return inQuad(progress(T_OUT - INHALE, T_OUT, lt)) * (1 - outCubic(progress(T_OUT, T_OUT + 0.14, lt)));
+}
+
+/**
+ * fx.shake, eased out before its last steps: those are sub-pixel and would
+ * shimmer the type's edges at the start of the hold.
+ */
+function jolt(lt: number, at: number, amp: number, decay: number): [number, number] {
+  const [x, y] = shake(lt, at, amp, decay);
+  const k = 1 - smoothstep(at + 2 * decay, at + 3 * decay, lt);
+  return [x * k, y * k];
 }
 
 function worldCam(lt: number, lk: Lockup): WorldCam {
-  // Close on the caret as the iris opens, pan along the typed line, then
-  // pull back as the first word lands and reframe as each line joins.
-  const pull = swiftInOut(progress(0.37, T_P - 0.004, lt));
-  const a = swiftInOut(progress(0.7, 0.93, lt));
-  const b = swiftInOut(progress(1.0, T_CI - 0.005, lt));
-  const dive = lerp(0.6, 1, outCubic(progress(0, 0.36, lt)));
-  const track = smoothstep(T_IRIS - 0.04, T_TYPED + 0.03, lt);
-  const cx = lerp(lerp(LX + 60, LX + lk.monoW / 2, track), W / 2, pull);
-  const cy = lerp(lk.ym - 8, lerp(lerp(lk.c1, lk.c2, a), H / 2, b), pull);
-  // A slow push keeps the holds alive between hits.
-  const frame = lerp(Z0 * dive, lerp(lerp(Z1, Z2, a), 1, b), pull);
-  const z = frame * (1 + 0.012 * lt) * (1 + 0.022 * swell(lt));
-  const s1 = shake(lt, T_P, 7, 0.06);
-  const s2 = shake(lt, T_W, 4, 0.05);
-  const s3 = shake(lt, T_CI, 14, 0.07);
-  const s4 = shake(lt, T_OUT, 4, 0.04);
+  // Rushing in as the pupil opens, close on the lead as it types, then
+  // pulling back as the first display word lands and reframing as each
+  // line joins, to rest with the block centered.
+  const open = lerp(0.5, 1, outCubic(progress(T_IRIS - 0.08, T_IRIS + 0.34, lt)));
+  const pull = swiftInOut(progress(T_TYPED - 0.06, T_P + 0.01, lt));
+  const a = swiftInOut(progress(T_BRANCH - 0.08, T_W + 0.04, lt));
+  const b = swiftInOut(progress(T_AND - 0.12, T_CI - 0.005, lt));
+  const typed = smoothstep(T_CARET, T_TYPED, lt);
+  const mid = lk.lx + lk.wl / 2;
+  const cx = lerp(lerp(mid - 50, mid + 50, typed), W / 2, pull);
+  const cy = lerp(lk.c0, lerp(lerp(lk.c1, lk.c2, a), H / 2, b), pull);
+  // At rest the camera is exactly still: a slow drift would step each line
+  // of type a pixel at a time as the canvas snaps its baselines.
+  const frame = lerp(Z0 * open, lerp(lerp(Z1, Z2, a), 1, b), pull);
+  const z = frame * (1 + 0.02 * swell(lt));
+  const s1 = jolt(lt, T_P, 7, 0.06);
+  const s2 = jolt(lt, T_W, 4, 0.05);
+  const s3 = jolt(lt, T_CI, 14, 0.07);
+  const s4 = jolt(lt, T_OUT, 4, 0.04);
   return {
     cx,
     cy,
@@ -272,151 +351,201 @@ function glyph(
   ctx.restore();
 }
 
-// Key times for the hero line. The score ticks these, so every visible key
-// has its click.
-export const KEY_T: readonly number[] = (() => {
-  const w: number[] = [];
-  for (let i = 0; i < HERO.length; i++) {
-    w.push(0.6 + hash(i, 41) * 0.8 + (HERO[i - 1] === " " ? 0.5 : 0));
-  }
-  const total = w.reduce((s, v) => s + v, 0);
-  let acc = 0;
-  return w.map((v) => {
-    const t = T_IRIS + (acc / total) * (T_TYPED - T_IRIS);
-    acc += v;
-    return t;
-  });
-})();
+// --- The caret -----------------------------------------------------------------
 
-const CARET_W = 15;
-const CARET_H = 29;
+// A pill the height of the lead's ascender to its descender: the glint arc,
+// straightened.
+const CARET_W = 13;
+const CARET_H = 76;
 
-/** Caret rectangle in screen space (center and size). */
-function caretRect(c: WorldCam, lk: Lockup, lt: number) {
+/** Keys landed by `lt`. */
+function keysIn(lt: number): number {
   let n = 0;
-  while (n < KEY_T.length && lt >= KEY_T[n]) n++;
-  const last = lk.mono[Math.max(0, n - 1)];
-  const x = n === 0 ? LX + 1 : last.x + last.w / 2 + 3;
-  return {
-    x: sx(c, x + CARET_W / 2),
-    y: sy(c, lk.ym - 21 + CARET_H / 2),
-    w: CARET_W * c.z,
-    h: CARET_H * c.z,
-  };
+  while (n < KEYS.length && lt >= KEYS[n].t) n++;
+  return n;
 }
 
-function fillCaret(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  r: number,
-  fill: string,
-): void {
-  roundedRect(ctx, x - w / 2, y - h / 2, w, h, r);
-  ctx.fillStyle = fill;
-  ctx.fill();
-}
-
-// --- The monocle dive ------------------------------------------------------
-
-const MONOCLE_FACE: [number, number] = [18, -28];
-let monocleWorld: V3 | null = null;
-function monocleAt(): V3 {
-  if (!monocleWorld) {
-    const f = boxFrame(H2_POSE);
-    const c = add(f.c, f.z);
-    const [u, v] = MONOCLE_FACE;
-    monocleWorld = add(c, add(mul(f.x, (2 * u) / 104), mul(f.y, (-2 * v) / 128)));
+/** The caret's center and size on screen. */
+function caretRect(c: WorldCam, lk: Lockup, lt: number) {
+  const n = keysIn(lt);
+  const last = n > 0 ? KEYS[n - 1] : null;
+  let x = lk.lx - 4 - CARET_W / 2;
+  let line = 0;
+  if (last) {
+    line = last.line;
+    if (last.i >= 0) {
+      const g = lk.lead[line][last.i];
+      x = g.x + g.w / 2 + 5 + CARET_W / 2;
+    }
   }
-  return monocleWorld;
+  const y = lk.yl[line] + 14 - CARET_H / 2;
+  return { x: sx(c, x), y: sy(c, y), w: CARET_W * c.z, h: CARET_H * c.z };
 }
 
-const Z_DIVE = 36;
-function diveCam(lt: number): Camera {
-  const p = progress(0, T_IRIS, lt);
-  const m = monocleAt();
-  const m0 = new View(HERO_CAM).project(m);
-  const move = cubicBezier(0.4, 0, 0.2, 1)(progress(0, 0.75, p));
-  const turn = cubicBezier(0.45, 0, 0.25, 1)(progress(0, 0.95, p));
-  // Exponential zoom that keeps accelerating until it punches through.
-  const zoom = Z_DIVE ** (p ** 1.7);
-  return {
-    cx: lerp(m0.x, W / 2, move),
-    cy: lerp(m0.y, H / 2, move),
-    scale: HERO_CAM.scale * zoom,
-    yaw: lerp(HERO_CAM.yaw, 0, turn),
-    pitch: lerp(HERO_CAM.pitch, 0, turn),
-    roll: -14 * DEG * turn,
-    target: m,
-  };
+/** A caret, or the arc on its way to being one: a round-capped stroke through `pts`. */
+function stroke(ctx: CanvasRenderingContext2D, pts: readonly [number, number][], width: number, color: string): void {
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.lineWidth = width;
+  ctx.strokeStyle = color;
+  ctx.beginPath();
+  pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** The caret's pill as a stroke from its top to its bottom, in `n` points. */
+function caretPts(r: { x: number; y: number; w: number; h: number }, n: number): [number, number][] {
+  const top = r.y - r.h / 2 + r.w / 2;
+  const bottom = r.y + r.h / 2 - r.w / 2;
+  return Array.from({ length: n }, (_, i) => [r.x, lerp(bottom, top, i / (n - 1))]);
+}
+
+// --- The monocle dive ----------------------------------------------------------
+
+/** The logo's square on screen: logo (x, y) is at (x0 + x k, y0 + y k), k = size / 128. */
+interface Square {
+  x: number;
+  y: number;
+  size: number;
+}
+
+function squareOf(cam: Camera): Square {
+  const v = new View(cam);
+  const a = faceToScreen(v, H2_POSE, 0, 0);
+  const b = faceToScreen(v, H2_POSE, 128, 0);
+  return { x: a.x, y: a.y, size: b.x - a.x };
+}
+const onScreen = (q: Square, x: number, y: number): [number, number] => [
+  q.x + (x * q.size) / 128,
+  q.y + (y * q.size) / 128,
+];
+
+// The dive's zoom runs DIVE_ZOOM ** inCubic(u), so it is fastest as it
+// lands on the lens. Past DIVE1 the camera coasts on through the glass at
+// that rate, easing off over COAST, so the push never stops dead.
+const RATE = (3 * Math.log(DIVE_ZOOM)) / (DIVE1 - DIVE0);
+const COAST = 0.05;
+let diveEnd: { sq: Square; fixed: [number, number] } | null = null;
+
+/** The dive's last square, and the fixed point its zoom was taken about. */
+function landed() {
+  if (!diveEnd) {
+    const sq = squareOf(diveCam(DIVE1));
+    const s0 = squareOf(diveCam(DIVE0));
+    const z = sq.size / s0.size;
+    diveEnd = { sq, fixed: [(z * s0.x - sq.x) / (z - 1), (z * s0.y - sq.y) / (z - 1)] };
+  }
+  return diveEnd;
+}
+
+/** The logo's square at local time `lt`: diveCam's, then coasting on through the lens. */
+function diveSquare(lt: number): Square {
+  if (lt <= T_IRIS) return squareOf(diveCam(S.start + lt));
+  const { sq, fixed } = landed();
+  const d = lt - T_IRIS;
+  const z = Math.exp(RATE * COAST * (1 - Math.exp(-d / COAST)));
+  // The coast starts about the dive's own fixed point and drifts to the
+  // pupil, so the pupil stays in frame as it opens.
+  const [px, py] = onScreen(sq, 86, 63);
+  const k = smoothstep(0, 0.08, d);
+  const fx = lerp(fixed[0], px, k);
+  const fy = lerp(fixed[1], py, k);
+  return { x: fx + z * (sq.x - fx), y: fy + z * (sq.y - fy), size: z * sq.size };
+}
+
+/** The pupil behind the glass, in logo units: it dilates as the dive lands, then opens past the lens. */
+function pupilRadius(lt: number): number {
+  return 8.5 + 3 * inQuad(progress(0, T_IRIS, lt)) + 60 * inQuad(progress(T_IRIS, T_IRIS + 0.16, lt));
+}
+
+// The glint arc, logo.svg's "M69 57a18 18 0 0 1 10-12": 18 units about
+// (86.46, 61.38), from 194.1° to 245.5°, drawn 4 units wide.
+const ARC_C: [number, number] = [86.46, 61.38];
+const ARC_A0 = Math.atan2(57 - ARC_C[1], 69 - ARC_C[0]) + TAU;
+const ARC_A1 = Math.atan2(45 - ARC_C[1], 79 - ARC_C[0]) + TAU;
+const ARC_N = 24;
+/** A reflection does not ride the glass: the arc eases off the dive over this long. */
+const LETGO = 0.04;
+const MORPH = cubicBezier(0.45, 0, 0.2, 1);
+
+/** The arc's points in screen space at local time `lt`, morphing into the caret at `r`. */
+function arcPts(lt: number, r: { x: number; y: number; w: number; h: number }) {
+  const d = Math.max(0, lt - T_PEEL);
+  const q = diveSquare(T_PEEL + LETGO * (1 - Math.exp(-d / LETGO)));
+  const src = Array.from({ length: ARC_N }, (_, i): [number, number] => {
+    const a = lerp(ARC_A0, ARC_A1, i / (ARC_N - 1));
+    return onScreen(q, ARC_C[0] + 18 * Math.cos(a), ARC_C[1] + 18 * Math.sin(a));
+  });
+  const dst = caretPts(r, ARC_N);
+  const m = MORPH(progress(T_PEEL + 0.02, T_CARET, lt));
+  // It swings down in a curve, bowing out to the left of the straight path.
+  const bow = Math.sin(Math.PI * m) * 0.18;
+  const pts = src.map(([x, y], i): [number, number] => {
+    const [u, v] = dst[i];
+    const dx = u - x;
+    const dy = v - y;
+    return [lerp(x, u, m) + dy * bow, lerp(y, v, m) - dx * bow];
+  });
+  return { pts, width: lerp((4 * q.size) / 128, r.w, m), m };
 }
 
 function drawDive(ctx: CanvasRenderingContext2D, lt: number, lk: Lockup): void {
-  const p = progress(0, T_IRIS, lt);
-  const cam = diveCam(lt);
-  ctx.fillStyle = PALETTE.bg;
-  ctx.fillRect(0, 0, W, H);
-  drawStagedBox(ctx, cam, H2_POSE);
-  if (lt <= 0) return;
-  const view = new View(cam);
-  const m = panelMatrix(view, boxFrame(H2_POSE), "face");
-  const [fx, fy] = MONOCLE_FACE;
-  // Trace a circle in the face plane; restoring the transform keeps the path.
-  const circle = (r: number) => {
+  const q = diveSquare(lt);
+  const cam = lt <= T_IRIS ? diveCam(S.start + lt) : logoCam(q.x, q.y, q.size);
+  const k = q.size / 128;
+  const [px, py] = onScreen(q, 86 + LOGO_FACE.look[0], 63 + LOGO_FACE.look[1]);
+  const rp = pupilRadius(lt) * k;
+  // Once the pupil holds all four corners, only the world is left.
+  const far = Math.max(Math.hypot(px, py), Math.hypot(W - px, py), Math.hypot(px, H - py), Math.hypot(W - px, H - py));
+  const c = worldCam(lt, lk);
+  const bg = mix(LOGO_INK, PALETTE.bg, smoothstep(T_IRIS - 0.04, T_IRIS + 0.2, lt));
+  if (rp < far) {
+    ctx.fillStyle = PALETTE.bg;
+    ctx.fillRect(0, 0, W, H);
+    // The contract frame on the bar line; after it the arc is ours to move.
+    const pose = lt < T_PEEL ? H2_POSE : { ...H2_POSE, face: { ...LOGO_FACE, arc: 0 } };
+    drawLogoBox(ctx, cam, pose);
+    if (lt <= 0) return;
+    // The pupil dilates behind the glass, then opens past it on the world.
     ctx.save();
-    applyMatrix(ctx, m);
+    if (lt < T_IRIS) {
+      const [mx, my] = onScreen(q, 86, 62);
+      ctx.beginPath();
+      ctx.arc(mx, my, 18 * k, 0, TAU);
+      ctx.clip();
+    }
     ctx.beginPath();
-    ctx.arc(fx, fy, r, 0, TAU);
+    ctx.arc(px, py, rp, 0, TAU);
+    ctx.clip();
+    drawWorld(ctx, lt, lk, bg, c);
     ctx.restore();
-  };
-  // The pupil dilates out to the monocle ring and opens on the type world.
-  const rp = lerp(8, 14.4, swiftOut(progress(0.05, 0.8, p)));
-  const rim = lerp(0.3, 1.2, smoothstep(0, 0.4, p));
-  circle(rp);
-  ctx.fillStyle = INK;
-  ctx.fill();
-  ctx.save();
-  circle(rp - rim);
-  ctx.clip();
-  drawWorld(ctx, lt, lk, mix(INK, PALETTE.bg, smoothstep(0.05, 0.55, p)));
-  ctx.restore();
-
-  // The lens glint stays on the glass as we pass through it.
-  const shine = 0.9 * (1 - smoothstep(0.5, 0.85, p));
-  if (shine > 0) {
-    ctx.save();
-    applyMatrix(ctx, m);
-    ctx.beginPath();
-    ctx.arc(fx, fy, 12, 205 * DEG, 240 * DEG);
-    ctx.restore();
-    ctx.save();
-    ctx.lineCap = "round";
-    ctx.strokeStyle = rgba(CREAM, shine);
-    ctx.lineWidth = (3 * cam.scale) / 104;
-    ctx.stroke();
-    ctx.restore();
+    // A hot rim as the iris opens.
+    const rim = smoothstep(T_IRIS - 0.08, T_IRIS, lt) * (1 - smoothstep(T_IRIS + 0.04, T_IRIS + 0.14, lt));
+    if (rim > 0) {
+      ctx.save();
+      ctx.strokeStyle = rgba(PALETTE.amberBright, 0.8 * rim);
+      ctx.lineWidth = 3 + 0.02 * rp;
+      ctx.beginPath();
+      ctx.arc(px, py, rp, 0, TAU);
+      ctx.stroke();
+      ctx.restore();
+    }
+  } else {
+    drawWorld(ctx, lt, lk, bg, c);
   }
-
-  // The eye's highlight rides the pupil, then peels off to become the caret.
-  const q = swiftInOut(progress(0.45, 1, p));
-  const hl = faceToScreen(view, H2_POSE, 15.5, -30.5);
-  const he = faceToScreen(view, H2_POSE, 18.1, -30.5);
-  const hr = Math.min(Math.hypot(he.x - hl.x, he.y - hl.y), 20);
-  const car = caretRect(worldCam(lt, lk), lk, lt);
-  fillCaret(
-    ctx,
-    lerp(hl.x, car.x, q),
-    lerp(hl.y, car.y, q),
-    lerp(hr * 2, car.w, q),
-    lerp(hr * 2, car.h, q),
-    lerp(hr, 2, q),
-    mix(CREAM, PALETTE.amber, q),
-  );
+  if (lt < T_PEEL || lt >= T_CARET) return;
+  // The glint arc lets go of the lens and becomes the caret, cooling from
+  // the glass's white to amber as it straightens.
+  const r = caretRect(c, lk, lt);
+  const arc = arcPts(lt, r);
+  const mid = arc.pts[ARC_N >> 1];
+  glow(ctx, mid[0], mid[1], 120 + 2 * arc.width, PALETTE.amberBright, 0.5 * Math.sin(Math.PI * arc.m));
+  stroke(ctx, arc.pts, arc.width, mix("#ffffff", PALETTE.amber, smoothstep(0.35, 1, arc.m)));
 }
 
-// --- The type world --------------------------------------------------------
+// --- The type world ------------------------------------------------------------
 
 // The rails run a little under the baselines, so the letters stand on them
 // and only descenders cross (with an ink skip).
@@ -430,13 +559,13 @@ const BRANCH_W = 3.5;
  * commit on the right.
  */
 function branchGeom(lk: Lockup) {
-  const ax = LX - 58;
+  const ax = lk.lx - 58;
   const ay = lk.y1 + RAIL_DY;
   const by = lk.y2 + RAIL_DY;
   const r = 46;
   const segV = by - r - ay;
   const arc = (r * Math.PI) / 2;
-  const x1 = LX + WL + 58;
+  const x1 = lk.lx + lk.wl + 58;
   const segH = x1 - (ax + r);
   const total = segV + arc + segH;
   const sAt = (x: number) => segV + arc + (x - (ax + r));
@@ -498,6 +627,8 @@ interface Flyer {
   key: keyof typeof NODES;
   /** Arc height above the chord's midpoint, px (negative is up). */
   lift: number;
+  /** Sideways bow of the arc, px (positive is right). */
+  bow: number;
   /** Peak lean mid-flight, radians; negative lifts the right end. */
   bank: number;
   /** Launch after T_OUT, seconds. */
@@ -507,9 +638,8 @@ interface Flyer {
 }
 
 // The names are under way two frames after the break and keep real speed
-// into the last frames: about 90% of the way at 1.75 s and 97% at 1.80 s,
-// so they arrive with the score's whooshes at the section's end instead of
-// creeping in.
+// into the last frames, so they arrive with the score's whooshes at the
+// section's end instead of creeping in.
 const FLY = cubicBezier(0.3, 0.05, 0.55, 1);
 const LAG = 0.0012;
 // Motion blur as a 180° shutter: trailing samples over half a frame.
@@ -517,7 +647,9 @@ const SHUTTER = 0.5 / 60;
 const BLUR_N = 8;
 
 // The names launch on the break, a hair apart, and all land together, each
-// on a shallow arc that diverges from the other two.
+// on a shallow arc that diverges from the other two: "project" peels off to
+// the upper left, "worktree" rises up the middle, bowing right to let it
+// pass, and "CI" climbs to the upper right.
 function flyers(lk: Lockup): Flyer[] {
   return [
     {
@@ -525,7 +657,8 @@ function flyers(lk: Lockup): Flyer[] {
       k: lk.k1,
       y: lk.y1,
       key: "project",
-      lift: -60,
+      lift: -90,
+      bow: -60,
       bank: -0.16,
       delay: 0,
       dir: -1,
@@ -535,9 +668,10 @@ function flyers(lk: Lockup): Flyer[] {
       k: lk.k2,
       y: lk.y2,
       key: "worktree",
-      lift: -70,
-      bank: -0.1,
-      delay: 0.008,
+      lift: 0,
+      bow: 150,
+      bank: 0.08,
+      delay: 0.02,
       dir: 1,
     },
     {
@@ -546,8 +680,9 @@ function flyers(lk: Lockup): Flyer[] {
       y: lk.y3,
       key: "ci",
       lift: -40,
+      bow: 60,
       bank: -0.08,
-      delay: 0.004,
+      delay: 0.008,
       dir: 1,
     },
   ];
@@ -569,7 +704,7 @@ function drawFlyer(ctx: CanvasRenderingContext2D, c: WorldCam, f: Flyer, lt: num
   const a1 = lx0 + (e0.x + e0.w / 2 + eN.x + eN.w / 2) / 2;
   const x0 = sx(c, a0);
   const y0 = sy(c, f.y);
-  const cxp = (x0 + a1) / 2;
+  const cxp = (x0 + a1) / 2 + f.bow;
   const cyp = (y0 + ly) / 2 + f.lift;
   const k0 = f.k * c.z;
   /** Glyph j's baseline center, scale, and lean at time `at`. */
@@ -629,6 +764,8 @@ interface Piece {
   vy: number;
   spin: number;
   gravity: number;
+  /** How fast it recedes into the frame; DEPTH by default. */
+  depth?: number;
   /** Seconds at full strength after letting go, then the fade's end. */
   hold: number;
   life: number;
@@ -640,30 +777,37 @@ interface Piece {
 // and the period fall straight out of the bottom of the frame.
 const DEPTH = 1.2;
 const G = 12000;
+const LEAD_FILL = PALETTE.text2;
 
 function fallers(lk: Lockup): Piece[] {
   const out: Piece[] = [];
-  // The hero line crumbles: a small hop off its guide, then a fast drop.
-  const mid = LX + lk.monoW / 2;
-  lk.mono.forEach((g, i) => {
-    const side = (g.x - mid) / (lk.monoW / 2);
-    out.push({
-      spec: SPEC_MONO,
-      ch: g.ch,
-      w: g.w,
-      x: g.x,
-      y: lk.ym,
-      k: 1,
-      fill: PALETTE.text2,
-      delay: hash(i, 9) * 0.008,
-      vx: side * 160 + (hash(i, 3) - 0.5) * 180,
-      vy: -(80 + hash(i, 5) * 160),
-      spin: (hash(i, 7) - 0.5) * 18,
-      gravity: 14000,
-      hold: 0.05,
-      life: 0.19,
-    });
-  });
+  // The lead bursts: its letters are knocked up and out, spinning away into
+  // depth, and are spent before "project" climbs through where it stood.
+  const mid = lk.lx + lk.wl / 2;
+  let n = 0;
+  lk.lead.forEach((line, l) =>
+    line.forEach((g) => {
+      const side = (g.x - mid) / (lk.wl / 2);
+      const i = n++;
+      out.push({
+        spec: LEAD_SPEC,
+        ch: g.ch,
+        w: g.w,
+        x: g.x,
+        y: lk.yl[l],
+        k: 1,
+        fill: LEAD_FILL,
+        delay: hash(i, 9) * 0.008,
+        vx: side * 900 + (hash(i, 3) - 0.5) * 500,
+        vy: -(500 + hash(i, 5) * 700) + l * 250,
+        spin: (hash(i, 7) - 0.5) * 22,
+        gravity: 9000,
+        depth: 7,
+        hold: 0.015,
+        life: 0.1,
+      });
+    }),
+  );
   const heavy = (
     g: Glyph,
     y: number,
@@ -678,17 +822,15 @@ function fallers(lk: Lockup): Piece[] {
     life: number,
   ) => out.push({ spec, ch: g.ch, w: g.w, x: g.x, y, k, fill, delay, vx, vy, spin, gravity: G, hold, life });
   const P = PALETTE.paper;
-  // Both "s," pairs sit where "worktree" is headed. They just let go and
-  // tumble straight down, so the names pull away from them instead of
-  // carrying them along; they cross behind "worktree" and CI already turned
-  // sideways, and fade once the fall reads.
+  // Both "s," pairs let go and tumble straight down, so the names pull away
+  // from them instead of carrying them along, and fade once the fall reads.
   heavy(lk.proj[7], lk.y1, lk.k1, SPEC, P, 0, 60, 40, 12, 0.067, 0.19);
   heavy(lk.proj[8], lk.y1, lk.k1, SPEC, P, 0.012, 150, 0, 16, 0.067, 0.19);
   heavy(lk.work[8], lk.y2, lk.k2, SPEC, P, 0.004, -40, 60, -11, 0.067, 0.19);
   heavy(lk.work[9], lk.y2, lk.k2, SPEC, P, 0.014, 60, 20, 15, 0.067, 0.19);
-  // "and" lets go letter by letter, a frame apart; the
-  // period falls away under CI. Nothing flies below them, so they leave
-  // through the bottom of the frame.
+  // "and" lets go letter by letter, a frame apart; the period falls away
+  // under CI. Nothing flies below them, so they leave through the bottom of
+  // the frame.
   const andV: [number, number, number][] = [
     [-70, -130, -3.5],
     [-15, -110, 2.5],
@@ -702,22 +844,15 @@ function fallers(lk: Lockup): Piece[] {
 }
 
 /** Screen offset, spin, depth scale, and fade of a piece `d` s after it lets go. */
-function fall(p: Pick<Piece, "vx" | "vy" | "spin" | "gravity" | "hold" | "life">, d: number) {
+function fall(p: Pick<Piece, "vx" | "vy" | "spin" | "gravity" | "depth" | "hold" | "life">, d: number) {
   return {
     dx: p.vx * d,
     dy: p.vy * d + 0.5 * p.gravity * d * d,
     rot: p.spin * d,
-    s: 1 / (1 + DEPTH * d),
+    s: 1 / (1 + (p.depth ?? DEPTH) * d),
     alpha: 1 - smoothstep(p.hold, p.life, d),
   };
 }
-
-// The HUD, padded: the title row with its rolling chapter label at top left
-// and the bar counter at top right. The grid stays out of them.
-const HUD_RECTS: [number, number, number, number][] = [
-  [36, 20, 660, 104],
-  [1716, 30, 1884, 95],
-];
 
 const GRID = 40;
 /** A faint dot grid: makes the type camera's moves legible; hits ripple it. */
@@ -734,14 +869,14 @@ function drawGrid(
   const y0 = c.cy - H / 2 / c.z;
   const y1 = c.cy + H / 2 / c.z;
   const waves = [
-    { t: 0.1, x: LX + 8, y: lk.ym - 6, amp: 0.8 },
-    { t: T_P, x: LX + WL / 2, y: lk.y1, amp: 0.55 },
-    { t: T_W, x: LX + WL + 58, y: lk.y2, amp: 0.55 },
-    { t: T_CI, x: LX + WL - 180, y: lk.y3 - 100, amp: 0.55 },
+    { t: T_IRIS, x: lk.lx, y: lk.yl[0] - 30, amp: 0.8 },
+    { t: T_P, x: lk.lx + lk.wl / 2, y: lk.y1, amp: 0.55 },
+    { t: T_W, x: lk.lx + lk.wl + 58, y: lk.y2, amp: 0.55 },
+    { t: T_CI, x: lk.lx + lk.wl - 180, y: lk.y3 - 100, amp: 0.55 },
     { t: T_OUT, x: W / 2, y: H / 2, amp: 0.5 },
   ].filter((w) => lt > w.t && lt < w.t + 0.6);
   // Brighter while the iris opens, so the lens lands on a lit stage.
-  const base = lerp(0.3, 0.16, smoothstep(T_IRIS, T_IRIS + 0.25, lt));
+  const base = lerp(0.3, 0.14, smoothstep(T_IRIS + 0.1, T_IRIS + 0.4, lt));
   const s = 2.2 * c.z;
   ctx.save();
   ctx.fillStyle = PALETTE.text3;
@@ -749,14 +884,11 @@ function drawGrid(
     const px = sx(c, gx);
     for (let gy = Math.ceil(y0 / GRID) * GRID; gy <= y1; gy += GRID) {
       const py = sy(c, gy);
-      let hud = false;
-      for (const [a, b, e, f] of HUD_RECTS) if (px > a && px < e && py > b && py < f) hud = true;
-      if (hud) continue;
       let a = base;
       for (const w of waves) {
         const r = (lt - w.t) * 2600;
         const d = Math.hypot(gx - w.x, gy - w.y) - r;
-        a += w.amp * Math.exp(-(d * d) / 5000) * (1 - (lt - w.t) / 0.6);
+        a += w.amp * Math.exp(-(d * d) / 5000) * (1 - (lt - w.t) / 0.6) * smoothstep(0, 0.02, lt - w.t);
       }
       // Fall off toward the frame edges.
       const ex = (px - W / 2) / (W / 2);
@@ -769,8 +901,12 @@ function drawGrid(
   ctx.restore();
 }
 
-function drawWorld(ctx: CanvasRenderingContext2D, lt: number, lk: Lockup, bg: string): void {
-  const c = worldCam(lt, lk);
+/** Whether the caret shows: solid while it types, then on for the first of every two beats (about 1 Hz, and on at b8). */
+export function caretOn(lt: number): boolean {
+  return lt < T_TYPED || Math.floor(lt / BEAT + 1e-9) % 2 === 0;
+}
+
+function drawWorld(ctx: CanvasRenderingContext2D, lt: number, lk: Lockup, bg: string, c: WorldCam): void {
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, W, H);
 
@@ -779,49 +915,55 @@ function drawWorld(ctx: CanvasRenderingContext2D, lt: number, lk: Lockup, bg: st
   const giant = lt >= T_CI ? 1 - clamp(ciSnap(lt)) : 0;
   const dim = 1 - giant;
   const out = lt >= T_OUT;
-  const loose = inQuad(progress(T_OUT - 0.055, T_OUT, lt));
+  const loose = inQuad(progress(T_OUT - INHALE, T_OUT, lt));
 
   drawGrid(
     ctx,
     c,
     lk,
     lt,
-    smoothstep(0.02, 0.16, lt) * (1 - smoothstep(T_OUT + 0.05, T_OUT + 0.32, lt)) * dim,
+    smoothstep(T_IRIS - 0.12, T_IRIS + 0.02, lt) * (1 - smoothstep(T_OUT + 0.05, T_OUT + 0.32, lt)) * dim,
   );
 
   // The iris lands on a lit prompt: a glow that rides the caret, and a
-  // double ripple fixed in the world where the caret sat before the first
-  // key, so the camera's track carries it off to the left. Both rings are
-  // spent before the typing gets far.
+  // double ripple fixed in the world where the caret lands, so the
+  // camera's track carries it off to the left. Both rings are spent before
+  // the typing gets far.
   if (lt < T_P) {
     const cr = caretRect(c, lk, lt);
-    const glowA = smoothstep(0.1, 0.2, lt) * (1 - smoothstep(T_TYPED - 0.05, T_P, lt));
+    const glowA = smoothstep(T_CARET - 0.12, T_CARET, lt) * (1 - smoothstep(T_TYPED - 0.1, T_P, lt));
     glow(ctx, cr.x, cr.y, 150 * (c.z / Z0), PALETTE.amber, 0.55 * glowA);
-    const ex = sx(c, LX + 1 + CARET_W / 2);
-    const ey = sy(c, lk.ym - 21 + CARET_H / 2);
-    ring(ctx, ex, ey, 380 * c.z, progress(0.12, 0.35, lt), PALETTE.amberBright, 7);
-    ring(ctx, ex, ey, 260 * c.z, progress(0.17, 0.35, lt), PALETTE.amber, 4);
+    const ex = sx(c, lk.lx - 4 - CARET_W / 2);
+    const ey = sy(c, lk.yl[0] + 14 - CARET_H / 2);
+    // The rings burst out already clear of the caret, as its click lands.
+    const burst = (end: number) => {
+      const p = progress(T_CARET, end, lt);
+      return p > 0 ? lerp(0.12, 1, p) : 0;
+    };
+    ring(ctx, ex, ey, 380 * c.z, burst(T_CARET + 0.24), PALETTE.amberBright, 7);
+    ring(ctx, ex, ey, 240 * c.z, burst(T_CARET + 0.2), PALETTE.amber, 4);
   }
 
   // Construction guides: baselines drawn with a pen tip, and the margins.
   ctx.save();
   ctx.lineCap = "round";
-  const guides = [lk.ym, lk.y1, lk.y2, lk.y3];
+  const guides = [lk.yl[0], lk.yl[1], lk.y1, lk.y2, lk.y3];
   guides.forEach((y, i) => {
     const g0 = outCubic(progress(T_OUT + i * 0.012, T_OUT + 0.12 + i * 0.012, lt));
-    const g1 = swiftOut(progress(0.04 + i * 0.05, 0.4 + i * 0.05, lt));
+    const pen = progress(T_IRIS + i * 0.05, T_IRIS + 0.4 + i * 0.05, lt);
+    const g1 = swiftOut(pen);
     if (g1 <= g0) return;
-    const xa = LX - 110;
-    const xb = LX + WL + 110;
+    const xa = lk.lx - 110;
+    const xb = lk.lx + lk.wl + 110;
     // Retracting guides fade as they go, so no stub is left hanging.
-    ctx.strokeStyle = rgba(PALETTE.divider, (i === 0 ? 0.6 : 0.95) * dim * (1 - g0));
+    ctx.strokeStyle = rgba(PALETTE.divider, (i < 2 ? 0.6 : 0.95) * dim * (1 - g0));
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(sx(c, lerp(xa, xb, g0)), sy(c, y));
     ctx.lineTo(sx(c, lerp(xa, xb, g1)), sy(c, y));
     ctx.stroke();
-    if (i > 0 && i !== 2) {
-      const hitA = pulse(lt, [T_P, T_W, T_CI][i - 1], 0.004, 0.09) * dim;
+    if (i >= 2 && i !== 3) {
+      const hitA = pulse(lt, i === 2 ? T_P : T_CI, 0.004, 0.09) * dim;
       if (hitA > 0.01) {
         ctx.strokeStyle = rgba(PALETTE.amberBright, 0.7 * hitA);
         ctx.lineWidth = 2.5;
@@ -830,14 +972,14 @@ function drawWorld(ctx: CanvasRenderingContext2D, lt: number, lk: Lockup, bg: st
     }
     if (g1 < 0.995) {
       const tx = sx(c, lerp(xa, xb, g1));
-      glow(ctx, tx, sy(c, y), 26 * c.z, PALETTE.amber, 0.7 * (1 - g1));
+      glow(ctx, tx, sy(c, y), 26 * c.z, PALETTE.amber, 0.7 * (1 - g1) * smoothstep(0, 0.08, pen));
     }
   });
-  for (const [i, x] of [LX, LX + WL].entries()) {
+  for (const [i, x] of [lk.lx, lk.lx + lk.wl].entries()) {
     const g0 = outCubic(progress(T_OUT, T_OUT + 0.12, lt));
-    const g1 = swiftOut(progress(0.12 + i * 0.06, 0.52 + i * 0.06, lt));
+    const g1 = swiftOut(progress(T_IRIS + 0.08 + i * 0.06, T_IRIS + 0.48 + i * 0.06, lt));
     if (g1 <= g0) continue;
-    const ya = lk.ym - 70;
+    const ya = lk.yl[0] - 110;
     const yb = lk.y3 + 50;
     ctx.strokeStyle = rgba(PALETTE.divider, 0.6 * dim * (1 - g0));
     ctx.lineWidth = 1.5;
@@ -851,11 +993,10 @@ function drawWorld(ctx: CanvasRenderingContext2D, lt: number, lk: Lockup, bg: st
   const br = branchGeom(lk);
   drawBranch(ctx, c, br, lt, bg, dim);
 
-  // "projects,": letters drop in a fast cascade, one per 128th note, and
-  // squash on the main line. Drawn before the kicker so they fall behind it.
-  const STAG = beat(1 / 32);
+  // "projects,": letters drop in a fast cascade, one per DROP_STAG, and
+  // squash on the main line. Drawn before the lead so they fall behind it.
   const FALL = 0.14;
-  // Screen boxes of letters still dropping, for the kicker's knockout.
+  // Screen boxes of letters still dropping, for the lead's knockout.
   const drops: [number, number, number, number][] = [];
   // Descenders skip the main line's ink where they cross it.
   const railBand = (y: number) => {
@@ -866,10 +1007,10 @@ function drawWorld(ctx: CanvasRenderingContext2D, lt: number, lk: Lockup, bg: st
   const skip1 = railBand(lk.y1);
   if (!out) {
     lk.proj.forEach((g, i) => {
-      const tl = T_P + i * STAG;
+      const tl = T_P + i * DROP_STAG;
       if (lt < tl - FALL) return;
       const u = progress(tl - FALL, tl, lt);
-      let dy = -950 * (1 - u * u);
+      let dy = -1100 * (1 - u * u);
       let sxk = 1;
       let syk = 1;
       let rot = (hash(i, 7) - 0.5) * 0.7 * (1 - u);
@@ -904,35 +1045,34 @@ function drawWorld(ctx: CanvasRenderingContext2D, lt: number, lk: Lockup, bg: st
     });
   }
 
-  // The hero line: each key lands warm and a few px low, then settles and
-  // cools. The caret leads, solid while typing, then blinks in time.
-  const monoDip = 10 * wobble(lt, T_P, 4, 10);
+  // The lead: each key lands warm and a few px low, then settles and cools.
+  // The caret leads, solid while typing, then blinks in time.
+  const leadDip = 12 * wobble(lt, T_P, 4, 10) * (1 - smoothstep(T_P + 0.4, T_P + 0.6, lt));
   if (!out) {
-    lk.mono.forEach((g, i) => {
-      const t = KEY_T[i];
-      if (lt < t || g.ch === " ") return;
-      const d = lt - t;
-      const rise = 6 * (1 - outCubic(progress(0, 0.07, d))) - 3 * loose;
-      const fill = mix(PALETTE.amberBright, PALETTE.text2, smoothstep(0.02, 0.14, d));
+    for (const key of KEYS) {
+      if (lt < key.t || key.i < 0) continue;
+      const g = lk.lead[key.line][key.i];
+      if (g.ch === " ") continue;
+      const d = lt - key.t;
+      const rise = 12 * (1 - outCubic(progress(0, 0.07, d))) - 3 * loose;
+      const fill = mix(PALETTE.amberBright, LEAD_FILL, smoothstep(0.02, 0.16, d));
       const x = sx(c, g.x);
-      const y = sy(c, lk.ym + monoDip + rise);
+      const y = sy(c, lk.yl[key.line] + leadDip + rise);
       // A thin knockout only where a dropping letter passes behind.
       const hw = 0.5 * g.w * c.z;
       let over = false;
       for (const [a, b, e, f] of drops) {
-        if (x + hw > a && x - hw < e && y + 7 * c.z > b && y - 22 * c.z < f) over = true;
+        if (x + hw > a && x - hw < e && y + 12 * c.z > b && y - 60 * c.z < f) over = true;
       }
-      glyph(ctx, SPEC_MONO, g.ch, g.w, x, y, c.z, fill, {
+      glyph(ctx, LEAD_SPEC, g.ch, g.w, x, y, c.z, fill, {
         alpha: dim,
-        halo: over ? { color: bg, width: 4.5 * c.z } : undefined,
+        halo: over ? { color: bg, width: 6 * c.z } : undefined,
       });
-    });
-    if (lt >= T_IRIS) {
-      const on = lt < T_P || (lt / beat(1)) % 1 < 0.5;
-      if (on) {
-        const r = caretRect(c, lk, lt);
-        fillCaret(ctx, r.x, r.y + monoDip * c.z, r.w, r.h, 2, rgba(PALETTE.amber, dim));
-      }
+    }
+    // Before T_CARET the caret is still the glint arc (drawDive draws it).
+    if (lt >= T_CARET && caretOn(lt)) {
+      const r = caretRect(c, lk, lt);
+      stroke(ctx, caretPts({ ...r, y: r.y + leadDip * c.z }, 2), r.w, rgba(PALETTE.amber, dim));
     }
   }
 
@@ -970,7 +1110,7 @@ function drawWorld(ctx: CanvasRenderingContext2D, lt: number, lk: Lockup, bg: st
   }
 
   // "and" glides in on the pickup; CI stamps in giant with a split on the
-  // half beat, then snaps down beside it.
+  // beat, then snaps down beside it.
   if (!out && lt >= T_AND) {
     lk.and.forEach((g, j) => {
       const u = swiftOut(progress(T_AND + j * 0.025, T_AND + 0.2 + j * 0.025, lt));
@@ -996,14 +1136,14 @@ function drawWorld(ctx: CanvasRenderingContext2D, lt: number, lk: Lockup, bg: st
     }
     // The caret goes with its line.
     const cr = caretRect(c, lk, lt);
-    const caret = { vx: 240, vy: -200, spin: 9, gravity: 14000, hold: 0.05, life: 0.19 };
+    const caret = { vx: 900, vy: -300, spin: 14, gravity: 9000, depth: 7, hold: 0.015, life: 0.1 };
     const f = fall(caret, Math.max(0, lt - T_OUT - 0.004));
     if (f.alpha > 0) {
       ctx.save();
       ctx.globalAlpha *= f.alpha;
       ctx.translate(cr.x + f.dx, cr.y + f.dy);
       ctx.rotate(f.rot);
-      fillCaret(ctx, 0, 0, cr.w * f.s, cr.h * f.s, 2, PALETTE.amber);
+      stroke(ctx, caretPts({ x: 0, y: 0, w: cr.w * f.s, h: cr.h * f.s }, 2), cr.w * f.s, PALETTE.amber);
       ctx.restore();
     }
     for (const fl of flyers(lk)) drawFlyer(ctx, c, fl, lt);
@@ -1054,9 +1194,8 @@ function drawBranch(
     }
     if (mainP < 1) penTip(ctx, sx(c, m1), sy(c, br.ay), c.z, 0.8);
   }
-  const tipAt = MAIN_TIP;
-  const tip = outBack(2.6)(progress(tipAt - 0.01, tipAt + 0.08, lt)) * gone;
-  const tipHot = 0.8 * pulse(lt, tipAt, 0.004, 0.06);
+  const tip = outBack(2.6)(progress(MAIN_TIP - 0.01, MAIN_TIP + 0.08, lt)) * gone;
+  const tipHot = 0.8 * pulse(lt, MAIN_TIP, 0.004, 0.06);
   commit(ctx, sx(c, br.x1), sy(c, br.ay), 11 * c.z * tip, lw, tipHot, bg, dim);
   if (head > 0) {
     const tail = br.total * retract;
@@ -1094,12 +1233,12 @@ function drawBranch(
   ctx.restore();
 }
 
-/** Snap progress for CI: 0 while giant, overshoots past 1, settles at 1. */
+/** Snap progress for CI: 0 while giant, overshoots past 1, settles at 1 by b4.5. */
 function ciSnap(lt: number): number {
   if (lt < T_SNAP) return 0;
   const a = progress(T_SNAP, T_SNAP + 0.09, lt);
   if (a < 1) return 1.05 * outCubic(a);
-  return lerp(1.05, 1, cubicBezier(0.45, 0, 0.55, 1)(progress(T_SNAP + 0.09, T_SNAP + 0.2, lt)));
+  return lerp(1.05, 1, cubicBezier(0.45, 0, 0.55, 1)(progress(T_SNAP + 0.09, T_DONE - 0.01, lt)));
 }
 
 const GIANT = 3.1;
@@ -1162,8 +1301,8 @@ export const scene: Scene = {
       return;
     }
     const lk = lockup(ctx);
-    if (lt < T_IRIS) drawDive(ctx, lt, lk);
-    else drawWorld(ctx, lt, lk, PALETTE.bg);
+    if (lt < T_IRIS + 0.25) drawDive(ctx, lt, lk);
+    else drawWorld(ctx, lt, lk, PALETTE.bg, worldCam(lt, lk));
     ctx.restore();
   },
 };

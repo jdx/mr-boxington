@@ -9,7 +9,7 @@ import {
   DLAST,
   SLAP,
   T_BEAM0,
-  T_BEAM1,
+  T_DROP as T_BEAM1,
   T_BEAMEND,
   T_DISC,
   T_LAND0,
@@ -116,7 +116,7 @@ function prune(m: Mix, s: Section): void {
   const rows = new Map<number, { n: number; side: number; slap: number }>();
   for (const c of city()) {
     if (c.keep) continue;
-    const r = rows.get(c.rank) ?? { n: 0, side: 0, slap: s.at(c.hit + SLAP * c.fs) };
+    const r = rows.get(c.rank) ?? { n: 0, side: 0, slap: s.at(c.fold + SLAP) };
     r.n++;
     r.side += c.x - c.z;
     rows.set(c.rank, r);
