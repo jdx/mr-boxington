@@ -14,12 +14,11 @@ import {
   applyMapCam,
   type BoxSpot,
   boxPose,
-  type BuildView,
   type ChipState,
   type Curve,
   cursorOn,
   drawArrow,
-  drawCacheBar,
+  drawBuildView,
   drawChip,
   drawSpark,
   drawFrame,
@@ -36,7 +35,6 @@ import {
   type MapCam,
   mixMapCam,
   OVERVIEW,
-  type PaneLayout,
   type PaneState,
   PLAN,
   planChip,
@@ -50,8 +48,8 @@ import {
   UC_END,
 } from "../map";
 import { clamp, inCubic, inOutCubic, lerp, outCubic, progress, pulse, smoothstep, swiftInOut, swiftOut, wobble } from "../math";
-import { drawSprite, type Pose } from "../sprite";
-import { type Caption, DETAIL, drawText, drawWords, font, MONO, wordStyle } from "../type";
+import type { Pose } from "../sprite";
+import { type Caption, DETAIL, drawWords, font, MONO, wordStyle } from "../type";
 import { drawSquashedSlab, dust, type SlabAt, tossed } from "./every-checkout-kit";
 
 const S = sec("under-cargo-build");
@@ -128,26 +126,6 @@ function spritePose(lt: number): Pose {
   return lt >= BLINK[0] && lt < BLINK[1] ? { ...RUNNING_POSE, eye: "shut" } : RUNNING_POSE;
 }
 
-/**
- * The build view, painted as drawPane paints a pane's `view` (the mascot,
- * its status, the `Build / cache` bar) so it can come up on Enter with a
- * flash and hand over to drawPane unchanged.
- */
-function drawView(ctx: CanvasRenderingContext2D, L: PaneLayout, v: BuildView, alpha: number): void {
-  if (alpha <= 0) return;
-  const s = L.window.w / 780;
-  ctx.save();
-  ctx.globalAlpha *= alpha;
-  drawSprite(ctx, v.pose, L.sprite.x, L.sprite.y, L.px);
-  if (v.status) {
-    const fill = v.status.tone === "ok" ? TERM.green : v.status.tone === "dim" ? PALETTE.text3 : PALETTE.text1;
-    drawText(ctx, v.status.text, L.status.x, L.status.y, { font: font(Math.round(44 * s), 700, MONO), fill });
-  }
-  drawText(ctx, "Build / cache", L.barLabel.x, L.barLabel.y, { font: font(Math.round(30 * s), 500, MONO), fill: PALETTE.text3 });
-  drawCacheBar(ctx, L.bar, v.filled, v.mix);
-  ctx.restore();
-}
-
 /** The terminal: its slab hopping over from the tower, then the window swinging up, the prompt, the build view. */
 function drawTerminal(ctx: CanvasRenderingContext2D, lt: number, t: number): void {
   const land: SlabAt = { x: PANE.rect.x, y: PANE.rect.y + PANE.rect.h - 62, w: PANE.rect.w, rot: 0 };
@@ -178,8 +156,9 @@ function drawTerminal(ctx: CanvasRenderingContext2D, lt: number, t: number): voi
   }
   const L = drawPane(ctx, p);
   if (lt >= T_RUN) {
-    const v = PANE.view!;
-    drawView(ctx, L, { ...v, pose: spritePose(lt) }, 1);
+    // Over the pane, as drawPane would paint its `view`, so it comes up on
+    // Enter under a flash and hands over to drawPane unchanged.
+    drawBuildView(ctx, L, { ...PANE.view!, pose: spritePose(lt) });
     // Enter: the view comes up with a flash of the terminal's light.
     const f = pulse(lt, T_RUN, 0.001, 0.09);
     if (f > 0.01) glow(ctx, L.sprite.x + L.sprite.w / 2, L.sprite.y + L.sprite.h / 2, 420, TERM.text, 0.3 * f);

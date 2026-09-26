@@ -1,57 +1,14 @@
 // Small pieces every-checkout and under-cargo-build share on top of the map
-// kit (map.ts): a terminal's scrolling log drawn exactly as a pane draws its
-// lines, a slab tossed through the air, the dust a landing kicks up, and
-// sparks gathering on the spot where something is about to pop in. All of
-// it is a pure function of its arguments.
+// kit (map.ts): the width of a log row, a slab tossed through the air, the
+// dust a landing kicks up, and sparks gathering on the spot where something
+// is about to pop in. All of it is a pure function of its arguments.
 
 import { PALETTE } from "../bible";
 import { rgba } from "../color";
 import { glow } from "../fx";
-import { curveAt, drawSlab, type PaneLayout, type PaneState, type Pt, SLAB_H } from "../map";
+import { curveAt, drawSlab, type Pt, SLAB_H } from "../map";
 import { clamp, hash, lerp, progress, TAU } from "../math";
-import { drawText, font, layout, MONO } from "../type";
-
-/** One row of a log: `Compiling <crate>`, where it sits and how far it has faded in. */
-export interface LogRow {
-  crate: string;
-  /** Line slot under the prompt, fractional while it scrolls; below 0 it has scrolled away. */
-  slot: number;
-  alpha: number;
-  /** Still rising into place, px. */
-  dy?: number;
-}
-
-/**
- * A pane's `Compiling` rows at fractional slots, painted with the same calls
- * drawPane makes for its `compile` lines, so a scene can scroll a log and
- * hand the settled rows back to drawPane without a pixel changing. Rows are
- * clipped under the prompt, where they scroll away. Draw it after drawPane,
- * on a pane standing fully open.
- */
-export function drawLog(ctx: CanvasRenderingContext2D, p: PaneState, L: PaneLayout, rows: readonly LogRow[]): void {
-  const a = p.alpha ?? 1;
-  if (a <= 0) return;
-  const text = p.text ?? 56;
-  const bold = font(text, 700, MONO);
-  const head = "Compiling ";
-  const top = L.prompt.y + text * 0.28;
-  ctx.save();
-  ctx.globalAlpha *= a * (1 - 0.6 * (p.dim ?? 0));
-  ctx.beginPath();
-  ctx.rect(L.window.x, top, L.window.w, L.window.y + L.window.h - top);
-  ctx.clip();
-  for (const r of rows) {
-    const la = r.alpha * clamp(1 + r.slot);
-    if (la <= 0) continue;
-    const y = L.line.y + r.slot * L.lineStep + (r.dy ?? 0);
-    ctx.save();
-    ctx.globalAlpha *= la;
-    drawText(ctx, head, L.line.x, y, { font: bold, fill: PALETTE.amber });
-    drawText(ctx, r.crate, L.line.x + layout(ctx, head, bold).width, y, { font: font(text, 500, MONO), fill: PALETTE.text2 });
-    ctx.restore();
-  }
-  ctx.restore();
-}
+import { font, layout, MONO } from "../type";
 
 /** The width of `Compiling <crate>` in a pane's log. */
 export function rowWidth(ctx: CanvasRenderingContext2D, crate: string, text = 56): number {

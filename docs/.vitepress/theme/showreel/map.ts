@@ -940,6 +940,14 @@ export interface TermLine {
   /** compile: `Compiling` in amber then the crate; ok: green; dim: muted. */
   tone?: "compile" | "ok" | "dim" | "text";
   alpha?: number;
+  /**
+   * Its line slot under the prompt (default its index), fractional while a
+   * log scrolls. Lines are clipped under the prompt, and one scrolled above
+   * slot 0 fades as it goes.
+   */
+  slot?: number;
+  /** Still rising into its slot, px. */
+  dy?: number;
 }
 
 export interface Prompt {
@@ -1070,8 +1078,12 @@ export function drawCacheBar(ctx: CanvasRenderingContext2D, r: Rect, filled: num
   run(hits + misses, rest, BAR.other);
 }
 
-/** The pixel build view inside a pane's body: the mascot, its status, the bar. */
-function drawBuildView(ctx: CanvasRenderingContext2D, L: PaneLayout, v: BuildView): void {
+/**
+ * The pixel build view inside a pane's body: the mascot, its status, the
+ * bar. drawPane draws it from `view`; a scene can draw it over the pane
+ * itself, at the layout drawPane returns.
+ */
+export function drawBuildView(ctx: CanvasRenderingContext2D, L: PaneLayout, v: BuildView): void {
   const s = L.window.w / 780;
   drawSprite(ctx, v.pose, L.sprite.x, L.sprite.y, L.px);
   if (v.status) {
@@ -1144,23 +1156,33 @@ export function drawPane(ctx: CanvasRenderingContext2D, p: PaneState): PaneLayou
         ctx.fillRect(cx + typed + 4, L.prompt.y - text * 0.78, text * 0.56, text * 0.95);
       }
     }
-    (p.lines ?? []).forEach((l, i) => {
-      const la = l.alpha ?? 1;
-      if (la <= 0) return;
-      const y = L.line.y + i * L.lineStep;
+    if (p.lines?.length) {
+      // The log scrolls away under the prompt.
+      const top = L.prompt.y + text * 0.28;
       ctx.save();
-      ctx.globalAlpha *= la;
-      if (l.tone === "compile") {
-        const bold = font(text, 700, MONO);
-        const head = "Compiling ";
-        drawText(ctx, head, L.line.x, y, { font: bold, fill: PALETTE.amber });
-        drawText(ctx, l.text, L.line.x + layout(ctx, head, bold).width, y, { font: font(text, 500, MONO), fill: PALETTE.text2 });
-      } else {
-        const fill = l.tone === "ok" ? TERM.green : l.tone === "dim" ? PALETTE.text3 : PALETTE.text1;
-        drawText(ctx, l.text, L.line.x, y, { font: font(text, l.tone === "ok" ? 700 : 500, MONO), fill });
-      }
+      ctx.beginPath();
+      ctx.rect(win.x, top, win.w, bottom - top);
+      ctx.clip();
+      p.lines.forEach((l, i) => {
+        const slot = l.slot ?? i;
+        const la = (l.alpha ?? 1) * clamp(1 + slot);
+        if (la <= 0) return;
+        const y = L.line.y + slot * L.lineStep + (l.dy ?? 0);
+        ctx.save();
+        ctx.globalAlpha *= la;
+        if (l.tone === "compile") {
+          const bold = font(text, 700, MONO);
+          const head = "Compiling ";
+          drawText(ctx, head, L.line.x, y, { font: bold, fill: PALETTE.amber });
+          drawText(ctx, l.text, L.line.x + layout(ctx, head, bold).width, y, { font: font(text, 500, MONO), fill: PALETTE.text2 });
+        } else {
+          const fill = l.tone === "ok" ? TERM.green : l.tone === "dim" ? PALETTE.text3 : PALETTE.text1;
+          drawText(ctx, l.text, L.line.x, y, { font: font(text, l.tone === "ok" ? 700 : 500, MONO), fill });
+        }
+        ctx.restore();
+      });
       ctx.restore();
-    });
+    }
     if (p.view) drawBuildView(ctx, L, p.view);
     ctx.restore();
     roundedRect(ctx, win.x, win.y, win.w, win.h, 18);

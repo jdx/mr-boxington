@@ -35,13 +35,14 @@ import {
   type Pt,
   popIn,
   SLAB_H,
+  type TermLine,
   TOWER_NAMES,
   towerSlabs,
   typedChars,
 } from "../map";
 import { clamp, inOutSine, inQuad, outCubic, progress, pulse, smoothstep, spring, swiftInOut, swiftOut, wobble } from "../math";
 import type { Caption } from "../type";
-import { drawLog, drawSquashedSlab, dust, gather, type LogRow, rowWidth, type SlabAt, threadPoint, tossed } from "./every-checkout-kit";
+import { drawSquashedSlab, dust, gather, rowWidth, type SlabAt, threadPoint, tossed } from "./every-checkout-kit";
 
 const S = sec("every-checkout");
 const b = (n: number): number => n * BEAT;
@@ -147,12 +148,12 @@ function cardPane(k: number, lt: number, t: number): PaneState {
 }
 
 /** Card `k`'s log: each row rises in on its eighth; CI's scrolls up as it dims, leaving `syn` on top. */
-function cardRows(k: number, lt: number): LogRow[] {
+function cardRows(k: number, lt: number): TermLine[] {
   const rise = b(0.2);
   const scroll = CARDS[k] === "ci" ? swiftOut(progress(T_DIM[0] + b(0.25), T_DIM[0] + b(0.5), lt)) : 0;
   return ROWS.map((crate, j) => {
     const p = progress(rowAt(k, j), rowAt(k, j) + rise, lt);
-    return { crate, slot: j - scroll, alpha: clamp(p * 2.5), dy: 22 * (1 - swiftOut(p)) };
+    return { text: crate, tone: "compile", slot: j - scroll, alpha: clamp(p * 2.5), dy: 22 * (1 - swiftOut(p)) };
   });
 }
 
@@ -231,8 +232,7 @@ function drawThrows(ctx: CanvasRenderingContext2D, lt: number): void {
 function drawCard(ctx: CanvasRenderingContext2D, k: number, lt: number, t: number): void {
   const id = CARDS[k];
   if (lt < T_CARD[k] || (id !== "ci" && lt >= T_SHUT)) return;
-  const p = cardPane(k, lt, t);
-  const rows = cardRows(k, lt);
+  const p: PaneState = { ...cardPane(k, lt, t), lines: cardRows(k, lt) };
   // Standing up, it overshoots a little about its foot.
   const r = p.rect;
   const over = 0.06 * wobble(lt, T_CARD[k] + STAND * 0.8, 3.5, 9);
@@ -242,15 +242,9 @@ function drawCard(ctx: CanvasRenderingContext2D, k: number, lt: number, t: numbe
     ctx.scale(1, 1 + over);
     ctx.translate(-r.x - r.w / 2, -r.y - r.h);
   }
-  if ((p.open ?? 1) < 1) {
-    // Standing up or folding down, the log stands still: drawPane draws it.
-    drawPane(ctx, { ...p, lines: rows.map((q) => ({ text: q.crate, tone: "compile" as const, alpha: q.alpha * clamp(1 + q.slot) })) });
-  } else {
-    const L = drawPane(ctx, p);
-    drawLog(ctx, p, L, rows);
-    const flare = pulse(lt, rowAt(k, 1), 0.02, 0.16);
-    if (flare > 0.01) glow(ctx, L.line.x + 190, L.line.y + L.lineStep - 18, 260, PALETTE.amber, 0.55 * flare);
-  }
+  const L = drawPane(ctx, p);
+  const flare = (p.open ?? 1) < 1 ? 0 : pulse(lt, rowAt(k, 1), 0.02, 0.16);
+  if (flare > 0.01) glow(ctx, L.line.x + 190, L.line.y + L.lineStep - 18, 260, PALETTE.amber, 0.55 * flare);
   ctx.restore();
 }
 
