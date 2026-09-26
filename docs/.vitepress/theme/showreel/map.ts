@@ -1650,7 +1650,7 @@ export const MACHINE = {
    * band, even pushed in.
    */
   frame: { x: -400, y: -300, w: 2720, h: 1680 },
-  /** Mr Boxington, left: x 252-628, the lid's top at y 324 shut, its right end at 230 raised 4. */
+  /** Mr Boxington, left: x 252-628, the lid's top at y 324 shut, and 245 at its right end raised 4. */
   box: { x: 440, y: FLOOR, w: 376 },
   /** The pane, right: its window x 1050-1830, y 100-634, on its slab to FLOOR. */
   pane: { x: 1040, y: 100, w: 800, h: FLOOR - 100 },
