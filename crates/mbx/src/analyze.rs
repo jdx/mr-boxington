@@ -11,6 +11,12 @@
 //! that crate is the one a reader can do something about. An edit to a crate
 //! with many dependents therefore reads as one large cause, which is what it
 //! cost, rather than as many small misses.
+//!
+//! Compiler time says what a build spent, not what it waited for, because
+//! compilations overlap. The [`critical_path`] section answers the second
+//! question from the recorded start, end, and dependencies of each unit.
+
+mod critical_path;
 
 use crate::config::Config;
 use crate::events::{ActionOutcome, SessionEvent};
@@ -19,6 +25,7 @@ use crate::explain::{
     join_names, previous_recording,
 };
 use crate::util::format_duration;
+use critical_path::CriticalPath;
 use eyre::Result;
 use mbx_cache_core::ActionDiagnostic;
 use std::collections::{BTreeMap, BTreeSet};
@@ -113,6 +120,7 @@ pub(crate) struct Analysis {
     uncached_count: u64,
     uncached_ns: u64,
     groups: BTreeMap<Cause, Group>,
+    critical: Option<CriticalPath>,
     truncated: bool,
     baseline_truncated: bool,
 }
@@ -235,6 +243,7 @@ impl Analysis {
             uncached_count,
             uncached_ns,
             groups,
+            critical: CriticalPath::of(&session.events),
             truncated: is_truncated(session),
             baseline_truncated: baselines.truncated,
         }
@@ -295,6 +304,10 @@ impl Analysis {
             for (cause, group) in ranked {
                 self.write_group(&mut out, cause, group);
             }
+        }
+
+        if let Some(critical) = &self.critical {
+            write_critical_path(&mut out, critical);
         }
 
         let expected: Vec<_> = self
@@ -364,6 +377,74 @@ impl Analysis {
                 let _ = writeln!(out, "{indent}{line}");
             }
         }
+    }
+}
+
+/// The chain the build waited on, with short steps folded together.
+fn write_critical_path(out: &mut String, critical: &CriticalPath) {
+    let micros = |us: u64| duration(us.saturating_mul(1_000));
+    let share = critical
+        .path_us
+        .saturating_mul(100)
+        .checked_div(critical.span_us)
+        .unwrap_or(100);
+    let _ = writeln!(
+        out,
+        "\ncritical path: {}, {share}% of the {} between the first unit starting and the last finishing",
+        micros(critical.path_us),
+        micros(critical.span_us),
+    );
+    // A step under one percent of the path is folded into the line after it,
+    // which keeps a deep graph readable without hiding where the time went.
+    let threshold = critical.path_us / 100;
+    let mut folded = (0u64, 0u64);
+    let flush = |out: &mut String, folded: &mut (u64, u64)| {
+        if folded.0 > 0 {
+            let _ = writeln!(
+                out,
+                "{:>7}  {} shorter {}",
+                micros(folded.1),
+                folded.0,
+                plural(folded.0, "step", "steps"),
+            );
+            *folded = (0, 0);
+        }
+    };
+    for step in &critical.steps {
+        if step.span_us < threshold {
+            folded.0 += 1;
+            folded.1 += step.span_us;
+            continue;
+        }
+        flush(out, &mut folded);
+        let waited = if step.waited_us > 0 && step.waited_us * 10 >= step.span_us {
+            format!(", {} of it waiting to start", micros(step.waited_us))
+        } else {
+            String::new()
+        };
+        let _ = writeln!(out, "{:>7}  {}{waited}", micros(step.span_us), step.label);
+    }
+    flush(out, &mut folded);
+    let indent = "         ";
+    for line in wrap(
+        "The build could not finish sooner than this chain; other work overlapped with it. Shortening a step, or removing a dependency between two steps, shortens the build.",
+        72,
+    ) {
+        let _ = writeln!(out, "{indent}{line}");
+    }
+    if critical.alone_us > 0 {
+        let names: Vec<_> = critical
+            .alone
+            .iter()
+            .take(3)
+            .map(|(label, us)| format!("{label} {}", micros(*us)))
+            .collect();
+        let _ = writeln!(
+            out,
+            "\nonly one unit running for {}: {}",
+            micros(critical.alone_us),
+            join_names(&names),
+        );
     }
 }
 

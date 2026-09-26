@@ -57,6 +57,16 @@ pub(crate) fn start(adapter: &str, unit: Option<String>) -> Invocation {
     Invocation
 }
 
+/// Name the build unit this invocation produces and the units it consumed.
+pub(crate) fn identify(unit_id: Option<String>, dependencies: Vec<String>) {
+    ACTIVE.with(|active| {
+        if let Some(tracker) = active.borrow_mut().as_mut() {
+            tracker.timing.unit_id = unit_id;
+            tracker.timing.dependencies = dependencies;
+        }
+    });
+}
+
 pub(crate) fn phase(name: &'static str) -> Phase {
     Phase(ACTIVE.with(|active| {
         let mut active = active.borrow_mut();
