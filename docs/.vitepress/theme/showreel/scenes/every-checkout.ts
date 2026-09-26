@@ -53,9 +53,10 @@ type Local = Exclude<Card, "ci">;
 
 // Beat map, local seconds. The score (score/every-checkout.ts) is written to these.
 
-/** Each card stands up from its slab on its beat, over STAND... */
+/** Each card stands up from its slab on its beat, over STAND, and is up at T_STOOD... */
 export const T_CARD = [b(0), b(1), b(2)] as const;
 const STAND = b(0.3);
+export const T_STOOD = T_CARD.map((t) => t + STAND);
 /** ...and its `cargo build` types from here over TYPE. */
 export const T_TYPE = [b(0.25), b(1.25), b(2.25)] as const;
 export const TYPE = b(0.5);
@@ -188,7 +189,7 @@ function cardSlab(id: Local): SlabAt {
 
 /** The tower at `lt`: the old slabs dropping in, the thrown ones once landed, jolting and teetering about its foot. */
 function drawPile(ctx: CanvasRenderingContext2D, lt: number): void {
-  let sway = 0.02 * wobble(lt, T_TEETER, 1.4, 2.4);
+  let sway = 0.032 * wobble(lt, T_TEETER, 1.4, 2.4);
   for (const at of T_LANDS) sway += 0.012 * wobble(lt, at, 3, 6);
   sway *= 1 - smoothstep(b(10.5), b(11.5), lt);
   ctx.save();
@@ -325,7 +326,7 @@ function draw(ctx: CanvasRenderingContext2D, lt: number, env: SceneEnv): void {
   // Landings kick up dust.
   (["project", "worktree"] as const).forEach((id, i) => {
     const r = EC_CARDS[id];
-    dust(ctx, r.x + r.w / 2, r.y + r.h, r.w * 0.8, lt, T_CARD[i] + b(0.1), 50 + i, 0.45);
+    dust(ctx, r.x + r.w / 2, r.y + r.h, r.w * 0.8, lt, T_STOOD[i], 50 + i, 0.45);
     dust(ctx, r.x + r.w / 2, r.y + r.h, r.w, lt, T_SHUT, 40 + i, 0.8);
   });
   dust(ctx, TOWER.x + TOWER.w / 2, TOWER.base, TOWER.w, lt, T_DROPS[0], 60, 0.9);

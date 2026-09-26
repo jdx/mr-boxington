@@ -16,7 +16,7 @@ import {
   ROWS,
   rowAt,
   STITCHES,
-  T_CARD,
+  T_STOOD,
   T_DIM,
   T_DROPS,
   T_FOLD,
@@ -44,7 +44,7 @@ function standUp(m: Mix, t: number, k: number): void {
   m.duck(t, 0.15, 0.08);
   knock(m, t, hz(52 + 2 * k), 0.34, PAN[k], 0.14);
   if (CARDS[k] !== "ci") thump(m, t, 0.35, 150, 60, 0.16, { pan: PAN[k] });
-  whoosh(m, ad(t - 0.05, t, 0.05, t + 0.06), sweep(t - 0.05, 900, t, 3000), 1.4, { pan: PAN[k] });
+  whoosh(m, ad(t - 0.12, t - 0.01, 0.06, t + 0.05), sweep(t - 0.12, 900, t, 3000), 1.4, { pan: PAN[k] });
 }
 
 /** `cargo build` typing on (map.ts typedChars: a character shows once its share of the time has passed). */
@@ -212,7 +212,7 @@ function popIn(m: Mix, t: number): void {
 export const part: Part = {
   cues(m, s) {
     CARDS.forEach((_, k) => {
-      standUp(m, s.at(T_CARD[k]) + 0.02, k);
+      standUp(m, s.at(T_STOOD[k]), k);
       typing(m, s.at(T_TYPE[k]), k);
       ROWS.forEach((_, j) => row(m, s.at(rowAt(k, j)), k, j));
       const ci = CARDS[k] === "ci";
