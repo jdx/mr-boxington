@@ -97,7 +97,11 @@ const NOTES = [
   { text: "Cargo plans the build", x: MACHINE.chips.x + MACHINE.chips.w, y: 128, in: 1.5, out: 6, fill: PALETTE.text2, align: "right" },
   { text: "no daemon: the cache agent starts and stops with each command", x: 90, y: 64, in: 3.5, out: 6.25, fill: PALETTE.text3, align: "left" },
 ] as const;
-const WRAPPER = { x: MACHINE.box.x, y: 200, in: 2.5, out: 6 };
+/**
+ * RUSTC_WRAPPER over his middle, where the chips leave it room, and its tick
+ * down to 16 px over the hinged lid's top there (about y 282 at lid 4).
+ */
+const WRAPPER = { x: MACHINE.box.x, y: 200, in: 2.5, out: 6, tick: 54 };
 const NOTE_STYLE = { ...DETAIL, fill: PALETTE.text3 };
 
 const OLD = TOWER_NAMES.slice(0, 5);
@@ -246,7 +250,7 @@ function drawHits(ctx: CanvasRenderingContext2D, lt: number): void {
   ring(ctx, MOUTH.x, MOUTH.y, 260, progress(syn, syn + 0.4, lt), PALETTE.amberBright, 6);
 }
 
-/** The 40 px notes, and RUSTC_WRAPPER over the lid with a tick down to the gap. */
+/** The 40 px notes, and RUSTC_WRAPPER over the lid with a tick down to it. */
 function drawNotes(ctx: CanvasRenderingContext2D, lt: number): void {
   for (const n of NOTES) {
     drawWords(ctx, n.text, n.x, n.y, { ...NOTE_STYLE, fill: n.fill }, lt, b(n.in), b(n.out), n.align);
@@ -260,7 +264,7 @@ function drawNotes(ctx: CanvasRenderingContext2D, lt: number): void {
     ctx.lineWidth = 3;
     ctx.beginPath();
     ctx.moveTo(WRAPPER.x, WRAPPER.y + 12);
-    ctx.lineTo(WRAPPER.x, WRAPPER.y + 12 + 22 * tick);
+    ctx.lineTo(WRAPPER.x, WRAPPER.y + 12 + WRAPPER.tick * tick);
     ctx.stroke();
     ctx.restore();
   }
