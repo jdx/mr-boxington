@@ -1,29 +1,29 @@
-// Scene 5, "Data": the published next-commit benchmark as a bar chart. The
-// chart whips in from the right in layers, cargo lurches forward crate by
-// crate while mbx springs to its mark beside it, and a dimension line
-// measures the time saved. Then the page falls away in perspective while the
-// camera swings around the mbx bar, which compacts into a square and pops out
-// of the page as the cube that opens the isometric world.
+// Section 11, "Next push, measured": the published next-commit benchmark as
+// a bar chart. The chart arrives on the ci section's whip (map.ts drawWhip),
+// its layers trailing one another in from the right. Cargo alone and Cargo
+// with mbx leave the zero line together: Cargo lurches forward crate by
+// crate while mbx springs to its mark, and at that instant both tips are
+// flush, because Cargo has run just as long. A strip of mbx's lookups slides
+// in under its bar, one tile per compilation with the compiled ones amber,
+// and the hatched delta lands. The finished chart holds long enough to read.
+// Then the page falls away in perspective while the camera swings around the
+// mbx bar, which compacts into a square and pops out of the page as the cube
+// that opens the isometric world.
+//
+// Every figure comes from the published run (facts.ts). Without a commit
+// fact, which is only published when the two tools' runs are separated(),
+// no bar is drawn and the chart gives way to a card pointing at the
+// benchmarks page.
 
-import {
-  BEAT,
-  CUBE,
-  drawStagedBox,
-  H5_POSE,
-  PALETTE,
-  type ReelFacts,
-  type Scene,
-  sec,
-  WHIP,
-  WORLD_CAM,
-} from "../bible";
+import { BEAT, CUBE, PALETTE, type Scene, sec, WHIP, WORLD_CAM } from "../bible";
 import { drawShadow, OUTLINE, OUTLINE_RATIO } from "../box";
 import { mix, rgba } from "../color";
+import { type CommitFact, delta, medianOf, type ReelFacts, tenths } from "../facts";
 import { glow, makeCanvas, smear } from "../fx";
+import { drawHandoff, drawWhip } from "../map";
 import {
   clamp,
   cubicBezier,
-  hash,
   inCubic,
   inOutSine,
   type Key,
@@ -49,64 +49,122 @@ import {
   type V3,
   View,
 } from "../space";
-import { drawText, font, layout, MONO } from "../type";
+import { CAPTION, drawText, drawWords, font, layout, LABEL, type WordStyle } from "../type";
 
 const S = sec("next-push");
 
 /** Local time of beat `n` of the section. */
 const b = (n: number): number => n * BEAT;
-const FRAME = 1 / 60;
+/**
+ * One frame of the 120 fps render, which holds every 60 fps frame. Where a
+ * move must be home "on the frame nearest the beat", it is timed to this.
+ */
+const FRAME = 1 / 120;
+/**
+ * The shutter for motion smears and rolling drums: one 60 fps frame of
+ * travel, so the 60 fps file shows each streak joining the next.
+ */
+const SHUTTER = 1 / 60;
 
-/** Beat map, local seconds. The score (score/data.ts) is written to these. */
+/**
+ * The run's facts. Every env.facts comes from factsFromBenchmarks, whose
+ * ReelFacts bible.ts still declares as its older three-field subset.
+ */
+const facts = (env: { facts: unknown }): ReelFacts | null => env.facts as ReelFacts | null;
+
+// Beat map, local seconds. The score (score/data.ts) is written to these.
+//
+//   b0-b0.3   the whip in (the ci part's whoosh), layers trailing
+//   b0.5      Cargo and mbx leave the zero line together
+//   b1.25     mbx locks on its mark, flush with Cargo's tip (mbxLock)
+//   b1.5-b2   the tile strip slides in under mbx, its compile lands last
+//   b2.25     Cargo's last crate clunks home (CARGO_DONE)
+//   b2.5      the delta's lines and hatch; its figure lands on b2.75
+//   b2.75-b11 the finished chart holds (3.87 s); a glint crosses the mbx
+//             bar on b3, and a light runs the strip from b7
+//   b11-b12   the page falls away and the mbx bar becomes the cube
+
 export const T = {
-  cargo: b(0.5),
-  mbx: b(1),
-  cargoLand: b(1.75),
-  delta: b(2),
-  label: b(2.25),
-  glint: b(2.5),
-  clear: b(3),
-  hit: b(3.25),
+  race: b(0.5),
+  lock: b(1.25),
+  strip: b(1.5),
+  amber: b(2),
+  cargoLand: b(2.25),
+  delta: b(2.5),
+  label: b(2.75),
+  glint: b(3),
+  shimmer: b(7),
+  clear: b(11),
+  hit: b(11.25),
   end: S.len,
 };
+/** How long the green tiles take to sweep in, left to right. */
+export const STRIP_SWEEP = b(0.375);
 
-// Layout in chart px, which equal screen px while the camera faces the chart.
-// The zero line is the spine: the title aligns to it and the row labels hang
-// to its left.
-const AX0 = 380;
-const AXLEN = 1120;
+// Layout in chart px, which equal screen px while the camera faces the
+// chart. The zero line is the spine: the title, the row labels, and the
+// strip all hang from it.
+const AX0 = 160;
+const AXLEN = 1320;
 const TH = 96;
-const ROW_CARGO = 518;
-const ROW_MBX = 668;
-const AXIS_Y = 768;
-const GRID_TOP = ROW_CARGO - TH / 2 - 24;
-const TITLE_Y = 280;
-const SUB_Y = 322;
-const BRK_Y = 424;
-const NUM_SIZE = 68;
-const NUM_GAP = 26;
-const LABEL_SIZE = 34;
-const TICK_SIZE = 24;
-const DELTA_SIZE = 84;
+const TITLE_Y = 186;
+const SUB_Y = [248, 298] as const;
+const ROW_CARGO = 552;
+const ROW_MBX = 772;
+/** A row label's baseline above its bar's top edge. */
+const LABEL_GAP = 26;
+const LABEL_SIZE = 56;
+/** The delta's dimension line, above the Cargo bar. */
+const BRK_Y = ROW_CARGO - TH / 2 - 42;
+const GRID_TOP = ROW_CARGO - TH / 2 - 18;
+const GRID_BOT = ROW_MBX + TH / 2 + 12;
+const NUM_SIZE = 120;
+const NUM_GAP = 30;
+const DELTA_SIZE = 120;
+/** The tile strip's top edge, under the mbx bar. */
+const STRIP_Y = ROW_MBX + TH / 2 + 26;
+/** The tile pitch the strip aims for: big enough for one amber tile to read. */
+const STRIP_PITCH = 13.5;
+/** At most this many rows, so the strip stays a strip. */
+const STRIP_ROWS = 9;
 
-// Whip-in: content starts fully off the right edge.
+// The card that stands in for the chart: 88 px, on the chart's rows.
+// bench-refresh.yml checks weekly but reruns only when a newer mbx release
+// is out, so the card says "for each release", not "every week".
+export const CARD = ["Benchmarks, rerun for each release:", "mr-boxington.jdx.dev/benchmarks"] as const;
+/** The chart's title, 88 px. */
+export const TITLE = "CI builds the next push";
+const CARD_Y = [560, 668] as const;
+/** Where the card's cube pops out of the page, chart px. */
+const CARD_PIVOT = { x: 960, y: 820 };
+
+/** Chart layers whip in from here, as map.ts whipIn has them on the bar line. */
 const WHIP_D = 1800;
 
-interface Model {
+/** The measured chart, from the commit fact. */
+interface Chart {
   cargo: number;
   mbx: number;
   max: number;
   step: number;
-  /** Real numbers available: readouts, tick labels, and the delta. */
-  numbers: boolean;
-  subject: string | null;
   cargoText: string;
   mbxText: string;
+  /** The saving, from the raw medians; "" when mbx was not a printable tenth faster. */
   deltaText: string;
-  /** Where each of cargo's steps brings its bar to rest, as fractions of its value. */
+  /** The annotation: restored, then compiled (facts.annotation, in two colours). */
+  note: readonly [restored: string, compiled: string | null];
+  lookups: number;
+  misses: number;
+  /** Where each of Cargo's steps brings its bar to rest, as fractions of its value. */
   steps: number[];
   /** The same rests for the readout, as fractions of the figure it shows. */
   readSteps: number[];
+}
+
+interface Model {
+  chart: Chart | null;
+  /** The 40 px subtitle, one or two lines. */
+  sub: string[];
 }
 
 function niceStep(raw: number): number {
@@ -118,85 +176,91 @@ function niceStep(raw: number): number {
 /** A step that rests exactly on mbx's mark. */
 const MEET = -1;
 
-// Cargo lurches forward crate by crate on the sixteenths. Its third step
-// comes to rest on mbx's mark just before mbx locks there on b1.25, so at
-// the lock both tips are flush: mbx is done, cargo is halfway. Then a bigger
-// step and a last grind that clunks home on b1.75. [start, end, fraction].
+// Cargo lurches forward crate by crate on the eighths. Its third step comes
+// to rest on mbx's mark just before mbx locks there on b1.25: both started
+// on b0.5, so at the instant mbx is done Cargo has run exactly as long, and
+// the tips are flush. It waits there a sixteenth, lurches on while the strip
+// slides in, and a last grind clunks home on b2.25. [start, end, fraction].
+const LURCH = 0.1;
 export const STEP_PLAN: readonly (readonly [number, number, number])[] = [
-  [b(0.5), b(0.5) + 6 * FRAME, 0.13],
-  [b(0.75), b(0.75) + 6 * FRAME, 0.28],
-  [b(1), b(1) + 6 * FRAME, MEET],
-  [b(1.25) + 2 * FRAME, b(1.25) + 8 * FRAME, 0.725],
+  [b(0.5), b(0.5) + LURCH, 0.14],
+  [b(0.75), b(0.75) + LURCH, 0.3],
+  [b(1), b(1) + LURCH, MEET],
+  [b(1.5), b(1.5) + LURCH, 0.64],
+  [b(1.75), b(1.75) + LURCH, 0.8],
   // Ends half a frame early so the frame nearest the beat shows it home.
-  [b(1.25) + 8 * FRAME, T.cargoLand - FRAME / 2, 1],
+  [b(2), T.cargoLand - FRAME / 2, 1],
 ];
 export const CARGO_DONE = T.cargoLand - FRAME / 2;
 /** The last step starts slow and arrives at speed, so it stops with a clunk. */
 const grind = cubicBezier(0.4, 0, 0.8, 0.8);
 
+/** The subtitle: the subject, the scenario in plain words, and the runs. */
+export function subtitle(f: ReelFacts | null): string[] {
+  const setup = "the cache holds the previous commit";
+  const runner = "Linux CI runner";
+  const median = f?.commit ? medianOf(f.commit.trials) : null;
+  if (f?.subject === "hk") {
+    return ["hk, a mid-size Rust CLI with C dependencies", [setup, runner, median].filter(Boolean).join(" · ")];
+  }
+  return [[f?.subject || null, setup].filter(Boolean).join(" · "), [runner, median].filter(Boolean).join(" · ")];
+}
+
+/** The annotation under the mbx bar, split where its colour changes. */
+export function noteParts(c: CommitFact): readonly [string, string | null] {
+  return [`${c.hits} of ${c.lookups} restored`, c.misses > 0 ? `${c.misses} compiled` : null];
+}
+
+/** The delta's figure, drawn after a minus; "" when there is none to claim. */
+export function deltaText(c: CommitFact): string {
+  const d = delta(c);
+  return d === null ? "" : tenths(d);
+}
+
 let modelCache: { facts: ReelFacts | null; m: Model } | null = null;
-function model(facts: ReelFacts | null): Model {
-  if (modelCache && modelCache.facts === facts) return modelCache.m;
-  const c = facts?.commit ?? null;
-  let m: Model;
-  if (c && c.cargo > 0 && c.mbx > 0) {
+function model(f: ReelFacts | null): Model {
+  if (modelCache && modelCache.facts === f) return modelCache.m;
+  const c = f?.commit ?? null;
+  let chart: Chart | null = null;
+  if (c) {
     const hi = Math.max(c.cargo, c.mbx);
     const step = niceStep(hi / 4);
     const max = Math.ceil((hi * 1.02) / step) * step;
-    const cargoText = c.cargo.toFixed(1);
-    const mbxText = c.mbx.toFixed(1);
-    // The saving is the difference of the figures on screen, so it adds up
-    // for anyone who subtracts them (it is within rounding of the raw one).
-    const tenths = Math.round(Number(cargoText) * 10) - Math.round(Number(mbxText) * 10);
+    const cargoText = tenths(c.cargo);
+    const mbxText = tenths(c.mbx);
     const shown = Number(cargoText);
     // Only meet mbx on the way when it is the shorter bar.
     const meet = c.mbx < c.cargo;
     // Readout rests sit on whole tenths so the figure is crisp between steps.
     const readSteps = STEP_PLAN.map(([, , f0]) => {
       if (f0 === MEET && meet) return Number(mbxText) / shown;
-      const f = f0 === MEET ? 0.455 : f0;
-      return f >= 1 ? 1 : Math.max(0.1, Math.round(f * shown * 10) / 10) / shown;
+      const fr = f0 === MEET ? 0.47 : f0;
+      return fr >= 1 ? 1 : Math.max(0.1, Math.round(fr * shown * 10) / 10) / shown;
     });
-    m = {
+    chart = {
       cargo: c.cargo,
       mbx: c.mbx,
       max,
       step,
-      numbers: true,
-      subject: facts?.subject || null,
       cargoText,
       mbxText,
-      // The time-saved annotation only makes sense when mbx is faster.
-      deltaText: tenths > 0 ? (tenths / 10).toFixed(1) : "",
+      deltaText: deltaText(c),
+      note: noteParts(c),
+      lookups: c.lookups,
+      misses: c.misses,
       // The bar meets mbx's tip exactly; its readout meets mbx's figure.
-      steps: STEP_PLAN.map(([, , f], i) => (f === MEET && meet ? c.mbx / c.cargo : readSteps[i])),
+      steps: STEP_PLAN.map(([, , fr], i) => (fr === MEET && meet ? c.mbx / c.cargo : readSteps[i])),
       readSteps,
     };
-  } else {
-    // No published numbers: the same moves, unlabeled, and no ratio either.
-    // A longer cargo bar would be an unsourced speedup claim, so both bars
-    // stop at one length (mbx's usual mark, which keeps the camera path).
-    m = {
-      cargo: 0.46,
-      mbx: 0.46,
-      max: 1,
-      step: 0.25,
-      numbers: false,
-      subject: facts?.subject || null,
-      cargoText: "",
-      mbxText: "",
-      deltaText: "",
-      steps: STEP_PLAN.map(([, , f]) => (f === MEET ? 0.455 : f)),
-      readSteps: [],
-    };
   }
-  modelCache = { facts, m };
+  const m: Model = { chart, sub: subtitle(f) };
+  modelCache = { facts: f, m };
   return m;
 }
 
-const pxPer = (m: Model): number => AXLEN / m.max;
-const cargoEnd = (m: Model): number => AX0 + m.cargo * pxPer(m);
-const mbxEnd = (m: Model): number => AX0 + m.mbx * pxPer(m);
+const pxPer = (c: Chart): number => AXLEN / c.max;
+const cargoEnd = (c: Chart): number => AX0 + c.cargo * pxPer(c);
+const mbxEnd = (c: Chart): number => AX0 + c.mbx * pxPer(c);
 
 // Growth curves, 0..1 of each bar's value.
 
@@ -215,39 +279,33 @@ function cargoGrow(steps: readonly number[], t: number, quick = 1): number {
   return g;
 }
 
-/**
- * mbx launches with speed, reaches its mark on the frame nearest b1.25 (a
- * hair early, so that frame shows the tips flush), and overshoots by about 7%
- * before settling. The launch is tuned so the figure counts up evenly, one or
- * two units a frame: 1.3, 3.0, 4.8, 6.4, 7.7, 8.6, then 9.2 on the beat.
- */
-export const mbxGrow = (t: number): number => spring(t - T.mbx, 3.7, 0.66, 7.75);
-let mbxCross = -1;
-/** When the mbx bar first reaches its value. */
-function mbxCrossing(): number {
-  if (mbxCross >= 0) return mbxCross;
-  let lo = T.mbx;
-  let hi = T.mbx + 0.5;
-  for (let t = T.mbx; t < T.mbx + 0.5; t += 1 / 240) {
-    if (mbxGrow(t) >= 1) {
-      hi = t;
-      break;
-    }
-    lo = t;
-  }
-  for (let i = 0; i < 30; i++) {
+// mbx's spring is today's at a third of the speed: it launches with speed,
+// reaches its mark half a frame before b1.25 (so the frame nearest the beat
+// shows the tips flush), overshoots by about 7%, and settles while the strip
+// slides in.
+const SPRING = [3.7, 0.66, 7.75] as const;
+const springAt = (u: number): number => spring(u, ...SPRING);
+/** Seconds the spring takes to first reach its mark at full speed. */
+const FIRST = (() => {
+  let lo = 0;
+  let hi = 0.5;
+  for (let i = 0; i < 50; i++) {
     const mid = (lo + hi) / 2;
-    if (mbxGrow(mid) >= 1) hi = mid;
+    if (springAt(mid) >= 1) hi = mid;
     else lo = mid;
   }
-  mbxCross = hi;
   return hi;
-}
+})();
+/** When the mbx bar first reaches its value. */
+const MBX_CROSS = T.lock - FRAME / 2;
+const SLOW = FIRST / (MBX_CROSS - T.race);
+export const mbxGrow = (t: number): number => springAt((t - T.race) * SLOW);
 /** The readout locks half a frame before the bar's crossing, so the lock frame is crisp. */
-export const mbxLock = (): number => mbxCrossing() - FRAME / 2;
+export const mbxLock = (): number => MBX_CROSS - FRAME / 2;
 
-// Whip layers. The title leads; the plot and then the row labels trail it
-// with more overshoot and a longer, dragging settle.
+// Whip layers. The title leads on map.ts whipIn's own track; the subtitle,
+// the plot, and then the row labels trail it with more overshoot and a
+// longer, dragging settle.
 
 interface Layer {
   /** Chart-px rows this layer occupies, for its streak buffer. */
@@ -272,30 +330,30 @@ function whipTrack(delay: number, over: number, settle: number, drag: number): (
 }
 
 const L_TITLE: Layer = {
-  y0: TITLE_Y - 40,
-  y1: TITLE_Y + 14,
-  x: whipTrack(0, 10, 0.16, 0),
+  y0: TITLE_Y - 84,
+  y1: TITLE_Y + 28,
+  x: whipTrack(0, 12, 0.16, 0),
   buf: null,
-  maxGain: 2.5,
+  maxGain: 1.8,
 };
 const L_SUB: Layer = {
-  y0: SUB_Y - 30,
-  y1: SUB_Y + 12,
-  x: whipTrack(FRAME, 14, 0.18, 0),
+  y0: SUB_Y[0] - 38,
+  y1: SUB_Y[1] + 14,
+  x: whipTrack(SHUTTER, 16, 0.18, 0),
   buf: null,
   maxGain: 2.5,
 };
 const L_PLOT: Layer = {
   y0: GRID_TOP - 8,
-  y1: AXIS_Y + 60,
-  x: whipTrack(2 * FRAME, 20, 0.2, 0.15),
+  y1: GRID_BOT + 8,
+  x: whipTrack(2 * SHUTTER, 22, 0.2, 0.15),
   buf: null,
   maxGain: 1.5,
 };
 const L_LABELS: Layer = {
-  y0: ROW_CARGO - 44,
-  y1: ROW_MBX + 40,
-  x: whipTrack(3 * FRAME, 28, 0.26, 0.2),
+  y0: ROW_CARGO - TH / 2 - LABEL_GAP - 56,
+  y1: ROW_MBX - TH / 2 - LABEL_GAP + 20,
+  x: whipTrack(3 * SHUTTER, 30, 0.26, 0.2),
   buf: null,
   maxGain: 1.4,
 };
@@ -313,7 +371,7 @@ function whipLayer(
   const off = L.x(t);
   // Still entirely off the right edge (its trail extends further right).
   if (off > 1700) return;
-  const vel = off - L.x(t - FRAME);
+  const vel = off - L.x(t - SHUTTER);
   // Only the whip itself streaks. The overshoot and drag are slow enough to
   // draw once, sharp: a streak there would soften text that has landed.
   if (Math.abs(vel) < 20) {
@@ -364,108 +422,6 @@ function whipLayer(
   ctx.restore();
 }
 
-// Speed lines: scene 4 leaves on a dense field of streaks, so the arrival
-// picks the same vocabulary up at full strength on its first drawn frame and
-// lets it die away as the layers brake. Each line is a light streak with a
-// bright head on the left and a tail that shortens as the whip slows.
-interface Streak {
-  y: number;
-  x: number;
-  len: number;
-  w: number;
-  par: number;
-  color: string;
-  a: number;
-}
-let streaks: Streak[] | null = null;
-function streakField(): Streak[] {
-  if (streaks) return streaks;
-  const colors = [PALETTE.paper, PALETTE.amber, PALETTE.green, PALETTE.tealLight, PALETTE.amberBright];
-  streaks = [];
-  for (let i = 0; i < 32; i++) {
-    const fat = hash(i, 97) < 0.22;
-    streaks.push({
-      y: 150 + hash(i, 71) * 780,
-      x: -400 + hash(i, 79) * 2400,
-      len: (fat ? 500 : 260) + hash(i, 73) * 700,
-      w: fat ? 10 + hash(i, 89) * 14 : 1.5 + hash(i, 89) * 3,
-      par: 0.7 + hash(i, 83) * 0.9,
-      color: colors[Math.floor(hash(i, 101) * colors.length)],
-      a: fat ? 0.28 + hash(i, 103) * 0.2 : 0.5 + hash(i, 103) * 0.25,
-    });
-  }
-  return streaks;
-}
-
-let streakSprites: Map<string, HTMLCanvasElement> | null = null;
-/** A streak of `color`: hot at the left end, trailing off to the right, soft top and bottom. */
-function streakSprite(color: string): HTMLCanvasElement {
-  streakSprites ??= new Map();
-  let c = streakSprites.get(color);
-  if (!c) {
-    c = makeCanvas(128, 16);
-    const g = c.getContext("2d")!;
-    const gx = g.createLinearGradient(0, 0, 128, 0);
-    gx.addColorStop(0, rgba(color, 0));
-    gx.addColorStop(0.04, rgba(color, 1));
-    gx.addColorStop(0.3, rgba(color, 0.55));
-    gx.addColorStop(1, rgba(color, 0));
-    g.fillStyle = gx;
-    g.fillRect(0, 0, 128, 16);
-    // Round the profile: fade the top and bottom rows.
-    g.globalCompositeOperation = "destination-in";
-    const gy = g.createLinearGradient(0, 0, 0, 16);
-    gy.addColorStop(0, "rgba(0,0,0,0)");
-    gy.addColorStop(0.35, "rgba(0,0,0,1)");
-    gy.addColorStop(0.65, "rgba(0,0,0,1)");
-    gy.addColorStop(1, "rgba(0,0,0,0)");
-    g.fillStyle = gy;
-    g.fillRect(0, 0, 128, 16);
-    streakSprites.set(color, c);
-  }
-  return c;
-}
-
-/** [y, height, color, alpha, head offset]: soft bands at the chart's rows. */
-const BANDS: readonly (readonly [number, number, string, number, number])[] = [
-  [TITLE_Y - 10, 34, PALETTE.paper, 0.2, 0],
-  [ROW_CARGO, TH * 1.2, PALETTE.teal, 0.42, 90],
-  [ROW_MBX, TH * 1.2, PALETTE.amber, 0.42, 140],
-  [AXIS_Y, 22, PALETTE.paper, 0.16, 40],
-  [880, 60, PALETTE.green, 0.14, 300],
-  [190, 70, PALETTE.amberDeep, 0.14, 420],
-];
-
-/** The whip's travel still to come, 1 at the cut and 0 as the title lands. */
-const whipLeft = (t: number): number => 1 - outQuart(progress(0, WHIP, t));
-
-function speedLines(ctx: CanvasRenderingContext2D, t: number): void {
-  // Frame 0 is the handoff (empty); full strength from the first drawn frame.
-  const env = t < FRAME * 0.5 ? 0 : 1 - smoothstep(2 * FRAME, WHIP * 0.75, t);
-  if (env <= 0) return;
-  const left = whipLeft(t);
-  ctx.save();
-  ctx.globalCompositeOperation = "lighter";
-  // Broad bands at the chart's own rows: the bars' colors race through
-  // where the bars will stand, and give the whip the mass of scene 4's exit.
-  for (const [y, h, color, a, lead] of BANDS) {
-    const x = AX0 + lead + 700 * left;
-    const len = 380 + 1800 * left;
-    if (x > 1920) continue;
-    ctx.globalAlpha = a * env;
-    ctx.drawImage(streakSprite(color), x, y - h / 2, len, h);
-  }
-  for (const s of streakField()) {
-    // Heads sweep left and brake with the layers; tails shrink with speed.
-    const x = s.x + 800 * s.par * left - 160 * s.par;
-    const len = s.len * (0.25 + 0.75 * left) * s.par;
-    if (x > 1920 || x + len < 0) continue;
-    ctx.globalAlpha = s.a * env;
-    ctx.drawImage(streakSprite(s.color), x, s.y - s.w / 2, len, s.w);
-  }
-  ctx.restore();
-}
-
 // The chart plane. While the camera faces it the whole chart is one affine
 // transform; once the page falls away in perspective every element is
 // projected on its own, so the page really recedes rather than shearing.
@@ -488,8 +444,7 @@ const FLAT: Plane = {
 function projPlane(view: View, m: Model, z: number): Plane {
   const p = pivot(m);
   const w = (x: number, y: number): V3 => [(x - p.x) / S0, CUBE / 2 - (y - p.y) / S0, z];
-  const frame = (x: number, y: number) =>
-    view.planeMatrix(w(x, y), [1 / S0, 0, 0], [0, -1 / S0, 0]);
+  const frame = (x: number, y: number) => view.planeMatrix(w(x, y), [1 / S0, 0, 0], [0, -1 / S0, 0]);
   return {
     pt: (x, y) => view.project(w(x, y)),
     at: (ctx, x, y) => applyMatrix(ctx, frame(x, y)),
@@ -644,7 +599,7 @@ function drumDigit(ctx: CanvasRenderingContext2D, d: number, cx: number, y: numb
 
 /**
  * One drum centered at `cx`, baseline `y`, at position `q` turning `v`
- * digits per frame. `low` marks the lowest drum, the only one that spins.
+ * digits per shutter. `low` marks the lowest drum, the only one that spins.
  */
 function drawDrum(
   ctx: CanvasRenderingContext2D,
@@ -700,7 +655,7 @@ function drawDrum(
 
 /**
  * Draws `text` (its final reading) rolled to `value`, with its left edge at
- * chart (x, y). `prev` is the value one frame earlier (null when locked),
+ * chart (x, y). `prev` is the value one shutter earlier (null when locked),
  * `settle` a small extra turn of the lowest drum, `pop` a lock accent.
  */
 function drawOdometer(
@@ -780,31 +735,55 @@ function readoutX(ctx: CanvasRenderingContext2D, text: string, value: number, ti
   return tip + NUM_GAP - numMetrics(ctx).slot * (1 - leadVisible(text, value));
 }
 
-interface Rect {
+interface Box {
   x0: number;
   y0: number;
   x1: number;
   y1: number;
 }
 
+// Row labels, 56 px, hung over their bars from the zero line.
+
+const LABEL_FONT = font(LABEL_SIZE, 600);
+const labelY = (row: number): number => row - TH / 2 - LABEL_GAP;
+/** Each label's row, its runs of text and colour, and how hard it kicks when its bar lands. */
+const LABELS: readonly { row: number; parts: readonly (readonly [string, string])[]; amp: number }[] = [
+  { row: ROW_CARGO, parts: [["Cargo, no cache", PALETTE.text2]], amp: 0.04 },
+  {
+    row: ROW_MBX,
+    parts: [
+      ["Cargo + ", PALETTE.text1],
+      ["mbx", PALETTE.amber],
+    ],
+    amp: 0.07,
+  },
+];
+
+/** A row label's padded box, which lines running past it break around. */
+function labelBox(ctx: CanvasRenderingContext2D, L: (typeof LABELS)[number]): Box {
+  const w = L.parts.reduce((s, [text]) => s + layout(ctx, text, LABEL_FONT).width, 0);
+  const y = labelY(L.row);
+  return { x0: AX0 - 10, x1: AX0 + w + 14, y0: y - 48, y1: y + 18 };
+}
+
 /**
- * Padded boxes around the readouts, knocked out of the grid lines. `open`
- * closes the gaps as the readouts fade, so the grid heals rather than pops.
+ * Padded boxes knocked out of the grid lines: the readouts, which `open`
+ * closes as they fade so the grid heals rather than pops, and the labels.
  */
-function readoutBoxes(ctx: CanvasRenderingContext2D, m: Model, t: number, open = 1): Rect[] {
-  if (!m.numbers || open <= 0) return [];
-  const out: Rect[] = [];
+function knockBoxes(ctx: CanvasRenderingContext2D, c: Chart, t: number, open = 1): Box[] {
+  const out = LABELS.map((L) => labelBox(ctx, L));
+  if (open <= 0) return out;
   const box = (text: string, x: number, row: number) => {
     const y = row + NUM_SIZE * 0.36;
-    const c = y + (DN - UP) / 2;
+    const mid = y + (DN - UP) / 2;
     const h = ((UP + DN) / 2 + 8) * open;
-    out.push({ x0: x - 12, x1: x + readoutWidth(ctx, text) + 12, y0: c - h, y1: c + h });
+    out.push({ x0: x - 12, x1: x + readoutWidth(ctx, text) + 12, y0: mid - h, y1: mid + h });
   };
-  if (t >= T.cargo) {
-    const v = cargoValue(m, t);
-    box(m.cargoText, readoutX(ctx, m.cargoText, v * Number(m.cargoText), cargoTip(m, t)), ROW_CARGO);
+  if (t >= T.race) {
+    const v = cargoValue(c, t);
+    box(c.cargoText, readoutX(ctx, c.cargoText, v * Number(c.cargoText), cargoTip(c, t)), ROW_CARGO);
+    box(c.mbxText, mbxTip(c, t) + NUM_GAP, ROW_MBX);
   }
-  if (t >= T.mbx) box(m.mbxText, mbxTip(m, t) + NUM_GAP, ROW_MBX);
   return out;
 }
 
@@ -821,13 +800,13 @@ const WORLD_C: Camera = {
   target: CENTER,
 };
 const S0 = TH / CUBE;
-/** Chart px of the cube's front-view center: the square at the mbx tip. */
+/** Chart px of the cube's front-view center: the square at the mbx tip, or the card's. */
 function pivot(m: Model): { x: number; y: number } {
-  return { x: mbxEnd(m) - TH / 2, y: ROW_MBX };
+  return m.chart ? { x: mbxEnd(m.chart) - TH / 2, y: ROW_MBX } : CARD_PIVOT;
 }
 
-/** Slow push-in while the chart plays, about the frame center. */
-const push = (t: number): number => lerp(1, 1.04, inOutSine(progress(0.05, T.clear + 0.1, t)));
+/** Slow push-in while the chart plays and holds, about the frame center. */
+const push = (t: number): number => lerp(1, 1.045, inOutSine(progress(0.05, T.clear + 0.1, t)));
 
 function frontCam(m: Model, t: number): Camera {
   const z = push(t);
@@ -842,9 +821,9 @@ function frontCam(m: Model, t: number): Camera {
   };
 }
 
-// b3 to b4: the page falls back while the bar compacts on b3.25, the
+// b11 to b12: the page falls back while the bar compacts on b11.25, the
 // camera orbits in perspective while the square extrudes, then the lens
-// flattens and dollies back to the world view. Everything starts on b3, the
+// flattens and dollies back to the world view. Everything starts on b11, the
 // score's swipe, and the page keeps falling until the cube settles.
 const ROT = [T.clear, T.end - 0.07] as const;
 const MOVE = [T.clear, T.end - 0.1] as const;
@@ -861,7 +840,7 @@ const T_REST = T.end - 0.03;
 /** Viewer distance, world units, at the orbit's widest lens. */
 const PERSP = 7;
 
-/** Perspective opening on b3: a kick on the first frame, full by +0.16 s. */
+/** Perspective opening on b11: a kick on the first frame, full by +0.16 s. */
 const lensIn = (t: number): number => outCubic(progress(T.clear, T.clear + 0.16, t));
 
 function camAt(m: Model, t: number): Camera {
@@ -898,8 +877,7 @@ const PAGE_FAR = 0.42;
 /** A shove on the swipe, then a long fall that lands with the cube. */
 const fallEase = cubicBezier(0.45, 0, 0.55, 1);
 const fallAt = (t: number): number =>
-  0.07 * outCubic(progress(T.clear, T.clear + 3 * FRAME, t)) +
-  0.93 * fallEase(progress(T.clear, SETTLE, t));
+  0.07 * outCubic(progress(T.clear, T.clear + 3 * SHUTTER, t)) + 0.93 * fallEase(progress(T.clear, SETTLE, t));
 
 /**
  * How far the page has fallen back behind the cube, world units. Chosen so
@@ -909,8 +887,9 @@ const fallAt = (t: number): number =>
 const recede = (t: number): number => PERSP * (1 / lerp(1, PAGE_FAR, fallAt(t)) - 1);
 
 // The page clears as one move, in depth order: its words go first, on the
-// swipe, then the bars, and the grid stays longest as the reference the orbit
-// turns against, falling away under the cube until it lands.
+// swipe, then the bars and tiles, and the grid stays longest as the
+// reference the orbit turns against, falling away under the cube until it
+// lands.
 function pageFade(t: number): Fade {
   // Fades that hold, then go: the page is still there, dimming with
   // distance, until the frame the cube lands.
@@ -943,22 +922,14 @@ const FACES: { n: V3; c: [number, number, number][] }[] = [
   { n: [-1, 0, 0], c: [[-1, 1, -1], [-1, 1, 1], [-1, -1, 1], [-1, -1, -1]] },
 ];
 
-function drawSlab(
-  ctx: CanvasRenderingContext2D,
-  view: View,
-  lo: V3,
-  hi: V3,
-  look: number,
-): void {
+function drawSlab(ctx: CanvasRenderingContext2D, view: View, lo: V3, hi: V3, look: number): void {
   const c: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
   const h: V3 = [(hi[0] - lo[0]) / 2, (hi[1] - lo[1]) / 2, (hi[2] - lo[2]) / 2];
   const vis: { pts: Projected[]; depth: number; n: V3 }[] = [];
   for (const face of FACES) {
     const at: V3 = [c[0] + face.n[0] * h[0], c[1] + face.n[1] * h[1], c[2] + face.n[2] * h[2]];
     if (!view.facing(face.n, at)) continue;
-    const pts = face.c.map(([x, y, z]) =>
-      view.project([c[0] + x * h[0], c[1] + y * h[1], c[2] + z * h[2]]),
-    );
+    const pts = face.c.map(([x, y, z]) => view.project([c[0] + x * h[0], c[1] + y * h[1], c[2] + z * h[2]]));
     vis.push({ pts, depth: view.project(at).z, n: face.n });
   }
   vis.sort((p, q) => p.depth - q.depth);
@@ -986,69 +957,93 @@ function drawSlab(
   ctx.restore();
 }
 
-// Chart chrome: title, caption, row labels, grid, axis, and tick labels.
+// The page's words: title, subtitle, row labels, and the card.
 
-function drawTitle(ctx: CanvasRenderingContext2D, P: Plane, m: Model, a: number): void {
+function drawTitle(ctx: CanvasRenderingContext2D, P: Plane, a: number): void {
   if (a <= 0) return;
-  const tf = font(30, 500, MONO);
   ctx.save();
   ctx.globalAlpha *= a;
   P.at(ctx, AX0, TITLE_Y);
-  let x = 0;
-  if (m.subject) {
-    drawText(ctx, m.subject, x, 0, { font: tf, fill: PALETTE.amber });
-    x += layout(ctx, `${m.subject} `, tf).width;
-    drawText(ctx, "·", x, 0, { font: tf, fill: PALETTE.text3 });
-    x += layout(ctx, "· ", tf).width;
-  }
-  drawText(ctx, "next commit", x, 0, { font: tf, fill: PALETTE.text1 });
+  drawText(ctx, TITLE, 0, 0, { font: CAPTION.font, fill: PALETTE.paper });
   ctx.restore();
 }
 
-function drawCaption(ctx: CanvasRenderingContext2D, P: Plane, a: number): void {
+function drawSubtitle(ctx: CanvasRenderingContext2D, P: Plane, m: Model, a: number): void {
   if (a <= 0) return;
-  ctx.save();
-  ctx.globalAlpha *= a;
-  P.at(ctx, AX0, SUB_Y);
-  drawText(ctx, "build time, store warmed at the parent commit", 0, 0, {
-    font: font(24, 400),
-    fill: PALETTE.text3,
+  const f = font(40, 500);
+  m.sub.forEach((line, i) => {
+    ctx.save();
+    ctx.globalAlpha *= a;
+    P.at(ctx, AX0, SUB_Y[i]);
+    drawText(ctx, line, 0, 0, { font: f, fill: PALETTE.text3 });
+    ctx.restore();
   });
-  ctx.restore();
 }
 
 function drawRowLabels(ctx: CanvasRenderingContext2D, P: Plane, t: number, a: number): void {
   if (a <= 0) return;
-  const lf = font(LABEL_SIZE, 600);
-  for (const [label, y, fill, at, amp] of [
-    ["cargo", ROW_CARGO, PALETTE.text2, CARGO_DONE, 0.05],
-    ["mbx", ROW_MBX, PALETTE.amber, mbxLock(), 0.1],
-  ] as const) {
+  for (const [i, L] of LABELS.entries()) {
     // Each label kicks when its bar lands: a small secondary beat.
-    const kick = pulse(t, at, 0.015, 0.09);
+    const kick = pulse(t, i === 0 ? CARGO_DONE : mbxLock(), 0.015, 0.09);
     ctx.save();
     ctx.globalAlpha *= a;
-    P.at(ctx, AX0 - 28, y);
-    ctx.scale(1 + amp * kick, 1 + amp * kick);
-    drawText(ctx, label, 0, 12, {
-      font: lf,
-      tracking: -0.6,
-      align: "right",
-      fill: kick > 0.05 ? mix(fill, PALETTE.paper, kick * 0.7) : fill,
-    });
+    P.at(ctx, AX0, labelY(L.row));
+    ctx.scale(1 + L.amp * kick, 1 + L.amp * kick);
+    let x = 0;
+    for (const [text, fill] of L.parts) {
+      x += drawText(ctx, text, x, 0, {
+        font: LABEL_FONT,
+        fill: kick > 0.05 ? mix(fill, PALETTE.paper, kick * 0.7) : fill,
+      }).width;
+    }
     ctx.restore();
   }
 }
 
-/** A vertical grid line from y0 up to y1, broken around `knock` boxes. */
-function gridLine(
+/** Words on the page with the reel's rise, at chart (x, y). */
+function pageWords(
   ctx: CanvasRenderingContext2D,
   P: Plane,
+  text: string,
   x: number,
-  y0: number,
-  y1: number,
-  knock: Rect[],
-): void {
+  y: number,
+  style: WordStyle,
+  t: number,
+  land: number,
+  a: number,
+): number {
+  if (a <= 0) return 0;
+  ctx.save();
+  ctx.globalAlpha *= a;
+  P.at(ctx, x, y);
+  const w = drawWords(ctx, text, 0, 0, style, t, land);
+  ctx.restore();
+  return w;
+}
+
+const URL_STYLE: WordStyle = { ...CAPTION, fill: PALETTE.amber };
+
+/**
+ * The card that stands in for the chart: its first line rises in with the
+ * race's lurches, the address lands on the lock, and a rule draws under it
+ * with the delta's cue.
+ */
+function drawCard(ctx: CanvasRenderingContext2D, P: Plane, t: number, a: number): void {
+  if (a <= 0) return;
+  pageWords(ctx, P, CARD[0], AX0, CARD_Y[0], CAPTION, t, b(1), a);
+  const w = pageWords(ctx, P, CARD[1], AX0, CARD_Y[1], URL_STYLE, t, T.lock, a);
+  const u = swiftOut(progress(T.delta, T.delta + 0.3, t));
+  if (u <= 0) return;
+  ctx.save();
+  ctx.globalAlpha *= a;
+  ctx.fillStyle = rgba(PALETTE.amber, 0.7);
+  quad(ctx, P, AX0, CARD_Y[1] + 26, w * u, 6);
+  ctx.fill();
+  ctx.restore();
+}
+
+/** A vertical grid line from y0 up to y1, broken around `knock` boxes. */
+function gridLine(ctx: CanvasRenderingContext2D, P: Plane, x: number, y0: number, y1: number, knock: Box[]): void {
   let runs: [number, number][] = [[y1, y0]];
   for (const r of knock) {
     if (x < r.x0 || x > r.x1) continue;
@@ -1068,64 +1063,23 @@ function gridLine(
   ctx.stroke();
 }
 
-function drawPlot(
-  ctx: CanvasRenderingContext2D,
-  P: Plane,
-  m: Model,
-  t: number,
-  knock: Rect[],
-  fade: Fade,
-): void {
-  // Grid lines rise from the axis on a stagger.
-  const ticks = Math.round(m.max / m.step);
-  const tf = font(TICK_SIZE, 500);
+/** The grid: a line per step rising on a stagger, the zero line brightest. */
+function drawPlot(ctx: CanvasRenderingContext2D, P: Plane, c: Chart, t: number, knock: Box[], fade: Fade): void {
+  if (fade.line <= 0) return;
+  const ticks = Math.round(c.max / c.step);
   ctx.save();
   const a0 = ctx.globalAlpha;
   ctx.lineCap = "butt";
   for (let i = 0; i <= ticks; i++) {
-    const x = AX0 + (i * m.step * AXLEN) / m.max;
+    const x = AX0 + (i * c.step * AXLEN) / c.max;
     const grow = swiftOut(progress(0.1 + i * 0.035, 0.38 + i * 0.035, t));
-    const top = lerp(AXIS_Y, GRID_TOP, grow);
-    const k = P.k(x, AXIS_Y);
-    if (top < AXIS_Y - 0.5 && fade.line > 0) {
-      ctx.globalAlpha = a0 * fade.line;
-      ctx.strokeStyle =
-        i === 0 ? rgba(PALETTE.text3, 0.8) : mix(PALETTE.divider, PALETTE.text3, 0.5 * fade.fall, 0.95);
-      ctx.lineWidth = (i === 0 ? 2 : 1.5) * k;
-      // The zero line is the spine: never broken.
-      gridLine(ctx, P, x, AXIS_Y, top, i === 0 ? [] : knock);
-    }
-    // Tick marks hang below the axis.
-    if (fade.line > 0) {
-      ctx.globalAlpha = a0 * fade.line;
-      ctx.strokeStyle = rgba(PALETTE.text3, 0.8);
-      ctx.lineWidth = 2 * k;
-      ctx.beginPath();
-      seg(ctx, P, x, AXIS_Y, x, AXIS_Y + 10);
-      ctx.stroke();
-    }
-    if (m.numbers && fade.text > 0) {
-      const v = i * m.step;
-      const txt = Number.isInteger(v) ? String(v) : v.toFixed(1);
-      ctx.save();
-      ctx.globalAlpha = a0 * fade.text;
-      P.at(ctx, x, AXIS_Y + 44);
-      drawText(ctx, txt, 0, 0, { font: tf, align: "center", fill: PALETTE.text3 });
-      if (i === ticks) {
-        const w = layout(ctx, txt, tf).width;
-        drawText(ctx, "s", w / 2 + 6, 0, { font: font(TICK_SIZE * 0.8, 500), fill: PALETTE.text3 });
-      }
-      ctx.restore();
-    }
-  }
-  // Axis baseline.
-  if (fade.line > 0) {
+    const top = lerp(GRID_BOT, GRID_TOP, grow);
+    if (top >= GRID_BOT - 0.5) continue;
     ctx.globalAlpha = a0 * fade.line;
-    ctx.strokeStyle = rgba(PALETTE.text3, 0.8);
-    ctx.lineWidth = 2 * P.k(AX0, AXIS_Y);
-    ctx.beginPath();
-    seg(ctx, P, AX0 - 14, AXIS_Y, AX0 + AXLEN + 14, AXIS_Y);
-    ctx.stroke();
+    ctx.strokeStyle = i === 0 ? rgba(PALETTE.text3, 0.8) : mix(PALETTE.divider, PALETTE.text3, 0.5 * fade.fall, 0.95);
+    ctx.lineWidth = (i === 0 ? 2 : 1.5) * P.k(x, GRID_BOT);
+    // The zero line is the spine: never broken.
+    gridLine(ctx, P, x, GRID_BOT, top, i === 0 ? [] : knock);
   }
   ctx.restore();
 }
@@ -1155,14 +1109,7 @@ function ramp(color: string): HTMLCanvasElement {
  * Light at a growing bar's leading edge: a hot edge line, light pooled in the
  * bar behind it, and a small bloom, all kept inside the bar's band.
  */
-function tipLight(
-  ctx: CanvasRenderingContext2D,
-  P: Plane,
-  x: number,
-  row: number,
-  a: number,
-  color: string,
-): void {
+function tipLight(ctx: CanvasRenderingContext2D, P: Plane, x: number, row: number, a: number, color: string): void {
   if (a <= 0.01 || x - AX0 < 1) return;
   ctx.save();
   P.at(ctx, x, row);
@@ -1184,14 +1131,7 @@ function tipLight(
  * Landing flare at a bar's live tip: a hot edge line a little taller than
  * the bar and a bloom inside the bar, both on one short envelope `k`.
  */
-function landFlare(
-  ctx: CanvasRenderingContext2D,
-  P: Plane,
-  x: number,
-  row: number,
-  k: number,
-  color: string,
-): void {
+function landFlare(ctx: CanvasRenderingContext2D, P: Plane, x: number, row: number, k: number, color: string): void {
   if (k <= 0.01) return;
   ctx.save();
   P.at(ctx, x, row);
@@ -1214,7 +1154,7 @@ const flash = (t: number, at: number, decay: number): number =>
 
 /**
  * Photo finish on mbx's lock: a hairline through both tips, flush at that
- * instant, from the top of the cargo bar to the foot of the mbx bar.
+ * instant, from the top of the Cargo bar to the foot of the mbx bar.
  */
 function photoFinish(ctx: CanvasRenderingContext2D, P: Plane, x: number, k: number): void {
   if (k <= 0.01) return;
@@ -1234,19 +1174,18 @@ function photoFinish(ctx: CanvasRenderingContext2D, P: Plane, x: number, k: numb
 }
 
 /**
- * Cargo's value, 0..1, as its readout shows it: each lurch settles in about
- * four frames so the figure rests crisp between steps, and it locks when the
- * last crate lands.
+ * Cargo's value, 0..1, as its readout shows it: each lurch settles a little
+ * sooner than the bar so the figure rests crisp between steps, and it locks
+ * when the last crate lands.
  */
-const cargoValue = (m: Model, t: number): number =>
-  t >= CARGO_DONE ? 1 : cargoGrow(m.readSteps, t, 1.5);
-/** Chart x of the cargo bar's tip, with a small recoil after the clunk. */
-const cargoTip = (m: Model, t: number): number =>
-  AX0 + (cargoEnd(m) - AX0) * cargoGrow(m.steps, t) + 6 * wobble(t, CARGO_DONE, 6, 16);
+const cargoValue = (c: Chart, t: number): number => (t >= CARGO_DONE ? 1 : cargoGrow(c.readSteps, t, 1.5));
+/** Chart x of the Cargo bar's tip, with a small recoil after the clunk. */
+const cargoTip = (c: Chart, t: number): number =>
+  AX0 + (cargoEnd(c) - AX0) * cargoGrow(c.steps, t) + 6 * wobble(t, CARGO_DONE, 6, 16);
 
-function drawCargo(ctx: CanvasRenderingContext2D, P: Plane, m: Model, t: number, fade: Fade): void {
-  if (t < T.cargo) return;
-  const tip = cargoTip(m, t);
+function drawCargo(ctx: CanvasRenderingContext2D, P: Plane, c: Chart, t: number, fade: Fade): void {
+  if (t < T.race) return;
+  const tip = cargoTip(c, t);
   const len = tip - AX0;
   if (len > 0.5 && fade.bar > 0) {
     ctx.save();
@@ -1258,76 +1197,76 @@ function drawCargo(ctx: CanvasRenderingContext2D, P: Plane, m: Model, t: number,
   }
   if (t < T.clear) {
     // Leading-edge light while a crate is moving.
-    const v = cargoTip(m, t) - cargoTip(m, t - FRAME);
+    const v = cargoTip(c, t) - cargoTip(c, t - SHUTTER);
     tipLight(ctx, P, tip, ROW_CARGO, clamp(v / 70) * 0.8, PALETTE.tealLight);
-    // A short, muted flare when the last crate lands on b1.75.
-    landFlare(ctx, P, tip, ROW_CARGO, flash(t, CARGO_DONE, 0.04) * 0.6, PALETTE.tealLight);
+    // A short, muted flare when the last crate lands.
+    landFlare(ctx, P, tip, ROW_CARGO, flash(t, CARGO_DONE, 0.05) * 0.6, PALETTE.tealLight);
   }
-  // The readout rides the tip.
-  // Full strength from its first frame: a half-faded figure reads as a ghost.
-  const na = progress(T.cargo, T.cargo + 0.01, t) * fade.text;
-  if (!m.numbers || na <= 0) return;
-  const target = Number(m.cargoText);
-  const v = cargoValue(m, t);
+  // The readout rides the tip, at full strength from its first frame: a
+  // half-faded figure reads as a ghost.
+  const na = progress(T.race, T.race + 0.01, t) * fade.text;
+  if (na <= 0) return;
+  const target = Number(c.cargoText);
+  const v = cargoValue(c, t);
   const locked = t >= CARGO_DONE;
   drawOdometer(
     ctx,
     P,
-    m.cargoText,
+    c.cargoText,
     v * target,
-    locked ? null : cargoValue(m, t - FRAME) * target,
-    readoutX(ctx, m.cargoText, v * target, tip),
+    locked ? null : cargoValue(c, t - SHUTTER) * target,
+    readoutX(ctx, c.cargoText, v * target, tip),
     ROW_CARGO + NUM_SIZE * 0.36,
     PALETTE.text1,
     na,
     0,
-    pulse(t, CARGO_DONE, 0.005, 0.06) * 0.6,
+    pulse(t, CARGO_DONE, 0.005, 0.07) * 0.6,
   );
 }
 
 /** Chart x of the mbx bar's tip. */
-const mbxTip = (m: Model, t: number): number => AX0 + (mbxEnd(m) - AX0) * mbxGrow(t);
+const mbxTip = (c: Chart, t: number): number => AX0 + (mbxEnd(c) - AX0) * mbxGrow(t);
 
-function drawMbxReadout(ctx: CanvasRenderingContext2D, P: Plane, m: Model, t: number, fade: Fade): void {
-  if (!m.numbers || t < T.mbx) return;
+function drawMbxReadout(ctx: CanvasRenderingContext2D, P: Plane, c: Chart, t: number, fade: Fade): void {
+  if (t < T.race) return;
   const lock = mbxLock();
-  const target = Number(m.mbxText);
+  const target = Number(c.mbxText);
   const locked = t >= lock;
-  const a = progress(T.mbx, T.mbx + 0.01, t) * fade.text;
+  const a = progress(T.race, T.race + 0.01, t) * fade.text;
   // Mechanical settle once locked: the lowest drum nudges past and back,
   // a tenth of a digit at most, never fast enough to blur.
-  const settle = 0.2 * wobble(t, lock, 5, 13);
+  const settle = 0.2 * wobble(t, lock, 4, 9);
   drawOdometer(
     ctx,
     P,
-    m.mbxText,
+    c.mbxText,
     locked ? target : clamp(mbxGrow(t)) * target,
-    locked ? null : clamp(mbxGrow(t - FRAME)) * target,
-    mbxTip(m, t) + NUM_GAP,
+    locked ? null : clamp(mbxGrow(t - SHUTTER)) * target,
+    mbxTip(c, t) + NUM_GAP,
     ROW_MBX + NUM_SIZE * 0.36,
     PALETTE.amberBright,
     a,
     settle,
-    pulse(t, lock, 0.005, 0.08),
+    pulse(t, lock, 0.005, 0.1),
   );
 }
 
-function drawMbxFx(ctx: CanvasRenderingContext2D, P: Plane, m: Model, t: number): void {
-  if (t < T.mbx || t >= T.clear) return;
-  const tip = mbxTip(m, t);
-  const v = tip - mbxTip(m, t - FRAME);
+function drawMbxFx(ctx: CanvasRenderingContext2D, P: Plane, c: Chart, t: number): void {
+  if (t < T.race || t >= T.clear) return;
+  const tip = mbxTip(c, t);
+  const v = tip - mbxTip(c, t - SHUTTER);
   tipLight(ctx, P, tip, ROW_MBX, clamp(v / 50), PALETTE.amberBright);
-  // The lock: a flare at the live tip, 3–4 frames, and the photo-finish
-  // line, gone before mbx's overshoot or cargo's next step can reach it.
-  landFlare(ctx, P, tip, ROW_MBX, flash(t, mbxLock(), 0.04), PALETTE.amberBright);
-  const pf = flash(t, mbxLock(), 0.016);
-  if (m.mbx < m.cargo && pf > 0.25) photoFinish(ctx, P, mbxEnd(m), pf);
-  // A light sweep across the bar, entering it on b2.5. Cream laid over the
+  // The lock: a flare at the live tip and the photo-finish line, gone
+  // before mbx's overshoot or Cargo's next step can reach it.
+  landFlare(ctx, P, tip, ROW_MBX, flash(t, mbxLock(), 0.05), PALETTE.amberBright);
+  const pf = flash(t, mbxLock(), 0.03);
+  if (c.mbx < c.cargo && pf > 0.2) photoFinish(ctx, P, mbxEnd(c), pf);
+  // A light sweep across the bar as the hold begins. Cream laid over the
   // amber, never added, so no channel clips and the hue stays amber.
-  const gp = progress(T.glint - 0.04, T.glint + 0.22, t);
+  const gp = progress(T.glint - 0.04, T.glint + 0.34, t);
   if (gp > 0 && gp < 1) {
     const x0 = AX0;
-    const x1 = mbxEnd(m);
+    const x1 = mbxEnd(c);
     const cx = lerp(x0 - 60, x1 + 160, inOutSine(gp));
     ctx.save();
     ctx.beginPath();
@@ -1336,7 +1275,7 @@ function drawMbxFx(ctx: CanvasRenderingContext2D, P: Plane, m: Model, t: number)
     ctx.transform(1, 0, -0.5, 1, 0.5 * ROW_MBX, 0);
     const g = ctx.createLinearGradient(cx - 100, 0, cx + 100, 0);
     g.addColorStop(0, rgba(PALETTE.paper, 0));
-    g.addColorStop(0.5, rgba(PALETTE.paper, 0.24));
+    g.addColorStop(0.5, rgba(PALETTE.paper, 0.26));
     g.addColorStop(1, rgba(PALETTE.paper, 0));
     ctx.fillStyle = g;
     ctx.fillRect(cx - 100, ROW_MBX - TH / 2, 200, TH);
@@ -1344,20 +1283,152 @@ function drawMbxFx(ctx: CanvasRenderingContext2D, P: Plane, m: Model, t: number)
   }
 }
 
-// The delta figure pops on b2.25: launched two frames early on a stiff
-// spring so it is at full size on the beat, then overshoots.
-const DELTA_POP = (t: number): number => spring(t - (T.label - 2 * FRAME), 5, 0.45, 40);
+// The tile strip: one tile per compilation mbx looked up, in columns under
+// its bar, filled column by column. The restored ones sweep in green from
+// the left, dropping out from under the bar; the compiled ones, last in a
+// build (the edited crate and whatever depends on it), land amber on b2 with
+// the annotation's last word. Halfway through the hold a light runs along
+// the strip and the compile flares again as it passes.
 
-function drawDelta(ctx: CanvasRenderingContext2D, P: Plane, m: Model, t: number, fade: Fade): void {
-  if (!m.deltaText || t < T.delta) return;
-  const xa = mbxEnd(m);
-  const xb = cargoEnd(m);
+interface StripLayout {
+  rows: number;
+  cols: number;
+  pitch: number;
+  tile: number;
+  /** The strip's right edge and bottom edge, chart px. */
+  x1: number;
+  y1: number;
+}
+
+/** As many rows as a pitch of about STRIP_PITCH needs to fit the strip under the bar. */
+function stripLayout(c: Chart): StripLayout {
+  const len = mbxEnd(c) - AX0;
+  const rows = clamp(Math.ceil(c.lookups / Math.max(1, Math.floor(len / STRIP_PITCH))), 1, STRIP_ROWS);
+  const cols = Math.ceil(c.lookups / rows);
+  const pitch = clamp(len / cols, 4, 18);
+  const tile = pitch - Math.max(1.5, pitch * 0.2);
+  return { rows, cols, pitch, tile, x1: AX0 + cols * pitch, y1: STRIP_Y + rows * pitch };
+}
+
+/** When tile `i` lands: the green ones on the sweep, the amber ones on b2. */
+function tileAt(c: Chart, L: StripLayout, i: number): number {
+  const green = c.lookups - c.misses;
+  if (i >= green) return T.amber + (i - green) * 0.006;
+  const last = Math.max(1, Math.ceil(green / L.rows) - 1);
+  return T.strip + (STRIP_SWEEP * Math.floor(i / L.rows)) / last + (i % L.rows) * 0.004;
+}
+
+/** How long a tile takes to drop into place. */
+const DROP = 0.09;
+/** The hold's light takes this long to run the strip. */
+export const SHIMMER = b(1);
+/** How bright the hold's light makes the tile in column `col`, 0..1. */
+function shimmerAt(L: StripLayout, col: number, t: number): number {
+  const d = (t - (T.shimmer + (SHIMMER * col) / L.cols)) / 0.08;
+  return Math.abs(d) > 3 ? 0 : Math.exp(-d * d);
+}
+
+function drawStrip(ctx: CanvasRenderingContext2D, P: Plane, c: Chart, t: number, a: number): void {
+  if (t < T.strip || a <= 0) return;
+  const L = stripLayout(c);
+  const green = c.lookups - c.misses;
+  ctx.save();
+  ctx.globalAlpha *= a;
+  const a0 = ctx.globalAlpha;
+  // Green tiles at rest share one path, so the hold fills the strip once.
+  const rest = new Path2D();
+  const add = (x: number, y: number, w: number) => {
+    const q = [P.pt(x, y), P.pt(x + w, y), P.pt(x + w, y + w), P.pt(x, y + w)];
+    rest.moveTo(q[0].x, q[0].y);
+    for (let k = 1; k < 4; k++) rest.lineTo(q[k].x, q[k].y);
+    rest.closePath();
+  };
+  for (let i = 0; i < c.lookups; i++) {
+    const at = tileAt(c, L, i);
+    if (t < at) continue;
+    const u = progress(at, at + DROP, t);
+    const amber = i >= green;
+    const col = Math.floor(i / L.rows);
+    const row = i % L.rows;
+    const x = AX0 + col * L.pitch;
+    const y = STRIP_Y + row * L.pitch;
+    // Each tile lands hot and cools to its colour; the hold's light warms
+    // it again as it passes.
+    const hot = Math.max(1 - progress(at, at + 0.14, t), 0.8 * shimmerAt(L, col, t));
+    if (!amber && u >= 1 && hot <= 0.02) {
+      add(x, y, L.tile);
+      continue;
+    }
+    const base = amber ? PALETTE.amber : PALETTE.green;
+    ctx.globalAlpha = a0 * clamp(u / 0.35);
+    ctx.fillStyle = hot > 0.02 ? mix(base, PALETTE.paper, 0.7 * hot) : base;
+    if (amber) {
+      // The compile pops in past its size and settles.
+      const size = L.tile * spring(t - at, 5, 0.35);
+      quad(ctx, P, x + (L.tile - size) / 2, y + (L.tile - size) / 2, size, size);
+    } else {
+      quad(ctx, P, x, y - (1 - swiftOut(u)) * L.pitch * 2.2, L.tile, L.tile);
+    }
+    ctx.fill();
+  }
+  ctx.globalAlpha = a0;
+  ctx.fillStyle = PALETTE.green;
+  ctx.fill(rest);
+  ctx.restore();
+  // The compiles glow amber: a burst as they land and again as the hold's
+  // light passes, and an ember between.
+  if (c.misses > 0 && t >= T.amber) {
+    for (let i = green; i < c.lookups; i++) {
+      const col = Math.floor(i / L.rows);
+      const cx = AX0 + col * L.pitch + L.tile / 2;
+      const cy = STRIP_Y + (i % L.rows) * L.pitch + L.tile / 2;
+      const p = P.pt(cx, cy);
+      const k = P.k(cx, cy);
+      const burst = flash(t, tileAt(c, L, i), 0.12) + 0.7 * flash(t, T.shimmer + SHIMMER, 0.14);
+      glow(ctx, p.x, p.y, (30 + 60 * burst) * k, PALETTE.amber, (a * (0.5 + 0.6 * burst)) / Math.sqrt(c.misses));
+    }
+  }
+}
+
+/**
+ * The annotation beside the strip, lined up under mbx's readout: restored
+ * in green, compiled in amber, its words rising one per 1/32 note to land on
+ * b2 with the amber tile. It goes under the strip when there is no room.
+ */
+function drawNote(ctx: CanvasRenderingContext2D, P: Plane, c: Chart, t: number, a: number): void {
+  if (a <= 0) return;
+  const L = stripLayout(c);
+  const [restored, compiled] = c.note;
+  const first = compiled ? `${restored},` : restored;
+  const space = layout(ctx, " ", LABEL.font).width;
+  const w0 = layout(ctx, first, LABEL.font).width;
+  const total = w0 + (compiled ? space + layout(ctx, compiled, LABEL.font).width : 0);
+  const x0 = Math.max(L.x1, mbxEnd(c)) + NUM_GAP;
+  const beside = x0 + total <= 1800;
+  const x = beside ? x0 : AX0;
+  const y = beside ? (STRIP_Y + L.y1) / 2 + 20 : L.y1 + 64;
+  const green: WordStyle = { ...LABEL, fill: PALETTE.green };
+  const amber: WordStyle = { ...LABEL, fill: PALETTE.amber };
+  // The two runs share one line's timing: the compiled words land last, on b2.
+  const tail = compiled ? compiled.split(" ").length : 0;
+  pageWords(ctx, P, first, x, y, green, t, T.amber - (tail * BEAT) / 8, a);
+  if (compiled) pageWords(ctx, P, compiled, x + w0 + space, y, amber, t, T.amber, a);
+}
+
+// The delta figure pops on b2.75: launched two frames early on a stiff
+// spring so it is at full size on the beat, then overshoots.
+const DELTA_POP = (t: number): number => spring(t - (T.label - 2 * SHUTTER), 5, 0.45, 40);
+
+function drawDelta(ctx: CanvasRenderingContext2D, P: Plane, c: Chart, t: number, fade: Fade): void {
+  if (!c.deltaText || t < T.delta) return;
+  const xa = mbxEnd(c);
+  const xb = cargoEnd(c);
   const green = PALETTE.green;
   ctx.save();
   ctx.lineCap = "round";
 
-  // The saved stretch of the cargo bar is hatched out, left to right.
-  const hatch = outQuart(progress(T.delta + 0.05, T.delta + 0.26, t));
+  // The saved stretch of the Cargo bar is hatched out, left to right.
+  const hatch = outQuart(progress(T.delta + 0.05, T.delta + 0.3, t));
   if (hatch > 0 && fade.bar > 0) {
     const top = ROW_CARGO - TH / 2;
     const w = (xb - xa) * hatch;
@@ -1370,7 +1441,7 @@ function drawDelta(ctx: CanvasRenderingContext2D, P: Plane, m: Model, t: number,
     ctx.strokeStyle = rgba(PALETTE.tealLight, 0.42);
     ctx.lineWidth = 3 * P.k(xa, ROW_CARGO);
     ctx.lineCap = "butt";
-    const crawl = ((t - T.delta) * 36) % 20;
+    const crawl = ((t - T.delta) * 30) % 20;
     ctx.beginPath();
     for (let x = xa - TH + crawl - 20; x < xa + w + 20; x += 20) seg(ctx, P, x, top + TH, x + TH, top);
     ctx.stroke();
@@ -1378,20 +1449,34 @@ function drawDelta(ctx: CanvasRenderingContext2D, P: Plane, m: Model, t: number,
   }
 
   // Extension lines rise from each bar's end, then the dimension line spans
-  // them. On b3 they draw back up into the dimension line and leave with the
-  // words, so nothing points at the bar once it has gone.
+  // them. On b11 they draw back up into the dimension line and leave with
+  // the words, so nothing points at the bar once it has gone. Where mbx's
+  // bar is short enough for them to reach the row labels, they break around
+  // them, as a drawing's dimension lines do.
   if (fade.text > 0) {
     ctx.save();
+    const boxes = LABELS.map((L) => labelBox(ctx, L)).filter((lb) => xa < lb.x1);
+    if (boxes.length) {
+      ctx.beginPath();
+      ctx.rect(-1e5, -1e5, 2e5, 2e5);
+      for (const lb of boxes) {
+        const q = [P.pt(lb.x0, lb.y0), P.pt(lb.x0, lb.y1), P.pt(lb.x1, lb.y1), P.pt(lb.x1, lb.y0)];
+        ctx.moveTo(q[0].x, q[0].y);
+        for (const p of q.slice(1)) ctx.lineTo(p.x, p.y);
+        ctx.closePath();
+      }
+      ctx.clip("evenodd");
+    }
     ctx.globalAlpha *= fade.text;
     ctx.strokeStyle = green;
     const k = P.k(xa, BRK_Y);
-    ctx.lineWidth = 2.5 * k;
+    ctx.lineWidth = 3 * k;
     const back = swiftInOut(progress(T.clear - 0.03, T.clear + 0.1, t));
     const ext = (x: number, from: number, e: number) => {
       if (e <= 0 || back >= 1) return;
       const foot = lerp(from, BRK_Y - 14, back);
       ctx.save();
-      ctx.setLineDash([7 * k, 7 * k]);
+      ctx.setLineDash([8 * k, 8 * k]);
       ctx.beginPath();
       seg(ctx, P, x, foot, x, lerp(from, BRK_Y - 14, e));
       ctx.stroke();
@@ -1399,14 +1484,14 @@ function drawDelta(ctx: CanvasRenderingContext2D, P: Plane, m: Model, t: number,
     };
     // The mbx line stands on the bar's top, which dips as the bar crouches.
     const mbxTop = ROW_MBX - TH / 2 + TH * CROUCH * crouchAt(t);
-    ext(xa, mbxTop - 8, swiftOut(progress(T.delta, T.delta + 0.14, t)));
-    ext(xb, ROW_CARGO - TH / 2 - 8, swiftOut(progress(T.delta + 0.04, T.delta + 0.15, t)));
-    const span = swiftInOut(progress(T.delta + 0.04, T.delta + 0.19, t));
+    ext(xa, mbxTop - 8, swiftOut(progress(T.delta, T.delta + 0.16, t)));
+    ext(xb, ROW_CARGO - TH / 2 - 8, swiftOut(progress(T.delta + 0.04, T.delta + 0.17, t)));
+    const span = swiftInOut(progress(T.delta + 0.04, T.delta + 0.22, t));
     if (span > 0) {
       ctx.beginPath();
       seg(ctx, P, xa, BRK_Y, lerp(xa, xb, span), BRK_Y);
-      seg(ctx, P, xa, BRK_Y - 12, xa, BRK_Y + 12);
-      if (span > 0.98) seg(ctx, P, xb, BRK_Y - 12, xb, BRK_Y + 12);
+      seg(ctx, P, xa, BRK_Y - 14, xa, BRK_Y + 14);
+      if (span > 0.98) seg(ctx, P, xb, BRK_Y - 14, xb, BRK_Y + 14);
       ctx.stroke();
     }
     ctx.restore();
@@ -1418,7 +1503,7 @@ function drawDelta(ctx: CanvasRenderingContext2D, P: Plane, m: Model, t: number,
     const s = lerp(0.7, 1, pop);
     const f = font(DELTA_SIZE, 600);
     const track = -0.04 * DELTA_SIZE;
-    const w = layout(ctx, m.deltaText, f, track).width;
+    const w = layout(ctx, c.deltaText, f, track).width;
     const uf = font(DELTA_SIZE * 0.5, 500);
     const uw = layout(ctx, "s", uf).width;
     const mw = DELTA_SIZE * 0.4;
@@ -1427,12 +1512,12 @@ function drawDelta(ctx: CanvasRenderingContext2D, P: Plane, m: Model, t: number,
     const total = mw + gap + w + ugap + uw;
     ctx.save();
     ctx.globalAlpha *= clamp(pop * 3) * fade.text;
-    P.at(ctx, (xa + xb) / 2, BRK_Y - 24);
+    P.at(ctx, (xa + xb) / 2, BRK_Y - 26);
     ctx.scale(s, s);
     const x0 = -total / 2;
     ctx.fillStyle = green;
     ctx.fillRect(x0, -DELTA_SIZE * 0.34, mw, DELTA_SIZE * 0.075);
-    drawText(ctx, m.deltaText, x0 + mw + gap, 0, { font: f, tracking: track, fill: green });
+    drawText(ctx, c.deltaText, x0 + mw + gap, 0, { font: f, tracking: track, fill: green });
     drawText(ctx, "s", x0 + mw + gap + w + ugap, 0, { font: uf, fill: rgba(green, 0.8) });
     ctx.restore();
   }
@@ -1443,26 +1528,31 @@ function drawDelta(ctx: CanvasRenderingContext2D, P: Plane, m: Model, t: number,
 const crouchAt = keys([
   [T.clear - 0.11, 0],
   [T.clear, 1, swiftOut],
-  // The release snaps on b3, with the swipe.
+  // The release snaps on b11, with the swipe.
   [T.hit - 0.02, 0, outCubic],
 ]);
 const CROUCH = 0.11;
 
-/** The mbx bar, from chart bar through square to cube, in world space. */
+/**
+ * The mbx bar, from chart bar through square to cube, in world space. With
+ * the card there is no bar: its square pops out of the page on b11.
+ */
 function drawMbxBox(ctx: CanvasRenderingContext2D, view: View, m: Model, t: number): void {
-  if (t < T.mbx) return;
+  const c = m.chart;
+  if (t < (c ? T.race : T.clear)) return;
   const p = pivot(m);
   const wx = (sx: number) => (sx - p.x) / S0;
   // Collapse: the zero end rushes to the tip and the bar compacts to a square.
-  const tip = mbxTip(m, t);
-  const left = collapseLeft(m, t);
+  const tip = c ? mbxTip(c, t) : p.x + TH / 2;
+  const left = c ? collapseLeft(c, t) : p.x - TH / 2;
+  const grow = c ? 1 : spring(t - T.clear, 5, 0.5);
   // Anticipation: the bar crouches into the floor before it compacts, then
   // an impact squash where the square forms, recovering through the swing.
-  const crouch = crouchAt(t);
+  const crouch = c ? crouchAt(t) : 0;
   const sq = 0.14 * wobble(t, T.hit, 4, 9) * (1 - progress(EXTRUDE[1] - 0.1, EXTRUDE[1], t));
   const cx = wx((tip + left) / 2);
-  const hw = ((tip - left) / S0 / 2) * (1 - sq);
-  const hgt = CUBE * (1 + sq * 0.9) * (1 - CROUCH * crouch);
+  const hw = ((tip - left) / S0 / 2) * (1 - sq) * grow;
+  const hgt = CUBE * (1 + sq * 0.9) * (1 - CROUCH * crouch) * grow;
   // The square pops out of the chart's plane toward the viewer.
   const depth =
     CUBE *
@@ -1475,48 +1565,41 @@ function drawMbxBox(ctx: CanvasRenderingContext2D, view: View, m: Model, t: numb
   // The contact shadow opens as the camera rises over the floor.
   const sh = progress(T.hit, DOLLY[1], t);
   if (sh > 0) drawShadow(ctx, view, [cx, 0, 0], CUBE, 0, 0.45 * sh);
-  collapseTrail(ctx, view, m, t, wx(left), hgt);
-  drawSlab(ctx, view, [cx - hw, 0, -CUBE / 2], [cx + hw, hgt, -CUBE / 2 + depth], look);
+  if (c) collapseTrail(ctx, view, c, t, wx(left), hgt);
+  const y0 = (CUBE - hgt) / 2 * (c ? 0 : 1);
+  drawSlab(ctx, view, [cx - hw, y0, -CUBE / 2], [cx + hw, y0 + hgt, -CUBE / 2 + depth], look);
 }
 
 /**
  * Where the collapsing bar's zero end is, chart px: a latch-release jolt on
- * b3 (visible on its first frame), then the rush into b3.25.
+ * b11 (visible on its first frame), then the rush into b11.25.
  */
-function collapseLeft(m: Model, t: number): number {
-  const c =
-    0.07 * outCubic(progress(T.clear, T.clear + 2.5 * FRAME, t)) +
-    0.93 * inCubic(progress(T.clear, T.hit, t));
-  return lerp(AX0, mbxTip(m, t) - TH, c);
+function collapseLeft(c: Chart, t: number): number {
+  const k =
+    0.07 * outCubic(progress(T.clear, T.clear + 2.5 * SHUTTER, t)) + 0.93 * inCubic(progress(T.clear, T.hit, t));
+  return lerp(AX0, mbxTip(c, t) - TH, k);
 }
 
 /**
- * The zero end covers most of its travel in the two frames before b3.25, so
- * it drags a smear of the ground it just crossed, and on impact that smear
+ * The zero end covers most of its travel in the frames before b11.25, so it
+ * drags a smear of the ground it just crossed, and on impact that smear
  * breaks into three speed ticks that are reeled in behind the square.
  */
-function collapseTrail(
-  ctx: CanvasRenderingContext2D,
-  view: View,
-  m: Model,
-  t: number,
-  left: number,
-  hgt: number,
-): void {
+function collapseTrail(ctx: CanvasRenderingContext2D, view: View, c: Chart, t: number, left: number, hgt: number): void {
   if (t < T.clear || t > T.hit + 0.12) return;
-  const p = pivot(m);
-  const wx = (sx: number) => (sx - p.x) / S0;
   const z = -CUBE / 2;
+  const p = mbxEnd(c) - TH / 2;
+  const wx = (sx: number) => (sx - p) / S0;
   ctx.save();
   if (t < T.hit) {
     // About a frame and a half of travel, fading back toward where the end
     // was; only once the end is really moving, or it reads as a shadow.
-    const from = wx(collapseLeft(m, t - FRAME * 1.5));
+    const from = wx(collapseLeft(c, t - SHUTTER * 1.5));
     const run = left - from;
     if (run > 16 / S0) {
       const a = view.project([from, hgt / 2, z]);
-      const c = view.project([left, hgt / 2, z]);
-      const g = ctx.createLinearGradient(a.x, a.y, c.x, c.y);
+      const e = view.project([left, hgt / 2, z]);
+      const g = ctx.createLinearGradient(a.x, a.y, e.x, e.y);
       const k = clamp((run * S0 - 16) / 60);
       g.addColorStop(0, rgba(PALETTE.amber, 0));
       g.addColorStop(0.7, rgba(PALETTE.amber, 0.22 * k));
@@ -1544,13 +1627,35 @@ function collapseTrail(
     ] as const) {
       const gap = 10 / S0;
       const a = view.project([left - gap, hgt * h, z]);
-      const c = view.project([left - gap - reach * r, hgt * h, z]);
+      const e = view.project([left - gap - reach * r, hgt * h, z]);
       ctx.moveTo(a.x, a.y);
-      ctx.lineTo(c.x, c.y);
+      ctx.lineTo(e.x, e.y);
     }
     ctx.stroke();
   }
   ctx.restore();
+}
+
+/** Everything on the page, under plane `P`, in back-to-front order. */
+function drawPage(ctx: CanvasRenderingContext2D, P: Plane, m: Model, t: number, fade: Fade, knock: Box[]): void {
+  const c = m.chart;
+  if (c) {
+    drawPlot(ctx, P, c, t, knock, fade);
+    drawRowLabels(ctx, P, t, fade.text);
+  }
+  drawTitle(ctx, P, fade.text);
+  drawSubtitle(ctx, P, m, fade.text);
+  if (!c) {
+    drawCard(ctx, P, t, fade.text);
+    return;
+  }
+  drawCargo(ctx, P, c, t, fade);
+  drawDelta(ctx, P, c, t, fade);
+  // The strip leaves soon after the words: a green slab falling away under
+  // the cube would read as its footing.
+  drawStrip(ctx, P, c, t, Math.min(fade.bar, 1 - outCubic(progress(T.clear, T.clear + 0.22, t))));
+  drawNote(ctx, P, c, t, fade.text);
+  drawMbxReadout(ctx, P, c, t, fade);
 }
 
 export const scene: Scene = {
@@ -1559,13 +1664,14 @@ export const scene: Scene = {
   end: S.end,
   draw(ctx, lt, env) {
     const t = lt;
-    ctx.fillStyle = PALETTE.bg;
-    ctx.fillRect(0, 0, env.W, env.H);
     if (t >= T_REST) {
-      drawStagedBox(ctx, WORLD_CAM, H5_POSE);
+      drawHandoff(ctx, "next-push|pruned", env);
       return;
     }
-    const m = model(env.facts);
+    ctx.fillStyle = PALETTE.bg;
+    ctx.fillRect(0, 0, env.W, env.H);
+    const m = model(facts(env));
+    const c = m.chart;
     const cam = camAt(m, t);
     const view = new View(cam);
 
@@ -1573,42 +1679,47 @@ export const scene: Scene = {
       // The page falls back behind the cube, every element projected.
       const P = projPlane(new View(pageCam(cam, t)), m, -CUBE / 2 - recede(t));
       const fade = pageFade(t);
-      ctx.save();
-      drawPlot(ctx, P, m, t, readoutBoxes(ctx, m, t, fade.text), fade);
-      drawTitle(ctx, P, m, fade.text);
-      drawCaption(ctx, P, fade.text);
-      drawRowLabels(ctx, P, t, fade.text);
-      drawCargo(ctx, P, m, t, fade);
-      drawDelta(ctx, P, m, t, fade);
-      drawMbxReadout(ctx, P, m, t, fade);
-      ctx.restore();
+      drawPage(ctx, P, m, t, fade, c ? knockBoxes(ctx, c, t, fade.text) : []);
       drawMbxBox(ctx, view, m, t);
       return;
     }
 
-    speedLines(ctx, t);
     // Behind the box: the chart plane, its layers whipping in on a stagger.
     ctx.save();
     enterChart(ctx, view, m);
-    const knock = readoutBoxes(ctx, m, t);
     const plotOff = L_PLOT.x(t);
-    whipLayer(ctx, L_PLOT, t, (g) => drawPlot(g, FLAT, m, t, knock, OPAQUE));
-    whipLayer(ctx, L_TITLE, t, (g) => drawTitle(g, FLAT, m, 1));
-    whipLayer(ctx, L_SUB, t, (g) => drawCaption(g, FLAT, 1));
-    whipLayer(ctx, L_LABELS, t, (g) => drawRowLabels(g, FLAT, t, 1));
-    // The bars and their readouts ride the plot's layer.
-    ctx.translate(plotOff, 0);
-    drawCargo(ctx, FLAT, m, t, OPAQUE);
-    drawDelta(ctx, FLAT, m, t, OPAQUE);
+    whipLayer(ctx, L_TITLE, t, (g) => drawTitle(g, FLAT, 1));
+    whipLayer(ctx, L_SUB, t, (g) => drawSubtitle(g, FLAT, m, 1));
+    if (c) {
+      const knock = knockBoxes(ctx, c, t);
+      whipLayer(ctx, L_PLOT, t, (g) => drawPlot(g, FLAT, c, t, knock, OPAQUE));
+      whipLayer(ctx, L_LABELS, t, (g) => drawRowLabels(g, FLAT, t, 1));
+      // The bars, their readouts, and the strip ride the plot's layer.
+      ctx.translate(plotOff, 0);
+      drawCargo(ctx, FLAT, c, t, OPAQUE);
+      drawDelta(ctx, FLAT, c, t, OPAQUE);
+      drawStrip(ctx, FLAT, c, t, 1);
+      drawNote(ctx, FLAT, c, t, 1);
+    } else {
+      drawCard(ctx, FLAT, t, 1);
+    }
     ctx.restore();
 
-    drawMbxBox(ctx, view, m, t);
+    // The mbx bar rides the plot's layer too, still braking as the race
+    // starts, so its zero end stays on the spine.
+    drawMbxBox(ctx, new View({ ...cam, cx: cam.cx + plotOff * push(t) }), m, t);
 
     // Light and the readout ride on top of the bar.
-    ctx.save();
-    enterChart(ctx, view, m);
-    drawMbxFx(ctx, FLAT, m, t);
-    drawMbxReadout(ctx, FLAT, m, t, OPAQUE);
-    ctx.restore();
+    if (c) {
+      ctx.save();
+      enterChart(ctx, view, m);
+      ctx.translate(plotOff, 0);
+      drawMbxFx(ctx, FLAT, c, t);
+      drawMbxReadout(ctx, FLAT, c, t, OPAQUE);
+      ctx.restore();
+    }
+
+    // The whip's speed lines, over everything, until they die out.
+    if (t < WHIP) drawWhip(ctx, env.t);
   },
 };
