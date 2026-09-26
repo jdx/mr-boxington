@@ -2,12 +2,12 @@
 //
 // The logo character (`kind: "logo"`) is docs/public/logo.svg's box built as
 // a solid: 1 wide, 0.85 tall and 1 deep, with the lid a slab of its own that
-// hovers in the terminal mascot's steps and opens a mouth. It is painted in
-// flat logo colours with no outline. The front art is the logo's own paths in
-// logo units, drawn in the front panel's plane, and the art on the lid comes
-// from projected corners, so LOGO_POSE under logoCam() reproduces the logo
-// (test/logo.test.ts compares the two pixel by pixel) and any other camera
-// sees the same box in the round.
+// hinges up at its left end in the terminal mascot's steps and opens a mouth.
+// It is painted in flat logo colours with no outline. The front art is the
+// logo's own paths in logo units, drawn in the front panel's plane, and the
+// art on the lid comes from projected corners, so LOGO_POSE under logoCam()
+// reproduces the logo (test/logo.test.ts compares the two pixel by pixel) and
+// any other camera sees the same box in the round.
 //
 // The cube (`kind: "cube"`, the default) is the old isometric character and
 // the reel's plain cartons. Its face, bow tie, and label are deprecated and
@@ -235,8 +235,10 @@ export interface BoxPose {
 
   // The logo character only.
   /**
-   * How far the lid hovers above the box, in the terminal mascot's steps
-   * (LID_STEP each; sprite.ts LID_MAX is 4). 0 is shut. Fractions glide.
+   * How far the lid's right end rises above the box, in the terminal
+   * mascot's steps (LID_STEP each; sprite.ts LID_MAX is 4), its left end
+   * hinged on the rim as mascot.rs's stamp_lid draws it. 0 is shut.
+   * Fractions glide.
    */
   lid?: number;
   /** The lid swung open about its back edge, radians. */
@@ -801,9 +803,9 @@ export function drawBox(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose
 
 // The logo character. Its parts in the box's local [-1, 1] coordinates: the
 // body from the floor (y -1) to the rim, the lid slab from the rim to the top
-// (y 1), raised `lift` and swung `tilt` about its back edge. The front art is
-// in logo.svg units: x 4..124 across the front, y 22 at the top of the lid's
-// front edge down to 124 at the floor.
+// (y 1), turned `hinge` about its left bottom edge and swung `tilt` about its
+// back edge. The front art is in logo.svg units: x 4..124 across the front,
+// y 22 at the top of the lid's front edge down to 124 at the floor.
 
 /** The monocle: center and rim radius in logo units. */
 const MONOCLE: readonly [number, number, number] = [86, 62, 24.5];
@@ -849,13 +851,26 @@ interface LogoBox {
   up: V3;
   /** Local y of the rim, where the shut lid's slab begins. */
   rim: number;
-  /** The lid's hover as a local y offset, and its swing, radians. */
-  lift: number;
+  /** The lid's turn on its hinge and its swing, radians. */
+  hinge: number;
   tilt: number;
   shut: boolean;
+  /** The hinge, along the lid's left bottom edge: its middle and its axis. */
+  hingePivot: V3;
+  hingeAxis: V3;
   /** The lid's axis of swing, through its back bottom edge. */
   pivot: V3;
   axis: V3;
+}
+
+/**
+ * The lid's turn on its left-hand hinge that raises its right end, top and
+ * all, `rise` lid widths: sin a + t (cos a - 1) = rise for a lid `t` widths
+ * thick.
+ */
+function hingeAngle(rise: number, t: number): number {
+  if (rise <= 0) return 0;
+  return Math.asin(Math.min((rise + t) / Math.hypot(1, t), 1)) - Math.atan(t);
 }
 
 function logoBox(pose: BoxPose): LogoBox {
@@ -865,30 +880,39 @@ function logoBox(pose: BoxPose): LogoBox {
   const ex = mul(f.x, 2 / LOGO_UNITS);
   const up = mul(f.y, (2 * w) / (LOGO_UNITS * h));
   const rim = 1 - (2 * LID_THICK * w) / h;
-  const lift = (2 * Math.max(pose.lid ?? 0, 0) * LID_STEP * w) / h;
+  // The lid's width and thickness as it stands, squash and all.
+  const width = 2 * len(f.x);
+  const thick = (1 - rim) * len(f.y);
+  const hinge = hingeAngle(Math.max(pose.lid ?? 0, 0) * LID_STEP, thick / width);
   const tilt = pose.lidTilt ?? 0;
   return {
     f,
     ex,
     up,
     rim,
-    lift,
+    hinge,
     tilt,
-    shut: lift === 0 && tilt === 0,
-    pivot: boxPoint(f, 0, rim + lift, -1),
+    shut: hinge === 0 && tilt === 0,
+    hingePivot: boxPoint(f, -1, rim, 0),
+    // Turning about the depth axis carries the right end up.
+    hingeAxis: norm(f.z),
+    pivot: boxPoint(f, 0, rim, -1),
     axis: norm(f.x),
   };
 }
 
 /** A point on the lid slab from local coordinates at rest (y from the rim to 1). */
 function lidPoint(b: LogoBox, lx: number, ly: number, lz: number): V3 {
-  const p = boxPoint(b.f, lx, ly + b.lift, lz);
+  let p = boxPoint(b.f, lx, ly, lz);
+  if (b.hinge) p = rotateAround(p, b.hingePivot, b.hingeAxis, b.hinge);
   return b.tilt ? rotateAround(p, b.pivot, b.axis, -b.tilt) : p;
 }
 
 /** A direction on the lid, turned with it. */
 function lidVector(b: LogoBox, v: V3): V3 {
-  return b.tilt ? rotateAround(v, [0, 0, 0], b.axis, -b.tilt) : v;
+  const o: V3 = [0, 0, 0];
+  const hinged = b.hinge ? rotateAround(v, o, b.hingeAxis, b.hinge) : v;
+  return b.tilt ? rotateAround(hinged, o, b.axis, -b.tilt) : hinged;
 }
 
 /** A point on the front plane (local z 1) from logo coordinates. */

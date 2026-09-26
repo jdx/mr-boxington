@@ -26,6 +26,7 @@ import {
   lidAt,
   lidOffset,
   PALETTE,
+  pixels,
   PUPILS,
   type Pose,
   poseAt,
@@ -76,9 +77,10 @@ test("every layer is mascot.rs's, pixel for pixel", () => {
     ([, x, y, body]) => ({ x: num(x), y: num(y), rows: strings(body) }),
   );
   assert.deepEqual([...Sprite.CHEEKS], theirCheeks);
-  const pupil = rust.match(/const PUPIL: &\[&str\] = &\[([^\]]*)\];/);
-  assert.ok(pupil, "found PUPIL");
-  assert.deepEqual([...Sprite.PUPIL], strings(pupil[1]));
+  const shapes = [...rust.matchAll(/const (\w+): &\[&str\] = &\[([^\]]*)\];/g)];
+  assert.deepEqual(shapes.map((m) => m[1]), ["PUPIL", "PUPIL_DOWN"], "found the pupils");
+  const mineShapes = Sprite as unknown as Record<string, readonly string[] | undefined>;
+  for (const [, name, body] of shapes) assert.deepEqual([...(mineShapes[name] ?? [])], strings(body), name);
 });
 
 test("the constants are mascot.rs's", () => {
@@ -101,16 +103,63 @@ test("the constants are mascot.rs's", () => {
 });
 
 test("the gaze's pupils are mascot.rs's", () => {
+  const shape = Sprite as unknown as Record<string, readonly string[]>;
+  const layer = (x: string, y: string, rows: string): Layer => ({ x: num(x), y: num(y), rows: shape[rows] });
+  const pupil = /Layer::at\((\d+), (\d+), (\w+)\)/.source;
+  const arm = new RegExp(`Self::(List|Bar|You) => \\[\\s*${pupil},\\s*${pupil},?\\s*\\]`, "g");
   const theirs = Object.fromEntries(
-    [...rust.matchAll(/Self::(List|Bar|You) => \[\((\d+), (\d+)\), \((\d+), (\d+)\)\]/g)].map((m) => [
-      m[1].toLowerCase(),
-      [
-        [num(m[2]), num(m[3])],
-        [num(m[4]), num(m[5])],
-      ],
-    ]),
+    [...rust.matchAll(arm)].map((m) => [m[1].toLowerCase(), [layer(m[2], m[3], m[4]), layer(m[5], m[6], m[7])]]),
   );
+  assert.deepEqual(Object.keys(theirs).sort(), ["bar", "list", "you"], "found every gaze's pupils");
   assert.deepEqual(PUPILS, theirs);
+  // The parked glint moves across the lens for the gazes mascot.rs names.
+  const right = rust.match(/if matches!\(pose\.gaze, ([^)]*)\) \{\s*PARKED_GLINT_RIGHT/);
+  assert.ok(right, "found the parked glint's gazes");
+  const rightOf = new Set([...right[1].matchAll(/Gaze::(\w+)/g)].map((m) => m[1].toLowerCase()));
+  for (const gaze of ["list", "bar", "you"] as Gaze[]) {
+    const { x, y } = rightOf.has(gaze) ? Sprite.PARKED_GLINT_RIGHT : Sprite.PARKED_GLINT;
+    assert.equal(sprite({ ...DEFAULT_POSE, gaze })[y][x], "G", gaze);
+  }
+});
+
+test("mascot_tests.rs's pupil rules: clear of the glint and ring, glancing down and left", () => {
+  for (const gaze of ["list", "bar", "you"] as Gaze[]) {
+    for (const glint of [null, 0, 1, 2, 3]) {
+      const canvas = sprite({ ...DEFAULT_POSE, gaze, glint });
+      const pupil = PUPILS[gaze][1];
+      for (const [x, y] of pixels(pupil)) {
+        assert.equal(canvas[y][x], "K", `${gaze} ${glint} at (${x}, ${y})`);
+        if (glint === null && y === pupil.y + pupil.rows.length - 1) {
+          assert.equal(canvas[y + 1][x], "L", `${gaze} at (${x}, ${y})`);
+        }
+      }
+    }
+  }
+  for (const i of [0, 1]) {
+    const [list, bar, you] = (["list", "bar", "you"] as Gaze[]).map((g) => PUPILS[g][i]);
+    assert.ok(list.x < you.x);
+    assert.equal(bar.x, list.x);
+    assert.equal(bar.y, list.y + 1);
+  }
+});
+
+test("the lid hinges at its left end, as stamp_lid draws it", () => {
+  const body = rust.match(/fn stamp_lid\(canvas: &mut Canvas, rise: u8\) \{([\s\S]*?)\n\}/);
+  assert.ok(body, "found stamp_lid");
+  assert.match(body[1], /LID\.y \+ 1 - usize::from\(rise\) \* x \/ \(SIZE - 1\)/);
+  // Each column's front edge: its topmost lid pixel of the deep key.
+  const front = (lid: number) => {
+    const canvas = rows(sprite({ ...DEFAULT_POSE, lid }));
+    return Array.from({ length: 18 }, (_, x) => canvas.findIndex((row) => row[x] === "D"));
+  };
+  for (let lid = 1; lid <= LID_MAX; lid++) {
+    // The left end stays on the shut lid's front edge row, and the right end rises `lid` rows.
+    const edge = front(lid);
+    assert.equal(edge[0], 5, `${lid}`);
+    assert.equal(edge[17], 5 - lid, `${lid}`);
+    // A step down drops no column by more than a pixel.
+    front(lid - 1).forEach((y, x) => assert.ok(y - edge[x] <= 1 && y >= edge[x], `${lid} at ${x}`));
+  }
 });
 
 test("mascot_tests.rs's golden sprites", () => {

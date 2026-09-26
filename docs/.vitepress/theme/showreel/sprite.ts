@@ -84,8 +84,9 @@ export const BODY = at(1, 6, [
 /** The open top of the box, drawn whenever the lid is not shut on it. */
 export const OPENING = at(1, 5, ["DHHHHHHHHHHHHHHD"]);
 /**
- * The lid, shut. Drawn `lid` pixels higher while the build runs. Its front
- * edge overhangs the box by a pixel on each side.
+ * The lid, shut. While the build runs, the left end stays hinged to the box
+ * and the right end rises by `lid` pixels (stampLid). Its front edge
+ * overhangs the box.
  */
 export const LID = at(0, 4, [
   "..BBBBBBBBBBBBBB..",
@@ -145,6 +146,7 @@ export const PUPIL: readonly string[] = [
   "KK",
   "KK",
 ];
+export const PUPIL_DOWN: readonly string[] = ["KK"];
 
 export const RING = at(8, 6, [
   "..KKKK..",
@@ -160,6 +162,8 @@ export const RING = at(8, 6, [
  * ring's top-left chamfer, with lens between it and the tape tab.
  */
 export const PARKED_GLINT = at(10, 8, ["G"]);
+/** While looking left, put the highlight across the lens from the pupil. */
+export const PARKED_GLINT_RIGHT = at(13, 8, ["G"]);
 /** The eye behind the monocle, blinking. */
 export const MONOCLE_SHUT = at(9, 9, ["KKKKKK"]);
 /**
@@ -210,7 +214,7 @@ export const STRAWBERRY = at(4, 0, [
 ]);
 
 export const LID_MAX = 4;
-/** The drawn lid descends at most this far per drawn frame. */
+/** The drawn lid's right edge descends at most this far per drawn frame. */
 export const LID_STEP_PX = 1;
 /** The Compiling list for [0, 4200), the progress bar for [4200, 5400), and you for [5400, 7000). */
 export const GAZE_LOOP_MS = 7000;
@@ -244,7 +248,7 @@ export function blinking(ms: number): boolean {
 }
 
 export type Eye = "skeptic" | "squint" | "shut";
-/** Right toward the Compiling list, down toward the progress bar, or straight out at you. */
+/** Left toward the Compiling list, down toward the progress bar, or straight out at you. */
 export type Gaze = "list" | "bar" | "you";
 
 export function gazeAt(ms: number): Gaze {
@@ -259,7 +263,7 @@ export function gazeAt(ms: number): Gaze {
  * in integers.
  *
  * 4 px at the start, then 3, 2 and 1 from 22.5%, 45% and 67.5%, and shut
- * from 90%. An unknown or zero total hovers at 4 and never moves. Exact for
+ * from 90%. An unknown or zero total holds the lid fully open. Exact for
  * counts below 2^49.
  */
 export function lidOffset(done: number, total: number | null): number {
@@ -333,32 +337,19 @@ export interface Inputs {
   ok: boolean | null;
 }
 
-/** The top-left pixels of the bare eye's pupil and the monocle's for a gaze. */
-type Pixel = readonly [number, number];
-export const PUPILS: Readonly<Record<Gaze, readonly [Pixel, Pixel]>> = {
-  list: [
-    [5, 9],
-    [12, 8],
-  ],
-  bar: [
-    [4, 10],
-    [12, 9],
-  ],
-  you: [
-    [4, 9],
-    [11, 9],
-  ],
+/**
+ * The bare eye's pupil and the monocle's for a gaze. The downward glance uses
+ * a shorter pupil so lens glass remains between it and the ring.
+ */
+export const PUPILS: Readonly<Record<Gaze, readonly [Layer, Layer]>> = {
+  list: [at(3, 9, PUPIL), at(10, 9, PUPIL)],
+  bar: [at(3, 10, PUPIL_DOWN), at(10, 10, PUPIL_DOWN)],
+  you: [at(4, 9, PUPIL), at(11, 9, PUPIL)],
 };
-
-/** Every lens position keeps a pixel of glass between the pupil and the ring. */
-function pupils(gaze: Gaze): [Layer, Layer] {
-  const [[x, y], [lensX, lensY]] = PUPILS[gaze];
-  return [at(x, y, PUPIL), at(lensX, lensY, PUPIL)];
-}
 
 /** What a frame shows. A finished failure is the default with `failed` set. */
 export interface Pose {
-  /** Pixels the lid hovers above the box, 0 to LID_MAX. */
+  /** Pixels the lid's right edge rises above its closed position, 0 to LID_MAX. */
   lid: number;
   /** Tape over the shut lid, on success only. */
   taped: boolean;
@@ -406,6 +397,23 @@ function stamp(canvas: Canvas, layer: Layer): void {
   for (const [x, y, key] of pixels(layer)) canvas[y][x] = key;
 }
 
+function stampLid(canvas: Canvas, rise: number): void {
+  if (rise === 0) {
+    stamp(canvas, LID);
+    return;
+  }
+  // Hinge the left end at the box. Each column drops by at most one pixel
+  // when `rise` drops by one, so jumpy Cargo progress still reads as closing.
+  let previousY = LID.y + 1;
+  for (let x = 0; x < LID.rows[1].length; x++) {
+    const frontY = LID.y + 1 - Math.floor((rise * x) / (SIZE - 1));
+    canvas[frontY][x] = "D";
+    if (frontY < previousY) canvas[previousY][x] = "D";
+    if (x >= 2 && x < SIZE - 2) canvas[frontY - 1][x] = "B";
+    previousY = frontY;
+  }
+}
+
 /**
  * Turn the lens pixels on diagonals `2p + 1` and `2p + 2` into glint. Only
  * pixels still showing lens light up: never the pupil, the ring or the shut
@@ -431,12 +439,12 @@ export function sprite(pose: Pose): Canvas {
     return canvas;
   }
   if (pose.lid > 0) stamp(canvas, OPENING);
-  stamp(canvas, at(LID.x, LID.y - pose.lid, LID.rows));
+  stampLid(canvas, pose.lid);
   if (pose.taped) stamp(canvas, TAPE);
   if (pose.cheeks > 0) {
     for (const [x, y] of CHEEKS.flatMap(pixels)) canvas[y][x] = String(pose.cheeks);
   }
-  const [eyePupil, lensPupil] = pupils(pose.gaze);
+  const [eyePupil, lensPupil] = PUPILS[pose.gaze];
   const [eyelid, monocle] =
     pose.eye === "skeptic"
       ? [EYELID, lensPupil]
@@ -450,7 +458,7 @@ export function sprite(pose: Pose): Canvas {
   stamp(canvas, eyelid);
   stamp(canvas, RING);
   stamp(canvas, monocle);
-  stamp(canvas, PARKED_GLINT);
+  stamp(canvas, pose.gaze === "list" || pose.gaze === "bar" ? PARKED_GLINT_RIGHT : PARKED_GLINT);
   if (pose.glint !== null) lightBand(canvas, pose.glint);
   stamp(canvas, MUSTACHE);
   if (pose.strawberry) stamp(canvas, STRAWBERRY);

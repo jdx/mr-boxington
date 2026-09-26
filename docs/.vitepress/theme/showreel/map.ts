@@ -1,13 +1,13 @@
 // The middle of the reel as one world, and every section's handoff.
 //
 // every-checkout through ci play on one map: Mr Boxington (the logo
-// character, box.ts) with his lid hovering, the terminal panes that stand on
-// their checkouts' target/ slabs, the pixel build view with the real
-// terminal mascot (sprite.ts) over the real `Build / cache` bar, the tower of
-// old target/ slabs, the dashed `your machine` frame, and on the CI side the
-// runners and the remote cache with its backend chips. This file lays them
-// out, draws them (the kit), and fixes the exact frame on every bar line
-// (HANDOFFS), which the scene before ends on and the scene after starts
+// character, box.ts) with his lid raised on its hinge, the terminal panes
+// that stand on their checkouts' target/ slabs, the pixel build view with
+// the real terminal mascot (sprite.ts) over the real `Build / cache` bar, the
+// tower of old target/ slabs, the dashed `your machine` frame, and on the CI
+// side the runners and the remote cache with its backend chips. This file
+// lays them out, draws them (the kit), and fixes the exact frame on every bar
+// line (HANDOFFS), which the scene before ends on and the scene after starts
 // from. At 120 fps every bar line is a displayed frame.
 //
 // Coordinates are the reel's 1920x1080 logical px at the HOME camera. Every
@@ -300,13 +300,20 @@ export function buildAt(plan: BuildPlan, t: number): BuildView {
   return { pose, filled, mix: { hits: m.hits, misses: m.misses, bypasses: m.bypasses, unconsulted: m.unconsulted } };
 }
 
-/** Where the big box's pupils look for the mascot's gaze, logo units. */
+/**
+ * Where the big box's pupils look for the mascot's gaze, logo units. A gaze
+ * names what he watches, not a way to look: in the terminal the Compiling
+ * list and the bar stand to the mascot's left (view.rs), so the pixel mascot
+ * looks left and down and left, but on the map Cargo's plan and the pane
+ * stand to the big box's right, so he looks right and down and right.
+ */
 const LOOK: Readonly<Record<Gaze, [number, number]>> = { list: [3, -1], bar: [2, 3], you: [0, 0] };
 
 /**
- * The big box mirroring the pixel mascot: the same lid step, tape, blush,
- * strawberry and glint (the sprite's band p is sweep (p + 0.5) / 4), the
- * squint and the blink.
+ * The big box mirroring the pixel mascot: the same lid, hinged at its left
+ * end and raised at its right by the sprite's steps (box.ts `lid`), the
+ * tape, blush, strawberry and glint (the sprite's band p is sweep (p + 0.5) /
+ * 4), the squint and the blink.
  */
 export function boxFromSprite(pose: Pose, face: Partial<LogoFace> = {}): BoxPose {
   return boxPose({
@@ -1003,7 +1010,9 @@ export interface PaneLayout {
 
 /**
  * A pane's layout. The build view is laid out for PANE's 800 px and scales
- * with the window's width.
+ * with the window's width. As view.rs draws it, the mascot stands at the
+ * right and its status and counts read at the left; the bar runs the width
+ * of the pane under both.
  */
 export function paneLayout(p: PaneState): PaneLayout {
   const { x, y, w, h } = p.rect;
@@ -1017,7 +1026,8 @@ export function paneLayout(p: PaneState): PaneLayout {
   const pad = 32 * s;
   const prompt = { x: body.x + pad, y: body.y + text * 1.36 };
   const px = Math.max(2, Math.round(12 * s));
-  const sprite = { x: body.x + pad, y: body.y + 108 * s, w: SPRITE_SIZE * px, h: SPRITE_SIZE * px };
+  const side = SPRITE_SIZE * px;
+  const sprite = { x: body.x + body.w - pad - side, y: body.y + 108 * s, w: side, h: side };
   const barLabel = { x: body.x + pad, y: sprite.y + sprite.h + 50 * s };
   return {
     window,
@@ -1028,8 +1038,8 @@ export function paneLayout(p: PaneState): PaneLayout {
     lineStep: text * 1.36,
     sprite,
     px,
-    status: { x: sprite.x + sprite.w + 40 * s, y: sprite.y + 64 * s },
-    counts: { x: sprite.x + sprite.w + 40 * s, y: sprite.y + 124 * s },
+    status: { x: body.x + pad, y: sprite.y + 64 * s },
+    counts: { x: body.x + pad, y: sprite.y + 124 * s },
     barLabel,
     bar: { x: body.x + pad, y: barLabel.y + 16 * s, w: body.w - 2 * pad, h: 44 * s },
   };
@@ -1088,7 +1098,13 @@ export function drawBuildView(ctx: CanvasRenderingContext2D, L: PaneLayout, v: B
   drawSprite(ctx, v.pose, L.sprite.x, L.sprite.y, L.px);
   if (v.status) {
     const fill = v.status.tone === "ok" ? TERM.green : v.status.tone === "dim" ? PALETTE.text3 : PALETTE.text1;
-    drawText(ctx, v.status.text, L.status.x, L.status.y, { font: font(Math.round(44 * s), 700, MONO), fill });
+    // A long crate name shrinks the line to fit beside the mascot, where
+    // view.rs's content column ends.
+    const size = Math.round(44 * s);
+    const room = L.sprite.x - 32 * s - L.status.x;
+    const wide = layout(ctx, v.status.text, font(size, 700, MONO)).width;
+    const fit = wide > room ? Math.floor((size * room) / wide) : size;
+    drawText(ctx, v.status.text, L.status.x, L.status.y, { font: font(fit, 700, MONO), fill });
   }
   if (v.counts) {
     drawText(ctx, v.counts, L.counts.x, L.counts.y, { font: font(Math.round(40 * s), 500, MONO), fill: TERM.green });
@@ -1553,7 +1569,7 @@ export function drawWorld(ctx: CanvasRenderingContext2D, s: WorldState): void {
 
 /**
  * Where a world state's actors land on the screen, under its camera: a
- * conservative box per actor (the box's lid hover and strawberry included,
+ * conservative box per actor (the box's raised lid and strawberry included,
  * a chip without a width estimated), for checking what a frame keeps clear.
  */
 export function worldBounds(s: WorldState): { actor: string; rect: Rect }[] {
@@ -1620,7 +1636,7 @@ export const MACHINE = {
    * band, even pushed in.
    */
   frame: { x: -400, y: -300, w: 2720, h: 1680 },
-  /** Mr Boxington, left: x 252-628, the lid's top at y 324 shut, 230 hovering. */
+  /** Mr Boxington, left: x 252-628, the lid's top at y 324 shut, its right end at 230 raised 4. */
   box: { x: 440, y: FLOOR, w: 376 },
   /** The pane, right: its window x 1050-1830, y 100-634, on its slab to FLOOR. */
   pane: { x: 1040, y: 100, w: 800, h: FLOOR - 100 },
@@ -1971,13 +1987,13 @@ const HANDOFF_LIST: Omit<Handoff, "from" | "to" | "t">[] = [
   worldHandoff(
     "every-checkout|under-cargo-build",
     "hold",
-    "The `your machine` frame around the box (lid hovering at 4, no blush) and the leaning tower of six target/ slabs, hk on top; CI's card dimmed outside it with its label.",
+    "The `your machine` frame around the box (lid hinged up 4 at its right end, no blush) and the leaning tower of six target/ slabs, hk on top; CI's card dimmed outside it with its label.",
     EC_END,
   ),
   worldHandoff(
     "under-cargo-build|first-build",
     "hold",
-    "Pushed in (FOLLOW) on the box, lid at 4, eyes toward the plan, and Cargo's plan with syn's chip amber and the rest dimmed; the time-lapse pane at the right edge, its mascot waiting over an empty bar.",
+    "Pushed in (FOLLOW) on the box, lid hinged up 4, eyes toward the plan, and Cargo's plan with syn's chip amber and the rest dimmed; the time-lapse pane at the right edge, `Compiling` over an empty bar, its mascot at the pane's right out of the frame.",
     UC_END,
   ),
   worldHandoff(
