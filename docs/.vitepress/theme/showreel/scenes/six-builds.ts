@@ -93,17 +93,26 @@ export const T_SHINE = b(9);
 /** The cards fly together into ci's two runners. */
 export const T_MERGE = b(11.5);
 
+/**
+ * One sentence, a word per 1/32 note from b0.875: the second line starts to
+ * rise as the first lands. Landing the first line at b1.25 lets the pair
+ * hold all seven words for 2.25 s even when it leaves at b6.25.
+ */
 const CAPTION_1: Caption["lines"] = [
-  { in: 1.5, text: "Six builds share" },
+  { in: 1.25, text: "Six builds share" },
   { in: 1.75, text: "one pool of permits." },
 ];
 
-/** The figure line needs the peaks; without them the first caption holds. */
+/**
+ * The figure line needs the peaks; without them the first caption holds.
+ * Its six words rise on the lower row from the tip, so the first caption
+ * wipes a quarter beat before it and is gone from that row when they start.
+ */
 function captions(facts: ReelFacts | null): readonly Caption[] {
   const c = contention(facts);
   if (!c) return [{ out: 11.5, lines: CAPTION_1 }];
   return [
-    { out: 6.5, lines: CAPTION_1 },
+    { out: 6.25, lines: CAPTION_1 },
     { out: 11.75, lines: [{ in: 7.25, text: `${c.scheduled} compilers at peak, not ${c.unscheduled}.` }] },
   ];
 }

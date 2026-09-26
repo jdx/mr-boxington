@@ -1,16 +1,19 @@
 // Six builds at once and CI (scenes/six-builds.ts, scenes/ci.ts): their
 // copy is the storyboard's and the facts', the permit rail behaves like one
 // pool served first come first served, the storyboard's beats hold, and the
-// score sounds where the picture puts its hits.
+// score sounds where the picture puts its hits. Also, for every scene, that
+// no caption line rises on a baseline another is still wiping off, which
+// six-builds' figure line once did.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { playScore } from "../audio";
 import { BEAT, type ReelFacts, sec, WHIP } from "../bible";
 import { WHIP_AT, WHIP_WIND } from "../map";
+import { scenes } from "../scenes";
 import * as ci from "../scenes/ci";
 import * as six from "../scenes/six-builds";
-import { plain } from "../type";
+import { entrance, plain, timeCaptions } from "../type";
 import { MockContext } from "./mock-audio";
 import { hk, NOTHING } from "./published";
 
@@ -22,17 +25,49 @@ const lines = (facts: ReelFacts | null) =>
 
 test("six-builds' figure line is the contention peaks, and without them the first caption holds", () => {
   const first = [
-    [1.5, "Six builds share"],
+    [1.25, "Six builds share"],
     [1.75, "one pool of permits."],
   ];
   assert.deepEqual(lines(hk()), [
-    { out: 6.5, lines: first },
+    { out: 6.25, lines: first },
     { out: 11.75, lines: [[7.25, "32 compilers at peak, not 162."]] },
   ]);
   const peaks = { ...hk(), contention: { scheduled: 28, unscheduled: 140, trials: 3 } };
   assert.equal(lines(peaks)[1].lines[0][1], "28 compilers at peak, not 140.");
   for (const facts of [null, NOTHING, { ...hk(), contention: null }]) {
     assert.deepEqual(lines(facts), [{ out: 11.5, lines: first }]);
+  }
+});
+
+test("no caption line starts to rise on a baseline before the last line there has wiped off", () => {
+  // drawCaptions writes a line in behind the wipe of the one leaving its
+  // baseline, so a line that starts inside that wipe shares the row with it:
+  // the figure line once read "32 compilerspermits.". A line shows ink from
+  // its first word's entrance until its wipe ends (the wipe's edge overshoots
+  // the ink), so the two must not overlap on any baseline.
+  for (const facts of [hk(), null]) {
+    const rows = new Map<number, { start: number; end: number; text: string }[]>();
+    for (const s of scenes) {
+      for (const c of timeCaptions(sec(s.id), s.captions?.(facts) ?? [])) {
+        for (const l of c.lines) {
+          const row = rows.get(l.y) ?? [];
+          row.push({ start: entrance(l.text, l.land), end: c.end, text: `${s.id}: "${plain(l.text)}"` });
+          rows.set(l.y, row);
+        }
+      }
+    }
+    for (const [y, row] of rows) {
+      row.sort((p, q) => p.start - q.start);
+      for (let i = 1; i < row.length; i++) {
+        const [last, next] = [row[i - 1], row[i]];
+        const at = (t: number) => `${t.toFixed(4)} s`;
+        const where = `y${y}, ${facts ? "facts" : "no facts"}`;
+        assert.ok(
+          next.start >= last.end - 1e-9,
+          `${where}: ${next.text} rises from ${at(next.start)}, ${last.text} wipes until ${at(last.end)}`,
+        );
+      }
+    }
   }
 });
 
