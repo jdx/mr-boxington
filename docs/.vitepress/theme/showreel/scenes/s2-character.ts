@@ -23,7 +23,6 @@ import {
   FRONT_CAM,
   faceToScreen,
   frontMatrix,
-  LENS,
   LOGO_FACE,
   logoCam,
 } from "../box";
@@ -437,12 +436,6 @@ function clinkRipple(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose, l
   const e = faceToScreen(view, pose, 86 + 24.5, 62);
   const r = Math.hypot(e.x - c.x, e.y - c.y);
   ctx.save();
-  if (lt < MONO + 0.034) {
-    ctx.beginPath();
-    ctx.arc(c.x, c.y, r * 0.8, 0, TAU);
-    ctx.fillStyle = rgba(PALETTE.paper, 0.4 * (1 - progress(MONO, MONO + 0.034, lt)));
-    ctx.fill();
-  }
   ctx.beginPath();
   ctx.arc(c.x, c.y, r * lerp(1.1, 1.75, outCubic(p)), 0, TAU);
   ctx.strokeStyle = rgba(PALETTE.paper, 0.8 * (1 - p) ** 1.5);
@@ -460,19 +453,24 @@ const ARC_PTS: readonly [number, number][] = [
 
 function glintShimmer(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose, lt: number): void {
   const d = lt - (GLINT - LEAD);
-  if (d < 0 || d > 0.3) return;
+  if (d < 0 || d > 0.2) return;
   const scale = view.cam.scale / FRONT_CAM.scale;
-  // Light rides the arc's head as it draws, then blooms and fades on the lens.
+  // A point of light rides the arc's head as it draws, then flares once at
+  // its tip and fades; the lens itself stays matte, as a glint off a hit
+  // would not.
   const u = arcAt(lt);
   const seg = u < 0.5 ? 0 : 1;
   const k = u < 0.5 ? u / 0.5 : (u - 0.5) / 0.5;
   const [x0, y0] = ARC_PTS[seg];
   const [x1, y1] = ARC_PTS[seg + 1];
   const head = faceToScreen(view, pose, lerp(x0, x1, k), lerp(y0, y1, k));
-  const fade = 1 - smoothstep(0.05, 0.3, d);
-  glow(ctx, head.x, head.y, 90 * scale * (0.6 + 0.4 * u), "#ffffff", 0.55 * fade);
-  const mid = faceToScreen(view, pose, 86, 62);
-  glow(ctx, mid.x, mid.y, 170 * scale, LENS, 0.28 * fade * smoothstep(0, 0.05, d));
+  const ride = 1 - smoothstep(0.04, 0.1, d);
+  glow(ctx, head.x, head.y, 46 * scale, "#ffffff", 0.7 * ride);
+  const flare = pulse(lt, GLINT + 0.05, 0.02, 0.05);
+  if (flare > 0.01) {
+    const tip = faceToScreen(view, pose, ARC_PTS[2][0], ARC_PTS[2][1]);
+    glow(ctx, tip.x, tip.y, 60 * scale, "#ffffff", 0.5 * flare);
+  }
 }
 
 function cheekBloom(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose, lt: number): void {
