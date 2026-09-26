@@ -3,21 +3,19 @@
 // screen, and a beat ruler with a playhead and the caption spans, so the
 // section's captions and timing can be reviewed in place. Each new
 // section's scene file is one of these until its real scene replaces it.
+//
+// A stub starts on the handoff frame it inherits (map.ts handoffIn) and
+// ends on the one it owes the next section (handoffOut), so the reel stays
+// seamless on every bar line while real scenes replace stubs one by one:
+// it fades from the first to its placeholder over a beat and a half, fades
+// the second in over the second-to-last beat, and holds it for the last.
+// A section that leaves on the whip whips its placeholder out instead.
 
-import {
-  BEAT,
-  drawNodeLabel,
-  PALETTE,
-  type Scene,
-  type SceneEnv,
-  SECTIONS,
-  type SectionId,
-  sec,
-  WHIP,
-} from "../bible";
+import { BEAT, PALETTE, type Scene, type SceneEnv, SECTIONS, type SectionId, sec, WHIP } from "../bible";
 import { rgba } from "../color";
-import { roundedRect, smear } from "../fx";
-import { progress } from "../math";
+import { roundedRect } from "../fx";
+import { drawWhip, drawWhipOut, handoffIn, handoffOut, WHIP_AT, WHIP_WIND } from "../map";
+import { smoothstep } from "../math";
 import { type Caption, DETAIL, drawText, drawWords, entrance, font, LABEL, layout, MONO, type WordStyle } from "../type";
 
 /** Copy on screen besides the captions, in section-local beats. */
@@ -36,9 +34,9 @@ export interface Stub {
   learns: string;
   captions?: Scene["captions"];
   copy?: (env: SceneEnv) => readonly StubCopy[];
-  /** Open on the three node labels the lockup hands over. */
+  /** @deprecated Every stub now starts on its handoff; ignored. */
   nodesIn?: boolean;
-  /** Leave with the whip pan the chart comes in on. */
+  /** @deprecated A stub owing the whip whips out on its own; ignored. */
   whipOut?: boolean;
 }
 
@@ -49,6 +47,9 @@ const FW = 1600;
 const FH = 640;
 const PAD = 48;
 const RULER_Y = FY + FH - 76;
+
+/** Beats the stub takes to leave its first handoff frame. */
+const FADE_IN = 1.5;
 
 /** Break `text` into lines no wider than `width` in `spec`. */
 function wrap(ctx: CanvasRenderingContext2D, text: string, spec: string, width: number): string[] {
@@ -133,40 +134,48 @@ function placeholder(ctx: CanvasRenderingContext2D, stub: Stub, lt: number, env:
   ruler(ctx, stub, lt, env);
 }
 
-/** Content offset for the whip out: a small wind-up right, then off to the left. */
-function whipX(lt: number, len: number): number {
-  const p = progress(len - WHIP, len - 1 / 60, lt);
-  return 20 * progress(len - WHIP - 0.3, len - WHIP, lt) - 1970 * p ** 1.7;
-}
-
 export function stubScene(stub: Stub): Scene {
   const S = sec(stub.id);
+  const from = handoffIn(stub.id);
+  const to = handoffOut(stub.id);
+  const whips = to?.id === "ci|next-push";
   return {
     id: S.id,
     start: S.start,
     end: S.end,
     draw(ctx, lt, env) {
-      ctx.fillStyle = PALETTE.bg;
-      ctx.fillRect(0, 0, env.W, env.H);
-      if (stub.nodesIn) {
-        // The lockup's last frame is exactly these labels; they give way to
-        // the placeholder over the first two beats.
-        const a = 1 - progress(BEAT, 2 * BEAT, lt);
-        drawNodeLabel(ctx, "project", a);
-        drawNodeLabel(ctx, "worktree", a);
-        drawNodeLabel(ctx, "ci", a);
-      }
-      const fade = stub.nodesIn ? progress(0.5 * BEAT, 2 * BEAT, lt) : 1;
-      if (fade <= 0) return;
-      ctx.save();
-      ctx.globalAlpha = fade;
-      if (stub.whipOut) {
-        const x = whipX(lt, S.len);
-        smear(ctx, x, x - whipX(lt - 1 / 60, S.len), () => placeholder(ctx, stub, lt, env));
-      } else {
+      const beats = S.len / BEAT;
+      const fill = () => {
+        ctx.fillStyle = PALETTE.bg;
+        ctx.fillRect(0, 0, env.W, env.H);
+      };
+      // The body: the inherited frame giving way to the placeholder.
+      const body = () => {
+        const k = from ? smoothstep(0, FADE_IN * BEAT, lt) : 1;
+        if (from && k < 1) from.draw(ctx, env);
+        if (k <= 0) return;
+        ctx.save();
+        ctx.globalAlpha = k;
+        if (k < 1) fill();
         placeholder(ctx, stub, lt, env);
+        ctx.restore();
+      };
+      fill();
+      if (whips && env.t >= WHIP_AT - WHIP - WHIP_WIND) {
+        // Smeared copies of the placeholder, then the speed lines over them.
+        drawWhipOut(ctx, env.t, body);
+        drawWhip(ctx, env.t);
+        return;
       }
-      ctx.restore();
+      body();
+      // The owed frame fades in over the second-to-last beat and holds.
+      const b = to ? smoothstep((beats - 2) * BEAT, (beats - 1) * BEAT, lt) : 0;
+      if (to && b > 0) {
+        ctx.save();
+        ctx.globalAlpha = b;
+        to.draw(ctx, env);
+        ctx.restore();
+      }
     },
     captions: stub.captions,
   };

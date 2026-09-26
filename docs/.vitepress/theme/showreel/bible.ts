@@ -1,11 +1,12 @@
 // The reel's shared contract: tempo, the timeline, palette, cameras, and the
 // exact frame each scene hands to the next. Scenes own everything between
-// handoffs.
+// handoffs; map.ts draws every handoff frame (drawHandoff) and lays out the
+// world the middle sections share.
 
-import { type BoxPose, drawBox, drawShadow, FACE_FULL, HERO_POSE } from "./box";
-import { DEG } from "./math";
+import { type BoxPose, drawBox, drawShadow, FRONT_CAM, LOGO_POSE, logoCam } from "./box";
+import { DEG, inCubic, progress } from "./math";
 import { type Camera, View } from "./space";
-import type { SectionId } from "./timeline";
+import { type SectionId, sec } from "./timeline";
 import { type Caption, drawText, font } from "./type";
 
 /** Logical frame size. Scenes draw in these units at any output resolution. */
@@ -88,10 +89,17 @@ export interface Scene {
 
 export const iso = { yaw: 45 * DEG, pitch: 30 * DEG };
 
-// Handoffs fold → mr-boxington and mr-boxington → what: Mr Boxington centered
-// in the logo pose. At the first the box is closed and taped with no face or
-// label; by the second it wears HERO_POSE.
+// Handoffs fold → mr-boxington and mr-boxington → what: the logo character
+// (box.ts LOGO_POSE, standing on the origin) seen from straight ahead. At the
+// first he is shut and taped with no face, centered at FRONT_CAM; by the
+// second he wears the logo's face at H2_CAM, eased left for the name card,
+// and the push toward his monocle is under way. Both frames are drawn with
+// drawLogoBox.
 
+/**
+ * @deprecated The old isometric hero view, kept for the scenes that still
+ * perform in it. Handoffs use H1_CAM and H2_CAM.
+ */
 export const HERO_CAM: Camera = { cx: 960, cy: 540, scale: 280, ...iso, target: [0, 0, 0] };
 /** A box standing on the floor: its contact shadow, then the box. */
 export function drawStagedBox(
@@ -104,21 +112,87 @@ export function drawStagedBox(
   drawBox(ctx, view, pose);
 }
 
-export const H1_POSE: BoxPose = { ...HERO_POSE, label: 0, face: null };
-export const H2_POSE: BoxPose = { ...HERO_POSE, face: { ...FACE_FULL } };
+/**
+ * The logo character on the floor, seen from straight ahead: a soft contact
+ * shadow under its base, then the box. drawShadow's floor ellipse lies edge
+ * on in the front view, so this one is drawn on the screen under the base.
+ */
+export function drawLogoBox(ctx: CanvasRenderingContext2D, cam: Camera, pose: BoxPose, shadow = 1): void {
+  const view = new View(cam);
+  if (shadow > 0) {
+    const s = pose.size ?? 1;
+    const l = view.project([pose.pos[0] - s / 2, pose.pos[1], pose.pos[2] + s / 2]);
+    const r = view.project([pose.pos[0] + s / 2, pose.pos[1], pose.pos[2] + s / 2]);
+    const w = r.x - l.x;
+    const cx = (l.x + r.x) / 2;
+    ctx.save();
+    ctx.translate(cx, l.y);
+    ctx.scale(1, 0.085);
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, w * 0.66);
+    g.addColorStop(0, `rgba(0,0,0,${0.55 * shadow})`);
+    g.addColorStop(0.6, `rgba(0,0,0,${0.3 * shadow})`);
+    g.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(0, 0, w * 0.66, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+  drawBox(ctx, view, pose);
+}
 
-// Handoff what → every-checkout: only three labels on the background,
-// exactly as drawn by drawNodeLabel, at the node positions the next section
-// builds on.
+/** fold → mr-boxington: the logo 480 px square in the middle of the frame. */
+export const H1_CAM: Camera = FRONT_CAM;
+/** fold → mr-boxington: shut and taped in flat logo colours, no face yet. */
+export const H1_POSE: BoxPose = { ...LOGO_POSE, face: null };
 
+/**
+ * mr-boxington's name-card framing, where the push toward the monocle
+ * starts: the logo 440 px square at (250, 250), so the box stands at x
+ * 264-676 on y 676 and the right of the frame is free for the name card.
+ */
+export const H2_CAM: Camera = logoCam(250, 250, 440);
+/** mr-boxington → what: the logo exactly, taped, with its face and rosy cheeks. */
+export const H2_POSE: BoxPose = { ...LOGO_POSE };
+
+/** The monocle dive runs from mr-boxington b7.75 to what b0.5, across the bar line. */
+export const DIVE0 = sec("mr-boxington").beat(7.75);
+export const DIVE1 = sec("what").beat(0.5);
+/** How far the dive zooms: the lens (logo r 21 inside the rim) then covers the frame. */
+export const DIVE_ZOOM = 16;
+/**
+ * The monocle dive's camera at global time `t`: H2_CAM until DIVE0, then an
+ * accelerating zoom (DIVE_ZOOM to the power inCubic) about the one screen
+ * point that brings the monocle (logo 86, 62) to the frame's center as the
+ * zoom reaches DIVE_ZOOM on DIVE1, held after. Both scenes draw H2_POSE
+ * under it, so the dive is one move across the bar line, where the zoom is
+ * 1.108.
+ */
+export function diveCam(t: number): Camera {
+  const z = DIVE_ZOOM ** inCubic(progress(DIVE0, DIVE1, t));
+  const k = 440 / 128;
+  // The zoom's fixed point: the monocle, at (250 + 86k, 250 + 62k), lands
+  // on the frame's center.
+  const fx = (DIVE_ZOOM * (250 + 86 * k) - W / 2) / (DIVE_ZOOM - 1);
+  const fy = (DIVE_ZOOM * (250 + 62 * k) - H / 2) / (DIVE_ZOOM - 1);
+  return logoCam(fx + (250 - fx) * z, fy + (250 - fy) * z, 440 * z);
+}
+
+// Handoff what → every-checkout: only the three node labels on the
+// background, exactly as drawn by drawNodeLabel. They are the labels over
+// every-checkout's three terminal cards (map.ts EC_CARDS), clear of the
+// captions' band.
+
+/** Each node label's baseline center: 56 px type over its card. */
 export const NODES = {
-  project: { x: 330, y: 520, label: "project" },
-  worktree: { x: 1590, y: 330, label: "worktree" },
-  ci: { x: 1590, y: 750, label: "CI" },
+  project: { x: 360, y: 196, label: "project" },
+  worktree: { x: 960, y: 196, label: "worktree" },
+  ci: { x: 1560, y: 196, label: "CI" },
 } as const;
-export const NODE_LABEL = { dy: 118, size: 40, weight: 600, fill: PALETTE.paper, tracking: -0.8 } as const;
+/** The labels' type. The baseline sits `dy` below the NODES point (0: on it). */
+export const NODE_LABEL = { dy: 0, size: 56, weight: 600, fill: PALETTE.paper, tracking: -1.1 } as const;
 
-/** The handoff label for a node, centered below it. */
+/** The handoff label for a node, centered on its NODES point. */
 export function drawNodeLabel(
   ctx: CanvasRenderingContext2D,
   key: keyof typeof NODES,
@@ -138,9 +212,10 @@ export function drawNodeLabel(
 }
 
 // Handoff ci → next-push: a whip pan. The CI section's content leaves to the
-// left over its last 0.14 s using fx.smear; the chart arrives from the right
-// over its first 0.14 s the same way. The background is PALETTE.bg on both
-// sides.
+// left over its last WHIP (map.ts whipOut, with fx.smear); the chart arrives
+// from the right over the next section's first WHIP. map.ts drawWhip's
+// streaks run through both halves and peak on the bar line, whose frame is
+// the streaks alone on PALETTE.bg.
 export const WHIP = 0.14;
 
 // Handoff next-push → pruned: one plain cube (no face, tape, or label) at the
@@ -178,8 +253,51 @@ export function keptDiscs(): { x: number; y: number; r: number }[] {
   });
 }
 
-// Handoff morph → end: the silhouette of END_POSE under END_CAM
-// (boxSilhouette) filled flat with PALETTE.amber on PALETTE.night.
+// Handoff morph → end: the front-facing silhouette of END_POSE under END_CAM
+// (boxSilhouette, six points) filled flat with PALETTE.amber on
+// PALETTE.night. The end card inflates it into the logo.
 
-export const END_CAM: Camera = { cx: 960, cy: 410, scale: 185, ...iso, target: [0, 0, 0] };
-export const END_POSE: BoxPose = { ...HERO_POSE };
+/**
+ * The end card's box: the logo, standing half a box width below the origin
+ * as the old hero did, so the card's inflate about the box's middle keeps
+ * its place.
+ */
+export const END_POSE: BoxPose = { ...LOGO_POSE, pos: [0, -0.5, 0] };
+/** The lid's top, where END_CAM looks. */
+const END_LID = END_POSE.pos[1] + 0.85;
+
+/**
+ * The end card's exact logo view of END_POSE: the logo 420 px square at
+ * (750, 185), the box at x 763-1157, y 208-592 (logoCam, moved down with
+ * the box). The end card can land on this.
+ */
+export const END_LOGO_CAM: Camera = (() => {
+  const L = logoCam(750, 185, 420);
+  const [x, y, z] = L.target ?? [0, 0, 0];
+  return { ...L, target: [x, y + END_POSE.pos[1], z] };
+})();
+
+/**
+ * The morph's target and the end card's first frame: END_LOGO_CAM's eye
+ * turned to look at the middle of the lid, so (cx, cy) is the lid's center
+ * on screen (960, 230) rather than the horizon above the box, as a scene
+ * placing things by END_CAM's center expects. It is the same front view
+ * from the same eye point with the picture plane tipped 7.8° down: the
+ * silhouette's top is END_LOGO_CAM's to a pixel, and its base is 9 px
+ * narrower and 11 px higher (y 581, not 592), so the sides taper by 1°.
+ */
+export const END_CAM: Camera = (() => {
+  const L = END_LOGO_CAM;
+  // The logo's eye: straight out from its target, persp away.
+  const eye = [0, (L.target ?? [0, 0, 0])[1], L.persp ?? 0];
+  const dy = eye[1] - END_LID;
+  const D = Math.hypot(dy, eye[2]);
+  const pitch = Math.atan2(dy, eye[2]);
+  const view = new View(L);
+  const at = view.project([0, END_LID, 0]);
+  // Match the lid's front edge: 0.5 either side, 0.5 toward the eye.
+  const near = view.project([0.5, END_LID, 0.5]);
+  const f = D / (D - 0.5 * Math.cos(pitch));
+  const scale = (near.x - at.x) / (0.5 * f);
+  return { cx: at.x, cy: at.y, scale, yaw: 0, pitch, persp: D, target: [0, END_LID, 0] };
+})();
