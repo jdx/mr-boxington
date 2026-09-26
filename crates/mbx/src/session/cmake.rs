@@ -215,6 +215,8 @@ fn configures(arguments: &[OsString]) -> bool {
                 | "--open"
                 | "--workflow"
                 | "--list-presets"
+                | "--find-package"
+                | "--system-information"
                 | "-E"
                 | "-P"
                 | "-N"
@@ -619,6 +621,8 @@ mod tests {
             &["-E", "echo", "hi"],
             &["-P", "script.cmake"],
             &["--version"],
+            &["--find-package", "-DNAME=ZLIB", "-DMODE=EXIST"],
+            &["--system-information", "info.txt"],
         ] {
             assert!(!configures(passthrough), "{passthrough:?}");
         }
