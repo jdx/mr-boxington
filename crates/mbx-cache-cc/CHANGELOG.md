@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.18.2...mbx-cache-cc-v0.18.3) - 2026-09-26
+
+### Other
+
+- redesign the Mr Boxington logo and animated build mascot ([#558](https://github.com/jdx/mr-boxington/pull/558))
+
 ## [0.18.2](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.18.1...mbx-cache-cc-v0.18.2) - 2026-09-25
 
 ### Added
