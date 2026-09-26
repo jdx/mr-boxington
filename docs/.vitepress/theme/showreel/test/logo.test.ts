@@ -2,7 +2,9 @@
 // docs/public/logo.svg drawn by the same browser at the same size. The two
 // may differ only where antialiasing does: along edges, and by a little.
 // Skipped when no Chromium is installed (`aube exec playwright-core install
-// chromium-headless-shell`, or a Chromium at CHROME_PATH).
+// chromium-headless-shell`, or a Chromium at CHROME_PATH), unless
+// SHOWREEL_REQUIRE_CHROMIUM is set: CI sets it whenever it installs one, so a
+// broken install fails here instead of skipping the check.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -27,6 +29,7 @@ test("drawBox(LOGO_POSE) reproduces logo.svg", async (t) => {
   try {
     browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || undefined });
   } catch (err) {
+    if (process.env.SHOWREEL_REQUIRE_CHROMIUM) throw err;
     t.skip(`no Chromium to draw in: ${String(err).split("\n")[0]}`);
     return;
   }

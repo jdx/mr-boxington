@@ -58,9 +58,11 @@ jobs:
       # and its renderer, the font, the benchmark numbers, the logo and the
       # terminal mascot it redraws, and the locked tool versions, so it is
       # cached on those and rendered again only when one of them changes. A
-      # miss also installs the Chromium that the reel's logo and sprite tests
-      # need. Reusing it also keeps its versioned URLs stable for link
-      # previews, because two renders of the same inputs are not byte-identical.
+      # miss also installs the Chromium that the reel's logo test draws in and
+      # requires it; a hit skips that test, whose inputs are all in the key and
+      # so already passed in the run that saved the cache. Reusing the video
+      # also keeps its versioned URLs stable for link previews, because two
+      # renders of the same inputs are not byte-identical.
       - name: Restore the showreel video
         id: showreel
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -76,6 +78,7 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q ffmpeg
           (cd docs && aube install && aube exec playwright-core install --with-deps chromium-headless-shell)
+          echo "SHOWREEL_REQUIRE_CHROMIUM=1" >> "$GITHUB_ENV"
           mise run render:showreel
       - name: Build with VitePress
         env:
