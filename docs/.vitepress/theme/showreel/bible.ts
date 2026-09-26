@@ -250,8 +250,10 @@ export function keptDiscs(): { x: number; y: number; r: number }[] {
 }
 
 // Handoff morph → end: the front-facing silhouette of END_POSE under END_CAM
-// (boxSilhouette, six points) filled flat with PALETTE.amber on
-// PALETTE.night. The end card inflates it into the logo.
+// (boxSilhouette: six corners, plus a seventh point on the right-hand side,
+// where the lid's edge meets the wall, that turns by less than a hundredth
+// of a pixel) filled flat with PALETTE.amber on PALETTE.night. The end card
+// inflates it into the logo.
 
 /**
  * The end card's box: the logo, standing half a box width below the origin
@@ -265,7 +267,8 @@ const END_LID = END_POSE.pos[1] + 0.85;
 /**
  * The end card's exact logo view of END_POSE: the logo 420 px square at
  * (750, 185), the box at x 763-1157, y 208-592 (logoCam, moved down with
- * the box). The end card can land on this.
+ * the box). END_CAM is derived from it; the end card itself lands smaller,
+ * on s8's CARD_SQ, to leave room for its copy under the box.
  */
 export const END_LOGO_CAM: Camera = (() => {
   const L = logoCam(750, 185, 420);
