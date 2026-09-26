@@ -820,14 +820,16 @@ function fallers(lk: Lockup): Piece[] {
     spin: number,
     hold: number,
     life: number,
-  ) => out.push({ spec, ch: g.ch, w: g.w, x: g.x, y, k, fill, delay, vx, vy, spin, gravity: G, hold, life });
+    depth = DEPTH,
+  ) => out.push({ spec, ch: g.ch, w: g.w, x: g.x, y, k, fill, delay, vx, vy, spin, gravity: G, depth, hold, life });
   const P = PALETTE.paper;
   // Both "s," pairs let go and tumble straight down, so the names pull away
-  // from them instead of carrying them along, and fade once the fall reads.
-  heavy(lk.proj[7], lk.y1, lk.k1, SPEC, P, 0, 60, 40, 12, 0.067, 0.19);
-  heavy(lk.proj[8], lk.y1, lk.k1, SPEC, P, 0.012, 150, 0, 16, 0.067, 0.19);
-  heavy(lk.work[8], lk.y2, lk.k2, SPEC, P, 0.004, -40, 60, -11, 0.067, 0.19);
-  heavy(lk.work[9], lk.y2, lk.k2, SPEC, P, 0.014, 60, 20, 15, 0.067, 0.19);
+  // from them instead of carrying them along. They are knocked back into
+  // depth and spent before "CI" climbs through where they fall.
+  heavy(lk.proj[7], lk.y1, lk.k1, SPEC, P, 0, 60, 40, 12, 0.04, 0.12, 5);
+  heavy(lk.proj[8], lk.y1, lk.k1, SPEC, P, 0.012, 150, 0, 16, 0.04, 0.12, 5);
+  heavy(lk.work[8], lk.y2, lk.k2, SPEC, P, 0.004, -40, 60, -11, 0.03, 0.1, 5);
+  heavy(lk.work[9], lk.y2, lk.k2, SPEC, P, 0.014, 60, 20, 15, 0.03, 0.1, 5);
   // "and" lets go letter by letter, a frame apart; the period falls away
   // under CI. Nothing flies below them, so they leave through the bottom of
   // the frame.
