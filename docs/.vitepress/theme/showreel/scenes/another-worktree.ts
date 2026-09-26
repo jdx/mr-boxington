@@ -137,9 +137,9 @@ const LID_PX = 23.5;
 /** Where the stored and the new key's tags hang: their holes. */
 const STORED_TAG: Pt = { x: 672, y: 236 };
 const NEW_TAG: Pt = { x: 672, y: 392 };
-/** The target path chip's top left, and its type: small enough to stay out of the pane. */
-const PATH_CHIP: Pt = { x: 640, y: 462 };
-const PATH_SIZE = 36;
+/** The target path chip's top left, and its type: small enough to fit between the box and the pane. */
+const PATH_CHIP: Pt = { x: 638, y: 464 };
+const PATH_SIZE = 32;
 /** hk's carton while it compiles: its base's center. */
 const HK_AT: Pt = { x: 850, y: 612 };
 const KEY = "9e1f";
@@ -474,7 +474,11 @@ export const FLIPS = Array.from(PREFIX, (_, i) => lerp(REWRITE[0], REWRITE[1], f
 /** Local seconds the `}` snaps on. */
 export const T_CLOSE = lerp(REWRITE[0], REWRITE[1], CLOSE);
 
-/** A mono chip whose `~/src/hk-fix/` flips to `${` as `target` slides left and `}` pops on. */
+/**
+ * A mono chip whose `~/src/hk-fix/` flips to `${` as `target` slides left
+ * and `}` pops on. It scales about the middle of its full width, so a pop
+ * never pushes it into the box or the pane.
+ */
 function drawPathChip(ctx: CanvasRenderingContext2D, x: number, y: number, k: number, scale: number, alpha: number): void {
   const spec = font(PATH_SIZE, 500, MONO);
   const cw = layout(ctx, "M", spec).width;
@@ -489,8 +493,10 @@ function drawPathChip(ctx: CanvasRenderingContext2D, x: number, y: number, k: nu
   const lit = pulse(k, CLOSE + 0.02, 0.05, 0.12);
   ctx.save();
   ctx.globalAlpha *= alpha;
-  ctx.translate(x, y + h / 2);
+  const mid = ((from.length + core.length) * cw) / 2 + pad;
+  ctx.translate(x + mid, y + h / 2);
   ctx.scale(scale, scale);
+  ctx.translate(-mid, 0);
   drawChip(ctx, { text: "", x: 0, y: -h / 2, w, size: PATH_SIZE, tone: "neutral", lit });
   const base = h * 0.25;
   const glyph = (ch: string, gx: number, sy: number, a: number, fill: string) => {
@@ -565,7 +571,7 @@ function drawKey(ctx: CanvasRenderingContext2D, lt: number): void {
   // The path under it, rewritten, then drawn up into it.
   const take = swiftIn(progress(T_TAKE, T_DIGEST, lt));
   if (take < 1) {
-    const cp = spring(lt - T_CHIP - 0.04, 5, 0.55);
+    const cp = spring(lt - T_CHIP - 0.04, 5, 0.7);
     const py = lerp(PATH_CHIP.y, NEW_TAG.y - chipHeight(PATH_SIZE) / 2, take);
     drawPathChip(ctx, PATH_CHIP.x, py, progress(REWRITE[0], REWRITE[1], lt), cp * (1 - 0.8 * take), clamp(cp * 3) * (1 - take));
   }
@@ -645,13 +651,34 @@ function floorRing(ctx: CanvasRenderingContext2D, p: number, color: string): voi
 
 // hk (edited), compiling.
 
+/** hk's compile ring, round the carton's middle. */
+const HK_RING = { x: HK_AT.x, y: HK_AT.y - HK.size * 0.42, r: 104 };
+/** Seconds the ring takes to burst and fade once hk leaves it. */
+const RELEASE = 0.16;
+
+/** The ring letting go as hk leaves it: a full amber circle bursting out and fading. */
+function drawRelease(ctx: CanvasRenderingContext2D, lt: number): void {
+  const p = progress(HK.launch, HK.launch + RELEASE, lt);
+  if (p <= 0 || p >= 1) return;
+  const e = swiftOut(p);
+  glow(ctx, HK_RING.x, HK_RING.y, 150 + 60 * e, PALETTE.amber, 0.6 * (1 - p));
+  ctx.save();
+  ctx.strokeStyle = rgba(PALETTE.amberBright, (1 - p) ** 1.5);
+  ctx.lineWidth = 8 * (1 - p) + 1;
+  ctx.beginPath();
+  ctx.arc(HK_RING.x, HK_RING.y, HK_RING.r * (1 + 0.45 * e), 0, TAU);
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawCompile(ctx: CanvasRenderingContext2D, lt: number): void {
+  drawRelease(ctx, lt);
   if (lt < T_HK - 0.02 || lt >= HK.launch) return;
   const pop = spring(lt - T_HK, 4.5, 0.5);
   const p = progress(T_HK, HK.launch, lt);
   const frame = Math.floor(S.at(lt) * 30);
-  const cy = HK_AT.y - HK.size * 0.42;
-  const r = 104;
+  const cy = HK_RING.y;
+  const r = HK_RING.r;
   // rustc at work: a glow that breathes, the ring filling round the carton,
   // and a crackle of short arcs off its edge.
   glow(ctx, HK_AT.x, cy, 150, PALETTE.amber, (0.45 + 0.25 * hash(frame, 101)) * clamp(pop));
@@ -700,20 +727,19 @@ function drawCompile(ctx: CanvasRenderingContext2D, lt: number): void {
   });
 }
 
-/** The label follows its carton into the slab. */
+/** The label stays where hk compiled and lifts away as the ring lets go, clear of the pane. */
 function drawHkLabel(ctx: CanvasRenderingContext2D, lt: number): void {
-  if (lt < HK.launch || lt >= HK.land) return;
-  const u = progress(HK.launch, HK.land, lt);
-  const p = curveAt(path(HK), u);
+  const u = progress(HK.launch, HK.launch + RELEASE, lt);
+  if (u <= 0 || u >= 1) return;
   drawLabel(ctx, {
     text: "hk (edited)",
-    x: p.x,
-    y: p.y - HK.size - 104 - 26 + HK.size * 0.42,
+    x: HK_AT.x,
+    y: HK_RING.y - HK_RING.r - 26 - 24 * swiftOut(u),
     size: 56,
     mono: true,
     align: "center",
     fill: PALETTE.amberBright,
-    alpha: 1 - swiftIn(u),
+    alpha: (1 - u) ** 2,
   });
 }
 

@@ -165,8 +165,9 @@ function compile(m: Mix, s: Section): void {
     v.noise("pink", 0.4, bp);
     v.osc("sawtooth", sweep(t0, hz(38), t1, hz(45)), 0.25, v.filter("lowpass", sweep(t0, 300, t1, 900), 3));
   }
-  // It leaves the ring and drops into the slab.
+  // The ring lets go as it leaves, and it drops into the slab.
   flick(m, t1, 0.15, 0.12);
+  pop(m, t1, hz(69), 0.1, 0.1, 0.14);
   const land = s.at(HK.land);
   m.duck(land, 0.25, 0.12);
   thump(m, land, 0.4, 170, 60, 0.2, { pan: 0.2 });
