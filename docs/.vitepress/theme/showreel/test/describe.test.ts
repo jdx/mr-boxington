@@ -11,7 +11,7 @@ import { annotation, delta, factsFromBenchmarks, type ReelFacts, tenths } from "
 import { scenes } from "../scenes";
 import { SECTIONS, type SectionId } from "../timeline";
 import { plain } from "../type";
-import { hk, live, NOTHING, numbers, standIn } from "./published";
+import { hk, live, NOTHING, numbers } from "./published";
 
 /**
  * The figures a chapter of the video shows under `f`: `told` are the ones
@@ -23,7 +23,6 @@ function onScreen(id: SectionId, f: ReelFacts | null): { told: string[]; shown: 
   const scene = scenes.find((s) => s.id === id);
   const told = (scene?.captions?.(f) ?? [])
     .flatMap((c) => c.lines)
-    .filter((l) => !standIn(id, l.text))
     .flatMap((l) => numbers(plain(l.text)));
   const shown: string[] = [];
   if (id === "first-build" && f?.toolchain) shown.push(...numbers(f.toolchain));

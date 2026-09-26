@@ -18,7 +18,7 @@ import {
 import { scenes } from "../scenes";
 import type { SectionId } from "../timeline";
 import { plain } from "../type";
-import { cell, hk, live, NOTHING, published, standIn } from "./published";
+import { cell, hk, live, NOTHING, published } from "./published";
 
 test("today's run gives the storyboard's figures", () => {
   const f = hk();
@@ -230,7 +230,6 @@ test("no caption shows a number the facts do not back", () => {
   for (const [what, facts, ids] of withheld) {
     for (const id of ids) {
       for (const line of lines(id, facts)) {
-        if (standIn(id, line)) continue;
         assert.doesNotMatch(line, /\d/, `${id} with ${what}: "${line}"`);
       }
     }

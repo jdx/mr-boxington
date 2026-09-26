@@ -3,8 +3,9 @@
 // line types. The push runner's outputs whoosh up and click onto the
 // shelf; the read-only line locks with a click; the pull request's restores
 // drop in with a sparkle each (a sound, not a glint: no mbx hit happens
-// there), and its own compile thunks off the line. The whip pan into the
-// chart ends the section.
+// there), and its own compile thunks off the line. In the hold a breath of
+// air runs along the shelf with its light. The whip pan into the chart ends
+// the section.
 
 import type { Section } from "../bible";
 import {
@@ -18,6 +19,7 @@ import {
   T_LEAP,
   T_LOCK,
   T_REMOTE,
+  T_SHIMMER,
   T_THROW,
   T_USES,
   UPLOAD_FLY,
@@ -101,6 +103,14 @@ function bounce(m: Mix, s: Section): void {
   knock(m, s.at(T_BACK), hz(45), 0.16, 0.5, 0.06);
 }
 
+/** The light along the shelf: a breath of air left to right, and a soft chime as it crosses the middle. */
+function shimmer(m: Mix, s: Section): void {
+  const t0 = s.at(T_SHIMMER);
+  const t1 = t0 + 0.7;
+  whoosh(m, ad(t0, (t0 + t1) / 2, 0.035, t1), sweep(t0, 5200, t1, 8200), 3, { pan: line(t0, 0.15, t1, 0.75), send: 0.3 }, "white");
+  ping(m, (t0 + t1) / 2, hz(100), 0.025, 0.5, { pan: 0.45, send: 0.45 });
+}
+
 export const part: Part = {
   cues(m, s) {
     hop(m, s);
@@ -109,6 +119,7 @@ export const part: Part = {
     lock(m, s);
     restores(m, s);
     bounce(m, s);
+    shimmer(m, s);
     whip(m, s.end);
   },
   drums: (m, s) => drumBars(m, s, [HALF]),

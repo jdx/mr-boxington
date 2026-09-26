@@ -1,19 +1,20 @@
 // Section 9, "Six builds at once". The benchmark's six real jobs (check,
 // clippy and test --no-run, each with the default features and with
 // --all-features --all-targets) start together on one machine. The
-// another-worktree pane cracks into six job cards and all six type their
-// command at once, bobbing out of step like six drum loops. Before any
-// compiler starts, the permit rail slams down between them and the loops
-// snap onto one groove. Compilations fall onto the rail as amber sparks:
-// each takes a permit slot while rustc runs, and once the pool is full the
-// rest queue above it. Cache hits come straight out of Mr Boxington's
-// monocle as green sparks and pass through the rail without stopping. One
-// pair is singled out: `cargo check` and `cargo clippy` need the same `syn`
-// compilation, so clippy's waits beside check's and takes its result, green,
-// when it lands (`ran once`). Then the rail, full, tips over: its 32 permits
-// slide down it into a bar, `scheduler on`, and the run with the scheduler
-// off shoots out beside it. At the end the six cards fly together into the
-// ci section's two runners as the frame closes in around Mr Boxington.
+// another-worktree pane cracks into six tiles, which carry off its picture
+// and round into job cards, and all six type their command at once, bobbing
+// out of step like six drum loops. Before any compiler starts, the permit
+// rail slams down between them and the loops snap onto one groove.
+// Compilations fall onto the rail as amber sparks: each takes a permit slot
+// while rustc runs, and once the pool is full the rest queue above it. Cache
+// hits come straight out of Mr Boxington's monocle as green sparks and pass
+// through the rail without stopping. One pair is singled out: `cargo check`
+// and `cargo clippy` need the same `syn` compilation, so clippy's waits
+// beside check's and takes its result, green, when it lands (`ran once`).
+// Then the rail, full, tips over: its 32 permits slide down it into a bar,
+// `scheduler on`, and the run with the scheduler off shoots out beside it.
+// At the end the six cards fly together into the ci section's two runners as
+// the frame closes in around Mr Boxington.
 //
 // The peaks are the contention benchmark's (facts.contention): each run's
 // most compilers seen at once. Without them no bar or figure is drawn, the
@@ -363,6 +364,8 @@ interface CardStyle {
   amber: number;
   edge: number;
   scale: number;
+  /** 0..1 how much of the command shows: it goes first as the cards fly together. */
+  ink: number;
 }
 
 /** A job card: a pill with its command in mono at 40 px, a block cursor while it types. */
@@ -381,6 +384,11 @@ function drawCard(ctx: CanvasRenderingContext2D, r: Rect, cmd: string, s: CardSt
   ctx.lineWidth = 2.5;
   ctx.strokeStyle = mix(PALETTE.divider, s.edge > 0 ? PALETTE.amber : tint, Math.max(s.green, s.amber, s.edge));
   ctx.stroke();
+  if (s.ink <= 0) {
+    ctx.restore();
+    return;
+  }
+  ctx.globalAlpha *= s.ink;
   const spec = font(40, 500, MONO);
   const shown = cmd.slice(0, Math.floor(s.typed));
   const w = drawText(ctx, shown, -r.w / 2 + 22, 14, { font: spec, fill: PALETTE.text1 }).width;
@@ -403,21 +411,48 @@ const tile = (j: number): Rect => ({
 export const TILES: readonly number[] = [0, 2, 4, 1, 3, 5].map((k) => T_SPLIT + 0.015 + (k * BEAT) / 32);
 const tileAt = (j: number): number => TILES[j];
 
-/** A tile on its way from the pane to its card: window-coloured, rounding into a pill. */
-function drawTile(ctx: CanvasRenderingContext2D, r: Rect, k: number, alpha: number): void {
+/** The picture the pane cracks: another-worktree's window, without its slab. */
+const PICTURE: PaneState = { ...(AW_END.pane as PaneState), rect: WINDOW, slab: null };
+/** How dark the picture has gone under the crack's seams, and how it fades on a tile (by its k). */
+const CRACK_DIM = 0.35;
+const fade = (k: number): number => CRACK_DIM + (1 - CRACK_DIM) * smoothstep(0, 0.45, k);
+
+/**
+ * A tile on its way from the pane to its card: its piece of the pane's
+ * picture riding with it and fading as it rounds into a pill, its seam
+ * amber at first.
+ */
+function drawTile(ctx: CanvasRenderingContext2D, j: number, r: Rect, k: number, alpha: number): void {
   if (alpha <= 0) return;
+  const src = tile(j);
+  const fill = mix(KIT.window, PALETTE.surface, clamp(k));
+  const shape = () => roundedRect(ctx, r.x, r.y, r.w, r.h, lerp(6, r.h / 2, clamp(k)));
   ctx.save();
   ctx.globalAlpha *= alpha;
-  roundedRect(ctx, r.x, r.y, r.w, r.h, lerp(6, r.h / 2, clamp(k)));
-  ctx.fillStyle = mix(KIT.window, PALETTE.surface, clamp(k));
+  shape();
+  ctx.fillStyle = fill;
   ctx.fill();
+  const dim = fade(k);
+  if (dim < 1) {
+    ctx.save();
+    ctx.clip();
+    ctx.translate(r.x, r.y);
+    ctx.scale(r.w / src.w, r.h / src.h);
+    ctx.translate(-src.x, -src.y);
+    drawPane(ctx, PICTURE);
+    ctx.restore();
+    // drawPane leaves its own path behind.
+    shape();
+    ctx.fillStyle = rgba(fill, dim);
+    ctx.fill();
+  }
   ctx.lineWidth = 2.5;
-  ctx.strokeStyle = mix(KIT.edge, PALETTE.divider, clamp(k));
+  ctx.strokeStyle = mix(PALETTE.amberBright, PALETTE.divider, smoothstep(0, 0.6, k));
   ctx.stroke();
   ctx.restore();
 }
 
-/** The pane as another-worktree leaves it, cracking: its picture whites out along the seams, then the tiles leave. */
+/** The pane as another-worktree leaves it, cracking: its seams light amber and its picture dims, then the tiles leave. */
 function drawCrack(ctx: CanvasRenderingContext2D, lt: number): void {
   const pane = AW_END.pane as PaneState;
   // The slab sinks into the floor as the window leaves it.
@@ -430,23 +465,20 @@ function drawCrack(ctx: CanvasRenderingContext2D, lt: number): void {
   ctx.restore();
   if (lt >= TILES[0]) return;
   // The window itself, then the seams lighting up across it.
-  drawPane(ctx, { ...pane, rect: WINDOW, slab: null });
+  drawPane(ctx, PICTURE);
   const k = progress(T_SPLIT - 0.004, TILES[0], lt);
   if (k <= 0) return;
   ctx.save();
-  roundedRect(ctx, WINDOW.x, WINDOW.y, WINDOW.w, WINDOW.h, 18);
-  ctx.fillStyle = rgba(KIT.window, 0.85 * k);
-  ctx.fill();
-  ctx.strokeStyle = rgba(PALETTE.amberBright, k);
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  for (const f of [1 / 3, 2 / 3]) {
-    ctx.moveTo(WINDOW.x + WINDOW.w * f, WINDOW.y);
-    ctx.lineTo(WINDOW.x + WINDOW.w * f, WINDOW.y + WINDOW.h);
+  // Every tile's own outline, as the tiles draw them when they leave.
+  for (let j = 0; j < JOBS.length; j++) {
+    const r = tile(j);
+    roundedRect(ctx, r.x, r.y, r.w, r.h, 6);
+    ctx.fillStyle = rgba(KIT.window, CRACK_DIM * k);
+    ctx.fill();
+    ctx.strokeStyle = rgba(PALETTE.amberBright, k);
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
   }
-  ctx.moveTo(WINDOW.x, WINDOW.y + WINDOW.h / 2);
-  ctx.lineTo(WINDOW.x + WINDOW.w, WINDOW.y + WINDOW.h / 2);
-  ctx.stroke();
   ctx.restore();
 }
 
@@ -792,7 +824,7 @@ function drawCards(ctx: CanvasRenderingContext2D, t: number, peaks: boolean, mer
     let r = lerpRect(tile(j), job.rect, k);
     if (merge > 0) r = lerpRect(r, runners[job.row].rect, merge);
     const asCard = smoothstep(0.35, 0.8, k);
-    if (asCard < 1) drawTile(ctx, r, k, 1);
+    if (asCard < 1) drawTile(ctx, j, r, k, 1);
     if (asCard <= 0) return;
     // The loops: out of step until the slam, then together.
     const loop = t < T_SLAM ? loopAt(j, t) : ((t - T_SLAM) / BEAT) % 1;
@@ -820,6 +852,7 @@ function drawCards(ctx: CanvasRenderingContext2D, t: number, peaks: boolean, mer
       amber,
       edge: clamp(pair),
       scale: 1,
+      ink: 1 - smoothstep(0, 0.22, merge),
     });
   });
   // The rows' labels, over their cards.

@@ -6,8 +6,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { factsFromBenchmarks, type ReelFacts } from "../facts";
-import type { SectionId } from "../timeline";
-import { plain } from "../type";
 import { REPO, SHOWREEL } from "./repo";
 
 /** Parsed JSON, which the tests garble on purpose. */
@@ -59,11 +57,3 @@ export const NOTHING: ReelFacts = {
  * version's parts.
  */
 export const numbers = (text: string): string[] => text.match(/(?<![\w.])\d+(?:\.\d+)?(?!\w|\.\d)/g) ?? [];
-
-/**
- * The six-builds stand-in still hard-codes the storyboard's peaks, and its
- * scene owner switches it to facts.contention. Once it does, this matches
- * nothing and can go.
- */
-export const standIn = (id: SectionId, text: string): boolean =>
-  id === "six-builds" && plain(text) === "32 compilers at peak, not 162.";

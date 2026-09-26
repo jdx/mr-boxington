@@ -127,5 +127,6 @@ test("the score sounds on the picture's hits", () => {
   near(C.at(ci.T_LAND), "the landing");
   near(C.at(ci.T_BOUNCE), "the read-only bounce");
   near(C.at(ci.UPLOADS[3] + ci.UPLOAD_FLY), "an upload landing");
+  near(C.at(ci.T_SHIMMER), "the light along the shelf");
   near(C.end, "the whip");
 });

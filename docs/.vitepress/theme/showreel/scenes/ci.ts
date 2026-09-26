@@ -7,6 +7,8 @@
 // copies down, restored, without a glint: in the Action's default archive
 // mode Cargo reuses the restored target/ directly, so no mbx hit happens.
 // Its own compile, thrown up, bounces off the read-only line over it.
+// Each runner's rack lights blink amber while it compiles and green while
+// it restores, and in the caption's hold a light runs along the shelf.
 // The section ends on the whip pan into the chart (map.ts whipOut and
 // drawWhip), still moving on its last frame.
 //
@@ -15,7 +17,7 @@
 import { BEAT, PALETTE, type Scene, type SceneEnv, sec, WHIP } from "../bible";
 import { LOGO_FACE, type LogoFace } from "../box";
 import { rgba } from "../color";
-import { glow, ring } from "../fx";
+import { glow, ring, roundedRect } from "../fx";
 import {
   arc,
   boxPose,
@@ -47,7 +49,7 @@ import {
   WHIP_AT,
   WHIP_WIND,
 } from "../map";
-import { inQuad, lerp, progress, pulse, smoothstep, swiftIn, swiftInOut, swiftOut, TAU, wobble } from "../math";
+import { hash, inQuad, lerp, progress, pulse, smoothstep, swiftIn, swiftInOut, swiftOut, TAU, wobble } from "../math";
 import { type Caption, drawText, font, MONO } from "../type";
 
 const S = sec("ci");
@@ -81,6 +83,8 @@ export const RESTORE_FLY = 0.3;
 export const T_THROW = b(6);
 export const T_BOUNCE = b(6.25);
 export const T_BACK = b(6.625);
+/** Under the caption's hold: a light runs along the shelf. */
+export const T_SHIMMER = b(9);
 /** The wind-up before the whip (map.ts), section-local. */
 export const T_WIND = WHIP_AT - WHIP - WHIP_WIND - S.start;
 
@@ -122,8 +126,8 @@ function hop(lt: number): { spot: BoxSpot; squash: number; air: number } {
   const along = swiftInOut(p);
   const spot = lerpSpot(MACHINE.box, HOP.box, along);
   const air = Math.sin(Math.PI * p);
-  // From rest on the bar line: the crouch eases in.
-  const crouch = lt < T_LEAP ? 1 - 0.12 * smoothstep(T_CROUCH, T_LEAP, lt) : 1;
+  // From rest on the bar line: the crouch eases in, and springs open over the first frames of the leap.
+  const crouch = 1 - 0.12 * (lt < T_LEAP ? smoothstep(T_CROUCH, T_LEAP, lt) : 1 - swiftOut(progress(T_LEAP, T_LEAP + 0.05, lt)));
   const stretch = lt >= T_LEAP && lt < T_LAND ? 1 + 0.1 * Math.sin(Math.PI * Math.min(1, p * 2)) : 1;
   const land = lt >= T_LAND ? 1 - 0.16 * Math.exp(-(lt - T_LAND) / 0.09) * Math.cos((lt - T_LAND) * 26) : 1;
   return { spot: { ...spot, y: FLOOR - 150 * air }, squash: crouch * stretch * land, air };
@@ -191,6 +195,43 @@ function restore(k: number): Curve {
   return { a: { x: s.x, y: s.y }, c: { x: lerp(s.x, PR_PORT.x, 0.25), y: s.y - 90 }, b: PR_PORT };
 }
 
+/**
+ * A runner's rack lights while it works, over drawRunner's dark ones (its
+ * geometry): amber while it compiles, green while it restores, blinking at
+ * `act` 0..1.
+ */
+function rackLights(ctx: CanvasRenderingContext2D, r: Rect, act: number, color: string, t: number, seed: number): void {
+  if (act <= 0.05) return;
+  const uh = (r.h - 116) / 2;
+  const fr = Math.floor(t * 30);
+  ctx.save();
+  ctx.fillStyle = color;
+  for (let u = 0; u < 2; u++) {
+    const mid = r.y + 96 + u * (uh + 8) + uh / 2;
+    for (let i = 0; i < 8; i++) {
+      if (hash(fr * 7 + i + u * 31, seed) < 0.3 + 0.7 * act) ctx.fillRect(r.x + 44 + i * 22, mid - 6, 12, 12);
+    }
+  }
+  ctx.restore();
+}
+
+/** A light running along the remote's shelf, once, at `p` 0..1. */
+function shimmer(ctx: CanvasRenderingContext2D, p: number): void {
+  if (p <= 0 || p >= 1) return;
+  const x = lerp(REMOTE.x - 120, REMOTE.x + REMOTE.w + 120, swiftInOut(p));
+  ctx.save();
+  roundedRect(ctx, REMOTE.x, REMOTE.y, REMOTE.w, REMOTE.h, 24);
+  ctx.clip();
+  ctx.globalCompositeOperation = "lighter";
+  const g = ctx.createLinearGradient(x - 110, 0, x + 110, 0);
+  g.addColorStop(0, rgba(PALETTE.paper, 0));
+  g.addColorStop(0.5, rgba(PALETTE.paper, 0.14 * Math.sin(Math.PI * p)));
+  g.addColorStop(1, rgba(PALETTE.paper, 0));
+  ctx.fillStyle = g;
+  ctx.fillRect(x - 110, REMOTE.y, 220, REMOTE.h);
+  ctx.restore();
+}
+
 function content(ctx: CanvasRenderingContext2D, lt: number, t: number): void {
   // The frame closes in on his corner and dims.
   const close = swiftInOut(progress(T_LEAP, T_LAND + 0.05, lt));
@@ -208,6 +249,7 @@ function content(ctx: CanvasRenderingContext2D, lt: number, t: number): void {
     let lit = pulse(lt, T_REMOTE, 0.01, 0.2);
     for (const u of UPLOADS) lit = Math.max(lit, 0.7 * pulse(lt, u + UPLOAD_FLY, 0.005, 0.12));
     drawRemote(ctx, { rect: { ...REMOTE, y: REMOTE.y + fall }, fill: landed / SLOTS.length, lit });
+    shimmer(ctx, progress(T_SHIMMER, T_SHIMMER + b(1.5), lt));
     if (lt >= T_REMOTE && lt < T_REMOTE + 0.5) {
       const p = progress(T_REMOTE, T_REMOTE + 0.5, lt);
       glow(ctx, REMOTE.x + REMOTE.w / 2, REMOTE.y + REMOTE.h, 260, PALETTE.paper, 0.25 * (1 - p) ** 2);
@@ -233,7 +275,11 @@ function content(ctx: CanvasRenderingContext2D, lt: number, t: number): void {
     const blocked = i === 1 && lt >= T_BOUNCE && lt < T_BOUNCE + 0.22;
     const led: RunnerState["led"] = blocked ? "blocked" : lt >= busy[1] ? "ok" : lt >= busy[0] ? "busy" : "idle";
     const activity = lt >= busy[0] && lt < busy[1] ? 1 : lt >= busy[1] ? 0.12 : 0;
-    drawRunner(ctx, { rect: lerpRect(r.rect, r.to, settle), label: r.label, led, t, activity });
+    const rect = lerpRect(r.rect, r.to, settle);
+    drawRunner(ctx, { rect, label: r.label, led, t, activity: 0 });
+    // Amber while main compiles; green while the pull request restores, amber for its own compile.
+    const own = i === 1 && lt >= T_THROW - 0.2 && lt < T_BACK;
+    rackLights(ctx, rect, activity, i === 0 || own ? PALETTE.amber : PALETTE.green, t, 91 + i);
   });
 
   // The read-only line over the pull request runner.
