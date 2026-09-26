@@ -99,6 +99,8 @@ export const T_LAND0 = b(0.5); // the first ring touches down
 export const T_LAND1 = b(2); // the rim lands
 /** The checkout's folder lifts out of its chip, crumples, and falls. */
 export const T_LIFT = b(2.25);
+/** It is crushed in the air from here to T_CRUMPLE, then drops. */
+export const T_CRUSH = T_LIFT + 0.09;
 export const T_CRUMPLE = b(2.5);
 /** The 30-day clock pops onto a carton and its hand runs out the month. */
 export const T_CLOCK = b(3);
@@ -140,8 +142,9 @@ const popScale = outBack(2.2);
 
 // The scan beam sweeps the diagonal x + z = c from behind the back corner
 // on b5 to past the front corner on b8 at one speed, six rows a beat. It
-// reaches the orphan's row just as its rule lands on b5.25, and every row
-// by b7.6, so the last carton is flat by b8.
+// crosses the back row as the orphan, a row in, starts to fold and reaches
+// it as it slaps flat on b5.25; it has crossed every row by b7.6, so the
+// last carton is flat by b8.
 const V_BEAM = 6 / BEAT;
 const C_BEAM0 = -8 - V_BEAM * (T_RULES[0] - 0.07 - T_BEAM0);
 const beamPos = (t: number): number => C_BEAM0 + V_BEAM * (t - T_BEAM0);
@@ -161,7 +164,7 @@ interface Named {
 const NAMED: readonly Named[] = [
   { name: "hk", cell: [-2, 2], dx: -176, dy: 22 },
   { name: "hk-fix", cell: [3, 1], dx: 164, dy: -36 },
-  { name: "hk-pr-812", cell: [-3, -4], dx: 92, dy: -68 },
+  { name: "hk-pr-812", cell: [-3, -3], dx: 92, dy: -78 },
   { name: "hk-old-spike", cell: [-4, 1], dx: -128, dy: -64 },
   { name: "hk-bisect", cell: [2, -4], dx: 100, dy: -66 },
   { name: "hk-try-2", cell: [0, 4], dx: -150, dy: 56 },
@@ -169,7 +172,7 @@ const NAMED: readonly Named[] = [
 /** Rule 2's group: the stale carton wearing the clock, and the others nobody used either. */
 const STALE: readonly (readonly [number, number])[] = [
   [-4, 1],
-  [-3, -3],
+  [-3, -4],
   [0, -4],
   [-4, -1],
 ];
@@ -1283,10 +1286,10 @@ function coat(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose, color: s
 
 // Kept cubes: after the glow they hop, turn a quarter, flatten to amber, and
 // round off into discs, arriving with zero velocity on T_DISC.
-const SPIN0 = T_HOP + 0.02;
-const SPIN1 = T_HOP + 0.62;
-const FLAT0 = T_DISC - 0.34;
-const FLAT1 = T_DISC - 0.16;
+export const SPIN0 = T_HOP + 0.02;
+export const SPIN1 = T_HOP + 0.62;
+export const FLAT0 = T_DISC - 0.34;
+export const FLAT1 = T_DISC - 0.16;
 const M0 = T_DISC - 0.3;
 const M1 = T_DISC;
 
@@ -1728,7 +1731,8 @@ function folderGlyph(ctx: CanvasRenderingContext2D, w: number, color = FOLDER): 
   ctx.fill();
 }
 
-function chipPop(c: Cell): number {
+/** When a named carton's chip pops in, local seconds. */
+export function chipPop(c: Cell): number {
   return c.center ? T_LAND0 + 0.02 : c.land + 0.05;
 }
 
@@ -1815,7 +1819,7 @@ function drawChips(ctx: CanvasRenderingContext2D, view: View, list: Cell[], t: n
 const measure = (ctx: CanvasRenderingContext2D, text: string): number => layout(ctx, text, CHIP_FONT).width;
 
 // The orphan's folder: it lifts out of the chip, crumples into a ball, and
-// drops to the floor beside its carton, bouncing twice.
+// drops onto its carton's roof, bouncing twice.
 /** The paper ball's radius, and the folder's width while it hangs over the chip, px. */
 const BALL_R = 21;
 const LIFTED = 62;
@@ -1852,11 +1856,11 @@ function drawCrumple(ctx: CanvasRenderingContext2D, view: View, c: Cell, st: Sta
   const y0 = top.y + n.dy;
   // Up and out of the chip, growing, then crushed in the air.
   const lift = swiftOut(progress(T_LIFT, T_LIFT + 0.12, t));
-  const crush = inOutCubic(progress(T_LIFT + 0.09, T_CRUMPLE, t));
+  const crush = inOutCubic(progress(T_CRUSH, T_CRUMPLE, t));
   const size = lerp(CHIP.icon, LIFTED, lift);
   const hover = { x: x0 - 30 * lift, y: y0 - 74 * lift };
-  // Then it drops to the floor beside its carton and bounces twice.
-  const floor = view.project([c.x - 0.2, 0, c.z + 0.9]);
+  // Then it drops onto the front of its carton's roof and bounces twice.
+  const floor = view.project([c.x - 0.1, st.lift + CUBE * (st.pose.squash ?? 1), c.z + 0.2]);
   let x = hover.x;
   let y = hover.y;
   let rot = -0.35 * crush + 0.06 * Math.sin(TAU * 9 * (t - T_LIFT)) * Math.sin(Math.PI * crush);
@@ -1881,9 +1885,11 @@ function drawCrumple(ctx: CanvasRenderingContext2D, view: View, c: Cell, st: Sta
         s -= th;
       }
     }
-    x = lerp(hover.x, floor.x, outQuad(clamp(u / (t1 + 0.3))));
+    const roll = outQuad(clamp(u / (t1 + 0.3)));
+    x = lerp(hover.x, floor.x, roll);
     y = hover.y + yy;
-    rot += u * 8;
+    // It rolls as it travels, and comes to rest with it.
+    rot += 3.6 * roll;
     alpha = 1 - smoothstep(0.45, 0.7, u);
   }
   if (alpha <= 0) return;
@@ -1926,8 +1932,8 @@ function drawClock(ctx: CanvasRenderingContext2D, view: View, c: Cell, st: Stand
   const f = boxFrame(st.pose);
   // The carton's front left panel faces the viewer; the clock hangs on it.
   const p = view.project(boxPoint(f, 0, 0.1, 1));
-  const R = 30;
-  const days = inOutSine(progress(T_DAYS0, T_DAYS, t));
+  const R = 34;
+  const days = clockDays(t);
   const done = t >= T_DAYS ? Math.exp(-(t - T_DAYS) / 0.12) : 0;
   ctx.save();
   ctx.globalAlpha *= 1 - gone;
@@ -1977,6 +1983,9 @@ function drawClock(ctx: CanvasRenderingContext2D, view: View, c: Cell, st: Stand
   ctx.restore();
 }
 
+/** 0..1 of the month the clock's hand has run. */
+export const clockDays = (t: number): number => inOutSine(progress(T_DAYS0, T_DAYS, t));
+
 /** 1 when a popIn spring has landed; 0 before `at`. */
 const popIn = (t: number, at: number): number => spring(t - at, 4.5, 0.5);
 
@@ -2004,9 +2013,11 @@ const DETAIL_MONO: WordStyle = {
 const DETAIL: WordStyle = { ...wordStyle(40, PALETTE.text3) };
 const RULE = wordStyle(64);
 const LINK = "target -> <cache root>/targets/v1/<checkout digest>";
-const HEADER = "Pruned after builds:";
+export const HEADER = "Pruned after builds:";
 export const RULE_TEXT = ["checkout deleted", "unused 30 days", "over budget"] as const;
-const COPY_OUT = b(11.5);
+/** The header lands on b5, a beat before the first rule; everything leaves on b11.5. */
+export const T_HEADER = b(5);
+export const COPY_OUT = b(11.5);
 const ROW = [832, 936] as const;
 const RULE_GAP = 72;
 
@@ -2039,7 +2050,7 @@ function drawCopy(ctx: CanvasRenderingContext2D, t: number): void {
   const end = x - RULE_GAP;
   ctx.save();
   if (rowWipe(ctx, t, COPY_OUT, end - 160)) {
-    drawWords(ctx, HEADER, 160, ROW[0], RULE, t, b(5));
+    drawWords(ctx, HEADER, 160, ROW[0], RULE, t, T_HEADER);
     drawWords(ctx, "least recently used first", end, ROW[0], DETAIL, t, b(7.25), Infinity, "right");
   }
   ctx.restore();

@@ -21,6 +21,7 @@ import {
   TAU,
   wobble,
 } from "../math";
+import { drawHandoff } from "../map";
 import { View } from "../space";
 
 const S = sec("morph");
@@ -117,11 +118,32 @@ interface Layout {
   hc: Pt;
 }
 
+/**
+ * The silhouette's corners. The front view's hull can keep a vertex where
+ * the lid's side meets the wall's, a fraction of a pixel off the straight
+ * line and turning the wrong way; rounding that as a corner would loop the
+ * rim back on itself, so any vertex that barely turns is dropped. None of
+ * them moves the outline by as much as a hundredth of a pixel.
+ */
+function corners(sil: readonly Pt[]): Pt[] {
+  const out = sil.map((p) => ({ x: p.x, y: p.y }));
+  for (let i = 0; i < out.length && out.length > 3; ) {
+    const a = out[(i - 1 + out.length) % out.length];
+    const p = out[i];
+    const b = out[(i + 1) % out.length];
+    const cross = (p.x - a.x) * (b.y - p.y) - (p.y - a.y) * (b.x - p.x);
+    const turn = cross / (Math.hypot(p.x - a.x, p.y - a.y) * Math.hypot(b.x - p.x, b.y - p.y));
+    if (Math.abs(turn) < 0.02) out.splice(i, 1);
+    else i++;
+  }
+  return out;
+}
+
 let cached: Layout | null = null;
 function layout(): Layout {
   if (cached) return cached;
   const discs = keptDiscs();
-  const hex = boxSilhouette(new View(END_CAM), END_POSE).map((p) => ({ x: p.x, y: p.y }));
+  const hex = corners(boxSilhouette(new View(END_CAM), END_POSE));
   let hx = 0;
   let hy = 0;
   for (const p of hex) {
@@ -1215,18 +1237,19 @@ export const scene: Scene = {
   draw(ctx, lt, env) {
     const t = lt;
     const L = layout();
+    // Handoff pruned → morph: exactly the kept discs on the bar line.
+    if (t <= 0) {
+      drawHandoff(ctx, "pruned|morph", env);
+      return;
+    }
     // bg → night, so the end card's black arrives already.
     const dark = smoothstep(0.2, 1.55, t);
     ctx.fillStyle = dark >= 1 ? PALETTE.night : mix(PALETTE.bg, PALETTE.night, dark);
     ctx.fillRect(0, 0, env.W, env.H);
 
+    // Set: exactly the handoff morph → end, the silhouette the end card inflates.
     if (t >= SETTLED) {
-      ctx.beginPath();
-      ctx.moveTo(L.hex[0].x, L.hex[0].y);
-      for (const p of L.hex) ctx.lineTo(p.x, p.y);
-      ctx.closePath();
-      ctx.fillStyle = PALETTE.amber;
-      ctx.fill();
+      drawHandoff(ctx, "morph|end", env);
       return;
     }
 

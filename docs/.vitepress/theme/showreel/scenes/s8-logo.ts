@@ -60,7 +60,7 @@ export const T_URL = b(4);
 export const T_GLINT = b(8);
 export const T_BLINK = b(10);
 /** Nothing moves from here: the card ends on a still frame. */
-const STILL = b(10.75);
+export const STILL = b(10.75);
 
 /** Pops start one frame early with a kick, so the anchor frame already reads. */
 const LEAD = 1 / 60;
@@ -453,15 +453,15 @@ function drawBerryLanding(ctx: CanvasRenderingContext2D, view: View, pose: BoxPo
 // glint.
 const CX = 960;
 export const CARD = { word: 614, line: 732, install: 834, url: 936 } as const;
-const WORD = "mr boxington";
+export const WORD = "mr boxington";
 /** The wordmark, 128 px, as on the name card. */
 const WORD_STYLE = wordStyle(128);
 /** When the wordmark's first word starts to rise. */
 export const WORD_IN = entrance(WORD, T_WORD);
-const LINE = "A shared cache for Cargo builds";
-const INSTALL = "cargo install mbx --locked && mbx setup";
+export const LINE = "A shared cache for Cargo builds";
+export const INSTALL = "cargo install mbx --locked && mbx setup";
 const INSTALL_FONT = font(56, 500, MONO);
-const URL_TEXT = "mr-boxington.jdx.dev";
+export const URL_TEXT = "mr-boxington.jdx.dev";
 const URL_STYLE = wordStyle(72, PALETTE.amberBright);
 
 // The command types on, a key per few milliseconds, each landing warm and
