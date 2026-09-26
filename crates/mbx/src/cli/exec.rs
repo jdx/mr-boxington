@@ -50,10 +50,15 @@ pub(super) fn run(config: &Config, settings: &CliSettings, args: &ExecArgs) -> R
         // Outside the session directory, and outside the store the collector
         // sweeps: a configure step records these paths and expects to find
         // them on the next build.
-        let Some(shims) = session::install_path_shims(&config.shims_dir)? else {
+        let mut arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
+        let shims = session::install_path_shims(&config.shims_dir)?;
+        // CMake is still worth a session without them: the launchers a
+        // configure records reach a compiler named by path or by a versioned
+        // name, and a later `cmake --build` needs the session to use them.
+        if shims.is_none() && !session::cmake::is_cmake(&program) {
             log::warn!("no C or C++ compiler was found on PATH, so this command is not cached");
-            return Ok((run_cargo(&program, arguments, BTreeMap::new()), None));
-        };
+            return Ok((run_cargo(&program, &arguments, BTreeMap::new()), None));
+        }
         let session = CacheSession::start_with_events_limit(
             session_dir.path(),
             config,
@@ -62,9 +67,13 @@ pub(super) fn run(config: &Config, settings: &CliSettings, args: &ExecArgs) -> R
         .await?;
         let mut environment = inherited_environment(|name| std::env::var(name).ok(), &working_dir);
         let run = session
-            .begin_exec(&project_root, &args.command, &shims, &mut environment)
+            .begin_exec(
+                &project_root,
+                &args.command,
+                shims.as_ref(),
+                &mut environment,
+            )
             .await;
-        let mut arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
         session.prepare_exec_cmake(&program, &mut arguments, &mut environment);
 
         let status = run_cargo(&program, &arguments, environment);

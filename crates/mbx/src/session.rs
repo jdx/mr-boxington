@@ -593,7 +593,7 @@ impl CacheSession {
         &self,
         project_root: &Path,
         command: &[String],
-        shims: &PathShims,
+        shims: Option<&PathShims>,
         environment: &mut BTreeMap<String, String>,
     ) -> Option<ActionRun> {
         let identity = exec_identity(project_root, command);
@@ -661,6 +661,9 @@ impl CacheSession {
         for (name, value) in &self.scheduler_env {
             environment.insert(name.clone(), value.clone());
         }
+        let Some(shims) = shims else {
+            return action_run;
+        };
         if let Ok(pins) = serde_json::to_string(&shims.compilers) {
             environment.insert(PATH_SHIMS_ENV.into(), pins);
         }

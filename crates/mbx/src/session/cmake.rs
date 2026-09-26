@@ -108,16 +108,20 @@ pub(super) fn exec_arguments(
     arguments: &mut Vec<OsString>,
     environment: &mut BTreeMap<String, String>,
 ) -> Result<()> {
-    let is_cmake = Path::new(program)
-        .file_stem()
-        .and_then(OsStr::to_str)
-        .is_some_and(|stem| stem.eq_ignore_ascii_case("cmake"));
-    if !is_cmake || !configures(arguments) {
+    if !is_cmake(program) || !configures(arguments) {
         return Ok(());
     }
     install_launchers(directory, &std::env::current_exe()?)?;
     environment.extend(add_launchers(arguments, directory, &LAUNCHERS));
     Ok(())
+}
+
+/// Whether `mbx exec` was handed CMake to run.
+pub fn is_cmake(program: &OsStr) -> bool {
+    Path::new(program)
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("cmake"))
 }
 
 /// Install the C and C++ launchers, and the scripts that point a cache at them.

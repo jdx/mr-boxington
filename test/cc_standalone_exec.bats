@@ -203,6 +203,45 @@ EOF
   build/probe
 }
 
+@test "a CMake configure is cached with no unversioned compiler on PATH" {
+  command -v cmake >/dev/null 2>&1 || skip "cmake is not available"
+  command -v c++ >/dev/null 2>&1 || skip "no C++ compiler is available"
+  local project="$BATS_TEST_TMPDIR/cmake-no-shims"
+  local report="$BATS_TEST_TMPDIR/cmake-no-shims.json"
+  local tools="$BATS_TEST_TMPDIR/tools"
+  local cc_path cxx_path directory entry name
+  cc_path="$(command -v cc)"
+  cxx_path="$(command -v c++)"
+  # Everything on PATH but the names mbx exec would shim, so it installs none.
+  # CMake by its real path: a version manager's shim may not survive the move.
+  mkdir -p "$tools"
+  echo 'message("${CMAKE_COMMAND}")' >"$BATS_TEST_TMPDIR/where.cmake"
+  ln -s "$(cmake -P "$BATS_TEST_TMPDIR/where.cmake" 2>&1)" "$tools/cmake"
+  IFS=: read -ra directories <<<"$PATH"
+  for directory in "${directories[@]}"; do
+    for entry in "$directory"/*; do
+      name="${entry##*/}"
+      case "$name" in cc | c++ | gcc | g++ | clang | clang++) continue ;; esac
+      if [[ -f "$entry" && -x "$entry" && ! -e "$tools/$name" ]]; then
+        ln -s "$entry" "$tools/$name"
+      fi
+    done
+  done
+  write_cmake_project "$project"
+  cd "$project"
+
+  PATH="$tools" "$MBX_BIN" exec cmake -S . -B build \
+    "-DCMAKE_C_COMPILER=$cc_path" "-DCMAKE_CXX_COMPILER=$cxx_path" >/dev/null
+  run grep -E '^CMAKE_C_COMPILER_LAUNCHER:.*mbx-cmake-launch-c$' build/CMakeCache.txt
+  assert_success
+  PATH="$tools" "$MBX_BIN" exec cmake --build build
+  PATH="$tools" cmake --build build --target clean >/dev/null
+  PATH="$tools" MBX_STATS_REPORT="$report" "$MBX_BIN" exec cmake --build build
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*2' "$report"
+  assert_success
+  build/probe
+}
+
 @test "a CMake launcher the caller chose is kept" {
   command -v cmake >/dev/null 2>&1 || skip "cmake is not available"
   command -v c++ >/dev/null 2>&1 || skip "no C++ compiler is available"
@@ -210,12 +249,27 @@ EOF
   write_cmake_project "$project"
   cd "$project"
 
+  # On the command line.
   "$MBX_BIN" exec cmake -S . -B build -DCMAKE_C_COMPILER_LAUNCHER=env >/dev/null
   run grep -Fx 'CMAKE_C_COMPILER_LAUNCHER:UNINITIALIZED=env' build/CMakeCache.txt
   assert_success
   # The other language still gets mbx's.
   run grep -E '^CMAKE_CXX_COMPILER_LAUNCHER:.*mbx-cmake-launch-cxx$' build/CMakeCache.txt
   assert_success
+
+  # Exported, as CMake itself would read it into a fresh cache.
+  CMAKE_C_COMPILER_LAUNCHER=env "$MBX_BIN" exec cmake -S . -B exported >/dev/null
+  run grep -E '^CMAKE_C_COMPILER_LAUNCHER:[A-Z]+=env$' exported/CMakeCache.txt
+  assert_success
+
+  # Already in a cache configured without mbx, and kept on reconfiguring.
+  cmake -S . -B cached -DCMAKE_C_COMPILER_LAUNCHER:STRING=env >/dev/null
+  "$MBX_BIN" exec cmake -S . -B cached >/dev/null
+  run grep -Fx 'CMAKE_C_COMPILER_LAUNCHER:STRING=env' cached/CMakeCache.txt
+  assert_success
+  run "$MBX_BIN" exec cmake --build cached
+  assert_success
+  cached/probe
 }
 
 @test "a failing command's exit code passes through" {
