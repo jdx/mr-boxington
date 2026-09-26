@@ -132,6 +132,92 @@ EOF
   assert_file_exists build/probe
 }
 
+# Lay a two-language CMake project down at $1.
+write_cmake_project() {
+  mkdir -p "$1"
+  cat >"$1/CMakeLists.txt" <<'EOF'
+cmake_minimum_required(VERSION 3.20)
+project(probe C CXX)
+option(PROBE_OPTION "" OFF)
+add_executable(probe main.c helper.cpp)
+EOF
+  echo 'int helper(void); int main(void) { return helper(); }' >"$1/main.c"
+  echo 'extern "C" int helper(void) { return 0; }' >"$1/helper.cpp"
+}
+
+@test "a CMake build directory configured without mbx is cached once reconfigured under it" {
+  command -v cmake >/dev/null 2>&1 || skip "cmake is not available"
+  command -v c++ >/dev/null 2>&1 || skip "no C++ compiler is available"
+  local project="$BATS_TEST_TMPDIR/cmake-existing"
+  local report="$BATS_TEST_TMPDIR/cmake-existing.json"
+  write_cmake_project "$project"
+  cd "$project"
+
+  cmake -S . -B build -DPROBE_OPTION=ON >/dev/null
+  local compiler
+  compiler="$(grep -E '^CMAKE_C_COMPILER:' build/CMakeCache.txt)"
+
+  run "$MBX_BIN" exec cmake -S . -B build
+  assert_success
+  # The launchers join the cache without replacing the recorded compiler, so
+  # CMake keeps the configuration it already had.
+  run grep -E '^CMAKE_C_COMPILER_LAUNCHER:.*mbx-cmake-launch-c$' build/CMakeCache.txt
+  assert_success
+  run grep -E '^CMAKE_CXX_COMPILER_LAUNCHER:.*mbx-cmake-launch-cxx$' build/CMakeCache.txt
+  assert_success
+  run grep -Fx "$compiler" build/CMakeCache.txt
+  assert_success
+  run grep -Fx 'PROBE_OPTION:BOOL=ON' build/CMakeCache.txt
+  assert_success
+
+  "$MBX_BIN" exec cmake --build build
+  cmake --build build --target clean >/dev/null
+  MBX_STATS_REPORT="$report" "$MBX_BIN" exec cmake --build build
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*2' "$report"
+  assert_success
+  build/probe
+
+  # Outside mbx the launchers stand aside.
+  cmake --build build --target clean >/dev/null
+  run cmake --build build
+  assert_success
+  build/probe
+}
+
+@test "a compiler a CMake build names by path is cached" {
+  command -v cmake >/dev/null 2>&1 || skip "cmake is not available"
+  command -v c++ >/dev/null 2>&1 || skip "no C++ compiler is available"
+  local project="$BATS_TEST_TMPDIR/cmake-named"
+  local report="$BATS_TEST_TMPDIR/cmake-named.json"
+  write_cmake_project "$project"
+  cd "$project"
+
+  # An absolute path never reaches the compiler shims on PATH.
+  "$MBX_BIN" exec cmake -S . -B build \
+    "-DCMAKE_C_COMPILER=$(command -v cc)" "-DCMAKE_CXX_COMPILER=$(command -v c++)" >/dev/null
+  "$MBX_BIN" exec cmake --build build
+  cmake --build build --target clean >/dev/null
+  MBX_STATS_REPORT="$report" "$MBX_BIN" exec cmake --build build
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*2' "$report"
+  assert_success
+  build/probe
+}
+
+@test "a CMake launcher the caller chose is kept" {
+  command -v cmake >/dev/null 2>&1 || skip "cmake is not available"
+  command -v c++ >/dev/null 2>&1 || skip "no C++ compiler is available"
+  local project="$BATS_TEST_TMPDIR/cmake-user-launcher"
+  write_cmake_project "$project"
+  cd "$project"
+
+  "$MBX_BIN" exec cmake -S . -B build -DCMAKE_C_COMPILER_LAUNCHER=env >/dev/null
+  run grep -Fx 'CMAKE_C_COMPILER_LAUNCHER:UNINITIALIZED=env' build/CMakeCache.txt
+  assert_success
+  # The other language still gets mbx's.
+  run grep -E '^CMAKE_CXX_COMPILER_LAUNCHER:.*mbx-cmake-launch-cxx$' build/CMakeCache.txt
+  assert_success
+}
+
 @test "a failing command's exit code passes through" {
   local project="$BATS_TEST_TMPDIR/failing"
   write_project "$project"

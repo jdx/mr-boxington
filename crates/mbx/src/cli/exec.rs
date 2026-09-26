@@ -4,6 +4,7 @@ use crate::session::{self, CacheSession};
 use crate::util::is_checkout_root;
 use eyre::Result;
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -26,7 +27,7 @@ pub(super) fn run(config: &Config, settings: &CliSettings, args: &ExecArgs) -> R
     let Some((program, arguments)) = args.command.split_first() else {
         eyre::bail!("exec needs a command to run");
     };
-    let program: std::ffi::OsString = program.into();
+    let program: OsString = program.into();
     let working_dir = std::env::current_dir()?;
     let project_root = match &args.project_root {
         Some(root) => absolute(&working_dir, root),
@@ -63,8 +64,10 @@ pub(super) fn run(config: &Config, settings: &CliSettings, args: &ExecArgs) -> R
         let run = session
             .begin_exec(&project_root, &args.command, &shims, &mut environment)
             .await;
+        let mut arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
+        session.prepare_exec_cmake(&program, &mut arguments, &mut environment);
 
-        let status = run_cargo(&program, arguments, environment);
+        let status = run_cargo(&program, &arguments, environment);
 
         // As in a cargo build: a compilation that was restored or published
         // before a later one failed is still worth remembering.

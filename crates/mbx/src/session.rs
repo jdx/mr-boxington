@@ -674,6 +674,23 @@ impl CacheSession {
         action_run
     }
 
+    /// Add the compiler launchers to a CMake configure `mbx exec` runs.
+    ///
+    /// They live beside this binary's own native shims, which a CMake cache
+    /// may record, rather than in the shared `PATH` shim directory.
+    pub fn prepare_exec_cmake(
+        &self,
+        program: &OsStr,
+        arguments: &mut Vec<OsString>,
+        environment: &mut BTreeMap<String, String>,
+    ) {
+        if let Err(error) =
+            cmake::exec_arguments(&self.cmake_shims_dir, program, arguments, environment)
+        {
+            warn!("CMake compiler launchers are unavailable: {error:#}");
+        }
+    }
+
     /// Warm the recorded actions for a Cargo command without running Cargo.
     pub async fn prefetch(&self, workspace_root: &Path, command: &[String]) -> Result<()> {
         let identity = build_identity(workspace_root, command);

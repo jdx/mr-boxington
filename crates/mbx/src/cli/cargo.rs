@@ -843,7 +843,7 @@ pub(super) fn manage_existing_target_with(
 
 pub(super) fn run_cargo(
     cargo: &std::ffi::OsStr,
-    arguments: &[String],
+    arguments: &[impl AsRef<std::ffi::OsStr>],
     environment: BTreeMap<String, String>,
 ) -> Result<ExitCode> {
     let mut command = Command::new(cargo);

@@ -10,8 +10,8 @@ tools:
 mbx exec make -j8
 ```
 
-For CMake, run the configure step through `mbx exec` too. CMake chooses a
-compiler while configuring and reuses that choice when it builds.
+For CMake, run the configure step through `mbx exec` too. That is where mbx
+sets up CMake's compiler launchers, which later builds reuse.
 
 ```sh
 mbx exec cmake -S . -B build
@@ -41,31 +41,62 @@ The wrappers use the same local and remote cache as Cargo builds. The command's
 exit status and compiler output are passed through unchanged, and the wrappers
 go away from `PATH` when the command finishes.
 
-## CMake and other configured builds
+## CMake builds
 
-Some build systems save the compiler's absolute path during configuration.
-CMake writes it to `CMakeCache.txt`; autoconf may write it into generated
-makefiles. If configuration happens outside `mbx exec`, the saved path points
-straight to the compiler and later `mbx exec` builds cannot intercept it.
+When `mbx exec` runs a CMake configure, it also sets
+[`CMAKE_C_COMPILER_LAUNCHER`](https://cmake.org/cmake/help/latest/prop_tgt/LANG_COMPILER_LAUNCHER.html)
+and `CMAKE_CXX_COMPILER_LAUNCHER` in the build directory's cache. CMake then
+runs every C and C++ compile through mbx, whichever compiler it uses:
 
-For an existing CMake build configured with a direct compiler path, configure
-a fresh build directory through `mbx exec`. Changing `PATH` during a later
-build does not replace the compiler saved in `CMakeCache.txt`.
-
-Configure through `mbx exec` so the build system records mbx's wrapper.
-That path remains valid across later commands. You should still use `mbx exec`
-for each build you want cached:
+- **An existing build directory.** A directory configured earlier without mbx
+  keeps its compiler and options. Reconfiguring it through `mbx exec` only adds
+  the launchers, so CMake does not start over.
+- **A compiler the build names itself.** Compilers set with
+  `-DCMAKE_C_COMPILER=/opt/gcc-13/bin/gcc`, `CC=gcc-13`, or a toolchain file
+  are cached, although the wrappers on `PATH` never see them.
 
 ```sh
-# Configure once.
+# Configured once without mbx:
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+# Add the launchers, keeping the existing configuration:
 mbx exec cmake -S . -B build
 
-# Build as often as needed.
+# Build as often as needed:
 mbx exec cmake --build build
 ```
 
+mbx leaves a launcher alone if you choose one yourself, either with
+`-DCMAKE_C_COMPILER_LAUNCHER=...` or by exporting
+`CMAKE_C_COMPILER_LAUNCHER`. A launcher left by an older mbx is replaced.
+
 Running `cmake --build build` without `mbx exec` still works, but it calls the
 real compiler without using the cache.
+
+The launchers work with the Makefile and Ninja generators. CMake ignores them
+with the Visual Studio and Xcode generators. CMake has no launcher for
+assembly: `.S` files are cached only when CMake found its compiler through the
+wrappers on `PATH`, which happens on a fresh configure under `mbx exec`.
+
+mbx only sets up the launchers when the command after `mbx exec` is `cmake`
+itself. A script that runs CMake for you still gets the `PATH` wrappers
+described above.
+
+## Other configured builds
+
+Some build systems save the compiler's absolute path during configuration.
+autoconf may write it into generated makefiles. If configuration happens
+outside `mbx exec`, the saved path points straight to the compiler and later
+`mbx exec` builds cannot intercept it. Configure through `mbx exec` so the
+build system records mbx's wrapper instead:
+
+```sh
+mbx exec ./configure
+mbx exec make -j8
+```
+
+The recorded wrapper stays valid across later commands. Outside `mbx exec` it
+runs the real compiler without using the cache.
 
 ## What gets cached
 
@@ -77,9 +108,9 @@ multi-source compiler calls, or commands whose behavior it cannot model
 safely. Those commands still run normally; the session summary counts their
 bypasses, and `MBX_SUMMARY=full` reports the grouped reasons.
 
-`mbx exec` only intercepts the unversioned compiler names listed above. It
-leaves commands such as `gcc-13`, absolute compiler paths, and explicitly
-selected cross-compilers alone.
+Outside CMake, `mbx exec` only intercepts the unversioned compiler names listed
+above. It leaves commands such as `gcc-13`, absolute compiler paths, and
+explicitly selected cross-compilers alone.
 
 See [limits](/limits#c-and-c-caching-covers-the-host-compiles-mbx-drives) for
 the complete list of supported and bypassed invocations.

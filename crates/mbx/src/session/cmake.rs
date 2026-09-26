@@ -1,12 +1,20 @@
-//! Keep compiler identity stable when cmake-rs inherits mbx's CC shims.
+//! Cache CMake's C and C++ compiles through `CMAKE_<LANG>_COMPILER_LAUNCHER`.
 //!
-//! CMake discards configuration options when CMAKE_<LANG>_COMPILER changes.
-//! Translate our compiler paths to their real drivers before configuration,
-//! and cache C/C++ through launchers instead. ASM keeps its real driver too,
-//! but CMake does not support an ASM compiler launcher.
+//! Under `mbx build`, cmake-rs inherits mbx's CC shims, and CMake discards
+//! configuration options when CMAKE_<LANG>_COMPILER changes. Translate our
+//! compiler paths to their real drivers before configuration, and cache C/C++
+//! through launchers instead. ASM keeps its real driver too, but CMake does not
+//! support an ASM compiler launcher.
+//!
+//! `mbx exec cmake` adds the same launchers to the configure it runs, so
+//! whichever compiler CMake settles on is cached: one an existing build
+//! directory recorded without mbx, or one the build named itself.
 
 use super::shims::{CcShims, is_target_triple, link_path_shim, resolve_on_path};
-use super::{record_cc_bypass, reserve_stderr_for_compiler, run_transparent_cc, session_socket};
+use super::{
+    pin_names_a_compiler, record_cc_bypass, reserve_stderr_for_compiler, run_transparent_cc,
+    session_socket,
+};
 use eyre::Result;
 use mbx_cache_cc::CcLanguage;
 use std::collections::BTreeMap;
@@ -19,6 +27,10 @@ const COMPILERS: &str = "MBX_CMAKE_COMPILERS";
 const SHIM: &str = "mbx-cmake";
 const C_LAUNCHER: &str = "mbx-cmake-launch-c";
 const CXX_LAUNCHER: &str = "mbx-cmake-launch-cxx";
+const LAUNCHERS: [(&str, &str); 2] = [
+    ("CMAKE_C_COMPILER_LAUNCHER", C_LAUNCHER),
+    ("CMAKE_CXX_COMPILER_LAUNCHER", CXX_LAUNCHER),
+];
 
 pub(super) fn environment(
     directory: &Path,
@@ -73,17 +85,49 @@ pub(super) fn environment(
     for compiler in &compilers.targeted {
         pins.insert(cmake_path(&compiler.shim), compiler.real.clone());
     }
-    for (variable, launcher) in [
-        ("CMAKE_C_COMPILER_LAUNCHER", C_LAUNCHER),
-        ("CMAKE_CXX_COMPILER_LAUNCHER", CXX_LAUNCHER),
-    ] {
-        let installed = directory.join(super::shim_file_name(launcher));
-        link_path_shim(&executable, &installed)?;
-        write_launcher_script(directory, variable, launcher, &installed)?;
-    }
+    install_launchers(directory, &executable)?;
     environment.insert(PROGRAMS.into(), serde_json::to_string(&programs)?);
     environment.insert(COMPILERS.into(), serde_json::to_string(&pins)?);
     Ok(environment)
+}
+
+/// Point a configure that `mbx exec` runs itself at the compiler launchers.
+///
+/// The compiler shims on `PATH` reach only a build that finds its compiler by
+/// one of their names, on a fresh configure. A launcher reaches the compiler
+/// CMake already recorded, and one the build chose by path or by a versioned
+/// name, without changing CMAKE_<LANG>_COMPILER and so without discarding the
+/// build directory's configuration.
+///
+/// Only the command `mbx exec` was given, not a `cmake` on `PATH`: a version
+/// manager's `cmake` shim may itself search `PATH` for the next `cmake`, and a
+/// wrapper there would be handed back to itself indefinitely.
+pub(super) fn exec_arguments(
+    directory: &Path,
+    program: &OsStr,
+    arguments: &mut Vec<OsString>,
+    environment: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    let is_cmake = Path::new(program)
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("cmake"));
+    if !is_cmake || !configures(arguments) {
+        return Ok(());
+    }
+    install_launchers(directory, &std::env::current_exe()?)?;
+    environment.extend(add_launchers(arguments, directory, &LAUNCHERS));
+    Ok(())
+}
+
+/// Install the C and C++ launchers, and the scripts that point a cache at them.
+fn install_launchers(directory: &Path, executable: &Path) -> Result<()> {
+    for (variable, launcher) in LAUNCHERS {
+        let installed = directory.join(super::shim_file_name(launcher));
+        link_path_shim(executable, &installed)?;
+        write_launcher_script(directory, variable, launcher, &installed)?;
+    }
+    Ok(())
 }
 
 fn read_map(name: &str) -> BTreeMap<String, PathBuf> {
@@ -120,6 +164,12 @@ pub fn dispatch() -> Option<ExitCode> {
             return Some(ExitCode::FAILURE);
         };
         let arguments: Vec<_> = arguments.collect();
+        // A build configured under `mbx exec` records the compiler shim it
+        // found on `PATH`, and that shim caches the compile itself.
+        let current = std::env::current_exe().ok();
+        if !pin_names_a_compiler(Path::new(&compiler), current.as_deref()) {
+            return Some(run_transparent_cc(compiler, arguments));
+        }
         if session_socket().is_some() {
             match crate::cc::compile(&compiler, &arguments, language) {
                 Ok(code) => return Some(code),
@@ -136,43 +186,85 @@ pub fn dispatch() -> Option<ExitCode> {
         .unwrap_or_else(|| "cmake".into());
     let mut arguments: Vec<_> = std::env::args_os().skip(1).collect();
     let mut command = Command::new(program);
-    // --build, --install, -E, -P, and probes must pass through verbatim.
-    if !arguments.iter().any(|arg| {
-        matches!(
-            arg.to_str(),
-            Some("--build" | "--install" | "-E" | "-P" | "--version" | "--help")
-        )
-    }) {
-        let mut scripts = Vec::new();
-        for (variable, launcher) in rewrite_compilers(&mut arguments, &read_map(COMPILERS)) {
-            // A launcher chosen on the command line is left to the caller.
-            // One exported in the environment still runs the script, which
-            // installs it in place of a stale mbx launcher: CMake itself would
-            // only have read it into a fresh cache.
-            if defines(&arguments, variable) {
-                continue;
-            }
-            let directory = invoked.parent().unwrap();
-            let script = directory.join(launcher_script_name(launcher));
-            if script.is_file() {
-                scripts.extend([OsString::from("-C"), script.into_os_string()]);
-            } else if std::env::var_os(variable).is_none() {
-                command.env(variable, directory.join(super::shim_file_name(launcher)));
-            }
-        }
-        // After the caller's own initial-cache scripts: one that seeds a
-        // launcher without FORCE must find the entry still empty.
-        let position = after_initial_cache_scripts(&arguments);
-        arguments.splice(position..position, scripts);
+    if configures(&arguments) {
+        let launchers = rewrite_compilers(&mut arguments, &read_map(COMPILERS));
+        command.envs(add_launchers(
+            &mut arguments,
+            invoked.parent().unwrap(),
+            &launchers,
+        ));
     }
-    let status = command.args(arguments).status();
-    Some(match status {
+    Some(run_cmake(command, arguments))
+}
+
+/// Whether a CMake command line configures a build tree.
+///
+/// Building, installing, scripting, and informational modes must pass through
+/// verbatim: several of them reject `-C`.
+fn configures(arguments: &[OsString]) -> bool {
+    !arguments.iter().any(|argument| {
+        let argument = argument.to_str().unwrap_or_default();
+        matches!(
+            argument,
+            "--build"
+                | "--install"
+                | "--open"
+                | "--workflow"
+                | "--list-presets"
+                | "-E"
+                | "-P"
+                | "-N"
+                | "--version"
+                | "-version"
+                | "--help"
+                | "-help"
+                | "-h"
+                | "/?"
+        ) || argument.starts_with("--help-")
+            || argument.starts_with("--list-presets=")
+    })
+}
+
+/// Point a configure at the launchers in `directory`, returning any
+/// environment CMake needs for it.
+fn add_launchers(
+    arguments: &mut Vec<OsString>,
+    directory: &Path,
+    launchers: &[(&str, &str)],
+) -> Vec<(String, String)> {
+    let mut scripts = Vec::new();
+    let mut environment = Vec::new();
+    for &(variable, launcher) in launchers {
+        // A launcher chosen on the command line is left to the caller.
+        // One exported in the environment still runs the script, which
+        // installs it in place of a stale mbx launcher: CMake itself would
+        // only have read it into a fresh cache.
+        if defines(arguments, variable) {
+            continue;
+        }
+        let script = directory.join(launcher_script_name(launcher));
+        if script.is_file() {
+            scripts.extend([OsString::from("-C"), script.into_os_string()]);
+        } else if std::env::var_os(variable).is_none() {
+            let launcher = directory.join(super::shim_file_name(launcher));
+            environment.push((variable.into(), launcher.to_string_lossy().into_owned()));
+        }
+    }
+    // After the caller's own initial-cache scripts: one that seeds a
+    // launcher without FORCE must find the entry still empty.
+    let position = after_initial_cache_scripts(arguments);
+    arguments.splice(position..position, scripts);
+    environment
+}
+
+fn run_cmake(mut command: Command, arguments: Vec<OsString>) -> ExitCode {
+    match command.args(arguments).status() {
         Ok(status) => crate::materialize::exit_code(status),
         Err(error) => {
             eprintln!("mbx[error]: failed to execute CMake: {error}");
             ExitCode::FAILURE
         }
-    })
+    }
 }
 
 /// File name of the initial-cache script that installs `launcher`.
@@ -505,6 +597,81 @@ mod tests {
         assert!(defines(&arguments, "CMAKE_C_COMPILER_LAUNCHER"));
         assert!(defines(&arguments, "CMAKE_CXX_COMPILER_LAUNCHER"));
         assert!(!defines(&arguments[3..], "CMAKE_C_COMPILER_LAUNCHER"));
+    }
+
+    #[test]
+    fn only_configures_receive_launcher_scripts() {
+        let configures =
+            |items: &[&str]| configures(&items.iter().map(OsString::from).collect::<Vec<_>>());
+        assert!(configures(&["-S", ".", "-B", "build"]));
+        assert!(configures(&["--preset", "default"]));
+        assert!(configures(&["."]));
+        for passthrough in [
+            &["--build", "build"][..],
+            &["--install", "build"],
+            &["--workflow", "--preset", "default"],
+            &["--list-presets=all"],
+            &["--help-command", "project"],
+            &["-E", "echo", "hi"],
+            &["-P", "script.cmake"],
+            &["--version"],
+        ] {
+            assert!(!configures(passthrough), "{passthrough:?}");
+        }
+    }
+
+    #[test]
+    fn exec_adds_launchers_only_to_a_cmake_configure() {
+        let directory = tempfile::tempdir().unwrap();
+        let run = |program: &str, items: &[&str]| {
+            let mut arguments: Vec<OsString> = items.iter().map(OsString::from).collect();
+            let mut environment = BTreeMap::new();
+            exec_arguments(
+                directory.path(),
+                OsStr::new(program),
+                &mut arguments,
+                &mut environment,
+            )
+            .unwrap();
+            arguments
+        };
+        let script = |launcher| {
+            directory
+                .path()
+                .join(launcher_script_name(launcher))
+                .into_os_string()
+        };
+        assert_eq!(
+            run("/opt/bin/cmake", &["-C", "mine.cmake", "-S", "."]),
+            [
+                "-C".into(),
+                "mine.cmake".into(),
+                "-C".into(),
+                script(C_LAUNCHER),
+                "-C".into(),
+                script(CXX_LAUNCHER),
+                "-S".into(),
+                ".".into(),
+            ]
+        );
+        assert!(
+            directory
+                .path()
+                .join(launcher_script_name(C_LAUNCHER))
+                .is_file()
+        );
+        assert_eq!(run("cmake", &["--build", "build"]), ["--build", "build"]);
+        assert_eq!(run("make", &["-C", "build"]), ["-C", "build"]);
+        assert_eq!(
+            run("cmake", &["-S", ".", "-DCMAKE_C_COMPILER_LAUNCHER=ccache"]),
+            [
+                "-C".into(),
+                script(CXX_LAUNCHER),
+                "-S".into(),
+                ".".into(),
+                "-DCMAKE_C_COMPILER_LAUNCHER=ccache".into(),
+            ]
+        );
     }
 
     #[test]
