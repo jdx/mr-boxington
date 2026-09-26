@@ -209,12 +209,19 @@ const RAMP: [number, string, string][] = [
 // lands exactly on the logo's #e6ad54 and the top on #f2c479, and a band
 // FLAT_BAND darker (the lid's edge, the base) on #cf8f35. Faces turned from
 // that view shade continuously, so a turning box still reads as a solid.
+// Seen isometrically, the right-hand wall is #bd7d23, the old logo's; below
+// it the material goes on darkening toward the ink, so the bands on that
+// wall show and a carton put in shadow keeps its two walls apart.
 const AHEAD = new View({ cx: 0, cy: 0, scale: 1, yaw: 0, pitch: 0 });
 const TONE_FRONT = tone(AHEAD, [0, 0, 1]);
 const TONE_TOP = tone(AHEAD, [0, 1, 0]);
+const TONE_ISO_RIGHT = tone(new View({ cx: 0, cy: 0, scale: 1, yaw: Math.PI / 4, pitch: Math.PI / 6 }), [1, 0, 0]);
 /** How much darker a deep band is than the face it is painted on. */
 export const FLAT_BAND = 0.25;
 const FLAT: [number, string][] = [
+  [TONE_ISO_RIGHT - 2 * FLAT_BAND, "#8e5f1d"],
+  [TONE_ISO_RIGHT - FLAT_BAND, "#a56e20"],
+  [TONE_ISO_RIGHT, "#bd7d23"],
   [TONE_FRONT - 2 * FLAT_BAND, "#bd7d23"],
   [TONE_FRONT - FLAT_BAND, "#cf8f35"],
   [TONE_FRONT, "#e6ad54"],
