@@ -1879,7 +1879,15 @@ impl CacheAgent {
         for request in requests {
             responses.push(self.respond_on(request, &mut connection).await);
         }
+        self.release_bypass(&mut connection);
         responses
+    }
+
+    /// Emit a held bypass reason that no compiler run claimed.
+    fn release_bypass(&self, connection: &mut ConnectionUploads) {
+        if let Some(kind) = connection.take_bypass() {
+            self.emit(|| AgentEvent::Bypass { kind });
+        }
     }
 
     fn write_lock(&self, digest: &CacheDigest) -> Arc<tokio::sync::Mutex<()>> {
@@ -1910,8 +1918,10 @@ impl CacheAgent {
     /// the queue falls back to treating every blob it holds as a prerequisite.
     #[cfg(test)]
     async fn respond(&self, request: AgentRequest) -> AgentResponse {
-        self.respond_on(request, &mut ConnectionUploads::default())
-            .await
+        let mut connection = ConnectionUploads::default();
+        let response = self.respond_on(request, &mut connection).await;
+        self.release_bypass(&mut connection);
+        response
     }
 
     async fn respond_on(
@@ -1966,7 +1976,12 @@ impl CacheAgent {
                     .unwrap()
                     .entry(kind.clone())
                     .or_insert(0) += 1;
-                self.emit(|| AgentEvent::Bypass { kind });
+                // Held until the connection's next compiler run, which is the
+                // compilation this bypass describes when the shim reports the
+                // two together. A reason nothing claims is emitted on its own.
+                if let Some(unclaimed) = connection.hold_bypass(kind) {
+                    self.emit(|| AgentEvent::Bypass { kind: unclaimed });
+                }
                 Ok(AgentResponse::BypassRecorded)
             }
             AgentRequest::RecordUnconsulted => {
@@ -2066,6 +2081,12 @@ impl CacheAgent {
                 // never find it.
                 let (outcome, incremental) = lookup_outcome(&outcome);
                 let outcome = outcome.to_string();
+                let bypass = if outcome == "bypass" {
+                    connection.take_bypass()
+                } else {
+                    self.release_bypass(connection);
+                    None
+                };
                 let diagnostic = connection
                     .take_action_diagnostic(&outcome, crate_name.as_deref())
                     .map(|diagnostic| AgentEvent::ActionDiagnostic {
@@ -2079,6 +2100,7 @@ impl CacheAgent {
                     crate_name.as_deref(),
                     duration_ns,
                     diagnostic,
+                    bypass,
                 )
             }
             AgentRequest::RecordActionVerification { matched, restore } => {
@@ -2507,6 +2529,7 @@ impl CacheAgent {
         crate_name: Option<&str>,
         duration_ns: u64,
         diagnostic: Option<AgentEvent>,
+        bypass: Option<String>,
     ) -> Result<AgentResponse> {
         if !matches!(outcome, "miss" | "unconsulted" | "bypass" | "verification") {
             bail!("invalid compiler invocation outcome");
@@ -2529,14 +2552,19 @@ impl CacheAgent {
             let duration = slow.entry(crate_name.to_string()).or_default();
             *duration = duration.saturating_add(duration_ns);
         }
-        self.emit_action(
-            diagnostic,
-            AgentEvent::CompilerInvocation {
+        let action = match bypass {
+            Some(kind) => AgentEvent::BypassedCompilation {
+                kind,
+                crate_name: crate_name.map(str::to_string),
+                duration_ns,
+            },
+            None => AgentEvent::CompilerInvocation {
                 outcome: outcome.to_string(),
                 crate_name: crate_name.map(str::to_string),
                 duration_ns,
             },
-        );
+        };
+        self.emit_action(diagnostic, action);
         Ok(AgentResponse::CompilerInvocationRecorded)
     }
 
@@ -3071,16 +3099,22 @@ impl CacheAgent {
         // publishes a compilation's blobs and the action result naming them over
         // one connection, in that order.
         let mut connection = ConnectionUploads::default();
-        while let Some(line) = read_request(&mut reader).await? {
-            let response = match serde_json::from_str(&line) {
-                Ok(request) => self.respond_on(request, &mut connection).await,
-                Err(error) => AgentResponse::Error {
-                    message: format!("invalid agent request: {error}"),
-                },
-            };
-            send_response(&mut writer, &response).await?;
+        let served = async {
+            while let Some(line) = read_request(&mut reader).await? {
+                let response = match serde_json::from_str(&line) {
+                    Ok(request) => self.respond_on(request, &mut connection).await,
+                    Err(error) => AgentResponse::Error {
+                        message: format!("invalid agent request: {error}"),
+                    },
+                };
+                send_response(&mut writer, &response).await?;
+            }
+            Ok(())
         }
-        Ok(())
+        .await;
+        // However the connection ended, a reason it reported still counts.
+        self.release_bypass(&mut connection);
+        served
     }
 }
 
