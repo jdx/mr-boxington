@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Wire protocol version used between an in-process cache agent and its shims.
-pub const AGENT_PROTOCOL_VERSION: u8 = 10;
+pub const AGENT_PROTOCOL_VERSION: u8 = 11;
 /// Largest single protocol request the agent will read.
 ///
 /// Requests are small JSON objects; the largest legitimate ones carry an output
@@ -343,6 +343,12 @@ pub struct WrapperTiming {
     pub phases_ns: std::collections::BTreeMap<String, u64>,
     /// Nested spans relative to this wrapper's start, capped at 512.
     pub spans: Vec<WrapperSpan>,
+    /// The build unit this invocation produced, when it can be identified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_id: Option<String>,
+    /// Units whose outputs this invocation consumed, by [`Self::unit_id`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<String>,
 }
 
 /// A trace interval inside one wrapper process.

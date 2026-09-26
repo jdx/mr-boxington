@@ -2056,6 +2056,9 @@ impl CacheAgent {
                     || timing.phases_ns.len() > 32
                     || timing.adapter.len() > 64
                     || timing.unit.as_ref().is_some_and(|s| s.len() > 1024)
+                    || timing.unit_id.as_ref().is_some_and(|s| s.len() > 256)
+                    || timing.dependencies.len() > 4096
+                    || timing.dependencies.iter().any(|s| s.len() > 256)
                     || timing.phases_ns.keys().any(|s| s.len() > 64)
                     || timing.spans.iter().any(|s| s.name.len() > 64)
                 {

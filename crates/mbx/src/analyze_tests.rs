@@ -353,3 +353,33 @@ fn a_build_with_nothing_uncached_says_so() {
 fn prose_wraps_at_word_boundaries() {
     assert_eq!(wrap("one two three four", 9), ["one two", "three", "four"]);
 }
+
+#[test]
+fn the_report_ends_with_the_critical_path() {
+    let mut timing = mbx_cache_core::WrapperTiming::default();
+    timing.unit = Some("engine".into());
+    timing.unit_id = Some("a1".into());
+    timing.duration_ns = 2 * SECOND;
+    let text = analyze(
+        Vec::new(),
+        vec![
+            action(ActionOutcome::Unconsulted, "engine", 2, None),
+            SessionEvent::WrapperTiming {
+                v: 1,
+                ts_ms: 0,
+                timing,
+            },
+        ],
+    )
+    .text();
+
+    assert!(
+        text.contains("critical path: 2.00s, 100% of the 2.00s between the first unit starting"),
+        "{text}"
+    );
+    assert!(text.contains("  2.00s  engine\n"), "{text}");
+    assert!(
+        text.contains("only one unit running for 2.00s: engine 2.00s"),
+        "{text}"
+    );
+}

@@ -98,7 +98,7 @@ enum Commands {
     Explain(explain::ExplainArgs),
     /// Rank the last build's uncached compiler time by cause, with what would remove each one.
     ///
-    /// Reads the build's recorded history, so it runs nothing. A crate that rebuilt only because a dependency changed is counted under the change that started it.
+    /// Reads the build's recorded history, so it runs nothing. A crate that rebuilt only because a dependency changed is counted under the change that started it. The report ends with the chain of units the build waited on and the time only one unit was running.
     Analyze(analyze::AnalyzeArgs),
     /// Make plain Cargo commands run through mbx.
     Setup(setup::SetupArgs),

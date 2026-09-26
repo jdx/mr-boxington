@@ -155,7 +155,6 @@ pub(crate) fn compile(
     arguments: &[OsString],
     wrapper_argument: Option<&OsStr>,
 ) -> Result<ExitCode> {
-    let _timing = crate::phase_timing::start("rustc", session::crate_name_argument(arguments));
     let setup = crate::phase_timing::phase("key");
     let working_dir = std::env::current_dir()?;
     // The orchestrated session supplies the target root. A persistent wrapper

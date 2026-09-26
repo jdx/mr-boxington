@@ -1555,6 +1555,12 @@ pub fn run_rustc_shim() -> ExitCode {
         .is_some_and(|wrapper| wrapper == rustc);
     let (wrapper_argument, compiler_arguments) = workspace_wrapper_arguments(&rustc, &arguments);
     let cacheable_workspace_wrapper = is_workspace_wrapper && wrapper_argument.is_some();
+    // Held here rather than inside the cache attempt so that a compilation
+    // that bypasses is timed through its compiler run as well.
+    let _timing = crate::phase_timing::start("rustc", crate_name_argument(&arguments));
+    let out_dir = std::env::var_os("OUT_DIR").map(PathBuf::from);
+    let (unit_id, dependencies) = crate::unit_graph::rustc_unit(&arguments, out_dir.as_deref());
+    crate::phase_timing::identify(unit_id, dependencies);
     if std::env::var_os(PREVIOUS_RUSTC_WRAPPER_ENV).is_none()
         && (!is_workspace_wrapper || cacheable_workspace_wrapper)
     {
@@ -1695,6 +1701,7 @@ fn run_transparent_rustc(
         if permit.is_none() {
             // This process becomes the compiler, so nothing is left to time it.
             send_bypass(&bypass);
+            crate::phase_timing::finish();
             let error = command.exec();
             report_shim_error(&format!("the rustc shim failed to execute rustc: {error}"));
             return ExitCode::from(1);
@@ -1702,12 +1709,15 @@ fn run_transparent_rustc(
         // A held permit must be released when the compiler finishes, and its
         // lease lock is close-on-exec, so this process has to outlive the
         // compiler rather than become it.
-        match command.spawn().and_then(|mut child| {
+        let compiler = crate::phase_timing::phase("compiler");
+        let waited = command.spawn().and_then(|mut child| {
             if let Some(action) = &mut action {
                 action.started();
             }
             child.wait()
-        }) {
+        });
+        drop(compiler);
+        match waited {
             Ok(status) => {
                 drop(permit);
                 if let Some(demand) = &demand {
@@ -1732,7 +1742,8 @@ fn run_transparent_rustc(
         use std::os::windows::io::AsRawHandle as _;
         use windows_sys::Win32::System::Threading::GetExitCodeProcess;
 
-        match command.spawn().and_then(|mut child| {
+        let compiler = crate::phase_timing::phase("compiler");
+        let waited = command.spawn().and_then(|mut child| {
             let status = child.wait()?;
             let mut exit_code = 1;
             // SAFETY: the child owns a valid process handle until it is
@@ -1743,7 +1754,9 @@ fn run_transparent_rustc(
             } else {
                 Ok((exit_code, status))
             }
-        }) {
+        });
+        drop(compiler);
+        match waited {
             Ok((exit_code, status)) => {
                 drop(permit);
                 if let Some(demand) = &demand {
@@ -1754,6 +1767,8 @@ fn run_transparent_rustc(
                     crate_name.as_deref(),
                     duration_ns(started.elapsed()),
                 );
+                // ExitProcess skips Rust destructors, including the timer.
+                crate::phase_timing::finish();
                 // SAFETY: This process is only a transparent compiler wrapper.
                 // ExitProcess is required to preserve Windows exception codes,
                 // which cannot be represented by stable Rust's ExitCode API.

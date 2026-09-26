@@ -3,8 +3,9 @@ description: Rank where a build's uncached compiler time went, and see what woul
 ---
 # Analyzing a build
 
-`mbx analyze` reads the most recent recorded build of the current workspace
-and groups its uncached compiler time by cause, largest first. It runs nothing.
+`mbx analyze` reads the most recent recorded build of the current workspace,
+groups its uncached compiler time by cause, largest first, and shows the chain
+of units the build waited on. It runs nothing.
 
 ```sh
 cargo check
@@ -69,11 +70,39 @@ project, the same baseline `mbx explain --last` uses. Recordings come from
 [session history](/tui#recording), which keeps a week of builds, at most 256
 of them.
 
+## Critical path
+
+After the causes, the report lists the chain of units the build waited on.
+Walking back from the unit that finished last, each step follows the
+dependency that became ready last. Build-script runs are units too, so a slow
+`build.rs` appears where the crates that read its output waited for it.
+
+```text
+critical path: 531.3ms, 100% of the 531.3ms between the first unit starting and the last finishing
+121.4ms  api build script (compile)
+313.1ms  api build script
+ 35.1ms  api, 3.7ms of it waiting to start
+ 61.7ms  cli
+
+only one unit running for 483.5ms: api build script 308.0ms, api build script (compile) 86.0ms and cli 58.1ms
+```
+
+Each step is credited with the time it added to the chain, and the steps add
+up to the path. A crate that Cargo starts once its dependency's metadata is
+ready is credited from its own start. Waiting to start is time between the
+last recorded dependency becoming ready and the unit starting: Cargo waiting
+for a free job, or a dependency the recording does not name. Steps under one
+percent of the path are folded into one line.
+
+The last line reports how long exactly one unit was running, and which units
+ran alone. Nothing else was building during that time.
+
 ## Limits
 
-- Times are compiler wall time. Compilations overlap, so the total is not the
-  build's duration, and the largest cause is not necessarily the one the build
-  waited on.
+- Cause times are compiler wall time. Compilations overlap, so their total is
+  not the build's duration; the critical path is the part the build waited on.
+- Build-script runs appear on the critical path but not in the cause ranking,
+  which covers compilations.
 - Dependents are matched by crate name. A crate built for both the host and
   the target shares one verdict.
 - Bypasses recorded without a compile time, such as rustdoc and C compiler

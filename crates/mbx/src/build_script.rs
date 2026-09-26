@@ -297,6 +297,13 @@ pub(crate) fn run_real() -> ExitCode {
 pub(crate) fn run() -> Result<ExitCode> {
     let invoked = session::build_script_invocation_path()
         .ok_or_else(|| eyre::eyre!("build-script shim has no argv0"))?;
+    let package = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| cargo_package_name().into());
+    let _timing =
+        crate::phase_timing::start("build-script", Some(format!("{package} build script")));
+    let out_dir = std::env::var_os("OUT_DIR").map(std::path::PathBuf::from);
+    let (unit_id, dependencies) =
+        crate::unit_graph::build_script_run_unit(out_dir.as_deref(), &invoked);
+    crate::phase_timing::identify(unit_id, dependencies);
     let real = session::find_build_script_real_path(&invoked)
         .ok_or_else(|| eyre::eyre!("preserved build script is missing"))?;
     let action_path = build_script_action_path(&real);
