@@ -87,21 +87,26 @@ provide tools to explain cache hits and misses.
 
 **For Rust builds, mbx wraps Cargo as well as the compiler; kache wraps
 the compiler.** Cargo organizes a Rust build and calls the compiler to do the
-work. kache steps in when Cargo calls the compiler. mbx starts Cargo too, which lets
-it set up the build and manage its build directories as well as cache the
-compilation work.
+work. kache steps in when Cargo calls the compiler. mbx starts Cargo too, so it
+can show build progress with cache hits and misses in place of Cargo's output,
+start a new checkout with the dependency builds another checkout already has,
+and optionally run test binaries within the same CPU and memory budget as
+compilations.
 
 With kache, you run `kache init` once and continue using `cargo build`. With
 mbx, you use `mbx build` or enable the Cargo setup described above. Choose
 kache if you want a cache in your existing build setup; choose mbx if you also
 want it to run your Cargo commands, place `target/` directories and remove them
 automatically, and coordinate builds and test runs across agents.
+kache removes target directories only when you run `kache clean`. mbx removes
+them after builds once their checkout is deleted, they go unused for 30 days,
+or together they exceed a disk budget.
 
 Both tools support C and C++; kache also supports CUDA. See its
 [current feature list](https://github.com/kunobi-ninja/kache) for supported
 workloads and its [architecture guide](https://ninja.kunobi.com/docs/kache/how-it-works/architecture)
 for the implementation details.
-This comparison was checked against its documentation on September 25, 2026.
+This comparison was checked against kache 0.26.3 on September 26, 2026.
 
 ## sccache
 
