@@ -214,16 +214,25 @@ export function drawNodeLabel(
 // the streaks alone on PALETTE.bg.
 export const WHIP = 0.14;
 
-// Handoff next-push → pruned: one plain cube (no face, tape, or label) at the
+// Handoff next-push → pruned: one plain carton (no face or tape) at the
 // center cell of the world grid under WORLD_CAM, with no floor grid yet.
 
 export const WORLD_CAM: Camera = { cx: 960, cy: 600, scale: 70, ...iso, target: [0, 0, 0] };
 /** Grid cells run from -GRID_R to GRID_R on x and z. */
 export const GRID_R = 4;
 export const CUBE = 0.78;
+/**
+ * A world carton on cell (x, z): the logo character built as a cube, CUBE
+ * on every side, faceless, in the flat logo colours with no outline, so it
+ * wears the lid band and base band the reel's other cartons (map.ts
+ * drawCarton) do and `tape` lays the logo's tab.
+ */
 export const cellPose = (x: number, z: number, extra: Partial<BoxPose> = {}): BoxPose => ({
+  kind: "logo",
   pos: [x, 0, z],
   size: CUBE,
+  dims: [1, 1, 1],
+  face: null,
   ...extra,
 });
 export const H5_POSE: BoxPose = cellPose(0, 0);

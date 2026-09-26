@@ -16,7 +16,7 @@
 // benchmarks page.
 
 import { BEAT, CUBE, PALETTE, type Scene, sec, WHIP, WORLD_CAM } from "../bible";
-import { drawShadow, OUTLINE, OUTLINE_RATIO } from "../box";
+import { drawShadow, LID_THICK } from "../box";
 import { mix, rgba } from "../color";
 import { type CommitFact, delta, medianOf, type ReelFacts, tenths } from "../facts";
 import { glow, makeCanvas, smear } from "../fx";
@@ -42,7 +42,8 @@ import {
 import {
   applyMatrix,
   type Camera,
-  cardboardFill,
+  FLAT_BAND,
+  flatCard,
   polygon,
   type Projected,
   tone,
@@ -903,10 +904,16 @@ function enterChart(ctx: CanvasRenderingContext2D, view: View, m: Model): void {
   applyMatrix(ctx, view.planeMatrix(o, [1 / S0, 0, 0], [0, -1 / S0, 0]));
 }
 
-// A shaded cuboid: flat amber at `look` 0, the handoff cube's cardboard at 1.
-// Same panel order, fills, and outline weight as drawBox.
+// A cuboid in the bar's flat amber at `look` 0 and the handoff carton's flat
+// logo colours at 1: each face in its colour for the light, as drawBox paints
+// the logo character, and each wall with the lid's edge along its top and a
+// base band along its foot, one FLAT_BAND darker, at the carton's own
+// heights however long the bar is. Seen straight on, a front face's colour
+// is the bar's amber, so the look only fades in the bands and the sides.
 
-const LW = OUTLINE_RATIO * CUBE;
+/** The lid's edge and the base band, in world units: logo units 5 and 6 of a CUBE-wide carton's 120. */
+const LID_BAND = LID_THICK * CUBE;
+const FOOT_BAND = (6 / 120) * CUBE;
 const FACES: { n: V3; c: [number, number, number][] }[] = [
   { n: [0, 1, 0], c: [[-1, 1, -1], [1, 1, -1], [1, 1, 1], [-1, 1, 1]] },
   { n: [0, -1, 0], c: [[-1, -1, -1], [-1, -1, 1], [1, -1, 1], [1, -1, -1]] },
@@ -919,33 +926,38 @@ const FACES: { n: V3; c: [number, number, number][] }[] = [
 function drawSlab(ctx: CanvasRenderingContext2D, view: View, lo: V3, hi: V3, look: number): void {
   const c: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
   const h: V3 = [(hi[0] - lo[0]) / 2, (hi[1] - lo[1]) / 2, (hi[2] - lo[2]) / 2];
-  const vis: { pts: Projected[]; depth: number; n: V3 }[] = [];
+  const vis: { pts: Projected[]; depth: number; n: V3; corners: V3[] }[] = [];
   for (const face of FACES) {
     const at: V3 = [c[0] + face.n[0] * h[0], c[1] + face.n[1] * h[1], c[2] + face.n[2] * h[2]];
     if (!view.facing(face.n, at)) continue;
-    const pts = face.c.map(([x, y, z]) => view.project([c[0] + x * h[0], c[1] + y * h[1], c[2] + z * h[2]]));
-    vis.push({ pts, depth: view.project(at).z, n: face.n });
+    const corners = face.c.map(([x, y, z]): V3 => [c[0] + x * h[0], c[1] + y * h[1], c[2] + z * h[2]]);
+    vis.push({ pts: corners.map((p) => view.project(p)), depth: view.project(at).z, n: face.n, corners });
   }
   vis.sort((p, q) => p.depth - q.depth);
+  // A wall's band between heights y0 and y1, clamped to the slab.
+  const band = (corners: V3[], y0: number, y1: number): Projected[] => {
+    const [a, b2] = [Math.max(y0, lo[1]), Math.min(y1, hi[1])];
+    return corners.map((p) => view.project([p[0], p[1] > c[1] ? b2 : a, p[2]]));
+  };
   ctx.save();
-  const a0 = ctx.globalAlpha;
-  ctx.lineJoin = "round";
-  ctx.strokeStyle = OUTLINE;
   for (const face of vis) {
-    polygon(ctx, face.pts);
+    const t = tone(view, face.n) - (face.n[1] < 0 ? FLAT_BAND : 0);
     if (look > 0) {
-      ctx.fillStyle = cardboardFill(ctx, face.pts, tone(view, face.n));
+      polygon(ctx, face.pts);
+      ctx.fillStyle = flatCard(t);
       ctx.fill();
+      if (face.n[1] === 0) {
+        ctx.fillStyle = flatCard(t - FLAT_BAND);
+        polygon(ctx, band(face.corners, hi[1] - LID_BAND, hi[1]));
+        ctx.fill();
+        polygon(ctx, band(face.corners, lo[1], lo[1] + FOOT_BAND));
+        ctx.fill();
+      }
     }
     if (look < 1) {
+      polygon(ctx, face.pts);
       ctx.fillStyle = rgba(PALETTE.amber, 1 - look);
       ctx.fill();
-    }
-    if (look > 0) {
-      ctx.globalAlpha = a0 * look;
-      ctx.lineWidth = LW * view.cam.scale * face.pts[0].f;
-      ctx.stroke();
-      ctx.globalAlpha = a0;
     }
   }
   ctx.restore();

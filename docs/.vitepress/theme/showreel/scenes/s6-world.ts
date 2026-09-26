@@ -28,14 +28,9 @@ import {
   boxPoint,
   boxSilhouette,
   drawBox,
-  OUTLINE,
-  OUTLINE_RATIO,
+  LID_THICK,
+  LOGO_TAPE,
   sparkle,
-  TAPE,
-  TAPE_DROP,
-  TAPE_EDGE,
-  TAPE_HALF,
-  TAPE_SIDE,
 } from "../box";
 import { mix, mixRGB, type RGB, rgb, rgba } from "../color";
 import { glow, makeCanvas, roundedRect } from "../fx";
@@ -62,7 +57,8 @@ import {
   add,
   applyMatrix,
   type Camera,
-  cardboardFill,
+  FLAT_BAND,
+  flatCard,
   hull,
   mixCamera,
   mix3,
@@ -124,8 +120,18 @@ export const T_DISC = b(11.5);
 
 const HALF = CUBE / 2;
 const EDGE = GRID_R + 0.5;
-// The folding carton matches drawBox's outline weight and tape proportions.
-const LW = OUTLINE_RATIO * CUBE; // drawBox's outline, in world units
+// The folding carton is drawn as drawBox draws the standing cartons
+// (cellPose, the logo character built as a cube): each face in its flat
+// logo colour, no outline, and each wall with the lid's edge along its top
+// and a base band along its foot, one FLAT_BAND darker. Heights are shares
+// of the carton's height, which is its width.
+/** The base band: logo units 118 to 124 of the front's 120. */
+const FOOT_BAND = 6 / 120;
+/** The tape tab's half-width at the lid's back and front edges (box.ts's). */
+const TAB_BACK = 0.14;
+const TAB_FRONT = 2 / 15;
+/** How far the tab runs down the front: 14 logo units. */
+const TAB_DROP = 14 / 120;
 /** The outermost occupied ring (the four corner cells stay empty). */
 export const DLAST = Math.hypot(GRID_R, GRID_R - 1);
 
@@ -783,7 +789,6 @@ function drawFold(ctx: CanvasRenderingContext2D, view: View, c: Cell, t: number)
   const condemned = -lerp(BACKLIT, 0.36, smoothstep(0, 0.02, u));
   const flat = smoothstep(0.03, SLAP + 0.01, u);
   const dim = condemned * (1 - 0.5 * flat);
-  const lw = LW * view.cam.scale;
   const corners: Projected[] = [];
   const boxes = levels.map((L, k) => {
     const P = (lx: number, lz: number, ly: number): V3 => [
@@ -794,58 +799,51 @@ function drawFold(ctx: CanvasRenderingContext2D, view: View, c: Cell, t: number)
     for (const a of [-1, 1]) for (const bb of [-1, 1]) corners.push(view.project(P(a, bb, 0)), view.project(P(a, bb, 1)));
     const nx = mul(L.ex, -1);
     const nz = mul(L.ez, -1);
-    return {
-      P,
-      L,
-      mid: P(0, 0, 0.5),
-      faces: [
-        { id: "top", q: [P(-1, -1, 1), P(1, -1, 1), P(1, 1, 1), P(-1, 1, 1)], n: [0, 1, 0] as V3 },
-        { id: "x+", q: [P(1, -1, 0), P(1, 1, 0), P(1, 1, 1), P(1, -1, 1)], n: wallN(L.ex) },
-        { id: "x-", q: [P(-1, -1, 0), P(-1, 1, 0), P(-1, 1, 1), P(-1, -1, 1)], n: wallN(nx) },
-        { id: "z+", q: [P(-1, 1, 0), P(1, 1, 0), P(1, 1, 1), P(-1, 1, 1)], n: wallN(L.ez) },
-        { id: "z-", q: [P(-1, -1, 0), P(1, -1, 0), P(1, -1, 1), P(-1, -1, 1)], n: wallN(nz) },
-      ],
+    // A wall between its bottom corners (lx, lz), and its band from `lo` to `hi` of its height.
+    const wall = (id: string, n: V3, a: readonly [number, number], bb: readonly [number, number]) => {
+      const band = (lo: number, hi: number): V3[] => [
+        P(a[0], a[1], lo),
+        P(bb[0], bb[1], lo),
+        P(bb[0], bb[1], hi),
+        P(a[0], a[1], hi),
+      ];
+      return { id, n, q: band(0, 1), band };
     };
+    const faces: { id: string; n: V3; q: V3[]; band?: (lo: number, hi: number) => V3[] }[] = [
+      { id: "top", n: [0, 1, 0], q: [P(-1, -1, 1), P(1, -1, 1), P(1, 1, 1), P(-1, 1, 1)] },
+      wall("x+", wallN(L.ex), [1, -1], [1, 1]),
+      wall("x-", wallN(nx), [-1, -1], [-1, 1]),
+      wall("z+", wallN(L.ez), [-1, 1], [1, 1]),
+      wall("z-", wallN(nz), [-1, -1], [1, -1]),
+    ];
+    return { P, L, mid: P(0, 0, 0.5), faces };
   });
   const outline = hull(corners);
 
   const paint = () => {
-    ctx.lineJoin = "round";
-    ctx.strokeStyle = OUTLINE;
-    ctx.lineWidth = lw;
-    for (const bx of boxes) {
+    const fill = (q: readonly V3[], color: string) => {
+      polygon(ctx, q.map((p) => view.project(p)));
+      ctx.fillStyle = color;
+      ctx.fill();
+    };
+    for (const { P, L, mid, faces } of boxes) {
       const shown = new Set<string>();
-      for (const f of bx.faces) {
-        if (!view.facing(f.n, bx.mid)) continue;
+      for (const f of faces) {
+        if (!view.facing(f.n, mid)) continue;
         shown.add(f.id);
-        const pts = f.q.map((q) => view.project(q));
-        polygon(ctx, pts);
-        ctx.fillStyle = cardboardFill(ctx, pts, tone(view, f.n) + dim);
-        ctx.fill();
-        ctx.stroke();
+        const t0 = tone(view, f.n) + dim;
+        fill(f.q, flatCard(t0));
+        if (f.band) {
+          fill(f.band(1 - LID_THICK, 1), flatCard(t0 - FLAT_BAND));
+          fill(f.band(0, FOOT_BAND), flatCard(t0 - FLAT_BAND));
+        }
       }
-      if (bx.L.tape) {
-        // Tape across the top, and its end down the +x panel, as drawBox lays it.
-        const strip = (q: V3[], fill: string) => {
-          polygon(
-            ctx,
-            q.map((p) => view.project(p)),
-          );
-          ctx.fillStyle = fill;
-          ctx.fill();
-          ctx.save();
-          ctx.lineWidth = lw / 2;
-          ctx.strokeStyle = TAPE_EDGE;
-          ctx.stroke();
-          ctx.restore();
-        };
-        const hw = TAPE_HALF;
-        const P = bx.P;
-        if (shown.has("top")) strip([P(-1, -hw, 1), P(1, -hw, 1), P(1, hw, 1), P(-1, hw, 1)], TAPE);
-        const drop = 1 - TAPE_DROP;
-        if (shown.has("x+"))
-          strip([P(1, hw, 1), P(1, -hw, 1), P(1, -hw, drop), P(1, hw, drop)], TAPE_SIDE);
-      }
+      if (!L.tape) continue;
+      // The tape's tab over the lid from its back edge, slightly wider
+      // there, and down the front over the lid's edge.
+      const [tw, end] = [TAB_FRONT, 1 - TAB_DROP];
+      if (shown.has("top")) fill([P(-TAB_BACK, -1, 1), P(TAB_BACK, -1, 1), P(tw, 1, 1), P(-tw, 1, 1)], LOGO_TAPE);
+      if (shown.has("z+")) fill([P(-tw, 1, 1), P(tw, 1, 1), P(tw, 1, end), P(-tw, 1, end)], LOGO_TAPE);
     }
     const dust = dustAt(c, t);
     if (dust > 0) {
@@ -855,13 +853,23 @@ function drawFold(ctx: CanvasRenderingContext2D, view: View, c: Cell, t: number)
     }
     if (flat > 0) {
       polygon(ctx, outline);
-      ctx.fillStyle = rgba(PALETTE.bg, 0.42 * flat);
+      ctx.fillStyle = rgba(PALETTE.bg, 0.5 * flat);
       ctx.fill();
     }
   };
 
   ctx.save();
   if (sink <= 0) {
+    if (flat > 0) {
+      // Lying flat, a carton throws a hairline of shadow along its near
+      // edges onto the ones under it, so the carpet reads as cartons.
+      ctx.save();
+      ctx.translate(0, 2 * (view.cam.scale / WORLD_CAM.scale));
+      polygon(ctx, outline);
+      ctx.fillStyle = rgba(PALETTE.night, 0.5 * flat);
+      ctx.fill();
+      ctx.restore();
+    }
     paint();
     ctx.restore();
     return;
@@ -1345,7 +1353,6 @@ function drawKept(
     ...st.pose,
     yaw: spin,
     toneShift: (st.pose.toneShift ?? 0) + bright,
-    outline: 1 - flat,
     tape: 0,
   };
   const hullPts = boxSilhouette(view, pose);
