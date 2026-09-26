@@ -1,20 +1,23 @@
 // Section 6, "First build fills the store". The store is empty, so rustc
-// compiles as usual: an amber ring races round `syn`'s chip, and its output
-// pops out as a carton that arcs in under Mr Boxington's hovering lid, a
-// gulp. Then a cutaway: a hole opens in his front and the camera pushes in
-// on the store inside him, where `syn`'s carton lands on an empty shelf and
-// the inputs of its key snap onto the wall: the crate's sources, rustc,
-// features, profile and RUSTFLAGS, and the two paths in its rustc call,
-// which flip letter by letter to `${cargo_registry}` and `${target}`. The
-// key stamps onto the carton's tag. The camera backs out, the rest of the
-// plan streams in under the lid, and the lid steps down four times with the
-// terminal's own mascot while its real bar fills grey: a cold store mostly
-// reports "not looked up". The build finishes taped, with no blush and no
-// strawberry, the mascot's real cold finish, and no fanfare.
+// compiles as usual: an amber ring races round `syn`'s chip while the camera
+// eases out until the pane's `Compiling syn` is beside it, and its output
+// pops out as a carton that arcs in under the raised end of Mr Boxington's
+// lid, a gulp. Then a cutaway: a hole opens in his front and the camera
+// pushes in on the store inside him, where `syn`'s carton lands on an empty
+// shelf and the inputs of its key snap onto the wall: the crate's sources,
+// rustc, features, profile and RUSTFLAGS, and the two paths in its rustc
+// call, which flip letter by letter to `${cargo_registry}` and `${target}`.
+// The key stamps onto the carton's tag. The camera backs out, the rest of
+// the plan streams in under the lid, and the lid steps down four times with
+// the terminal's own mascot while its real bar fills grey: a cold store
+// mostly reports "not looked up". The build finishes taped, with no blush
+// and no strawberry, the mascot's real cold finish, and no fanfare.
 //
 // The section starts on under-cargo-build's frame (map.ts UC_END: pushed in
-// on the box and the plan) and settles onto FB_END at home. Nothing here
-// depends on the benchmark's numbers except the text of two chips.
+// on the box and the plan, the pane cut off at the right), eases out from it
+// to WIDE, where the whole pane and its mascot are in, pushes in from there,
+// and settles onto FB_END at home. Nothing here depends on the benchmark's
+// numbers except the text of two chips.
 
 import { BEAT, PALETTE, type Scene, type SceneEnv, sec } from "../bible";
 import { type BoxPose, boxFrame, boxPoint, frontMatrix, LID_THICK, LOGO_DIMS } from "../box";
@@ -44,17 +47,20 @@ import {
   drawTag,
   drawTower,
   FB_END,
+  FLOOR,
   HOME,
   KIT,
   MACHINE,
   type MapCam,
+  mapToScreen,
+  mixMapCam,
   PLAN,
   planChip,
   type Pt,
   UC_END,
   type Unit,
 } from "../map";
-import { clamp, cubicBezier, hash, inQuad, lerp, progress, smoothstep, swiftIn, swiftInOut, swiftOut } from "../math";
+import { clamp, cubicBezier, hash, inOutSine, inQuad, lerp, progress, smoothstep, swiftIn, swiftInOut, swiftOut } from "../math";
 import { polygon, type Projected, View } from "../space";
 import { type Caption, drawWords, font, layout, MONO, wordStyle } from "../type";
 import { bouncyLid, bump, jolt, land, lidSteps, tapeAt } from "./first-build-kit";
@@ -71,6 +77,12 @@ const local = (t: number): number => t - S.start;
 
 /** The pane's status names the crate the ring is compiling. */
 export const T_STATUS = b(0.25);
+/**
+ * The camera eases out from under-cargo-build's push until the whole pane is
+ * in, settling as the carton leaves.
+ */
+export const T_WIDE0 = 0;
+export const T_WIDE1 = b(2.5);
 /** The amber ring runs round `syn`'s chip, twice, speeding up. */
 export const T_RING0 = 0;
 /** It closes: the chip collapses and the carton pops out of it. */
@@ -154,7 +166,6 @@ export const T_NAMED = NAMED_UNIT.map((k) => streamAt(k) - S.start);
 
 // Cameras.
 
-/** Where the camera looks into the store: the front's hole fills the frame. */
 /**
  * Where the camera looks into the store: pushed in until his front's border
  * runs down the frame's edges, left of where the captions start, with the
@@ -163,6 +174,14 @@ export const T_NAMED = NAMED_UNIT.map((k) => streamAt(k) - S.start);
 const INSIDE: Readonly<MapCam> = { cx: 440, cy: 494.8, zoom: 4.6 };
 /** under-cargo-build's push-in, which this section starts on. */
 const FOLLOW: MapCam = UC_END.cam ?? HOME;
+/**
+ * Where the camera eases out to while `syn` compiles: the whole machine, his
+ * contact shadow (x 192) to the pane's slab (x 1840) about 45 px in from
+ * the frame's edges, so the pane's `Compiling syn` and its mascot read beside
+ * the ring. The pane's top sits 49 px under the frame's, and his shadow ends
+ * above the captions' band.
+ */
+export const WIDE: Readonly<MapCam> = { cx: 1016, cy: 542, zoom: 1.11 };
 
 /**
  * A move from `a` to `b` zooming about the one map point that stays put on
@@ -181,8 +200,14 @@ function zoomCam(a: MapCam, b: MapCam, e: number): MapCam {
 /** Backing out: off the mark in a few frames, then a long settle home. */
 const PULL_EASE = cubicBezier(0.35, 0, 0.12, 1);
 
+/**
+ * The camera at `lt`: off FOLLOW's rest and out to WIDE at about half the
+ * speed under-cargo-build's push came in at, so it reads as a settle rather
+ * than a bounce back; then the push in and the long way home.
+ */
 function camAt(lt: number): MapCam {
-  if (lt < T_PULL0) return zoomCam(FOLLOW, INSIDE, swiftInOut(progress(T_PUSH0, T_PUSH1, lt)));
+  if (lt < T_PUSH0) return mixMapCam(FOLLOW, WIDE, inOutSine(progress(T_WIDE0, T_WIDE1, lt)));
+  if (lt < T_PULL0) return zoomCam(WIDE, INSIDE, swiftInOut(progress(T_PUSH0, T_PUSH1, lt)));
   return zoomCam(INSIDE, HOME, PULL_EASE(progress(T_PULL0, T_PULL1, lt)));
 }
 
@@ -832,9 +857,10 @@ function draw(ctx: CanvasRenderingContext2D, lt: number, env: SceneEnv): void {
 /**
  * How dark the captions' band is kept while the camera is in close: his
  * front sweeps down through it as the camera pushes in and backs out, and
- * inside him it is the store's floor. None at FOLLOW's zoom or wider.
+ * inside him it is the store's floor. None while the floor the map stands
+ * on is above the band, as it is at FOLLOW, WIDE and HOME.
  */
-const scrimAt = (cam: MapCam): number => smoothstep(0, 1, Math.log(cam.zoom / FOLLOW.zoom) / Math.log(1.5 / FOLLOW.zoom));
+const scrimAt = (cam: MapCam): number => smoothstep(CAPTION_TOP - 20, CAPTION_TOP + 50, mapToScreen(cam, { x: 0, y: FLOOR }).y);
 
 /** A shadow over the captions' band, fading in from just under the shelf. */
 function drawScrim(ctx: CanvasRenderingContext2D, env: SceneEnv, k: number): void {
