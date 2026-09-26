@@ -1565,6 +1565,40 @@ fn models_embedded_metadata_selection_in_the_action_key() {
     }
 }
 
+/// Cargo's `-Zbuild-std` compiles `core`, `alloc`, `std` and their siblings
+/// with `-Zforce-unstable-if-unmarked` and `RUSTC_BOOTSTRAP=1`. Both are
+/// cacheable, and both stay in the key rather than being discarded.
+#[test]
+fn models_standard_library_units_in_the_action_key() {
+    let invocation = |extra: &[&str]| {
+        let mut arguments = vec![
+            "--crate-name=core",
+            "--edition=2024",
+            "--crate-type=lib",
+            "--emit=dep-info,metadata,link",
+            "--codegen=opt-level=3",
+        ];
+        arguments.extend_from_slice(extra);
+        arguments.push("src/lib.rs");
+        RustcInvocation::parse(&args(&arguments)).unwrap()
+    };
+    let key = |invocation: &RustcInvocation, bootstrap: Option<&str>| {
+        let mut context = context(&[("src/lib.rs", "source")]);
+        if let Some(value) = bootstrap {
+            context
+                .environment
+                .insert("RUSTC_BOOTSTRAP".into(), Some(value.into()));
+        }
+        invocation.action(context).unwrap().digest
+    };
+
+    let std_unit = invocation(&["-Zforce-unstable-if-unmarked"]);
+    assert_eq!(std_unit, invocation(&["-Z", "force-unstable-if-unmarked"]));
+    let plain = invocation(&[]);
+    assert_ne!(key(&std_unit, Some("1")), key(&plain, Some("1")));
+    assert_ne!(key(&std_unit, Some("1")), key(&std_unit, None));
+}
+
 #[test]
 fn parallel_frontend_options_require_values() {
     for arguments in [
