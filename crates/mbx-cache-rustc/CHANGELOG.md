@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.18.2...mbx-cache-rustc-v0.18.3) - 2026-09-26
+
+### Fixed
+
+- *(rustc)* cache -Zbuild-std standard library units instead of bypassing them ([#566](https://github.com/jdx/mr-boxington/pull/566))
+
+### Other
+
+- redesign the Mr Boxington logo and animated build mascot ([#558](https://github.com/jdx/mr-boxington/pull/558))
+
 ## [0.18.2](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.18.1...mbx-cache-rustc-v0.18.2) - 2026-09-25
 
 ### Added

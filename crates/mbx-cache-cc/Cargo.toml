@@ -1,6 +1,6 @@
 [package]
 name = "mbx-cache-cc"
-version = "0.18.2"
+version = "0.18.3"
 description = "mbx internals: conservative C and C++ action analysis and key construction. No API stability -- use the mbx CLI or mbx-cache-protocol."
 edition.workspace = true
 rust-version.workspace = true
@@ -16,7 +16,7 @@ all-features = true
 
 [dependencies]
 memchr = "2"
-mbx-cache-core = { path = "../mbx-cache-core", version = "0.18.2", default-features = false }
+mbx-cache-core = { path = "../mbx-cache-core", version = "0.18.3", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 strum = { version = "0.28", features = ["derive"] }

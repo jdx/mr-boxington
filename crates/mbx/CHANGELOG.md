@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.0](https://github.com/jdx/mr-boxington/compare/v1.18.0...v1.19.0) - 2026-09-26
+
+### Added
+
+- *(exec)* cache CMake builds through compiler launchers ([#564](https://github.com/jdx/mr-boxington/pull/564))
+
+### Fixed
+
+- *(pretty)* hide the mascot after a successful build ([#567](https://github.com/jdx/mr-boxington/pull/567))
+- *(rustc)* cache -Zbuild-std standard library units instead of bypassing them ([#566](https://github.com/jdx/mr-boxington/pull/566))
+- *(pretty)* move mascot right and clarify its animation ([#561](https://github.com/jdx/mr-boxington/pull/561))
+- *(pretty)* recognize colored test results on xterm terminals ([#559](https://github.com/jdx/mr-boxington/pull/559))
+
+### Other
+
+- redesign the Mr Boxington logo and animated build mascot ([#558](https://github.com/jdx/mr-boxington/pull/558))
+
 ## [1.18.0](https://github.com/jdx/mr-boxington/compare/v1.17.0...v1.18.0) - 2026-09-25
 
 ### Added
