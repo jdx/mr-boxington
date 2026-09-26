@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 mod adopt;
+mod analyze;
 mod cache;
 mod cargo;
 mod cargo_invocation;
@@ -95,6 +96,10 @@ enum Commands {
     Doctor(doctor::DoctorArgs),
     /// Explain cache bypasses, or replay the last build and diagnose its misses.
     Explain(explain::ExplainArgs),
+    /// Rank the last build's uncached compiler time by cause, with what would remove each one.
+    ///
+    /// Reads the build's recorded history, so it runs nothing. A crate that rebuilt only because a dependency changed is counted under the change that started it.
+    Analyze(analyze::AnalyzeArgs),
     /// Make plain Cargo commands run through mbx.
     Setup(setup::SetupArgs),
     /// Collect learned incremental state and managed targets, then evict cached objects to fit budgets.
@@ -154,6 +159,7 @@ fn compiles_nothing(command: &Commands) -> Option<&'static str> {
         Commands::Adopt(_) => Some("adopt"),
         Commands::Tui(_) => Some("tui"),
         Commands::Stats(_) => Some("stats"),
+        Commands::Analyze(_) => Some("analyze"),
         // Its whole subject is the C and C++ compiles of a build cargo is not
         // running, so a Rust toolchain has nothing to select here.
         Commands::Exec(_) => Some("exec"),
@@ -209,6 +215,7 @@ pub fn run() -> Result<ExitCode> {
             shim::prepare_explicit_cargo()?;
             explain::run(&config, &settings, args, toolchain)
         }
+        Commands::Analyze(args) => analyze::run(&config, args),
         Commands::Setup(args) => setup::run(&args, args.action()?),
         Commands::Gc(args) if args.automatic => {
             if args.json || args.dry_run || args.max_size.is_some() {

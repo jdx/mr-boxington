@@ -65,7 +65,7 @@ export default defineConfig({
         text: "Docs",
         link: "/guide",
         activeMatch:
-          "^/(guide|getting-started|installation|setup|cookbook/local-development|scheduling|incremental|linkers|managed-targets|standalone-builds|tui|stats|troubleshooting|cache-results|how-it-works|limits|compared|faq|acknowledgements)",
+          "^/(guide|getting-started|installation|setup|cookbook/local-development|scheduling|incremental|linkers|managed-targets|standalone-builds|tui|stats|troubleshooting|analyze|cache-results|how-it-works|limits|compared|faq|acknowledgements)",
       },
       {
         text: "CI & sharing",
@@ -120,6 +120,7 @@ export default defineConfig({
         text: "Understand & troubleshoot",
         items: [
           { text: "Troubleshooting", link: "/troubleshooting" },
+          { text: "Analyzing a build", link: "/analyze" },
           { text: "Cache results", link: "/cache-results" },
           { text: "Savings and statistics", link: "/stats" },
           { text: "How it works", link: "/how-it-works" },
@@ -142,6 +143,7 @@ export default defineConfig({
               { text: "completion", link: "/cli/completion" },
               { text: "doctor", link: "/cli/doctor" },
               { text: "explain", link: "/cli/explain" },
+              { text: "analyze", link: "/cli/analyze" },
               { text: "clean", link: "/cli/clean" },
               { text: "gc", link: "/cli/gc" },
               { text: "tui", link: "/cli/tui" },

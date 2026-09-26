@@ -54,6 +54,7 @@ pub mod tui;
 #[doc(hidden)]
 pub mod util;
 
+mod analyze;
 mod ar;
 mod build_script;
 mod cc;

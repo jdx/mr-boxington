@@ -31,8 +31,16 @@ pub(crate) fn run_with_settings(
 /// Replay the newest recorded build for this workspace and explain its misses
 /// against the most recent earlier recording of each compilation unit.
 pub(crate) fn last(config: &Config) -> Result<ExitCode> {
+    let (target, baselines) = last_recorded(config)?;
+    display_last(&target, &baselines);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The newest recorded build for this workspace, and what earlier builds of the
+/// same project recorded for comparison.
+pub(crate) fn last_recorded(config: &Config) -> Result<(RecordedSession, Baselines)> {
     let workspace = crate::util::workspace_root(&std::env::current_dir()?);
-    let sessions = recorded_sessions(&config.store_dir())?;
+    let mut sessions = recorded_sessions(&config.store_dir())?;
     let Some(target_index) = sessions
         .iter()
         .rposition(|session| session.workspace == workspace)
@@ -43,18 +51,19 @@ pub(crate) fn last(config: &Config) -> Result<ExitCode> {
         );
     };
 
-    let target = &sessions[target_index];
-    let baselines = Baselines::collect(&sessions[..target_index], target);
-    display_last(target, &baselines);
-    Ok(ExitCode::SUCCESS)
+    // Only earlier builds can explain this one.
+    sessions.truncate(target_index + 1);
+    let target = sessions.pop().expect("the target session was just found");
+    let baselines = Baselines::collect(&sessions, &target);
+    Ok((target, baselines))
 }
 
-struct RecordedSession {
-    workspace: std::path::PathBuf,
+pub(crate) struct RecordedSession {
+    pub(crate) workspace: std::path::PathBuf,
     /// What that build called the project, when it recorded one.
-    identity: Option<String>,
-    command: Vec<String>,
-    events: Vec<SessionEvent>,
+    pub(crate) identity: Option<String>,
+    pub(crate) command: Vec<String>,
+    pub(crate) events: Vec<SessionEvent>,
 }
 
 type RecordedKeys = BTreeMap<(String, String), ActionDiagnostic>;
@@ -79,15 +88,15 @@ type RecordedKeys = BTreeMap<(String, String), ActionDiagnostic>;
 /// before the identity was written carry none, and a missing identity is not a
 /// match.
 #[derive(Default)]
-struct Baselines {
+pub(crate) struct Baselines {
     here: RecordedKeys,
     elsewhere: RecordedKeys,
     /// Whether a session this drew on stopped recording before it finished.
-    truncated: bool,
+    pub(crate) truncated: bool,
 }
 
 impl Baselines {
-    fn collect(sessions: &[RecordedSession], target: &RecordedSession) -> Self {
+    pub(crate) fn collect(sessions: &[RecordedSession], target: &RecordedSession) -> Self {
         let mut baselines = Self::default();
         let mut truncated = false;
         for session in sessions {
@@ -161,7 +170,7 @@ fn recorded_sessions(store: &Path) -> Result<Vec<RecordedSession>> {
 }
 
 /// Whether this session stopped recording rows before the build ended.
-fn is_truncated(session: &RecordedSession) -> bool {
+pub(crate) fn is_truncated(session: &RecordedSession) -> bool {
     session
         .events
         .iter()
@@ -252,7 +261,7 @@ fn compilation_unit(diagnostic: &ActionDiagnostic) -> Option<String> {
         .map(mbx_cache_core::CacheDigest::key)
 }
 
-fn previous_recording<'a>(
+pub(crate) fn previous_recording<'a>(
     baselines: &'a Baselines,
     crate_name: &str,
     diagnostic: Option<&ActionDiagnostic>,
@@ -321,7 +330,7 @@ fn diff_lines(previous: &ActionDiagnostic, current: &ActionDiagnostic) -> Vec<St
 }
 
 /// Render names as a reader would say them out loud.
-fn join_names(names: &[String]) -> String {
+pub(crate) fn join_names(names: &[String]) -> String {
     match names {
         [] => String::new(),
         [only] => only.clone(),
@@ -330,7 +339,7 @@ fn join_names(names: &[String]) -> String {
 }
 
 /// The crates whose artifacts account for every changed input, if they do.
-fn dependencies_behind(inputs: &[String]) -> Vec<String> {
+pub(crate) fn dependencies_behind(inputs: &[String]) -> Vec<String> {
     let names: Vec<_> = inputs
         .iter()
         .filter_map(|path| dependency_name(path))
@@ -371,7 +380,7 @@ fn dependency_name(path: &str) -> Option<String> {
     .then(|| name.to_string())
 }
 
-fn changed_keys(
+pub(crate) fn changed_keys(
     previous: &BTreeMap<String, mbx_cache_core::CacheDigest>,
     current: &BTreeMap<String, mbx_cache_core::CacheDigest>,
 ) -> Vec<String> {
@@ -492,7 +501,7 @@ fn display(records: &Records) {
     }
 }
 
-fn guidance(kind: &str) -> &'static str {
+pub(crate) fn guidance(kind: &str) -> &'static str {
     match kind {
         "compiler-query" => {
             "Expected: Cargo asks rustc for toolchain information; there is no compilation to cache."

@@ -111,6 +111,30 @@ setup() {
   assert_output --partial "src/lib.rs"
 }
 
+@test "analyze charges a dependent's rebuild to the crate that changed" {
+  export MBX_LEARNED_INCREMENTAL=0
+  mkdir analyzed-project
+  cd analyzed-project
+  printf '[workspace]\nmembers = ["engine", "app"]\nresolver = "2"\n' >Cargo.toml
+  cargo new --lib --vcs none engine
+  cargo new --lib --vcs none app
+  printf 'engine = { path = "../engine" }\n' >>app/Cargo.toml
+  printf 'pub fn app() -> u64 { engine::add(1, 2) }\n' >app/src/lib.rs
+
+  run "$MBX_BIN" check
+  assert_success
+
+  printf 'pub fn add(a: u64, b: u64) -> u64 { a + b + 1 }\n' >engine/src/lib.rs
+  run "$MBX_BIN" check
+  assert_success
+
+  run "$MBX_BIN" analyze
+  assert_success
+  assert_output --partial "uncached compiler time by cause"
+  assert_output --partial "inputs of engine changed (2)"
+  assert_output --partial "then 1 crate that depends on it rebuilt: app"
+}
+
 @test "inspection commands offer versioned JSON" {
   run "$MBX_BIN" cache dir --json
   assert_success
