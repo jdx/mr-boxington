@@ -76,7 +76,7 @@ test("the flat material lands on the logo's colours from straight ahead", () => 
   assert.equal(flatCard(tone(view, [0, 0, 1]) - FLAT_BAND), "#cf8f35");
 });
 
-test("the lid hovers a step at a time and opens a mouth", () => {
+test("the lid hinges up a step at a time and opens a mouth", () => {
   const view = new View(logoCam(0, 0, 128));
   const shut = boxSilhouette(view, LOGO_POSE);
   const open = boxSilhouette(view, { ...LOGO_POSE, lid: 4 });

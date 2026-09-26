@@ -80,7 +80,7 @@ export const TYPE = [B(0.9375), B(1.1875)] as const;
 export const T_START = B(1.25);
 /** The tape's rip, seconds. */
 export const RIP = 0.06;
-/** The lid pops up to hover and flings the strawberry off. */
+/** The lid springs up on its hinge and flings the strawberry off. */
 export const T_LID = T_START + RIP;
 /** The new key's tag pops up, rolling its digest, with the target path under it. */
 export const T_CHIP = B(1.375);
@@ -317,7 +317,7 @@ export function lidSteps(): number[] {
   return out;
 }
 
-/** The lid's hover: popped up to 4 on the start, then stepping down with the pixel mascot's. */
+/** The lid on its hinge: sprung up to 4 on the start, then stepping down with the pixel mascot's. */
 function lidAt(lt: number, view: BuildView): number {
   if (lt < T_LID) return 0;
   const pop = 4 * spring(lt - T_LID, 6, 0.42);

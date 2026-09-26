@@ -324,8 +324,8 @@ function drawSparks(ctx: CanvasRenderingContext2D, t: number): void {
 
 function boxAt(lt: number, view: BuildView) {
   const t = S.at(lt);
-  // The old tape tears off, then the lid springs up to the running hover;
-  // from there it steps down with the card's mascot.
+  // The old tape tears off, then the lid springs up on its hinge to the
+  // running height; from there it steps down with the card's mascot.
   const rip = 1 - swiftIn(progress(T_RIP0, T_RIP1, lt));
   const lid = view.pose.taped ? 0 : LID_MAX * land(lt, T_LIFT, 0.22, 0.3) - (LID_MAX - bouncyLid(LID_STEPS, t));
   const tape = lt < T_FINISH ? rip : tapeAt(lt, T_TAPE0, T_TAPE1);

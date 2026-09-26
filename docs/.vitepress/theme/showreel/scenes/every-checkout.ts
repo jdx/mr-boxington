@@ -6,7 +6,7 @@
 // onto a leaning tower of old ones as it piles up, the dashed `your machine`
 // frame draws around it, and the CI card dims outside. The camera leans in
 // on the pile while the caption holds and pulls back as Mr Boxington pops in
-// beside it with his lid hovering, the frame under-cargo-build starts from
+// beside it with his lid raised, the frame under-cargo-build starts from
 // (map.ts EC_END).
 
 import { BEAT, drawNodeLabel, NODES, PALETTE, type Scene, type SceneEnv, sec } from "../bible";
@@ -91,7 +91,7 @@ export const T_LEAN = [b(7.5), b(10.5)] as const;
 export const T_PULL = [b(10.75), b(11.4)] as const;
 /** The pile teeters once. */
 export const T_TEETER = b(9);
-/** Sparks gather, and Mr Boxington pops in with his lid hovering. */
+/** Sparks gather, and Mr Boxington pops in with his lid raised. */
 export const T_POP = b(11.5);
 export const GATHER = b(0.6);
 /** From here the frame is exactly EC_END. */
@@ -284,7 +284,7 @@ function drawStitches(ctx: CanvasRenderingContext2D, lt: number): void {
   }
 }
 
-/** Mr Boxington popping in on his spot: a spring about his foot, the lid dropping into its hover. */
+/** Mr Boxington popping in on his spot: a spring about his foot, the lid springing up on its hinge. */
 function drawPop(ctx: CanvasRenderingContext2D, lt: number): void {
   const spot = MACHINE.box;
   const mid = spot.y - spot.w * 0.55;

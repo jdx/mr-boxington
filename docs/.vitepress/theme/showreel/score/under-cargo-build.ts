@@ -3,8 +3,8 @@
 // `cargo build` types and the build view comes up with a chime. Cargo's plan
 // pops in one crate per eighth, climbing, and every `rustc` call lands in the
 // gap under the lid with a wooden tock, syn's on the downbeat with an amber
-// thunk. Under it all the hovering lid hums; the push in on syn swells into
-// first-build.
+// thunk. Under it all the raised lid hums; the ease in to the whole machine
+// swells into first-build.
 
 import { BEAT, type Section } from "../bible";
 import { rng } from "../math";
@@ -81,7 +81,7 @@ function calls(m: Mix, s: Section): void {
   });
 }
 
-/** The lid hovering: a low hum on D and A, breathing slowly, that knocks up with each call. */
+/** The raised lid: a low hum on D and A, breathing slowly, that knocks up with each call. */
 function hum(m: Mix, s: Section): void {
   const t0 = s.at(T_OPEN[0]);
   const t1 = s.end;
@@ -95,7 +95,7 @@ function hum(m: Mix, s: Section): void {
   v.osc("sine", hz(50), 0.4, am);
 }
 
-/** The push in on syn: a slow swell of air into first-build. */
+/** The ease in to the whole machine (FOLLOW): a slow swell of air into first-build. */
 function push(m: Mix, s: Section): void {
   const t0 = s.at(T_PUSH[0]);
   const t1 = s.at(T_PUSH[1]);

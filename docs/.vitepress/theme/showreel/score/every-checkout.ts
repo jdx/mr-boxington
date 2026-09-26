@@ -199,7 +199,7 @@ function riser(m: Mix, s: Section, t0: number, pop: number): void {
   }
 }
 
-/** Sparks spiral in, then he pops: a cork pop over a woody thump, and the lid springing into its hover. */
+/** Sparks spiral in, then he pops: a cork pop over a woody thump, and the lid springing up on its hinge. */
 function popIn(m: Mix, t: number): void {
   whoosh(m, ad(t - GATHER, t - 0.006, 0.14, t), sweep(t - GATHER, 5200, t, 1100), 2, { send: 0.14 });
   m.duck(t, 0.5, 0.2);

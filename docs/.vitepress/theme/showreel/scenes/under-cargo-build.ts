@@ -4,7 +4,7 @@
 // pile slides out of sight behind it. `cargo build` types and the real build
 // view comes up. Cargo's plan of hk's dependencies unfolds between the
 // terminal and Mr Boxington, and each crate fires its `rustc` call through
-// the gap under his hovering lid, syn's amber and thicker. Then the rest of
+// the gap under his raised lid, syn's amber and thicker. Then the rest of
 // the plan dims and the camera pushes in on the machine, as far as it goes
 // with the terminal and its mascot still in (map.ts UC_END), where
 // first-build compiles syn.
@@ -224,7 +224,7 @@ function drawCalls(ctx: CanvasRenderingContext2D, lt: number): void {
   });
 }
 
-/** Mr Boxington: lid hovering and knocked up a little by each call that lands, eyes on the plan. */
+/** Mr Boxington: lid raised on its hinge and knocked up a little by each call that lands, eyes on the plan. */
 function boxAt(lt: number): { spot: BoxSpot; lid: number; look: [number, number]; blink: number } {
   let lid = 4;
   PLAN.forEach((_, i) => {
