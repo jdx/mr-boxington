@@ -1282,6 +1282,13 @@ export interface RunnerState {
   t?: number;
   /** 0..1 how busy its activity lights are. */
   activity?: number;
+  /**
+   * The lit activity lights' colour: green (the default) while it restores,
+   * amber while it compiles, as everywhere on the map.
+   */
+  lights?: string;
+  /** Sets the lights' flicker, so racks side by side blink apart (default 91). */
+  seed?: number;
 }
 
 /** Where cartons leave and land on a runner: the middle of its top edge. */
@@ -1333,8 +1340,8 @@ export function drawRunner(ctx: CanvasRenderingContext2D, r: RunnerState): void 
       ctx.stroke();
     }
     for (let i = 0; i < 8; i++) {
-      const lit = act > 0.05 && hash(fr * 7 + i + u * 31, 91) < 0.3 + 0.7 * act;
-      ctx.fillStyle = lit ? PALETTE.green : "#3a342a";
+      const lit = act > 0.05 && hash(fr * 7 + i + u * 31, r.seed ?? 91) < 0.3 + 0.7 * act;
+      ctx.fillStyle = lit ? (r.lights ?? PALETTE.green) : "#3a342a";
       ctx.fillRect(x + 44 + i * 22, mid - 6, 12, 12);
     }
   }

@@ -49,7 +49,7 @@ import {
   WHIP_AT,
   WHIP_WIND,
 } from "../map";
-import { hash, inQuad, lerp, progress, pulse, smoothstep, swiftIn, swiftInOut, swiftOut, TAU, wobble } from "../math";
+import { inQuad, lerp, progress, pulse, smoothstep, swiftIn, swiftInOut, swiftOut, TAU, wobble } from "../math";
 import { type Caption, drawText, font, MONO } from "../type";
 
 const S = sec("ci");
@@ -195,26 +195,6 @@ function restore(k: number): Curve {
   return { a: { x: s.x, y: s.y }, c: { x: lerp(s.x, PR_PORT.x, 0.25), y: s.y - 90 }, b: PR_PORT };
 }
 
-/**
- * A runner's rack lights while it works, over drawRunner's dark ones (its
- * geometry): amber while it compiles, green while it restores, blinking at
- * `act` 0..1.
- */
-function rackLights(ctx: CanvasRenderingContext2D, r: Rect, act: number, color: string, t: number, seed: number): void {
-  if (act <= 0.05) return;
-  const uh = (r.h - 116) / 2;
-  const fr = Math.floor(t * 30);
-  ctx.save();
-  ctx.fillStyle = color;
-  for (let u = 0; u < 2; u++) {
-    const mid = r.y + 96 + u * (uh + 8) + uh / 2;
-    for (let i = 0; i < 8; i++) {
-      if (hash(fr * 7 + i + u * 31, seed) < 0.3 + 0.7 * act) ctx.fillRect(r.x + 44 + i * 22, mid - 6, 12, 12);
-    }
-  }
-  ctx.restore();
-}
-
 /** A light running along the remote's shelf, once, at `p` 0..1. */
 function shimmer(ctx: CanvasRenderingContext2D, p: number): void {
   if (p <= 0 || p >= 1) return;
@@ -276,10 +256,10 @@ function content(ctx: CanvasRenderingContext2D, lt: number, t: number): void {
     const led: RunnerState["led"] = blocked ? "blocked" : lt >= busy[1] ? "ok" : lt >= busy[0] ? "busy" : "idle";
     const activity = lt >= busy[0] && lt < busy[1] ? 1 : lt >= busy[1] ? 0.12 : 0;
     const rect = lerpRect(r.rect, r.to, settle);
-    drawRunner(ctx, { rect, label: r.label, led, t, activity: 0 });
     // Amber while main compiles; green while the pull request restores, amber for its own compile.
     const own = i === 1 && lt >= T_THROW - 0.2 && lt < T_BACK;
-    rackLights(ctx, rect, activity, i === 0 || own ? PALETTE.amber : PALETTE.green, t, 91 + i);
+    const lights = i === 0 || own ? PALETTE.amber : PALETTE.green;
+    drawRunner(ctx, { rect, label: r.label, led, t, activity, lights, seed: 91 + i });
   });
 
   // The read-only line over the pull request runner.
