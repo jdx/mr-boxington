@@ -29,6 +29,7 @@ import {
   H2_POSE,
   H5_POSE,
   keptDiscs,
+  type LitRect,
   NODES,
   PALETTE,
   type SceneEnv,
@@ -1043,6 +1044,18 @@ export function paneLayout(p: PaneState): PaneLayout {
     barLabel,
     bar: { x: body.x + pad, y: barLabel.y + 16 * s, w: body.w - 2 * pad, h: 44 * s },
   };
+}
+
+/**
+ * A pane's window as the lit screen the reel's vignette spares (Scene.lit):
+ * on the screen under `cam`, folded `open` of the way up from its base as
+ * drawPane folds it.
+ */
+export function paneLit(p: PaneState, cam: MapCam = HOME, open = 1, alpha = 1): LitRect {
+  const win = paneLayout(p).window;
+  const h = win.h * clamp(open);
+  const a = mapToScreen(cam, { x: win.x, y: win.y + win.h - h });
+  return { x: a.x, y: a.y, w: win.w * cam.zoom, h: h * cam.zoom, alpha };
 }
 
 function drawBadge(ctx: CanvasRenderingContext2D, right: number, cy: number, badge: Badge): void {

@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BEAT, DIVE0, DIVE1, diveCam, H, H2_CAM, H2_POSE, NODES, SECTIONS, sec, W, WHIP } from "../bible";
+import { BEAT, DIVE0, DIVE1, diveCam, H, H2_CAM, H2_POSE, NODES, SECTIONS, type SectionId, sec, W, WHIP } from "../bible";
 import { monocleScreen } from "../box";
 import {
   BAR_CELLS,
@@ -22,6 +22,7 @@ import {
   MACHINE,
   mapToScreen,
   OVERVIEW,
+  paneLayout,
   PLAN,
   planChip,
   type Rect,
@@ -33,6 +34,8 @@ import {
   WHIP_WIND,
   worldBounds,
 } from "../map";
+import { POSTER_TIME } from "../reel";
+import { scenes } from "../scenes";
 import { View } from "../space";
 
 const bottom = (r: Rect) => r.y + r.h;
@@ -182,4 +185,24 @@ test("the map's sections start and end on map states or shared moves", () => {
   assert.equal(handoffIn("every-checkout")?.id, "what|every-checkout");
   // The poster, a beat before another-worktree ends, is its end state.
   assert.equal(sec("another-worktree").end - sec("another-worktree").beat(11), BEAT);
+});
+
+test("the pane's window is lit where it stands, the same on both sides of its bar lines, and in full on the poster", () => {
+  const scene = (id: SectionId) => scenes.find((s) => s.id === id);
+  const lit = (id: SectionId, lt: number) => scene(id)?.lit?.(lt) ?? null;
+  const pane: SectionId[] = ["under-cargo-build", "first-build", "same-checkout", "another-worktree", "six-builds"];
+  for (const s of SECTIONS) if (!pane.includes(s.id)) assert.equal(scene(s.id)?.lit, undefined, `${s.id} has no pane to light`);
+  for (let i = 0; i + 1 < pane.length; i++) {
+    const a = lit(pane[i], sec(pane[i]).len - 1e-9);
+    const b = lit(pane[i + 1], 0);
+    assert.ok(a && b, `${pane[i]}|${pane[i + 1]}`);
+    for (const k of ["x", "y", "w", "h", "alpha"] as const) assert.ok(Math.abs(a[k] - b[k]) < 1e-6, `${pane[i]}|${pane[i + 1]} ${k}: ${a[k]} vs ${b[k]}`);
+  }
+  // Nothing is lit before the terminal swings up, and the six tiles take it with them.
+  assert.equal(lit("under-cargo-build", 0), null);
+  assert.equal(lit("six-builds", sec("six-builds").len / 2), null);
+  const poster = lit("another-worktree", POSTER_TIME - sec("another-worktree").start);
+  const aw = HANDOFFS["another-worktree|six-builds"].world?.pane;
+  assert.ok(aw);
+  assert.deepEqual(poster, { ...paneLayout(aw).window, alpha: 1 });
 });

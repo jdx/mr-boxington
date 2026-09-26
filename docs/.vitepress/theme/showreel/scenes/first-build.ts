@@ -17,7 +17,7 @@
 // into the store, and settles onto FB_END at home. Nothing here depends on
 // the benchmark's numbers except the text of two chips.
 
-import { BEAT, PALETTE, type Scene, type SceneEnv, sec } from "../bible";
+import { BEAT, type LitRect, PALETTE, type Scene, type SceneEnv, sec } from "../bible";
 import { type BoxPose, boxFrame, boxPoint, frontMatrix, LID_THICK, LOGO_DIMS } from "../box";
 import { mix, rgba } from "../color";
 import type { ReelFacts } from "../facts";
@@ -51,6 +51,7 @@ import {
   MACHINE,
   type MapCam,
   mapToScreen,
+  paneLit,
   PLAN,
   planChip,
   type Pt,
@@ -193,9 +194,10 @@ function camAt(lt: number): MapCam {
   return zoomCam(INSIDE, HOME, PULL_EASE(progress(T_PULL0, T_PULL1, lt)));
 }
 
-/** How far the rest of the map has dimmed around the cutaway: gone before the push has gone far, back as it ends. */
-const spotAt = (lt: number): number =>
-  0.95 * (smoothstep(T_PUSH0, T_PUSH0 + b(0.6), lt) - smoothstep(T_PULL0, T_PULL0 + b(0.75), lt));
+/** How far the rest of the map has gone into the dark around the cutaway: before the push has gone far, back as it ends. */
+const darkAt = (lt: number): number => smoothstep(T_PUSH0, T_PUSH0 + b(0.6), lt) - smoothstep(T_PULL0, T_PULL0 + b(0.75), lt);
+/** How far it has dimmed. */
+const spotAt = (lt: number): number => 0.95 * darkAt(lt);
 
 /** How far the hole in his front is open, 0..1: out from the middle of his face, then shut again the same way. */
 const openAt = (lt: number): number =>
@@ -878,6 +880,8 @@ export const scene: Scene = {
   end: S.end,
   draw,
   captions: () => CAPTIONS,
+  // The pane's window, lit, but not while the dark round the cutaway covers it.
+  lit: (lt: number): LitRect => paneLit(FB_END.pane!, camAt(lt), 1, 1 - darkAt(lt)),
 };
 
 // Kept for the tests: the box's pose and the pane on any frame.

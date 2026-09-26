@@ -1,6 +1,7 @@
 // Shared finishing effects. Offscreen canvases are created lazily on first
 // use so importing this module is safe during server-side rendering.
 
+import type { LitRect } from "./bible";
 import { rgba } from "./color";
 import { clamp, hash } from "./math";
 
@@ -84,18 +85,74 @@ export function grain(
   ctx.restore();
 }
 
+let vignetteLayer: HTMLCanvasElement | null = null;
+
+/**
+ * How far round a lit screen the vignette is spared, in the screen's half
+ * widths and heights: all of it inside the ellipse through its corners,
+ * fading back to none twice as far out.
+ */
+const SPARE_CORE = Math.SQRT2;
+const SPARE_OUT = 2 * Math.SQRT2;
+
+/**
+ * Darkens the frame toward its edges. A lit screen, if given, is left out
+ * of it: the ellipse through its corners spared by `lit.alpha`, fading back
+ * into the vignette with no edge. Without one the vignette is painted
+ * straight onto the frame.
+ */
 export function vignette(
   ctx: CanvasRenderingContext2D,
   W: number,
   H: number,
   strength = 0.55,
+  lit: LitRect | null = null,
 ): void {
-  const g = ctx.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, H * 1.05);
-  g.addColorStop(0, "rgba(0,0,0,0)");
-  g.addColorStop(1, `rgba(0,0,0,${strength})`);
+  const paint = (c: CanvasRenderingContext2D) => {
+    const g = c.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, H * 1.05);
+    g.addColorStop(0, "rgba(0,0,0,0)");
+    g.addColorStop(1, `rgba(0,0,0,${strength})`);
+    c.fillStyle = g;
+    c.fillRect(0, 0, W, H);
+  };
+  const spare = lit ? clamp(lit.alpha) : 0;
+  if (!lit || spare <= 0 || lit.w < 1 || lit.h < 1) {
+    ctx.save();
+    paint(ctx);
+    ctx.restore();
+    return;
+  }
+  // On a layer of its own, so the spared ellipse can be cut out of it.
+  const { width, height } = ctx.canvas;
+  vignetteLayer ??= makeCanvas(width, height);
+  if (vignetteLayer.width !== width || vignetteLayer.height !== height) {
+    vignetteLayer.width = width;
+    vignetteLayer.height = height;
+  }
+  const v = vignetteLayer.getContext("2d")!;
+  v.setTransform(1, 0, 0, 1, 0, 0);
+  v.globalAlpha = 1;
+  v.globalCompositeOperation = "source-over";
+  v.clearRect(0, 0, width, height);
+  v.setTransform(ctx.getTransform());
+  paint(v);
+  v.globalCompositeOperation = "destination-out";
+  v.translate(lit.x + lit.w / 2, lit.y + lit.h / 2);
+  v.scale(lit.w / 2, lit.h / 2);
+  const s = v.createRadialGradient(0, 0, 0, 0, 0, SPARE_OUT);
+  const core = SPARE_CORE / SPARE_OUT;
+  s.addColorStop(0, `rgba(0,0,0,${spare})`);
+  for (let i = 0; i <= 8; i++) {
+    const u = i / 8;
+    s.addColorStop(core + (1 - core) * u, `rgba(0,0,0,${spare * (1 - u * u * (3 - 2 * u))})`);
+  }
+  v.fillStyle = s;
+  v.fillRect(-SPARE_OUT, -SPARE_OUT, 2 * SPARE_OUT, 2 * SPARE_OUT);
   ctx.save();
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, W, H);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = "source-over";
+  ctx.drawImage(vignetteLayer, 0, 0);
   ctx.restore();
 }
 

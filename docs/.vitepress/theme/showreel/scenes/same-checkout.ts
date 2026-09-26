@@ -13,7 +13,7 @@
 // warm fact the card shows no label, counter or source line, and the caption
 // claims no figure.
 
-import { BEAT, PALETTE, type Scene, type SceneEnv, sec } from "../bible";
+import { BEAT, type LitRect, PALETTE, type Scene, type SceneEnv, sec } from "../bible";
 import { mix, rgba } from "../color";
 import { medianOf, type ReelFacts, tenths } from "../facts";
 import { glow, makeCanvas, shake } from "../fx";
@@ -34,6 +34,7 @@ import {
   MACHINE,
   type PaneState,
   paneLayout,
+  paneLit,
   type Rect,
   SC_END,
   TERM,
@@ -370,11 +371,20 @@ function draw(ctx: CanvasRenderingContext2D, lt: number, env: SceneEnv): void {
   ctx.restore();
 }
 
+/** The window, lit, as wide as it shows while it flips over. */
+function lit(lt: number): LitRect {
+  const r = paneLit(CARD);
+  const turn = swiftInOut(progress(T_FLIP0, T_FLIP1, lt)) * Math.PI;
+  const w = r.w * Math.abs(Math.cos(turn));
+  return { ...r, x: r.x + (r.w - w) / 2, w };
+}
+
 export const scene: Scene = {
   id: S.id,
   start: S.start,
   end: S.end,
   draw,
+  lit,
   captions: (facts: ReelFacts | null): readonly Caption[] => [
     {
       out: 7.75,

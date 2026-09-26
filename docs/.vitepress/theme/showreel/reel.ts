@@ -50,7 +50,8 @@ export function createReel(facts: ReelFacts | null, options: ReelOptions = {}): 
       s.draw(ctx, t - s.start, { W, H, t, facts });
       ctx.restore();
       if (!options.raw) {
-        vignette(ctx, W, H, 0.5);
+        // Darker toward the edges, but not over the pane's window, a lit screen.
+        vignette(ctx, W, H, 0.5, s.lit?.(t - s.start) ?? null);
         // Over the vignette, so a caption reads the same at the frame's edge;
         // under the grain, so it sits in the picture.
         drawCaptions(ctx, t, captions);

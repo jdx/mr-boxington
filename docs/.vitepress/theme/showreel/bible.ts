@@ -81,6 +81,25 @@ export interface Scene {
    * here and keeps that band quiet while they are up.
    */
   captions?(facts: ReelFacts | null): readonly Caption[];
+  /**
+   * The lit screen on the frame at `lt`, if there is one: the pane's
+   * window, which the reel's vignette leaves out.
+   */
+  lit?(lt: number): LitRect | null;
+}
+
+/**
+ * A screen in the frame, logical px: a terminal's window, lit from within.
+ * The vignette spares it, so the pixel pane's colours read as the
+ * terminal's wherever it stands.
+ */
+export interface LitRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** How far the vignette spares it, 0 to 1. */
+  alpha: number;
 }
 
 export const iso = { yaw: 45 * DEG, pitch: 30 * DEG };

@@ -21,7 +21,7 @@
 // rail keeps cycling, and the first caption holds to b11.5. Every flight is
 // planned once (plan()), so a frame is a pure function of time.
 
-import { BEAT, PALETTE, type Scene, type SceneEnv, sec } from "../bible";
+import { BEAT, type LitRect, PALETTE, type Scene, type SceneEnv, sec } from "../bible";
 import { boxFrame, boxPoint, drawStrawberry, LOGO_FACE, type LogoFace } from "../box";
 import { mix, rgba } from "../color";
 import { type ContentionFact, medianOf, type ReelFacts } from "../facts";
@@ -906,6 +906,15 @@ function drawBars(ctx: CanvasRenderingContext2D, t: number, c: ContentionFact, f
   ctx.restore();
 }
 
+/** When the last tile's piece of the picture has faded out on it (fade, at k 0.45). */
+const PICTURE_GONE = Math.max(...TILES) + 0.06;
+
+/** The pane's window, lit as another-worktree leaves it, until its tiles have carried the picture off. */
+function lit(lt: number): LitRect | null {
+  if (lt >= PICTURE_GONE) return null;
+  return { ...WINDOW, alpha: 1 - smoothstep(T_SPLIT, PICTURE_GONE, lt) };
+}
+
 export const scene: Scene = {
   id: S.id,
   start: S.start,
@@ -914,4 +923,5 @@ export const scene: Scene = {
     draw(ctx, lt, env);
   },
   captions,
+  lit,
 };

@@ -13,7 +13,7 @@
 // The pixel pane is an illustration, not a benchmark, so it shows no counts:
 // 28 units, one per cell of the bar, 27 restored and hk compiled.
 
-import { BEAT, PALETTE, type Scene, sec } from "../bible";
+import { BEAT, type LitRect, PALETTE, type Scene, sec } from "../bible";
 import { type BoxPose, drawStrawberry, sparkle } from "../box";
 import { rgba } from "../color";
 import { glow, shake } from "../fx";
@@ -43,6 +43,7 @@ import {
   drawTower,
   drawWorld,
   paneLayout,
+  paneLit,
   FLOOR,
   MACHINE,
   type PaneState,
@@ -813,6 +814,13 @@ function draw(ctx: CanvasRenderingContext2D, lt: number): void {
   ctx.restore();
 }
 
+/** The pane's window, lit: the benchmark card's as it folds down, then hk-fix's as it opens up. */
+function lit(lt: number): LitRect | null {
+  if (lt < SWAP[0]) return paneLit(SC_END.pane!, undefined, 1 - swiftIn(progress(FOLD[0], FOLD[1], lt)));
+  if (lt < SWAP[1]) return null;
+  return paneLit(AW_END.pane!, undefined, swiftOut(progress(OPEN[0], OPEN[1], lt)));
+}
+
 export const scene: Scene = {
   id: S.id,
   start: S.start,
@@ -820,5 +828,6 @@ export const scene: Scene = {
   draw(ctx, lt) {
     draw(ctx, lt);
   },
+  lit,
   captions: () => CAPTIONS,
 };

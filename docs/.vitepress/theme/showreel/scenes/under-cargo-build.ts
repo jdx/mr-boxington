@@ -9,7 +9,7 @@
 // with the terminal and its mascot still in (map.ts UC_END), where
 // first-build compiles syn.
 
-import { BEAT, PALETTE, type Scene, type SceneEnv, sec } from "../bible";
+import { BEAT, type LitRect, PALETTE, type Scene, type SceneEnv, sec } from "../bible";
 import { rgba } from "../color";
 import { glow, ring } from "../fx";
 import {
@@ -38,6 +38,7 @@ import {
   mixMapCam,
   OVERVIEW,
   type PaneState,
+  paneLit,
   PLAN,
   planChip,
   type Pt,
@@ -318,10 +319,17 @@ function draw(ctx: CanvasRenderingContext2D, lt: number, env: SceneEnv): void {
   ctx.restore();
 }
 
+/** The terminal's window, lit as it swings up off its slab. */
+function lit(lt: number): LitRect | null {
+  if (lt < T_OPEN[0]) return null;
+  return paneLit(PANE, camAt(lt), swiftOut(progress(T_OPEN[0], T_OPEN[1], lt)));
+}
+
 export const scene: Scene = {
   id: S.id,
   start: S.start,
   end: S.end,
   draw,
   captions: () => CAPTIONS,
+  lit,
 };
