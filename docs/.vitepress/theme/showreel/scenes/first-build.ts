@@ -797,7 +797,7 @@ function paneView(lt: number): BuildView {
 const HEADER = { ...wordStyle(40, PALETTE.text2), font: font(40, 500) };
 
 function draw(ctx: CanvasRenderingContext2D, lt: number, env: SceneEnv): void {
-  const facts = env.facts as ReelFacts | null;
+  const facts = env.facts;
   const t = env.t;
   ctx.fillStyle = PALETTE.bg;
   ctx.fillRect(0, 0, env.W, env.H);

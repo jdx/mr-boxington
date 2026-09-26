@@ -8,12 +8,9 @@ import { test } from "node:test";
 import { BEAT, type ReelFacts, type SectionId, sec } from "../bible";
 import { scenes } from "../scenes";
 import { type Caption, entrance, plain, readingTime, timeCaptions, WIPE, WORD, wordCount } from "../type";
+import { hk } from "./published";
 
-const FACTS: ReelFacts = {
-  subject: "hk",
-  warm: { hits: 354, lookups: 354, seconds: 1.25 },
-  commit: { cargo: 18.877, mbx: 9.229 },
-};
+const FACTS: ReelFacts = hk();
 
 /** Every scene's captions under each set of facts, in timeline order. */
 function everyCaption(): { name: string; id: SectionId; caps: readonly Caption[] }[] {

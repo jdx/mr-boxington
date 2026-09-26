@@ -13,7 +13,7 @@
 // warm fact the card shows no label, counter or source line, and the caption
 // claims no figure.
 
-import { BEAT, PALETTE, type ReelFacts as BibleFacts, type Scene, type SceneEnv, sec } from "../bible";
+import { BEAT, PALETTE, type Scene, type SceneEnv, sec } from "../bible";
 import { mix, rgba } from "../color";
 import { medianOf, type ReelFacts, tenths } from "../facts";
 import { glow, makeCanvas, shake } from "../fx";
@@ -345,7 +345,7 @@ function boxAt(lt: number, view: BuildView) {
 }
 
 function draw(ctx: CanvasRenderingContext2D, lt: number, env: SceneEnv): void {
-  const facts = env.facts as ReelFacts | null;
+  const facts = env.facts;
   const t = env.t;
   ctx.fillStyle = PALETTE.bg;
   ctx.fillRect(0, 0, env.W, env.H);
@@ -375,12 +375,12 @@ export const scene: Scene = {
   start: S.start,
   end: S.end,
   draw,
-  captions: (facts: BibleFacts | null): readonly Caption[] => [
+  captions: (facts: ReelFacts | null): readonly Caption[] => [
     {
       out: 7.75,
       lines: [
         { in: 0.75, text: "Same checkout, empty `target/`:" },
-        { in: 3.25, text: restored(facts as ReelFacts | null) },
+        { in: 3.25, text: restored(facts) },
       ],
     },
   ],

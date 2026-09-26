@@ -66,12 +66,6 @@ const FRAME = 1 / 120;
  */
 const SHUTTER = 1 / 60;
 
-/**
- * The run's facts. Every env.facts comes from factsFromBenchmarks, whose
- * ReelFacts bible.ts still declares as its older three-field subset.
- */
-const facts = (env: { facts: unknown }): ReelFacts | null => env.facts as ReelFacts | null;
-
 // Beat map, local seconds. The score (score/data.ts) is written to these.
 //
 //   b0-b0.3   the whip in (the ci part's whoosh), layers trailing
@@ -1670,7 +1664,7 @@ export const scene: Scene = {
     }
     ctx.fillStyle = PALETTE.bg;
     ctx.fillRect(0, 0, env.W, env.H);
-    const m = model(facts(env));
+    const m = model(env.facts);
     const c = m.chart;
     const cam = camAt(m, t);
     const view = new View(cam);

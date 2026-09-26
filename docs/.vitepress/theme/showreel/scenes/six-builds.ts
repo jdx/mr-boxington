@@ -21,7 +21,7 @@
 // rail keeps cycling, and the first caption holds to b11.5. Every flight is
 // planned once (plan()), so a frame is a pure function of time.
 
-import { BEAT, PALETTE, type ReelFacts as SceneFacts, type Scene, type SceneEnv, sec } from "../bible";
+import { BEAT, PALETTE, type Scene, type SceneEnv, sec } from "../bible";
 import { boxFrame, boxPoint, drawStrawberry, LOGO_FACE, type LogoFace } from "../box";
 import { mix, rgba } from "../color";
 import { type ContentionFact, medianOf, type ReelFacts } from "../facts";
@@ -99,7 +99,7 @@ const CAPTION_1: Caption["lines"] = [
 ];
 
 /** The figure line needs the peaks; without them the first caption holds. */
-function captions(facts: SceneFacts | null): readonly Caption[] {
+function captions(facts: ReelFacts | null): readonly Caption[] {
   const c = contention(facts);
   if (!c) return [{ out: 11.5, lines: CAPTION_1 }];
   return [
@@ -108,8 +108,8 @@ function captions(facts: SceneFacts | null): readonly Caption[] {
   ];
 }
 
-/** The contention peaks, when the run backs them. Every env.facts comes from factsFromBenchmarks. */
-const contention = (facts: SceneFacts | null): ContentionFact | null => (facts as ReelFacts | null)?.contention ?? null;
+/** The contention peaks, when the run backs them. */
+const contention = (facts: ReelFacts | null): ContentionFact | null => facts?.contention ?? null;
 
 // Layout, map px at HOME. Mr Boxington stays at MACHINE.box, where
 // another-worktree leaves him and ci picks him up.
@@ -649,7 +649,7 @@ function draw(ctx: CanvasRenderingContext2D, lt: number, env: SceneEnv): void {
   riseIn(ctx, note1, right - layout(ctx, note1, spec40).width, RAIL.y + 128, spec40, PALETTE.text2, t, b(1.5), notesOut);
   riseIn(ctx, note2, right - layout(ctx, note2, spec40).width, RAIL.y + 176, spec40, PALETTE.text2, t, b(1.625), notesOut);
 
-  if (peaks) drawBars(ctx, t, peaks, env.facts as ReelFacts);
+  if (peaks && env.facts) drawBars(ctx, t, peaks, env.facts);
 
   // The finish: the cards fly into the runners, which fade up in their place.
   if (merge > 0) {
@@ -743,7 +743,7 @@ function drawFlights(ctx: CanvasRenderingContext2D, t: number, alpha: number): v
 }
 
 /** check's `syn` in its slot, clippy's waiting over it, and the result going to both. */
-function drawSyn(ctx: CanvasRenderingContext2D, t: number, facts: SceneFacts | null, alpha: number): void {
+function drawSyn(ctx: CanvasRenderingContext2D, t: number, facts: ReelFacts | null, alpha: number): void {
   if (t < T_SYN_CHECK || t > T_SYN_DONE + b(5)) return;
   ctx.save();
   ctx.globalAlpha *= alpha;

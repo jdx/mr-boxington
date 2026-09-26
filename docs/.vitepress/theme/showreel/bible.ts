@@ -4,6 +4,7 @@
 // world the middle sections share.
 
 import { type BoxPose, drawBox, drawShadow, FRONT_CAM, LOGO_POSE, logoCam } from "./box";
+import type { ReelFacts } from "./facts";
 import { DEG, inCubic, progress } from "./math";
 import { type Camera, View } from "./space";
 import { type SectionId, sec } from "./timeline";
@@ -52,14 +53,9 @@ export const PALETTE = {
   outline: "#53350f",
 } as const;
 
-export interface ReelFacts {
-  /** Benchmark subject, e.g. "hk". */
-  subject: string;
-  /** Warm build: every lookup restored from the store. */
-  warm: { hits: number; lookups: number; seconds: number } | null;
-  /** Next-commit build: plain Cargo against mbx with a store warmed at the parent. */
-  commit: { cargo: number; mbx: number } | null;
-}
+// The benchmark claims are read, checked and typed where the published run
+// is parsed: facts.ts.
+export type { ReelFacts };
 
 export interface SceneEnv {
   W: number;
