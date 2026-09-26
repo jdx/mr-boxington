@@ -961,18 +961,23 @@ function corner(out: [number, number][], cx: number, cy: number, r: number, a0: 
   }
 }
 
+/** The logo's rounded bottom corners, in logo units. */
+const FOOT = 3;
+/** How far a neighbouring wall reaches from their corner on screen, in logo units, before the feet there are square. */
+const JOIN = 24;
+
 /**
  * A wall's outline from logo height `top` to the floor, `span` logo units
- * wide, with the logo's 3-unit rounded bottom corners. With top 118 it is the
- * base band.
+ * wide, with rounded bottom corners of radius `ra` on its left and `rb` on its
+ * right (the logo's FOOT). With top 118 it is the base band.
  */
-function wallOutline(top: number, span: number): [number, number][] {
+function wallOutline(top: number, span: number, ra = FOOT, rb = FOOT): [number, number][] {
   const pts: [number, number][] = [
     [0, top],
     [span, top],
   ];
-  corner(pts, span - 3, 121, 3, 0);
-  corner(pts, 3, 121, 3, Math.PI / 2);
+  corner(pts, span - rb, 124 - rb, rb, 0);
+  corner(pts, ra, 124 - ra, ra, Math.PI / 2);
   return pts;
 }
 
@@ -992,8 +997,10 @@ function traceWall(
   n: V3,
   top: number,
   span: number,
+  ra = FOOT,
+  rb = FOOT,
 ): Projected[] {
-  const pts = wallOutline(top, span).map(([x, y]) =>
+  const pts = wallOutline(top, span, ra, rb).map(([x, y]) =>
     view.project(add(origin, add(mul(along, x), mul(up, 124 - y)))),
   );
   if (view.cam.persp && dot(n, view.v) < 1 - 1e-9) {
@@ -1005,8 +1012,8 @@ function traceWall(
   ctx.beginPath();
   ctx.moveTo(0, top);
   ctx.lineTo(span, top);
-  ctx.arc(span - 3, 121, 3, 0, Math.PI / 2);
-  ctx.arc(3, 121, 3, Math.PI / 2, Math.PI);
+  ctx.arc(span - rb, 124 - rb, rb, 0, Math.PI / 2);
+  ctx.arc(ra, 124 - ra, ra, Math.PI / 2, Math.PI);
   ctx.closePath();
   ctx.restore();
   return pts;
@@ -1071,6 +1078,43 @@ function drawLogoBox(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose): 
     fillFace(ctx, pts, t, shade);
     outline(pts);
   };
+  // Where two walls, or two of the lid's edges, meet and both show, the one
+  // painted first is carried a hair under the other along the edge from `a`
+  // to `c`, in its own fill, so the background does not show through where
+  // their antialiased edges meet. Never wider than either face reaches from
+  // the edge (`width`, on screen), so it stays inside the box as one turns
+  // out of view.
+  const seam = (a: V3, c: V3, width: number) => {
+    if (width <= 0) return;
+    const [p, q] = [view.project(a), view.project(c)];
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(q.x, q.y);
+    ctx.strokeStyle = ctx.fillStyle;
+    ctx.lineWidth = Math.min(1, width);
+    ctx.lineCap = "butt";
+    ctx.stroke();
+  };
+  /** How far `far` lies on screen from the line through `a` and `c`: a face's reach from its edge, 0 edge on. */
+  const reach = (a: V3, c: V3, far: V3) => {
+    const [p, q, r] = [view.project(a), view.project(c), view.project(far)];
+    const [ex, ey] = [q.x - p.x, q.y - p.y];
+    const l = Math.hypot(ex, ey);
+    return l > 1e-9 ? Math.abs(ex * (r.y - p.y) - ey * (r.x - p.x)) / l : 0;
+  };
+  // The walls in WALLS order, which is the order they are painted: each
+  // wall's right-hand neighbour is the next, its left-hand one the last.
+  const walls = WALLS.map((wall) => {
+    const pa = boxPoint(f, wall.a[0], -1, wall.a[1]);
+    const pb = boxPoint(f, wall.b[0], -1, wall.b[1]);
+    const n = wall.normal(f);
+    return { ...wall, pa, pb, n, shown: view.facing(n, add(mul(add(pa, pb), 0.5), f.y)) };
+  });
+  /** The lid edges painted after edge `i` and beside it: its right-hand (side 0) then left-hand neighbour, where shown. */
+  const later = (i: number, shown: (j: number) => boolean) =>
+    [(i + 1) % 4, (i + 3) % 4].map((j, side) => ({ j, side })).filter(({ j }) => j > i && shown(j));
+  /** Each wall's gradient, which its base band and lid edge share. */
+  const wallPts: Partial<Record<PanelId, Projected[]>> = {};
   // Logo heights: the lid's top and the rim.
   const yTop = 124 - (LOGO_UNITS * h) / w;
   const yRim = yTop + LID_THICK * LOGO_UNITS;
@@ -1098,7 +1142,7 @@ function drawLogoBox(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose): 
   // logo's front band).
   const tape = pose.tape ?? 0;
   const lidN = lidVector(b, topN);
-  const lidFaces: { pts: V3[]; n: V3; top: boolean }[] = [
+  const lidFaces: { pts: V3[]; n: V3; top: boolean; wall?: number }[] = [
     {
       pts: [
         lidPoint(b, -1, 1, -1),
@@ -1120,7 +1164,7 @@ function drawLogoBox(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose): 
       top: false,
     },
   ];
-  for (const wall of WALLS) {
+  WALLS.forEach((wall, i) => {
     const [ax, az] = wall.a;
     const [bx, bz] = wall.b;
     lidFaces.push({
@@ -1132,17 +1176,32 @@ function drawLogoBox(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose): 
       ],
       n: lidVector(b, wall.normal(f)),
       top: false,
+      wall: i,
     });
-  }
+  });
   const drawLid = (top: boolean) => {
-    for (const lf of lidFaces) {
-      if (lf.top !== top) continue;
-      const mid = mul(lf.pts.reduce((s, p) => add(s, p), [0, 0, 0] as V3), 0.25);
-      if (!view.facing(lf.n, mid)) continue;
-      face(
-        lf.pts.map((p) => view.project(p)),
-        tone(view, lf.n) + shift - (top ? 0 : FLAT_BAND),
-      );
+    const shown = lidFaces.map(
+      (lf) => lf.top === top && view.facing(lf.n, mul(lf.pts.reduce((s, p) => add(s, p), [0, 0, 0] as V3), 0.25)),
+    );
+    lidFaces.forEach((lf, at) => {
+      if (!shown[at]) return;
+      const pts = lf.pts.map((p) => view.project(p));
+      polygon(ctx, pts);
+      const t = tone(view, lf.n) + shift - (top ? 0 : FLAT_BAND);
+      // An edge band shades as its wall does, one step darker.
+      fillFace(ctx, (lf.wall !== undefined && wallPts[WALLS[lf.wall].id]) || pts, t, shade);
+      if (lf.wall !== undefined) {
+        const i = lf.wall;
+        for (const { j, side } of later(i, (j) => shown[2 + j])) {
+          const [a, c] = side === 0 ? [lf.pts[1], lf.pts[2]] : [lf.pts[0], lf.pts[3]];
+          // Each edge's far end along the lid, on its top.
+          const mine = side === 0 ? lf.pts[0] : lf.pts[1];
+          const theirs = lidFaces[2 + j].pts[side === 0 ? 1 : 0];
+          seam(a, c, Math.min(reach(a, c, mine), reach(a, c, theirs)));
+        }
+        if (lw > 0) polygon(ctx, pts);
+      }
+      outline(pts);
       if (top && tape > 0) {
         // The tab, laid from the back edge toward the front, from projected
         // corners; slightly wider at the back, as the logo draws it.
@@ -1161,7 +1220,7 @@ function drawLogoBox(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose): 
         ctx.fillStyle = LOGO_TAPE;
         ctx.fill();
       }
-    }
+    });
   };
 
   // Shut, the box is one convex solid whose faces never overlap on screen,
@@ -1184,22 +1243,51 @@ function drawLogoBox(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose): 
     );
   }
   let front = false;
-  for (const wall of WALLS) {
-    const pa = boxPoint(f, wall.a[0], -1, wall.a[1]);
-    const pb = boxPoint(f, wall.b[0], -1, wall.b[1]);
-    const n = wall.normal(f);
-    if (!view.facing(n, add(mul(add(pa, pb), 0.5), f.y))) continue;
+  const top = b.shut ? yTop : yRim;
+  walls.forEach((wall, i) => {
+    if (!wall.shown) return;
+    const { pa, pb, n } = wall;
     if (wall.id === "face") front = true;
     // The wall's width in logo units, which keep their size on every wall.
     const span = len(sub(pb, pa)) / len(b.ex);
     const along = mul(sub(pb, pa), 1 / span);
     const t = tone(view, n) + shift;
-    const pts = traceWall(ctx, view, pa, along, b.up, n, b.shut ? yTop : yRim, span);
+    const up = (p: V3, y: number) => add(p, mul(b.up, 124 - y));
+    // Its corners with its right-hand and left-hand neighbours. A foot beside
+    // a neighbour that shows squares off as the neighbour turns into view,
+    // square once the neighbour reaches JOIN logo units from the corner on
+    // screen, so no notch opens between two rounded feet. With no neighbour
+    // showing, as in the logo seen square on, both feet are round.
+    const corners = [
+      { j: (i + 1) % 4, at: pb, mine: pa, theirs: walls[(i + 1) % 4].pb },
+      { j: (i + 3) % 4, at: pa, mine: pb, theirs: walls[(i + 3) % 4].pa },
+    ].map(({ j, at, mine, theirs }) => {
+      if (!walls[j].shown) return { j, at, r: FOOT, width: 0 };
+      const head = up(at, 0);
+      const [p, q] = [view.project(at), view.project(head)];
+      const unit = Math.hypot(q.x - p.x, q.y - p.y) / 124;
+      const near = reach(at, head, theirs);
+      return {
+        j,
+        at,
+        r: FOOT * (1 - smoothstep(0, JOIN * unit, near)),
+        width: Math.min(near, reach(at, head, mine)),
+      };
+    });
+    const [rb, ra] = [corners[0].r, corners[1].r];
+    const seams = corners.filter(({ j }) => j > i && walls[j].shown);
+    const pts = traceWall(ctx, view, pa, along, b.up, n, top, span, ra, rb);
     fillFace(ctx, pts, t, shade);
+    for (const c of seams) seam(up(c.at, top), up(c.at, 118), c.width);
+    if (lw > 0 && seams.length) traceWall(ctx, view, pa, along, b.up, n, top, span, ra, rb);
     outline(pts);
-    const band = traceWall(ctx, view, pa, along, b.up, n, 118, span);
-    fillFace(ctx, band, t - FLAT_BAND, shade);
-  }
+    // The base band takes its wall's gradient, so it reads as the wall's
+    // foot, one step darker, rather than a strip shaded on its own.
+    traceWall(ctx, view, pa, along, b.up, n, 118, span, ra, rb);
+    fillFace(ctx, pts, t - FLAT_BAND, shade);
+    for (const c of seams) seam(up(c.at, 118), up(c.at, 124 - c.r), c.width);
+    wallPts[wall.id] = pts;
+  });
 
   if (!b.shut) drawLid(true);
   drawLid(false);
