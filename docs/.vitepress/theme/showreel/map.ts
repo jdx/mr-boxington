@@ -1112,12 +1112,21 @@ export function drawBuildView(ctx: CanvasRenderingContext2D, L: PaneLayout, v: B
   if (v.status) {
     const fill = v.status.tone === "ok" ? TERM.green : v.status.tone === "dim" ? PALETTE.text3 : PALETTE.text1;
     // A terminal never changes its type size: as view.rs crops its content
-    // column beside the mascot, a long crate name is cut at the last whole
-    // character that fits there.
+    // column beside the mascot, a long crate name is cut to fit there. The
+    // cut ends in an ellipsis so it never reads as another crate's name
+    // (libgit2-sys cut to libgit2).
     const spec = font(Math.round(44 * s), 700, MONO);
     const room = L.sprite.x - 32 * s - L.status.x;
-    const glyphs = layout(ctx, v.status.text, spec).glyphs;
-    const text = glyphs.filter((g) => g.x + g.w <= room).map((g) => g.ch).join("");
+    const full = layout(ctx, v.status.text, spec);
+    const cut = room - layout(ctx, "…", spec).width;
+    const text =
+      full.width <= room
+        ? v.status.text
+        : `${full.glyphs
+            .filter((g) => g.x + g.w <= cut)
+            .map((g) => g.ch)
+            .join("")
+            .trimEnd()}…`;
     drawText(ctx, text, L.status.x, L.status.y, { font: spec, fill });
   }
   if (v.counts) {
@@ -2053,7 +2062,7 @@ const HANDOFF_LIST: Omit<Handoff, "from" | "to" | "t">[] = [
   {
     id: "next-push|pruned",
     meet: "hold",
-    note: "One plain cube, H5_POSE under WORLD_CAM, with its shadow; no grid.",
+    note: "One flat taped carton (the logo kind), H5_POSE under WORLD_CAM, with its shadow; no grid.",
     draw(ctx, env) {
       bg(ctx, env);
       drawStagedBox(ctx, WORLD_CAM, H5_POSE);
