@@ -19,6 +19,8 @@ import {
   type MapCam,
   mapToScreen,
   paneLayout,
+  PLAN,
+  planChip,
   type Rect,
   SC_END,
   segments,
@@ -65,41 +67,30 @@ test("first-build starts on under-cargo-build's frame and settles onto the cold 
   }
 });
 
-test("while syn compiles, the camera eases off under-cargo-build's rest until the pane's status and mascot are in", () => {
+test("while syn compiles, the camera holds under-cargo-build's push, with the pane's status and mascot and syn's chip in", () => {
   const onScreen = (cam: MapCam, r: Rect): boolean => {
     const a = mapToScreen(cam, r);
     const b = mapToScreen(cam, { x: r.x + r.w, y: r.y + r.h });
     return a.x >= 0 && a.y >= 0 && b.x <= W && b.y <= H;
   };
-  // The first frame after the bar line moves nothing by half a pixel: the
-  // move starts from the push's rest.
   const follow = UC_END.cam;
   assert.ok(follow);
-  const next = first.frameState(1 / 120).cam;
-  for (const p of [{ x: 0, y: 0 }, { x: 2000, y: 1200 }, { x: MACHINE.box.x, y: FLOOR }]) {
-    const [a, b] = [mapToScreen(follow, p), mapToScreen(next, p)];
-    assert.ok(Math.hypot(a.x - b.x, a.y - b.y) < 0.5, `a jump of ${Math.hypot(a.x - b.x, a.y - b.y)} px`);
-  }
   const pane = FB_END.pane;
   assert.ok(pane);
   const L = paneLayout(pane);
   // `Compiling syn` in bold mono at 44 px, 0.6 em a character.
   const status: Rect = { x: L.status.x, y: L.status.y - 44, w: 13 * 0.6 * 44, h: 56 };
   const box = MACHINE.box;
-  for (let lt = 0; lt < first.T_PUSH0; lt += 1 / 120) {
-    const { cam } = first.frameState(lt);
-    // His base and contact shadow stay above the captions' band.
-    assert.ok(mapToScreen(cam, { x: box.x, y: FLOOR + 0.06 * box.w }).y <= CAPTION_TOP, `the floor in the captions at ${lt}`);
-    // The status reads from the moment the first caption's first line lands.
-    if (lt >= 0.75 * BEAT) assert.ok(onScreen(cam, status), `the status is cut off at ${lt}`);
-    // From the throw, the whole pane, slab and mascot and all, and all of him.
-    if (lt >= first.T_THROW) {
-      assert.ok(onScreen(cam, pane.rect), `the pane is cut off at ${lt}`);
-      assert.ok(onScreen(cam, { x: box.x - box.w / 2, y: FLOOR - box.w * 1.25, w: box.w, h: box.w * 1.25 }));
-    }
-  }
-  assert.deepEqual(first.frameState(first.T_WIDE1).cam, first.WIDE);
-  assert.ok(first.T_WIDE1 <= first.T_PUSH0);
+  const syn = planChip(PLAN.indexOf("syn"));
+  // The whole pane, slab and mascot and all, syn's chip, and all of him,
+  // his base and contact shadow above the captions' band.
+  assert.ok(onScreen(follow, pane.rect), "the pane is cut off");
+  assert.ok(onScreen(follow, status), "the status is cut off");
+  assert.ok(onScreen(follow, { x: syn.x, y: syn.y, w: syn.w ?? 0, h: 56 }), "syn's chip is cut off");
+  assert.ok(onScreen(follow, { x: box.x - box.w / 2, y: FLOOR - box.w * 1.25, w: box.w, h: box.w * 1.25 }), "he is cut off");
+  assert.ok(mapToScreen(follow, { x: box.x, y: FLOOR + 0.06 * box.w }).y <= CAPTION_TOP, "his floor is in the captions");
+  // It holds, without a drift, until the push into the store.
+  for (let lt = 0; lt < first.T_PUSH0; lt += 1 / 120) assert.deepEqual(first.frameState(lt).cam, follow, `the camera moves at ${lt}`);
 });
 
 test("same-checkout starts on the cold finish and ends on the bare benchmark card", () => {

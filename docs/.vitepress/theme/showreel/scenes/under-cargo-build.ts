@@ -4,8 +4,10 @@
 // pile slides out of sight behind it. `cargo build` types and the real build
 // view comes up. Cargo's plan of hk's dependencies unfolds between the
 // terminal and Mr Boxington, and each crate fires its `rustc` call through
-// the gap under his hovering lid, syn's amber and thicker. Then the camera
-// pushes in on him and syn (map.ts UC_END), where first-build compiles it.
+// the gap under his hovering lid, syn's amber and thicker. Then the rest of
+// the plan dims and the camera pushes in on the machine, as far as it goes
+// with the terminal and its mascot still in (map.ts UC_END), where
+// first-build compiles syn.
 
 import { BEAT, PALETTE, type Scene, type SceneEnv, sec } from "../bible";
 import { rgba } from "../color";
@@ -73,7 +75,7 @@ export const T_HIT = PLAN.map((_, i) => b(2.5 + 0.5 * i));
 /** ...after flying for FLY. */
 export const FLY = b(0.3);
 export const SYN = PLAN.indexOf("syn");
-/** The camera pushes in on Mr Boxington and syn, and the rest of the plan dims. */
+/** The camera pushes in until the machine fills the frame, and the rest of the plan dims. */
 export const T_PUSH = [b(6), b(7.75)] as const;
 /** From here the frame is exactly UC_END. */
 const SETTLED = b(7.8);

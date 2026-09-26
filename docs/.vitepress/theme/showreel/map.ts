@@ -1881,8 +1881,15 @@ export const EC_END: WorldState = {
   labels: [{ text: NODES.ci.label, x: NODES.ci.x, y: NODES.ci.y, align: "center", alpha: 0.4 }],
 };
 
-/** under-cargo-build → first-build: pushed in on the box and syn's chip. */
-export const FOLLOW: Readonly<MapCam> = { cx: 640, cy: 555, zoom: 1.25 };
+/**
+ * under-cargo-build → first-build: pushed in on the machine as far as it
+ * goes with all of it in, his contact shadow (x 192) to the pane's slab
+ * (x 1840) about 45 px in from the frame's edges. The pane's top sits 49 px
+ * under the frame's and his shadow ends above the captions' band, so syn's
+ * chip, the pane's `Compiling syn` and its mascot all read at once.
+ * first-build holds it until its push into the store.
+ */
+export const FOLLOW: Readonly<MapCam> = { cx: 1016, cy: 542, zoom: 1.11 };
 export const UC_END: WorldState = {
   cam: FOLLOW,
   frame: machineFrame,
@@ -1993,7 +2000,7 @@ const HANDOFF_LIST: Omit<Handoff, "from" | "to" | "t">[] = [
   worldHandoff(
     "under-cargo-build|first-build",
     "hold",
-    "Pushed in (FOLLOW) on the box, lid hinged up 4, eyes toward the plan, and Cargo's plan with syn's chip amber and the rest dimmed; the time-lapse pane at the right edge, `Compiling` over an empty bar, its mascot at the pane's right out of the frame.",
+    "Pushed in (FOLLOW) on the whole machine: the box, lid hinged up 4, eyes toward the plan; Cargo's plan with syn's chip amber and the rest dimmed; the time-lapse pane, `Compiling` over an empty bar, its mascot at the pane's right, all in frame.",
     UC_END,
   ),
   worldHandoff(
