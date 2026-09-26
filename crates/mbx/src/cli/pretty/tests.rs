@@ -434,7 +434,7 @@ fn uplifted_artifacts_match_shim_outcomes_without_merging_packages_or_tests() {
 }
 
 #[test]
-fn mascot_keeps_progress_readable_and_stays_out_of_narrow_views() {
+fn mascot_keeps_progress_readable_and_leaves_successful_builds() {
     let mut model = Model::new(&["build".into()]);
     model.units_total = Some(100);
     model.units_done = 91;
@@ -465,34 +465,30 @@ fn mascot_keeps_progress_readable_and_stays_out_of_narrow_views() {
             .to_string()
             .contains(chain)
     );
-    // The tape's colour appears only on a sealed box.
-    let tape = "247;228;184";
+    // A failed build keeps the knocked-over box beside its summary.
     model.finished = Some((false, Duration::from_secs(1)));
-    let failed = view::render(&mut model, None, 110, 27).to_string();
-    assert!(strip_ansi(&failed).contains("Failed"));
-    assert!(!failed.contains(tape));
-    model.finished = Some((true, Duration::from_secs(1)));
-    let done = view::render(&mut model, None, 110, 27);
-    assert_eq!(done.size().1, 9);
+    let failed = view::render(&mut model, None, 110, 27);
+    assert_eq!(failed.size().1, 9);
+    assert!(strip_ansi(&failed.to_string()).contains("Failed"));
     // Each mascot cell reaches the terminal with its own glyph, fg and bg.
     use crate::cli::mascot::{self, Pose};
     use norimel::Color;
     let paint =
         |color: Option<mascot::Rgb>| color.map_or(Color::Reset, |(r, g, b)| Color::Rgb(r, g, b));
     let mut painted = vec![Vec::new(); mascot::HEIGHT];
-    let mascot_x = done.size().0 - mascot::WIDTH as u16;
-    for (x, y, text, style) in done.runs() {
+    let mascot_x = failed.size().0 - mascot::WIDTH as u16;
+    for (x, y, text, style) in failed.runs() {
         for (i, glyph) in text.chars().enumerate() {
             if usize::from(x) + i >= usize::from(mascot_x) {
                 painted[usize::from(y)].push((glyph, style.fg, style.bg));
             }
         }
     }
-    let sealed = mascot::draw(Pose {
-        taped: true,
+    let knocked = mascot::draw(Pose {
+        failed: true,
         ..Pose::default()
     });
-    let expected: Vec<Vec<_>> = sealed
+    let expected: Vec<Vec<_>> = knocked
         .iter()
         .map(|row| {
             row.iter()
@@ -501,9 +497,14 @@ fn mascot_keeps_progress_readable_and_stays_out_of_narrow_views() {
         })
         .collect();
     assert_eq!(painted, expected);
-    let done = done.to_string();
-    assert!(strip_ansi(&done).contains('▀'));
-    assert!(done.contains(tape));
+    // A successful build leaves only its summary.
+    model.errors.clear();
+    model.finished = Some((true, Duration::from_secs(1)));
+    let done = view::render(&mut model, None, 110, 27);
+    let text = strip_ansi(&done.to_string());
+    assert!(text.contains("Built"), "{text}");
+    assert!(!text.contains('▀'), "{text}");
+    assert_eq!(done.size().1, view::summary(&model).size().1);
 }
 
 /// Cargo's counts arrive in jumps: an incremental build's first progress line

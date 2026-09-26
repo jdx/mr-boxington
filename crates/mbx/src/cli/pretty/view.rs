@@ -23,7 +23,9 @@ pub(super) struct Browser {
     pub scroll: usize,
 }
 
-/// Put the mascot beside the content only when both remain readable.
+/// Put the mascot beside the content only when both remain readable. A
+/// successful finish leaves just the summary in scrollback; a failure keeps the
+/// knocked-over box beside it.
 pub(super) fn render(
     model: &mut Model,
     browser: Option<&mut Browser>,
@@ -32,7 +34,11 @@ pub(super) fn render(
 ) -> Block {
     use super::norimel::Color;
     use crate::cli::mascot::{self, HEIGHT, Inputs, Rgb, WIDTH};
-    if browser.is_some() || width < 96 || height < HEIGHT as u16 {
+    if browser.is_some()
+        || width < 96
+        || height < HEIGHT as u16
+        || matches!(model.finished, Some((true, _)))
+    {
         return render_content(model, browser, width, height);
     }
     // The first compiler error settles the outcome, though Cargo still finishes
