@@ -417,6 +417,20 @@ pub enum AgentEvent {
     },
     /// A compilation no lookup was possible for.
     Unconsulted,
+    /// A compilation the adapter declined to cache, and the compiler run that
+    /// followed.
+    ///
+    /// Emitted in place of [`Self::Bypass`] and a `bypass`
+    /// [`Self::CompilerInvocation`] when a shim reports both over one
+    /// connection, so the reason arrives with the crate and time it cost.
+    BypassedCompilation {
+        /// Stable, low-cardinality bypass-reason name.
+        kind: String,
+        /// Compiler crate name, when the invocation supplied one.
+        crate_name: Option<String>,
+        /// Wall time spent running the compiler.
+        duration_ns: u64,
+    },
     /// A real compiler invocation ran.
     CompilerInvocation {
         /// Stable outcome category such as `miss`, `unconsulted`, or `bypass`.

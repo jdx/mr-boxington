@@ -72,6 +72,8 @@ pub(crate) struct ConnectionUploads {
     tickets: Vec<UploadTicket>,
     /// Diagnostic sent immediately before its action-accounting request.
     action_diagnostic: Option<(String, Option<String>, ActionDiagnostic)>,
+    /// A bypass reason still waiting for the compiler run it describes.
+    bypass: Option<String>,
 }
 
 impl ConnectionUploads {
@@ -90,6 +92,17 @@ impl ConnectionUploads {
         diagnostic: ActionDiagnostic,
     ) {
         self.action_diagnostic = Some((outcome, crate_name, diagnostic));
+    }
+
+    /// Hold a bypass reason for the compilation that follows it, returning one
+    /// already held that no compilation claimed.
+    pub(crate) fn hold_bypass(&mut self, kind: String) -> Option<String> {
+        self.bypass.replace(kind)
+    }
+
+    /// The bypass reason this connection is holding, if any.
+    pub(crate) fn take_bypass(&mut self) -> Option<String> {
+        self.bypass.take()
     }
 
     pub(crate) fn take_action_diagnostic(
