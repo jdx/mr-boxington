@@ -1,25 +1,30 @@
-// Scene 2, "Character". The closed box from the fold comes alive: it rocks
-// back onto its heel, leaps on a spinning arc to center, lands with a squash,
-// and then the face assembles one feature per sixteenth under a push-in,
-// until it wears the logo pose for the monocle dive.
+// Scene 2, "Mr Boxington". The box the fold shut rocks onto a corner, leaps
+// with a full turn and lands in a puff of dust. Then his face pops in, one
+// feature per sixteenth: the eye under its flat eyelid, the mustache, the
+// monocle on its brass chain, the glint arc on its lens and the rosy cheeks.
+// The camera eases him left and his name card rises beside him; he holds the
+// logo pose, glances at the card, blinks once, and the push toward his
+// monocle begins (bible.ts diveCam), the dive that "what" finishes.
+//
+// Everything is seen from the logo's own camera (box.ts logoCam), so the
+// first frame is the fold's handoff (H1_CAM, H1_POSE) and the pose he holds
+// is the logo exactly (H2_POSE).
 
-import { BEAT, bar, H1_POSE, HERO_CAM, PALETTE, type Scene } from "../bible";
+import { BEAT, DIVE0, diveCam, drawLogoBox, H1_POSE, H2_CAM, H2_POSE, PALETTE, type Scene, sec } from "../bible";
 import {
   type BoxFrame,
   type BoxPose,
   boxFrame,
   boxPoint,
   boxSilhouette,
-  CREAM,
-  drawBox,
+  CHAIN,
+  CHEEKS,
   type FaceParams,
+  FRONT_CAM,
   faceToScreen,
-  INK,
-  monoclePaths,
-  monocleScreen,
-  OUTLINE_RATIO,
-  panelMatrix,
-  sparkle,
+  frontMatrix,
+  LOGO_FACE,
+  logoCam,
 } from "../box";
 import { mix, rgba } from "../color";
 import { glow, shake } from "../fx";
@@ -27,7 +32,6 @@ import {
   clamp,
   cubicBezier,
   DEG,
-  inCubic,
   inOutSine,
   inQuad,
   keys,
@@ -39,120 +43,158 @@ import {
   rng,
   smoothstep,
   spring,
-  swiftInOut,
   TAU,
   wobble,
 } from "../math";
-import {
-  applyMatrix,
-  type Camera,
-  type DOMMatrix2D,
-  mixCamera,
-  type V3,
-  View,
-} from "../space";
+import { applyMatrix, type Camera, type V3, View } from "../space";
+import { CAPTION, drawWords, wordStyle } from "../type";
 
-// Accents in local time (scene start is global beat 4).
-const at = (b: number) => b * BEAT;
-const LAUNCH = at(0.5);
-const APEX = at(1);
-const LAND = at(1.5);
-const EYES = at(2);
-const BROWS = at(2.25);
-const MUST = at(2.5);
-const LABEL = at(2.75);
-const MONO = at(3);
-const GLINT = at(3.25);
-const TIE = at(3.5);
-const BLINK = at(3.75);
+const S = sec("mr-boxington");
+
+// Accents in local time. The score (score/character.ts) is written to these.
+const b = (n: number) => n * BEAT;
+export const LAUNCH = b(0.5);
+const APEX = b(0.875);
+export const LAND = b(1.25);
+/** The eye pops open under its flat eyelid. */
+export const EYE = b(1.5);
+/** The mustache. */
+export const MUST = b(1.75);
+/** The monocle's chain pays out from its anchor, one dot at a time... */
+export const CHAIN0 = b(1.875);
+/** ...and the monocle clinks onto its end. */
+export const MONO = b(2);
+/** The glint arc draws across the lens. */
+export const GLINT = b(2.25);
+/** The cheeks swell in, and the camera starts to ease him left. */
+export const BLUSH = b(2.5);
+/** The name card: the wordmark is in, then the line. */
+export const WORDMARK = b(2.75);
+export const TAGLINE = b(3);
+/** He glances at his name as it lands. */
+const GLANCE = b(2.75);
+/** One 160 ms blink. */
+export const BLINK = b(5.5);
+/** The card wipes away and the push toward the monocle begins. */
+export const PUSH = DIVE0 - S.start;
 
 /** Pops start one frame early with a kick, so the anchor frame already reads. */
 const LEAD = 1 / 60;
-/** Every residual wobble is blended to rest over this window before the handoff. */
-const FIN0 = 1.78;
-const FIN1 = 1.852;
+/** Every residual wobble is blended to rest over this window, before the card holds. */
+const FIN0 = b(3.25);
+const FIN1 = b(3.75);
 
 const FLOOR = H1_POSE.pos[1];
 const IMPACT = 0.045;
-const S2 = Math.SQRT1_2;
 
 type Pt = { x: number; y: number };
 
-// Camera: a lagging crane with the leap that is home again by touchdown, a
-// push toward the face while it assembles, and a pull back to the logo
-// framing that finishes before the blink, so the last beat plays on a locked
-// camera ahead of the dive.
+// Camera: the logo's own view throughout, so a move is the logo's square
+// sliding and scaling on the screen. It rises a little with the leap, pushes
+// in on the face while it assembles, and from BLUSH eases from there to the
+// name card's framing (H2_CAM), mostly there as the line lands. From PUSH it
+// is the dive.
 
-const PUSH_CAM: Camera = { ...HERO_CAM, scale: 380, target: [0, 0.08, 0.2] };
-const PUSH0 = 0.86;
-const PUSH1 = 1.41;
-const PULL0 = GLINT + 0.02;
-const PULL1 = BLINK - 0.025;
-const pullEase = cubicBezier(0.45, 0, 0.25, 1);
-const CRANE = 40;
+/** The logo's square on screen (box.ts logoCam): its top left corner and side, px. */
+interface Square {
+  x: number;
+  y: number;
+  size: number;
+}
+/** FRONT_CAM's square, where the fold left him, and H2_CAM's, beside the card. */
+const FRONT: Square = { x: 720, y: 300, size: 480 };
+const BESIDE: Square = { x: 250, y: 250, size: 440 };
+/** The push-in holds the box's middle (logo 64, 73) still. */
+const zoomed = (sq: Square, size: number): Square => ({
+  x: sq.x + (64 * (sq.size - size)) / 128,
+  y: sq.y + (73 * (sq.size - size)) / 128,
+  size,
+});
+const PUSHED = zoomed(FRONT, 536);
+const pushIn = cubicBezier(0.4, 0, 0.35, 1);
+/** The camera has eased him left, and the card stopped beside him, by b3.25: the line then holds still to read. */
+export const EASE1 = b(3.25);
+const easeLeft = cubicBezier(0.35, 0, 0.1, 1);
+/** Crane: the frame rises with the leap, px, and is home by touchdown. */
+const CRANE = 36;
 const craneAt = keys([
   [LAUNCH, 0],
   [APEX + 0.02, 1, inOutSine],
   [LAND - 0.01, 0, inOutSine],
 ]);
 
-function cameraAt(lt: number): Camera {
-  const push =
-    swiftInOut(progress(PUSH0, PUSH1, lt)) * (1 - pullEase(progress(PULL0, PULL1, lt)));
-  const cam = mixCamera(HERO_CAM, PUSH_CAM, push);
-  cam.cy += CRANE * craneAt(lt);
-  return cam;
+function squareAt(lt: number): Square {
+  const p = pushIn(progress(LAND + 0.03, BLUSH, lt));
+  const k = easeLeft(progress(BLUSH, EASE1, lt));
+  const from = zoomed(FRONT, lerp(FRONT.size, PUSHED.size, p));
+  return {
+    x: lerp(from.x, BESIDE.x, k),
+    y: lerp(from.y, BESIDE.y, k) + CRANE * craneAt(lt),
+    size: lerp(from.size, BESIDE.size, k),
+  };
 }
 
-// Body. On the ground it rocks about whichever bottom corner is lowest,
-// pinned where it stood, so leaning never slides it. In the air its center
-// flies a true parabola and every tilt pivots about that center.
+function cameraAt(lt: number): Camera {
+  if (lt >= PUSH) return diveCam(S.start + lt);
+  if (lt >= EASE1) return H2_CAM;
+  if (lt <= LAUNCH) return FRONT_CAM;
+  const sq = squareAt(lt);
+  return logoCam(sq.x, sq.y, sq.size);
+}
 
-/** Rocking back onto the heel is what carries the center off to the left. */
-const ROCK = 27 * DEG;
-/** Center rise above the straight line from takeoff to touchdown. */
-const LIFT = 0.74;
-const LAND_SQUASH = 1.1;
+// Body. On the ground he rocks about whichever bottom corner is lowest,
+// pinned where it stood, so leaning never slides him. In the air his middle
+// flies a true parabola and every tilt pivots about it.
 
-/** Lean toward screen right: rears back onto the heel, throws itself over, rights itself to land. */
+/** Rocking onto the left heel winds him up. */
+const ROCK = 15 * DEG;
+/** Height of the leap's middle above the straight line from takeoff to touchdown. */
+const LIFT = 0.62;
+const LAND_SQUASH = 1.08;
+
+/** Lean toward screen left (tiltZ): up onto the heel, thrown back over, righted to land. */
 const leanAt = keys([
-  [0.03, 0],
-  [0.2, -ROCK, inOutSine],
-  [LAUNCH, -ROCK * 1.04],
-  [LAUNCH + 0.1, 5 * DEG, inOutSine],
-  [APEX, 9 * DEG, inOutSine],
+  [0.02, 0],
+  [0.19, ROCK, inOutSine],
+  [LAUNCH, ROCK * 1.05],
+  [LAUNCH + 0.1, -7 * DEG, inOutSine],
+  [APEX, -4 * DEG, inOutSine],
   [LAND - 0.05, 0, inOutSine],
 ]);
-/** Lean toward the viewer, peaking a little later, so the bank precesses. */
+/** Lean away from the viewer, peaking a little later, so the bank precesses. */
 const pitchAt = keys([
   [LAUNCH, 0],
-  [APEX + 0.04, 7 * DEG, inOutSine],
+  [APEX + 0.04, -9 * DEG, inOutSine],
   [LAND - 0.05, 0, inOutSine],
 ]);
 
 const crouch = keys([
-  [0, 1],
-  [0.19, 0.82, inOutSine],
+  [0.02, 1],
+  [0.19, 0.84, inOutSine],
   [LAUNCH, 0.8],
-  [LAUNCH + 0.045, 1.15, outQuad],
-  [APEX - 0.02, 0.92, inOutSine],
+  [LAUNCH + 0.045, 1.14, outQuad],
+  [APEX - 0.02, 0.94, inOutSine],
   [LAND, LAND_SQUASH, inQuad],
 ]);
+
+/** Small body reactions as each feature lands. */
+function reactions(lt: number): number {
+  let s = 0.05 * wobble(lt, EYE - LEAD, 3.2, 8);
+  s -= 0.03 * wobble(lt, MUST, 4.5, 9);
+  s -= 0.035 * pulse(lt, MONO, 0.012, 0.03);
+  s += 0.025 * wobble(lt, BLUSH, 3.6, 8);
+  return s;
+}
 
 function squashAt(lt: number): number {
   if (lt < LAND) return crouch(lt);
   const d = lt - LAND;
   if (d < IMPACT) return lerp(LAND_SQUASH, 0.78, outQuad(d / IMPACT));
-  let s = 0.78 + 0.22 * spring(d - IMPACT, 2.8, 0.36);
-  // Small body reactions as features arrive.
-  s += 0.07 * wobble(lt, EYES - LEAD, 3.2, 7);
-  s -= 0.045 * pulse(lt, LABEL, 0.012, 0.022);
-  s -= 0.025 * wobble(lt, MONO, 5, 10);
-  s += 0.02 * wobble(lt, TIE, 4, 9);
-  return s;
+  return 0.78 + 0.22 * spring(d - IMPACT, 2.8, 0.36) + reactions(lt);
 }
 
-const WIND = -14 * DEG;
+/** A wind-up turn against the spin while he rocks, radians. */
+const WIND = -16 * DEG;
 const SPIN_K = 0.35;
 const FLIGHT = LAND - LAUNCH;
 
@@ -163,7 +205,7 @@ function yawAt(lt: number): number {
     // Fast off the push, easing toward touchdown but still turning.
     return lerp(WIND, TAU, p + SPIN_K * p * (1 - p));
   }
-  // Friction stops the spin at touchdown: it twists past square and recoils.
+  // Friction stops the spin at touchdown: he twists past square and recoils.
   const vLand = ((TAU - WIND) * (1 - SPIN_K)) / FLIGHT;
   const f = 3.2;
   return (vLand / (TAU * f)) * wobble(lt, LAND, f, 11);
@@ -174,24 +216,21 @@ function spinRate(lt: number): number {
   const p = clamp((lt - LAUNCH) / FLIGHT);
   return ((TAU - WIND) * (1 + SPIN_K * (1 - 2 * p))) / FLIGHT;
 }
+/** The spin in quarter turns a second at takeoff and at touchdown, for the score's flutter. */
+export const SPIN_QUARTERS: readonly [number, number] = [spinRate(LAUNCH) / (TAU / 4), spinRate(LAND) / (TAU / 4)];
 
-/** Squash, yaw, and tilts, with the box's bottom center at the origin of the floor. */
+/** Squash, yaw, and tilts, with the box's bottom middle on the floor's origin. */
 function trackPose(lt: number): BoxPose {
   const fin = smoothstep(FIN0, FIN1, lt);
-  // Momentum tips it on along the travel as it lands, then it rocks back.
-  const lean = leanAt(lt) + 0.07 * wobble(lt, LAND + 0.01, 2.6, 7);
-  const pitch = pitchAt(lt);
-  // Lean and pitch in world tilts; the head lifts as the eyes open, and the
-  // stamp shoves the right panel so the box rocks away and back.
-  const tx = S2 * (pitch - lean) - 0.045 * wobble(lt, EYES - LEAD, 2.4, 5);
-  const tz = -S2 * (lean + pitch) + 0.06 * wobble(lt, LABEL, 4, 7);
+  // Momentum tips him on along the travel as he lands, then he rocks back.
+  const lean = leanAt(lt) + 0.06 * wobble(lt, LAND + 0.01, 2.6, 7);
   return {
     ...H1_POSE,
     pos: [0, FLOOR, 0],
     squash: lerp(squashAt(lt), 1, fin),
     yaw: lerp(yawAt(lt), 0, fin),
-    tiltX: lerp(tx, 0, fin),
-    tiltZ: lerp(tz, 0, fin),
+    tiltX: lerp(pitchAt(lt), 0, fin),
+    tiltZ: lerp(lean, 0, fin),
   };
 }
 
@@ -215,6 +254,7 @@ function lowestCorner(f: BoxFrame): [number, number] {
 
 /** Standing: tilted about the lowest bottom corner, which stays where it stood. */
 function groundPose(base: BoxPose): BoxPose {
+  if (!base.tiltX && !base.tiltZ) return base;
   const tilted = boxFrame({ ...base, pos: ORIGIN });
   const flat = boxFrame({ ...base, pos: ORIGIN, tiltX: 0, tiltZ: 0 });
   const [i, k] = lowestCorner(tilted);
@@ -224,7 +264,7 @@ function groundPose(base: BoxPose): BoxPose {
 }
 
 let takeoff: { c: V3; heel: V3 } | null = null;
-/** Center and heel at the takeoff frame, where the air arc starts. */
+/** Middle and heel at the takeoff frame, where the air arc starts. */
 function takeoffState(): { c: V3; heel: V3 } {
   if (takeoff) return takeoff;
   const pose = groundPose(trackPose(LAUNCH));
@@ -234,17 +274,13 @@ function takeoffState(): { c: V3; heel: V3 } {
   return takeoff;
 }
 
-/** Airborne: the center on a ballistic arc from takeoff to the landing spot. */
+/** Airborne: the middle on a ballistic arc from takeoff to the landing spot. */
 function airPose(lt: number, base: BoxPose): BoxPose {
   const p = (lt - LAUNCH) / FLIGHT;
   const c0 = takeoffState().c;
-  const y1 = FLOOR + 0.5 * LAND_SQUASH;
-  const c: V3 = [
-    lerp(c0[0], 0, p),
-    lerp(c0[1], y1, p) + LIFT * 4 * p * (1 - p),
-    lerp(c0[2], 0, p),
-  ];
   const f = boxFrame({ ...base, pos: ORIGIN });
+  const y1 = FLOOR + (boxFrame({ ...H1_POSE, squash: LAND_SQUASH }).c[1] - H1_POSE.pos[1]);
+  const c: V3 = [lerp(c0[0], 0, p), lerp(c0[1], y1, p) + LIFT * 4 * p * (1 - p), lerp(c0[2], 0, p)];
   const pos: V3 = [c[0] - f.c[0], c[1] - f.c[1], c[2] - f.c[2]];
   // The floor still holds the heel through the push-off frames, where the
   // stretch reaches down.
@@ -264,302 +300,189 @@ function bodyPose(lt: number): BoxPose {
 const pop = (lt: number, anchor: number, f: number, z: number, kick = 22) =>
   spring(lt - anchor + LEAD, f, z, kick);
 
-/** Opaque from its first frame a third too big, then slammed flat on the anchor. */
-const STAMP = 0.034;
-const labelAt = (lt: number) =>
-  lt < LABEL - STAMP ? 0 : lerp(0.5, 1, inCubic(progress(LABEL - STAMP, LABEL, lt)));
+/** The eye opens as it pops in: its eyelid snaps up to the skeptic's line. */
+const openAt = (lt: number) => 1 - outQuad(progress(EYE - LEAD, EYE + 0.045, lt));
 
+/** One 160 ms blink: both eyes shut to one level line, hold, open. */
 const blinkAt = keys([
-  [BLINK - 0.035, 0],
-  [BLINK, 1, inQuad],
-  [BLINK + 0.017, 1],
-  [BLINK + 0.075, 0, outQuad],
+  [BLINK, 0],
+  [BLINK + 0.035, 1, inQuad],
+  [BLINK + 0.115, 1],
+  [BLINK + 0.16, 0, outQuad],
 ]);
 
-/** A small star on the rim: rises in two frames, a quick "ting" of a decay. */
-const GLINT_PEAK = 0.55;
-function glintAt(lt: number): number {
-  if (lt < GLINT) return GLINT_PEAK * outQuad(progress(GLINT - 0.034, GLINT, lt));
-  return GLINT_PEAK * (1 - outQuad(progress(GLINT, GLINT + 0.12, lt)));
-}
-
-function browLiftAt(lt: number): number {
-  // In low, then snapped up through rest on the anchor.
-  let lift = -7 * (1 - spring(lt - (BROWS - LEAD), 5, 0.45, 25));
-  // Raised watching the monocle drop; the clink knocks them down, then back.
-  if (lt < MONO) lift += 2 * smoothstep(MONO - 0.13, MONO - 0.03, lt);
-  else lift -= 4.2 * (1 - spring(lt - MONO, 6, 0.38));
-  return lift;
-}
-
-// Eyes glance down at the stamp, up at the monocle, and follow it home.
+/** He looks across at his name as it lands, then back at you well before the blink. */
 const lookX = keys([
-  [LABEL - 0.06, 0],
-  [LABEL - 0.025, 4.5, outCubic],
-  [LABEL + 0.03, 4.5],
-  [LABEL + 0.07, 3, outCubic],
-  [MONO - 0.01, 1.5, inOutSine],
-  [MONO + 0.06, 0, outCubic],
+  [GLANCE - 0.02, 0],
+  [GLANCE + 0.07, 3.4, outCubic],
+  [b(4.25), 3.4],
+  [b(4.25) + 0.1, 0, outCubic],
 ]);
 const lookY = keys([
-  [LABEL - 0.06, 0],
-  [LABEL - 0.025, 2.5, outCubic],
-  [LABEL + 0.03, 2.5],
-  [LABEL + 0.07, -5, outCubic],
-  [MONO - 0.01, -2, inOutSine],
-  [MONO + 0.06, 0, outCubic],
+  [GLANCE - 0.02, 0],
+  [GLANCE + 0.07, 0.8, outCubic],
+  [b(4.25), 0.8],
+  [b(4.25) + 0.1, 0, outCubic],
 ]);
 
-// The bow tie whirls one decelerating turn from the anchor, crosses square
-// before the blink still turning, and a stiff spring takes up the overshoot.
-const TIE_SPIN = 0.095;
-const TIE_K = 0.25;
-const TIE_F = 5.5;
-function tieSpin(lt: number): number {
-  if (lt < TIE + TIE_SPIN) {
-    const p = progress(TIE, TIE + TIE_SPIN, lt);
-    return -TAU * (1 - (TIE_K * p + (1 - TIE_K) * p * (2 - p)));
-  }
-  const v = (TAU * TIE_K) / TIE_SPIN;
-  return (v / (TAU * TIE_F)) * wobble(lt, TIE + TIE_SPIN, TIE_F, 16);
+/** The glint arc draws on from its lower end over a few frames. */
+const arcAt = (lt: number) => outQuad(progress(GLINT - LEAD, GLINT + 0.05, lt));
+
+/**
+ * Cheeks: scaled in by the anchor (box.ts reads 0..1 as the scale), then
+ * warmed through the mascot's three levels to the logo's rose.
+ */
+function cheeksAt(lt: number): number {
+  if (lt < BLUSH + 0.03) return outCubic(progress(BLUSH - LEAD - 0.02, BLUSH + 0.03, lt));
+  return 1 + 2 * smoothstep(BLUSH + 0.03, BLUSH + 0.2, lt);
 }
 
-function faceAt(lt: number): FaceParams {
+function faceAt(lt: number): FaceParams | null {
+  if (lt < EYE - LEAD) return null;
   const fin = smoothstep(FIN0, FIN1, lt);
-  const blink = blinkAt(lt);
+  const settle = (v: number, rest: number) => lerp(v, rest, fin);
   return {
-    eyes: lerp(pop(lt, EYES, 4.2, 0.42, 30), 1, fin),
-    // Scales in four frames early, overshooting as the flick lands.
-    brows: lerp(spring(lt - (BROWS - 0.067), 6, 0.5, 20), 1, fin),
-    browLift: lerp(browLiftAt(lt) - 3 * blink, 0, fin),
-    blink,
-    look: [lerp(lookX(lt), 0, fin), lerp(lookY(lt), 0, fin)],
-    monocle: lt >= MONO_SWITCH ? 1 : 0,
-    glint: glintAt(lt),
-    mustache: lerp(pop(lt, MUST, 3.6, 0.42, 30), 1, fin),
-    twitch: lerp(0.32 * wobble(lt, MUST + 0.05, 6.5, 6.5), 0, fin),
-    // Half size on the anchor frame and most of the way two frames later;
-    // the cap keeps the wings on the panel while the spin carries the energy.
-    bowtie: lerp(Math.min(pop(lt, TIE, 5, 0.62, 30), 1.04), 1, fin),
-    bowtieSpin: lerp(tieSpin(lt), 0, fin),
+    ...LOGO_FACE,
+    eyes: settle(pop(lt, EYE, 5, 0.45, 25), 1),
+    blink: Math.max(openAt(lt), blinkAt(lt)),
+    look: [lookX(lt), lookY(lt)],
+    mustache: lt < MUST - LEAD ? 0 : settle(pop(lt, MUST, 4.5, 0.45, 25), 1),
+    // The mustache's flourish: both tips curl up and wave out.
+    twitch: settle(0.3 * wobble(lt, MUST + 0.04, 6.5, 6.5), 0),
+    monocle: lt < MONO - LEAD ? 0 : settle(pop(lt, MONO, 6, 0.55, 20), 1),
+    // The chain: our dots while they pay out, drawBox's from the clink.
+    chain: lt < MONO - LEAD ? 0 : 1,
+    // The clink knocks the monocle swinging on its chain.
+    swing: settle(-0.12 * wobble(lt, MONO, 3.4, 8), 0),
+    arc: arcAt(lt),
+    cheeks: lt < BLUSH - LEAD - 0.02 ? 0 : cheeksAt(lt),
   };
 }
 
-// The monocle is flicked up from behind the lid once the mustache has had
-// its boing, hangs at the top of its arc over the stamp, and drops into the
-// seat, turning into the face plane.
+// The chain pays out from its anchor on the box's side toward the ring, one
+// dot every few frames, drawn as drawBox draws them (logo.svg's dotted path,
+// dots 4.7 units apart from the ring end), so the hand-over at the clink is
+// invisible.
 
-const MONO_TOP = MONO - 0.14;
-const MONO_UP = MONO_TOP - 0.05;
-const MONO_SWITCH = MONO + 0.08;
-/** Arc relative to the seat, in px at HERO_CAM scale. */
-const ARC_X = 125;
-const UP_Y = -120;
-const TOP_Y = -305;
-const REBOUND_LEN = 110;
-
-/** Face-plane matrix with its origin moved to the seated ring center. */
-function seatMatrix(view: View, f: BoxFrame): DOMMatrix2D {
-  const m = panelMatrix(view, f, "face");
-  return { ...m, e: m.a * 18 - m.c * 28 + m.e, f: m.b * 18 - m.d * 28 + m.f };
+const CHAIN_PATH: readonly [number, number][] = [
+  [110, 72],
+  [116, 78],
+  [120, 86],
+  [120, 96],
+];
+const CHAIN_DOTS = 6;
+const CHAIN_PITCH = 4.7;
+/** A point on the chain's curve at parameter u. */
+function chainAt(u: number): [number, number] {
+  const [p0, p1, p2, p3] = CHAIN_PATH;
+  const v = 1 - u;
+  const w = [v * v * v, 3 * v * v * u, 3 * v * u * u, u * u * u];
+  return [
+    w[0] * p0[0] + w[1] * p1[0] + w[2] * p2[0] + w[3] * p3[0],
+    w[0] * p0[1] + w[1] * p1[1] + w[2] * p2[1] + w[3] * p3[1],
+  ];
 }
-
-function mulRot(m: DOMMatrix2D, x: number, y: number, rot: number): DOMMatrix2D {
-  const c = Math.cos(rot);
-  const n = Math.sin(rot);
-  return {
-    a: m.a * c + m.c * n,
-    b: m.b * c + m.d * n,
-    c: -m.a * n + m.c * c,
-    d: -m.b * n + m.d * c,
-    e: m.a * x + m.c * y + m.e,
-    f: m.b * x + m.d * y + m.f,
-  };
-}
-
-function arcAt(lt: number): [number, number] {
-  const x = ARC_X * (1 - progress(MONO_UP, MONO, lt));
-  const y =
-    lt < MONO_TOP
-      ? lerp(UP_Y, TOP_Y, outCubic(progress(MONO_UP, MONO_TOP, lt)))
-      : TOP_Y * (1 - inQuad(progress(MONO_TOP, MONO, lt)));
-  return [x, y];
-}
-
-/** Ring-centered transform for the flying monocle, or null when drawBox owns it. */
-function monoAt(
-  view: View,
-  f: BoxFrame,
-  lt: number,
-): { m: DOMMatrix2D; behind: boolean } | null {
-  if (lt < MONO_UP || lt >= MONO_SWITCH) return null;
-  const seat = seatMatrix(view, f);
-  if (lt >= MONO) {
-    // The seat stops it dead: the rim flattens for a frame, one small
-    // pendulum rebound, then exactly home.
-    const settle = 1 - smoothstep(MONO + 0.045, MONO + 0.075, lt);
-    const th = 0.1 * wobble(lt, MONO, 7, 10) * settle;
-    const rx = -REBOUND_LEN * Math.sin(th);
-    const ry = -REBOUND_LEN * (1 - Math.cos(th));
-    const m = mulRot(seat, rx, ry, -th * 0.9);
-    const sq = 0.12 * Math.exp(-(lt - MONO) / 0.018) * settle;
-    const wx = 1 + sq * 0.5;
-    const wy = 1 - sq;
-    return { m: { ...m, a: m.a * wx, b: m.b * wx, c: m.c * wy, d: m.d * wy }, behind: false };
+let chainDots: [number, number][] | null = null;
+/** The dots' centres, ring end first, by arc length along the curve. */
+function dotsOnChain(): [number, number][] {
+  if (chainDots) return chainDots;
+  const out: [number, number][] = [];
+  let s = 0;
+  let prev = chainAt(0);
+  let next = 0;
+  for (let i = 1; i <= 2000 && out.length < CHAIN_DOTS; i++) {
+    const p = chainAt(i / 2000);
+    const step = Math.hypot(p[0] - prev[0], p[1] - prev[1]);
+    while (out.length < CHAIN_DOTS && s + step >= next) {
+      const k = step > 0 ? (next - s) / step : 0;
+      out.push([lerp(prev[0], p[0], k), lerp(prev[1], p[1], k)]);
+      next += CHAIN_PITCH;
+    }
+    s += step;
+    prev = p;
   }
-  const k = view.cam.scale / HERO_CAM.scale;
-  const [px, py] = arcAt(lt);
-  const [qx, qy] = arcAt(lt - 1 / 60);
-  const vx = px - qx;
-  const vy = py - qy;
-  const speed = Math.hypot(vx, vy);
-
-  // The seat's linear part as rotation, uniform scale, and a unit shear, so
-  // the ring can fly flat to the screen and take on the panel's shear last
-  // without ever collapsing.
-  const th0 = Math.atan2(seat.b, seat.a);
-  const c0 = Math.cos(th0);
-  const s0 = Math.sin(th0);
-  const sx = Math.hypot(seat.a, seat.b);
-  const kap = c0 * seat.c + s0 * seat.d;
-  const sy = -s0 * seat.c + c0 * seat.d;
-  const unit = Math.sqrt(Math.abs(sx * sy));
-  const fall = progress(MONO_TOP, MONO, lt);
-  const sh = smoothstep(0.3, 1, fall);
-  const ua = lerp(1, sx / unit, sh);
-  const uc = lerp(0, kap / unit, sh);
-  const ud = lerp(1, sy / unit, sh);
-  // Behind the box it is farther away; over the lid it is nearest the lens.
-  const grow =
-    lt < MONO_TOP
-      ? lerp(0.85, 1.22, outQuad(progress(MONO_UP, MONO_TOP, lt)))
-      : lerp(1.22, 1, inQuad(fall));
-  const scl = unit * grow;
-  // One full tumble in flight, finishing square to the seat.
-  const rot = th0 - TAU * (1 - progress(MONO_UP, MONO, lt));
-  const cr = Math.cos(rot) * scl;
-  const sr = Math.sin(rot) * scl;
-  let a = cr * ua;
-  let b = sr * ua;
-  let c = cr * uc - sr * ud;
-  let d = sr * uc + cr * ud;
-  let e = seat.e + px * k;
-  let g = seat.f + py * k;
-  // Directional smear on the fastest frames: stretched along the velocity,
-  // with the leading edge where the ring really is.
-  const sig = 1 + 0.75 * smoothstep(40, 68, speed);
-  if (sig > 1.001) {
-    const ux = vx / speed;
-    const uy = vy / speed;
-    const ac = 1 / Math.sqrt(sig);
-    const s11 = sig * ux * ux + ac * uy * uy;
-    const s12 = (sig - ac) * ux * uy;
-    const s22 = sig * uy * uy + ac * ux * ux;
-    [a, b, c, d] = [s11 * a + s12 * b, s12 * a + s22 * b, s11 * c + s12 * d, s12 * c + s22 * d];
-    const back = (sig - 1) * 19 * scl;
-    e -= ux * back;
-    g -= uy * back;
-  }
-  return { m: { a, b, c, d, e, f: g }, behind: lt < MONO_TOP };
+  chainDots = out;
+  return out;
 }
+/** When chain dot `i` (0 at the ring) rattles out: the anchor end first. */
+export const chainDotAt = (i: number): number =>
+  CHAIN0 + ((CHAIN_DOTS - 1 - i) / CHAIN_DOTS) * (MONO - LEAD - CHAIN0);
 
-// The monocle in flight, with box.ts's paths and drawFace's stroke widths,
-// so the hand-over to drawBox's seated monocle is invisible.
-function drawMonocle(ctx: CanvasRenderingContext2D, m: DOMMatrix2D) {
-  const p = monoclePaths();
+function drawChainOut(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose, lt: number): void {
+  if (lt < CHAIN0 || lt >= MONO - LEAD) return;
   ctx.save();
-  applyMatrix(ctx, m);
-  ctx.translate(-18, 28);
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.strokeStyle = INK;
-  ctx.lineWidth = 5;
-  ctx.stroke(p.ring);
-  ctx.strokeStyle = rgba(CREAM, 0.7);
-  ctx.lineWidth = 3;
-  ctx.stroke(p.glint);
-  ctx.strokeStyle = INK;
-  ctx.lineWidth = 3.5;
-  ctx.stroke(p.chain);
-  ctx.fillStyle = INK;
-  ctx.fill(p.bead);
-  ctx.restore();
-}
-
-/** Over the dark background only, a hairline of warm rim light keeps the ink ring legible. */
-function monocleRim(ctx: CanvasRenderingContext2D, m: DOMMatrix2D, sil: Pt[]) {
-  const s = Math.sqrt(Math.abs(m.a * m.d - m.b * m.c));
-  if (s <= 0) return;
-  ctx.save();
-  clipOutside(ctx, sil);
-  applyMatrix(ctx, m);
-  ctx.beginPath();
-  ctx.arc(0, 0, 19 + 0.75 / s, 0, TAU);
-  ctx.strokeStyle = rgba(PALETTE.amberBright, 0.45);
-  ctx.lineWidth = 1.5 / s;
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.arc(0, 0, 14 - 0.75 / s, 0, TAU);
-  ctx.strokeStyle = rgba(PALETTE.amberBright, 0.22);
-  ctx.stroke();
-  ctx.restore();
-}
-
-// Silhouette helpers: the outline stroke sits half outside the hull, so the
-// hull is inflated by that much before anything clips against it.
-
-function inflate(pts: Pt[], w: number): Pt[] {
-  const n = pts.length;
-  if (n < 3) return pts;
-  let area = 0;
-  for (let i = 0; i < n; i++) {
-    const p = pts[i];
-    const q = pts[(i + 1) % n];
-    area += p.x * q.y - q.x * p.y;
-  }
-  const sgn = area > 0 ? 1 : -1;
-  const normal = (i: number): [number, number] => {
-    const p = pts[i];
-    const q = pts[(i + 1) % n];
-    const l = Math.hypot(q.x - p.x, q.y - p.y) || 1;
-    return [(sgn * (q.y - p.y)) / l, (-sgn * (q.x - p.x)) / l];
-  };
-  return pts.map((p, i) => {
-    const [ax, ay] = normal((i - 1 + n) % n);
-    const [bx, by] = normal(i);
-    const k = w / Math.max(1 + ax * bx + ay * by, 0.2);
-    return { x: p.x + (ax + bx) * k, y: p.y + (ay + by) * k };
+  applyMatrix(ctx, frontMatrix(view, pose, 115, 84));
+  ctx.fillStyle = CHAIN;
+  dotsOnChain().forEach(([x, y], i) => {
+    const d = lt - chainDotAt(i);
+    if (d < 0) return;
+    // Each dot drops in a touch large and settles, a link catching.
+    const r = 1.5 * (1 + 0.5 * Math.exp(-d / 0.012));
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, TAU);
+    ctx.fill();
   });
+  ctx.restore();
 }
 
-/** Signed distance from a convex outline, negative inside. */
-function outsideBy(pts: Pt[], x: number, y: number): number {
-  const n = pts.length;
-  let area = 0;
-  for (let i = 0; i < n; i++) {
-    const p = pts[i];
-    const q = pts[(i + 1) % n];
-    area += p.x * q.y - q.x * p.y;
-  }
-  const sgn = area > 0 ? 1 : -1;
-  let d = -Infinity;
-  for (let i = 0; i < n; i++) {
-    const p = pts[i];
-    const q = pts[(i + 1) % n];
-    const l = Math.hypot(q.x - p.x, q.y - p.y) || 1;
-    d = Math.max(d, (sgn * ((q.y - p.y) * (x - p.x) - (q.x - p.x) * (y - p.y))) / l);
-  }
-  return d;
-}
+// Accents on the features: a ring knocked out around the lens as the
+// monocle clinks home, light running along the glint arc as it draws, and a
+// warm bloom as the cheeks swell.
 
-/** Clip to everything outside the silhouette. */
-function clipOutside(ctx: CanvasRenderingContext2D, sil: Pt[]) {
+function clinkRipple(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose, lt: number): void {
+  const p = progress(MONO, MONO + 0.16, lt);
+  if (p <= 0 || p >= 1) return;
+  const c = faceToScreen(view, pose, 86, 62);
+  const e = faceToScreen(view, pose, 86 + 24.5, 62);
+  const r = Math.hypot(e.x - c.x, e.y - c.y);
+  ctx.save();
   ctx.beginPath();
-  ctx.rect(-400, -400, 2720, 1880);
-  ctx.moveTo(sil[0].x, sil[0].y);
-  for (let i = 1; i < sil.length; i++) ctx.lineTo(sil[i].x, sil[i].y);
-  ctx.closePath();
-  ctx.clip("evenodd");
+  ctx.arc(c.x, c.y, r * lerp(1.1, 1.75, outCubic(p)), 0, TAU);
+  ctx.strokeStyle = rgba(PALETTE.paper, 0.8 * (1 - p) ** 1.5);
+  ctx.lineWidth = r * (0.13 * (1 - p) + 0.02);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** The arc's lower end, its middle, and its upper end, in logo units (logo.svg `M69 57a18 18 0 0 1 10-12`). */
+const ARC_PTS: readonly [number, number][] = [
+  [69, 57],
+  [72.3, 49.8],
+  [79, 45],
+];
+
+function glintShimmer(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose, lt: number): void {
+  const d = lt - (GLINT - LEAD);
+  if (d < 0 || d > 0.2) return;
+  const scale = view.cam.scale / FRONT_CAM.scale;
+  // A point of light rides the arc's head as it draws, then flares once at
+  // its tip and fades; the lens itself stays matte, as a glint off a hit
+  // would not.
+  const u = arcAt(lt);
+  const seg = u < 0.5 ? 0 : 1;
+  const k = u < 0.5 ? u / 0.5 : (u - 0.5) / 0.5;
+  const [x0, y0] = ARC_PTS[seg];
+  const [x1, y1] = ARC_PTS[seg + 1];
+  const head = faceToScreen(view, pose, lerp(x0, x1, k), lerp(y0, y1, k));
+  const ride = 1 - smoothstep(0.04, 0.1, d);
+  glow(ctx, head.x, head.y, 46 * scale, "#ffffff", 0.7 * ride);
+  const flare = pulse(lt, GLINT + 0.05, 0.02, 0.05);
+  if (flare > 0.01) {
+    const tip = faceToScreen(view, pose, ARC_PTS[2][0], ARC_PTS[2][1]);
+    glow(ctx, tip.x, tip.y, 60 * scale, "#ffffff", 0.5 * flare);
+  }
+}
+
+function cheekBloom(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose, lt: number): void {
+  const d = lt - BLUSH;
+  if (d < -LEAD || d > 0.35) return;
+  const k = pulse(lt, BLUSH + 0.04, 0.05, 0.08);
+  if (k <= 0.01) return;
+  const scale = view.cam.scale / FRONT_CAM.scale;
+  for (const x of [14, 106]) {
+    const p = faceToScreen(view, pose, x, 94);
+    glow(ctx, p.x, p.y, 70 * scale * (1 + 0.4 * smoothstep(0, 0.2, d)), CHEEKS[2], 0.45 * k);
+  }
 }
 
 // Dust: kicked out along the floor from under the base. Each jet is a low
@@ -592,7 +515,7 @@ interface JetSpec {
   /** Emission stretch on the footprint, [x, z] in half-extents (a point for a corner). */
   a: [number, number];
   b: [number, number];
-  /** Floor direction at a and at b: 135 is screen left, -45 screen right, 45 straight at the viewer. */
+  /** Floor direction at a and at b: 0 is screen right, 90 straight at the viewer, 180 screen left. */
   degA: number;
   degB: number;
   n: number;
@@ -604,23 +527,24 @@ interface JetSpec {
   bumps?: number;
 }
 
-// Takeoff: squeezed out behind the heel it pushed off from, a small skid
-// back along the floor.
+// Takeoff: squeezed out from under the heel he pushed off from, a small skid
+// out along the floor.
 const LAUNCH_DUST: JetSpec[] = [
-  { a: [0, 0], b: [0, 0], degA: 150, degB: 115, n: 6, reach: 0.3, size: 0.056, life: 0.16 },
+  { a: [0, 0], b: [0, 0], degA: 185, degB: 160, n: 5, reach: 0.3, size: 0.045, life: 0.15 },
 ];
-// Touchdown: a skirt out of both front edges and a skid off each side
-// corner, longest to the right where the momentum carries it. Skirt domes
-// sit closer than their radius, so the ridge stays whole as it erodes.
+// Touchdown: squeezed out sideways from under the base, which is how the
+// lens sees dust along the floor: a skid off each front corner, longest to
+// the right where the spin carries it, and a smaller one from further back
+// on each side.
 const LAND_DUST: JetSpec[] = [
-  { a: [1, -1], b: [1, -1], degA: -30, degB: -48, n: 6, reach: 0.4, size: 0.064, life: 0.17 },
-  { a: [-1, 1], b: [-1, 1], degA: 120, degB: 140, n: 5, reach: 0.3, size: 0.056, life: 0.16 },
-  { a: [-0.9, 1], b: [0.9, 1], degA: 90, degB: 90, n: 19, reach: 0.16, size: 0.05, life: 0.15, delay: 0.006, bumps: 5 },
-  { a: [1, 0.9], b: [1, -0.9], degA: 0, degB: 0, n: 19, reach: 0.2, size: 0.052, life: 0.16, delay: 0.006, bumps: 5 },
+  { a: [1, 1], b: [1, 1], degA: -8, degB: 25, n: 8, reach: 0.55, size: 0.066, life: 0.2 },
+  { a: [-1, 1], b: [-1, 1], degA: 188, degB: 155, n: 7, reach: 0.45, size: 0.06, life: 0.19 },
+  { a: [1, 0.2], b: [1, 0.2], degA: -15, degB: 5, n: 5, reach: 0.4, size: 0.05, life: 0.17, delay: 0.01 },
+  { a: [-1, 0.2], b: [-1, 0.2], degA: 195, degB: 175, n: 5, reach: 0.34, size: 0.048, life: 0.16, delay: 0.01 },
 ];
-const DUST_TINT = mix(PALETTE.text3, PALETTE.amberShade, 0.35);
-const DUST_BASE = mix(DUST_TINT, PALETTE.bg, 0.5);
-const DUST_TOP = mix(DUST_TINT, PALETTE.bg, 0.22);
+const DUST_TINT = mix(PALETTE.text3, PALETTE.amberShade, 0.25);
+const DUST_BASE = mix(DUST_TINT, PALETTE.bg, 0.4);
+const DUST_TOP = mix(DUST_TINT, PALETTE.paper, 0.1);
 const DUST_ALPHA = 0.72;
 const DRAG = 0.04;
 
@@ -718,8 +642,8 @@ function dustPuffs(
         origin[2] + l.z * half + l.dz * dist,
       ]);
       // The crown lifts a little as it rolls out, never off the floor.
-      const lift = 0.25 * r0 * smoothstep(0, 0.6, q) * view.cam.scale;
-      domes.push({ x: p.x, y: p.y - lift, rx: r * view.cam.scale });
+      const lift = 0.35 * r0 * smoothstep(0, 0.6, q) * view.cam.scale * p.f;
+      domes.push({ x: p.x, y: p.y - lift, rx: r * view.cam.scale * p.f });
     }
     out.push({ alpha: DUST_ALPHA * (1 - smoothstep(0.4, 0.9, q)), domes });
   }
@@ -728,8 +652,8 @@ function dustPuffs(
 /** A dome: a floor-flat half-ellipse footprint under a low crown. */
 function dome(path: Path2D, x: number, y: number, rx: number) {
   path.moveTo(x + rx, y);
-  path.ellipse(x, y, rx, rx * 0.5, 0, 0, Math.PI);
-  path.ellipse(x, y, rx, rx * 0.72, 0, Math.PI, TAU);
+  path.ellipse(x, y, rx, rx * 0.25, 0, 0, Math.PI);
+  path.ellipse(x, y, rx, rx * 0.85, 0, Math.PI, TAU);
 }
 
 function drawPuffs(ctx: CanvasRenderingContext2D, puffs: Puff[]) {
@@ -759,8 +683,8 @@ function drawPuffs(ctx: CanvasRenderingContext2D, puffs: Puff[]) {
 
 // Spin lines: clean tapered swooshes around the box at two heights on each
 // side, in its (un-spun) horizontal plane, so they tilt with the bank. They
-// lead with a round head in the spin direction, stay clear of the outline,
-// and retract into their heads as the spin slows.
+// lead with a round head in the spin direction, stay clear of the box, and
+// retract into their heads as the spin slows.
 
 interface Swoosh {
   /** 0 for the right side, PI for the left. */
@@ -778,25 +702,46 @@ interface Swoosh {
 }
 
 const SWOOSHES: Swoosh[] = [
-  { side: 0, j: 0.5, head: 0.3, len: 1, R: 1.78, delay: 0 },
-  { side: 0, j: -0.4, head: 0.05, len: 0.8, R: 1.7, delay: 0.017 },
-  { side: Math.PI, j: 0.35, head: 0.2, len: 0.9, R: 1.74, delay: 0.008 },
-  { side: Math.PI, j: -0.3, head: 0.4, len: 1, R: 1.82, delay: 0.025 },
+  { side: 0, j: 0.5, head: 0.3, len: 1, R: 1.7, delay: 0 },
+  { side: 0, j: -0.45, head: 0.05, len: 0.8, R: 1.62, delay: 0.017 },
+  { side: Math.PI, j: 0.35, head: 0.2, len: 0.9, R: 1.66, delay: 0.008 },
+  { side: Math.PI, j: -0.3, head: 0.4, len: 1, R: 1.74, delay: 0.025 },
 ];
 const SWOOSH_IN = 0.05;
-const SWOOSH_OUT0 = 0.1;
-const SWOOSH_OUT1 = 0.2;
+const SWOOSH_OUT0 = 0.12;
+const SWOOSH_OUT1 = 0.24;
 const SWOOSH_N = 28;
 const SWOOSH_COLOR = mix(PALETTE.paper, PALETTE.amberBright, 0.35);
 
-function drawSwooshes(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose, lt: number, sil: Pt[]) {
+/** Signed distance from a convex outline, negative inside. */
+function outsideBy(pts: Pt[], x: number, y: number): number {
+  const n = pts.length;
+  let area = 0;
+  for (let i = 0; i < n; i++) {
+    const p = pts[i];
+    const q = pts[(i + 1) % n];
+    area += p.x * q.y - q.x * p.y;
+  }
+  const sgn = area > 0 ? 1 : -1;
+  let d = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const p = pts[i];
+    const q = pts[(i + 1) % n];
+    const l = Math.hypot(q.x - p.x, q.y - p.y) || 1;
+    d = Math.max(d, (sgn * ((q.y - p.y) * (x - p.x) - (q.x - p.x) * (y - p.y))) / l);
+  }
+  return d;
+}
+
+function drawSwooshes(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose, lt: number) {
   const d0 = lt - LAUNCH;
   if (d0 <= 0 || d0 >= SWOOSH_OUT1 + 0.03) return;
+  const sil = boxSilhouette(view, pose);
   const f = boxFrame({ ...pose, yaw: 0 });
-  const k = view.cam.scale / HERO_CAM.scale;
-  // Screen-right and toward-viewer axes in the box's tilted floor plane.
-  const ur: V3 = [(f.x[0] - f.z[0]) * S2, (f.x[1] - f.z[1]) * S2, (f.x[2] - f.z[2]) * S2];
-  const ud: V3 = [(f.x[0] + f.z[0]) * S2, (f.x[1] + f.z[1]) * S2, (f.x[2] + f.z[2]) * S2];
+  const k = view.cam.scale / FRONT_CAM.scale;
+  // Screen right and toward the viewer, in the box's tilted floor plane.
+  const ur = f.x;
+  const ud = f.z;
   const spun = yawAt(lt) - WIND;
   const pts: Pt[] = [];
   ctx.save();
@@ -809,7 +754,8 @@ function drawSwooshes(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose, 
     const keep = 1 - inQuad(progress(SWOOSH_OUT0, SWOOSH_OUT1, d));
     const span = Math.min(spinRate(lt) * 0.05, 1.1) * s.len * grow * keep;
     if (span <= 0.02) continue;
-    // Spin runs toward decreasing angle; the head creeps along with it.
+    // The front turns toward screen right, so the spin runs toward
+    // decreasing angle; the head creeps along with it.
     const phiHead = s.side - s.head - 0.08 * spun;
     pts.length = 0;
     for (let n = 0; n <= SWOOSH_N; n++) {
@@ -823,25 +769,25 @@ function drawSwooshes(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose, 
       ];
       pts.push(view.project(w));
     }
-    // Keep the run from the head that stays clear of the outline.
+    // Keep the run from the head that stays clear of the box.
     let a = 0;
-    while (a < pts.length && outsideBy(sil, pts[a].x, pts[a].y) < 8 * k) a++;
-    let b = a;
-    while (b < pts.length && outsideBy(sil, pts[b].x, pts[b].y) >= 8 * k) b++;
-    if (b - a < 3) continue;
+    while (a < pts.length && outsideBy(sil, pts[a].x, pts[a].y) < 10 * k) a++;
+    let e = a;
+    while (e < pts.length && outsideBy(sil, pts[e].x, pts[e].y) >= 10 * k) e++;
+    if (e - a < 3) continue;
     let length = 0;
-    for (let n = a + 1; n < b; n++) length += Math.hypot(pts[n].x - pts[n - 1].x, pts[n].y - pts[n - 1].y);
+    for (let n = a + 1; n < e; n++) length += Math.hypot(pts[n].x - pts[n - 1].x, pts[n].y - pts[n - 1].y);
     if (length < 30 * k) continue;
-    const w0 = 4.2 * k * lerp(0.75, 1, keep);
+    const w0 = 5 * k * lerp(0.75, 1, keep);
     const left: Pt[] = [];
     const right: Pt[] = [];
-    for (let n = a; n < b; n++) {
+    for (let n = a; n < e; n++) {
       const p = pts[Math.max(a, n - 1)];
-      const q = pts[Math.min(b - 1, n + 1)];
+      const q = pts[Math.min(e - 1, n + 1)];
       const dx = q.x - p.x;
       const dy = q.y - p.y;
       const l = Math.hypot(dx, dy) || 1;
-      const u = (n - a) / (b - 1 - a);
+      const u = (n - a) / (e - 1 - a);
       const hw = w0 * (1 - u) ** 1.4;
       left.push({ x: pts[n].x - (dy / l) * hw, y: pts[n].y + (dx / l) * hw });
       right.push({ x: pts[n].x + (dy / l) * hw, y: pts[n].y - (dx / l) * hw });
@@ -861,154 +807,107 @@ function drawSwooshes(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose, 
 }
 
 /**
- * Contact shadow: identical to drawShadow at rest (the handoff frame), with
- * a tighter, darker core while the box is in the air.
+ * Contact shadow under the box's middle, on the floor under its front
+ * edge: at rest exactly the one drawLogoBox draws, and tighter and fainter
+ * the higher he is.
  */
-function contactShadow(
-  ctx: CanvasRenderingContext2D,
-  view: View,
-  at: V3,
-  size: number,
-  alpha: number,
-  core: number,
-) {
-  if (alpha <= 0.003) return;
+function contactShadow(ctx: CanvasRenderingContext2D, view: View, pose: BoxPose): void {
+  const f = boxFrame(pose);
+  const [li, lk] = lowestCorner(f);
+  const h = clamp((boxPoint(f, li, -1, lk)[1] - FLOOR) / 0.9);
+  const wide = (pose.size ?? 1) / Math.sqrt(Math.max(pose.squash ?? 1, 0.05)) * lerp(1, 0.6, h);
+  const l = view.project([f.c[0] - wide / 2, FLOOR, 0.5]);
+  const r = view.project([f.c[0] + wide / 2, FLOOR, 0.5]);
+  const w = r.x - l.x;
+  const a = lerp(1, 0.55, h);
   ctx.save();
-  applyMatrix(ctx, view.planeMatrix([at[0], FLOOR, at[2]], [size, 0, 0], [0, 0, size]));
-  const r = 0.78;
-  const g = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
-  g.addColorStop(0, `rgba(0,0,0,${alpha})`);
-  g.addColorStop(lerp(0.55, 0.32, core), `rgba(0,0,0,${alpha * lerp(0.5, 0.8, core)})`);
+  ctx.translate((l.x + r.x) / 2, l.y);
+  ctx.scale(1, 0.085);
+  const g = ctx.createRadialGradient(0, 0, 0, 0, 0, w * 0.66);
+  g.addColorStop(0, `rgba(0,0,0,${0.55 * a})`);
+  g.addColorStop(0.6, `rgba(0,0,0,${0.3 * a})`);
   g.addColorStop(1, "rgba(0,0,0,0)");
   ctx.fillStyle = g;
   ctx.beginPath();
-  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.arc(0, 0, w * 0.66, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 }
 
-// Impact ticks kicked off the label as it stamps down, in the panel's plane.
-// They fly out at full weight and retract from the tail until they are gone.
-const TICKS: [number, number, number, number][] = [
-  [28, 40, -0.8, -0.6],
-  [78, 40, 0.8, -0.6],
-  [78, 72, 0.8, 0.6],
-  [28, 72, -0.8, 0.6],
-  [28, 56, -1, 0],
-  [78, 56, 1, 0],
-];
-const TICK_LIFE = 0.08;
+// The name card, in the free right of the H2_CAM frame: the wordmark over
+// the line, set as the reel's captions are (type.ts drawWords: a word per
+// 1/32 note, rising; a sixteenth's wipe out), and centred on the box's
+// height. It leaves as the push begins, and has wiped by the bar line.
 
-function stampTicks(ctx: CanvasRenderingContext2D, view: View, f: BoxFrame, lt: number) {
-  const p = progress(LABEL, LABEL + TICK_LIFE, lt);
-  if (p <= 0 || p >= 1) return;
-  const head = 4 + 12 * outCubic(p);
-  const tail = 4 + 12 * inQuad(p);
-  if (head - tail < 0.6) return;
-  ctx.save();
-  applyMatrix(ctx, panelMatrix(view, f, "right"));
-  ctx.beginPath();
-  for (const [x, y, dx, dy] of TICKS) {
-    ctx.moveTo(x + dx * tail, y + dy * tail);
-    ctx.lineTo(x + dx * head, y + dy * head);
-  }
-  ctx.strokeStyle = CREAM;
-  ctx.lineCap = "round";
-  ctx.lineWidth = 3.4;
-  ctx.stroke();
-  ctx.restore();
+export const NAME = "mr boxington";
+export const LINE: readonly [string, string] = ["A shared cache", "for Cargo builds."];
+/** The wordmark, 128 px. */
+const NAME_STYLE = wordStyle(128);
+/** The card's left edge, and its baselines: the wordmark's, then the line's two. */
+export const CARD = { x: 772, name: 392, line: [540, 644] } as const;
+/**
+ * When each of the card's lines lands: the wordmark, then both halves of the
+ * line together, so the words cascade down the card a 1/32 note apart.
+ */
+export const CARD_LANDS: readonly [number, number, number] = [WORDMARK, TAGLINE, TAGLINE];
+
+/**
+ * The card rides beside him while the camera eases him left: it keeps its
+ * place relative to the box's right edge, so it arrives with him, and has
+ * stopped where H2_CAM frames it by the time the line is read.
+ */
+function cardShift(lt: number): number {
+  if (lt >= EASE1) return 0;
+  const right = (sq: Square) => sq.x + (124 * sq.size) / 128;
+  return right(squareAt(lt)) - right(BESIDE);
 }
 
-// The clink: a flash in the lens and a ring kicked out around it, riding
-// with the ring through its rebound.
-function clinkRipple(ctx: CanvasRenderingContext2D, m: DOMMatrix2D, lt: number) {
-  const p = progress(MONO, MONO + 0.15, lt);
-  if (p <= 0 || p >= 1) return;
-  ctx.save();
-  applyMatrix(ctx, m);
-  if (lt < MONO + 0.034) {
-    ctx.beginPath();
-    ctx.arc(0, 0, 14.5, 0, TAU);
-    ctx.fillStyle = rgba(CREAM, 0.45 * (1 - progress(MONO, MONO + 0.034, lt)));
-    ctx.fill();
-  }
-  ctx.beginPath();
-  ctx.arc(0, 0, lerp(17, 30, outCubic(p)), 0, TAU);
-  ctx.strokeStyle = rgba(CREAM, 0.85 * (1 - p) ** 1.5);
-  ctx.lineWidth = 3.5 * (1 - p) + 0.5;
-  ctx.stroke();
-  ctx.restore();
+function drawCard(ctx: CanvasRenderingContext2D, lt: number): void {
+  const x = CARD.x + cardShift(lt);
+  drawWords(ctx, NAME, x, CARD.name, NAME_STYLE, lt, CARD_LANDS[0], PUSH);
+  drawWords(ctx, LINE[0], x, CARD.line[0], CAPTION, lt, CARD_LANDS[1], PUSH);
+  drawWords(ctx, LINE[1], x, CARD.line[1], CAPTION, lt, CARD_LANDS[2], PUSH);
 }
 
 /** Footprint half-extent at the impact squash, where the landing dust leaves from. */
 const LAND_HALF = 0.5 / Math.sqrt(0.78);
 
 export const scene: Scene = {
-  id: "character",
-  start: bar(1),
-  end: bar(2),
+  id: S.id,
+  start: S.start,
+  end: S.end,
   draw(ctx, lt, env) {
     ctx.fillStyle = PALETTE.bg;
     ctx.fillRect(0, 0, env.W, env.H);
+    const cam = cameraAt(lt);
+    if (lt >= FIN1 && lt >= b(4.25) + 0.1 && (lt < BLINK || lt >= BLINK + 0.16)) {
+      // At rest in the logo pose: the handoff's own drawing, under the card.
+      drawLogoBox(ctx, cam, H2_POSE);
+      drawCard(ctx, lt);
+      return;
+    }
 
-    const view = new View(cameraAt(lt));
-    const k = view.cam.scale / HERO_CAM.scale;
-    const pose: BoxPose = { ...bodyPose(lt), label: labelAt(lt), face: faceAt(lt) };
-    const f = boxFrame(pose);
-    const sil = inflate(boxSilhouette(view, pose), (OUTLINE_RATIO / 2) * view.cam.scale + 0.5);
+    const view = new View(cam);
+    const face = faceAt(lt);
+    const pose: BoxPose = { ...bodyPose(lt), tape: 1, face };
     const [sx, sy] = shake(lt, LAND, 9, 0.07);
-    const [tx, ty] = shake(lt, LABEL, 4, 0.06);
 
     ctx.save();
-    ctx.translate(sx + tx, sy + ty);
-
-    // Contact shadow under the center of mass: it tightens and fades as the
-    // box rises, but never vanishes.
-    const [li, lk] = lowestCorner(f);
-    const hN = clamp((boxPoint(f, li, -1, lk)[1] - FLOOR) / 0.9);
-    const squash = pose.squash ?? 1;
-    const widen = 1 / Math.sqrt(Math.max(squash, 0.05));
-    contactShadow(ctx, view, f.c, widen * lerp(1, 0.6, hN), lerp(0.45, 0.3, hN), hN);
-
-    drawBox(ctx, view, pose);
-
+    ctx.translate(sx, sy);
+    contactShadow(ctx, view, pose);
+    drawLogoBox(ctx, cam, pose, 0);
+    drawChainOut(ctx, view, pose, lt);
     const puffs: Puff[] = [];
     dustPuffs(view, lt, LAUNCH, LAUNCH_DUST, 21, takeoffState().heel, 0, puffs);
     dustPuffs(view, lt, LAND, LAND_DUST, 7, [0, FLOOR, 0], LAND_HALF, puffs);
     drawPuffs(ctx, puffs);
-    drawSwooshes(ctx, view, pose, lt, sil);
-    stampTicks(ctx, view, f, lt);
-
-    const mono = monoAt(view, f, lt);
-    if (mono) {
-      if (mono.behind) {
-        ctx.save();
-        clipOutside(ctx, sil);
-        drawMonocle(ctx, mono.m);
-        ctx.restore();
-      } else {
-        drawMonocle(ctx, mono.m);
-      }
-      if (lt < MONO) monocleRim(ctx, mono.m, sil);
+    drawSwooshes(ctx, view, pose, lt);
+    if (face) {
+      clinkRipple(ctx, view, pose, lt);
+      glintShimmer(ctx, view, pose, lt);
+      cheekBloom(ctx, view, pose, lt);
     }
-    clinkRipple(ctx, mono ? mono.m : seatMatrix(view, f), lt);
-
-    // The glint: drawBox draws the star; add a small warm bloom and a
-    // smaller echo on the far side of the rim two frames later.
-    if (lt >= MONO_SWITCH) {
-      const g = glintAt(lt) / GLINT_PEAK;
-      if (g > 0) {
-        const gp = faceToScreen(view, pose, 7.5, -38);
-        glow(ctx, gp.x, gp.y, 45 * k * g, PALETTE.amberBright, 0.18 * g);
-      }
-      const g2 = glintAt(lt - 2 / 60);
-      if (g2 > 0) {
-        const r = monocleScreen(view, pose).r;
-        const p2 = faceToScreen(view, pose, 29.7, -16.3);
-        sparkle(ctx, p2.x, p2.y, r * 1.5 * g2 * 0.3, g2 / GLINT_PEAK, -g2 * 0.6);
-      }
-    }
-
     ctx.restore();
+    drawCard(ctx, lt);
   },
 };

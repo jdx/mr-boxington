@@ -1,5 +1,10 @@
 // Glyph-level text layout for kinetic type. Positions come from measuring
-// prefixes, so kerning survives when letters are animated one by one.
+// prefixes, so kerning survives when letters are animated one by one. Then
+// the reel's copy: words that rise in one per 1/32 note and wipe away, the
+// type sizes a phone viewer can read, and the must-read captions.
+
+import { clamp, progress, swiftOut } from "./math";
+import { BEAT, type Section } from "./timeline";
 
 export const DISPLAY = '"Space Grotesk", "Avenir Next", "Segoe UI", sans-serif';
 export const MONO = '"SFMono-Regular", Consolas, "Liberation Mono", monospace';
@@ -116,4 +121,264 @@ export function drawText(
   });
   ctx.restore();
   return line;
+}
+
+// Copy. The reel explains, so its lines are sized for the smallest screen
+// that plays it: a link preview shows the frame at about 0.14x, where 88 px
+// is about 12 px. Anything a muted phone viewer needs is 56 px or larger;
+// 40 px is desktop detail the story never depends on. Code (in backticks) is
+// mono and amber, a little smaller so its x-height matches.
+
+// The palette (bible.ts) imports this module, so its two colors are repeated.
+const PAPER = "#f5ead6";
+const AMBER = "#e6ad54";
+
+/** How a run of words looks and moves. */
+export interface WordStyle {
+  font: string;
+  fill: string;
+  /** Words in backticks. */
+  code: { font: string; fill: string };
+  /** How far each word rises as it fades in, px. */
+  rise: number;
+}
+
+/**
+ * Space Grotesk 600 at `size` px, code in mono at 10/11 of it, rising a
+ * little over a quarter of the size.
+ */
+export function wordStyle(size: number, fill = PAPER): WordStyle {
+  return {
+    font: font(size, 600),
+    fill,
+    code: { font: font(Math.round((size * 10) / 11), 600, MONO), fill: AMBER },
+    rise: Math.round((size * 24) / 88),
+  };
+}
+
+/** The must-read line: 88 px, code at 80 px, rising 24 px. */
+export const CAPTION = wordStyle(88);
+/** A label a phone viewer needs: 56 px; `wordStyle(64)` for the larger ones. */
+export const LABEL = wordStyle(56);
+/** Desktop-only detail: 40 px. */
+export const DETAIL = wordStyle(40);
+/** A figure: 144 px; figures run from `wordStyle(120)` to `wordStyle(160)`. */
+export const FIGURE = wordStyle(144);
+
+/** Words land one per 1/32 note, each rising and fading in over its own. */
+export const WORD = BEAT / 8;
+/** A line leaves with a left-to-right wipe over a sixteenth. */
+export const WIPE = BEAT / 4;
+
+interface Run {
+  text: string;
+  code: boolean;
+}
+/** A word is the runs between two spaces: `target/`: is code, then a colon. */
+type Word = Run[];
+
+/** Split copy into words, with backticks marking code. */
+function words(text: string): Word[] {
+  const out: Word[] = [];
+  let runs: Run[] = [];
+  let run = "";
+  let code = false;
+  const endRun = () => {
+    if (run) runs.push({ text: run, code });
+    run = "";
+  };
+  for (const ch of text) {
+    if (ch === "`") {
+      endRun();
+      code = !code;
+    } else if (ch === " ") {
+      endRun();
+      if (runs.length) out.push(runs);
+      runs = [];
+    } else {
+      run += ch;
+    }
+  }
+  endRun();
+  if (runs.length) out.push(runs);
+  return out;
+}
+
+/** The copy as displayed, without the backticks. */
+export const plain = (text: string): string => text.replaceAll("`", "");
+
+/**
+ * Words a reader has to take in: every word with a letter or digit in it,
+ * so `&&` and a lone dash do not count.
+ */
+export function wordCount(text: string): number {
+  return plain(text)
+    .split(/\s+/)
+    .filter((w) => /[\p{L}\p{N}]/u.test(w)).length;
+}
+
+/**
+ * The reading rule: a line stays fully in for at least this long, seconds,
+ * from the frame its last word lands to the frame it starts to leave.
+ */
+export const readingTime = (words: number): number => words / 4 + 0.5;
+
+/** When the first word of `text` starts to rise, if its last lands at `land`. */
+export const entrance = (text: string, land: number): number => land - words(text).length * WORD;
+
+/** Each word's offset from the start of the line, and the line's width. */
+function place(ctx: CanvasRenderingContext2D, list: Word[], style: WordStyle): { at: number[]; width: number } {
+  // Words are spaced as prose, inside code too: a mono space reads as two.
+  const space = layout(ctx, " ", style.font).width;
+  let width = 0;
+  const at = list.map((w, i) => {
+    const x0 = width;
+    for (const r of w) width += layout(ctx, r.text, r.code ? style.code.font : style.font).width;
+    if (i < list.length - 1) width += space;
+    return x0;
+  });
+  return { at, width };
+}
+
+/**
+ * Where a left-aligned line's exit wipe has reached at `t`: nothing of it
+ * shows left of this x. The edge overshoots the ink a little on both sides,
+ * so the line is whole on the wipe's first frame and gone on its last.
+ */
+function wipeEdge(ctx: CanvasRenderingContext2D, left: number, width: number, style: WordStyle, t: number, out: number): number {
+  const wipe = progress(out, out + WIPE, t);
+  if (wipe <= 0) return -Infinity;
+  const pad = 0.1 * layout(ctx, "M", style.font).width;
+  return left - pad + wipe * (width + 2 * pad);
+}
+
+/**
+ * Draw `text` at baseline `y` with the reel's word motion: the words rise
+ * and fade in one per 1/32 note, the last landing at `land`; from `out` the
+ * line wipes away left to right over a sixteenth. Times are on the caller's
+ * clock (`t`). Returns the line's width.
+ */
+export function drawWords(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  style: WordStyle,
+  t: number,
+  land: number,
+  out = Infinity,
+  align: "left" | "center" | "right" = "left",
+): number {
+  const list = words(text);
+  const { at, width } = place(ctx, list, style);
+  const n = list.length;
+  if (t < land - n * WORD || t >= out + WIPE) return width;
+  const left = align === "left" ? x : align === "center" ? x - width / 2 : x - width;
+
+  ctx.save();
+  const edge = wipeEdge(ctx, left, width, style, t, out);
+  if (edge > -Infinity) {
+    ctx.beginPath();
+    ctx.rect(edge, -1e5, 2e5, 2e5);
+    ctx.clip();
+  }
+  list.forEach((w, i) => {
+    const p = progress(land - (n - i) * WORD, land - (n - i - 1) * WORD, t);
+    if (p <= 0) return;
+    // Opaque well before it settles, so the rise reads as a landing.
+    const a = clamp(p / 0.6);
+    const dy = style.rise * (1 - swiftOut(p));
+    let rx = left + at[i];
+    for (const r of w) {
+      ctx.save();
+      ctx.globalAlpha *= a;
+      const spec = r.code ? style.code : style;
+      rx += drawText(ctx, r.text, rx, y + dy, { font: spec.font, fill: spec.fill }).width;
+      ctx.restore();
+    }
+  });
+  ctx.restore();
+  return width;
+}
+
+/** One line of a caption. Backticks mark code. */
+export interface CaptionLine {
+  /** Section-local beat its last word lands on. */
+  in: number;
+  text: string;
+}
+
+/**
+ * A must-read caption: one or two lines of about 36 characters at most,
+ * left-aligned in the lower third. Each line lands by its own `in` beat and
+ * both wipe away from `out`, in beats local to the scene's section. The
+ * next caption lands at least half a beat after this one starts to leave,
+ * and each line holds for its reading time (the tests check both).
+ */
+export interface Caption {
+  /** Section-local beat the exit wipe starts on. */
+  out: number;
+  lines: readonly CaptionLine[];
+}
+
+/** Captions start 160 px in from the left edge. */
+export const CAPTION_X = 160;
+/**
+ * Baselines: a caption's last line sits on the lower one, clear of a
+ * player's controls; a two-line caption's first line on the upper one.
+ */
+export const CAPTION_Y = [832, 936] as const;
+
+/** A caption placed on the reel's clock: global seconds. */
+export interface TimedCaption {
+  /** The first word starts to rise. */
+  start: number;
+  /** The wipe starts. */
+  out: number;
+  /** The wipe has finished. */
+  end: number;
+  lines: { text: string; land: number; y: number }[];
+}
+
+/** Place a section's captions on the reel's clock. */
+export function timeCaptions(s: Section, captions: readonly Caption[]): TimedCaption[] {
+  return captions.map((c) => {
+    const lines = c.lines.map((l, i) => ({
+      text: l.text,
+      land: s.beat(l.in),
+      y: CAPTION_Y[CAPTION_Y.length - c.lines.length + i],
+    }));
+    const out = s.beat(c.out);
+    return { start: Math.min(...lines.map((l) => entrance(l.text, l.land))), out, end: out + WIPE, lines };
+  });
+}
+
+/** Draw whichever captions are up at global time `t`. */
+export function drawCaptions(ctx: CanvasRenderingContext2D, t: number, captions: readonly TimedCaption[]): void {
+  // A caption can start to land while the last one wipes away. On each
+  // baseline it writes in behind the wipe's edge, never over letters that
+  // are still up.
+  const edges = new Map<number, number>();
+  for (const c of captions) {
+    if (t < c.out || t >= c.end) continue;
+    for (const l of c.lines) {
+      const { width } = place(ctx, words(l.text), CAPTION);
+      edges.set(l.y, wipeEdge(ctx, CAPTION_X, width, CAPTION, t, c.out));
+    }
+  }
+  for (const c of captions) {
+    if (t < c.start || t >= c.end) continue;
+    for (const l of c.lines) {
+      const edge = t < c.out ? edges.get(l.y) : undefined;
+      if (edge === -Infinity) continue;
+      ctx.save();
+      if (edge !== undefined) {
+        ctx.beginPath();
+        ctx.rect(edge - 2e5, -1e5, 2e5, 2e5);
+        ctx.clip();
+      }
+      drawWords(ctx, l.text, CAPTION_X, l.y, CAPTION, t, l.land, c.out);
+      ctx.restore();
+    }
+  }
 }

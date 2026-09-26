@@ -4,14 +4,18 @@
   "private": true,
   "scripts": {
     "docs:dev": "vitepress dev",
-    "docs:build": "node --test .vitepress/social-images.test.mjs && vitepress build && node .vitepress/check-social-images.mjs",
+    "docs:build": "tsc -p .vitepress/theme/showreel && node .vitepress/theme/showreel/test/run.mjs && node --test .vitepress/social-images.test.mjs && vitepress build && node .vitepress/check-social-images.mjs",
     "docs:preview": "vitepress preview",
-    "showreel:video": "node .vitepress/showreel-video.mjs"
+    "showreel:video": "node .vitepress/showreel-video.mjs",
+    "test:showreel": "node .vitepress/theme/showreel/test/run.mjs",
+    "typecheck": "tsc -p .vitepress/theme/showreel"
   },
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",
+    "@types/node": "^24",
     "esbuild": "^0.21.5",
     "playwright-core": "^1.63.0",
+    "typescript": "^7.0.2",
     "vitepress": "^1.6.3",
     "vitepress-plugin-tabs": "^0.9.1"
   },

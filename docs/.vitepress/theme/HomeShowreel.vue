@@ -1,68 +1,47 @@
 <script setup lang="ts">
 import { withBase } from "vitepress";
+import { onMounted, ref } from "vue";
 import { data } from "../benchmarks.data";
 import { data as showreel } from "../showreel.data";
-import type { ReelFacts } from "./showreel/bible";
+import { describeChapters } from "./showreel/describe";
 import { factsFromBenchmarks } from "./showreel/facts";
 
-// The reel is rendered to an MP4 by `mise run render:showreel` (the docs deploy
-// runs it), so this is a plain video player. Builds without a render leave the
-// section out.
+// The reel is rendered to MP4 files by `mise run render:showreel` (the docs
+// deploy runs it), so this is a plain video player. Builds without a render
+// leave the section out.
 
 const facts = factsFromBenchmarks(data);
-const secs = (n: number) => `${n.toFixed(1)} seconds`;
-
-/** The chart's delta, from the rounded readouts as the Data scene draws it. */
-function savedText(c: NonNullable<ReelFacts["commit"]>): string {
-  const delta = (Math.round(c.cargo * 10) - Math.round(c.mbx * 10)) / 10;
-  return delta > 0 ? `, ${secs(delta)} less` : "";
-}
-
-function describeChapters(f: ReelFacts | null) {
-  const bench = f?.subject ? `the ${f.subject} benchmark's` : "the benchmark's";
-  const warm = f?.warm;
-  const commit = f?.commit;
-  return [
-    {
-      label: "Line & fold",
-      text: "A point of light draws a flat cardboard net, which folds up into a closed, taped box.",
-    },
-    {
-      label: "Character",
-      text: "The box crouches, leaps, lands, and comes to life as Mr Boxington: eyes, brows, mustache, shipping label, monocle, and bow tie.",
-    },
-    {
-      label: "Kinetic type",
-      text: "The camera dives into his monocle, where the words reuse matching compilation work across projects, worktrees, and CI slam into place.",
-    },
-    {
-      label: "Particles",
-      text: `Compiled crates stream from a project into the box, which sends restored outputs to a worktree and to CI${
-        warm ? `, where counters reach ${warm.hits} of ${warm.lookups} cache hits` : ""
-      }.`,
-    },
-    {
-      label: "Data",
-      text: commit
-        ? `A bar chart of ${bench} next-commit build, with the store warmed at the parent commit: Cargo takes ${secs(commit.cargo)} and mbx takes ${secs(commit.mbx)}${savedText(commit)}.`
-        : `A bar chart compares Cargo with mbx on ${bench} next-commit build, with the store warmed at the parent commit.`,
-    },
-    {
-      label: "Isometric",
-      text: "Cached outputs drop into an isometric store as boxes. A scan sweeps the grid and prunes all but a few.",
-    },
-    {
-      label: "Liquid morph",
-      text: "The boxes that were kept melt together into one liquid shape, which takes on Mr Boxington's outline.",
-    },
-    {
-      label: "Logo resolve",
-      text: "Mr Boxington returns in full above the name mr boxington, the line A shared cache for Cargo builds, and the address mr-boxington.jdx.dev.",
-    },
-  ];
-}
-
 const described = describeChapters(facts);
+
+// The page is served with the 60 fps file, which plays everywhere. Once it is
+// mounted, and before anyone presses play, it switches to the 120 fps file if
+// the browser says it decodes that smoothly and power-efficiently (in
+// practice, in hardware). This tests the decoder, not the display, so a
+// capable 60 Hz screen gets the larger file too. Nothing downloads until play.
+const player = ref<HTMLVideoElement>();
+const src = ref(showreel?.src ?? "");
+onMounted(async () => {
+  const video120 = showreel?.video120;
+  if (!video120 || !navigator.mediaCapabilities) return;
+  try {
+    const { smooth, powerEfficient } = await navigator.mediaCapabilities.decodingInfo({
+      type: "file",
+      video: {
+        // H.264 High at level 5.1, as the renderer encodes it.
+        contentType: 'video/mp4; codecs="avc1.640033"',
+        width: 1920,
+        height: 1080,
+        framerate: 120,
+        bitrate: video120.bitrate,
+      },
+    });
+    // Someone who already pressed play keeps the file that is playing.
+    const idle = player.value?.paused && player.value.readyState === HTMLMediaElement.HAVE_NOTHING;
+    if (smooth && powerEfficient && idle) src.value = video120.src;
+  } catch {
+    // Older browsers reject the query; they keep the 60 fps file.
+  }
+});
 </script>
 
 <template>
@@ -70,15 +49,19 @@ const described = describeChapters(facts);
     <figure>
       <!-- No autoplay, and nothing downloads until someone presses play. -->
       <video
-        :src="withBase(showreel.src)"
+        ref="player"
+        :src="withBase(src)"
         :poster="withBase(showreel.poster)"
         width="1920"
         height="1080"
         controls
         playsinline
         preload="none"
-        aria-label="Mr Boxington, a cardboard box with a monocle and bow tie, folds into shape and shows matching Cargo build outputs being reused across projects, worktrees, and CI. Chapters are listed below."
-      />
+        aria-label="Mr Boxington showreel: how mbx caches Cargo builds. A cardboard box with a skeptical eye, a monocle on a brass chain and a handlebar mustache. Chapters are listed below."
+      >
+        <!-- Generated from the reel's sections; see showreel/timeline.ts. -->
+        <track kind="chapters" srclang="en" label="Chapters" :src="withBase('/showreel-chapters.vtt')" default />
+      </video>
       <ol class="sr-only" aria-label="Showreel chapters">
         <li v-for="c in described" :key="c.label">{{ c.label }}: {{ c.text }}</li>
       </ol>

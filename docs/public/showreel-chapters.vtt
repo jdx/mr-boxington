@@ -1,0 +1,57 @@
+WEBVTT
+
+fold
+00:00:00.000 --> 00:00:01.875
+Fold
+
+mr-boxington
+00:00:01.875 --> 00:00:05.625
+Mr Boxington
+
+what
+00:00:05.625 --> 00:00:11.250
+What mbx does
+
+every-checkout
+00:00:11.250 --> 00:00:16.875
+Every checkout compiles again
+
+under-cargo-build
+00:00:16.875 --> 00:00:20.625
+Under cargo build
+
+first-build
+00:00:20.625 --> 00:00:26.250
+First build fills the store
+
+same-checkout
+00:00:26.250 --> 00:00:30.000
+Same checkout, empty target/
+
+another-worktree
+00:00:30.000 --> 00:00:35.625
+Another worktree
+
+six-builds
+00:00:35.625 --> 00:00:41.250
+Six builds at once
+
+ci
+00:00:41.250 --> 00:00:46.875
+CI
+
+next-push
+00:00:46.875 --> 00:00:52.500
+Next push, measured
+
+pruned
+00:00:52.500 --> 00:00:58.125
+target/ pruned
+
+morph
+00:00:58.125 --> 00:01:00.000
+Morph
+
+end
+00:01:00.000 --> 00:01:05.625
+End card
