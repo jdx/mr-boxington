@@ -23,17 +23,18 @@ import type { ReelFacts } from "../facts";
 import { glow, ring, roundedRect } from "../fx";
 import {
   applyMapCam,
-  arc,
   boxCam,
   boxFromSprite,
   type BoxSpot,
   type BuildPlan,
   type BuildView,
   buildAt,
+  CAPTION_TOP,
   type ChipState,
   chipRect,
   type Curve,
   curveAt,
+  drawArrow,
   drawCarton,
   drawChip,
   drawFrame,
@@ -53,7 +54,7 @@ import {
   UC_END,
   type Unit,
 } from "../map";
-import { clamp, hash, inQuad, lerp, outCubic, progress, smoothstep, swiftIn, swiftInOut, swiftOut } from "../math";
+import { clamp, cubicBezier, hash, inQuad, lerp, progress, smoothstep, swiftIn, swiftInOut, swiftOut } from "../math";
 import { polygon, type Projected, View } from "../space";
 import { type Caption, drawWords, font, layout, MONO, wordStyle } from "../type";
 import { bouncyLid, bump, jolt, land, lidSteps, tapeAt } from "./first-build-kit";
@@ -95,10 +96,15 @@ export const T_REWRITE = [
   [b(7.5), b(8.5)],
   [b(8), b(9)],
 ] as const;
-/** Sparks run from every input to the tag, and the key stamps on. */
-export const T_HASH = b(8.875);
+/**
+ * A thread shoots from each input into the tag, top to bottom, and the key
+ * stamps on as the last one lands: the key is made of them.
+ */
+export const T_HASH = b(8.5);
+export const THREAD = b(0.3);
+export const T_THREADS = Array.from({ length: 7 }, (_, i) => T_HASH + b(0.07) * i + THREAD);
 export const T_STAMP = b(9.25);
-/** The camera backs out, and his front fades back in over the store as it goes. */
+/** The camera backs out, and the hole in his front shuts as it goes. */
 export const T_PULL0 = b(9.5);
 export const T_PULL1 = b(10.5);
 export const T_CLOSE0 = b(9.85);
@@ -172,18 +178,21 @@ function zoomCam(a: MapCam, b: MapCam, e: number): MapCam {
   return { cx: fx - ((fx - a.cx) * a.zoom) / z, cy: fy - ((fy - a.cy) * a.zoom) / z, zoom: z };
 }
 
+/** Backing out: off the mark in a few frames, then a long settle home. */
+const PULL_EASE = cubicBezier(0.35, 0, 0.12, 1);
+
 function camAt(lt: number): MapCam {
   if (lt < T_PULL0) return zoomCam(FOLLOW, INSIDE, swiftInOut(progress(T_PUSH0, T_PUSH1, lt)));
-  return zoomCam(INSIDE, HOME, outCubic(progress(T_PULL0, T_PULL1, lt)));
+  return zoomCam(INSIDE, HOME, PULL_EASE(progress(T_PULL0, T_PULL1, lt)));
 }
 
-/** How far the rest of the map has dimmed around the cutaway. */
+/** How far the rest of the map has dimmed around the cutaway: gone before the push has gone far, back as it ends. */
 const spotAt = (lt: number): number =>
-  0.95 * (smoothstep(T_PUSH0, T_PUSH1, lt) - smoothstep(T_PULL0, T_PULL0 + b(0.75), lt));
+  0.95 * (smoothstep(T_PUSH0, T_PUSH0 + b(0.6), lt) - smoothstep(T_PULL0, T_PULL0 + b(0.75), lt));
 
-/** How far the hole in his front is open, 0..1, and how much of the store shows through it. */
-const openAt = (lt: number): number => swiftOut(progress(T_OPEN0, T_OPEN1, lt));
-const shownAt = (lt: number): number => 1 - smoothstep(T_CLOSE0, T_CLOSE1, lt);
+/** How far the hole in his front is open, 0..1: out from the middle of his face, then shut again the same way. */
+const openAt = (lt: number): number =>
+  swiftOut(progress(T_OPEN0, T_OPEN1, lt)) * (1 - swiftIn(progress(T_CLOSE0, T_CLOSE1, lt)));
 
 // Cargo's plan: the chips under-cargo-build left, `syn`'s amber.
 
@@ -231,10 +240,13 @@ function drawRing(ctx: CanvasRenderingContext2D, lt: number): void {
   const pad = 7;
   const box = [c.x - pad, c.y - pad, w + 2 * pad, h + 2 * pad, h / 2 + pad] as const;
   const laps = ringAt(lt);
+  // It catches on the downbeat, and flares up over the first few frames.
+  const catches = clamp((lt - T_RING0) / 0.1);
   if (lt <= T_RING1) {
     // The track so far, dim, then the hot trail behind the head.
     const lit = clamp(laps);
     ctx.save();
+    ctx.globalAlpha *= catches;
     ctx.lineCap = "round";
     ctx.strokeStyle = rgba(PALETTE.amber, 0.35 + 0.35 * clamp(laps - 1));
     ctx.lineWidth = 5;
@@ -299,7 +311,7 @@ function chipAt(i: number, lt: number): ChipState | null {
     const gone = progress(T_RING1, T_RING1 + 0.09, lt);
     if (gone >= 1) return null;
     return planChip(i, "amber", {
-      ...(heat > 0 ? { lit: 0.3 + 0.7 * heat } : {}),
+      ...(heat > 0 ? { lit: 0.3 * clamp((lt - T_RING0) / 0.1) + 0.7 * heat } : {}),
       ...(gone > 0 ? { scale: 1 - swiftIn(gone) } : {}),
     });
   }
@@ -370,7 +382,9 @@ function drawFlights(ctx: CanvasRenderingContext2D, t: number): void {
     if (t < f.t0 || t >= f.t1 + 0.05) continue;
     const u = progress(f.t0, f.t1, t);
     const p = curveAt(f.curve, u);
-    drawCarton(ctx, p.x, p.y, f.size, "compiled", {
+    // The stream's cartons pop out of the plan as they leave; syn's has already popped.
+    const grow = f === SYN_FLIGHT ? 1 : land(t, f.t0, 0.07, 0.2);
+    drawCarton(ctx, p.x, p.y, f.size * grow, "compiled", {
       rot: f.spin * (u - 0.3),
       sy: 1 + 0.12 * Math.sin(Math.PI * u),
       sx: 1 - 0.08 * Math.sin(Math.PI * u),
@@ -619,7 +633,8 @@ function drawStore(ctx: CanvasRenderingContext2D, lt: number, facts: ReelFacts |
     drawCarton(ctx, CARTON_X, y, CARTON_SIZE, "compiled", { sy: 1 - squash, sx: 1 + squash * 0.6, label: "syn", lit });
   }
 
-  // The inputs, snapping onto the wall.
+  // The inputs, snapping onto the wall: the key chips in three rows, then
+  // the two paths.
   const toolchain = facts?.toolchain;
   const keys = [
     facts?.subject === "hk" ? "syn 2.0.119 sources" : "syn sources",
@@ -628,24 +643,34 @@ function drawStore(ctx: CanvasRenderingContext2D, lt: number, facts: ReelFacts |
     "profile",
     "RUSTFLAGS",
   ];
-  const hot = bump(lt, T_HASH, T_STAMP - T_HASH + 0.1);
-  // Where each input's spark leaves for the tag: its left end.
-  const starts: Pt[] = [];
   const rowX = ROWS.map(() => LEFT);
-  keys.forEach((text, i) => {
-    const s = snap(lt, T_CHIPS[i]);
+  const chips: ChipState[] = keys.map((text, i) => {
     const row = KEY_ROW[i];
     const c: ChipState = { text, x: rowX[row], y: ROWS[row], size: 40 };
     rowX[row] += chipRect(ctx, c).w + 16;
-    starts.push({ x: c.x + 10, y: c.y + 28 });
-    if (!s) return;
-    drawChip(ctx, { ...c, y: c.y + s.dy, alpha: s.alpha, lit: Math.max(s.lit, hot), scale: s.scale });
+    return c;
+  });
+  // Where each input's thread leaves from, in thread order: inside its
+  // chip's left end, so it comes out from under the chip.
+  const ends: Pt[] = [
+    ...chips.map((c) => ({ x: c.x + 20, y: c.y + 28 })),
+    ...PATHS.map((_, i) => ({ x: LEFT + 28, y: ROWS[3 + i] + 39 })),
+  ];
+  // Each chip lights as its thread leaves, and all of them as the key stamps on.
+  const hot = (i: number) =>
+    Math.max(bump(lt, T_THREADS[i] - THREAD - 0.02, THREAD + 0.12), bump(lt, T_STAMP - 0.03, 0.32));
+
+  // The threads, under the chips and the tag.
+  ends.forEach((a, i) => drawKeyThread(ctx, keyThread(a), lt, i));
+
+  chips.forEach((c, i) => {
+    const s = snap(lt, T_CHIPS[i]);
+    if (s) drawChip(ctx, { ...c, y: c.y + s.dy, alpha: s.alpha, lit: Math.max(s.lit, hot(i)), scale: s.scale });
   });
   PATHS.forEach((_, i) => {
     const s = snap(lt, T_PATHS[i]);
-    const y = ROWS[3 + i];
-    starts.push({ x: LEFT + 10, y: y + 39 });
     if (!s) return;
+    const y = ROWS[3 + i];
     ctx.save();
     ctx.globalAlpha *= s.alpha;
     const cx = LEFT + 300;
@@ -653,20 +678,21 @@ function drawStore(ctx: CanvasRenderingContext2D, lt: number, facts: ReelFacts |
     ctx.translate(cx, cy);
     ctx.scale(s.scale, s.scale);
     ctx.translate(-cx, -cy);
-    drawPathChip(ctx, i, LEFT, y + s.dy, lt, Math.max(s.lit, hot));
+    drawPathChip(ctx, i, LEFT, y + s.dy, lt, Math.max(s.lit, hot(keys.length + i)));
     ctx.restore();
   });
 
-  // The tag: out on its string from b5, blank until every input runs into
-  // it and the key stamps on.
+  // The tag: out on its string from b5, blank while the threads run into
+  // it, twitching as each lands, until the key stamps on.
   if (lt >= T_TAG) {
     const swing = land(lt, T_TAG, 0.35, 0.4);
+    const twitch = T_THREADS.reduce((k, at) => k + jolt(lt, at, 0.22, 7) * 0.05, 0);
     const knot: Pt = { x: CARTON_X + CARTON_SIZE * 0.36, y: SHELF_Y - CARTON_SIZE * 0.84 };
     const slam = lt >= T_STAMP ? 1 + 0.35 * (1 - land(lt, T_STAMP, 0.18, 0.3)) : 1;
     ctx.save();
     ctx.translate(TAG_AT.x, TAG_AT.y);
     ctx.scale(slam, slam);
-    ctx.rotate(-1.2 * (1 - swing));
+    ctx.rotate(-1.2 * (1 - swing) + twitch);
     ctx.translate(-TAG_AT.x, -TAG_AT.y);
     const stamped = lt >= T_STAMP;
     drawTag(ctx, TAG_AT.x, TAG_AT.y, stamped ? "key 9e1f…" : "key ····", {
@@ -677,29 +703,48 @@ function drawStore(ctx: CanvasRenderingContext2D, lt: number, facts: ReelFacts |
     ctx.restore();
     const flash = progress(T_STAMP, T_STAMP + 0.35, lt);
     if (flash > 0 && flash < 1) {
-      ring(ctx, TAG_AT.x + 130, TAG_AT.y, 240, flash, PALETTE.paper, 8);
-      glow(ctx, TAG_AT.x + 130, TAG_AT.y, 220, PALETTE.amberBright, 0.7 * (1 - flash) ** 2);
+      ring(ctx, KEY_AT.x, KEY_AT.y, 240, flash, PALETTE.paper, 8);
+      glow(ctx, KEY_AT.x, KEY_AT.y, 220, PALETTE.amberBright, 0.7 * (1 - flash) ** 2);
     }
   }
 
-  // Every input runs into the tag just before the stamp.
-  starts.forEach((s, i) => {
-    const t0 = T_HASH + i * 0.03;
-    const u = progress(t0, T_STAMP, lt);
-    if (u <= 0 || u >= 1) return;
-    const k = arc(s, { x: TAG_AT.x + 140, y: TAG_AT.y - 20 }, 0.18);
-    drawSpark(ctx, k, swiftIn(u), { color: PALETTE.amberBright, size: 8, trail: 0.3 });
+  // Each thread's spark, riding in ahead of it, over everything.
+  ends.forEach((a, i) => {
+    const u = progress(T_THREADS[i] - THREAD, T_THREADS[i], lt);
+    if (u > 0 && u < 1) drawSpark(ctx, keyThread(a), threadEase(u), { color: PALETTE.amberBright, size: 7, trail: 0.35 });
   });
+}
+
+/** Where the threads meet: the tag's blank, where the key is stamped. */
+const KEY_AT: Pt = { x: TAG_AT.x + 190, y: TAG_AT.y };
+
+/** An input's thread: out of its chip's left end, sagging down and left into the tag. */
+function keyThread(a: Pt): Curve {
+  return { a, c: { x: KEY_AT.x + 10, y: a.y + 40 }, b: KEY_AT };
+}
+
+const threadEase = (u: number): number => swiftInOut(u) * 0.7 + u * 0.3;
+
+/**
+ * Thread `i` drawing on into the tag, hot while it runs, flashing as the key
+ * stamps on and then reeled in after it, gone a quarter-second later.
+ */
+function drawKeyThread(ctx: CanvasRenderingContext2D, k: Curve, lt: number, i: number): void {
+  const t1 = T_THREADS[i];
+  const to = threadEase(progress(t1 - THREAD, t1, lt));
+  const from = swiftIn(progress(T_STAMP, T_STAMP + 0.24, lt));
+  if (to <= 0 || from >= 1) return;
+  const flash = bump(lt, T_STAMP - 0.04, 0.2);
+  const color = mix(PALETTE.amber, PALETTE.paper, Math.max(flash, 0.5 * bump(lt, t1 - 0.04, 0.14)));
+  drawArrow(ctx, k, { from, to, width: 4 + 2 * flash, color, head: 0, alpha: 0.9 });
 }
 
 function drawCutaway(ctx: CanvasRenderingContext2D, lt: number, pose: BoxPose, facts: ReelFacts | null): void {
   const open = openAt(lt);
-  const shown = shownAt(lt);
-  if (open <= 0 || shown <= 0) return;
+  if (open <= 0) return;
   const view = new View(boxCam(SPOT));
   const m = frontMatrix(view, pose);
   ctx.save();
-  ctx.globalAlpha *= shown;
   // Inside the front wall only.
   ctx.save();
   ctx.transform(m.a, m.b, m.c, m.d, m.e, m.f);
@@ -781,6 +826,25 @@ function draw(ctx: CanvasRenderingContext2D, lt: number, env: SceneEnv): void {
   drawSynPop(ctx, lt);
   drawWords(ctx, "first build · empty store", SPOT.x - 20, 187, HEADER, t, S.at(b(0.75)), S.at(b(11.25)), "center");
   ctx.restore();
+  drawScrim(ctx, env, scrimAt(cam));
+}
+
+/**
+ * How dark the captions' band is kept while the camera is in close: his
+ * front sweeps down through it as the camera pushes in and backs out, and
+ * inside him it is the store's floor. None at FOLLOW's zoom or wider.
+ */
+const scrimAt = (cam: MapCam): number => smoothstep(0, 1, Math.log(cam.zoom / FOLLOW.zoom) / Math.log(1.5 / FOLLOW.zoom));
+
+/** A shadow over the captions' band, fading in from just under the shelf. */
+function drawScrim(ctx: CanvasRenderingContext2D, env: SceneEnv, k: number): void {
+  if (k <= 0) return;
+  const top = CAPTION_TOP - 28;
+  const g = ctx.createLinearGradient(0, top, 0, top + 56);
+  g.addColorStop(0, rgba(PALETTE.bg, 0));
+  g.addColorStop(1, rgba(PALETTE.bg, 0.86 * k));
+  ctx.fillStyle = g;
+  ctx.fillRect(0, top, env.W, env.H - top);
 }
 
 const CAPTIONS: readonly Caption[] = [

@@ -89,19 +89,29 @@ test("the warm build blushes at the first hit, glints only while hits land, and 
     if (lt < same.T_BERRY) assert.equal(view.pose.strawberry, false);
     if (lt >= same.T_BERRY) assert.ok(view.pose.strawberry && (pose.face?.strawberry ?? 0) > 0);
   }
+  // The bar fills over a fixed 2.5 beats, whatever the benchmark counted.
+  assert.ok(Math.abs(same.T_FILL1 - same.T_FILL0 - 2.5 * BEAT) < 1e-9);
+  assert.equal(same.frameState(same.T_FILL0 - 1 / 120).view.filled, 0);
+  assert.ok(same.frameState(same.T_FILL0 + BEAT).view.filled > 0);
+  assert.ok(same.frameState(same.T_FILL1 - BEAT / 4).view.filled < BAR_CELLS);
+  assert.equal(same.frameState(same.T_FILL1).view.filled, BAR_CELLS);
   assert.ok(same.SWEEPS.length >= 2, "the glint sweeps while the bar fills");
   assert.ok(same.SWEEPS.every((w) => w.at >= SAME.at(blush) && w.at < SAME.at(finish)));
 });
 
-test("each lid steps down four times with the mascot's, and is home before the tape", () => {
-  for (const [s, steps, tape] of [
-    [FIRST, first.LID_STEPS, first.T_TAPE0],
-    [SAME, same.LID_STEPS, same.T_TAPE0],
+test("each lid steps down four times with the mascot's, and is shut before the tape", () => {
+  for (const [s, steps, tape, state] of [
+    [FIRST, first.LID_STEPS, first.T_TAPE0, first.frameState],
+    [SAME, same.LID_STEPS, same.T_TAPE0, same.frameState],
   ] as const) {
     assert.equal(steps.length, 4, `${s.id}: ${steps.length} steps`);
-    assert.ok(steps.every((t) => t > s.start && t + LID_DROP <= s.at(tape) + 1e-9), `${s.id}: a step lands after the tape`);
-    assert.equal(bouncyLid(steps, s.at(tape)), 0);
+    assert.ok(steps.every((t) => t > s.start && t < s.at(tape)), `${s.id}: a step comes after the tape`);
+    // Shut, bounce and all, on the frame before the tape starts to go on.
+    assert.equal(state(tape - 1 / 120).pose.lid, 0, `${s.id}: the lid is still open`);
+    assert.equal(bouncyLid(steps, s.at(tape) + LID_DROP), 0);
   }
+  // first-build's last step is home well before its tape.
+  assert.ok(first.LID_STEPS.every((t) => t + LID_DROP <= FIRST.at(first.T_TAPE0)));
   // first-build's steps come after the camera is back out, where the pane shows them.
   assert.ok(first.LID_STEPS.every((t) => t > FIRST.at(first.T_PULL1) - BEAT / 2));
   assert.deepEqual(lidSteps({ start: 0, total: 4, units: [] }, 1), []);

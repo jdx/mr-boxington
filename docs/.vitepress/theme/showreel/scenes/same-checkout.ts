@@ -62,7 +62,7 @@ export const T_LIFT = b(0.25);
 export const T_LABEL = b(0.5);
 /** The bar fills, a unit at a time, over a fixed 2.5 beats. */
 export const T_FILL0 = b(0.75);
-export const T_FILL1 = b(2.95);
+export const T_FILL1 = b(3.25);
 /** The build finishes: taped. */
 export const T_FINISH = b(3.25);
 export const T_TAPE0 = b(3.25);
@@ -77,7 +77,7 @@ export const T_OUT = b(7.5);
 // The warm build, in reel time: a fixed count, every unit a hit. The
 // benchmark's counts only change the counter's text.
 
-/** Units in the plan. The lid steps at 14, 27, 41 and 54 done. */
+/** Units in the plan. The lid steps at 14, 27, 41 and 54 done, the last just shut before the tape. */
 const TOTAL = 60;
 
 export const BUILD: BuildPlan = {
@@ -134,12 +134,27 @@ function cardView(t: number): BuildView {
 
 let flipCanvas: HTMLCanvasElement | null = null;
 
+/** How far the far edge of the turning card recedes: 0 flat, larger deeper. */
+const DEPTH = 0.2;
+/** Vertical strips the turning card is drawn in, for its perspective. */
+const STRIPS = 64;
+
 /**
- * The window drawn edge on by `sx` (1 flat, 0 edge on) about its middle,
- * through an offscreen canvas so the pixel mascot keeps its square pixels,
- * and shaded as it turns away.
+ * The window turned `turn` radians about its upright middle (0 facing us,
+ * pi/2 edge on), in perspective: drawn once flat on an offscreen canvas so
+ * the pixel mascot keeps its square pixels, then laid back in upright strips
+ * that shrink toward the far edge, and shaded as it turns from the light.
+ * `mirror` puts the far edge on the left, for the face that turns in, and
+ * `print` draws whatever else is on that face, in map px.
  */
-function drawFlipped(ctx: CanvasRenderingContext2D, pane: PaneState, sx: number, lift: number): void {
+function drawFlipped(
+  ctx: CanvasRenderingContext2D,
+  pane: PaneState,
+  turn: number,
+  mirror: boolean,
+  lift: number,
+  print?: (o: CanvasRenderingContext2D) => void,
+): void {
   const m = ctx.getTransform();
   const pad = 4;
   const x0 = Math.floor(m.a * WINDOW.x + m.e) - pad;
@@ -156,20 +171,45 @@ function drawFlipped(ctx: CanvasRenderingContext2D, pane: PaneState, sx: number,
   o.clearRect(0, 0, w, h);
   o.setTransform(m.a, 0, 0, m.d, m.e - x0, m.f - y0);
   drawPane(o, { ...pane, rect: WINDOW, slab: null });
-  const dw = w * sx;
+  print?.(o);
+  const cos = Math.cos(turn);
+  const sin = Math.sin(turn) * (mirror ? -1 : 1);
+  // A point u half-widths right of the middle lands at x(u), scaled by k(u).
+  const k = (u: number) => 1 / (1 + DEPTH * u * sin);
+  const x = (u: number) => ((u * cos * w) / 2) * k(u);
+  const cx = x0 + w / 2;
+  const cy = y0 + h / 2 - lift * m.d;
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  const dx = x0 + (w - dw) / 2;
-  const dy = y0 - lift * m.d;
-  ctx.drawImage(flipCanvas, dx, dy, dw, h);
+  ctx.imageSmoothingEnabled = true;
+  for (let i = 0; i < STRIPS; i++) {
+    const u0 = -1 + (2 * i) / STRIPS;
+    const u1 = u0 + 2 / STRIPS;
+    const xa = cx + x(u0);
+    const xb = cx + x(u1);
+    const sh = h * k((u0 + u1) / 2);
+    // Overlap each strip a hair so no seam shows between them.
+    const dx = Math.min(xa, xb) - 0.35;
+    ctx.drawImage(flipCanvas, (i * w) / STRIPS, 0, w / STRIPS, h, dx, cy - sh / 2, Math.abs(xb - xa) + 0.7, sh);
+  }
   // Turned away from the light, it darkens.
-  ctx.fillStyle = rgba("#000000", 0.55 * (1 - sx));
-  ctx.fillRect(dx + pad * sx, dy + pad, dw - 2 * pad * sx, h - 2 * pad);
+  const l = cx + x(-1);
+  const r = cx + x(1);
+  const tl = h * k(-1);
+  const tr = h * k(1);
+  ctx.fillStyle = rgba("#000000", 0.55 * (1 - Math.abs(cos)));
+  ctx.beginPath();
+  ctx.moveTo(l, cy - tl / 2 + pad);
+  ctx.lineTo(r, cy - tr / 2 + pad);
+  ctx.lineTo(r, cy + tr / 2 - pad);
+  ctx.lineTo(l, cy + tl / 2 - pad);
+  ctx.closePath();
+  ctx.fill();
   ctx.restore();
 }
 
-/** The terminal, the flip, and the card. */
-function drawTerminal(ctx: CanvasRenderingContext2D, lt: number, t: number): void {
+/** The terminal, the flip, and the card with its copy, which turns in with it. */
+function drawTerminal(ctx: CanvasRenderingContext2D, lt: number, t: number, facts: ReelFacts | null): void {
   const card: PaneState = { ...CARD, view: cardView(t) };
   const p = progress(T_FLIP0, T_FLIP1, lt);
   if (p <= 0) {
@@ -178,6 +218,7 @@ function drawTerminal(ctx: CanvasRenderingContext2D, lt: number, t: number): voi
   }
   if (p >= 1) {
     drawPane(ctx, card);
+    drawCardCopy(ctx, lt, t, facts);
     return;
   }
   const slab = paneLayout(CARD).slab as Rect;
@@ -185,8 +226,9 @@ function drawTerminal(ctx: CanvasRenderingContext2D, lt: number, t: number): voi
   // Over and back, gathering speed into the edge-on moment and settling out
   // of it, with a little hop there.
   const turn = swiftInOut(p) * Math.PI;
-  const sx = Math.abs(Math.cos(turn));
-  drawFlipped(ctx, turn < Math.PI / 2 ? OLD_PANE : card, Math.max(sx, 0.02), 26 * Math.sin(turn));
+  const lift = 26 * Math.sin(turn);
+  if (turn < Math.PI / 2) drawFlipped(ctx, OLD_PANE, turn, false, lift);
+  else drawFlipped(ctx, card, Math.PI - turn, true, lift, (o) => drawCardCopy(o, lt, t, facts));
 }
 
 // The copy on the card and over him.
@@ -215,7 +257,8 @@ function wrap(ctx: CanvasRenderingContext2D, text: string, style: WordStyle, wid
   return lines;
 }
 
-function drawCopy(ctx: CanvasRenderingContext2D, lt: number, t: number, facts: ReelFacts | null): void {
+/** The card's label and its hit counter, rolling with the bar. */
+function drawCardCopy(ctx: CanvasRenderingContext2D, lt: number, t: number, facts: ReelFacts | null): void {
   const copy = cardCopy(facts);
   const L = paneLayout(CARD);
   const out = S.at(T_OUT);
@@ -224,6 +267,12 @@ function drawCopy(ctx: CanvasRenderingContext2D, lt: number, t: number, facts: R
     const n = Math.round((copy.hits * doneAt(BUILD.units, t)) / TOTAL);
     drawWords(ctx, `${n} hits`, L.counts.x, L.counts.y, COUNTER, t, S.at(T_FILL0), out);
   }
+}
+
+/** The source line over him. */
+function drawSource(ctx: CanvasRenderingContext2D, t: number, facts: ReelFacts | null): void {
+  const copy = cardCopy(facts);
+  const out = S.at(T_OUT);
   if (copy.source) {
     wrap(ctx, copy.source, SOURCE, SOURCE_W).forEach((line, i) => {
       drawWords(ctx, line, SOURCE_X, SOURCE_Y + i * 48, SOURCE, t, S.at(b(1.25 + 0.25 * i)), out);
@@ -311,13 +360,13 @@ function draw(ctx: CanvasRenderingContext2D, lt: number, env: SceneEnv): void {
   // The old target/ slabs wait behind the pane; the flip would show them.
   const flipping = lt > T_FLIP0 && lt < T_FLIP1;
   if (SC_END.tower && !flipping) drawTower(ctx, SC_END.tower);
-  drawTerminal(ctx, lt, t);
+  drawTerminal(ctx, lt, t, facts);
   // His blush lands with a warm bloom.
   const blush = bump(lt, T_BLUSH, 0.3);
   if (blush > 0) for (const c of CHEEKS) glow(ctx, c.x, c.y, 90, mix(PALETTE.amber, "#e47a68", 0.7), 0.5 * blush);
   drawMapBox(ctx, { spot: SPOT, pose });
   drawSparks(ctx, t);
-  drawCopy(ctx, lt, t, facts);
+  drawSource(ctx, t, facts);
   ctx.restore();
 }
 

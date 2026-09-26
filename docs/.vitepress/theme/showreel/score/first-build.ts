@@ -2,10 +2,11 @@
 // compiles syn, a pop as its carton comes out, and a gulp as it drops in
 // under the lid. The cutaway tears open and the camera pushes in on a
 // swell; the carton knocks onto the shelf, its tag flicks out, the inputs
-// tick onto the wall, the paths' letters click over, and the key stamps on
-// with a thunk. Backing out, the rest of the plan drops in with quick
-// gulps, the lid clicks down four times with the mascot's, and the tape
-// zips on. No fanfare: the store was empty, so nothing hit.
+// tick onto the wall, the paths' letters click over, a thread from each
+// input plucks into the tag, and the key stamps on with a thunk. Backing
+// out, the hole shuts with a papery snap, the rest of the plan drops in
+// with quick gulps, the lid clicks down four times with the mascot's, and
+// the tape zips on. No fanfare: the store was empty, so nothing hit.
 
 import type { Section } from "../bible";
 import { lerp, progress, rng } from "../math";
@@ -13,6 +14,8 @@ import {
   FLIPS,
   LID_STEPS,
   T_CHIPS,
+  T_CLOSE0,
+  T_CLOSE1,
   T_GULP,
   T_HASH,
   T_NAMED,
@@ -29,6 +32,7 @@ import {
   T_TAG,
   T_TAPE0,
   T_TAPE1,
+  T_THREADS,
   T_THROW,
 } from "../scenes/first-build";
 import { TAPE_EASE } from "../scenes/first-build-kit";
@@ -84,6 +88,13 @@ function cutaway(m: Mix, open: number, p0: number, p1: number): void {
   if (v) v.noise("crackle", 2, v.filter("bandpass", sweep(open, 900, open + 0.2, 3800), 1), sweep(open, 1.4, open + 0.2, 0.6));
   whoosh(m, swell(p0, p0 + 0.1, 0.02, p1 - 0.02, 0.2, p1 + 0.08), sweep(p0, 400, p1, 2600), 1.2, { send: 0.3 });
   thump(m, p1, 0.3, 150, 60, 0.3);
+}
+
+/** The hole in his front shutting: a short tear, falling, and a soft pat as it seals. */
+function shut(m: Mix, t0: number, t1: number): void {
+  const v = m.voice(perc(t0, 0.07, 0.01, t1 - t0), { pan: BOX, send: 0.12 });
+  if (v) v.noise("crackle", 2, v.filter("bandpass", sweep(t0, 3200, t1, 900), 1), sweep(t0, 0.8, t1, 1.6));
+  thump(m, t1, 0.12, 200, 90, 0.08, { pan: BOX });
 }
 
 /** The key stamps on: the inputs zip into the tag, then the thunk. */
@@ -147,9 +158,12 @@ function cues(m: Mix, s: Section): void {
       if (v) v.noise("white", 1, v.filter("bandpass", 3200 + 1600 * r(), 3), 1, at + 0.03);
     }),
   );
+  // Each input's thread plucks as it lands in the tag, climbing.
+  T_THREADS.forEach((t, i) => tick(m, s.at(t), 2600 + 170 * i, 0.1, -0.05, 0.15));
   stampOn(m, s.at(T_HASH), s.at(T_STAMP));
   // Backing out.
   whoosh(m, ad(s.at(T_PULL0), s.at(T_PULL0) + 0.05, 0.16, s.at(T_PULL1)), sweep(s.at(T_PULL0), 2800, s.at(T_PULL1), 500), 1.2, { send: 0.2 });
+  shut(m, s.at(T_CLOSE0), s.at(T_CLOSE1));
   // The rest of the plan drops in: a quick gulp for each named crate, climbing.
   T_NAMED.forEach((t, i) => gulp(m, s.at(t), hz(52 + 2 * i), 0.55, BOX + 0.1));
   LID_STEPS.forEach((t, i) => lidClick(m, t, i, BOX));
