@@ -1,13 +1,28 @@
-// Scene 1, "Line & fold": two pens draw a flat cardboard net from one corner
-// and meet at a corner of the base; the net turns to card in straight wipes
-// radiating from that meeting point, the walls crouch together, then fold up
-// on sixteenths into the closed, taped box that handoff 1 → 2 expects. The
-// net is real geometry: six quads hinged in world space and drawn through the
-// same camera and outline as drawBox, so the switch to drawBox once the lid
-// is shut is invisible.
+// Scene 1, "Line & fold": two pens, lit from the first frame, draw the flat
+// net of the logo's 1 x 0.85 x 1 box from one corner and meet at a corner of
+// the base; the net turns to card in straight wipes radiating from that
+// meeting point, the walls crouch together, then fold up on sixteenths and
+// the lid slams on b3. The net is real geometry: six quads hinged in world
+// space and drawn through the same camera, outline, and cardboard as
+// drawBox, which takes over once the lid is shut. Then the camera swings
+// round from the isometric fold to the logo's front view as the outline
+// fades into its flat colours, and the tape runs down the front as the
+// logo's tab, landing on the frame handoff 1 → 2 expects.
 
-import { beat, drawStagedBox, H1_POSE, HERO_CAM, PALETTE, type Scene, sec } from "../bible";
-import { boxFrame, boxPoint, drawShadow, OUTLINE, OUTLINE_RATIO, sparkle } from "../box";
+import { beat, drawLogoBox, H1_CAM, H1_POSE, PALETTE, type Scene, sec } from "../bible";
+import {
+  type BoxPose,
+  boxFrame,
+  boxPoint,
+  drawShadow,
+  FRONT_CAM,
+  faceToScreen,
+  LOGO_DIMS,
+  OUTLINE,
+  OUTLINE_RATIO,
+  sparkle,
+  TAPE_TOP,
+} from "../box";
 import { mix, mixRGB, type RGB, rgba } from "../color";
 import { glow, makeCanvas, shake } from "../fx";
 import {
@@ -29,6 +44,7 @@ import {
   cardboard,
   cardboardFill,
   mix3,
+  mixCamera,
   polygon,
   type Projected,
   rotateAround,
@@ -48,14 +64,26 @@ export const FOLDS = [beat(2), beat(2.25), beat(2.5), beat(2.75)];
 export const T_SLAM = beat(3);
 export const T_TAPE0 = beat(3.25);
 export const T_TAPE1 = beat(3.75);
-/** From here the box is closed and drawBox renders it. */
-const T_BOXED = 1.515;
-const CAM_END = 1.72;
+/** The camera starts to turn from the isometric fold to the logo's front view... */
+const SWING0 = 1.3;
+/** ...and is at rest on FRONT_CAM (handoff 1 → 2) here. */
+const CAM_END = 1.8;
+/** The card has gone flat by here... */
+const FLAT0 = 1.52;
+/** ...and the outline has faded by here. */
+const FLAT_END = 1.76;
+/** From here every frame is the handoff frame (bible.ts H1_CAM, H1_POSE). */
+export const T_REST = 1.82;
 /** Each wall's rise. Longer than the gap between folds, so they cascade. */
 const LEAD = 0.22;
 
 const Q = Math.PI / 2;
-const FLOOR = -0.5;
+/** The logo box stands on the origin: its walls are ARM tall, a lid width deep. */
+const FLOOR = 0;
+const ARM = LOGO_DIMS[1];
+/** How far out from the base's centre a wall's free edge lies, and the lid's. */
+const RIM = 0.5 + ARM;
+const TIP = RIM + 1;
 const R2 = Math.SQRT1_2;
 
 type XZ = readonly [number, number];
@@ -67,12 +95,12 @@ const mixXZ = (a: XZ, b: XZ, t: number): XZ => [lerp(a[0], b[0], t), lerp(a[1], 
 // Two pens leave the far corner of the left wall in opposite directions and
 // meet at the base corner where the flood starts; each path is seven edges.
 const PATH_A: XZ[] = [
-  [-1.5, 0.5], [-1.5, -0.5], [-0.5, -0.5], [-0.5, -1.5],
-  [-0.5, -2.5], [0.5, -2.5], [0.5, -1.5], [0.5, -0.5],
+  [-RIM, 0.5], [-RIM, -0.5], [-0.5, -0.5], [-0.5, -RIM],
+  [-0.5, -TIP], [0.5, -TIP], [0.5, -RIM], [0.5, -0.5],
 ];
 const PATH_B: XZ[] = [
-  [-1.5, 0.5], [-0.5, 0.5], [-0.5, 1.5], [0.5, 1.5],
-  [0.5, 0.5], [1.5, 0.5], [1.5, -0.5], [0.5, -0.5],
+  [-RIM, 0.5], [-0.5, 0.5], [-0.5, RIM], [0.5, RIM],
+  [0.5, 0.5], [RIM, 0.5], [RIM, -0.5], [0.5, -0.5],
 ];
 const IGNITE: V3 = onFloor(PATH_A[0]);
 const CLOSE_AT: XZ = PATH_A[7];
@@ -121,7 +149,7 @@ const WALL: Record<WallKey, (typeof WALLS)[number]> = {
   back: WALLS[3],
 };
 const BASE_QUAD: XZ[] = [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]];
-const LID_PIVOT: V3 = [0, FLOOR, -1.5];
+const LID_PIVOT: V3 = [0, FLOOR, -RIM];
 
 /** An arm's flat quad from `k0` to `k1` units out along `o`: hinge edge first. */
 function armQuad(o: XZ, k0: number, k1: number): XZ[] {
@@ -136,7 +164,7 @@ const CREASES: { a: XZ; b: XZ; s: number; wall: WallKey | "lid"; on: PanelKey }[
   { a: [-0.5, 0.5], b: [-0.5, -0.5], s: 1, wall: "left", on: "base" },
   { a: [-0.5, 0.5], b: [0.5, 0.5], s: 1, wall: "face", on: "base" },
   { a: [-0.5, -0.5], b: [0.5, -0.5], s: 2, wall: "back", on: "base" },
-  { a: [-0.5, -1.5], b: [0.5, -1.5], s: 3, wall: "lid", on: "back" },
+  { a: [-0.5, -RIM], b: [0.5, -RIM], s: 3, wall: "lid", on: "back" },
   { a: [0.5, 0.5], b: [0.5, -0.5], s: 4, wall: "right", on: "base" },
 ];
 
@@ -275,7 +303,7 @@ function buildPanels(a: Angles, lt: number, squash: number): Panel[] {
     const ang = a[w.key];
     panels.push({
       key: w.key,
-      pts: armQuad(w.o, 0.5, 1.5).map((p) => carry(a, w.key, onFloor(p))),
+      pts: armQuad(w.o, 0.5, RIM).map((p) => carry(a, w.key, onFloor(p))),
       n: carry(a, w.key, DOWN, true),
       edges: [hingeA(ang), 1, w.key === "back" ? hingeA(a.lid) : 1, 1],
       rim: smoothstep(10 * DEG, 35 * DEG, ang) * (1 - smoothstep(w.at, w.at + 0.08, lt)),
@@ -285,7 +313,7 @@ function buildPanels(a: Angles, lt: number, squash: number): Panel[] {
   }
   panels.push({
     key: "lid",
-    pts: armQuad(WALL.back.o, 1.5, 2.5).map((p) => carry(a, "lid", onFloor(p))),
+    pts: armQuad(WALL.back.o, RIM, TIP).map((p) => carry(a, "lid", onFloor(p))),
     n: carry(a, "lid", DOWN, true),
     edges: [hingeA(a.lid), 1, 1, 1],
     rim: smoothstep(FOLDS[3] - 0.05, FOLDS[3], lt) * (1 - smoothstep(T_SLAM - 0.03, T_SLAM, lt)),
@@ -325,7 +353,7 @@ const along = (w: Wipe, p: XZ) => (p[0] - w.o[0]) * w.dir[0] + (p[1] - w.o[1]) *
  */
 const armLag = (o: XZ) => (o[0] * BASE_DIR[0] + o[1] * BASE_DIR[1] > 0 ? Math.SQRT2 - 1 : 0.2);
 const ARM_WIPES: Wipe[] = WALLS.map((w) => {
-  const quad = armQuad(w.o, 0.5, 1.5);
+  const quad = armQuad(w.o, 0.5, RIM);
   const d0 = Math.min(reach(quad[0]), reach(quad[1])) + armLag(w.o);
   return { key: w.key, quad, o: quad[0], dir: w.o, d0 };
 });
@@ -334,10 +362,10 @@ const WIPES: Wipe[] = [
   ...ARM_WIPES,
   {
     key: "lid",
-    quad: armQuad(WALL.back.o, 1.5, 2.5),
-    o: [0, -1.5],
+    quad: armQuad(WALL.back.o, RIM, TIP),
+    o: [0, -RIM],
     dir: WALL.back.o,
-    d0: ARM_WIPES[3].d0 + 1,
+    d0: ARM_WIPES[3].d0 + ARM,
   },
 ];
 const WIPE = Object.fromEntries(WIPES.map((w) => [w.key, w])) as Record<PanelKey, Wipe>;
@@ -974,8 +1002,11 @@ function drawCreases(
 
 // Camera: a close-up on the spark pulls back and spins to frame the net
 // top-down, holds that blueprint view while the net floods with only a slight
-// lean, then swings up and around with the folds, rising to give the upright
-// lid headroom. Hermite keys keep velocity continuous across the phases.
+// lean, then swings up and around with the folds into the isometric view,
+// rising to give the upright lid headroom. From SWING0 it turns on round to
+// the logo's own front view (swingCamera). Hermite keys keep velocity
+// continuous across the phases.
+const ISO_END = 1.72;
 const PITCH: HKey[] = [
   [0, 90, 0],
   [0.5, 90, 0],
@@ -984,7 +1015,7 @@ const PITCH: HKey[] = [
   [FOLDS[2], 50, -95],
   [FOLDS[3], 40, -60],
   [1.5, 32.5, -18],
-  [CAM_END, 30, 0],
+  [ISO_END, 30, 0],
 ];
 // The net spins in while it is drawn and is already near the logo's 45° by
 // the first fold, so every wall folds diagonally to the lens and reads.
@@ -993,22 +1024,22 @@ const YAW: HKey[] = [
   [T_CLOSE, 62, -40],
   [FOLDS[0], 52, -15],
   [1.3, 46.5, -8],
-  [CAM_END, 45, 0],
+  [ISO_END, 45, 0],
 ];
 const SCALE: HKey[] = [
   [0, 600, -600],
   [T_LAUNCH, 540, -1900],
   [0.3, 250, -300],
   [0.6, 212, 0],
-  [FOLDS[0], 216, 25],
-  [1.35, 256, 60],
-  [CAM_END, 280, 0],
+  [FOLDS[0], 222, 25],
+  [1.35, 270, 60],
+  [ISO_END, 300, 0],
 ];
 /** Target rise in world units: frames the box low while the lid stands. */
 const LIFT: HKey[] = [
   [0.95, 0, 0],
-  [1.3, 0.24, 0],
-  [CAM_END, 0, 0],
+  [1.3, 0.22, 0],
+  [ISO_END, 0, 0],
 ];
 
 /**
@@ -1064,17 +1095,20 @@ function framedXZ(lt: number, yaw: number): XZ {
   return [x / wsum, z / wsum];
 }
 
-function cameraAt(lt: number): Camera {
-  if (lt >= CAM_END) return HERO_CAM;
-  const home = swiftInOut(progress(0.8, CAM_END, lt));
-  const ip = lerp(0.2, 0, smoothstep(FOLDS[0] - 0.1, CAM_END, lt));
+/** The box's middle, which the swing keeps on a straight path across the frame. */
+const MIDDLE: V3 = [0, ARM / 2, 0];
+
+/** The fold's camera, ending on an isometric view of the box. */
+function foldCamera(lt: number): Camera {
+  const home = swiftInOut(progress(0.8, ISO_END, lt));
+  const ip = lerp(0.2, 0, smoothstep(FOLDS[0] - 0.1, ISO_END, lt));
   const yaw = hermite(YAW, lt) * DEG;
   const pitch = hermite(PITCH, lt) * DEG;
-  const target = mix3(onFloor(framedXZ(lt, yaw)), [0, 0, 0], home);
+  const target = mix3(onFloor(framedXZ(lt, yaw)), MIDDLE, home);
   target[1] += hermite(LIFT, lt);
   return {
-    cx: HERO_CAM.cx,
-    cy: HERO_CAM.cy,
+    cx: 960,
+    cy: 540,
     scale: hermite(SCALE, lt),
     yaw,
     pitch,
@@ -1084,15 +1118,42 @@ function cameraAt(lt: number): Camera {
   };
 }
 
-/** The tape's pull across the lid, which reaches the corner at TAPE_KNEE of its time. */
+/** The turn from the isometric fold to the front view: eases in, lands long. */
+const SWING = cubicBezier(0.55, 0, 0.2, 1);
+const swingAt = (lt: number): number => SWING(progress(SWING0, CAM_END, lt));
+
+/**
+ * The fold's camera turning into FRONT_CAM (mixCamera), with the frame
+ * shifted so the box's middle travels straight from where the fold framed
+ * it to where the logo view has it, rather than bowing as the two targets mix.
+ */
+function cameraAt(lt: number): Camera {
+  if (lt >= CAM_END) return FRONT_CAM;
+  const fold = foldCamera(lt);
+  const k = swingAt(lt);
+  if (k <= 0) return fold;
+  const cam = mixCamera(fold, FRONT_CAM, k);
+  const mid = (c: Camera) => new View(c).project(MIDDLE);
+  const a = mid(fold);
+  const b = mid(FRONT_CAM);
+  const m = mid(cam);
+  cam.cx += lerp(a.x, b.x, k) - m.x;
+  cam.cy += lerp(a.y, b.y, k) - m.y;
+  return cam;
+}
+
+/** The tape's pull across the lid, which reaches the front edge at TAPE_KNEE of its time. */
 export const TAPE_PULL = cubicBezier(0.3, 0, 0.25, 1);
 export const TAPE_KNEE = 0.7;
-/** Tape: a smooth pull across the lid, then a quick press down the side. */
+/**
+ * Tape: the logo's tab, pulled smoothly across the lid from the back edge
+ * (box.ts TAPE_TOP of `tape`), then pressed quickly down the front.
+ */
 function tapeAt(lt: number): number {
   const u = progress(T_TAPE0, T_TAPE1, lt);
   const knee = TAPE_KNEE;
-  if (u < knee) return 0.8 * TAPE_PULL(u / knee);
-  return 0.8 + 0.2 * outCubic((u - knee) / (1 - knee));
+  if (u < knee) return TAPE_TOP * TAPE_PULL(u / knee);
+  return TAPE_TOP + (1 - TAPE_TOP) * outCubic((u - knee) / (1 - knee));
 }
 
 /** Squash on the lid slam, recovered well before the handoff. */
@@ -1234,9 +1295,11 @@ function crossFlare(ctx: CanvasRenderingContext2D, x: number, y: number, size: n
 
 function drawLights(ctx: CanvasRenderingContext2D, view: View, lt: number): void {
   const s = penS(lt);
-  // Pen tips, kicking brighter each time they turn a corner.
+  // Pen tips, kicking brighter each time they turn a corner. They are lit on
+  // the first frame, so a muted preview never opens on black, and charge up
+  // until they leave on the first 32nd.
   if (lt < T_CLOSE) {
-    const ign = progress(0, 0.05, lt);
+    const ign = outCubic(progress(0, T_LAUNCH, lt));
     for (const [path, turns] of [
       [PATH_A, TURNS_A],
       [PATH_B, TURNS_B],
@@ -1245,7 +1308,7 @@ function drawLights(ctx: CanvasRenderingContext2D, view: View, lt: number): void
       let kick = 0;
       for (const k of turns) kick += pulse(lt, penT(k), 0.006, 0.03);
       const r =
-        (lt < T_LAUNCH ? 80 * outCubic(ign) : lerp(80, 64, progress(T_LAUNCH, 0.14, lt))) *
+        (lt < T_LAUNCH ? lerp(64, 80, ign) : lerp(80, 64, progress(T_LAUNCH, 0.14, lt))) *
         (1 + 0.55 * kick);
       glow(ctx, q.x, q.y, r, PALETTE.amber, 0.9);
       glow(ctx, q.x, q.y, r * 0.32, PALETTE.paper, 1);
@@ -1257,9 +1320,9 @@ function drawLights(ctx: CanvasRenderingContext2D, view: View, lt: number): void
         crossFlare(ctx, c.x, c.y, 56, f);
       }
     }
-    // Ignition flare, strongest on the first frames.
+    // Ignition flare, strongest as the pens leave.
     const q = view.project(IGNITE);
-    const flare = lt < T_LAUNCH ? outCubic(ign) : Math.exp(-(lt - T_LAUNCH) / 0.08);
+    const flare = lt < T_LAUNCH ? lerp(0.7, 1, ign) : Math.exp(-(lt - T_LAUNCH) / 0.08);
     glow(ctx, q.x, q.y, 190 * flare, PALETTE.amber, 0.55 * flare);
     streak(ctx, q.x, q.y, 520 * flare, 0.7 * flare);
   }
@@ -1289,7 +1352,7 @@ function drawSheen(
 ): void {
   const u = progress(0.7, 0.93, lt);
   if (u <= 0 || u >= 1) return;
-  const zc = lerp(-3, 2, SHEEN_EASE(u));
+  const zc = lerp(-TIP - 0.65, RIM + 0.65, SHEEN_EASE(u));
   const a = view.project([0, FLOOR, zc - 0.55]);
   const b = view.project([0, FLOOR, zc + 0.55]);
   const g = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
@@ -1314,17 +1377,22 @@ function drawSheen(
   ctx.restore();
 }
 
-/** The lid's seams light up for the two frames it seats. */
-function drawSlamSeams(ctx: CanvasRenderingContext2D, view: View, lt: number, panels: Panel[]): void {
+/** The lid's seams light up for the few frames it seats. */
+function drawSlamSeams(ctx: CanvasRenderingContext2D, view: View, lt: number, pose: BoxPose): void {
   const f = slamFlash(lt);
   if (f <= 0) return;
-  const lid = panels.find((p) => p.key === "lid")!;
+  const b = boxFrame(pose);
   ctx.save();
   ctx.globalCompositeOperation = "lighter";
   ctx.lineJoin = "round";
   polygon(
     ctx,
-    lid.pts.map((q) => view.project(q)),
+    [
+      [-1, -1],
+      [1, -1],
+      [1, 1],
+      [-1, 1],
+    ].map(([x, z]) => view.project(boxPoint(b, x, 1, z))),
   );
   ctx.strokeStyle = rgba(PALETTE.amberBright, 0.6 * f);
   ctx.lineWidth = 8;
@@ -1378,7 +1446,7 @@ function drawDust(ctx: CanvasRenderingContext2D, view: View, lt: number): void {
     const spread = u * (1 + travel);
     const p = view.project([
       o[0] * (0.5 + travel) - o[1] * spread,
-      0.48 + travel * 0.2,
+      ARM - 0.02 + travel * 0.2,
       o[1] * (0.5 + travel) + o[0] * spread,
     ]);
     const k = 1 - d / life;
@@ -1394,7 +1462,7 @@ function drawDust(ctx: CanvasRenderingContext2D, view: View, lt: number): void {
     const u = hash(i, 43) * 1.0 - 0.5;
     const sp = 3 + hash(i, 45) * 2.6;
     const out = (sp * (1 - Math.exp(-10 * d))) / 10;
-    const y = 0.5 + (1.3 + hash(i, 47)) * d - 9 * d * d;
+    const y = ARM + (1.3 + hash(i, 47)) * d - 9 * d * d;
     const p = view.project([
       o[0] * (0.5 + out) - o[1] * u,
       y,
@@ -1413,6 +1481,30 @@ function drawDust(ctx: CanvasRenderingContext2D, view: View, lt: number): void {
   ctx.restore();
 }
 
+/**
+ * The tape's glint: it rides the tab's leading edge back to front across
+ * the lid, then down the front as the tab presses home.
+ */
+function drawTapeGlint(ctx: CanvasRenderingContext2D, view: View, lt: number, pose: BoxPose): void {
+  const fadeIn = smoothstep(T_TAPE0, T_TAPE0 + 0.035, lt);
+  const live = fadeIn * (1 - smoothstep(T_TAPE1 + 0.01, T_TAPE1 + 0.06, lt));
+  if (live <= 0) return;
+  const tape = pose.tape ?? 0;
+  const q =
+    tape <= TAPE_TOP
+      ? view.project(boxPoint(boxFrame(pose), 0, 1, lerp(-1, 1, tape / TAPE_TOP)))
+      : faceToScreen(view, pose, 64, LOGO_TOP + TAB_DROP * ((tape - TAPE_TOP) / (1 - TAPE_TOP)));
+  // The light swells as the tape presses home on the beat; the star stays
+  // small so the tab reads as it seats.
+  const pop = pulse(lt, T_TAPE1, 0.03, 0.03);
+  glow(ctx, q.x, q.y, 52 * (1 + 0.9 * pop), PALETTE.amberBright, (0.45 + 0.15 * pop) * live);
+  sparkle(ctx, q.x, q.y, 17 * live * (1 + 0.2 * pop), live, lt * 3);
+}
+
+/** logo.svg's lid top edge, in its units, and how far the tab runs down the front. */
+const LOGO_TOP = 22;
+const TAB_DROP = 14;
+
 export const scene: Scene = {
   id: S.id,
   start: S.start,
@@ -1420,32 +1512,38 @@ export const scene: Scene = {
   draw(ctx, lt, env) {
     ctx.fillStyle = mix(PALETTE.night, PALETTE.bg, smoothstep(0.5, 1.4, lt));
     ctx.fillRect(0, 0, env.W, env.H);
+    if (lt >= T_REST) {
+      // Settled: exactly the handoff frame.
+      drawLogoBox(ctx, H1_CAM, H1_POSE);
+      return;
+    }
     const cam = cameraAt(lt);
     const view = new View(cam);
     const [sx, sy] = shake(lt, T_SLAM, 7, 0.045);
     const squash = slamSquash(lt);
+    // The contact shadow: on the floor while the camera looks down at it,
+    // handed to the logo's own under the base as the view comes round.
+    const swing = swingAt(lt);
+    const floor = 0.45 * smoothstep(0.95, 1.45, lt) * (1 - swing);
 
     ctx.save();
     ctx.translate(sx, sy);
-    if (lt >= T_BOXED) {
-      const tape = tapeAt(lt);
-      const pose = { ...H1_POSE, tape, squash };
-      drawStagedBox(ctx, cam, pose);
-      // A glint rides the tape's leading edge across the lid, then holds on
-      // the crease where the tape wraps over, so the end stays readable as
-      // it presses down the side.
-      const f = boxFrame(pose);
-      const along = clamp(tape / 0.8);
-      const q = view.project(boxPoint(f, -1 + 2 * along, 1, 0));
-      const fadeIn = smoothstep(T_TAPE0, T_TAPE0 + 0.035, lt);
-      const live = fadeIn * (1 - smoothstep(T_TAPE1 + 0.01, T_TAPE1 + 0.08, lt));
-      if (live > 0) {
-        // The light swells as the tape presses home on the beat; the star
-        // stays small so the tape end reads as it seats.
-        const pop = pulse(lt, T_TAPE1, 0.03, 0.03);
-        glow(ctx, q.x, q.y, 52 * (1 + 0.9 * pop), PALETTE.amberBright, (0.45 + 0.15 * pop) * live);
-        sparkle(ctx, q.x, q.y, 17 * live * (1 + 0.2 * pop), live, lt * 3);
-      }
+    if (lt >= T_SLAM) {
+      // Shut: the logo character from here, outlined and shaded like the
+      // net. The card goes flat under the slam's shake, and the outline
+      // fades as the view turns, leaving the logo's flat colours.
+      const pose: BoxPose = {
+        ...H1_POSE,
+        tape: tapeAt(lt),
+        squash,
+        lidTilt: Q - lidAngle(lt),
+        outline: 1 - smoothstep(T_SLAM + 0.04, FLAT_END, lt),
+        shade: 1 - outCubic(progress(T_SLAM + 0.01, FLAT0, lt)),
+      };
+      drawShadow(ctx, view, H1_POSE.pos, 1, 0, floor);
+      drawLogoBox(ctx, cam, pose, swing);
+      drawSlamSeams(ctx, view, lt, pose);
+      drawTapeGlint(ctx, view, lt, pose);
       drawDust(ctx, view, lt);
       ctx.restore();
       return;
@@ -1453,7 +1551,7 @@ export const scene: Scene = {
 
     const a = anglesAt(lt);
     const panels = buildPanels(a, lt, squash);
-    drawShadow(ctx, view, H1_POSE.pos, 1, 0, 0.45 * smoothstep(0.95, 1.45, lt));
+    drawShadow(ctx, view, H1_POSE.pos, 1, 0, floor);
 
     if (lt < T_FLOODED) {
       const D = floodD(lt);
@@ -1468,11 +1566,9 @@ export const scene: Scene = {
         drawCreases(ctx, view, lt, Infinity, a, key),
       );
       drawSheen(ctx, view, lt, panels, env.W, env.H);
-      drawSlamSeams(ctx, view, lt, panels);
     }
     drawLights(ctx, view, lt);
     drawSparks(ctx, view, lt);
-    drawDust(ctx, view, lt);
     ctx.restore();
   },
 };

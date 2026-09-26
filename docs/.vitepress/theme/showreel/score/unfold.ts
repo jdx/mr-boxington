@@ -1,5 +1,5 @@
 // The fold: ignition, the pens, the flood, four folds, the lid, and the
-// tape. No drums, only the build.
+// tape down the front. No drums, only the build.
 
 import type { Section } from "../bible";
 import { lerp, progress, rng } from "../math";
@@ -118,11 +118,12 @@ function lid(m: Mix, t: number, hang: number): void {
 }
 
 /**
- * s1 tapeAt: the tape pulls across the lid on an ease in and out
- * (TAPE_PULL) that comes to rest at the corner at TAPE_KNEE of the time,
- * then presses down the side on an ease out and seats on b3.75. The rip
- * follows the tape's speed: it swells across the lid, stalls at the corner,
- * and tears again down the side.
+ * s1 tapeAt: the logo's tab pulls across the lid from its back edge on an
+ * ease in and out (TAPE_PULL) that comes to rest at the front edge at
+ * TAPE_KNEE of the time, then presses down the front on an ease out and
+ * seats on b3.75. The rip follows the tape's speed: it swells across the
+ * lid, stalls at the edge, and tears again down the front, coming toward
+ * the lens as the camera comes round to face it.
  */
 function tape(m: Mix, t0: number, t1: number): void {
   const pull = TAPE_PULL;
@@ -139,11 +140,11 @@ function tape(m: Mix, t0: number, t1: number): void {
     env.push([t, 0.02 + 0.42 * s ** 0.7]);
     rate.push([t, 0.5 + 2.2 * s]);
   }
-  // Down the side: torn off at full speed, slowing on the ease out.
+  // Down the front: torn off at full speed, slowing on the ease out.
   env.push([turn + 0.004, 0.48], [turn + 0.03, 0.34]);
   env.push([t1 - 0.012, 0.055, "exp"], [t1, 0.0001, "exp"], [t1 + 0.004, 0]);
   rate.push([turn + 0.004, 2.6, "set"], [t1, 0.6, "exp"]);
-  const pan: Pt[] = [[t0, -0.45], [turn, 0.3], [t1, 0.45]];
+  const pan: Pt[] = [[t0, 0.3], [turn, 0.05], [t1, 0]];
   const v = m.voice(env, { pan, send: 0.12, hold: true });
   if (v) {
     const band: Pt[] = [
@@ -160,8 +161,8 @@ function tape(m: Mix, t0: number, t1: number): void {
     v.noise("white", 1.2, am);
   }
   // The tape creases over the edge, then seats with a pat.
-  tick(m, turn, 1900, 0.18, 0.3, 0.08);
-  thump(m, t1, 0.18, 240, 120, 0.08, { pan: 0.4 });
+  tick(m, turn, 1900, 0.18, 0.05, 0.08);
+  thump(m, t1, 0.18, 240, 120, 0.08);
 }
 
 export const part: Part = {
