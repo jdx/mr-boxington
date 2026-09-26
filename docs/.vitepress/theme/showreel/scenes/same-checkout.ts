@@ -14,6 +14,7 @@
 // claims no figure.
 
 import { BEAT, type LitRect, PALETTE, type Scene, type SceneEnv, sec } from "../bible";
+import { LID_STEP } from "../box";
 import { mix, rgba } from "../color";
 import { medianOf, type ReelFacts, tenths } from "../facts";
 import { glow, makeCanvas, shake } from "../fx";
@@ -290,12 +291,25 @@ const CHEEKS = [
   { x: 572, y: 596 },
 ];
 
-/** A restored output: a green spark from the gap under his lid down into hk's target/. */
+/** The rim, where the shut lid's front edge ends, and one lid step at its hinged right end, map px. */
+const RIM = 386;
+const LID_PX = SPOT.w * LID_STEP;
+
+/**
+ * A restored output: a green spark from the gap under his lid down into
+ * hk's target/, one for every other unit. They leave on a schedule of their
+ * own, a little ahead of the bar, so the last is out as the lid starts its
+ * last step down; each leaves from the gap as the hinged lid stands then.
+ */
 export const SPARKS: readonly { curve: Curve; t0: number; t1: number }[] = BUILD.units
   .filter((_, i) => i % 2 === 0)
-  .map((u, i) => {
-    const t0 = u.at;
-    const a = { x: lerp(560, 630, hash(i, 401)), y: lerp(318, 350, hash(i, 403)) };
+  .map((_, i, all) => {
+    const t0 = lerp(all[0].at, LID_STEPS[LID_STEPS.length - 1], i / (all.length - 1));
+    // High in the gap and near its open end, so it heads off down to the
+    // right clear of his front.
+    const x = lerp(592, 626, hash(i, 401));
+    const gap = Math.max(0, bouncyLid(LID_STEPS, t0)) * LID_PX * clamp((x - (SPOT.x - SPOT.w / 2)) / SPOT.w);
+    const a = { x, y: RIM - gap * lerp(0.5, 0.85, hash(i, 403)) };
     const end = { x: lerp(1120, 1760, hash(i, 407)), y: lerp(652, 676, hash(i, 409)) };
     return { curve: { a, c: { x: lerp(820, 960, hash(i, 411)), y: lerp(600, 660, hash(i, 413)) }, b: end }, t0, t1: t0 + lerp(0.28, 0.4, hash(i, 419)) };
   });
