@@ -1111,13 +1111,14 @@ export function drawBuildView(ctx: CanvasRenderingContext2D, L: PaneLayout, v: B
   drawSprite(ctx, v.pose, L.sprite.x, L.sprite.y, L.px);
   if (v.status) {
     const fill = v.status.tone === "ok" ? TERM.green : v.status.tone === "dim" ? PALETTE.text3 : PALETTE.text1;
-    // A long crate name shrinks the line to fit beside the mascot, where
-    // view.rs's content column ends.
-    const size = Math.round(44 * s);
+    // A terminal never changes its type size: as view.rs crops its content
+    // column beside the mascot, a long crate name is cut at the last whole
+    // character that fits there.
+    const spec = font(Math.round(44 * s), 700, MONO);
     const room = L.sprite.x - 32 * s - L.status.x;
-    const wide = layout(ctx, v.status.text, font(size, 700, MONO)).width;
-    const fit = wide > room ? Math.floor((size * room) / wide) : size;
-    drawText(ctx, v.status.text, L.status.x, L.status.y, { font: font(fit, 700, MONO), fill });
+    const glyphs = layout(ctx, v.status.text, spec).glyphs;
+    const text = glyphs.filter((g) => g.x + g.w <= room).map((g) => g.ch).join("");
+    drawText(ctx, text, L.status.x, L.status.y, { font: spec, fill });
   }
   if (v.counts) {
     drawText(ctx, v.counts, L.counts.x, L.counts.y, { font: font(Math.round(40 * s), 500, MONO), fill: TERM.green });
