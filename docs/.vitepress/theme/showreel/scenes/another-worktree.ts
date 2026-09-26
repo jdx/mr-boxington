@@ -146,8 +146,30 @@ const HK_AT: Pt = { x: 850, y: 612 };
 const KEY = "9e1f";
 const TAG_SIZE = 40;
 
-/** The middle of the gap between the rim and the hovering lid at lid `lid`, where cartons come out. */
-const gapY = (lid: number): number => RIM - (lid * LID_PX) / 2;
+/** The box's left and right ends, map px: the lid is hinged on the left. */
+const LEFT = BOX.x - BOX.w / 2;
+const RIGHT = BOX.x + BOX.w / 2;
+/** The top of his silhouette, the shut lid's back edge (a few px high, to be safe). */
+const LID_TOP = 323;
+
+/** How far the hinged lid at `lid` stands raised at x: LID_PX a step at its right end, nothing at the hinge. */
+const riseAt = (lid: number, x: number): number => lid * LID_PX * clamp((x - LEFT) / BOX.w);
+
+/** The middle of the gap between the rim and the lid at x (its right end unless given), where cartons come out. */
+const gapY = (lid: number, x = RIGHT): number => RIM - riseAt(lid, x) / 2;
+
+/**
+ * Whether anything of a flight drawn at `p` (its base), `size` px, with its
+ * trail back to `tail`, may still lie over him, lid `lid` up: a carton's
+ * corners reach 0.73 of its size from its turning point, and the lid and
+ * walls must cover whatever of it is still inside.
+ */
+function overBox(p: Pt, size: number, tail: Pt, lid: number): boolean {
+  const pad = 6;
+  const over = (x: number, y: number, r: number) =>
+    x - r < RIGHT + pad && y + r > LID_TOP - riseAt(lid, Math.min(x + r, RIGHT)) - pad;
+  return over(p.x, p.y - 0.39 * size, 0.73 * size) || over(tail.x, tail.y, 0.1 * size);
+}
 
 // The build the pane shows, planned on the reel's clock. Every carton is a
 // unit; a unit is done when its carton lands in hk-fix's target/.
@@ -238,7 +260,7 @@ export const PLAN: BuildPlan = {
 /** The restores come out of the gap under the lid as it stands when they launch. */
 const flights: readonly Flight[] = [
   SYN,
-  ...RESTORES.map((f) => ({ ...f, from: { x: f.from.x, y: gapY(buildAt(PLAN, S.at(f.launch)).pose.lid) + f.size * 0.35 } })),
+  ...RESTORES.map((f) => ({ ...f, from: { x: f.from.x, y: gapY(buildAt(PLAN, S.at(f.launch)).pose.lid, f.from.x) + f.size * 0.35 } })),
   HK,
 ];
 
@@ -580,28 +602,60 @@ function drawKey(ctx: CanvasRenderingContext2D, lt: number): void {
 
 // Cartons in the air.
 
-function drawFlight(ctx: CanvasRenderingContext2D, f: Flight, lt: number): void {
-  if (lt < f.launch || lt >= f.land) return;
+/** How much of its path a flight's trail runs back along. */
+const TRAIL = 0.22;
+
+/** A flight at `lt`, if it is in the air: its path, its base, its size as it grows, and its trail's curve and tail. */
+function flightAt(f: Flight, lt: number) {
+  if (lt < f.launch || lt >= f.land) return null;
   const u = progress(f.launch, f.land, lt);
   const k = path(f);
-  const p = curveAt(k, u);
-  const color = f.kind === "compiled" ? PALETTE.amber : PALETTE.green;
-  // A trail along the path of its middle.
+  // The trail runs along the path of its middle.
   const mid: Curve = {
     a: { x: k.a.x, y: k.a.y - f.size * 0.4 },
     c: { x: k.c.x, y: k.c.y - f.size * 0.4 },
     b: { x: k.b.x, y: k.b.y - f.size * 0.4 },
   };
-  drawSpark(ctx, mid, u, { color, size: f.size * 0.09, trail: 0.22, alpha: 0.55 });
   // Out of the gap small, full size in flight, and down into the slab.
   const grow = f === HK ? 1 : lerp(0.3, 1, swiftOut(progress(0, 0.14, u)));
+  return { u, p: curveAt(k, u), size: f.size * grow, mid, tail: curveAt(mid, Math.max(0, u - TRAIL)) };
+}
+
+/**
+ * When each flight has come clear of him, local seconds, on the lid the
+ * pixel mascot's steps give. Until then it is drawn in his mouth pass, so the
+ * lid and his front cover what of it is still inside.
+ */
+const CLEAR = new Map(
+  flights.map((f): [Flight, number] => {
+    for (let lt = f.launch; lt < f.land; lt += 1 / 960) {
+      const a = flightAt(f, lt);
+      const lid = buildAt(PLAN, S.at(lt)).pose.lid;
+      if (!a || lid <= 0 || !overBox(a.p, a.size, a.tail, lid)) return [f, lt];
+    }
+    return [f, f.land];
+  }),
+);
+/**
+ * The order the cartons are drawn in, inside him and out: the ones that come
+ * clear first on top, so each new one passes under those already out, as it
+ * did while it was inside, and none jumps in front of another as it comes
+ * clear.
+ */
+const DRAW_ORDER = [...flights].sort((a, b) => CLEAR.get(b)! - CLEAR.get(a)!);
+
+function drawFlight(ctx: CanvasRenderingContext2D, f: Flight, lt: number): void {
+  const a = flightAt(f, lt);
+  if (!a) return;
+  const color = f.kind === "compiled" ? PALETTE.amber : PALETTE.green;
+  drawSpark(ctx, a.mid, a.u, { color, size: f.size * 0.09, trail: TRAIL, alpha: 0.55 });
   ctx.save();
   ctx.beginPath();
   ctx.rect(0, 0, 1920, f.to.y);
   ctx.clip();
-  drawCarton(ctx, p.x, p.y, f.size * grow, f.kind, {
-    rot: f.spin * u,
-    label: p.y < f.to.y ? f.label : undefined,
+  drawCarton(ctx, a.p.x, a.p.y, a.size, f.kind, {
+    rot: f.spin * a.u,
+    label: a.p.y < f.to.y ? f.label : undefined,
   });
   ctx.restore();
 }
@@ -797,17 +851,19 @@ function draw(ctx: CanvasRenderingContext2D, lt: number): void {
   floorRing(ctx, progress(SYN.launch, SYN.launch + 0.5, lt), PALETTE.green);
   for (const at of BURSTS) floorRing(ctx, progress(at, at + 0.5, lt), PALETTE.green);
   const pose = boxAt(lt, view);
-  drawMapBox(ctx, { spot: BOX, pose });
+  // The cartons still coming out go in his mouth pass, under the lid and behind his front.
+  const inside = (pose.lid ?? 0) > 0 ? DRAW_ORDER.filter((f) => lt >= f.launch && lt < CLEAR.get(f)!) : [];
+  drawMapBox(ctx, { spot: BOX, pose: inside.length ? { ...pose, inside: (c) => inside.forEach((f) => drawFlight(c, f, lt)) } : pose });
   const berry = flungBerry(lt);
   if (berry) drawStrawberry(ctx, berry.x, berry.y, berry.w, berry.rot);
   // A flash in the mouth as each burst leaves.
   for (const at of [SYN.launch, ...BURSTS]) {
-    glow(ctx, 560, gapY(view.pose.lid) + 10, 150, PALETTE.green, 0.8 * pulse(lt, at, 0.01, 0.08));
+    glow(ctx, 560, gapY(view.pose.lid, 560) + 10, 150, PALETTE.green, 0.8 * pulse(lt, at, 0.01, 0.08));
   }
   drawKey(ctx, lt);
   drawCompile(ctx, lt);
   for (const f of flights) drawLanding(ctx, f, lt);
-  for (const f of flights) drawFlight(ctx, f, lt);
+  for (const f of DRAW_ORDER) if (!inside.includes(f)) drawFlight(ctx, f, lt);
   drawHkLabel(ctx, lt);
   drawBarLight(ctx, lt);
   drawWords(ctx, DETAIL_TEXT, 960, 64, DETAIL, lt, DETAIL_IN, DETAIL_OUT, "center");
