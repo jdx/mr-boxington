@@ -10,6 +10,7 @@ cached work.
 | --- | --- |
 | Plain Cargo does not use mbx | [Check Cargo's path](/setup#verify-plain-cargo); for standalone setup, also run `mbx setup --status` |
 | A build restores little or nothing | `mbx explain --last`, then [read the results](/cache-results#troubleshooting-a-low-hit-rate) |
+| A rebuild takes longer than expected | [`mbx analyze`](/analyze) ranks its uncached compiler time by cause |
 | Cargo waits for a target lock | Give simultaneous builds [separate targets](/scheduling) |
 | Cargo metadata fails before a build | [Check workspace discovery](#workspace-discovery-fails) |
 | Build storage is on NFS | Move outputs to [local storage](/configuration#local-build-storage) |

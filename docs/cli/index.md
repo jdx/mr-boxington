@@ -17,6 +17,7 @@
 - [`mbx completion <SHELL>`](/cli/completion.md)
 - [`mbx doctor [--json]`](/cli/doctor.md)
 - [`mbx explain [--last] [CARGO_COMMAND] [CARGO_ARGS]…`](/cli/explain.md)
+- [`mbx analyze`](/cli/analyze.md)
 - [`mbx setup [FLAGS]`](/cli/setup.md)
 - [`mbx gc [FLAGS]`](/cli/gc.md)
 - [`mbx cache <SUBCOMMAND>`](/cli/cache.md)
