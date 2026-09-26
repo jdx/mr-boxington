@@ -24,6 +24,17 @@ fn compiler_pins_name_a_toolchain_rustc_and_nothing_else() {
     assert!(pins.iter().all(|pin| pin.state.is_some()));
 }
 
+/// `RUSTC_BOOTSTRAP` enters the key only when set, so builds that never set
+/// it keep their existing keys.
+#[test]
+fn compiler_environment_keys_only_what_is_set() {
+    assert!(compiler_environment(|_| None).is_empty());
+    assert_eq!(
+        compiler_environment(|name| (name == "RUSTC_BOOTSTRAP").then(|| "1".into())),
+        BTreeMap::from([("RUSTC_BOOTSTRAP".into(), Some("1".into()))])
+    );
+}
+
 #[test]
 fn action_diagnostics_name_key_parts_without_retaining_their_values() {
     let bytes = br#"{"adapter_version":1,"arguments":["--crate-name=example","--codegen=metadata=unit-a","--codegen=opt-level=2","--cfg=feature=\"secret-feature\""],"compiler":{"host":"host","rustc_version":"version","toolchain":"toolchain"},"environment":{"SECRET":"do-not-record"},"inputs":[{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"path":"${workspace}/src/lib.rs"}],"kind":"rustc","version":1}"#.to_vec();

@@ -1535,7 +1535,13 @@ impl<'a> Parser<'a> {
         if let Some(attached) = value.strip_prefix("-Z") {
             let option = self.take_value("-Z", (!attached.is_empty()).then_some(attached))?;
             match option.as_str() {
-                "embed-metadata=no" | "embed-metadata=yes" | "shell-argfiles"
+                // Cargo passes `force-unstable-if-unmarked` to every standard
+                // library unit under `-Zbuild-std`. It changes the stability
+                // recorded in the crate's metadata, so it stays in the key.
+                "embed-metadata=no"
+                | "embed-metadata=yes"
+                | "force-unstable-if-unmarked"
+                | "shell-argfiles"
                 | "unstable-options" => {
                     self.parsed.push(Argument::Plain(format!("-Z{option}")));
                     return Ok(());

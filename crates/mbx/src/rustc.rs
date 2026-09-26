@@ -1963,7 +1963,7 @@ fn base_action_context(
         compiler,
         working_dir: working_dir.to_path_buf(),
         path_mappings: portable.mappings.clone(),
-        environment: BTreeMap::new(),
+        environment: compiler_environment(|name| std::env::var(name).ok()),
         portable_environment: BTreeSet::new(),
         inputs: Vec::new(),
     };
@@ -1976,6 +1976,29 @@ fn base_action_context(
         });
     }
     Ok(context)
+}
+
+/// Variables rustc reads itself rather than through `env!`, so dep-info never
+/// records them, yet they change what a compilation produces.
+///
+/// `RUSTC_BOOTSTRAP` decides whether unstable features and `-Z` flags are
+/// accepted, and how diagnostics describe them. Cargo sets it for every
+/// standard library unit under `-Zbuild-std`, alongside
+/// `-Zforce-unstable-if-unmarked`.
+const COMPILER_ENVIRONMENT: [&str; 1] = ["RUSTC_BOOTSTRAP"];
+
+/// The [`COMPILER_ENVIRONMENT`] values this compilation runs with.
+///
+/// Only a set variable enters the key, so a compilation that sets none keeps
+/// the key it always had. A value that is not UTF-8 is left out, matching
+/// rustc, which reads these with `std::env::var` and treats that as unset.
+fn compiler_environment(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> BTreeMap<String, Option<String>> {
+    COMPILER_ENVIRONMENT
+        .into_iter()
+        .filter_map(|name| lookup(name).map(|value| (name.into(), Some(value))))
+        .collect()
 }
 
 /// Find the config Clippy would load before consulting stale dep-info.
