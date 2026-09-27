@@ -1050,8 +1050,10 @@ impl Config {
                 .wrap_err("invalid gc.max_total_size")?
                 .flatten(),
             target_precedence: crate::target::Precedence {
-                keep: checkout_patterns(raw.target.keep.as_deref()),
-                evict_first: checkout_patterns(raw.target.evict_first.as_deref()),
+                keep: checkout_patterns(raw.target.keep.as_deref(), dirs::home_dir())
+                    .wrap_err("invalid target.keep")?,
+                evict_first: checkout_patterns(raw.target.evict_first.as_deref(), dirs::home_dir())
+                    .wrap_err("invalid target.evict_first")?,
             },
         };
         let mode = raw.remote.mode.parse().wrap_err("invalid remote.mode")?;
@@ -1450,7 +1452,11 @@ pub(crate) fn parse_optional_byte_size(value: &str) -> Result<Option<u64>> {
 /// A leading `~` is the home directory, and an absolute entry that exists is
 /// resolved the way checkout paths are recorded, so a symlinked home still
 /// matches. Relative entries stay relative: they match anywhere.
-fn checkout_patterns(entries: Option<&[String]>) -> Vec<PathBuf> {
+///
+/// A `~` entry with no home directory to expand it is an error: read as a
+/// relative path it would match nothing, and a `target.keep` that silently
+/// protects nothing is worse than a configuration that fails to load.
+fn checkout_patterns(entries: Option<&[String]>, home: Option<PathBuf>) -> Result<Vec<PathBuf>> {
     entries
         .unwrap_or_default()
         .iter()
@@ -1459,20 +1465,20 @@ fn checkout_patterns(entries: Option<&[String]>) -> Vec<PathBuf> {
         .map(|entry| {
             let path = match entry.strip_prefix('~') {
                 Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
-                    match dirs::home_dir() {
-                        Some(home) => std::fs::canonicalize(&home)
-                            .unwrap_or(home)
-                            .join(rest.trim_start_matches(['/', '\\'])),
-                        None => PathBuf::from(entry),
-                    }
+                    let Some(home) = home.clone() else {
+                        eyre::bail!("{entry:?} starts with ~, but there is no home directory");
+                    };
+                    std::fs::canonicalize(&home)
+                        .unwrap_or(home)
+                        .join(rest.trim_start_matches(['/', '\\']))
                 }
                 _ => PathBuf::from(entry),
             };
-            if path.is_absolute() {
+            Ok(if path.is_absolute() {
                 std::fs::canonicalize(&path).unwrap_or(path)
             } else {
                 path
-            }
+            })
         })
         .collect()
 }
@@ -1795,6 +1801,27 @@ mod tests {
         assert_eq!(
             retention.target_precedence.evict_first,
             [PathBuf::from(".claude/worktrees"), PathBuf::from("scratch")]
+        );
+    }
+
+    #[test]
+    fn a_home_relative_pattern_without_a_home_is_an_error() {
+        let entries = ["~/src/app".to_string(), "scratch".to_string()];
+
+        let error = checkout_patterns(Some(&entries), None).unwrap_err();
+        assert!(format!("{error:#}").contains("~/src/app"), "{error:#}");
+        assert_eq!(
+            checkout_patterns(Some(&entries[1..]), None).unwrap(),
+            [PathBuf::from("scratch")],
+            "entries that need no home still load"
+        );
+        assert_eq!(
+            checkout_patterns(
+                Some(&entries[..1]),
+                Some(PathBuf::from("/nonexistent-home"))
+            )
+            .unwrap(),
+            [PathBuf::from("/nonexistent-home/src/app")]
         );
     }
 
