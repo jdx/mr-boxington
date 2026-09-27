@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v11.jsonl");
+const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v12.jsonl");
 
 fn digest() -> CacheDigest {
     CacheDigest {
@@ -162,6 +162,10 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
         (
             "request.find_action_result",
             AgentRequest::FindActionResult { action: digest() },
+        ),
+        (
+            "request.read_action_result",
+            AgentRequest::ReadActionResult { action: digest() },
         ),
         (
             "request.record_action_hit",
@@ -474,7 +478,7 @@ fn assert_fixture<T: Serialize>(expected: &mut BTreeMap<&str, &str>, name: &str,
 }
 
 #[test]
-fn agent_protocol_v11_shapes_match_the_conformance_fixture() {
+fn agent_protocol_v12_shapes_match_the_conformance_fixture() {
     let mut expected = fixture();
     for line in AGENT_FIXTURE.lines() {
         let (name, json) = line
@@ -552,7 +556,7 @@ fn agent_protocol_v11_shapes_match_the_conformance_fixture() {
 
 #[test]
 fn protocol_constants_match_the_contract() {
-    assert_eq!(AGENT_PROTOCOL_VERSION, 11);
+    assert_eq!(AGENT_PROTOCOL_VERSION, 12);
     assert_eq!(PROTOCOL_VERSION, 1);
     assert_eq!(
         ACTION_RESULT_MEDIA_TYPE,
@@ -597,6 +601,7 @@ define_variant_coverage!(request_variant_name, EXPECTED_REQUEST_VARIANTS, AgentR
     AgentRequest::FindBlobs { .. } => "find_blobs",
     AgentRequest::StoreBlob { .. } => "store_blob",
     AgentRequest::FindActionResult { .. } => "find_action_result",
+    AgentRequest::ReadActionResult { .. } => "read_action_result",
     AgentRequest::RecordActionHit { .. } => "record_action_hit",
     AgentRequest::RecordBypass { .. } => "record_bypass",
     AgentRequest::RecordUnconsulted => "record_unconsulted",

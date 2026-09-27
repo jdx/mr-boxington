@@ -1093,6 +1093,54 @@ async fn publishes_a_complete_action_result() {
     );
 }
 
+/// A read after the compilation already ran returns the same record as a
+/// lookup but leaves the lookup count alone, so hits and misses still add up
+/// to it.
+#[tokio::test]
+async fn reading_an_action_result_is_not_a_lookup() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    let action = CacheDigest::blake3(b"action");
+    let metadata = CacheDigest::blake3(b"metadata");
+    let output_root = CacheDigest::blake3(b"directory");
+    for (digest, contents) in [
+        (&action, b"action".as_slice()),
+        (&metadata, b"metadata".as_slice()),
+        (&output_root, b"directory".as_slice()),
+    ] {
+        agent.cas.store_bytes(digest, contents).unwrap();
+    }
+    let stored = agent
+        .respond(AgentRequest::StoreActionResult {
+            result: RemoteActionResult {
+                action: action.clone(),
+                metadata: Some(metadata),
+                output_root: Some(output_root),
+                version: 1,
+            },
+        })
+        .await;
+    assert!(matches!(stored, AgentResponse::ActionStored { .. }));
+
+    let response = agent
+        .respond(AgentRequest::ReadActionResult {
+            action: action.clone(),
+        })
+        .await;
+    assert!(matches!(
+        response,
+        AgentResponse::ActionResult {
+            result: Some(result)
+        } if result.action == action
+    ));
+    assert_eq!(agent.stats().lookups, 0);
+
+    agent
+        .respond(AgentRequest::FindActionResult { action })
+        .await;
+    assert_eq!(agent.stats().lookups, 1);
+}
+
 #[tokio::test]
 async fn missing_action_result_is_a_cache_miss() {
     let directory = tempfile::tempdir().unwrap();

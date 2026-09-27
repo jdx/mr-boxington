@@ -2206,6 +2206,40 @@ fn bypass_diagnostic(expected: bool, message: &str) -> AgentRequest {
     }
 }
 
+/// Whether a read of an action result is a compilation's lookup.
+///
+/// The agent counts each lookup once, and the summary reads hits and misses
+/// against that count, so a compilation that reads the cache more than once
+/// must count only its first read.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ResultRead {
+    /// The first read this compilation makes.
+    Lookup,
+    /// A further read for a compilation already counted: another candidate
+    /// key, the result a flight it waited on published, or a check of an
+    /// existing result after it compiled.
+    Repeat,
+}
+
+impl ResultRead {
+    /// `Lookup` for a compilation that has not looked anything up yet.
+    pub(crate) fn after(attempted: bool) -> Self {
+        if attempted {
+            Self::Repeat
+        } else {
+            Self::Lookup
+        }
+    }
+
+    /// The agent request that reads `action` this way.
+    pub(crate) fn request(self, action: CacheDigest) -> AgentRequest {
+        match self {
+            Self::Lookup => AgentRequest::FindActionResult { action },
+            Self::Repeat => AgentRequest::ReadActionResult { action },
+        }
+    }
+}
+
 /// Record a compilation the cache had no key to look up with.
 pub(crate) fn record_unconsulted() {
     // A shim running outside a session has nowhere to report, which is fine.

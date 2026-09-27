@@ -2309,6 +2309,45 @@ fn a_changed_implicit_package_input_executes_the_build_script_again() {
     assert_eq!(std::fs::read_to_string(log.path()).unwrap(), "run\nrun\n");
 }
 
+/// A build script that looks up its cached run and misses runs again, and
+/// that run is the lookup's miss. Before, it was recorded as neither, so the
+/// summary's hits and misses fell short of its lookups.
+#[test]
+fn a_build_script_that_misses_counts_its_run_as_the_miss() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_execution_cached_project(project.path(), true);
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+    );
+    // A declared input changes, so the prediction still names this run but
+    // its action no longer matches the one that was stored.
+    std::fs::write(project.path().join("input.txt"), "second\n").unwrap();
+    let rebuilt = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("runs")).unwrap(),
+        "2",
+        "the changed input should run the build script again"
+    );
+    assert!(
+        count(&rebuilt, "misses") >= 1,
+        "the run should be a miss: {rebuilt}"
+    );
+    assert_eq!(
+        count(&rebuilt, "lookups"),
+        count(&rebuilt, "hits") + count(&rebuilt, "misses"),
+        "every lookup should end as a hit or a miss: {rebuilt}"
+    );
+}
+
 #[test]
 fn build_script_execution_cache_can_be_turned_off() {
     let store = tempfile::tempdir().unwrap();

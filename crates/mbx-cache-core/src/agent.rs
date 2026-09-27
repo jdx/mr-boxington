@@ -1954,6 +1954,7 @@ impl CacheAgent {
                 self.stats.lookups.fetch_add(1, Ordering::Relaxed);
                 self.find_action_result(&action).await
             }
+            AgentRequest::ReadActionResult { action } => self.find_action_result(&action).await,
             AgentRequest::RecordActionHit {
                 action,
                 restore,

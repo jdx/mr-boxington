@@ -4,8 +4,11 @@ description: Read cache counters, measure reuse with fresh targets, and diagnose
 # Cache results
 
 Use the build summary to see what mbx restored, compiled, or left uncached.
-Counts describe compiler actions observed by mbx; they do not include work
-Cargo skipped because its outputs were already fresh.
+Counts describe the compiler actions and cached build-script runs observed by
+mbx; they do not include work Cargo skipped because its outputs were already
+fresh. Each lookup ends as one hit or one miss, so the two add up to the
+lookup count. Under `MBX_VERIFY=1` a lookup that finds a result ends as a
+verification instead.
 
 ```sh
 mbx explain --last          # inspect the most recent recorded build
