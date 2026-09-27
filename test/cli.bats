@@ -123,6 +123,33 @@ global_config_file() {
   assert_output 'savings = "plain"'
 }
 
+@test "settings set repairs one setting while another is still invalid" {
+  config="$(global_config_file)"
+  mkdir -p "$(dirname "$config")"
+  printf 'savings = "loud"\ngc.interval = "soon"\n' >"$config"
+
+  run "$MBX_BIN" settings set savings plain
+  assert_success
+  assert_output --partial "invalid gc.interval"
+  run "$MBX_BIN" settings unset gc.interval
+  assert_success
+  run cat "$config"
+  assert_output 'savings = "plain"'
+  run "$MBX_BIN" stats
+  assert_success
+}
+
+@test "settings ls does not print the remote token" {
+  MBX_REMOTE_TOKEN=very-secret run "$MBX_BIN" settings ls remote
+  assert_success
+  assert_line "remote.token is set; \`mbx settings get remote.token\` prints it"
+  refute_output --partial "very-secret"
+
+  MBX_REMOTE_TOKEN=very-secret run "$MBX_BIN" settings get remote.token
+  assert_success
+  assert_output "very-secret"
+}
+
 @test "explain reports why compilations bypass the cache" {
   cargo init --lib --vcs none explained-project
   cd explained-project

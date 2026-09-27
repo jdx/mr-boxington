@@ -29,14 +29,16 @@ mbx settings get gc.max_size
 mbx settings unset gc.max_size
 ```
 
-The value must match the setting's type and allowed values, and the whole file
-must still load with it, or nothing is written. List settings take
-comma-separated items. Comments and formatting elsewhere in the file are kept,
-and a file that is a symlink stays one. `unset` removes the key, so the
-setting falls back to its default.
+The value must match the setting's type and allowed values and load as that
+setting, or nothing is written. A problem already elsewhere in the file does not
+block the edit, so `set` can repair one setting at a time; mbx warns about what
+is still wrong. List settings take comma-separated items. Comments and
+formatting elsewhere in the file are kept, and a file that is a symlink stays
+one. `unset` removes the key, so the setting falls back to its default.
 
 `mbx settings ls` prints every setting with its current value, and
-`mbx settings ls gc` prints one group. `get` and `ls` read the environment, the
+`mbx settings ls gc` prints one group. It does not print the value of
+`remote.token`; `mbx settings get remote.token` does. `get` and `ls` read the environment, the
 global file, and defaults; they do not read `.mbx.toml`. Table settings such as
 `linker.profiles` are edited in the file directly. Settings that are read only
 from the environment, such as `MBX_VERIFY`, cannot be written with

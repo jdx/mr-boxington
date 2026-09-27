@@ -136,6 +136,10 @@ fn unsetting_removes_the_key_and_a_table_left_empty() {
         (true, "# collection\n[gc]\n".to_owned())
     );
     assert_eq!(
+        removed("[gc] # collection\nmax_size = \"20GiB\"\n", "gc.max_size"),
+        (true, "[gc] # collection\n".to_owned())
+    );
+    assert_eq!(
         removed("savings = \"plain\"\n", "gc.max_size"),
         (false, "savings = \"plain\"\n".to_owned())
     );

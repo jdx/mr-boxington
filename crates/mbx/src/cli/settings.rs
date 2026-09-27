@@ -16,7 +16,8 @@ pub(super) enum SettingsCommands {
     /// List settings and their current values.
     ///
     /// Values come from the environment, the global configuration file, and
-    /// defaults. Workspace `.mbx.toml` settings are not included.
+    /// defaults. Workspace `.mbx.toml` settings are not included. The value of
+    /// `remote.token` is not printed; `mbx settings get remote.token` prints it.
     Ls(LsArgs),
     /// Print the current value of one setting.
     ///
@@ -26,8 +27,8 @@ pub(super) enum SettingsCommands {
     Get(KeyArgs),
     /// Write a setting to the global configuration file.
     ///
-    /// The value must match the setting's type and allowed values, and the
-    /// file must still load with it, or nothing is written. List settings take
+    /// The value must match the setting's type and allowed values and load as
+    /// that setting, or nothing is written. List settings take
     /// comma-separated items, such as `mbx settings set target.keep ~/src,/work`.
     /// Comments and formatting elsewhere in the file are kept. An environment
     /// variable for the same setting still takes precedence.
@@ -57,6 +58,10 @@ pub(super) struct SetArgs {
     #[usage(allow_negative_numbers)]
     value: String,
 }
+
+/// Settings whose values `ls` does not print, since a listing is easy to
+/// paste somewhere it should not go.
+const SECRETS: &[&str] = &["remote.token"];
 
 pub(super) fn run(args: SettingsArgs) -> Result<ExitCode> {
     match args.command {
@@ -89,6 +94,12 @@ fn list(filter: Option<&str>) -> Result<()> {
     for id in ids {
         let meta = registry.get(id);
         match (resolved.get(id), meta.default_note) {
+            (Some(_), _) if SECRETS.contains(&meta.key) => {
+                println!(
+                    "{} is set; `mbx settings get {}` prints it",
+                    meta.key, meta.key
+                )
+            }
             (Some(value), _) => println!("{} = {}", meta.key, toml_value(value)),
             (None, Some(note)) => println!("{} is unset; default: {note}", meta.key),
             (None, None) => println!("{} is unset", meta.key),
@@ -112,9 +123,14 @@ fn get(key: &str) -> Result<()> {
 fn set(key: &str, raw: &str) -> Result<()> {
     let meta = setting(key)?;
     let path = file_path()?;
+    // The new value on its own is what has to load, so a problem already
+    // elsewhere in the file cannot stop this setting from being repaired.
+    let mut alone = DocumentMut::new();
+    set_value(&mut alone, meta, raw, &path)?;
+    let _lock = lock(&path)?;
     let mut document = read(&path)?;
     set_value(&mut document, meta, raw, &path)?;
-    save(&path, &document)?;
+    save(&path, &document, Some(alone.to_string()))?;
     note_environment(meta);
     Ok(())
 }
@@ -122,14 +138,14 @@ fn set(key: &str, raw: &str) -> Result<()> {
 fn unset(key: &str) -> Result<()> {
     let meta = setting(key)?;
     let path = file_path()?;
-    if !path.try_exists()? {
-        return Ok(());
+    if path.try_exists()? {
+        let _lock = lock(&path)?;
+        let mut document = read(&path)?;
+        if remove_value(&mut document, meta, &path)? {
+            save(&path, &document, None)?;
+        }
     }
-    let mut document = read(&path)?;
-    if remove_value(&mut document, meta, &path)? {
-        save(&path, &document)?;
-        note_environment(meta);
-    }
+    note_environment(meta);
     Ok(())
 }
 
@@ -325,7 +341,7 @@ fn parent_table<'a>(
 }
 
 /// Drop the table `key` was in once nothing is left in it, unless a comment
-/// sits on its header.
+/// sits above or beside its header.
 fn remove_empty_group(document: &mut DocumentMut, key: &str) {
     let Some((group, _)) = key.split_once('.') else {
         return;
@@ -333,41 +349,65 @@ fn remove_empty_group(document: &mut DocumentMut, key: &str) {
     let Some(Item::Table(table)) = document.get(group) else {
         return;
     };
-    let commented = table
-        .decor()
-        .prefix()
-        .and_then(|prefix| prefix.as_str())
-        .is_some_and(|prefix| prefix.contains('#'));
+    let decor = table.decor();
+    let commented = [decor.prefix(), decor.suffix()]
+        .into_iter()
+        .flatten()
+        .filter_map(|text| text.as_str())
+        .any(|text| text.contains('#'));
     if table.is_empty() && !commented {
         document.remove(group);
     }
 }
 
-/// Write `document` to `path` once it loads as a configuration.
-fn save(path: &Path, document: &DocumentMut) -> Result<()> {
+/// Write `document` to `path`, refusing it unless `check` loads as a
+/// configuration, then warn about any problem left elsewhere in the file.
+fn save(path: &Path, document: &DocumentMut, check: Option<String>) -> Result<()> {
     let contents = document.to_string();
     // The check reads through the file layer, which treats a missing file as
     // empty without looking at the text it is handed. An empty file is a valid
     // configuration, so it can stand in until the real one is written.
     let created = !path.try_exists()?;
     if created {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
-        }
         std::fs::write(path, "")
             .wrap_err_with(|| format!("failed to create {}", path.display()))?;
     }
-    if let Err(error) = check_global_file(path, contents.clone()) {
-        if created {
-            let _ = std::fs::remove_file(path);
+    let written = (|| {
+        if let Some(check) = check {
+            check_global_file(path, check)
+                .map_err(|error| error.wrap_err(format!("{} was not changed", path.display())))?;
         }
-        return Err(error.wrap_err(format!("{} was not changed", path.display())));
+        // Through any link, so a managed dotfile stays a link.
+        let target = std::fs::canonicalize(path)
+            .wrap_err_with(|| format!("failed to resolve {}", path.display()))?;
+        crate::util::write_atomic(&target, contents.as_bytes())
+    })();
+    if written.is_err() && created {
+        let _ = std::fs::remove_file(path);
     }
-    // Through any link, so a managed dotfile stays a link.
-    let target = std::fs::canonicalize(path)
-        .wrap_err_with(|| format!("failed to resolve {}", path.display()))?;
-    crate::util::write_atomic(&target, contents.as_bytes())
+    written?;
+    if let Err(error) = check_global_file(path, contents) {
+        log::warn!("{error:#}");
+    }
+    Ok(())
+}
+
+/// Hold the edit lock for `path`, so two edits cannot both read the same
+/// contents and each write away the other's change.
+///
+/// A sibling file, because fslock empties the file it locks when it lets go.
+fn lock(path: &Path) -> Result<fslock::LockFile> {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        bail!("{} has no parent directory", path.display());
+    };
+    std::fs::create_dir_all(parent)
+        .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
+    let lock_path = parent.join(format!(".{}.lock", name.to_string_lossy()));
+    let mut lock = fslock::LockFile::open(&lock_path)
+        .wrap_err_with(|| format!("failed to open {}", lock_path.display()))?;
+    lock.lock()
+        .wrap_err_with(|| format!("failed to lock {}", lock_path.display()))?;
+    Ok(lock)
 }
 
 fn note_environment(meta: &PropMeta) {

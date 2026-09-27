@@ -5,7 +5,7 @@
 
 List settings and their current values.
 
-Values come from the environment, the global configuration file, and defaults. Workspace `.mbx.toml` settings are not included.
+Values come from the environment, the global configuration file, and defaults. Workspace `.mbx.toml` settings are not included. The value of `remote.token` is not printed; `mbx settings get remote.token` prints it.
 
 ## Arguments
 - **`[KEY]`** — Only list this setting, or the settings under this group, such as `gc`.
