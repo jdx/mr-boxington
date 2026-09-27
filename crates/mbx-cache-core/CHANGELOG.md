@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.18.2...mbx-cache-core-v0.19.0) - 2026-09-27
+
+### Added
+
+- *(analyze)* show the critical path of the last build ([#570](https://github.com/jdx/mr-boxington/pull/570))
+- *(events)* record the crate and compiler time of bypassed compilations ([#568](https://github.com/jdx/mr-boxington/pull/568))
+
+### Other
+
+- redesign the Mr Boxington logo and animated build mascot ([#558](https://github.com/jdx/mr-boxington/pull/558))
+
 ## [0.18.2](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.18.1...mbx-cache-core-v0.18.2) - 2026-09-25
 
 ### Added

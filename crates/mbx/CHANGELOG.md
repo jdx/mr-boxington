@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.0](https://github.com/jdx/mr-boxington/compare/v1.18.0...v1.19.0) - 2026-09-27
+
+### Added
+
+- *(target)* keep chosen checkouts' targets and evict others first ([#575](https://github.com/jdx/mr-boxington/pull/575))
+- *(gc)* collect sooner and past budgets when the disk runs low ([#574](https://github.com/jdx/mr-boxington/pull/574))
+- *(analyze)* show the critical path of the last build ([#570](https://github.com/jdx/mr-boxington/pull/570))
+- *(analyze)* rank a build's uncached compiler time by cause ([#569](https://github.com/jdx/mr-boxington/pull/569))
+- *(events)* record the crate and compiler time of bypassed compilations ([#568](https://github.com/jdx/mr-boxington/pull/568))
+- *(exec)* cache CMake builds through compiler launchers ([#564](https://github.com/jdx/mr-boxington/pull/564))
+
+### Fixed
+
+- *(setup)* report a Cargo shim whose mbx target was removed as outdated ([#576](https://github.com/jdx/mr-boxington/pull/576))
+- *(setup)* explain rust-analyzer's overrideCommand warning ([#573](https://github.com/jdx/mr-boxington/pull/573))
+- *(pretty)* hide the mascot after a successful build ([#567](https://github.com/jdx/mr-boxington/pull/567))
+- *(rustc)* cache -Zbuild-std standard library units instead of bypassing them ([#566](https://github.com/jdx/mr-boxington/pull/566))
+- *(pretty)* move mascot right and clarify its animation ([#561](https://github.com/jdx/mr-boxington/pull/561))
+- *(pretty)* recognize colored test results on xterm terminals ([#559](https://github.com/jdx/mr-boxington/pull/559))
+
+### Other
+
+- redesign the Mr Boxington logo and animated build mascot ([#558](https://github.com/jdx/mr-boxington/pull/558))
+
 ## [1.18.0](https://github.com/jdx/mr-boxington/compare/v1.17.0...v1.18.0) - 2026-09-25
 
 ### Added
