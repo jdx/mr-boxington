@@ -366,6 +366,12 @@ TOML
   assert_success
   run grep -E '"unmodeled-link-argument"' "$report"
   assert_failure
+  # The build script's compile and run and the cdylib all restore. Without
+  # the keyword modeled the cdylib links afresh and only the other two hit.
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*3,' "$report"
+  assert_success
+  run grep -E '"misses"[[:space:]]*:[[:space:]]*0,' "$report"
+  assert_success
   local library="$BATS_TEST_TMPDIR/addon-warm/debug/libaddon_fixture.so"
   run cmp "$BATS_TEST_TMPDIR/addon-cold/debug/libaddon_fixture.so" "$library"
   assert_success
