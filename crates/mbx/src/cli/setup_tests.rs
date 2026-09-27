@@ -390,6 +390,11 @@ fn setup_status_detects_and_setup_refreshes_a_replaced_wrapper() {
     let directory = tempfile::tempdir().unwrap();
     let executable = directory.path().join("mbx");
     std::fs::write(&executable, b"first mbx binary").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     let install = directory.path().join("data/bin");
     setup_at_action(
         &executable,
@@ -412,6 +417,40 @@ fn setup_status_detects_and_setup_refreshes_a_replaced_wrapper() {
         setup_at_action(&executable, &install, &MiseScope::None, SetupAction::Status,).unwrap(),
         ExitCode::FAILURE
     );
+    setup_at_action(
+        &executable,
+        &install,
+        &MiseScope::None,
+        SetupAction::Install,
+    )
+    .unwrap();
+    assert!(cargo_shim_is_current(&executable, &shim).unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_status_reports_a_shim_whose_target_was_removed_as_outdated() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let removed = directory.path().join("removed/mbx");
+    std::fs::create_dir_all(removed.parent().unwrap()).unwrap();
+    std::fs::write(&removed, b"old mbx binary").unwrap();
+    std::fs::set_permissions(&removed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let install = directory.path().join("data/bin");
+    setup_at_action(&removed, &install, &MiseScope::None, SetupAction::Install).unwrap();
+    std::fs::remove_dir_all(removed.parent().unwrap()).unwrap();
+
+    let executable = directory.path().join("mbx");
+    std::fs::write(&executable, b"mbx binary").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let shim = install.join("cargo");
+    assert!(!cargo_shim_is_current(&executable, &shim).unwrap());
+    assert_eq!(
+        setup_at_action(&executable, &install, &MiseScope::None, SetupAction::Status).unwrap(),
+        ExitCode::FAILURE
+    );
+
     setup_at_action(
         &executable,
         &install,
