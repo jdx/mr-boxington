@@ -59,6 +59,83 @@ struct ViewRecord {
     updated_secs: u64,
 }
 
+/// Checkouts whose managed targets collection treats apart from the rest:
+/// `target.keep` and `target.evict_first`.
+///
+/// An absolute entry names a directory and matches the checkouts at or under
+/// it. A relative entry matches wherever its components appear together in a
+/// checkout's path, so `.claude/worktrees` covers every checkout under a
+/// `.claude/worktrees` directory in any repository.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Precedence {
+    pub keep: Vec<PathBuf>,
+    pub evict_first: Vec<PathBuf>,
+}
+
+/// Where one checkout's target stands in collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Standing {
+    /// Over a budget, these go before any other.
+    EvictFirst,
+    Normal,
+    /// Never collected for age or size, nor its unused units; only for its
+    /// checkout being gone.
+    Keep,
+}
+
+impl Precedence {
+    pub(crate) fn standing(&self, workspace_root: &Path) -> Standing {
+        if self.keep.is_empty() && self.evict_first.is_empty() {
+            return Standing::Normal;
+        }
+        // Recorded as the build found it, which may be through a symlink the
+        // configured entry was written without, or the other way round.
+        let resolved = std::fs::canonicalize(workspace_root).ok();
+        let deepest = |entries: &[PathBuf]| {
+            deepest_match(entries, workspace_root).max(
+                resolved
+                    .as_deref()
+                    .and_then(|resolved| deepest_match(entries, resolved)),
+            )
+        };
+        let keep = deepest(&self.keep);
+        let evict = deepest(&self.evict_first);
+        // The entry that names more of the path is the more deliberate one:
+        // keeping `~/src/app` does not keep an agent's worktree under
+        // `~/src/app/.claude/worktrees`, while keeping that one worktree by
+        // name does. A tie keeps, since a wrong keep costs disk and a wrong
+        // eviction costs a rebuild somebody asked not to have.
+        match (keep, evict) {
+            (Some(keep), Some(evict)) if evict > keep => Standing::EvictFirst,
+            (Some(_), _) => Standing::Keep,
+            (None, Some(_)) => Standing::EvictFirst,
+            (None, None) => Standing::Normal,
+        }
+    }
+}
+
+/// How far into `workspace_root` the deepest of `entries` reaches, counted
+/// in path components; `None` when none matches.
+fn deepest_match(entries: &[PathBuf], workspace_root: &Path) -> Option<usize> {
+    let components: Vec<_> = workspace_root.components().collect();
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let wanted: Vec<_> = entry.components().collect();
+            if wanted.is_empty() {
+                return None;
+            }
+            if entry.is_absolute() {
+                return components.starts_with(&wanted).then_some(wanted.len());
+            }
+            components
+                .windows(wanted.len())
+                .rposition(|window| window == wanted.as_slice())
+                .map(|start| start + wanted.len())
+        })
+        .max()
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ViewStats {
     pub views: u64,
@@ -1017,17 +1094,40 @@ pub(crate) fn collect(
     max_age: Option<Duration>,
     dry_run: bool,
 ) -> Result<CollectionOutcome> {
-    collect_with(root, max_bytes, max_age, dry_run, now_secs(), || {}, || {})
+    collect_by(root, max_bytes, max_age, &Precedence::default(), dry_run)
+}
+
+/// [`collect`], keeping the checkouts `precedence` keeps and taking the ones
+/// it evicts first ahead of the rest.
+pub(crate) fn collect_by(
+    root: &Path,
+    max_bytes: Option<u64>,
+    max_age: Option<Duration>,
+    precedence: &Precedence,
+    dry_run: bool,
+) -> Result<CollectionOutcome> {
+    collect_with(
+        root,
+        max_bytes,
+        max_age,
+        precedence,
+        dry_run,
+        now_secs(),
+        || {},
+        || {},
+    )
 }
 
 /// [`collect`] with the sweep's clock, and with hooks where a build can
 /// arrive: between selecting views and removing them, and between removing a
 /// directory and its record. Tests stand in for that build, and pass a fixed
 /// `now` so the ages they set up do not shift while the sweep runs.
+#[allow(clippy::too_many_arguments)]
 fn collect_with(
     root: &Path,
     max_bytes: Option<u64>,
     max_age: Option<Duration>,
+    precedence: &Precedence,
     dry_run: bool,
     now: u64,
     before_removal: impl FnOnce(),
@@ -1055,18 +1155,25 @@ fn collect_with(
             record.updated_secs,
             bytes,
             crate::store::checkout_is_live_on(root, &record.workspace_root),
+            precedence.standing(&record.workspace_root),
         ));
     }
-    let expired =
-        |updated: u64| max_age.is_some_and(|age| now.saturating_sub(updated) > age.as_secs());
+    let expired = |updated: u64, standing: Standing| {
+        standing != Standing::Keep
+            && max_age.is_some_and(|age| now.saturating_sub(updated) > age.as_secs())
+    };
     // Before the budget is weighed, so a checkout's unused units go ahead of
     // a whole directory somebody may still be using.
     if let Some(max_age) = max_age
-        && entries.iter().any(|entry| entry.4 && !expired(entry.2))
+        && entries
+            .iter()
+            .any(|entry| entry.4 && entry.5 != Standing::Keep && !expired(entry.2, entry.5))
         && crate::target_units::access_times_tracked(&views_root(root))
     {
-        for (_, directory, updated, bytes, live) in &mut entries {
-            if !*live || expired(*updated) {
+        for (_, directory, updated, bytes, live, standing) in &mut entries {
+            // A kept target keeps what it holds: one built for a bisect or a
+            // release and left alone is exactly one whose units look unused.
+            if !*live || *standing == Standing::Keep || expired(*updated, *standing) {
                 continue;
             }
             // Held while units go, so a build that starts meanwhile waits
@@ -1102,8 +1209,8 @@ fn collect_with(
         .map(|entry| entry.3)
         .fold(uncollectable_bytes, u64::saturating_add);
     let mut selected = HashSet::new();
-    for (record_path, _, updated, bytes, live) in &entries {
-        if !live || expired(*updated) {
+    for (record_path, _, updated, bytes, live, standing) in &entries {
+        if !live || expired(*updated, *standing) {
             selected.insert(record_path.clone());
             remaining = remaining.saturating_sub(*bytes);
         }
@@ -1115,17 +1222,21 @@ fn collect_with(
         // Only the views the passes above left alone. An abandoned or expired
         // one is going regardless, so letting it hold the protected place below
         // would spend that protection on a directory already being deleted.
-        let mut candidates: Vec<&(PathBuf, PathBuf, u64, u64, bool)> = entries
+        // A kept one is not a candidate at all.
+        let mut candidates: Vec<&(PathBuf, PathBuf, u64, u64, bool, Standing)> = entries
             .iter()
-            .filter(|entry| !selected.contains(&entry.0))
+            .filter(|entry| !selected.contains(&entry.0) && entry.5 != Standing::Keep)
             .collect();
         // Spare the most recently used of them: that is the checkout somebody
         // is almost certainly working in, very likely the one whose build just
         // called this. Deleting it cannot hold the total down anyway, because
         // the next build recreates it, so a budget smaller than one working
         // target directory would otherwise delete those outputs after every
-        // build forever.
+        // build forever. An evict-first checkout gets the same protection,
+        // since an agent's build in its worktree is as current as any.
         candidates.pop();
+        // Stable, so each standing stays oldest-first.
+        candidates.sort_by_key(|entry| entry.5);
         for entry in candidates {
             if remaining <= max_bytes {
                 break;
@@ -1138,8 +1249,13 @@ fn collect_with(
             // Say so rather than delete the last directory standing: the
             // budget cannot be met, and the user is the only one who can
             // decide whether to raise it or keep fewer checkouts.
+            let kept = if entries.iter().any(|entry| entry.5 == Standing::Keep) {
+                " and those in target.keep are"
+            } else {
+                " is"
+            };
             log::warn!(
-                "managed target directories still hold {} after collection, over the {} budget; the most recently used one is kept",
+                "managed target directories still hold {} after collection, over the {} budget; the most recently used one{kept} kept",
                 bytesize::ByteSize::b(remaining).display().iec(),
                 bytesize::ByteSize::b(max_bytes).display().iec(),
             );
@@ -1147,7 +1263,7 @@ fn collect_with(
     }
 
     before_removal();
-    for (record_path, directory, updated, bytes, live) in entries {
+    for (record_path, directory, updated, bytes, live, _) in entries {
         if !selected.contains(&record_path) {
             continue;
         }

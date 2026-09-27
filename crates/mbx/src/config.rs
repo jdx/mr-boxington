@@ -392,6 +392,15 @@ struct RawTarget {
     /// long, or "none".
     #[usage(env = "MBX_TARGET_MAX_AGE", default = "30d", ty = "duration")]
     max_age: String,
+    /// Checkouts whose managed targets are never collected for age or size.
+    /// An absolute path covers the checkouts under it; a relative one matches
+    /// wherever it appears in a checkout's path.
+    #[usage(env = "MBX_TARGET_KEEP", parse = "list_by_comma")]
+    keep: Option<Vec<String>>,
+    /// Checkouts whose managed targets are collected first when targets are
+    /// over budget, such as ".claude/worktrees". Matched like `target.keep`.
+    #[usage(env = "MBX_TARGET_EVICT_FIRST", parse = "list_by_comma")]
+    evict_first: Option<Vec<String>>,
 }
 
 #[derive(Debug, usage::Config)]
@@ -726,6 +735,8 @@ pub(crate) struct RetentionSettings {
     pub incremental_max_bytes: Option<u64>,
     pub incremental_max_age: Option<Duration>,
     pub max_total_bytes: Option<u64>,
+    /// Checkouts whose targets `target.keep` and `target.evict_first` set apart.
+    pub target_precedence: crate::target::Precedence,
 }
 
 /// Settings only the command line consumes.
@@ -870,6 +881,7 @@ impl Default for RetentionSettings {
             incremental_max_bytes: Some(INCREMENTAL_BUDGET.fallback),
             incremental_max_age: Some(DEFAULT_TARGET_MAX_AGE),
             max_total_bytes: None,
+            target_precedence: crate::target::Precedence::default(),
         }
     }
 }
@@ -1037,6 +1049,10 @@ impl Config {
                 .transpose()
                 .wrap_err("invalid gc.max_total_size")?
                 .flatten(),
+            target_precedence: crate::target::Precedence {
+                keep: checkout_patterns(raw.target.keep.as_deref()),
+                evict_first: checkout_patterns(raw.target.evict_first.as_deref()),
+            },
         };
         let mode = raw.remote.mode.parse().wrap_err("invalid remote.mode")?;
         let s3_conditional_writes = raw
@@ -1429,6 +1445,38 @@ pub(crate) fn parse_optional_byte_size(value: &str) -> Result<Option<u64>> {
     parse_byte_size(value).map(Some)
 }
 
+/// `target.keep` or `target.evict_first` as paths to match checkouts against.
+///
+/// A leading `~` is the home directory, and an absolute entry that exists is
+/// resolved the way checkout paths are recorded, so a symlinked home still
+/// matches. Relative entries stay relative: they match anywhere.
+fn checkout_patterns(entries: Option<&[String]>) -> Vec<PathBuf> {
+    entries
+        .unwrap_or_default()
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let path = match entry.strip_prefix('~') {
+                Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
+                    match dirs::home_dir() {
+                        Some(home) => std::fs::canonicalize(&home)
+                            .unwrap_or(home)
+                            .join(rest.trim_start_matches(['/', '\\'])),
+                        None => PathBuf::from(entry),
+                    }
+                }
+                _ => PathBuf::from(entry),
+            };
+            if path.is_absolute() {
+                std::fs::canonicalize(&path).unwrap_or(path)
+            } else {
+                path
+            }
+        })
+        .collect()
+}
+
 fn parse_optional_duration(value: &str) -> Result<Option<Duration>> {
     if is_no_limit(value) {
         return Ok(None);
@@ -1715,6 +1763,38 @@ mod tests {
         assert_eq!(
             retention.max_total_bytes, None,
             "a combined budget stays opt-in"
+        );
+    }
+
+    #[test]
+    fn target_precedence_reads_lists_from_the_file_and_environment() {
+        let (_, retention) = configured_retention(None, &[]).unwrap();
+        assert_eq!(
+            retention.target_precedence,
+            crate::target::Precedence::default()
+        );
+
+        let (_, retention) = configured_retention(
+            Some("[target]\nkeep = [\"~/src/app\"]\nevict_first = [\".claude/worktrees\"]"),
+            &[],
+        )
+        .unwrap();
+        let home = dirs::home_dir().unwrap();
+        let home = std::fs::canonicalize(&home).unwrap_or(home);
+        assert_eq!(retention.target_precedence.keep, [home.join("src/app")]);
+        assert_eq!(
+            retention.target_precedence.evict_first,
+            [PathBuf::from(".claude/worktrees")]
+        );
+
+        let (_, retention) = configured_retention(
+            None,
+            &[("MBX_TARGET_EVICT_FIRST", ".claude/worktrees, scratch")],
+        )
+        .unwrap();
+        assert_eq!(
+            retention.target_precedence.evict_first,
+            [PathBuf::from(".claude/worktrees"), PathBuf::from("scratch")]
         );
     }
 

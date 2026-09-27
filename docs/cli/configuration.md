@@ -496,6 +496,22 @@ Detail printed after a build. Auto uses an explanatory CI report in CI and one l
 - `full`
 
 
+### `target.evict_first`
+
+- **Type:** `option<list<string>>`
+- **Optional:** true
+- **Set with:** `MBX_TARGET_EVICT_FIRST`
+
+Checkouts whose managed targets are collected first when targets are over budget, such as ".claude/worktrees". Matched like `target.keep`.
+
+### `target.keep`
+
+- **Type:** `option<list<string>>`
+- **Optional:** true
+- **Set with:** `MBX_TARGET_KEEP`
+
+Checkouts whose managed targets are never collected for age or size. An absolute path covers the checkouts under it; a relative one matches wherever it appears in a checkout's path.
+
 ### `target.max_age`
 
 - **Type:** `duration`

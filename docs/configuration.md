@@ -24,6 +24,7 @@ misspelled setting is an error.
 | Leave capacity for your editor | `scheduler.reserve_cpus = 2`; [parallel builds](/scheduling) |
 | Keep the action store under a fixed size | `gc.max_size = "20GiB"` |
 | Keep live targets longer | `target.max_age = "60d"`; [managed targets](/managed-targets) |
+| Collect agent worktrees' targets first | `target.evict_first = [".claude/worktrees"]`; [managed targets](/managed-targets#keep-or-evict-specific-checkouts) |
 | Use factual savings messages | `savings = "plain"` |
 | Print more cache detail | `summary = "full"`; [cache results](/cache-results) |
 | Share results with CI | [Remote cache](/remote-cache) |
@@ -146,6 +147,8 @@ interval = "1h"
 views = true
 max_size = "30GiB"       # default: 10% of the cache disk
 max_age = "30d"          # default
+keep = ["~/src/app"]     # never collected for age or size
+evict_first = [".claude/worktrees"]  # collected first when over budget
 
 [remote]
 url = "https://cache.example.com"  # or "s3://bucket/prefix"

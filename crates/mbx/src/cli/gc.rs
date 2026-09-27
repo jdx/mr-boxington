@@ -93,10 +93,11 @@ pub(super) fn run(
         .remaining_bytes
         .saturating_add(generated.remaining_bytes);
     let target_budget = target_budget(retention, max_bytes, reserved_bytes);
-    let pruned = target::collect(
+    let pruned = target::collect_by(
         &config.target.root,
         target_budget,
         retention.target_max_age,
+        &retention.target_precedence,
         dry_run,
     );
     let projected_target_bytes = match &pruned {
@@ -679,10 +680,11 @@ pub(super) fn prune_targets(
     let incremental_bytes = incremental_bytes.saturating_add(generated.removed_bytes);
     let incremental_remaining = incremental_remaining.saturating_add(generated.remaining_bytes);
     let target_budget = target_budget(retention, store_reserve, incremental_remaining);
-    match target::collect(
+    match target::collect_by(
         &config.target.root,
         target_budget,
         retention.target_max_age,
+        &retention.target_precedence,
         false,
     ) {
         Ok(pruned) => {

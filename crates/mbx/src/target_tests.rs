@@ -1001,6 +1001,7 @@ fn a_view_claimed_since_the_selection_is_kept() {
         &config.target.root,
         None,
         Some(Duration::from_secs(10)),
+        &Precedence::default(),
         false,
         now_secs(),
         move || {
@@ -1051,6 +1052,7 @@ fn a_checkout_recreated_since_the_selection_is_kept() {
         &config.target.root,
         None,
         None,
+        &Precedence::default(),
         false,
         now_secs(),
         move || {
@@ -1092,6 +1094,7 @@ fn a_view_refreshed_within_the_last_seconds_is_kept() {
         &config.target.root,
         None,
         Some(Duration::ZERO),
+        &Precedence::default(),
         false,
         now,
         || {},
@@ -1127,6 +1130,7 @@ fn a_record_rewritten_during_the_removal_is_kept() {
         &config.target.root,
         None,
         None,
+        &Precedence::default(),
         false,
         now_secs(),
         || {},
@@ -1142,4 +1146,156 @@ fn a_record_rewritten_during_the_removal_is_kept() {
     assert_eq!(outcome.removed_views, 1, "the old directory still went");
     assert!(record_path.exists(), "the record the build wrote stays");
     assert!(view.exists(), "and so does the directory it made");
+}
+
+#[test]
+fn precedence_matches_absolute_directories_and_relative_names() {
+    let precedence = Precedence {
+        keep: vec![PathBuf::from("/src/app")],
+        evict_first: vec![PathBuf::from(".claude/worktrees")],
+    };
+
+    assert_eq!(precedence.standing(Path::new("/src/app")), Standing::Keep);
+    assert_eq!(
+        precedence.standing(Path::new("/src/app/crates/cli")),
+        Standing::Keep,
+        "an absolute entry covers what is under it"
+    );
+    assert_eq!(
+        precedence.standing(Path::new("/src/application")),
+        Standing::Normal,
+        "by component, not by prefix of the name"
+    );
+    assert_eq!(
+        precedence.standing(Path::new("/elsewhere/.claude/worktrees/fix")),
+        Standing::EvictFirst,
+        "a relative entry matches in any repository"
+    );
+    assert_eq!(
+        precedence.standing(Path::new("/src/app/.claude/worktrees/fix")),
+        Standing::EvictFirst,
+        "the entry naming more of the path wins"
+    );
+    assert_eq!(
+        precedence.standing(Path::new("/src/claude/worktrees/fix")),
+        Standing::Normal
+    );
+
+    let named = Precedence {
+        keep: vec![PathBuf::from("/src/app/.claude/worktrees/bisect")],
+        ..precedence.clone()
+    };
+    assert_eq!(
+        named.standing(Path::new("/src/app/.claude/worktrees/bisect")),
+        Standing::Keep,
+        "keeping one worktree by name outranks evicting its siblings"
+    );
+    let tie = Precedence {
+        keep: vec![PathBuf::from("worktrees")],
+        evict_first: vec![PathBuf::from("worktrees")],
+    };
+    assert_eq!(
+        tie.standing(Path::new("/src/worktrees")),
+        Standing::Keep,
+        "a tie keeps"
+    );
+    assert_eq!(
+        Precedence::default().standing(Path::new("/src/app")),
+        Standing::Normal
+    );
+}
+
+/// Three live checkouts, oldest to newest: `kept`, `agent`, `human`, each with
+/// a 10-byte target, and the most recent one, `newest`, with 1 byte.
+fn ranked_views(root: &Path, config: &Config) -> [(PathBuf, PathBuf); 4] {
+    [
+        ("kept", 1, 10),
+        ("agent", 2, 10),
+        ("human", 3, 10),
+        ("newest", 4, 1),
+    ]
+    .map(|(name, updated, size)| {
+        let workspace = checkout(root, name);
+        let view = place(config, &workspace, &workspace.join("target"), false).unwrap();
+        std::fs::write(view.join("artifact"), vec![0_u8; size]).unwrap();
+        age_view(&config.target.root, &workspace, updated);
+        (workspace, view)
+    })
+}
+
+#[test]
+fn over_budget_takes_evict_first_targets_before_older_ones_and_never_kept_ones() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let [kept, agent, human, newest] = ranked_views(directory.path(), &config);
+    let precedence = Precedence {
+        keep: vec![kept.0.clone()],
+        evict_first: vec![agent.0.clone()],
+    };
+
+    // 31 bytes against 21: one 10-byte target has to go.
+    let outcome = collect_by(&config.target.root, Some(21), None, &precedence, false).unwrap();
+
+    assert_eq!(outcome.removed_views, 1);
+    assert!(!agent.1.exists(), "evict-first goes before an older target");
+    assert!(human.1.exists());
+    assert!(kept.1.exists());
+    assert!(newest.1.exists());
+
+    // Nothing but the kept one and the most recent left to take.
+    let outcome = collect_by(&config.target.root, Some(0), None, &precedence, false).unwrap();
+    assert_eq!(outcome.removed_views, 1);
+    assert!(!human.1.exists());
+    assert!(kept.1.exists(), "a kept target is never collected for size");
+    assert!(newest.1.exists(), "the most recently used one is spared");
+}
+
+#[test]
+fn the_most_recent_target_is_spared_even_when_it_is_evict_first() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let [_, agent, human, newest] = ranked_views(directory.path(), &config);
+    let precedence = Precedence {
+        evict_first: vec![agent.0.clone(), newest.0.clone()],
+        ..Precedence::default()
+    };
+
+    let outcome = collect_by(&config.target.root, Some(0), None, &precedence, false).unwrap();
+
+    assert_eq!(outcome.removed_views, 3);
+    assert!(!agent.1.exists());
+    assert!(!human.1.exists());
+    assert!(newest.1.exists());
+}
+
+#[test]
+fn a_kept_target_outlives_its_age_but_not_its_checkout() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let [kept, agent, human, newest] = ranked_views(directory.path(), &config);
+    let precedence = Precedence {
+        keep: vec![kept.0.clone()],
+        ..Precedence::default()
+    };
+    let unit = kept.1.join("debug/build/dep/0123456789abcdef");
+    std::fs::create_dir_all(&unit).unwrap();
+
+    let outcome = collect_by(
+        &config.target.root,
+        None,
+        Some(Duration::from_secs(60)),
+        &precedence,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(outcome.removed_views, 3, "every other target has expired");
+    assert!(kept.1.exists());
+    assert!(unit.exists(), "nor are a kept target's units pruned");
+    assert!(!agent.1.exists() && !human.1.exists() && !newest.1.exists());
+
+    std::fs::remove_dir_all(&kept.0).unwrap();
+    let outcome = collect_by(&config.target.root, None, None, &precedence, false).unwrap();
+    assert_eq!(outcome.removed_stale_views, 1);
+    assert!(!kept.1.exists(), "a checkout that is gone takes its target");
 }

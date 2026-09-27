@@ -292,6 +292,7 @@ fn the_first_run_notice_states_the_resolved_caps() {
         incremental_max_bytes: Some(20 * 1024 * 1024 * 1024),
         incremental_max_age: Some(std::time::Duration::from_secs(30 * 86_400)),
         max_total_bytes: None,
+        target_precedence: Default::default(),
     };
 
     let notice = first_run_notice(&config, &retention, false);
@@ -316,6 +317,7 @@ fn the_first_run_notice_omits_limits_that_are_off() {
         incremental_max_bytes: None,
         incremental_max_age: None,
         max_total_bytes: None,
+        target_precedence: Default::default(),
     };
 
     let notice = first_run_notice(&config, &retention, false);
