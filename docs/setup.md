@@ -152,6 +152,19 @@ target-directory lock. When `target` is managed, the editor directory lives
 inside that view and is collected with it, while the shared store warms both
 builds. Existing rust-analyzer check settings are left unchanged.
 
+After setup, rust-analyzer shows this message when it loads the user file:
+
+```text
+invalid config value:
+check/overrideCommand: unexpected field
+;
+```
+
+The check command still applies. rust-analyzer validates its user file against
+global and local settings only and flags `check.overrideCommand`, a workspace
+setting, before reading it. `mbx setup --status` confirms that the override is
+the one setup wrote.
+
 Releases through 1.11.0 wrote the override beside `Cargo.toml` when mbx was
 activated in a project mise scope, where rust-analyzer never read it. `mbx
 setup` and `mbx setup --uninstall` take that setting back out and report the

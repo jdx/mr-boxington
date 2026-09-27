@@ -516,6 +516,7 @@ pub(super) fn configure_rust_analyzer(
     match action {
         SetupAction::Status if owns_configuration => {
             println!("rust-analyzer checks run through mbx: {}", path.display());
+            print_rust_analyzer_warning_note();
             Ok(ExitCode::SUCCESS)
         }
         SetupAction::Status if owns_legacy_configuration => {
@@ -567,6 +568,7 @@ pub(super) fn configure_rust_analyzer(
                 "rust-analyzer background checks now use a separate target directory: {}",
                 path.display()
             );
+            print_rust_analyzer_warning_note();
             Ok(ExitCode::SUCCESS)
         }
         SetupAction::Install if has_check_settings => {
@@ -585,9 +587,20 @@ pub(super) fn configure_rust_analyzer(
                 "rust-analyzer background checks now run through mbx: {}",
                 path.display()
             );
+            print_rust_analyzer_warning_note();
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// rust-analyzer validates its user file against global and local settings
+/// only, so it flags the workspace-scoped `check.overrideCommand` as unknown
+/// and then applies it anyway. Warn ahead of the editor so the message does
+/// not read as a broken setup.
+fn print_rust_analyzer_warning_note() {
+    println!(
+        "rust-analyzer reports `check/overrideCommand: unexpected field` for this file; the check still runs through mbx"
+    );
 }
 
 fn setup_scope(args: &SetupArgs, action: SetupAction) -> Result<MiseScope> {

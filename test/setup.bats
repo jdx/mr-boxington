@@ -45,6 +45,7 @@ EOF
   [ ! -L "$MBX_SHIM_DIR/cargo" ]
   assert_file_contains "$MBX_RA_CONFIG" "$MBX_SHIM_DIR/cargo"
   assert_file_contains "$MBX_RA_CONFIG" 'message-format=json'
+  assert_output --partial 'reports `check/overrideCommand: unexpected field`'
   assert_output --partial "export PATH=\"$MBX_SHIM_DIR"
   assert_output --partial ':$PATH"'
   local fish_shim_dir="$BATS_TEST_TMPDIR/Application Support/mbx/bin"
@@ -82,6 +83,7 @@ EOF
   run "$MBX_BIN" setup --status
   assert_success
   assert_output --partial "installed and current"
+  assert_output --partial 'the check still runs through mbx'
 
   run "$MBX_BIN" doctor
   assert_success
