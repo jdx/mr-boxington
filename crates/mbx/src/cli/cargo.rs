@@ -129,8 +129,9 @@ fn cargo_with_settings_bypass_log_and_roots(
     };
     let mut config = config.clone();
     config.apply_workspace_policy(&roots.workspace_root)?;
-    let incremental = policy::incremental_allowed(config.incremental);
-    if config.incremental && !incremental {
+    let ci_incremental = config.ci_incremental && policy::is_ci() && !config.verify;
+    let incremental = policy::incremental_allowed(config.incremental) && !ci_incremental;
+    if config.incremental && !incremental && !ci_incremental {
         log::warn!(
             "incremental compilation is disabled here; it needs an earlier build to build on"
         );
@@ -150,7 +151,8 @@ fn cargo_with_settings_bypass_log_and_roots(
     // incremental state, so learned reuse yields to both.
     let learned_incremental = policy::learned_incremental_allowed(settings.learned_incremental)
         && !incremental
-        && !config.verify;
+        && !config.verify
+        && !ci_incremental;
     let config = &config;
 
     // Cargo's intermediate directory usually lies outside the target, where
@@ -388,6 +390,10 @@ fn cargo_with_settings_bypass_log_and_roots(
         // Stated explicitly for the same reason as the session's own keys: an
         // unset value would let the shim inherit one from the parent, with no
         // way to turn it off here.
+        environment.insert(
+            session::CI_INCREMENTAL_ENV.into(),
+            if ci_incremental { "1" } else { "0" }.into(),
+        );
         environment.insert(
             session::LEARNED_INCREMENTAL_ENV.into(),
             if learned_incremental { "1" } else { "0" }.into(),

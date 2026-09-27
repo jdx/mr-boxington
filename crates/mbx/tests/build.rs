@@ -590,6 +590,7 @@ fn cargo_with_command(
         .env_remove("MBX_INCREMENTAL")
         .env_remove("CARGO_INCREMENTAL")
         .env_remove("CI")
+        .env_remove("GITHUB_ACTIONS")
         .env_remove("MBX_RELEASE")
         // Same reason: a test asserting the default cross-checkout behaviour
         // must not read an answer out of the developer's environment.
@@ -1247,6 +1248,159 @@ fn compiled_incrementally(stats: &serde_json::Value) -> u64 {
     stats["incremental_compilations"].as_u64().unwrap_or(0)
 }
 
+#[test]
+fn ci_incremental_seeds_private_state_and_survives_a_fresh_target() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_dependent_project(project.path());
+    let settings = [
+        ("CI", "1"),
+        ("MBX_CI_INCREMENTAL", "1"),
+        ("CARGO_INCREMENTAL", "0"),
+    ];
+    let seed = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("seed.json"),
+        &settings,
+    )
+    .0;
+    assert_eq!(compiled_incrementally(&seed), 2, "{seed}");
+    assert_eq!(
+        seed["stored_bytes"].as_u64(),
+        Some(0),
+        "private artifacts must not be published: {seed}"
+    );
+    let state = find_files(&store.path().join("incremental"), |path| {
+        file_name_is(path, |name| name == "query-cache.bin")
+    });
+    assert_eq!(
+        state.len(),
+        2,
+        "both workspace crates should seed rustc state: {state:?}"
+    );
+    wipe_target(project.path());
+    assert!(
+        state.iter().all(|path| path.is_file()),
+        "Cargo target removal must preserve state"
+    );
+    std::fs::write(
+        project.path().join("base/src/lib.rs"),
+        "pub fn value() -> u32 { 21 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join("above/src/main.rs"),
+        "fn main() { assert_eq!(above::doubled(), 42); }\n",
+    )
+    .unwrap();
+    let next = cargo_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("next.json"),
+        &["run", "--offline", "-p", "above"],
+        &settings,
+    )
+    .0;
+    assert!(compiled_incrementally(&next) >= 2, "{next}");
+    assert_eq!(next["stored_bytes"].as_u64(), Some(0), "{next}");
+    wipe_target(project.path());
+    let disabled = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("disabled.json"),
+        &[("CI", "1"), ("MBX_CI_INCREMENTAL", "0")],
+    )
+    .0;
+    assert_eq!(compiled_incrementally(&disabled), 0, "{disabled}");
+    assert!(
+        disabled["stored_bytes"].as_u64().unwrap() > 0,
+        "disabling must restore shared publication: {disabled}"
+    );
+}
+
+#[test]
+fn ci_incremental_keeps_non_workspace_dependencies_shared() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let dependency = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let package = dependency
+        .path()
+        .join("registry/src/fixture/external-0.1.0");
+    write_named_project(&package, "external");
+    write_project(project.path());
+    let manifest = project.path().join("Cargo.toml");
+    let mut contents = std::fs::read_to_string(&manifest).unwrap();
+    contents.push_str(&format!(
+        "\n[dependencies]\nexternal = {{ path = {:?} }}\n",
+        package.to_str().unwrap()
+    ));
+    std::fs::write(manifest, contents).unwrap();
+    generate_lockfile(project.path());
+    let settings = [
+        ("GITHUB_ACTIONS", "true"),
+        ("MBX_CI_INCREMENTAL", "true"),
+        ("MBX_INCREMENTAL", "1"),
+        ("CARGO_HOME", dependency.path().to_str().unwrap()),
+    ];
+    let seed = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("seed.json"),
+        &settings,
+    )
+    .0;
+    assert_eq!(compiled_incrementally(&seed), 1, "{seed}");
+    assert!(seed["stored_bytes"].as_u64().unwrap() > 0, "{seed}");
+    wipe_target(project.path());
+    edit_project(project.path(), 1);
+    let next = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("next.json"),
+        &settings,
+    )
+    .0;
+    assert_eq!(compiled_incrementally(&next), 1, "{next}");
+    assert!(
+        next["hits"].as_u64().unwrap_or(0) >= 1,
+        "dependency should restore: {next}"
+    );
+}
+
+#[test]
+fn ci_incremental_requires_ci_and_yields_to_verification() {
+    for settings in [
+        vec![("CI", "1")],
+        vec![("MBX_CI_INCREMENTAL", "1")],
+        vec![
+            ("CI", "1"),
+            ("MBX_CI_INCREMENTAL", "1"),
+            ("MBX_VERIFY", "1"),
+        ],
+        vec![
+            ("GITHUB_ACTIONS", "true"),
+            ("MBX_CI_INCREMENTAL", "1"),
+            ("MBX_VERIFY_SAMPLE_RATE", "100"),
+        ],
+    ] {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(project.path());
+        let stats = build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("build.json"),
+            &settings,
+        )
+        .0;
+        assert_eq!(compiled_incrementally(&stats), 0, "{settings:?}: {stats}");
+    }
+}
+
 /// A workspace crate somebody is editing misses on every build no matter what
 /// the cache does. On its first edit, it gets its own incremental
 /// state -- which never reaches the store, because it describes one checkout's
@@ -1405,6 +1559,7 @@ fn a_failed_build_does_not_cost_the_streak() {
             .env_remove("MBX_INCREMENTAL")
             .env_remove("CARGO_INCREMENTAL")
             .env_remove("CI")
+            .env_remove("GITHUB_ACTIONS")
             .output()
             .expect("mbx should run");
         assert!(!failed.status.success(), "attempt {attempt} should fail");
@@ -3878,6 +4033,7 @@ fn build_into_target(
         .env_remove("MBX_VERIFY")
         .env_remove("MBX_VERIFY_SAMPLE_RATE")
         .env_remove("CI")
+        .env_remove("GITHUB_ACTIONS")
         .env_remove("MBX_SHARE_OUT_DIR")
         .env_remove("MBX_SOCKET")
         .env_remove("RUSTC_WRAPPER")
