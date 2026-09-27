@@ -63,7 +63,11 @@ test("the delta is only claimed when mbx was a printable tenth faster", () => {
   assert.equal(deltaText(c), tenths(delta(c) ?? 0));
 });
 
-test("the subject's description is hk's alone, and every figure falls back", () => {
+test("known subjects are described, others named, and every figure falls back", () => {
+  assert.deepEqual(subtitle({ ...hk(), subject: "aube" }), [
+    "aube, a 15-crate Rust workspace with C dependencies",
+    "the cache holds the previous commit · Linux CI runner · median of 3",
+  ]);
   const other: ReelFacts = { ...hk(), subject: "ripgrep" };
   assert.deepEqual(subtitle(other), ["ripgrep · the cache holds the previous commit", "Linux CI runner · median of 3"]);
   // Without a commit fact the chart gives way to the card, which claims no number.

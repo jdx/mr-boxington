@@ -76,9 +76,10 @@ performance series to `refs/notes/tak`.
 
 ## Real-world comparison
 
-`real_world.py` clones a pinned commit of [jdx/hk](https://github.com/jdx/hk) and
-compares plain Cargo, mbx, and kache. kache is included when it is on `PATH` and
-reported as skipped otherwise.
+`real_world.py` clones a pinned commit of [jdx/aube](https://github.com/jdx/aube)
+and compares plain Cargo, mbx, and kache. kache is included when it is on `PATH` and
+reported as skipped otherwise. `--subject hk` runs the same scenarios on
+[jdx/hk](https://github.com/jdx/hk), the subject published before aube.
 
 ```sh
 mise run bench

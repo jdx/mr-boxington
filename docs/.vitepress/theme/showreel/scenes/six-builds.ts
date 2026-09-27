@@ -756,7 +756,7 @@ function drawSyn(ctx: CanvasRenderingContext2D, t: number, facts: ReelFacts | nu
   if (t < T_SYN_CHECK || t > T_SYN_DONE + b(5)) return;
   ctx.save();
   ctx.globalAlpha *= alpha;
-  const hk = facts?.subject === "hk";
+  const hk = facts?.subject === "hk" || facts?.subject === "aube";
   const slot = { x: SLOTS[SYN_SLOT].x, y: RAIL.y };
   const tagOut = progress(T_SYN_DONE, T_SYN_DONE + 0.1, t);
   const tag = (p: Pt, a = 1) => {

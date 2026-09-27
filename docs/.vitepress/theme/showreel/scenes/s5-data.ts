@@ -190,14 +190,19 @@ export const CARGO_DONE = T.cargoLand - FRAME / 2;
 /** The last step starts slow and arrives at speed, so it stops with a clunk. */
 const grind = cubicBezier(0.4, 0, 0.8, 0.8);
 
+/** The subjects the benchmark knows, described as benchmarks/real_world.py describes them. */
+const DESCRIPTIONS: Readonly<Record<string, string>> = {
+  aube: "aube, a 15-crate Rust workspace with C dependencies",
+  hk: "hk, a mid-size Rust CLI with C dependencies",
+};
+
 /** The subtitle: the subject, the scenario in plain words, and the runs. */
 export function subtitle(f: ReelFacts | null): string[] {
   const setup = "the cache holds the previous commit";
   const runner = "Linux CI runner";
   const median = f?.commit ? medianOf(f.commit.trials) : null;
-  if (f?.subject === "hk") {
-    return ["hk, a mid-size Rust CLI with C dependencies", [setup, runner, median].filter(Boolean).join(" · ")];
-  }
+  const described = f ? DESCRIPTIONS[f.subject] : undefined;
+  if (described) return [described, [setup, runner, median].filter(Boolean).join(" · ")];
   return [[f?.subject || null, setup].filter(Boolean).join(" · "), [runner, median].filter(Boolean).join(" · ")];
 }
 

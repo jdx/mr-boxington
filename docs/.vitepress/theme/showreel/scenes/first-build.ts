@@ -646,7 +646,7 @@ function drawStore(ctx: CanvasRenderingContext2D, lt: number, facts: ReelFacts |
   // the two paths.
   const toolchain = facts?.toolchain;
   const keys = [
-    facts?.subject === "hk" ? "syn 2.0.119 sources" : "syn sources",
+    facts?.subject === "hk" || facts?.subject === "aube" ? "syn 2.0.119 sources" : "syn sources",
     toolchain ? `rustc ${toolchain}` : "rustc",
     "features",
     "profile",

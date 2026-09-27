@@ -5,9 +5,9 @@ description: Compare Cargo, mbx, and kache on a pinned Rust project with documen
 
 mbx is measured against plain Cargo and
 [kache](https://github.com/kunobi-ninja/kache) on
-[jdx/hk](https://github.com/jdx/hk), a mid-size Rust CLI with C dependencies,
-pinned to one commit and built with `cargo build --locked`. The scenarios cover
-work a developer or CI runner may repeat. Published results come from GitHub
+[jdx/aube](https://github.com/jdx/aube), a 15-crate Rust workspace with C
+dependencies, pinned to one commit and built with `cargo build --locked`. The
+scenarios cover work a developer or CI runner may repeat. Published results come from GitHub
 Actions. The page labels a tool fastest only when its lead exceeds the observed
 variation between trials.
 
@@ -37,15 +37,18 @@ has already seen.
 
 ### Next commit
 
-The store is warmed at one commit and the build runs at the next. Most of the
-dependency graph is unchanged and a few crates are not. Cargo's row is a cold
-build, since with an empty `target/` that is all it can do.
+The store is warmed at one commit and the build runs at the next. The next
+commit changes two of aube's library crates, so they and the workspace crates
+that depend on them compile again while the rest of the graph is restored.
+Cargo's row is a cold build, since with an empty `target/` that is all it can
+do.
 
 ### Local edit
 
-A full build, then one line of hk's own source changed and rebuilt in the same
-`target/` with incremental compilation on. This measures the edit/build loop,
-including cache bookkeeping and incremental compilation. Two details make the
+A full build, then one line changed in `aube-util`, which most of the
+workspace depends on, and rebuilt in the same `target/` with incremental
+compilation on. This measures the edit/build loop, including cache
+bookkeeping and incremental compilation. Two details make the
 comparison useful:
 
 - `CI` is unset for every tool. mbx switches
@@ -99,7 +102,7 @@ oversubscribed it.
 mise run bench
 ```
 
-That builds mbx, clones hk, and runs the warm, commit, and edit scenarios once
+That builds mbx, clones aube, and runs the warm, commit, and edit scenarios once
 each. kache is included when it is on `PATH` and noted as skipped otherwise.
 `mise run bench:refresh` is what CI runs: every scenario, three trials each,
 written to `benchmarks/results.json`.
@@ -115,9 +118,9 @@ instead of the latest release; `source` implies `dry_run`.
 
 ## What this does not measure
 
-These results describe the pinned hk workload. A project with a very different dependency shape,
-such as heavy proc macros, a large C component, or many small leaf crates,
-will see different ratios. Three trials expose some variation; their ranges
+These results describe the pinned aube workload. A project with a very
+different dependency shape, such as heavy proc macros, a large C component,
+or many small leaf crates, will see different ratios. Three trials expose some variation; their ranges
 are not confidence intervals, and a “fastest” label is a display heuristic,
 not a statistical significance test. The benchmark is Linux-only, and
 [limits](/limits) covers what changes on macOS and Windows.

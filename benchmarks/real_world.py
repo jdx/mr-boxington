@@ -35,6 +35,20 @@ from pathlib import Path
 # the parent and building the child is the push-to-push CI case, so the pair
 # has to be a genuine source change rather than two arbitrary revisions.
 SUBJECTS: dict[str, dict[str, object]] = {
+    "aube": {
+        "description": "jdx/aube, a 15-crate Rust workspace with C dependencies",
+        "url": "https://github.com/jdx/aube.git",
+        # The child changes aube-registry and aube-resolver, so the next-commit
+        # build recompiles those and every workspace crate that depends on
+        # them rather than a single leaf.
+        "parent": "757947e58a893b2dd1bcfa7d108fdd7db249d644",
+        "child": "e9a36ebef471af5acd13e5b5ace31fd94751215f",
+        "args": ["build", "--locked"],
+        # Most of the workspace depends on aube-util, so an edit here rebuilds
+        # a chain of crates. The binary's own main.rs is a thin shim and would
+        # rebuild in about a second.
+        "edit": "crates/aube-util/src/lib.rs",
+    },
     "hk": {
         "description": "jdx/hk, a mid-size Rust CLI with C dependencies",
         "url": "https://github.com/jdx/hk.git",
@@ -1200,7 +1214,7 @@ def summarize(result: dict[str, object]) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--subject", default="hk", choices=sorted(SUBJECTS))
+    parser.add_argument("--subject", default="aube", choices=sorted(SUBJECTS))
     parser.add_argument("--tools", default=",".join(TOOLS))
     parser.add_argument("--scenarios", default="warm,commit,edit")
     parser.add_argument(
