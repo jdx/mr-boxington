@@ -218,8 +218,8 @@ pub(super) fn set_value(
 
 /// Remove `key` from `document`, reporting whether it was there.
 ///
-/// A key mbx does not declare is removed only when it holds a value, so a
-/// typo cannot take a whole table of real settings with it.
+/// A key mbx does not declare is removed only when it holds a plain value, not
+/// a table of either kind, so a typo cannot take a group of settings with it.
 pub(super) fn remove_value(
     document: &mut DocumentMut,
     key: &str,
@@ -230,8 +230,8 @@ pub(super) fn remove_value(
         return Ok(false);
     };
     match table.get(name) {
-        Some(Item::Value(_)) => {}
         Some(_) if known => {}
+        Some(Item::Value(value)) if !value.is_inline_table() => {}
         _ => return Ok(false),
     }
     table.remove(name);

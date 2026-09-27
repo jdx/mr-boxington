@@ -167,6 +167,10 @@ fn unsetting_an_undeclared_key_removes_only_a_value() {
         removed("[gcc]\nauto = false\n", "gcc"),
         (false, "[gcc]\nauto = false\n".to_owned())
     );
+    assert_eq!(
+        removed("gcc = { auto = false }\n", "gcc"),
+        (false, "gcc = { auto = false }\n".to_owned())
+    );
 }
 
 #[cfg(unix)]
