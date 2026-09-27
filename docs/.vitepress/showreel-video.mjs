@@ -60,7 +60,7 @@ function benchmarkResults() {
     const results = JSON.parse(
       readFileSync(resolve(here, "../../benchmarks/results.json"), "utf8"),
     );
-    return [1, 2].includes(results.schema) && results.passed ? results : null;
+    return [1, 2].includes(results.schema) && results.passed && results.subject === "hk" ? results : null;
   } catch {
     return null;
   }

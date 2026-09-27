@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { factsFromBenchmarks, type ReelFacts } from "../facts";
+import { loadBenchmark } from "../../../benchmark-loader";
 import { REPO, SHOWREEL } from "./repo";
 
 /** Parsed JSON, which the tests garble on purpose. */
@@ -19,13 +20,7 @@ export const published = (): Json => JSON.parse(readFileSync(join(SHOWREEL, "tes
 
 /** The live benchmarks/results.json through the loaders' own check. */
 export function live(): Json {
-  try {
-    const run = JSON.parse(readFileSync(join(REPO, "benchmarks/results.json"), "utf8"));
-    // As benchmarks.data.ts and showreel-video.mjs load it.
-    return [1, 2].includes(run.schema) && run.passed ? run : null;
-  } catch {
-    return null;
-  }
+  return loadBenchmark(join(REPO, "benchmarks/results.json"), "hk");
 }
 
 /** One cell of a parsed run, for a test to garble. */

@@ -72,7 +72,6 @@ jobs:
     outputs:
       drift: ${{ steps.drift.outputs.drift }}
       release: ${{ steps.drift.outputs.release }}
-      bench: ${{ steps.drift.outputs.bench }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -87,14 +86,14 @@ jobs:
         run: |
           RELEASE=$(gh release view --json tagName --jq '.tagName | ltrimstr("v")')
           # Absent until the first refresh lands, which is itself drift.
+          AUBE_BENCH=$(jq -r '.versions.mbx // empty' benchmarks/results-aube.json 2>/dev/null || true)
           BENCH=$(jq -r '.versions.mbx // empty' benchmarks/results.json 2>/dev/null || true)
           if [ -z "$RELEASE" ]; then
             echo "::error::Could not resolve the latest mbx release"
             exit 1
           fi
           echo "release=$RELEASE" >> "$GITHUB_OUTPUT"
-          echo "bench=$BENCH" >> "$GITHUB_OUTPUT"
-          if [ "$FORCE_REFRESH" = "true" ] || [ "$BENCH" != "$RELEASE" ]; then
+          if [ "$FORCE_REFRESH" = "true" ] || [ "$BENCH" != "$RELEASE" ] || [ "$AUBE_BENCH" != "$RELEASE" ]; then
             echo "drift=true" >> "$GITHUB_OUTPUT"
           else
             echo "drift=false" >> "$GITHUB_OUTPUT"
@@ -110,7 +109,7 @@ jobs:
     # representative of the high-core-count local machines this models.
     runs-on: namespace-profile-endev-linux-amd64-xlarge;overrides.cache-tag=cache
     # Three trials of every scenario, including the six-job contention batch.
-    timeout-minutes: 180
+    timeout-minutes: 300
     permissions:
       contents: read
     steps:
@@ -179,25 +178,33 @@ jobs:
         env:
           MISE_LOCKED: "1"
         run: |
-          PATH="$KACHE_INSTALL_DIR:$PATH" \
-            python3 benchmarks/real_world.py \
-            --mbx "$MBX_BENCH_BINARY" \
-            --scenarios warm,commit,edit,contention \
-            --trials 3 \
-            --output target/benchmarks \
-            --write-results benchmarks/results.json
+          for SUBJECT in hk aube; do
+            RESULTS=benchmarks/results.json
+            if [ "$SUBJECT" = aube ]; then RESULTS=benchmarks/results-aube.json; fi
+            PATH="$KACHE_INSTALL_DIR:$PATH" \
+              python3 benchmarks/real_world.py \
+              --subject "$SUBJECT" \
+              --mbx "$MBX_BENCH_BINARY" \
+              --scenarios warm,commit,edit,contention \
+              --trials 3 \
+              --output "target/benchmarks/$SUBJECT" \
+              --write-results "$RESULTS"
+          done
       - name: Publish job summary
         if: always()
         # A run that failed before writing its summary has already reported
         # why; a missing file here would only add a second, less informative
         # red step on top of it.
         run: |
-          if [ -f target/benchmarks/real-world.md ]; then
-            cat target/benchmarks/real-world.md >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "The benchmark did not get as far as writing a summary." \
-              >> "$GITHUB_STEP_SUMMARY"
-          fi
+          for SUBJECT in hk aube; do
+            if [ -f "target/benchmarks/$SUBJECT/real-world.md" ]; then
+              echo "## $SUBJECT" >> "$GITHUB_STEP_SUMMARY"
+              cat "target/benchmarks/$SUBJECT/real-world.md" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "$SUBJECT did not get as far as writing a summary." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
       - name: Upload measurements
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -213,7 +220,9 @@ jobs:
           # The rendered table goes into the pull request body.
           path: |
             benchmarks/results.json
-            target/benchmarks/real-world.md
+            benchmarks/results-aube.json
+            target/benchmarks/hk/real-world.md
+            target/benchmarks/aube/real-world.md
           if-no-files-found: error
 
   # Opening the pull request is a separate job so the benchmark itself never
@@ -244,12 +253,12 @@ jobs:
           name: results-json-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/refreshed
       - name: Stage the refreshed results
-        run: cp "$RUNNER_TEMP/refreshed/benchmarks/results.json" benchmarks/results.json
+        run: cp "$RUNNER_TEMP"/refreshed/benchmarks/results*.json benchmarks/
       - name: Check for a diff
         id: dirty
         run: |
-          if git diff --quiet -- benchmarks/results.json \
-            && [ -z "$(git status --porcelain -- benchmarks/results.json)" ]; then
+          if git diff --quiet -- benchmarks/results*.json \
+            && [ -z "$(git status --porcelain -- benchmarks/results*.json)" ]; then
             echo "dirty=false" >> "$GITHUB_OUTPUT"
           else
             echo "dirty=true" >> "$GITHUB_OUTPUT"
@@ -265,7 +274,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B bench-refresh
-          git add benchmarks/results.json
+          git add benchmarks/results*.json
           git commit -m "chore: refresh real-world benchmarks"
           # persist-credentials: false means the push has to authenticate
           # explicitly. Re-point origin rather than pushing to a one-shot URL,
@@ -281,24 +290,22 @@ jobs:
           # create them, and one it opened would not start CI anyway.
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           RELEASE: ${{ needs.check.outputs.release }}
-          BENCH: ${{ needs.check.outputs.bench }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          SUMMARY: ${{ runner.temp }}/refreshed/target/benchmarks/real-world.md
+          SUMMARIES: ${{ runner.temp }}/refreshed/target/benchmarks
         run: |
           cat > "$RUNNER_TEMP/body.md" <<EOF
           ## Refreshed real-world benchmarks
 
-          \`benchmarks/results.json\` was measured with \`${BENCH:-no previous run}\`; the latest release is now \`mbx ${RELEASE}\`. Re-ran the benchmark with that release on the fixed Namespace Linux xlarge profile: a pinned checkout of jdx/aube built under raw cargo, mbx, and kache across the warm, next-commit, edit-loop, and six-job contention scenarios, three trials of each.
+          The latest release is \`mbx ${RELEASE}\`. Re-ran the benchmark with that release on the fixed Namespace Linux xlarge profile: pinned checkouts of jdx/hk and jdx/aube built under raw cargo, mbx, and kache across the warm, next-commit, edit-loop, and six-job contention scenarios, three trials of each.
 
           **Read the numbers before merging.** They publish to https://mr-boxington.jdx.dev/benchmarks on merge. Look into a scenario that swapped places, or a trial range wide enough to explain the gap beside it, before it goes on the site.
 
           EOF
           # The same table the job summary prints.
-          if [ -f "$SUMMARY" ]; then
-            cat "$SUMMARY" >> "$RUNNER_TEMP/body.md"
-          else
-            echo "The run did not write a summary table." >> "$RUNNER_TEMP/body.md"
-          fi
+          for SUBJECT in hk aube; do
+            echo "## $SUBJECT" >> "$RUNNER_TEMP/body.md"
+            cat "$SUMMARIES/$SUBJECT/real-world.md" >> "$RUNNER_TEMP/body.md"
+          done
           cat >> "$RUNNER_TEMP/body.md" <<EOF
 
           ---

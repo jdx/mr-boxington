@@ -5,6 +5,9 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { join } from "node:path";
+import { loadBenchmark } from "../../../benchmark-loader";
+import { REPO } from "./repo";
 import {
   annotation,
   delta,
@@ -234,4 +237,15 @@ test("no caption shows a number the facts do not back", () => {
       }
     }
   }
+});
+
+
+test("published workloads stay distinct and the showreel uses hk", () => {
+  const hkPath = join(REPO, "benchmarks/results.json");
+  const aubePath = join(REPO, "benchmarks/results-aube.json");
+  assert.equal(loadBenchmark(hkPath, "hk")?.subject, "hk");
+  assert.equal(loadBenchmark(aubePath, "aube")?.subject, "aube");
+  assert.equal(loadBenchmark(aubePath, "hk"), null);
+  assert.equal(loadBenchmark(hkPath, "aube"), null);
+  assert.equal(factsFromBenchmarks(live())?.subject, "hk");
 });

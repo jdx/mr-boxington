@@ -15,7 +15,7 @@
       <a
         v-for="tile in tiles"
         :key="tile.id"
-        :href="`#${tile.id}`"
+        :href="`#${prefix}${tile.id}`"
         class="bench-tile"
         :class="{ 'is-ahead': tile.ahead }"
       >
@@ -27,7 +27,7 @@
 
     <section
       v-for="card in cards"
-      :id="card.id"
+      :id="`${prefix}${card.id}`"
       :key="card.id"
       class="bench-card"
     >
@@ -126,8 +126,21 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
-import { data } from "../benchmarks.data";
-import type { BenchmarkCell, BenchmarkScenario } from "../benchmarks.data";
+import { data as published } from "../benchmarks.data";
+import type {
+  BenchmarkCell,
+  BenchmarkScenario,
+  BenchmarkResults,
+} from "../benchmarks.data";
+
+const props = defineProps<{
+  results?: BenchmarkResults | null;
+  prefix?: string;
+}>();
+const data = computed(() =>
+  props.results === undefined ? published : props.results,
+);
+const prefix = computed(() => props.prefix ?? "");
 
 // Page copy for the scenarios the harness knows. A scenario it does not know
 // falls back to the description the harness wrote into results.json.
@@ -531,7 +544,7 @@ function provenance(scenario: BenchmarkScenario) {
 }
 
 const built = computed(() =>
-  (data?.scenarios ?? []).map((scenario) =>
+  (data.value?.scenarios ?? []).map((scenario) =>
     scenario.kind === "contention"
       ? contentionCard(scenario)
       : buildCard(scenario),
@@ -543,9 +556,9 @@ const tiles = computed(() =>
 );
 
 const versionList = computed(() => {
-  if (!data) return "";
+  if (!data.value) return "";
   return (
-    Object.entries(data.versions)
+    Object.entries(data.value.versions)
       .filter(([, value]) => value)
       // `cargo -V` already says "cargo"; only mbx reports a bare number.
       .map(([n, value]) => (value!.startsWith(n) ? value! : `${n} ${value}`))

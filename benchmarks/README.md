@@ -7,7 +7,7 @@ commands from the repository root after `mise install`.
 | --- | --- | --- |
 | Did mbx startup get more expensive? | `mise run perf` | Instruction counts and wall time from `tak` |
 | How does mbx compare on a real project? | `mise run bench` | One trial of warm, commit, and edit scenarios |
-| How are the website's results refreshed? | `mise run bench:refresh` | Three trials of every scenario in `results.json` |
+| How are the website's results refreshed? | `mise run bench:refresh` | Three trials of every scenario for hk and aube |
 | Are cached builds correct in this workspace? | `measure_builds.py --verify` | Versioned reports, logs, and verification results |
 
 ## Startup cost
@@ -79,7 +79,8 @@ performance series to `refs/notes/tak`.
 `real_world.py` clones a pinned commit of [jdx/aube](https://github.com/jdx/aube)
 and compares plain Cargo, mbx, and kache. kache is included when it is on `PATH` and
 reported as skipped otherwise. `--subject hk` runs the same scenarios on
-[jdx/hk](https://github.com/jdx/hk), the subject published before aube.
+[jdx/hk](https://github.com/jdx/hk), the single application crate workload
+featured in the showreel.
 
 ```sh
 mise run bench
@@ -99,6 +100,10 @@ and caches run locally. Validity checks reject runs that did not exercise the
 intended behavior, such as a warm build with no restores or a Cargo baseline
 that accidentally used an mbx shim. Contention checks verify the permit limit
 was exercised; wall-time ordering remains a reported result.
+
+Refreshes measure both projects and write `results.json` for hk and
+`results-aube.json` for aube. Each file retains its own versions and CI
+provenance; the showreel reads the hk result.
 
 The website shows the median and the full range of three trials. It marks a
 tool fastest only when its lead exceeds either tool's range. See the

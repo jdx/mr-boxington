@@ -172,15 +172,20 @@ python3 benchmarks/real_world.py \
 # can tell a result from the machine, and rewrites the results file the
 # documentation site reads.
 [tasks."bench:refresh"]
-description = "Rerun the real-world benchmark and rewrite benchmarks/results.json"
+description = "Refresh published hk and aube benchmarks"
 depends = ["perf:prepare"]
 run = """
-python3 benchmarks/real_world.py \
-  --mbx target/release/mbx \
-  --scenarios warm,commit,edit,contention \
-  --trials 3 \
-  --output target/benchmarks \
-  --write-results benchmarks/results.json
+for subject in hk aube; do
+  results=benchmarks/results.json
+  if [ "$subject" = aube ]; then results=benchmarks/results-aube.json; fi
+  python3 benchmarks/real_world.py \
+    --subject "$subject" \
+    --mbx target/release/mbx \
+    --scenarios warm,commit,edit,contention \
+    --trials 3 \
+    --output "target/benchmarks/$subject" \
+    --write-results "$results" || exit "$?"
+done
 """
 
 [tasks."perf:record"]

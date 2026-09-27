@@ -1,17 +1,38 @@
 ---
-description: Compare Cargo, mbx, and kache on a pinned Rust project with documented trials and workload limitations.
+description: Compare Cargo, mbx, and kache on two pinned Rust projects with documented trials and workload limitations.
 ---
 # Benchmarks
 
+<script setup>
+import { data as aube } from './.vitepress/aube-benchmarks.data'
+</script>
+
 mbx is measured against plain Cargo and
-[kache](https://github.com/kunobi-ninja/kache) on
-[jdx/aube](https://github.com/jdx/aube), a 15-crate Rust workspace with C
-dependencies, pinned to one commit and built with `cargo build --locked`. The
-scenarios cover work a developer or CI runner may repeat. Published results come from GitHub
-Actions. The page labels a tool fastest only when its lead exceeds the observed
-variation between trials.
+[kache](https://github.com/kunobi-ninja/kache) on two pinned Rust projects,
+built with `cargo build --locked`. hk shows a change to one application crate;
+aube shows changes propagating through a workspace. Published results come
+from GitHub Actions. A tool is labeled fastest only when its lead exceeds the
+observed variation between trials.
+
+## hk: one application crate changes
+
+[jdx/hk](https://github.com/jdx/hk) is a mid-size Rust CLI with C dependencies.
+Its next-commit build recompiles one crate while restoring its dependencies.
+This is the workload featured in the landing-page showreel.
 
 <BenchmarkResults />
+
+## aube: changes propagate through a workspace
+
+[jdx/aube](https://github.com/jdx/aube) is a 15-crate Rust workspace with C
+dependencies. Its next commit changes two libraries and rebuilds their
+dependents, exposing the work that whole-compilation caching cannot reuse.
+
+<BenchmarkResults :results="aube" prefix="aube-" />
+
+Each project's results identify the measured mbx version, Rust version, and CI
+run below its charts. Historical runs can use different mbx releases, so compare tools within each
+project's run. Refreshes measure both projects with the same mbx release.
 
 ## Reading the results {#reading-the-cards}
 
@@ -37,17 +58,18 @@ has already seen.
 
 ### Next commit
 
-The store is warmed at one commit and the build runs at the next. The next
-commit changes two of aube's library crates, so they and the workspace crates
+The store is warmed at one commit and the build runs at the next. hk's next
+commit changes its application crate. For aube, the next commit changes two
+library crates, so they and the workspace crates
 that depend on them compile again while the rest of the graph is restored.
 Cargo's row is a cold build, since with an empty `target/` that is all it can
 do.
 
 ### Local edit
 
-A full build, then one line changed in `aube-util`, which most of the
-workspace depends on, and rebuilt in the same `target/` with incremental
-compilation on. This measures the edit/build loop, including cache
+A full build, then one line changed in hk's `src/main.rs` or aube's
+`aube-util`, which most of its workspace depends on, and rebuilt in
+the same `target/` with incremental compilation on. This measures the edit/build loop, including cache
 bookkeeping and incremental compilation. Two details make the
 comparison useful:
 
@@ -104,8 +126,9 @@ mise run bench
 
 That builds mbx, clones aube, and runs the warm, commit, and edit scenarios once
 each. kache is included when it is on `PATH` and noted as skipped otherwise.
-`mise run bench:refresh` is what CI runs: every scenario, three trials each,
-written to `benchmarks/results.json`.
+`mise run bench:refresh` is what CI runs: both projects across every scenario,
+three trials each, written to
+`benchmarks/results.json` (hk) and `benchmarks/results-aube.json` (aube).
 
 The
 [bench-refresh workflow](https://github.com/jdx/mr-boxington/actions/workflows/bench-refresh.yml)
@@ -118,7 +141,7 @@ instead of the latest release; `source` implies `dry_run`.
 
 ## What this does not measure
 
-These results describe the pinned aube workload. A project with a very
+These results describe the two pinned workloads. A project with a very
 different dependency shape, such as heavy proc macros, a large C component,
 or many small leaf crates, will see different ratios. Three trials expose some variation; their ranges
 are not confidence intervals, and a “fastest” label is a display heuristic,

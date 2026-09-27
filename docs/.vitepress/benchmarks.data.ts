@@ -1,6 +1,7 @@
-import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { loadBenchmark } from "./benchmark-loader";
 
 const configDir = dirname(fileURLToPath(import.meta.url));
 const resultsPath = resolve(configDir, "../../benchmarks/results.json");
@@ -74,22 +75,6 @@ export interface BenchmarkResults {
 }
 
 export default {
-  // Rebuild the page when a refreshed run lands, rather than serving the
-  // numbers that happened to be on disk when the dev server started.
   watch: [resultsPath],
-  load(): BenchmarkResults | null {
-    try {
-      const results = JSON.parse(
-        readFileSync(resultsPath, "utf8"),
-      ) as BenchmarkResults;
-      // A run that failed its own validity checks measured something other
-      // than what the page would claim; the empty state is the honest render.
-      // 2 added per-trial timings; 1 renders as a single trial per cell.
-      if (![1, 2].includes(results.schema) || !results.passed) return null;
-      return results;
-    } catch {
-      // No published run yet, or a file this page does not understand.
-      return null;
-    }
-  },
+  load: () => loadBenchmark(resultsPath, "hk"),
 };
