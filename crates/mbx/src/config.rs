@@ -1639,8 +1639,20 @@ pub(crate) fn settings_registry() -> usage_config::Registry {
 /// Resolve the settings from the environment and the global file, without
 /// the workspace policy.
 pub(crate) fn resolve_settings() -> Result<usage_config::Resolved> {
-    let env = EnvLayer::from_process();
-    let mut layers = Layers::new().then(&env);
+    resolve_settings_from(Some(&EnvLayer::from_process()))
+}
+
+/// Resolve the settings from the global file alone: what would apply once the
+/// environment stopped overriding it.
+pub(crate) fn resolve_file_settings() -> Result<usage_config::Resolved> {
+    resolve_settings_from(None)
+}
+
+fn resolve_settings_from(env: Option<&EnvLayer>) -> Result<usage_config::Resolved> {
+    let mut layers = Layers::new();
+    if let Some(env) = env {
+        layers = layers.then(env);
+    }
     let file = config_file_path().map(|path| FileLayer::at(path, FileScope::Global));
     if let Some(file) = &file {
         layers = layers.then(file);
