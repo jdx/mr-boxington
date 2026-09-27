@@ -626,7 +626,21 @@ fn cargo_with_command(
     for (name, value) in settings {
         command.env(name, value);
     }
-    let output = command.output().expect("mbx should run");
+    // Tests that copy mbx to a new path and run the copy can hit ETXTBSY: a
+    // sibling test that forks while the copy is open for write hands its child
+    // that descriptor until the child reaches its own exec.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let output = loop {
+        match command.output() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            other => break other.expect("mbx should run"),
+        }
+    };
     assert!(
         output.status.success(),
         "build failed ({}): {}",
