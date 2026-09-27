@@ -13,7 +13,9 @@ pub struct AgentStats {
     pub wrapper_phases_ns: BTreeMap<String, u64>,
     /// End-to-end lifetime of the task-scoped cache session.
     pub session_duration_ns: u64,
-    /// Number of action-result lookups.
+    /// Compilations that looked up an action result: each hit, miss, and
+    /// verification, counted when that outcome is recorded rather than per
+    /// read, so the three always add up to this.
     pub lookups: u64,
     /// Compilations no action-result lookup was possible for, because no usable
     /// action key was available.

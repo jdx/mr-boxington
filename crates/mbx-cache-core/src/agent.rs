@@ -1950,11 +1950,13 @@ impl CacheAgent {
             AgentRequest::StoreBlob { digest, source } => {
                 self.store_blob(&digest, &source, connection).await
             }
-            AgentRequest::FindActionResult { action } => {
-                self.stats.lookups.fetch_add(1, Ordering::Relaxed);
-                self.find_action_result(&action).await
-            }
-            AgentRequest::ReadActionResult { action } => self.find_action_result(&action).await,
+            // Not counted here: a lookup is counted with the outcome it ends
+            // in. One compilation can read several results -- a second
+            // candidate key, a flight it waited on, an existing result after
+            // it compiled -- and a read whose response is lost cannot say
+            // whether it arrived, so counting reads could never agree with
+            // the hits and misses they produced.
+            AgentRequest::FindActionResult { action } => self.find_action_result(&action).await,
             AgentRequest::RecordActionHit {
                 action,
                 restore,
@@ -2485,6 +2487,7 @@ impl CacheAgent {
             }
         }
         self.record_restore(restore);
+        self.stats.lookups.fetch_add(1, Ordering::Relaxed);
         self.stats.hits.fetch_add(1, Ordering::Relaxed);
         self.emit_action(
             diagnostic,
@@ -2543,6 +2546,10 @@ impl CacheAgent {
             self.stats
                 .incremental_compilations
                 .fetch_add(1, Ordering::Relaxed);
+        }
+        // A miss and a verification each ended a lookup, as a hit does.
+        if matches!(outcome, "miss" | "verification") {
+            self.stats.lookups.fetch_add(1, Ordering::Relaxed);
         }
         let mut compiler = self.stats.compiler.lock().unwrap();
         let stats = compiler.entry(outcome.to_string()).or_default();

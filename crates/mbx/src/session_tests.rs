@@ -1945,39 +1945,3 @@ fn routine_bypasses_are_debug_but_failed_cache_paths_are_warnings() {
         AgentRequest::RecordWarning { .. }
     ));
 }
-
-/// Only the first read that reaches the agent is a compilation's lookup. One
-/// whose request failed on the way counted nothing, so the next read is sent
-/// as the lookup instead of as an uncounted repeat.
-#[test]
-fn a_lookup_counts_once_and_only_once_it_reaches_the_agent() {
-    let action = mbx_cache_core::CacheDigest::blake3(b"action");
-    let kinds = std::cell::RefCell::new(Vec::new());
-    let record = |outcome: Result<()>| {
-        let kinds = &kinds;
-        move |requests: &[AgentRequest]| {
-            kinds.borrow_mut().push(match &requests[0] {
-                AgentRequest::FindActionResult { .. } => "find",
-                AgentRequest::ReadActionResult { .. } => "read",
-                other => panic!("unexpected request {other:?}"),
-            });
-            outcome.map(|()| vec![AgentResponse::ActionResult { result: None }])
-        }
-    };
-
-    let lookups = LookupCount::default();
-    assert!(
-        lookups
-            .read_with(action.clone(), record(Err(eyre::eyre!("socket closed"))))
-            .is_err()
-    );
-    lookups.read_with(action.clone(), record(Ok(()))).unwrap();
-    lookups.read_with(action.clone(), record(Ok(()))).unwrap();
-    assert_eq!(*kinds.borrow(), ["find", "find", "read"]);
-
-    kinds.borrow_mut().clear();
-    LookupCount::already_counted()
-        .read_with(action, record(Ok(())))
-        .unwrap();
-    assert_eq!(*kinds.borrow(), ["read"]);
-}

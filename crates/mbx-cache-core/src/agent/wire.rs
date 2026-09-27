@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Wire protocol version used between an in-process cache agent and its shims.
-pub const AGENT_PROTOCOL_VERSION: u8 = 12;
+pub const AGENT_PROTOCOL_VERSION: u8 = 11;
 /// Largest single protocol request the agent will read.
 ///
 /// Requests are small JSON objects; the largest legitimate ones carry an output
@@ -164,15 +164,6 @@ pub enum AgentRequest {
     },
     /// Look up an action-result record.
     FindActionResult {
-        /// Action digest to resolve.
-        action: CacheDigest,
-    },
-    /// Read an action-result record without counting it as a lookup.
-    ///
-    /// For an adapter checking a result it failed to publish over, after its
-    /// compilation already ran and was accounted for. Counting that read as
-    /// a lookup would leave one that is neither a hit nor a miss.
-    ReadActionResult {
         /// Action digest to resolve.
         action: CacheDigest,
     },

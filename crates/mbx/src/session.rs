@@ -2206,46 +2206,6 @@ fn bypass_diagnostic(expected: bool, message: &str) -> AgentRequest {
     }
 }
 
-/// One compilation's cache lookup, counted once it reaches the agent.
-///
-/// The agent counts each lookup once, and the summary reads hits and misses
-/// against that count. A compilation can read the cache more than once --
-/// another candidate key, the result a flight it waited on published, a
-/// check of an existing result after it compiled -- so only the first read
-/// the agent receives counts. One whose request never arrived did not count,
-/// and the next read takes its place.
-#[derive(Default)]
-pub(crate) struct LookupCount(std::cell::Cell<bool>);
-
-impl LookupCount {
-    /// For reads that follow a compilation already accounted for, which must
-    /// never count as its lookup.
-    pub(crate) fn already_counted() -> Self {
-        Self(std::cell::Cell::new(true))
-    }
-
-    /// Read `action`'s result, as this compilation's lookup when none has
-    /// reached the agent yet.
-    pub(crate) fn read(&self, action: CacheDigest) -> Result<Vec<AgentResponse>> {
-        self.read_with(action, request_agent)
-    }
-
-    fn read_with(
-        &self,
-        action: CacheDigest,
-        send: impl FnOnce(&[AgentRequest]) -> Result<Vec<AgentResponse>>,
-    ) -> Result<Vec<AgentResponse>> {
-        let request = if self.0.get() {
-            AgentRequest::ReadActionResult { action }
-        } else {
-            AgentRequest::FindActionResult { action }
-        };
-        let responses = send(&[request])?;
-        self.0.set(true);
-        Ok(responses)
-    }
-}
-
 /// Record a compilation the cache had no key to look up with.
 pub(crate) fn record_unconsulted() {
     // A shim running outside a session has nowhere to report, which is fine.
