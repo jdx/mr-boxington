@@ -112,7 +112,7 @@ continue to use the shared action cache; artifacts that link private workspace
 outputs also stay private.
 
 The first build can be slower, and state can occupy several GiB. Workspace
-crates always use this private mode while it is enabled, including when an
+crates use this private mode whenever state can be prepared, including when an
 unchanged compilation could otherwise restore complete shared outputs. Extra
 disk space makes retention practical, but does not guarantee a faster build.
 Measure the initial cost and later edits on your workload before enabling it.
@@ -122,7 +122,10 @@ next-build benefit.
 State uses the same [storage limits and cleanup](#bound-the-storage) as learned
 incremental reuse. Keep the same checkout and target paths, toolchain, and build
 flags for useful reuse. Private state is not uploaded to remote caches or
-included in cache exports. Verification disables the mode for verified units;
+included in cache exports. Verification disables incremental compilation for
+selected units, but units consuming private artifacts still stay out of shared
+publication. If private state cannot be prepared, a unit with no private inputs
+can fall back to ordinary shared caching;
 unsupported compiler invocations and existing unknown compiler wrappers keep
 their usual bypass behavior. Set `MBX_EAGER_INCREMENTAL=0` to override a
 checked-in setting and return to the default policy.

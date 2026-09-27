@@ -390,6 +390,8 @@ fn cargo_with_settings_bypass_log_and_roots(
         // Stated explicitly for the same reason as the session's own keys: an
         // unset value would let the shim inherit one from the parent, with no
         // way to turn it off here.
+        // Keep resolved session policy separate from the user override so a
+        // nested workspace can still apply its own checked-in configuration.
         environment.insert(
             session::EAGER_INCREMENTAL_ENV.into(),
             if eager_incremental { "1" } else { "0" }.into(),

@@ -244,12 +244,17 @@ pub(crate) fn compile(
         portable: &portable,
         linker: linker_for(&invocation)?,
     };
+    // Verification may select a consumer of an unsampled private artifact,
+    // and Cargo may also retain such an artifact from an earlier build. The
+    // consumer must stay private even when it compiles without incremental state.
+    let private_inputs = links_private_artifact(&compilation);
     let mut learned = if session::eager_incremental_requested() && !verify {
         eager_incremental_plan(&compilation)
     } else {
         reuse_hot_workspace_plan(&compilation, &outputs, learned_enabled)
     };
-    if !learned.engaged()
+    if !private_inputs
+        && !learned.engaged()
         && outputs.dep_info.is_file()
         && let Ok((candidates, discovered)) =
             action_from_current_dep_info(&compilation, &outputs.dep_info)
@@ -308,8 +313,8 @@ pub(crate) fn compile(
             }
         }
     }
-    let mut prediction_missing = false;
-    if !learned.engaged() && !action_lookup_attempted {
+    let mut prediction_missing = private_inputs;
+    if !private_inputs && !learned.engaged() && !action_lookup_attempted {
         match restore_predicted_result(
             &compilation,
             &outputs,
@@ -344,7 +349,7 @@ pub(crate) fn compile(
     // waking from that wait, or finding the prediction a finished flight left
     // behind, is one more chance to restore instead of compile. Never in
     // verify mode, whose whole point is running the compiler.
-    let flight = if verify || learned.engaged() {
+    let flight = if verify || private_inputs || learned.engaged() {
         None
     } else {
         join_flight(&compilation)
@@ -478,6 +483,7 @@ pub(crate) fn compile(
     let compiler_timer = Instant::now();
     let mut command = compiler_command(rustc, wrapper_argument);
     command.args(&arguments).current_dir(&working_dir);
+    let private_outputs = private_inputs || learned.engaged();
     if let Some(directory) = learned.directory.as_deref() {
         // Appended here rather than to the parsed argument vector: the parser
         // treats incremental state as uncacheable and would bypass the whole
@@ -485,6 +491,8 @@ pub(crate) fn compile(
         let mut flag = OsString::from("-Cincremental=");
         flag.push(directory);
         command.arg(flag);
+    }
+    if private_outputs {
         // Before the compiler starts, so that a dependent Cargo pipelines
         // behind this unit's metadata already finds the marker in place.
         if let Some(root) = incremental_root()
@@ -589,19 +597,18 @@ pub(crate) fn compile(
     }
     let mut compiler_input_invalid = false;
     if output.status.success() {
-        // An incremental artifact is never published, and its inputs were
+        // A private artifact is never published, and its inputs were
         // already fingerprinted while checking whether the manifest still
         // predicts them. Reuse that discovery to validate the result without
         // rebuilding an action key nobody looks up. A build script still needs
         // that key for its execution shim, and a changed input set needs it to
         // refresh the manifest.
-        let current_manifest_inputs = if learned.engaged()
-            && cargo_build_script_executable(&outputs, &invocation).is_none()
-        {
-            current_manifest_inputs(&compilation, &outputs)
-        } else {
-            None
-        };
+        let current_manifest_inputs =
+            if private_outputs && cargo_build_script_executable(&outputs, &invocation).is_none() {
+                current_manifest_inputs(&compilation, &outputs)
+            } else {
+                None
+            };
         let publication: Result<Option<ActionDiagnostic>> =
             if let Some(discovered) = current_manifest_inputs {
                 (|| {
@@ -640,7 +647,7 @@ pub(crate) fn compile(
                     // which is how the next build notices the churn ended -- but never
                     // published for another checkout to restore. The literal key is
                     // enough for that, and it skips reading the outputs back.
-                    let action = if learned.engaged() {
+                    let action = if private_outputs {
                         &candidates.literal
                     } else {
                         publish_result(&candidates, &outputs, &output, &portable.mappings)?
@@ -656,9 +663,9 @@ pub(crate) fn compile(
                         &timing,
                         flight
                             .as_ref()
-                            .filter(|_| !learned.engaged())
+                            .filter(|_| !private_outputs)
                             .map(|flight| &flight.flight),
-                        remote_claim.as_deref().filter(|_| !learned.engaged()),
+                        remote_claim.as_deref().filter(|_| !private_outputs),
                     );
                     Ok(compilation_action_diagnostic(&compilation, action).ok())
                 })()

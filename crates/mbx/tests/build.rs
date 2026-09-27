@@ -1367,6 +1367,131 @@ fn eager_incremental_keeps_non_workspace_dependencies_shared() {
 }
 
 #[test]
+fn verification_keeps_consumers_of_private_artifacts_out_of_the_shared_cache() {
+    for verification in ["MBX_VERIFY", "MBX_VERIFY_SAMPLE_RATE"] {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_dependent_project(project.path());
+        let manifest = project.path().join("Cargo.toml");
+        let contents = std::fs::read_to_string(&manifest).unwrap().replace(
+            "members = [\"base\", \"above\"]",
+            "members = [\"base\", \"above\", \"top\"]",
+        );
+        std::fs::write(manifest, contents).unwrap();
+        std::fs::create_dir_all(project.path().join("top/src")).unwrap();
+        std::fs::write(project.path().join("top/Cargo.toml"),
+            "[package]\nname = \"top\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nabove = { path = \"../above\" }\n").unwrap();
+        std::fs::write(
+            project.path().join("top/src/lib.rs"),
+            "pub fn value() -> u32 { above::doubled() }\n",
+        )
+        .unwrap();
+        generate_lockfile(project.path());
+        let seed = cargo_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("seed.json"),
+            &["build", "--offline", "-p", "base"],
+            &[("MBX_EAGER_INCREMENTAL", "1")],
+        )
+        .0;
+        assert_eq!(compiled_incrementally(&seed), 1, "{seed}");
+        assert_eq!(seed["stored_bytes"].as_u64(), Some(0), "{seed}");
+        // Cargo retains the private base artifact. The selected consumers must
+        // compile without incremental state, but must also remain private,
+        // including the transitive consumer of the non-incremental middle unit.
+        let checked = build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("checked.json"),
+            &[
+                ("MBX_EAGER_INCREMENTAL", "1"),
+                (
+                    verification,
+                    if verification == "MBX_VERIFY" {
+                        "1"
+                    } else {
+                        "100"
+                    },
+                ),
+            ],
+        )
+        .0;
+        assert_eq!(compiled_incrementally(&checked), 0, "{checked}");
+        assert_eq!(
+            checked["stored_bytes"].as_u64(),
+            Some(0),
+            "{verification}: {checked}"
+        );
+        assert_eq!(checked["hits"].as_u64(), Some(0), "{checked}");
+    }
+}
+
+#[test]
+fn nested_workspaces_keep_their_eager_policy_and_explicit_user_override() {
+    for (outer_eager, user_override) in [
+        (false, None),
+        (true, None),
+        (false, Some("0")),
+        (true, Some("1")),
+    ] {
+        let store = tempfile::tempdir().unwrap();
+        let outer = tempfile::tempdir().unwrap();
+        let inner = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_named_project(outer.path(), "outer");
+        write_named_project(inner.path(), "inner");
+        std::fs::write(
+            outer.path().join(".mbx.toml"),
+            format!("eager_incremental = {outer_eager}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            inner.path().join(".mbx.toml"),
+            format!("eager_incremental = {}\n", !outer_eager),
+        )
+        .unwrap();
+        std::fs::write(outer.path().join("build.rs"), r#"
+fn main() {
+    let expected = std::env::var("TEST_EXPECTED_OVERRIDE").unwrap();
+    assert_eq!(std::env::var("MBX_EAGER_INCREMENTAL").ok(), if expected.is_empty() { None } else { Some(expected) });
+    let output = std::process::Command::new(std::env::var_os("TEST_MBX").unwrap())
+        .current_dir(std::env::var_os("TEST_INNER").unwrap())
+        .args(["build", "--offline"])
+        .env("MBX_STATS_REPORT", std::env::var_os("TEST_INNER_REPORT").unwrap())
+        .output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+"#).unwrap();
+        let inner_report = reports.path().join("inner.json");
+        let mut settings = vec![
+            ("TEST_MBX", env!("CARGO_BIN_EXE_mbx")),
+            ("TEST_INNER", inner.path().to_str().unwrap()),
+            ("TEST_INNER_REPORT", inner_report.to_str().unwrap()),
+            ("TEST_EXPECTED_OVERRIDE", user_override.unwrap_or("")),
+        ];
+        if let Some(value) = user_override {
+            settings.push(("MBX_EAGER_INCREMENTAL", value));
+        }
+        build_with(
+            outer.path(),
+            store.path(),
+            &reports.path().join("outer.json"),
+            &settings,
+        );
+        let stats: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(inner_report).unwrap()).unwrap();
+        let expected = user_override.map_or(!outer_eager, |value| value == "1");
+        assert_eq!(
+            compiled_incrementally(&stats),
+            u64::from(expected),
+            "outer={outer_eager}, override={user_override:?}: {stats}"
+        );
+    }
+}
+
+#[test]
 fn eager_incremental_is_opt_in_and_yields_to_verification() {
     for settings in [
         vec![("CI", "1")],
