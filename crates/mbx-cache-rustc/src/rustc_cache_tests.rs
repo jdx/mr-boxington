@@ -2445,6 +2445,53 @@ fn link_arguments_bypass_whatever_actually_links() {
     );
 }
 
+/// `-z` keywords that only set a flag in the ELF output read no file, so a
+/// native Linux link keeps them in its key as text. Any other spelling, or a
+/// keyword outside the list, still bypasses.
+#[test]
+fn elf_keywords_are_keyed_on_a_native_linux_link() {
+    let link = |flag: &str| {
+        args(&[
+            "--crate-name=widget",
+            "--crate-type=cdylib",
+            "--emit=dep-info,link",
+            "--out-dir=target/debug/deps",
+            flag,
+            "src/lib.rs",
+        ])
+    };
+    let parsed = RustcInvocation::parse_with(&link("-Clink-arg=-Wl,-z,nodelete"), native_links());
+    if !cfg!(target_os = "linux") {
+        assert!(parsed.is_err());
+        return;
+    }
+    let invocation = parsed.unwrap();
+    assert!(invocation.links_natively());
+    for flag in [
+        "-Clink-arg=-Wl,-z,muldefs",
+        "-Clink-arg=-Wl,-z,nodelete,-T,link.x",
+        "-Clink-args=-Wl,-z,nodelete",
+        "-Clink-arg=-znodelete",
+    ] {
+        assert_eq!(
+            RustcInvocation::parse_with(&link(flag), native_links()),
+            Err(BypassReason::UnmodeledLinkArgument(
+                flag.strip_prefix("-C").unwrap().into()
+            )),
+            "{flag} should not be cacheable"
+        );
+    }
+    // A cross-compiled link is not native, so the keyword is not modeled.
+    let mut cross = link("-Clink-arg=-Wl,-z,nodelete");
+    cross.insert(0, "--target=wasm32-unknown-unknown".into());
+    assert_eq!(
+        RustcInvocation::parse_with(&cross, native_links()),
+        Err(BypassReason::UnmodeledLinkArgument(
+            "link-arg=-Wl,-z,nodelete".into()
+        ))
+    );
+}
+
 /// `-fuse-ld=<name>` is the one link argument beyond `-oso_prefix` the
 /// adapter models: on a native link the linker identity probe resolves and
 /// pins the selected linker, so the link caches. On any other link output the

@@ -342,3 +342,35 @@ RUST
   assert_success
   assert_output 42
 }
+
+@test "a Linux cdylib linked with -z nodelete is cached" {
+  [[ "$(uname -s)" == Linux ]] || skip "-z keywords are modeled on Linux only"
+  local project="$BATS_TEST_TMPDIR/addon"
+  mkdir -p "$project/src"
+  cat >"$project/Cargo.toml" <<'TOML'
+[package]
+name = "addon-fixture"
+version = "0.1.0"
+edition = "2021"
+[lib]
+crate-type = ["cdylib"]
+TOML
+  # What napi-build prints for every Node-API addon on Linux.
+  echo 'fn main() { println!("cargo:rustc-cdylib-link-arg=-Wl,-z,nodelete"); }' >"$project/build.rs"
+  echo '#[no_mangle] pub extern "C" fn answer() -> u32 { 42 }' >"$project/src/lib.rs"
+  cd "$project"
+  run env CARGO_TARGET_DIR="$BATS_TEST_TMPDIR/addon-cold" "$MBX_BIN" build --offline
+  assert_success
+  local report="$BATS_TEST_TMPDIR/addon-warm.json"
+  run env CARGO_TARGET_DIR="$BATS_TEST_TMPDIR/addon-warm" MBX_STATS_REPORT="$report" "$MBX_BIN" build --offline
+  assert_success
+  run grep -E '"unmodeled-link-argument"' "$report"
+  assert_failure
+  local library="$BATS_TEST_TMPDIR/addon-warm/debug/libaddon_fixture.so"
+  run cmp "$BATS_TEST_TMPDIR/addon-cold/debug/libaddon_fixture.so" "$library"
+  assert_success
+  # The flag reached the linker: the restored object carries DF_1_NODELETE.
+  run readelf -d "$library"
+  assert_success
+  assert_output --partial NODELETE
+}

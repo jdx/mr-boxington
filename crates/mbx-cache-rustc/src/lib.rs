@@ -1927,7 +1927,7 @@ impl<'a> Parser<'a> {
         // or an rmeta is produced without a linker invocation, so the option is
         // inert and the key carries its text like any other codegen option.
         if link_output != LinkOutput::Library
-            && let Some(option) = self.first_link_argument()
+            && let Some(option) = self.first_link_argument(link_output)
         {
             return Err(BypassReason::UnmodeledLinkArgument(option.to_owned()));
         }
@@ -2018,14 +2018,16 @@ impl<'a> Parser<'a> {
 impl Parser<'_> {
     /// The first `-C link-arg` or `-C link-args` option in the invocation,
     /// rendered as it appears in the action key.
-    fn first_link_argument(&self) -> Option<&str> {
+    fn first_link_argument(&self, link_output: LinkOutput) -> Option<&str> {
         self.parsed.iter().find_map(|argument| {
             let Argument::Plain(value) = argument else {
                 return None;
             };
             let option = value.strip_prefix("--codegen=")?;
-            let name = option.split_once('=').map_or(option, |(name, _)| name);
-            matches!(name, "link-arg" | "link-args").then_some(option)
+            let (name, value) = option.split_once('=').unwrap_or((option, ""));
+            (matches!(name, "link-arg" | "link-args")
+                && !(name == "link-arg" && elf_keyword_is_modeled(link_output, value)))
+            .then_some(option)
         })
     }
 
@@ -2170,6 +2172,39 @@ fn safe_install_name(name: &str) -> bool {
 /// value, rustc reads the flag itself as the request.
 fn is_enabled(value: Option<&str>) -> bool {
     matches!(value, None | Some("y" | "yes" | "on" | "true"))
+}
+
+/// Whether `-Wl,-z,KEYWORD` is a native Linux link option the key can carry
+/// as text.
+///
+/// A link argument is refused because its text cannot say whether it names a
+/// file. These keywords are the exception: each sets a flag or a dynamic
+/// section entry in the ELF output and reads nothing, in every linker the
+/// identity probe resolves (GNU ld, gold, lld, and mold all spell them the
+/// same). napi-build passes `-z nodelete` to every Node-API addon, so without
+/// it no such addon caches.
+fn elf_keyword_is_modeled(link_output: LinkOutput, value: &str) -> bool {
+    cfg!(target_os = "linux")
+        && matches!(
+            link_output,
+            LinkOutput::NativeExecutable
+                | LinkOutput::NativeProcMacro
+                | LinkOutput::NativeSharedLibrary
+        )
+        && value.strip_prefix("-Wl,-z,").is_some_and(|keyword| {
+            matches!(
+                keyword,
+                "defs"
+                    | "lazy"
+                    | "nodelete"
+                    | "nodlopen"
+                    | "noexecstack"
+                    | "norelro"
+                    | "now"
+                    | "origin"
+                    | "relro"
+            )
+        })
 }
 
 fn compiler_bundled_wasm_target(target: &str) -> bool {

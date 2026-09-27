@@ -110,6 +110,12 @@ Even then, a link bypasses if it names a native library (`-l`, which a build
 script emits as `cargo:rustc-link-lib`), overrides the linker, or carries a
 flag that would embed this checkout's paths (`-Crpath`, `-Cprefer-dynamic`) or
 leave a file beside the binary that mbx does not store (`-Csplit-debuginfo`).
+Most other `-C link-arg` values bypass, because their text cannot say whether
+they name a file the key would need to hash. On Linux, `-Wl,-z,` followed by `defs`,
+`lazy`, `nodelete`, `nodlopen`, `noexecstack`, `norelro`, `now`, `origin`, or
+`relro` is the exception: each sets a flag in the output and reads nothing, so
+it enters the key as text. Node-API addons built with napi-build pass
+`-z nodelete` and cache this way.
 On macOS a debug-info link records absolute object paths and their timestamps
 in the binary's debug map, so the shim passes ld64 `-oso_prefix` for its own
 output directory, which lets those links cache. An explicit `--target`
