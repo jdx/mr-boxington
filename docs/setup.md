@@ -164,7 +164,8 @@ check/overrideCommand: unexpected field
 The check command still applies. rust-analyzer validates its user file against
 global and local settings only and flags `check.overrideCommand`, a workspace
 setting, before reading it. `mbx setup --status` confirms that the override is
-the one setup wrote.
+the one setup wrote. The upstream discussion of the validation is in
+[rust-lang/rust-analyzer#23381](https://github.com/rust-lang/rust-analyzer/pull/23381).
 
 Releases through 1.11.0 wrote the override beside `Cargo.toml` when mbx was
 activated in a project mise scope, where rust-analyzer never read it. `mbx
