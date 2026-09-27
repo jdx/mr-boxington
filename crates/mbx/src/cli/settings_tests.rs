@@ -14,12 +14,8 @@ fn edited(contents: &str, key: &str, value: &str) -> Result<String> {
 
 fn removed(contents: &str, key: &str) -> (bool, String) {
     let mut document = contents.parse::<DocumentMut>().unwrap();
-    let found = remove_value(
-        &mut document,
-        setting(key).unwrap(),
-        Path::new("config.toml"),
-    )
-    .unwrap();
+    let known = setting(key).is_ok();
+    let found = remove_value(&mut document, key, known, Path::new("config.toml")).unwrap();
     (found, document.to_string())
 }
 
@@ -140,7 +136,40 @@ fn unsetting_removes_the_key_and_a_table_left_empty() {
         (true, "[gc] # collection\n".to_owned())
     );
     assert_eq!(
+        removed("gc = { max_size = \"20GiB\" }\n", "gc.max_size"),
+        (true, String::new())
+    );
+    assert_eq!(
         removed("savings = \"plain\"\n", "gc.max_size"),
         (false, "savings = \"plain\"\n".to_owned())
     );
+}
+
+#[test]
+fn unsetting_an_undeclared_key_removes_only_a_value() {
+    // How a misspelled key that stops mbx from loading gets taken out.
+    assert_eq!(
+        removed("[gc]\nauto = false\nsavings = \"plain\"\n", "gc.savings"),
+        (true, "[gc]\nauto = false\n".to_owned())
+    );
+    assert_eq!(
+        removed("[gcc]\nauto = false\n", "gcc"),
+        (false, "[gcc]\nauto = false\n".to_owned())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn links_are_followed_to_a_file_that_does_not_exist_yet() {
+    let directory = tempfile::tempdir().unwrap();
+    let real = directory.path().join("dotfiles/mbx.toml");
+    std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+    let link = directory.path().join("config.toml");
+    std::os::unix::fs::symlink("dotfiles/mbx.toml", &link).unwrap();
+    assert_eq!(
+        link_target(&link).unwrap(),
+        directory.path().join("dotfiles/mbx.toml")
+    );
+    let plain = directory.path().join("plain.toml");
+    assert_eq!(link_target(&plain).unwrap(), plain);
 }

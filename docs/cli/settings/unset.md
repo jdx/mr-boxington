@@ -5,6 +5,8 @@
 
 Remove a setting from the global configuration file, so it falls back to its default.
 
+A key mbx does not recognize, such as a misspelled one that stops mbx from loading, is removed too when it holds a value.
+
 ## Arguments
 - **`<KEY>`** — Setting name, such as `gc.max_size`.
 

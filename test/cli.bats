@@ -139,6 +139,27 @@ global_config_file() {
   assert_success
 }
 
+@test "an invalid configuration says how to repair it" {
+  config="$(global_config_file)"
+  mkdir -p "$(dirname "$config")"
+  printf '[gc]\nsavings = "plain"\n' >"$config"
+
+  run "$MBX_BIN" stats
+  assert_failure
+  assert_output --partial "unknown setting \`gc.savings\`"
+  assert_output --partial "\`mbx settings unset gc.savings\` removes it"
+
+  run "$MBX_BIN" settings unset gc.savings
+  assert_success
+  printf 'summary = "loud"\n' >"$config"
+  run "$MBX_BIN" stats
+  assert_failure
+  assert_output --partial "\`mbx settings set summary <value>\` replaces it"
+
+  MBX_SUMMARY=loud run "$MBX_BIN" doctor
+  assert_output --partial "MBX_SUMMARY sets it; change or unset that variable"
+}
+
 @test "settings ls does not print the remote token" {
   MBX_REMOTE_TOKEN=very-secret run "$MBX_BIN" settings ls remote
   assert_success

@@ -66,10 +66,18 @@ pub fn run(config: &Config, once: bool, cheeky: bool) -> Result<ExitCode> {
     }
     if !config.events {
         // Worth saying plainly: the dashboard would otherwise sit empty through
-        // a perfectly good build and look broken.
-        eprintln!(
-            "mbx[warning]: event recording is off, so builds will not appear here. Unset MBX_EVENTS or set events = true to record them."
-        );
+        // a perfectly good build and look broken. The fix depends on where the
+        // setting came from, since the environment outranks the file.
+        let from_environment = crate::config::resolve_settings().is_ok_and(|resolved| {
+            resolved
+                .origin_key("events")
+                .is_some_and(|origin| origin.kind == usage_config::SourceKind::ENV)
+        });
+        let fix = match from_environment {
+            true => "Unset MBX_EVENTS to record them.",
+            false => "`mbx settings set events true` records them.",
+        };
+        eprintln!("mbx[warning]: event recording is off, so builds will not appear here. {fix}");
     }
     watch(config, cheeky)
 }

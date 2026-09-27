@@ -725,7 +725,7 @@ pub(super) fn first_run_notice(
         ));
     }
     lines.push(
-        "mbx[setup]:   `mbx gc --dry-run` previews cleanup; every limit is configurable"
+        "mbx[setup]:   `mbx gc --dry-run` previews cleanup; `mbx settings ls gc` shows every limit"
             .to_string(),
     );
 

@@ -174,7 +174,7 @@ to understand what each cleanup command removes.
 | Set up an editor or watch loop | [Local development](/cookbook/local-development) |
 | Cache a GitHub Actions job | [GitHub Action](/github-action) |
 | Run independent builds together | [Parallel builds](/scheduling) |
-| Tune disk, output, or build policy | [Configuration](/configuration) |
+| Tune disk, output, or build policy | `mbx settings ls` and [Configuration](/configuration) |
 | Understand an unexpected result | [Troubleshooting](/troubleshooting) |
 
 <details>

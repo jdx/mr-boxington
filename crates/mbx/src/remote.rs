@@ -180,7 +180,9 @@ fn region(config: &Config, environment: &Option<String>, has_endpoint: bool) -> 
         // and signs against whatever it is given.
         None if has_endpoint => Ok("us-east-1".to_string()),
         None => {
-            bail!("an s3:// remote cache needs a region; set MBX_REMOTE_S3_REGION or AWS_REGION")
+            bail!(
+                "an s3:// remote cache needs a region; set MBX_REMOTE_S3_REGION or AWS_REGION, or run `mbx settings set remote.s3_region <region>`"
+            )
         }
     }
 }

@@ -41,12 +41,10 @@ mbx does not override an explicit target directory supplied by:
 
 ## Change target placement
 
-Set `target.root` in your global configuration to place managed targets on
-another local disk:
+Set `target.root` to place managed targets on another local disk:
 
-```toml
-[target]
-root = "/path/to/local/build-targets"
+```sh
+mbx settings set target.root /path/to/local/build-targets
 ```
 
 After any builds using the old target have finished, the next build can update
@@ -168,12 +166,11 @@ them. mbx skips this step when:
 Path dependencies and workspace members are never copied. Cargo trusts their
 source modification times, so a copied unit could pass as fresh with another
 checkout's contents. Copied units this checkout does not use are removed by
-[collection](#unused-build-units). Turn copying off with `MBX_TARGET_SEED=0`
-or:
+[collection](#unused-build-units). Turn copying off for one command with
+`MBX_TARGET_SEED=0`, or from then on with:
 
-```toml
-[target]
-seed = false
+```sh
+mbx settings set target.seed false
 ```
 
 ## Collection
@@ -248,10 +245,9 @@ size, and whose unused build units are left alone. A kept target is still
 removed when its checkout is gone. `target.evict_first` lists checkouts whose
 targets go before any other when the managed targets are over budget:
 
-```toml
-[target]
-keep = ["~/src/app"]
-evict_first = [".claude/worktrees"]
+```sh
+mbx settings set target.keep '~/src/app'
+mbx settings set target.evict_first .claude/worktrees
 ```
 
 An absolute entry, or one starting with `~`, covers the checkouts at or under
@@ -266,8 +262,9 @@ With the example above, `~/src/app` is kept and its agent worktrees under
 Evict-first targets are collected least recently used first, ahead of the rest.
 The most recently used target directory is still spared, whichever list it is
 on. Kept targets count toward `target.max_size`, so the other checkouts' targets
-make room for them. The environment variables take comma-separated lists:
-`MBX_TARGET_EVICT_FIRST=.claude/worktrees,scratch`.
+make room for them. `mbx settings set` and the environment variables take
+comma-separated lists: `mbx settings set target.evict_first .claude/worktrees,scratch`
+or `MBX_TARGET_EVICT_FIRST=.claude/worktrees,scratch`.
 
 ### When the disk runs low
 
@@ -348,11 +345,10 @@ remove mbx's private incremental state.
 
 ## Disable managed targets
 
-Set `MBX_TARGET_VIEWS=0`, or configure:
+Set `MBX_TARGET_VIEWS=0` for one command, or turn placement off from then on:
 
-```toml
-[target]
-views = false
+```sh
+mbx settings set target.views false
 ```
 
 Turning placement off does not delete a target directory mbx already manages.

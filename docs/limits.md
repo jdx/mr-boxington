@@ -178,8 +178,9 @@ used to produce a different object in every target directory. With
 the compiler `-fdebug-prefix-map` for that directory, so the object records the
 same placeholder the key does and two target directories produce the same bytes.
 An object that still embeds a checkout or target path is stored under a checkout-specific
-key by default. Set `MBX_CC_STORE_PATH_SPECIFIC=0` to skip storing those
-objects; existing entries remain readable. Windows debug information can also
+key by default. `mbx settings set cc_store_path_specific false` (or
+`MBX_CC_STORE_PATH_SPECIFIC=0`) skips storing those objects; existing entries
+remain readable. Windows debug information can also
 record the object output path.
 
 These path differences can affect debugging and byte-for-byte comparisons.

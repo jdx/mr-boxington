@@ -90,13 +90,11 @@ logical CPU and 85% of physical memory, which favors throughput. A smaller
 machine-wide budget trades some cold-build speed for lower fan noise and more
 headroom for the editor and browser.
 
-Add a budget to the platform config file listed on the
-[Configuration](/configuration) page:
+Set a budget:
 
-```toml
-[scheduler]
-cpus = 4
-memory = "8GiB"
+```sh
+mbx settings set scheduler.cpus 4
+mbx settings set scheduler.memory 8GiB
 ```
 
 Choose values for the machine; those numbers are an example. The

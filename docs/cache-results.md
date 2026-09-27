@@ -81,7 +81,7 @@ Expected: Cargo asks rustc for toolchain information; there is no compilation to
   - rustc invocation is a compiler query, not a compilation (2 times)
 
 incremental (5)
-Cargo compiled this incrementally, which mbx cannot cache. `MBX_INCREMENTAL=0` makes it cacheable again; mbx already gives a crate you are editing its own incremental state without giving up the rest of the cache.
+Cargo compiled this incrementally, which mbx cannot cache. `mbx settings set incremental false` (or `MBX_INCREMENTAL=0`) makes it cacheable again; mbx already gives a crate you are editing its own incremental state without giving up the rest of the cache.
   - incremental compilation cannot be combined with action caching (5 times)
 
 standard-input (1)

@@ -173,7 +173,8 @@ mbx build                           finished        0      0            3       
 Recording is on by default. A build appends one short line per compilation
 directly to its stream, with no buffering, so the dashboard is live. The cost
 is one small append against a compilation measured in milliseconds. Turn it
-off with `events = false` or `MBX_EVENTS=0` to disable session event recording.
+off with `mbx settings set events false`, or with `MBX_EVENTS=0` for one
+command, to disable session event recording.
 Cache entries and other build state are still stored.
 
 Streams live beside the rest of the store's bookkeeping:

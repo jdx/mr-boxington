@@ -80,7 +80,8 @@ their test runs together, each libtest harness starts a thread per CPU. Set
 the same pool:
 
 ```sh
-MBX_SCHEDULER_TESTS=1 mbx test --workspace
+MBX_SCHEDULER_TESTS=1 mbx test --workspace   # this run
+mbx settings set scheduler.tests true        # every run from now on
 ```
 
 mbx becomes Cargo's target runner for `cargo test` and calls any runner you

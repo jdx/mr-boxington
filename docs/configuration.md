@@ -34,7 +34,9 @@ setting, or nothing is written. A problem already elsewhere in the file does not
 block the edit, so `set` can repair one setting at a time; mbx warns about what
 is still wrong. List settings take comma-separated items. Comments and
 formatting elsewhere in the file are kept, and a file that is a symlink stays
-one. `unset` removes the key, so the setting falls back to its default.
+one. `unset` removes the key, so the setting falls back to its default. It also
+removes a key mbx does not recognize, which is how to clear a misspelled key that
+stops mbx from loading; the error for such a key names the command.
 
 `mbx settings ls` prints every setting with its current value, and
 `mbx settings ls gc` prints one group. It does not print the value of
@@ -46,17 +48,18 @@ from the environment, such as `MBX_VERIFY`, cannot be written with
 
 ## Common adjustments
 
-| Change | Setting or guide |
+| Change | Command or guide |
 | --- | --- |
-| Leave capacity for your editor | `scheduler.reserve_cpus = 2`; [parallel builds](/scheduling) |
-| Keep the action store under a fixed size | `gc.max_size = "20GiB"` |
-| Keep live targets longer | `target.max_age = "60d"`; [managed targets](/managed-targets) |
-| Collect agent worktrees' targets first | `target.evict_first = [".claude/worktrees"]`; [managed targets](/managed-targets#keep-or-evict-specific-checkouts) |
-| Use factual savings messages | `savings = "plain"` |
-| Print more cache detail | `summary = "full"`; [cache results](/cache-results) |
+| Leave capacity for your editor | `mbx settings set scheduler.reserve_cpus 2`; [parallel builds](/scheduling) |
+| Keep the action store under a fixed size | `mbx settings set gc.max_size 20GiB` |
+| Keep live targets longer | `mbx settings set target.max_age 60d`; [managed targets](/managed-targets) |
+| Collect agent worktrees' targets first | `mbx settings set target.evict_first .claude/worktrees`; [managed targets](/managed-targets#keep-or-evict-specific-checkouts) |
+| Use factual savings messages | `mbx settings set savings plain` |
+| Print more cache detail | `mbx settings set summary full`; [cache results](/cache-results) |
 | Share results with CI | [Remote cache](/remote-cache) |
 
-Use TOML section headers for dotted settings, as shown in the example below.
+In the file, use TOML section headers for dotted settings, as shown in the
+example below.
 Shell examples that set `NAME=value command` use POSIX syntax; PowerShell users
 can set `$env:NAME` before the command and remove it afterward.
 

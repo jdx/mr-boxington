@@ -232,7 +232,7 @@ fn display_last(session: &RecordedSession, baselines: &Baselines) {
                 "  this C object embeds absolute paths and is cached only for the same paths; a new checkout cannot reuse another checkout's entry",
             );
             crate::session::note(
-                "  set MBX_CC_STORE_PATH_SPECIFIC=0 to skip storing these objects in disposable worktrees; existing entries remain readable",
+                "  `mbx settings set cc_store_path_specific false` (or MBX_CC_STORE_PATH_SPECIFIC=0) skips storing these objects in disposable worktrees; existing entries remain readable",
             );
             continue;
         }
@@ -510,7 +510,7 @@ pub(crate) fn guidance(kind: &str) -> &'static str {
             "Expected for Cargo probes: source supplied on standard input cannot be rediscovered later."
         }
         "incremental" => {
-            "Cargo compiled this incrementally, which mbx cannot cache. `MBX_INCREMENTAL=0` makes it cacheable again; mbx already gives a crate you are editing its own incremental state without giving up the rest of the cache."
+            "Cargo compiled this incrementally, which mbx cannot cache. `mbx settings set incremental false` (or `MBX_INCREMENTAL=0`) makes it cacheable again; mbx already gives a crate you are editing its own incremental state without giving up the rest of the cache."
         }
         "response-file" => {
             "The invocation uses an `@response-file`; mbx does not model response-file contents yet."
@@ -605,6 +605,7 @@ mod tests {
                 .sum::<u64>(),
             2
         );
+        assert!(guidance("incremental").contains("mbx settings set incremental false"));
         assert!(guidance("incremental").contains("MBX_INCREMENTAL=0"));
     }
 

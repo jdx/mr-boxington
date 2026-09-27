@@ -166,7 +166,7 @@ async fn check(config: &Config, toolchain: Option<&str>) -> Vec<Check> {
     checks.push(Check::pass(
         "config",
         format!(
-            "{} budget, automatic gc {}, managed targets {} at {}",
+            "{} budget, automatic gc {}, managed targets {} at {}; `mbx settings ls` shows every setting",
             bytesize::ByteSize::b(config.gc.max_bytes).display().iec(),
             enabled(config.gc.auto),
             enabled(config.target.views),

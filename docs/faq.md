@@ -62,17 +62,18 @@ can place them elsewhere. Configuration comes from the paths listed in
 
 ## How do I turn one feature off?
 
-Every feature has its own switch:
+Every feature has its own switch. `mbx settings set` turns it off from then on;
+the environment variable turns it off for one command.
 
-| Switch | Turns off |
-| --- | --- |
-| `MBX_SCHEDULER=0` | [machine-wide compile scheduling](/scheduling#machine-wide-compile-scheduling) |
-| `MBX_CC=0` | [build-script and `mbx exec` C and C++ caching](/configuration#build-script-c-and-c) |
-| `MBX_TARGET_VIEWS=0` | [managed target directories](/managed-targets#disable-managed-targets) |
-| `MBX_CACHE_LINKS=0` | [native link caching](/limits#native-linking-is-cached-only-where-the-linker-can-be-described) |
-| `MBX_LEARNED_INCREMENTAL=0` | [learned incremental reuse](/incremental#learned-incremental-reuse) |
-| `MBX_EVENTS=0` | [per-compilation event streams](/tui#recording) |
-| `MBX_SAVINGS=off` | [the savings line](/configuration#the-savings-line) |
+| Turns off | Command | For one command |
+| --- | --- | --- |
+| [machine-wide compile scheduling](/scheduling#machine-wide-compile-scheduling) | `mbx settings set scheduler.enabled false` | `MBX_SCHEDULER=0` |
+| [build-script and `mbx exec` C and C++ caching](/configuration#build-script-c-and-c) | `mbx settings set cc false` | `MBX_CC=0` |
+| [managed target directories](/managed-targets#disable-managed-targets) | `mbx settings set target.views false` | `MBX_TARGET_VIEWS=0` |
+| [native link caching](/limits#native-linking-is-cached-only-where-the-linker-can-be-described) | environment only | `MBX_CACHE_LINKS=0` |
+| [learned incremental reuse](/incremental#learned-incremental-reuse) | `mbx settings set learned_incremental false` | `MBX_LEARNED_INCREMENTAL=0` |
+| [per-compilation event streams](/tui#recording) | `mbx settings set events false` | `MBX_EVENTS=0` |
+| [the savings line](/configuration#the-savings-line) | `mbx settings set savings off` | `MBX_SAVINGS=off` |
 
 ## Something looks wrong. What should a report include?
 

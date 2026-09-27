@@ -35,6 +35,9 @@ pub(super) enum SettingsCommands {
     Set(SetArgs),
     /// Remove a setting from the global configuration file, so it falls back to
     /// its default.
+    ///
+    /// A key mbx does not recognize, such as a misspelled one that stops mbx
+    /// from loading, is removed too when it holds a value.
     Unset(KeyArgs),
 }
 
@@ -136,16 +139,33 @@ fn set(key: &str, raw: &str) -> Result<()> {
 }
 
 fn unset(key: &str) -> Result<()> {
-    let meta = setting(key)?;
+    // A key mbx does not declare can still be in the file, which is how a
+    // misspelling gets there, and removing it is how that load error is fixed.
+    let meta = match setting(key) {
+        Ok(meta) => Some(meta),
+        Err(error) if is_group(key) => return Err(error),
+        Err(_) => None,
+    };
     let path = file_path()?;
+    let mut removed = false;
     if path.try_exists()? {
         let _lock = lock(&path)?;
         let mut document = read(&path)?;
-        if remove_value(&mut document, meta, &path)? {
+        removed = remove_value(
+            &mut document,
+            meta.map_or(key, |meta| meta.key),
+            meta.is_some(),
+            &path,
+        )?;
+        if removed {
             save(&path, &document, None)?;
         }
     }
-    note_environment(meta);
+    match meta {
+        Some(meta) => note_environment(meta),
+        None if !removed => return setting(key).map(|_| ()),
+        None => {}
+    }
     Ok(())
 }
 
@@ -196,19 +216,26 @@ pub(super) fn set_value(
     Ok(())
 }
 
-/// Remove `meta` from `document`, reporting whether it was there.
+/// Remove `key` from `document`, reporting whether it was there.
+///
+/// A key mbx does not declare is removed only when it holds a value, so a
+/// typo cannot take a whole table of real settings with it.
 pub(super) fn remove_value(
     document: &mut DocumentMut,
-    meta: &PropMeta,
+    key: &str,
+    known: bool,
     path: &Path,
 ) -> Result<bool> {
-    let Some((table, name, _)) = parent_table(document, meta.key, false, path)? else {
+    let Some((table, name, _)) = parent_table(document, key, false, path)? else {
         return Ok(false);
     };
-    if table.remove(name).is_none() {
-        return Ok(false);
+    match table.get(name) {
+        Some(Item::Value(_)) => {}
+        Some(_) if known => {}
+        _ => return Ok(false),
     }
-    remove_empty_group(document, meta.key);
+    table.remove(name);
+    remove_empty_group(document, key);
     Ok(true)
 }
 
@@ -218,14 +245,17 @@ pub(super) fn setting(key: &str) -> Result<&'static PropMeta> {
     if let Some(found) = registry.lookup(key) {
         return Ok(registry.get(found.id));
     }
-    if registry
-        .props
-        .iter()
-        .any(|meta| !meta.hide && in_group(meta.key, key))
-    {
+    if is_group(key) {
         bail!("{key} is a group of settings; `mbx settings ls {key}` lists them");
     }
     bail!("unknown setting: {key}; `mbx settings ls` lists them")
+}
+
+fn is_group(key: &str) -> bool {
+    settings_registry()
+        .props
+        .iter()
+        .any(|meta| !meta.hide && meta.key != key && in_group(meta.key, key))
 }
 
 fn in_group(key: &str, group: &str) -> bool {
@@ -346,16 +376,20 @@ fn remove_empty_group(document: &mut DocumentMut, key: &str) {
     let Some((group, _)) = key.split_once('.') else {
         return;
     };
-    let Some(Item::Table(table)) = document.get(group) else {
-        return;
+    let empty = match document.get(group) {
+        Some(Item::Table(table)) => {
+            let decor = table.decor();
+            let commented = [decor.prefix(), decor.suffix()]
+                .into_iter()
+                .flatten()
+                .filter_map(|text| text.as_str())
+                .any(|text| text.contains('#'));
+            table.is_empty() && !commented
+        }
+        Some(Item::Value(toml_edit::Value::InlineTable(table))) => table.is_empty(),
+        _ => false,
     };
-    let decor = table.decor();
-    let commented = [decor.prefix(), decor.suffix()]
-        .into_iter()
-        .flatten()
-        .filter_map(|text| text.as_str())
-        .any(|text| text.contains('#'));
-    if table.is_empty() && !commented {
+    if empty {
         document.remove(group);
     }
 }
@@ -364,26 +398,26 @@ fn remove_empty_group(document: &mut DocumentMut, key: &str) {
 /// configuration, then warn about any problem left elsewhere in the file.
 fn save(path: &Path, document: &DocumentMut, check: Option<String>) -> Result<()> {
     let contents = document.to_string();
+    // Through any link, so a managed dotfile stays a link.
+    let target = link_target(path)?;
     // The check reads through the file layer, which treats a missing file as
     // empty without looking at the text it is handed. An empty file is a valid
     // configuration, so it can stand in until the real one is written.
-    let created = !path.try_exists()?;
+    let created = !target.try_exists()?;
     if created {
-        std::fs::write(path, "")
-            .wrap_err_with(|| format!("failed to create {}", path.display()))?;
+        std::fs::write(&target, "")
+            .wrap_err_with(|| format!("failed to create {}", target.display()))?;
     }
     let written = (|| {
         if let Some(check) = check {
             check_global_file(path, check)
                 .map_err(|error| error.wrap_err(format!("{} was not changed", path.display())))?;
         }
-        // Through any link, so a managed dotfile stays a link.
-        let target = std::fs::canonicalize(path)
-            .wrap_err_with(|| format!("failed to resolve {}", path.display()))?;
         crate::util::write_atomic(&target, contents.as_bytes())
     })();
+    // The placeholder, never the link that led to it.
     if written.is_err() && created {
-        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(&target);
     }
     written?;
     if let Err(error) = check_global_file(path, contents) {
@@ -392,13 +426,46 @@ fn save(path: &Path, document: &DocumentMut, check: Option<String>) -> Result<()
     Ok(())
 }
 
+/// The file `path` names once every link is followed, whether or not that
+/// file exists yet.
+///
+/// `canonicalize` cannot answer for a link to a file that has not been
+/// written, and treating that link as the file is how a failed first write
+/// used to delete it.
+pub(super) fn link_target(path: &Path) -> Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    // The same bound the kernel puts on a chain of links.
+    for _ in 0..40 {
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let next = std::fs::read_link(&current)
+                    .wrap_err_with(|| format!("failed to read {}", current.display()))?;
+                current = match current.parent() {
+                    Some(parent) => parent.join(next),
+                    None => next,
+                };
+            }
+            Ok(_) => return Ok(current),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(current),
+            Err(error) => {
+                return Err(error)
+                    .wrap_err_with(|| format!("failed to read {}", current.display()));
+            }
+        }
+    }
+    bail!("{} is a chain of too many links", path.display())
+}
+
 /// Hold the edit lock for `path`, so two edits cannot both read the same
 /// contents and each write away the other's change.
 ///
-/// A sibling file, because fslock empties the file it locks when it lets go.
+/// A sibling of the file the links lead to, so two links to one file share a
+/// lock, and not the file itself, because fslock empties the file it locks
+/// when it lets go.
 fn lock(path: &Path) -> Result<fslock::LockFile> {
-    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-        bail!("{} has no parent directory", path.display());
+    let target = link_target(path)?;
+    let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
+        bail!("{} has no parent directory", target.display());
     };
     std::fs::create_dir_all(parent)
         .wrap_err_with(|| format!("failed to create {}", parent.display()))?;

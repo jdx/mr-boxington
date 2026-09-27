@@ -40,10 +40,10 @@ state used by a running build is never removed.
 
 `learned_incremental_max_size` limits each crate to `8GiB` by default. Once a
 crate exceeds that limit, mbx warns and discards its state before the next
-compilation. Set it in your global configuration:
+compilation. Raise it with:
 
-```toml
-learned_incremental_max_size = "12GiB"
+```sh
+mbx settings set learned_incremental_max_size 12GiB
 ```
 
 The environment equivalent is `MBX_LEARNED_INCREMENTAL_MAX_SIZE`; `"none"`
@@ -58,10 +58,9 @@ GiB and 100 GiB. `gc.incremental_max_age` defaults to 30 days. The
 least-recently-used checkouts are collected first, while mbx keeps the most
 recent one even when it alone exceeds the aggregate budget:
 
-```toml
-[gc]
-incremental_max_size = "30GiB" # or "none"
-incremental_max_age = "14d"    # or "none"
+```sh
+mbx settings set gc.incremental_max_size 30GiB   # or none
+mbx settings set gc.incremental_max_age 14d      # or none
 ```
 
 `gc.max_total_size`, when set, covers the action store, managed targets, and

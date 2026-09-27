@@ -961,6 +961,7 @@ impl Config {
         let env = EnvLayer::from_process();
         let file = config_file_path().map(|path| FileLayer::at(path, FileScope::Global));
         Self::from_layers_for_cli(&env, file.as_ref())
+            .map_err(|error| with_repair_hints(error, &env, file.as_ref()))
     }
 
     fn from_layers_for_cli(
@@ -1012,7 +1013,9 @@ impl Config {
         measure_memory: impl Fn() -> Option<u64>,
     ) -> Result<(Self, CliSettings)> {
         let cache_dir = raw.cache_dir.or_else(default_cache_dir).ok_or_else(|| {
-            eyre::eyre!("could not determine a cache directory; set MBX_CACHE_DIR")
+            eyre::eyre!(
+                "could not determine a cache directory; set MBX_CACHE_DIR or `mbx settings set cache_dir <path>`"
+            )
         })?;
         let shims_dir = match raw.shims_dir {
             Some(directory) if directory.is_absolute() => directory,
@@ -1023,16 +1026,20 @@ impl Config {
                         Component::Normal(part) => relative.push(part),
                         Component::CurDir => (),
                         Component::ParentDir if relative.pop() => (),
-                        _ => bail!(
-                            "invalid shims_dir: relative paths must stay beneath cache_dir; \
-                             use an absolute path for a directory outside the cache"
-                        ),
+                        _ => {
+                            return Err(eyre::eyre!(
+                                "relative paths must stay beneath cache_dir; \
+                                 use an absolute path for a directory outside the cache"
+                            )
+                            .wrap_err(Invalid("shims_dir")));
+                        }
                     }
                 }
                 if relative.as_os_str().is_empty() {
-                    bail!(
-                        "invalid shims_dir: relative paths must name a directory beneath cache_dir"
-                    );
+                    return Err(eyre::eyre!(
+                        "relative paths must name a directory beneath cache_dir"
+                    )
+                    .wrap_err(Invalid("shims_dir")));
                 }
                 cache_dir.join(relative)
             }
@@ -1049,21 +1056,21 @@ impl Config {
             .as_deref()
             .map(parse_store_budget)
             .transpose()
-            .wrap_err("invalid gc.max_size")?;
+            .wrap_err(Invalid("gc.max_size"))?;
         let target_budget = raw
             .target
             .max_size
             .as_deref()
             .map(parse_optional_byte_size)
             .transpose()
-            .wrap_err("invalid target.max_size")?;
+            .wrap_err(Invalid("target.max_size"))?;
         let incremental_budget = raw
             .gc
             .incremental_max_size
             .as_deref()
             .map(parse_optional_byte_size)
             .transpose()
-            .wrap_err("invalid gc.incremental_max_size")?;
+            .wrap_err(Invalid("gc.incremental_max_size"))?;
         // Measured only where a budget actually needs scaling, so a fully
         // configured machine pays for no syscall at all. The two budgets are
         // measured separately because `target.root` can be on another volume,
@@ -1080,50 +1087,50 @@ impl Config {
             target_max_bytes: target_budget
                 .unwrap_or_else(|| Some(TARGET_BUDGET.resolve(target_disk))),
             target_max_age: parse_optional_duration(&raw.target.max_age)
-                .wrap_err("invalid target.max_age")?,
+                .wrap_err(Invalid("target.max_age"))?,
             incremental_max_bytes: incremental_budget
                 .unwrap_or_else(|| Some(INCREMENTAL_BUDGET.resolve(store_disk))),
             incremental_max_age: parse_optional_duration(&raw.gc.incremental_max_age)
-                .wrap_err("invalid gc.incremental_max_age")?,
+                .wrap_err(Invalid("gc.incremental_max_age"))?,
             max_total_bytes: raw
                 .gc
                 .max_total_size
                 .as_deref()
                 .map(parse_optional_byte_size)
                 .transpose()
-                .wrap_err("invalid gc.max_total_size")?
+                .wrap_err(Invalid("gc.max_total_size"))?
                 .flatten(),
             target_precedence: crate::target::Precedence {
                 keep: checkout_patterns(raw.target.keep.as_deref(), dirs::home_dir())
-                    .wrap_err("invalid target.keep")?,
+                    .wrap_err(Invalid("target.keep"))?,
                 evict_first: checkout_patterns(raw.target.evict_first.as_deref(), dirs::home_dir())
-                    .wrap_err("invalid target.evict_first")?,
+                    .wrap_err(Invalid("target.evict_first"))?,
             },
             min_free: match raw.gc.min_free_size.as_deref() {
                 None => Some(MinFree::ShareOfDisk),
                 Some(value) => parse_optional_byte_size(value)
-                    .wrap_err("invalid gc.min_free_size")?
+                    .wrap_err(Invalid("gc.min_free_size"))?
                     .map(MinFree::Bytes),
             },
         };
-        let mode = raw.remote.mode.parse().wrap_err("invalid remote.mode")?;
+        let mode = raw.remote.mode.parse().wrap_err(Invalid("remote.mode"))?;
         let s3_conditional_writes = raw
             .remote
             .s3_conditional_writes
             .parse()
-            .wrap_err("invalid remote.s3_conditional_writes")?;
+            .wrap_err(Invalid("remote.s3_conditional_writes"))?;
         let http = HttpSettings {
-            timeout: parse_duration(&raw.http.timeout).wrap_err("invalid http.timeout")?,
+            timeout: parse_duration(&raw.http.timeout).wrap_err(Invalid("http.timeout"))?,
             download_timeout: parse_duration(&raw.http.download_timeout)
-                .wrap_err("invalid http.download_timeout")?,
+                .wrap_err(Invalid("http.download_timeout"))?,
             read_stall_budget: parse_duration(&raw.http.read_stall_budget)
-                .wrap_err("invalid http.read_stall_budget")?,
+                .wrap_err(Invalid("http.read_stall_budget"))?,
             retries: raw.http.retries,
         };
         let gc = GcSettings {
             auto: raw.gc.auto,
             max_bytes: store_budget.unwrap_or_else(|| STORE_BUDGET.resolve(store_disk)),
-            interval: parse_duration(&raw.gc.interval).wrap_err("invalid gc.interval")?,
+            interval: parse_duration(&raw.gc.interval).wrap_err(Invalid("gc.interval"))?,
         };
         let target = TargetSettings {
             views: raw.target.views,
@@ -1134,14 +1141,16 @@ impl Config {
             Some(cpus) => u64::try_from(cpus)
                 .ok()
                 .filter(|cpus| *cpus > 0)
-                .ok_or_else(|| eyre::eyre!("invalid scheduler.cpus: must be a positive count"))?,
+                .ok_or_else(|| {
+                    eyre::eyre!("must be a positive count").wrap_err(Invalid("scheduler.cpus"))
+                })?,
             None => std::thread::available_parallelism().map_or(1, |cpus| cpus.get() as u64),
         };
         let scheduler_reserve_cpus = u64::try_from(raw.scheduler.reserve_cpus).map_err(|_| {
-            eyre::eyre!("invalid scheduler.reserve_cpus: must be a non-negative count")
+            eyre::eyre!("must be a non-negative count").wrap_err(Invalid("scheduler.reserve_cpus"))
         })?;
         let scheduler_memory = match raw.scheduler.memory.as_deref() {
-            Some(value) => parse_optional_byte_size(value).wrap_err("invalid scheduler.memory")?,
+            Some(value) => parse_optional_byte_size(value).wrap_err(Invalid("scheduler.memory"))?,
             // Measured only when the scheduler would use the answer, like the
             // disk budgets above.
             None => Some(
@@ -1163,7 +1172,7 @@ impl Config {
                 .scheduler
                 .priority
                 .parse()
-                .wrap_err("invalid scheduler.priority")?,
+                .wrap_err(Invalid("scheduler.priority"))?,
             tests: raw.scheduler.tests,
             pressure: raw.scheduler.pressure,
             suspend: raw.scheduler.suspend,
@@ -1184,7 +1193,9 @@ impl Config {
             verify_sample_rate: u8::try_from(raw.verify_sample_rate)
                 .ok()
                 .filter(|rate| *rate <= 100)
-                .ok_or_else(|| eyre::eyre!("invalid verify_sample_rate: expected 0–100"))?,
+                .ok_or_else(|| {
+                    eyre::eyre!("expected 0–100").wrap_err(Invalid("verify_sample_rate"))
+                })?,
             incremental: raw.incremental,
             share_out_dir: raw.share_out_dir,
             restore_hardlink: raw.restore_hardlink,
@@ -1213,18 +1224,18 @@ impl Config {
             config,
             CliSettings {
                 retention,
-                savings: raw.savings.parse().wrap_err("invalid savings")?,
-                summary: raw.summary.parse().wrap_err("invalid summary")?,
+                savings: raw.savings.parse().wrap_err(Invalid("savings"))?,
+                summary: raw.summary.parse().wrap_err(Invalid("summary"))?,
                 pretty_inspect: raw.pretty_inspect,
                 plain_output: raw.display == "plain",
                 learned_incremental: raw._learned_incremental,
                 learned_incremental_max_size: parse_optional_byte_size(
                     &raw.learned_incremental_max_size,
                 )
-                .wrap_err("invalid learned_incremental_max_size")?,
+                .wrap_err(Invalid("learned_incremental_max_size"))?,
                 cache_links: raw.cache_links,
                 events_max_size: parse_optional_byte_size(&raw.events_max_size)
-                    .wrap_err("invalid events_max_size")?,
+                    .wrap_err(Invalid("events_max_size"))?,
             },
         ))
     }
@@ -1538,6 +1549,81 @@ fn parse_optional_duration(value: &str) -> Result<Option<Duration>> {
         return Ok(None);
     }
     parse_duration(value).map(Some)
+}
+
+/// The setting a value was refused for, as the context of the error, so a
+/// report can say where the value came from and how to change it.
+#[derive(Debug)]
+struct Invalid(&'static str);
+
+impl std::fmt::Display for Invalid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid {}", self.0)
+    }
+}
+
+/// `error` followed by how to fix each setting it names.
+///
+/// Resolved a second time rather than threaded through, because only a
+/// failing load pays for it and the resolution itself has no side effects.
+fn with_repair_hints(
+    error: eyre::Report,
+    env: &EnvLayer,
+    file: Option<&FileLayer>,
+) -> eyre::Report {
+    let mut layers = Layers::new().then(env);
+    if let Some(file) = file {
+        layers = layers.then(file);
+    }
+    let Ok(resolved) = usage_config::resolve(RawConfig::SETTINGS_REGISTRY, layers) else {
+        return error;
+    };
+    let hints = if resolved.warnings.is_empty() {
+        error
+            .downcast_ref::<Invalid>()
+            .and_then(|invalid| {
+                resolved
+                    .origin_key(invalid.0)
+                    .and_then(|origin| repair_hint(origin, invalid.0, false))
+            })
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        resolved
+            .warnings
+            .iter()
+            .filter_map(|warning| {
+                let origin = warning.origin.as_ref()?;
+                let key = match origin.kind {
+                    usage_config::SourceKind::FILE => origin.identifier.rsplit_once('#')?.1,
+                    _ => "",
+                };
+                let unknown = warning.kind == usage_config::WarningKind::UnknownSetting;
+                repair_hint(origin, key, unknown)
+            })
+            .collect()
+    };
+    if hints.is_empty() {
+        return error;
+    }
+    eyre::eyre!("{error:#}\n{}", hints.join("\n"))
+}
+
+/// How to change a value that came from `origin`, for the setting `key`.
+fn repair_hint(origin: &usage_config::Origin, key: &str, unknown: bool) -> Option<String> {
+    match origin.kind {
+        usage_config::SourceKind::ENV => Some(format!(
+            "{} sets it; change or unset that variable",
+            origin.identifier
+        )),
+        usage_config::SourceKind::FILE if unknown => {
+            Some(format!("`mbx settings unset {key}` removes it"))
+        }
+        usage_config::SourceKind::FILE => Some(format!(
+            "`mbx settings set {key} <value>` replaces it, or `mbx settings unset {key}` restores the default"
+        )),
+        _ => None,
+    }
 }
 
 /// The global configuration file, which `mbx settings` edits.
@@ -2532,6 +2618,26 @@ default = "rust-lld"
         config
             .apply_workspace_policy_with(directory.path(), |_| false)
             .unwrap();
+    }
+
+    #[test]
+    fn a_refused_value_names_its_setting_for_the_repair_hint() {
+        let error = configured(Some("[gc]\ninterval = \"soon\"\n"), &[]).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<Invalid>().map(|invalid| invalid.0),
+            Some("gc.interval")
+        );
+        let error = configured(None, &[("MBX_SCHEDULER_CPUS", "0")]).unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "invalid scheduler.cpus: must be a positive count"
+        );
+        let env = EnvLayer::new([("MBX_SCHEDULER_CPUS".to_string(), "0".to_string())]);
+        assert_eq!(
+            format!("{:#}", with_repair_hints(error, &env, None)),
+            "invalid scheduler.cpus: must be a positive count\n\
+             MBX_SCHEDULER_CPUS sets it; change or unset that variable"
+        );
     }
 
     #[test]
