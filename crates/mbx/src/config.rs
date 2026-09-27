@@ -159,9 +159,9 @@ pub(crate) struct RawConfig {
     /// Let local workspace members compile incrementally.
     #[usage(env = "MBX_INCREMENTAL", default = false)]
     incremental: bool,
-    /// Keep private workspace incremental state from the first build on persistent CI runners.
-    #[usage(env = "MBX_CI_INCREMENTAL", default = false)]
-    ci_incremental: bool,
+    /// Keep private workspace incremental state from the first compilation, locally or in CI.
+    #[usage(env = "MBX_EAGER_INCREMENTAL", default = false)]
+    eager_incremental: bool,
     /// Compile crates that keep missing the cache with changed content
     /// incrementally, keeping their outputs out of the shared cache.
     #[usage(
@@ -486,8 +486,8 @@ pub struct Config {
     /// Let cargo compile workspace members incrementally, rather than forcing
     /// `CARGO_INCREMENTAL=0` for the whole build.
     pub incremental: bool,
-    /// Seed private workspace incremental state in CI; disabled by default.
-    pub ci_incremental: bool,
+    /// Seed private workspace incremental state from the first compilation; disabled by default.
+    pub eager_incremental: bool,
     /// Share compilations that read `OUT_DIR` between checkouts.
     ///
     /// Enabled by default. When the source scan finds `OUT_DIR`, rustc receives
@@ -603,7 +603,7 @@ impl Config {
             verify: false,
             verify_sample_rate: 0,
             incremental: false,
-            ci_incremental: false,
+            eager_incremental: false,
             share_out_dir: false,
             restore_hardlink: true,
             share_workspace_root: false,
@@ -1203,7 +1203,7 @@ impl Config {
                     eyre::eyre!("expected 0–100").wrap_err(Invalid("verify_sample_rate"))
                 })?,
             incremental: raw.incremental,
-            ci_incremental: raw.ci_incremental,
+            eager_incremental: raw.eager_incremental,
             share_out_dir: raw.share_out_dir,
             restore_hardlink: raw.restore_hardlink,
             share_workspace_root: raw.share_workspace_root,
@@ -1360,14 +1360,14 @@ impl Config {
             if !matches!(
                 key,
                 "incremental"
-                    | "ci_incremental"
+                    | "eager_incremental"
                     | "share_out_dir"
                     | "share_workspace_root"
                     | "build_script_execution"
                     | "cc"
             ) {
                 bail!(
-                    "{} contains unsupported workspace setting {key:?}; only incremental, ci_incremental, share_out_dir, share_workspace_root, build_script_execution, cc, linker, and scheduler are allowed",
+                    "{} contains unsupported workspace setting {key:?}; only incremental, eager_incremental, share_out_dir, share_workspace_root, build_script_execution, cc, linker, and scheduler are allowed",
                     path.display()
                 );
             }
@@ -1378,8 +1378,8 @@ impl Config {
                 "incremental" if !environment_contains("MBX_INCREMENTAL") => {
                     self.incremental = value;
                 }
-                "ci_incremental" if !environment_contains("MBX_CI_INCREMENTAL") => {
-                    self.ci_incremental = value;
+                "eager_incremental" if !environment_contains("MBX_EAGER_INCREMENTAL") => {
+                    self.eager_incremental = value;
                 }
                 "share_out_dir" if !environment_contains("MBX_SHARE_OUT_DIR") => {
                     self.share_out_dir = value;
@@ -1394,7 +1394,7 @@ impl Config {
                     self.cc = value;
                 }
                 "incremental"
-                | "ci_incremental"
+                | "eager_incremental"
                 | "share_out_dir"
                 | "share_workspace_root"
                 | "build_script_execution"
@@ -2316,29 +2316,33 @@ mod tests {
     }
 
     #[test]
-    fn ci_incremental_is_opt_in_and_workspace_policy_respects_environment() {
-        assert!(!configured(None, &[]).unwrap().ci_incremental);
+    fn eager_incremental_is_opt_in_and_workspace_policy_respects_environment() {
+        assert!(!configured(None, &[]).unwrap().eager_incremental);
         assert!(
-            configured(None, &[("MBX_CI_INCREMENTAL", "1")])
+            configured(None, &[("MBX_EAGER_INCREMENTAL", "1")])
                 .unwrap()
-                .ci_incremental
+                .eager_incremental
         );
         let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join(".mbx.toml"), "ci_incremental = true").unwrap();
-        let mut config = configured(Some("ci_incremental = false"), &[]).unwrap();
+        std::fs::write(
+            directory.path().join(".mbx.toml"),
+            "eager_incremental = true",
+        )
+        .unwrap();
+        let mut config = configured(Some("eager_incremental = false"), &[]).unwrap();
         config
             .apply_workspace_policy_with(directory.path(), |_| false)
             .unwrap();
-        assert!(config.ci_incremental);
+        assert!(config.eager_incremental);
         let mut config = configured(
-            Some("ci_incremental = true"),
-            &[("MBX_CI_INCREMENTAL", "0")],
+            Some("eager_incremental = true"),
+            &[("MBX_EAGER_INCREMENTAL", "0")],
         )
         .unwrap();
         config
-            .apply_workspace_policy_with(directory.path(), |name| name == "MBX_CI_INCREMENTAL")
+            .apply_workspace_policy_with(directory.path(), |name| name == "MBX_EAGER_INCREMENTAL")
             .unwrap();
-        assert!(!config.ci_incremental);
+        assert!(!config.eager_incremental);
     }
 
     /// On by default: a crate nobody is editing never reaches the threshold, so

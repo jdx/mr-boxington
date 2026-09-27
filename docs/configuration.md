@@ -151,7 +151,7 @@ and machine-specific paths do not belong in a checked-in `.mbx.toml`.
 # <config directory>/mbx/config.toml
 cache_dir = "/var/cache/mbx"
 incremental = false
-ci_incremental = false  # opt-in for persistent CI runners
+eager_incremental = false  # opt-in state from the first compilation
 learned_incremental_max_size = "8GiB"  # or "none"
 share_out_dir = true
 share_workspace_root = false
@@ -222,7 +222,7 @@ and scheduler policy below:
 
 ```toml
 incremental = false
-ci_incremental = false
+eager_incremental = false
 share_out_dir = false
 share_workspace_root = false
 build_script_execution = true
@@ -376,9 +376,9 @@ Cargo's `-q` and `--quiet` also suppress the summary for that invocation.
 
 Leave `MBX_INCREMENTAL` unset for mbx's default combination of shared caching
 and private incremental state. `MBX_INCREMENTAL=1` hands control to Cargo and
-reduces reuse across checkouts. Persistent CI runners can opt into private
-workspace state with `ci_incremental = true` (`MBX_CI_INCREMENTAL=1`). See
-[Incremental builds](/incremental#persistent-ci-runners) for the storage and
+reduces reuse across checkouts. Local builds and persistent CI runners can seed
+private workspace state from the first compilation with `eager_incremental = true` (`MBX_EAGER_INCREMENTAL=1`). See
+[Incremental builds](/incremental#eager-incremental-reuse) for the storage and
 first-build tradeoffs.
 
 ## Learned incremental reuse

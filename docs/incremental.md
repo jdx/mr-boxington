@@ -11,7 +11,7 @@ normal edit/build loop.
 | --- | --- | --- |
 | Shared action cache | Complete matching compiler outputs | Across equivalent builds and checkouts |
 | Learned incremental reuse | Intermediate work from earlier source edits | Private to one checkout |
-| Opt-in CI incremental reuse | Private intermediate work seeded on the first build | Persistent CI runner, same checkout path |
+| Eager incremental reuse | Private intermediate work seeded on the first compilation | One checkout, locally or in CI |
 | Cargo incremental mode | Cargo-managed incremental state | Private to Cargo's target directory |
 
 ## Learned incremental reuse
@@ -81,50 +81,61 @@ This lets Cargo manage incremental workspace compilation. Those artifacts
 remain checkout-specific and bypass the shared cache; their dependents may
 also miss. Use it only when you want that tradeoff.
 
-## Persistent CI runners
+## Eager incremental reuse
 
-`ci_incremental` is an opt-in mode for CI runners that retain the mbx cache and
-reuse the same checkout path between jobs. Enable it for a build with:
+`eager_incremental` is an opt-in mode for builds where you expect more source
+edits and have disk space to retain intermediate compiler work. It is useful on
+developer machines and persistent CI runners. Enable it for a build with:
 
 ```sh
-CI=1 MBX_CI_INCREMENTAL=1 mbx build --locked
+MBX_EAGER_INCREMENTAL=1 mbx build --locked
+```
+
+To enable it globally on your machine:
+
+```sh
+mbx settings set eager_incremental true
 ```
 
 Or commit the setting in `.mbx.toml`:
 
 ```toml
-ci_incremental = true
+eager_incremental = true
 ```
 
-The setting defaults to `false` and takes effect only when `CI` or
-`GITHUB_ACTIONS` indicates a CI job. It is independent of `learned_incremental`.
-Workspace crates seed private incremental state from their first compilation,
-so a later commit can reuse it even after Cargo's target directory is removed.
-This works with `CARGO_INCREMENTAL=0`: mbx manages the private state itself.
-Other dependencies continue to use the shared action cache; artifacts that link
-private workspace outputs also stay private.
+The setting defaults to `false` and works locally and in CI. Unlike learned
+incremental reuse, it seeds private state for workspace crates from their first
+compilation, before any source edits. A later build can reuse that state even
+after Cargo's target directory is removed. This works with
+`CARGO_INCREMENTAL=0`: mbx manages the private state itself. Other dependencies
+continue to use the shared action cache; artifacts that link private workspace
+outputs also stay private.
 
 The first build can be slower, and state can occupy several GiB. Workspace
 crates always use this private mode while it is enabled, including when an
-unchanged build could otherwise restore complete shared outputs. Measure the
-seed cost and later builds on your workload before enabling it. Fresh hosted
-runners with no retained state gain nothing from this setting.
+unchanged compilation could otherwise restore complete shared outputs. Extra
+disk space makes retention practical, but does not guarantee a faster build.
+Measure the initial cost and later edits on your workload before enabling it.
+Fresh CI runners with no retained state pay the initial cost without the
+next-build benefit.
 
 State uses the same [storage limits and cleanup](#bound-the-storage) as learned
 incremental reuse. Keep the same checkout and target paths, toolchain, and build
 flags for useful reuse. Private state is not uploaded to remote caches or
 included in cache exports. Verification disables the mode for verified units;
 unsupported compiler invocations and existing unknown compiler wrappers keep
-their usual bypass behavior. Set `MBX_CI_INCREMENTAL=0` to override a checked-in
-setting and return to the normal shared-cache policy.
+their usual bypass behavior. Set `MBX_EAGER_INCREMENTAL=0` to override a
+checked-in setting and return to the default policy.
 
 ## Overrides and CI
 
 - `MBX_LEARNED_INCREMENTAL=0` disables learned incremental reuse.
-- `MBX_INCREMENTAL=1` supersedes it by handing incremental control to Cargo.
-- `MBX_VERIFY=1` disables it for the build being verified.
+- `MBX_INCREMENTAL=1` hands incremental control to Cargo unless eager reuse is enabled.
+- `MBX_EAGER_INCREMENTAL=1` takes precedence over both policies and seeds private
+  workspace state from the first compilation, locally or in CI.
+- `MBX_VERIFY=1` disables learned and eager reuse for the build being verified.
 - CI disables Cargo incremental mode and learned incremental reuse by default.
-  `MBX_CI_INCREMENTAL=1` explicitly seeds private state on persistent runners.
+  Eager reuse is available when explicitly enabled.
 
 Use [Cache results](/cache-results) to distinguish private incremental work
 from ordinary misses. The [local-edit benchmark](/benchmarks#local-edit) reports

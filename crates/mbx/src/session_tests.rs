@@ -121,7 +121,7 @@ fn test_config(cache_dir: &Path) -> Config {
         verify: false,
         verify_sample_rate: 0,
         incremental: false,
-        ci_incremental: false,
+        eager_incremental: false,
         share_out_dir: false,
         restore_hardlink: true,
         share_workspace_root: false,

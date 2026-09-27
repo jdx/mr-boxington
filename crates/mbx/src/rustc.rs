@@ -244,8 +244,8 @@ pub(crate) fn compile(
         portable: &portable,
         linker: linker_for(&invocation)?,
     };
-    let mut learned = if session::ci_incremental_requested() && !verify {
-        ci_incremental_plan(&compilation)
+    let mut learned = if session::eager_incremental_requested() && !verify {
+        eager_incremental_plan(&compilation)
     } else {
         reuse_hot_workspace_plan(&compilation, &outputs, learned_enabled)
     };
@@ -1289,10 +1289,10 @@ fn plan_learned_reuse(
     }
 }
 
-/// Persistent CI runners can opt into seeding private state before any source
+/// Builds can opt into seeding private state before any source
 /// edits, including when Cargo's target directory has been discarded. Units
 /// linking private artifacts must stay private too, even outside the workspace.
-fn ci_incremental_plan(compilation: &Compilation<'_>) -> LearnedPlan {
+fn eager_incremental_plan(compilation: &Compilation<'_>) -> LearnedPlan {
     if !source_is_in_workspace(compilation) && !links_private_artifact(compilation) {
         return LearnedPlan::default();
     }
@@ -1312,7 +1312,9 @@ fn ci_incremental_plan(compilation: &Compilation<'_>) -> LearnedPlan {
         )
     })();
     planned.unwrap_or_else(|error| {
-        session::report_shim_warning(&format!("CI incremental state was not prepared: {error:#}"));
+        session::report_shim_warning(&format!(
+            "eager incremental state was not prepared: {error:#}"
+        ));
         LearnedPlan::default()
     })
 }

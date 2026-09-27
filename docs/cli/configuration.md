@@ -71,14 +71,6 @@ Cache C and C++ compilations run by build scripts.
 
 Store C objects that embed absolute paths under checkout-specific keys. Disable for disposable worktrees to avoid storing objects that cannot be reused at another path. Existing entries may still be restored.
 
-### `ci_incremental`
-
-- **Type:** `bool`
-- **Default:** `false`
-- **Set with:** `MBX_CI_INCREMENTAL`
-
-Keep private workspace incremental state from the first build on persistent CI runners.
-
 ### `display`
 
 - **Type:** `string`
@@ -91,6 +83,14 @@ Cargo display mode. Plain disables animated output even in a terminal.
 - `auto`
 - `plain`
 
+
+### `eager_incremental`
+
+- **Type:** `bool`
+- **Default:** `false`
+- **Set with:** `MBX_EAGER_INCREMENTAL`
+
+Keep private workspace incremental state from the first compilation, locally or in CI.
 
 ### `events`
 

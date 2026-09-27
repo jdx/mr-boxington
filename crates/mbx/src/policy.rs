@@ -2,8 +2,8 @@
 //!
 //! Cache writes are only trusted from a CI context that a pull request cannot
 //! influence, so untrusted contexts read the remote cache but never publish to
-//! it. CI uses shared actions by default; persistent runners can explicitly opt
-//! into private workspace incremental state.
+//! it. CI uses shared actions by default; eager incremental reuse is an explicit
+//! opt-in for both local builds and persistent runners.
 
 use mbx_cache_core::RemoteCacheMode;
 
@@ -37,7 +37,7 @@ fn effective_remote_cache_mode_with(
 /// This Cargo-managed mode stays disabled in CI: a fresh runner
 /// starts with no incremental state to build on, and an incrementally built
 /// member emits a different rlib than a cached one, so every crate above it in
-/// the graph misses. Persistent CI runners have a separate opt-in policy.
+/// the graph misses. Eager incremental reuse has a separate opt-in policy.
 pub fn incremental_allowed(configured: bool) -> bool {
     incremental_allowed_with(configured, |name| std::env::var(name).ok())
 }

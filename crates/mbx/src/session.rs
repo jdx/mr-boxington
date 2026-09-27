@@ -101,7 +101,7 @@ pub(crate) const BUILD_SCRIPT_EXECUTION_ENV: &str = "MBX_BUILD_SCRIPT_EXECUTION"
 pub(crate) const FORWARD_COMPILER_NOTIFICATIONS_ENV: &str = "MBX_FORWARD_COMPILER_NOTIFICATIONS";
 pub(crate) const BUILD_SCRIPT_SHIM_PATH_ENV: &str = "MBX_BUILD_SCRIPT_SHIM_PATH";
 pub(crate) const AR_DETERMINISM_ENV: &str = "MBX_AR_DETERMINISM";
-pub(crate) const CI_INCREMENTAL_ENV: &str = "MBX_CI_INCREMENTAL";
+pub(crate) const EAGER_INCREMENTAL_ENV: &str = "MBX_EAGER_INCREMENTAL";
 pub(crate) const LEARNED_INCREMENTAL_ENV: &str = "MBX_LEARNED_INCREMENTAL";
 pub(crate) const LEARNED_INCREMENTAL_MAX_SIZE_ENV: &str = "MBX_LEARNED_INCREMENTAL_MAX_SIZE";
 pub(crate) const INCREMENTAL_ROOT_ENV: &str = "MBX_INCREMENTAL_ROOT";
@@ -2037,9 +2037,9 @@ pub(crate) fn learned_incremental_requested() -> bool {
     std::env::var_os(LEARNED_INCREMENTAL_ENV).is_some_and(|value| !value.is_empty() && value != "0")
 }
 
-/// Whether the session opted into eager private workspace state on a CI runner.
-pub(crate) fn ci_incremental_requested() -> bool {
-    crate::policy::is_ci() && std::env::var_os(CI_INCREMENTAL_ENV).is_some_and(|value| value == "1")
+/// Whether the session opted into private workspace state from the first compilation.
+pub(crate) fn eager_incremental_requested() -> bool {
+    std::env::var_os(EAGER_INCREMENTAL_ENV).is_some_and(|value| value == "1")
 }
 
 /// How much incremental state one crate may keep before the shim discards it;

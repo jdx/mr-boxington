@@ -1249,16 +1249,12 @@ fn compiled_incrementally(stats: &serde_json::Value) -> u64 {
 }
 
 #[test]
-fn ci_incremental_seeds_private_state_and_survives_a_fresh_target() {
+fn eager_incremental_seeds_private_state_and_survives_a_fresh_target() {
     let store = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();
     write_dependent_project(project.path());
-    let settings = [
-        ("CI", "1"),
-        ("MBX_CI_INCREMENTAL", "1"),
-        ("CARGO_INCREMENTAL", "0"),
-    ];
+    let settings = [("MBX_EAGER_INCREMENTAL", "1"), ("CARGO_INCREMENTAL", "0")];
     let seed = build_with(
         project.path(),
         store.path(),
@@ -1310,7 +1306,7 @@ fn ci_incremental_seeds_private_state_and_survives_a_fresh_target() {
         project.path(),
         store.path(),
         &reports.path().join("disabled.json"),
-        &[("CI", "1"), ("MBX_CI_INCREMENTAL", "0")],
+        &[("MBX_EAGER_INCREMENTAL", "0")],
     )
     .0;
     assert_eq!(compiled_incrementally(&disabled), 0, "{disabled}");
@@ -1321,7 +1317,7 @@ fn ci_incremental_seeds_private_state_and_survives_a_fresh_target() {
 }
 
 #[test]
-fn ci_incremental_keeps_non_workspace_dependencies_shared() {
+fn eager_incremental_keeps_non_workspace_dependencies_shared() {
     let store = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let dependency = tempfile::tempdir().unwrap();
@@ -1341,7 +1337,7 @@ fn ci_incremental_keeps_non_workspace_dependencies_shared() {
     generate_lockfile(project.path());
     let settings = [
         ("GITHUB_ACTIONS", "true"),
-        ("MBX_CI_INCREMENTAL", "true"),
+        ("MBX_EAGER_INCREMENTAL", "true"),
         ("MBX_INCREMENTAL", "1"),
         ("CARGO_HOME", dependency.path().to_str().unwrap()),
     ];
@@ -1371,18 +1367,23 @@ fn ci_incremental_keeps_non_workspace_dependencies_shared() {
 }
 
 #[test]
-fn ci_incremental_requires_ci_and_yields_to_verification() {
+fn eager_incremental_is_opt_in_and_yields_to_verification() {
     for settings in [
         vec![("CI", "1")],
-        vec![("MBX_CI_INCREMENTAL", "1")],
+        vec![],
+        vec![("MBX_EAGER_INCREMENTAL", "1"), ("MBX_VERIFY", "1")],
+        vec![
+            ("MBX_EAGER_INCREMENTAL", "1"),
+            ("MBX_VERIFY_SAMPLE_RATE", "100"),
+        ],
         vec![
             ("CI", "1"),
-            ("MBX_CI_INCREMENTAL", "1"),
+            ("MBX_EAGER_INCREMENTAL", "1"),
             ("MBX_VERIFY", "1"),
         ],
         vec![
             ("GITHUB_ACTIONS", "true"),
-            ("MBX_CI_INCREMENTAL", "1"),
+            ("MBX_EAGER_INCREMENTAL", "1"),
             ("MBX_VERIFY_SAMPLE_RATE", "100"),
         ],
     ] {
