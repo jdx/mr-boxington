@@ -969,7 +969,6 @@ fn configured_cargo_shim_target(install_dir: &Path) -> Option<PathBuf> {
 #[cfg(unix)]
 fn configured_cargo_shim_target_is_executable(install_dir: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt as _;
-    use std::os::unix::fs::PermissionsExt as _;
 
     let Ok(bytes) = std::fs::read(install_dir.join(super::CARGO_SHIM_TARGET_FILE)) else {
         return false;
@@ -979,9 +978,15 @@ fn configured_cargo_shim_target_is_executable(install_dir: &Path) -> bool {
         .next()
         .unwrap_or_default();
     let target = Path::new(OsStr::from_bytes(line));
-    target.is_absolute()
-        && std::fs::metadata(target)
-            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    if !target.is_absolute() || !target.is_file() {
+        return false;
+    }
+    // Ask the kernel, like the launcher's `[ -x ]`, so an execute bit that only
+    // applies to another user does not count.
+    let Ok(target) = std::ffi::CString::new(line) else {
+        return false;
+    };
+    unsafe { libc::access(target.as_ptr(), libc::X_OK) == 0 }
 }
 
 fn write_cargo_shim_target(install_dir: &Path, executable: &Path) -> Result<()> {
