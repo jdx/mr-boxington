@@ -17,6 +17,31 @@ change. mbx reads configuration from three places; the first value found wins:
 Anything still unset takes its default. Unknown TOML keys are rejected, so a
 misspelled setting is an error.
 
+## Change settings from the command line
+
+`mbx settings set` writes one setting to the global configuration file and
+creates the file if it does not exist yet:
+
+```sh
+mbx settings set gc.max_size 20GiB
+mbx settings set target.evict_first .claude/worktrees,tmp
+mbx settings get gc.max_size
+mbx settings unset gc.max_size
+```
+
+The value must match the setting's type and allowed values, and the whole file
+must still load with it, or nothing is written. List settings take
+comma-separated items. Comments and formatting elsewhere in the file are kept,
+and a file that is a symlink stays one. `unset` removes the key, so the
+setting falls back to its default.
+
+`mbx settings ls` prints every setting with its current value, and
+`mbx settings ls gc` prints one group. `get` and `ls` read the environment, the
+global file, and defaults; they do not read `.mbx.toml`. Table settings such as
+`linker.profiles` are edited in the file directly. Settings that are read only
+from the environment, such as `MBX_VERIFY`, cannot be written with
+`settings set`.
+
 ## Common adjustments
 
 | Change | Setting or guide |

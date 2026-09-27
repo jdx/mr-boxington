@@ -49,6 +49,7 @@ export default defineConfig({
   srcExclude: ["cli/configuration.md"],
   rewrites: {
     "cli/cache.md": "cli/cache/index.md",
+    "cli/settings.md": "cli/settings/index.md",
   },
   sitemap: {
     hostname: "https://mr-boxington.jdx.dev",
@@ -140,6 +141,17 @@ export default defineConfig({
             collapsed: true,
             items: [
               { text: "setup", link: "/cli/setup" },
+              {
+                text: "settings",
+                link: "/cli/settings/",
+                collapsed: true,
+                items: [
+                  { text: "ls", link: "/cli/settings/ls" },
+                  { text: "get", link: "/cli/settings/get" },
+                  { text: "set", link: "/cli/settings/set" },
+                  { text: "unset", link: "/cli/settings/unset" },
+                ],
+              },
               { text: "completion", link: "/cli/completion" },
               { text: "doctor", link: "/cli/doctor" },
               { text: "explain", link: "/cli/explain" },

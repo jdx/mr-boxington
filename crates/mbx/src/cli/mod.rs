@@ -27,6 +27,7 @@ mod mascot;
 mod plain_progress;
 mod prefetch;
 mod pretty;
+mod settings;
 mod setup;
 mod shim;
 mod stats;
@@ -56,7 +57,7 @@ pub(crate) use setup::{
     setup_at_action as doctor_setup_at_action,
 };
 #[cfg(test)]
-use {cache::*, cargo::*, exec::*, gc::*, setup::*};
+use {cache::*, cargo::*, exec::*, gc::*, settings::*, setup::*};
 
 #[derive(usage::Cli)]
 #[usage(completion = true)]
@@ -102,6 +103,8 @@ enum Commands {
     Analyze(analyze::AnalyzeArgs),
     /// Make plain Cargo commands run through mbx.
     Setup(setup::SetupArgs),
+    /// Read and change settings in the global configuration file.
+    Settings(settings::SettingsArgs),
     /// Collect learned incremental state and managed targets, then evict cached objects to fit budgets.
     ///
     /// A missing cached object is rebuilt when it is needed again.
@@ -153,6 +156,7 @@ fn compiles_nothing(command: &Commands) -> Option<&'static str> {
     match command {
         Commands::Completion { .. } => Some("completion"),
         Commands::Setup(_) => Some("setup"),
+        Commands::Settings(_) => Some("settings"),
         Commands::Gc(_) => Some("gc"),
         Commands::Cache(_) => Some("cache"),
         Commands::Clean(_) => Some("clean"),
@@ -205,12 +209,20 @@ pub fn run() -> Result<ExitCode> {
         print!("{}", Cli::completion_script(shell));
         return Ok(ExitCode::SUCCESS);
     }
+    // Settings resolve the configuration themselves, so a broken file can
+    // still be read and repaired.
+    if let Commands::Settings(args) = cli.command {
+        return settings::run(args);
+    }
     let (config, settings) = Config::load_for_cli()?;
     match cli.command {
         Commands::Completion { .. } => {
             unreachable!("completion was handled before configuration loading")
         }
         Commands::Doctor(_) => unreachable!("doctor was handled before configuration loading"),
+        Commands::Settings(_) => {
+            unreachable!("settings were handled before configuration loading")
+        }
         Commands::Explain(args) => {
             shim::prepare_explicit_cargo()?;
             explain::run(&config, &settings, args, toolchain)
@@ -323,5 +335,7 @@ mod exec_tests;
 mod gc_tests;
 #[cfg(test)]
 mod prefetch_tests;
+#[cfg(test)]
+mod settings_tests;
 #[cfg(test)]
 mod setup_tests;

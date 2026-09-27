@@ -138,6 +138,7 @@ fn a_toolchain_is_refused_where_no_compiler_would_see_it() {
         (vec!["mbx", "+1.91", "stats", "--json"], "stats"),
         (vec!["mbx", "+1.91", "exec", "make"], "exec"),
         (vec!["mbx", "+1.91", "setup"], "setup"),
+        (vec!["mbx", "+1.91", "settings", "ls"], "settings"),
     ] {
         let owned = argv.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>();
         let cli = Cli::try_parse_from(&owned).unwrap();

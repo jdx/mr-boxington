@@ -73,6 +73,45 @@ setup() {
   assert_output --partial "0 B"
 }
 
+@test "settings set writes the global configuration file and unset removes it" {
+  config="$XDG_CONFIG_HOME/mbx/config.toml"
+
+  run "$MBX_BIN" settings set gc.max_size 20GiB
+  assert_success
+  assert_file_exists "$config"
+  run "$MBX_BIN" settings get gc.max_size
+  assert_success
+  assert_output "20GiB"
+  run "$MBX_BIN" settings ls gc
+  assert_success
+  assert_line 'gc.max_size = "20GiB"'
+
+  MBX_GC_MAX_SIZE=30GiB run "$MBX_BIN" settings get gc.max_size
+  assert_success
+  assert_output "30GiB"
+
+  run "$MBX_BIN" settings unset gc.max_size
+  assert_success
+  run "$MBX_BIN" settings get gc.max_size
+  assert_success
+  assert_output ""
+}
+
+@test "settings set leaves the file alone when the value does not load" {
+  run "$MBX_BIN" settings set gc.interval soon
+  assert_failure
+  assert_output --partial "invalid gc.interval"
+  assert_file_not_exists "$XDG_CONFIG_HOME/mbx/config.toml"
+
+  run "$MBX_BIN" settings set savings plain
+  assert_success
+  run "$MBX_BIN" settings set gc.max_size lots
+  assert_failure
+  assert_output --partial "was not changed"
+  run cat "$XDG_CONFIG_HOME/mbx/config.toml"
+  assert_output 'savings = "plain"'
+}
+
 @test "explain reports why compilations bypass the cache" {
   cargo init --lib --vcs none explained-project
   cd explained-project

@@ -1540,8 +1540,37 @@ fn parse_optional_duration(value: &str) -> Result<Option<Duration>> {
     parse_duration(value).map(Some)
 }
 
-fn config_file_path() -> Option<PathBuf> {
+/// The global configuration file, which `mbx settings` edits.
+pub(crate) fn config_file_path() -> Option<PathBuf> {
     dirs::config_dir().map(|dir| dir.join("mbx").join("config.toml"))
+}
+
+/// Every setting mbx declares.
+pub(crate) fn settings_registry() -> usage_config::Registry {
+    RawConfig::SETTINGS_REGISTRY
+}
+
+/// Resolve the settings from the environment and the global file, without
+/// the workspace policy.
+pub(crate) fn resolve_settings() -> Result<usage_config::Resolved> {
+    let env = EnvLayer::from_process();
+    let mut layers = Layers::new().then(&env);
+    let file = config_file_path().map(|path| FileLayer::at(path, FileScope::Global));
+    if let Some(file) = &file {
+        layers = layers.then(file);
+    }
+    Ok(usage_config::resolve(settings_registry(), layers)?)
+}
+
+/// Check that `contents` would be a valid global configuration file at `path`,
+/// ignoring the environment so a variable cannot hide a bad value.
+///
+/// `path` must exist, because the file layer treats a missing file as empty
+/// before it ever reaches the text it is handed here.
+pub(crate) fn check_global_file(path: &Path, contents: String) -> Result<()> {
+    let file = FileLayer::at(path, FileScope::Global).preprocess(move |_| Ok(contents.clone()));
+    Config::from_layers_for_cli(&EnvLayer::new(Vec::<(String, String)>::new()), Some(&file))
+        .map(|_| ())
 }
 
 fn default_cache_dir() -> Option<PathBuf> {
