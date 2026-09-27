@@ -5,7 +5,7 @@ use crate::materialize::{
     record_action_hit_with_diagnostic, record_verification, replay_bytes, resolve_executable,
     stage_verified_cached_output, staging_directory, validate_file_mode,
 };
-use crate::session::ResultRead;
+use crate::session::LookupCount;
 use crate::{session, util::workspace_root};
 use eyre::{Context, Result, bail};
 use mbx_cache_core::{
@@ -149,6 +149,8 @@ struct Compilation<'a> {
     portable: &'a Portable,
     /// Identity of the linker, for an invocation whose key must describe it.
     linker: Option<LinkerIdentity>,
+    /// This compilation's cache lookup, whichever read makes it.
+    lookups: LookupCount,
 }
 
 pub(crate) fn compile(
@@ -244,6 +246,7 @@ pub(crate) fn compile(
         working_dir: &working_dir,
         portable: &portable,
         linker: linker_for(&invocation)?,
+        lookups: LookupCount::default(),
     };
     let mut learned = reuse_hot_workspace_plan(&compilation, &outputs, learned_enabled);
     if !learned.engaged()
@@ -261,7 +264,7 @@ pub(crate) fn compile(
             &outputs,
             &discovered,
             !verify,
-            ResultRead::Lookup,
+            &compilation.lookups,
             &portable.mappings,
         ) {
             Ok(Some((action, mut cached))) => {
@@ -959,6 +962,7 @@ fn compile_execution_only_build_script(
                     working_dir,
                     portable,
                     linker: linker_for(invocation)?,
+                    lookups: LookupCount::default(),
                 };
                 Ok(
                     action_from_current_dep_info(&compilation, &outputs.dep_info)?
@@ -1681,17 +1685,14 @@ fn restore_prediction_payload(
         bail!("the action prediction no longer matches its predicted inputs");
     }
     // From this point onward, every return follows at least one action-result
-    // request, including error responses from a corrupt local record. One
-    // that already looked up, and is here after waiting on a flight, has
-    // been counted.
-    let read = ResultRead::after(*action_lookup_attempted);
+    // request, including error responses from a corrupt local record.
     *action_lookup_attempted = true;
     let restored = restore_candidates(
         &candidates,
         outputs,
         &discovered,
         restore_outputs,
-        read,
+        &compilation.lookups,
         &portable.mappings,
     )?;
     match restored {
@@ -1901,21 +1902,25 @@ fn action_diagnostic(action: &RustcAction, source: &str) -> Result<ActionDiagnos
 /// and without the second lookup it would never hit, not even in the checkout
 /// that compiled it.
 ///
-/// `read` says whether this is the compilation's lookup. Only the first key
-/// tried can be: the second is the same compilation asking again.
+/// Only the first key to reach the agent counts as the compilation's lookup:
+/// the second is the same compilation asking again.
 fn restore_candidates(
     candidates: &ActionCandidates,
     outputs: &RustcOutputs,
     discovered: &DiscoveredInputs,
     restore_outputs: bool,
-    read: ResultRead,
+    lookups: &LookupCount,
     mappings: &[PathMapping],
 ) -> Result<Option<(CacheDigest, CachedCompilation)>> {
-    for (index, action) in candidates.ordered().enumerate() {
-        let read = if index == 0 { read } else { ResultRead::Repeat };
-        if let Some(cached) =
-            restore_result(action, outputs, discovered, restore_outputs, read, mappings)?
-        {
+    for action in candidates.ordered() {
+        if let Some(cached) = restore_result(
+            action,
+            outputs,
+            discovered,
+            restore_outputs,
+            lookups,
+            mappings,
+        )? {
             return Ok(Some((action.digest.clone(), cached)));
         }
     }
@@ -2403,11 +2408,11 @@ fn restore_result(
     outputs: &RustcOutputs,
     discovered: &DiscoveredInputs,
     restore_outputs: bool,
-    read: ResultRead,
+    lookups: &LookupCount,
     mappings: &[PathMapping],
 ) -> Result<Option<CachedCompilation>> {
     let _phase = crate::phase_timing::phase("restore");
-    let responses = session::request_agent(&[read.request(action.digest.clone())])?;
+    let responses = lookups.read(action.digest.clone())?;
     let Some(response) = responses.into_iter().next() else {
         bail!("cache agent did not return an action lookup response");
     };

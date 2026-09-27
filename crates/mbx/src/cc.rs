@@ -16,7 +16,7 @@ use crate::materialize::{
     record_verification, replay_bytes, resolve_executable, stage_verified_cached_output,
     staging_directory, validate_file_mode,
 };
-use crate::session::{self, ResultRead};
+use crate::session::{self, LookupCount};
 use eyre::{Context, Result, bail};
 use mbx_cache_cc::{
     CcAction, CcActionContext, CcBypassReason, CcCompilerFamily, CcCompilerIdentity, CcDepfile,
@@ -132,7 +132,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
             &invocation,
             &discovered,
             !verify,
-            ResultRead::Lookup,
+            &lookup.count,
             &context.path_mappings,
             &context.working_dir,
         ) {
@@ -442,7 +442,7 @@ fn publish(
             invocation,
             &discovered,
             false,
-            ResultRead::Repeat,
+            &LookupCount::already_counted(),
             &context.path_mappings,
             &context.working_dir,
         );
@@ -465,6 +465,7 @@ fn publish(
 #[derive(Default)]
 struct LookupState {
     attempted: bool,
+    count: LookupCount,
     diagnostic: Option<mbx_cache_core::ActionDiagnostic>,
 }
 
@@ -516,16 +517,13 @@ fn restore_flight_prediction(
     if recorded_action.is_some_and(|recorded| recorded != &action.digest) {
         bail!("the action promise no longer matches its predicted inputs");
     }
-    // A compilation that already missed and then waited on this flight has
-    // had its lookup counted.
-    let read = ResultRead::after(lookup.attempted);
     lookup.record(&action, invocation_digest, prediction.path_specific);
     let restored = restore_result(
         &action,
         invocation,
         &discovered,
         true,
-        read,
+        &lookup.count,
         &context.path_mappings,
         &context.working_dir,
     )?;
@@ -1198,13 +1196,13 @@ fn restore_result(
     invocation: &CcInvocation,
     discovered: &CcDiscoveredInputs,
     restore_outputs: bool,
-    read: ResultRead,
+    lookups: &LookupCount,
     mappings: &[PathMapping],
     working_dir: &Path,
 ) -> Result<Option<CachedCompilation>> {
     let _phase = crate::phase_timing::phase("restore");
     let text_mappings = rustc_path_mappings(mappings);
-    let responses = session::request_agent(&[read.request(action.digest.clone())])?;
+    let responses = lookups.read(action.digest.clone())?;
     let Some(response) = responses.into_iter().next() else {
         bail!("cache agent did not return an action lookup response");
     };

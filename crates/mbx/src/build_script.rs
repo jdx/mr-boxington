@@ -278,9 +278,7 @@ fn archive_timestamp_key() -> Option<String> {
 /// a run that falls back is timed through the script it runs.
 pub(crate) fn start_timing() -> Option<crate::phase_timing::Invocation> {
     let invoked = session::build_script_invocation_path()?;
-    let package = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| cargo_package_name().into());
-    let timing =
-        crate::phase_timing::start("build-script", Some(format!("{package} build script")));
+    let timing = crate::phase_timing::start("build-script", Some(stats_label()));
     let out_dir = std::env::var_os("OUT_DIR").map(std::path::PathBuf::from);
     let (unit_id, dependencies) =
         crate::unit_graph::build_script_run_unit(out_dir.as_deref(), &invoked);
@@ -338,7 +336,7 @@ pub(crate) fn run() -> Result<ExitCode> {
         // script republishes it, where bypassing would leave it broken.
         match restore(&action, &action_bytes) {
             Ok(Some(restored)) => {
-                record_action_hit(&action, restored.stats, cargo_package_name());
+                record_action_hit(&action, restored.stats, &stats_label());
                 replay_bytes(&restored.stdout, &restored.stderr)?;
                 return Ok(ExitCode::SUCCESS);
             }
@@ -362,7 +360,7 @@ pub(crate) fn run() -> Result<ExitCode> {
         .wrap_err("failed to execute the build script")?;
     session::record_compiler_invocation(
         if looked_up { "miss" } else { "unconsulted" },
-        Some(cargo_package_name()),
+        Some(&stats_label()),
         crate::util::duration_ns(started.elapsed()),
     );
     replay_bytes(&output.stdout, &output.stderr)?;
@@ -392,10 +390,22 @@ fn record_bypass(kind: &str) {
     let _ = session::request_agent(&[AgentRequest::RecordBypass { kind: kind.into() }]);
 }
 
-fn cargo_package_name() -> &'static str {
-    // Statistics only need a stable, bounded label. The rustc convention is
-    // retained when Cargo did not provide one.
-    "build_script_build"
+/// The package Cargo is running this build script for, when it says.
+fn cargo_package_name() -> Option<String> {
+    std::env::var("CARGO_PKG_NAME")
+        .ok()
+        .filter(|name| !name.is_empty() && name.len() <= 200 && !name.chars().any(char::is_control))
+}
+
+/// The label a run is recorded under, as its timing names it: every package's
+/// build script is the crate `build_script_build`, so that alone would merge
+/// them all in the slow-compilation report. The crate name is kept when Cargo
+/// did not provide a package.
+fn stats_label() -> String {
+    cargo_package_name().map_or_else(
+        || "build_script_build".into(),
+        |package| format!("{package} build script"),
+    )
 }
 
 fn build_script_action_path(real: &Path) -> PathBuf {

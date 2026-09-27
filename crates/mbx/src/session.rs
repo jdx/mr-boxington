@@ -2206,37 +2206,43 @@ fn bypass_diagnostic(expected: bool, message: &str) -> AgentRequest {
     }
 }
 
-/// Whether a read of an action result is a compilation's lookup.
+/// One compilation's cache lookup, counted once it reaches the agent.
 ///
 /// The agent counts each lookup once, and the summary reads hits and misses
-/// against that count, so a compilation that reads the cache more than once
-/// must count only its first read.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum ResultRead {
-    /// The first read this compilation makes.
-    Lookup,
-    /// A further read for a compilation already counted: another candidate
-    /// key, the result a flight it waited on published, or a check of an
-    /// existing result after it compiled.
-    Repeat,
-}
+/// against that count. A compilation can read the cache more than once --
+/// another candidate key, the result a flight it waited on published, a
+/// check of an existing result after it compiled -- so only the first read
+/// the agent receives counts. One whose request never arrived did not count,
+/// and the next read takes its place.
+#[derive(Default)]
+pub(crate) struct LookupCount(std::cell::Cell<bool>);
 
-impl ResultRead {
-    /// `Lookup` for a compilation that has not looked anything up yet.
-    pub(crate) fn after(attempted: bool) -> Self {
-        if attempted {
-            Self::Repeat
-        } else {
-            Self::Lookup
-        }
+impl LookupCount {
+    /// For reads that follow a compilation already accounted for, which must
+    /// never count as its lookup.
+    pub(crate) fn already_counted() -> Self {
+        Self(std::cell::Cell::new(true))
     }
 
-    /// The agent request that reads `action` this way.
-    pub(crate) fn request(self, action: CacheDigest) -> AgentRequest {
-        match self {
-            Self::Lookup => AgentRequest::FindActionResult { action },
-            Self::Repeat => AgentRequest::ReadActionResult { action },
-        }
+    /// Read `action`'s result, as this compilation's lookup when none has
+    /// reached the agent yet.
+    pub(crate) fn read(&self, action: CacheDigest) -> Result<Vec<AgentResponse>> {
+        self.read_with(action, request_agent)
+    }
+
+    fn read_with(
+        &self,
+        action: CacheDigest,
+        send: impl FnOnce(&[AgentRequest]) -> Result<Vec<AgentResponse>>,
+    ) -> Result<Vec<AgentResponse>> {
+        let request = if self.0.get() {
+            AgentRequest::ReadActionResult { action }
+        } else {
+            AgentRequest::FindActionResult { action }
+        };
+        let responses = send(&[request])?;
+        self.0.set(true);
+        Ok(responses)
     }
 }
 
