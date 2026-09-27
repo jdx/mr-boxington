@@ -248,7 +248,9 @@ pub(crate) fn compile(
     // and Cargo may also retain such an artifact from an earlier build. The
     // consumer must stay private even when it compiles without incremental state.
     let private_inputs = links_private_artifact(&compilation);
-    let mut learned = if session::eager_incremental_requested() && !verify {
+    let mut learned = if !verify
+        && (session::eager_incremental_requested() || (learned_enabled && private_inputs))
+    {
         eager_incremental_plan(&compilation)
     } else {
         reuse_hot_workspace_plan(&compilation, &outputs, learned_enabled)
@@ -495,12 +497,22 @@ pub(crate) fn compile(
     if private_outputs {
         // Before the compiler starts, so that a dependent Cargo pipelines
         // behind this unit's metadata already finds the marker in place.
-        if let Some(root) = incremental_root()
-            && let Err(error) = record_private_artifacts(&root, &outputs)
-        {
-            session::report_shim_warning(&format!(
-                "private artifacts were not recorded: {error:#}"
+        let root = incremental_root();
+        let marked = root
+            .as_deref()
+            .ok_or_else(|| eyre::eyre!("no private artifact directory is available"))
+            .and_then(|root| record_private_artifacts(root, &outputs));
+        if let Err(error) = marked {
+            if let Some(root) = root.as_deref() {
+                forget_private_artifacts(root, &outputs);
+            }
+            session::report_shim_error(&format!(
+                "private artifacts could not be marked: {error:#}"
             ));
+            // An Err asks the outer shim to compile transparently. A private
+            // consumer must not take that fallback: its own dependents need
+            // these markers before Cargo sees any compiler notifications.
+            return Ok(ExitCode::FAILURE);
         }
     }
     let forwarded = session::forward_compiler_notifications_requested();
@@ -1296,7 +1308,7 @@ fn plan_learned_reuse(
     }
 }
 
-/// Builds can opt into seeding private state before any source
+/// Eager builds and consumers of private artifacts can prepare state before any source
 /// edits, including when Cargo's target directory has been discarded. Units
 /// linking private artifacts must stay private too, even outside the workspace.
 fn eager_incremental_plan(compilation: &Compilation<'_>) -> LearnedPlan {

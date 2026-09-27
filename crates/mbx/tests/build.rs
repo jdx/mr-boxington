@@ -1367,6 +1367,87 @@ fn eager_incremental_keeps_non_workspace_dependencies_shared() {
 }
 
 #[test]
+fn learned_private_dependents_reuse_state_after_the_target_is_removed() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_dependent_project(project.path());
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+    );
+    for revision in 1..=2 {
+        if revision == 2 {
+            wipe_target(project.path());
+        }
+        std::fs::write(
+            project.path().join("base/src/lib.rs"),
+            format!("pub fn value() -> u32 {{ {revision} }}\n"),
+        )
+        .unwrap();
+        let stats = build(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("edit-{revision}.json")),
+        );
+        assert_eq!(
+            compiled_incrementally(&stats),
+            2,
+            "revision {revision}: {stats}"
+        );
+        assert_eq!(stats["stored_bytes"].as_u64(), Some(0), "{stats}");
+    }
+}
+
+#[test]
+fn private_marker_failure_stops_the_build_before_compiling_unmarked_outputs() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("seed.json"),
+        &[("MBX_EAGER_INCREMENTAL", "1")],
+    );
+    wipe_target(project.path());
+    let markers = std::fs::read_dir(store.path().join("incremental"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("private"))
+        .find(|path| path.is_dir())
+        .unwrap();
+    std::fs::remove_dir_all(&markers).unwrap();
+    std::fs::write(&markers, "block marker directory creation").unwrap();
+    let output = mbx_command()
+        .current_dir(project.path())
+        .args(["build", "--offline"])
+        .env("MBX_CACHE_DIR", store.path())
+        .env("MBX_GC_AUTO", "0")
+        .env("MBX_EAGER_INCREMENTAL", "1")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "unmarked private compilation must fail: {output:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("private artifacts could not be marked"),
+        "{output:?}"
+    );
+    assert!(
+        find_files(&project.path().join("target"), |path| path
+            .extension()
+            .is_some_and(|ext| ext == "rlib" || ext == "rmeta"))
+        .is_empty()
+    );
+}
+
+#[test]
 fn verification_keeps_consumers_of_private_artifacts_out_of_the_shared_cache() {
     for verification in ["MBX_VERIFY", "MBX_VERIFY_SAMPLE_RATE"] {
         let store = tempfile::tempdir().unwrap();
