@@ -288,8 +288,23 @@ pub fn duration_ns(duration: Duration) -> u64 {
 /// fixed budget to fall back on: guessing a disk size would be worse than
 /// admitting the probe failed.
 pub fn disk_total_bytes(path: &Path) -> Option<u64> {
+    disk_space(path).map(|space| space.total)
+}
+
+/// How big the filesystem holding `path` is, and how much of it is free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DiskSpace {
+    pub total: u64,
+    /// What an unprivileged process may still write: the blocks a filesystem
+    /// reserves for root are not space a build can use.
+    pub available: u64,
+}
+
+/// [`disk_total_bytes`] and the free space beside it, from one probe of the
+/// nearest existing ancestor.
+pub(crate) fn disk_space(path: &Path) -> Option<DiskSpace> {
     let existing = path.ancestors().find(|ancestor| ancestor.exists())?;
-    disk_total_bytes_at(existing)
+    disk_space_at(existing)
 }
 
 /// Apple's `statvfs` counts blocks in a 32-bit field, which wraps somewhere
@@ -297,7 +312,7 @@ pub fn disk_total_bytes(path: &Path) -> Option<u64> {
 /// quietly sizing a budget from a fraction of a large volume. `statfs` is the
 /// native call there and counts in 64 bits.
 #[cfg(all(unix, target_vendor = "apple"))]
-fn disk_total_bytes_at(path: &Path) -> Option<u64> {
+fn disk_space_at(path: &Path) -> Option<DiskSpace> {
     use std::os::unix::ffi::OsStrExt as _;
 
     let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
@@ -310,14 +325,19 @@ fn disk_total_bytes_at(path: &Path) -> Option<u64> {
         }
         stats
     };
+    let block_size = u64::from(stats.f_bsize);
     // A zero product falls back rather than claiming an empty disk.
-    u64::from(stats.f_bsize)
+    let total = block_size
         .checked_mul(stats.f_blocks)
-        .filter(|total| *total > 0)
+        .filter(|total| *total > 0)?;
+    Some(DiskSpace {
+        total,
+        available: block_size.saturating_mul(stats.f_bavail),
+    })
 }
 
 #[cfg(all(unix, not(target_vendor = "apple")))]
-fn disk_total_bytes_at(path: &Path) -> Option<u64> {
+fn disk_space_at(path: &Path) -> Option<DiskSpace> {
     use std::os::unix::ffi::OsStrExt as _;
 
     let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
@@ -330,42 +350,49 @@ fn disk_total_bytes_at(path: &Path) -> Option<u64> {
         }
         stats
     };
-    // `f_frsize` is the fundamental block size `f_blocks` counts in. It is
-    // reported as 0 by some filesystems, which would silently answer "0 bytes",
-    // so a zero product falls back rather than claiming an empty disk.
+    // `f_frsize` is the fundamental block size `f_blocks` and `f_bavail` count
+    // in. It is reported as 0 by some filesystems, which would silently answer
+    // "0 bytes", so a zero product falls back rather than claiming an empty disk.
     //
-    // Both fields are already `u64` on 64-bit glibc, where these conversions do
+    // The fields are already `u64` on 64-bit glibc, where these conversions do
     // nothing, but they narrow on 32-bit targets -- the conversions are what let
     // one body compile everywhere CI builds it.
     #[allow(clippy::useless_conversion)]
     let block_size = u64::try_from(stats.f_frsize).ok()?;
     #[allow(clippy::useless_conversion)]
     let blocks = u64::try_from(stats.f_blocks).ok()?;
-    block_size.checked_mul(blocks).filter(|total| *total > 0)
+    #[allow(clippy::useless_conversion)]
+    let available = u64::try_from(stats.f_bavail).ok()?;
+    let total = block_size.checked_mul(blocks).filter(|total| *total > 0)?;
+    Some(DiskSpace {
+        total,
+        available: block_size.saturating_mul(available),
+    })
 }
 
 #[cfg(windows)]
-fn disk_total_bytes_at(path: &Path) -> Option<u64> {
+fn disk_space_at(path: &Path) -> Option<DiskSpace> {
     use std::os::windows::ffi::OsStrExt as _;
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
     let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
     wide.push(0);
+    let mut available = 0_u64;
     let mut total = 0_u64;
     // SAFETY: `wide` is NUL-terminated and outlives the call, and the out
     // parameters are either null (ignored by the API) or a valid `u64`.
     let ok = unsafe {
         GetDiskFreeSpaceExW(
             wide.as_ptr(),
-            std::ptr::null_mut(),
+            &mut available,
             &mut total,
             std::ptr::null_mut(),
         )
     };
-    if ok == 0 {
+    if ok == 0 || total == 0 {
         None
     } else {
-        Some(total).filter(|total| *total > 0)
+        Some(DiskSpace { total, available })
     }
 }
 

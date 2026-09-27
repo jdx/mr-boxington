@@ -716,6 +716,9 @@ pub(super) fn first_run_notice(
         if let Some(bytes) = retention.target_max_bytes {
             reasons.push(format!("over {} total", ByteSize::b(bytes).display().iec()));
         }
+        if retention.min_free.is_some() {
+            reasons.push("the disk runs low".to_string());
+        }
         lines.push(format!(
             "mbx[setup]:   target/ is managed: deleted when {}",
             join_clauses(&reasons),
