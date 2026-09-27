@@ -1896,8 +1896,8 @@ fn evicts_objects_no_live_checkout_needs_before_older_rooted_ones() {
     // were written moments ago; `dropped` has to be older than those by more
     // than a slow runner takes to get here, or they go first and satisfy the
     // budget without it.
-    age(&store, &kept, Duration::from_secs(60 * 60));
-    age(&store, &dropped, Duration::from_secs(30 * 60));
+    age(&store, &kept, Duration::from_secs(2 * 60 * 60));
+    age(&store, &dropped, Duration::from_secs(60 * 60));
     std::fs::remove_dir_all(&deleted).unwrap();
 
     gc(&store, stats(&store).unwrap().total_bytes() - 10).unwrap();
