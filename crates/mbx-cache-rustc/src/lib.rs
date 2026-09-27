@@ -387,6 +387,11 @@ enum LinkOutput {
     WasmExecutable,
     NativeExecutable,
     NativeProcMacro,
+    /// A `cdylib` linked for the host. Admitted on Linux only: an ELF shared
+    /// object names neither its own path nor an import library beside it,
+    /// where a Mach-O dylib records its output path as its install name and
+    /// a Windows DLL leaves an import library and export file next to it.
+    NativeSharedLibrary,
 }
 
 /// What the caller is prepared to model beyond the default tier.
@@ -469,7 +474,9 @@ impl RustcInvocation {
     pub fn links_natively(&self) -> bool {
         matches!(
             self.link_output,
-            LinkOutput::NativeExecutable | LinkOutput::NativeProcMacro
+            LinkOutput::NativeExecutable
+                | LinkOutput::NativeProcMacro
+                | LinkOutput::NativeSharedLibrary
         )
     }
 
@@ -683,7 +690,7 @@ impl RustcInvocation {
                     LinkOutput::Library => ("lib", "rlib"),
                     LinkOutput::WasmExecutable => ("", "wasm"),
                     LinkOutput::NativeExecutable => ("", std::env::consts::EXE_EXTENSION),
-                    LinkOutput::NativeProcMacro => (
+                    LinkOutput::NativeProcMacro | LinkOutput::NativeSharedLibrary => (
                         std::env::consts::DLL_PREFIX,
                         std::env::consts::DLL_SUFFIX.trim_start_matches('.'),
                     ),
@@ -1895,6 +1902,8 @@ impl<'a> Parser<'a> {
             self.check_native_link_is_portable()?;
             if matches!(self.crate_types.as_slice(), [kind] if kind == "proc-macro") {
                 LinkOutput::NativeProcMacro
+            } else if matches!(self.crate_types.as_slice(), [kind] if kind == "cdylib") {
+                LinkOutput::NativeSharedLibrary
             } else {
                 LinkOutput::NativeExecutable
             }
@@ -1945,7 +1954,10 @@ impl<'a> Parser<'a> {
             Some(selection.as_str())
         }) && !matches!(
             link_output,
-            LinkOutput::Library | LinkOutput::NativeExecutable | LinkOutput::NativeProcMacro
+            LinkOutput::Library
+                | LinkOutput::NativeExecutable
+                | LinkOutput::NativeProcMacro
+                | LinkOutput::NativeSharedLibrary
         ) {
             return Err(BypassReason::UnmodeledLinkArgument(format!(
                 "link-arg=-fuse-ld={selection}"
@@ -1955,7 +1967,9 @@ impl<'a> Parser<'a> {
             matches!(argument, Argument::Plain(value) if value.starts_with("--codegen=linker="))
         }) && !matches!(
             link_output,
-            LinkOutput::NativeExecutable | LinkOutput::NativeProcMacro
+            LinkOutput::NativeExecutable
+                | LinkOutput::NativeProcMacro
+                | LinkOutput::NativeSharedLibrary
         ) {
             return Err(BypassReason::UnknownCodegenOption("linker".into()));
         }
@@ -1964,7 +1978,10 @@ impl<'a> Parser<'a> {
         // adapter cannot vouch for, exactly like the arguments above.
         if !matches!(
             link_output,
-            LinkOutput::Library | LinkOutput::NativeExecutable | LinkOutput::NativeProcMacro
+            LinkOutput::Library
+                | LinkOutput::NativeExecutable
+                | LinkOutput::NativeProcMacro
+                | LinkOutput::NativeSharedLibrary
         ) && self
             .parsed
             .iter()
@@ -2059,7 +2076,9 @@ impl Parser<'_> {
             // for a linker identity and refusing flags no linker ever saw.
             && self.emits.iter().any(|emit| emit.kind == "link")
             && ((self.test && self.crate_types.is_empty())
-                || matches!(self.crate_types.as_slice(), [kind] if matches!(kind.as_str(), "bin" | "proc-macro")))
+                || matches!(self.crate_types.as_slice(), [kind] if matches!(kind.as_str(), "bin" | "proc-macro"))
+                || (cfg!(target_os = "linux")
+                    && matches!(self.crate_types.as_slice(), [kind] if kind == "cdylib")))
     }
 
     /// Reject a native link whose result depends on something the key cannot

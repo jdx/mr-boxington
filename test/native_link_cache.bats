@@ -289,3 +289,56 @@ TOML
     assert_output '42'
   done
 }
+
+@test "Linux cdylibs restore across checkouts and still load" {
+  [[ "$(uname -s)" == Linux ]] || skip "only ELF shared objects are cached"
+  command -v python3 >/dev/null || skip "python3 loads the library"
+  local first="$BATS_TEST_TMPDIR/ffi-a" second="$BATS_TEST_TMPDIR/ffi-b"
+  mkdir -p "$first/src"
+  cat >"$first/Cargo.toml" <<'TOML'
+[package]
+name = "ffi-fixture"
+version = "0.1.0"
+edition = "2021"
+[lib]
+crate-type = ["cdylib"]
+TOML
+  cat >"$first/src/lib.rs" <<'RUST'
+#[no_mangle]
+pub extern "C" fn double(value: u32) -> u32 {
+    value * 2
+}
+RUST
+  cp -R "$first" "$second"
+  # Debug info names the checkout, as it does for every other unit; the remap
+  # is what lets the two checkouts' libraries be compared byte for byte.
+  cd "$first"
+  run env RUSTFLAGS="--remap-path-prefix=$first=/workspace" "$MBX_BIN" build --offline
+  assert_success
+  cd "$second"
+  local report="$BATS_TEST_TMPDIR/ffi-verify.json"
+  run env MBX_VERIFY=1 MBX_STATS_REPORT="$report" RUSTFLAGS="--remap-path-prefix=$second=/workspace" "$MBX_BIN" build --offline
+  assert_success
+  refute_output --partial 'has different contents'
+  run grep -E '"verifications"[[:space:]]*:[[:space:]]*1' "$report"
+  assert_success
+  run grep -E '"divergences"[[:space:]]*:[[:space:]]*0' "$report"
+  assert_success
+  run grep -E '"misses"[[:space:]]*:[[:space:]]*0' "$report"
+  assert_success
+  run grep -E '"unsupported-crate-type"' "$report"
+  assert_failure
+  # Verification compiled the library itself. A fresh target directory makes
+  # the next build restore it, which is the file the checks below read.
+  local restored="$BATS_TEST_TMPDIR/ffi-restored"
+  local restore="$BATS_TEST_TMPDIR/ffi-restore.json"
+  run env CARGO_TARGET_DIR="$restored" MBX_STATS_REPORT="$restore" RUSTFLAGS="--remap-path-prefix=$second=/workspace" "$MBX_BIN" build --offline
+  assert_success
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*1' "$restore"
+  assert_success
+  run cmp "$first/target/debug/libffi_fixture.so" "$restored/debug/libffi_fixture.so"
+  assert_success
+  run python3 -c 'import ctypes, sys; print(ctypes.CDLL(sys.argv[1]).double(21))' "$restored/debug/libffi_fixture.so"
+  assert_success
+  assert_output 42
+}

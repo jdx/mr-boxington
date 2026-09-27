@@ -2258,6 +2258,54 @@ fn linked_proc_macro_uses_the_native_link_tier() {
     );
 }
 
+/// An ELF shared object records neither its own path nor a second file beside
+/// it, so a host `cdylib` on Linux caches like a proc macro. A Mach-O dylib
+/// names its output path as its install name and a Windows DLL leaves an
+/// import library behind, so elsewhere it still bypasses.
+#[test]
+fn linked_cdylib_uses_the_native_link_tier_on_linux() {
+    let arguments = args(&[
+        "--crate-name=widget",
+        "--crate-type=cdylib",
+        "--emit=dep-info,link",
+        "--out-dir=target/debug/deps",
+        "src/lib.rs",
+    ]);
+    let parsed = RustcInvocation::parse_with(&arguments, native_links());
+    if !cfg!(target_os = "linux") {
+        assert_eq!(
+            parsed,
+            Err(BypassReason::UnsupportedCrateType("cdylib".into()))
+        );
+        return;
+    }
+    let invocation = parsed.unwrap();
+    assert!(invocation.links_natively());
+    assert_eq!(
+        invocation.outputs(&absolute(&["workspace"])).unwrap().files,
+        [absolute(&[
+            "workspace",
+            "target",
+            "debug",
+            "deps",
+            "libwidget.so"
+        ])]
+    );
+    // A cross-compiled cdylib is linked by a toolchain the linker identity
+    // does not describe.
+    let mut cross = arguments.clone();
+    cross.insert(0, "--target=aarch64-unknown-linux-gnu".into());
+    assert_eq!(
+        RustcInvocation::parse_with(&cross, native_links()),
+        Err(BypassReason::UnsupportedCrateType("cdylib".into()))
+    );
+    // Only when the caller can describe the linker.
+    assert_eq!(
+        RustcInvocation::parse(&arguments),
+        Err(BypassReason::UnsupportedCrateType("cdylib".into()))
+    );
+}
+
 #[test]
 fn proc_macro_prefer_dynamic_is_pinned_by_the_compiler_identity() {
     let invocation = RustcInvocation::parse_with(

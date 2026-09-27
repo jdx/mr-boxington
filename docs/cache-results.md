@@ -139,8 +139,9 @@ cache. Set `MBX_SUMMARY=full` when the one-line counts need a breakdown.
 
 A link mbx cannot describe always runs, so its downstream crates may have work
 to do on an otherwise warm build. Native executables, tests, and proc macros on
-Linux, macOS, and Windows, plus binaries, tests, and `cdylib`s for supported
-self-contained WebAssembly targets, may be restored as hits; see
+Linux, macOS, and Windows, host `cdylib`s on Linux, and binaries, tests, and
+`cdylib`s for supported self-contained WebAssembly targets may be restored as
+hits; see
 [limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
 
 ## Troubleshooting a low hit rate

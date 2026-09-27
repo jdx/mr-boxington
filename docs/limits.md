@@ -95,6 +95,10 @@ selected VC and Universal CRT libraries. Two hosts that differ in any of those
 produce different keys and miss. `cache_links` (`MBX_CACHE_LINKS=0`) turns it
 off.
 
+A host `cdylib` is cached the same way on Linux. On macOS a `cdylib` records
+its own output path as its install name, and on Windows it leaves an import
+library beside the DLL, so it bypasses there.
+
 Some hosts cannot be described. mbx asks the driver to place a startup object
 and a libc; a host where neither resolves gets no linker identity and no cached
 links, because two hosts failing the same probe would otherwise agree on a key
