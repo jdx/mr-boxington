@@ -158,6 +158,15 @@ Action-store and per-session remote-download budget.
 
 Combined action-store, managed-target, and learned-incremental budget, or "none".
 
+### `gc.min_free_size`
+
+- **Type:** `option<string>`
+- **Optional:** true
+- **Default:** 10% of each disk, from 5GiB to 50GiB
+- **Set with:** `MBX_GC_MIN_FREE_SIZE`
+
+Free space to keep on the disks holding the cache and managed targets, or "none". Below it, sweeps run more often and collect learned incremental state and managed targets past their budgets.
+
 ### `http.download_timeout`
 
 - **Type:** `duration`

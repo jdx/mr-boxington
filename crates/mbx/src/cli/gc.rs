@@ -8,6 +8,7 @@ use bytesize::ByteSize;
 use eyre::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 /// Where the collector a build started leaves what it freed, for the next
 /// build to say. Claimed by rename, so two builds finishing together cannot
@@ -24,6 +25,12 @@ const SWEEP_LOG: &str = "gc/v1/sweep.log";
 /// half; an automatic collector that finds it held has nothing left to do, and
 /// an explicit `mbx gc` waits its turn.
 const COLLECTOR_LOCK: &str = "gc/v1/collector.lock";
+
+/// The longest a build waits between sweeps while a disk is short of
+/// `gc.min_free_size`. Several builds at once can fill a disk well inside the
+/// usual hour, and a sweep that finds nothing left to free costs a walk in a
+/// detached process, not time on a build.
+pub(super) const LOW_DISK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(usage::Args)]
 pub(super) struct GcArgs {
@@ -55,12 +62,14 @@ pub(super) fn run(
     if !dry_run {
         collector.lock()?;
     }
+    let mut low_disk = None;
+    let incremental_limit = incremental_limit(config, retention, max_bytes, &mut low_disk);
     // The collector below remains the authority for store errors. Estimating
     // a combined budget must not prevent independent target collection when
     // the action store is damaged.
     let incremental = match crate::incremental::collect(
         &config.cache_dir.join("incremental"),
-        incremental_budget(retention, max_bytes),
+        incremental_limit,
         retention.incremental_max_age,
         dry_run,
     ) {
@@ -82,8 +91,7 @@ pub(super) fn run(
     // their own when evicted.
     let generated = collect_generated(
         config,
-        incremental_budget(retention, max_bytes)
-            .map(|budget| budget.saturating_sub(incremental.remaining_bytes)),
+        incremental_limit.map(|budget| budget.saturating_sub(incremental.remaining_bytes)),
         retention.target_max_age,
         dry_run,
     );
@@ -92,7 +100,18 @@ pub(super) fn run(
     let reserved_bytes = incremental
         .remaining_bytes
         .saturating_add(generated.remaining_bytes);
-    let target_budget = target_budget(retention, max_bytes, reserved_bytes);
+    let target_budget = target_limit(config, retention, max_bytes, reserved_bytes, &mut low_disk);
+    // First, ahead of the removals it explains, all of which print below.
+    if let Some(disk) = &low_disk
+        && !json
+    {
+        println!("{}", disk.describe(dry_run));
+        if dry_run {
+            println!(
+                "a real run measures the disk again after each step, so it may remove fewer target directories"
+            );
+        }
+    }
     let pruned = target::collect_by(
         &config.target.root,
         target_budget,
@@ -148,6 +167,9 @@ pub(super) fn run(
             if !json {
                 print_incremental_removals(&incremental, dry_run);
                 print_generated_removals(&generated, dry_run);
+            }
+            if !dry_run {
+                warn_if_still_low(config, retention);
             }
             return Err(error);
         }
@@ -213,6 +235,9 @@ pub(super) fn run(
         for line in target_removals(&pruned, dry_run) {
             println!("{line}");
         }
+    }
+    if !dry_run {
+        warn_if_still_low(config, retention);
     }
     Ok(())
 }
@@ -408,7 +433,7 @@ pub(super) fn sweep_store(config: &Config, retention: &RetentionSettings) -> Swe
     if !config.gc.auto {
         return sweep;
     }
-    match store::claim_sweep(&config.store_dir(), config.gc.interval) {
+    match store::claim_sweep(&config.store_dir(), sweep_interval(config, retention)) {
         Ok(false) => {}
         Ok(true) => {
             start_sweep_log(&config.store_dir());
@@ -434,6 +459,7 @@ pub(super) fn sweep_store(config: &Config, retention: &RetentionSettings) -> Swe
                 Ok(outcome) => outcome,
                 Err(error) => {
                     log::warn!("the store was not swept: {error}");
+                    warn_if_still_low(config, retention);
                     return sweep;
                 }
             };
@@ -441,12 +467,16 @@ pub(super) fn sweep_store(config: &Config, retention: &RetentionSettings) -> Swe
             if outcome.removed_bytes > 0 {
                 sweep.lines.push(evictions(&outcome));
             }
+            // After the store's own sweep, which can free space on the cache
+            // disk too.
+            warn_if_still_low(config, retention);
         }
         Err(error) => {
             log::warn!("the store was not swept: {error}");
             let pruned = prune_targets(config, retention, config.gc.max_bytes);
             sweep.delta.freed_target_bytes = pruned.freed_bytes;
             sweep.lines.extend(pruned.removals);
+            warn_if_still_low(config, retention);
         }
     }
     sweep
@@ -484,7 +514,7 @@ pub(super) fn schedule_sweep(config: &Config, retention: &RetentionSettings) {
         return;
     }
     let store = config.store_dir();
-    if !store::sweep_is_due(&store, config.gc.interval) {
+    if !store::sweep_is_due(&store, sweep_interval(config, retention)) {
         return;
     }
     if let Err(error) = spawn_collector(config) {
@@ -635,9 +665,9 @@ pub(super) struct PruneReport {
     /// `None` when collection failed, so a caller sizing a combined budget
     /// knows to measure rather than assume.
     remaining_bytes: Option<u64>,
-    freed_bytes: u64,
+    pub(super) freed_bytes: u64,
     /// The lines describing removed target directories and units.
-    removals: Vec<String>,
+    pub(super) removals: Vec<String>,
 }
 
 /// Collect target views as the other half of a due automatic sweep.
@@ -649,9 +679,11 @@ pub(super) fn prune_targets(
     // A target directory whose checkout is gone is the largest thing
     // collection ever frees, and walking for it on every build would be the
     // slowest, so callers keep this inside the store sweep's throttle.
+    let mut low_disk = None;
+    let incremental_limit = incremental_limit(config, retention, store_reserve, &mut low_disk);
     let incremental = crate::incremental::collect(
         &config.cache_dir.join("incremental"),
-        incremental_budget(retention, store_reserve),
+        incremental_limit,
         retention.incremental_max_age,
         false,
     );
@@ -666,8 +698,7 @@ pub(super) fn prune_targets(
     };
     let generated = collect_generated(
         config,
-        incremental_budget(retention, store_reserve)
-            .map(|budget| budget.saturating_sub(incremental_remaining)),
+        incremental_limit.map(|budget| budget.saturating_sub(incremental_remaining)),
         retention.target_max_age,
         false,
     );
@@ -679,8 +710,14 @@ pub(super) fn prune_targets(
     }
     let incremental_bytes = incremental_bytes.saturating_add(generated.removed_bytes);
     let incremental_remaining = incremental_remaining.saturating_add(generated.remaining_bytes);
-    let target_budget = target_budget(retention, store_reserve, incremental_remaining);
-    match target::collect_by(
+    let target_budget = target_limit(
+        config,
+        retention,
+        store_reserve,
+        incremental_remaining,
+        &mut low_disk,
+    );
+    let mut report = match target::collect_by(
         &config.target.root,
         target_budget,
         retention.target_max_age,
@@ -708,6 +745,154 @@ pub(super) fn prune_targets(
                 removals: Vec::new(),
             }
         }
+    };
+    // Said only beside something it explains: a disk nothing here can relieve
+    // would otherwise repeat the same line after every low-disk sweep.
+    if let Some(disk) = low_disk
+        && report.freed_bytes > 0
+    {
+        report.removals.insert(0, disk.describe(false));
+    }
+    report
+}
+
+/// A disk found with less free space than `gc.min_free_size` asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LowDisk {
+    path: PathBuf,
+    available: u64,
+    min_free: u64,
+}
+
+impl LowDisk {
+    pub(super) fn shortfall(&self) -> u64 {
+        self.min_free.saturating_sub(self.available)
+    }
+
+    pub(super) fn describe(&self, dry_run: bool) -> String {
+        let verb = if dry_run {
+            "would collect"
+        } else {
+            "collecting"
+        };
+        format!(
+            "{} free on the disk holding {}, under the {} minimum; {verb} learned incremental state and managed targets past their budgets",
+            ByteSize::b(self.available).display().iec(),
+            self.path.display(),
+            ByteSize::b(self.min_free).display().iec(),
+        )
+    }
+}
+
+/// The disk holding `path`, when it is short of the configured free space.
+///
+/// `None` also when there is no minimum or the disk cannot be measured: a
+/// probe that fails is no reason to delete anything.
+pub(super) fn low_disk(retention: &RetentionSettings, path: &Path) -> Option<LowDisk> {
+    let min_free = retention.min_free?;
+    let space = crate::util::disk_space(path)?;
+    let disk = LowDisk {
+        path: path.to_path_buf(),
+        available: space.available,
+        min_free: min_free.bytes(space.total),
+    };
+    (disk.shortfall() > 0).then_some(disk)
+}
+
+/// How long sweeps wait for one another: `gc.interval`, or less while a disk
+/// the sweep could relieve is short of space.
+pub(super) fn sweep_interval(config: &Config, retention: &RetentionSettings) -> Duration {
+    let low = low_disk(retention, &config.cache_dir).is_some()
+        || (config.target.views && low_disk(retention, &config.target.root).is_some());
+    if low {
+        config.gc.interval.min(LOW_DISK_INTERVAL)
+    } else {
+        config.gc.interval
+    }
+}
+
+/// A budget lowered far enough that collecting `usage` down to it frees
+/// `shortfall`. Only ever lower than the budget it was given.
+pub(super) fn relieve(budget: Option<u64>, usage: u64, shortfall: u64) -> Option<u64> {
+    if shortfall == 0 {
+        return budget;
+    }
+    let relieved = usage.saturating_sub(shortfall);
+    Some(budget.map_or(relieved, |budget| budget.min(relieved)))
+}
+
+/// The budget learned incremental state and generated source trees are
+/// collected to, lowered while the cache disk is short of space.
+///
+/// Per-checkout state goes first because it is private: a checkout that loses
+/// it recompiles its own crates, while every checkout reads the shared store.
+fn incremental_limit(
+    config: &Config,
+    retention: &RetentionSettings,
+    store_reserve: u64,
+    low: &mut Option<LowDisk>,
+) -> Option<u64> {
+    let budget = incremental_budget(retention, store_reserve);
+    let Some(disk) = low_disk(retention, &config.cache_dir) else {
+        return budget;
+    };
+    // Measured only on a short disk: a walk ordinary sweeps do not pay for.
+    let usage = crate::incremental::stats(&config.cache_dir.join("incremental"))
+        .map_or(0, |stats| stats.bytes)
+        .saturating_add(
+            crate::out_dir::stats(&config.cache_dir.join(crate::out_dir::ROOT))
+                .map_or(0, |stats| stats.remaining_bytes),
+        );
+    let limit = relieve(budget, usage, disk.shortfall());
+    low.get_or_insert(disk);
+    limit
+}
+
+/// The managed-target budget, lowered while the target disk is short of
+/// space after the collections before it.
+///
+/// Measured again rather than carried over: the targets may be on another
+/// disk, and on the same one, what learned incremental state gave back already
+/// shows. A dry run's disk shows nothing freed, and what the steps before
+/// would free is not credited either: removing a reflinked copy frees less
+/// than its logical size, by an amount nothing short of removing it can tell.
+/// The preview is the most a real run could remove.
+fn target_limit(
+    config: &Config,
+    retention: &RetentionSettings,
+    store_reserve: u64,
+    incremental_reserve: u64,
+    low: &mut Option<LowDisk>,
+) -> Option<u64> {
+    let budget = target_budget(retention, store_reserve, incremental_reserve);
+    let Some(disk) = low_disk(retention, &config.target.root) else {
+        return budget;
+    };
+    let usage = target::stats(&config.target.root).map_or(0, |stats| stats.bytes);
+    let limit = relieve(budget, usage, disk.shortfall());
+    low.get_or_insert(disk);
+    limit
+}
+
+/// Say when collection could not bring a disk back above its minimum.
+///
+/// The shared store keeps its own budget and the most recently used target
+/// directory is never collected, so a disk filled by something else stays
+/// short, and only the person who owns it can decide what to remove.
+fn warn_if_still_low(config: &Config, retention: &RetentionSettings) {
+    let cache = low_disk(retention, &config.cache_dir);
+    // The target root is its own disk only when it is not the cache's, and
+    // then it can be short on its own account.
+    let target = (!crate::util::same_disk(&config.cache_dir, &config.target.root))
+        .then(|| low_disk(retention, &config.target.root))
+        .flatten();
+    for disk in cache.into_iter().chain(target) {
+        log::warn!(
+            "the disk holding {} still has {} free after collection, under the {} minimum; the shared cache keeps its gc.max_size budget",
+            disk.path.display(),
+            ByteSize::b(disk.available).display().iec(),
+            ByteSize::b(disk.min_free).display().iec(),
+        );
     }
 }
 

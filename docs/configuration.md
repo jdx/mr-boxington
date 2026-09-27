@@ -99,9 +99,14 @@ learned incremental state are also collected after 30 days unused. The table in
 [managed target directories](/managed-targets#budgets-scale-with-the-disk)
 lists the bounds and what collection removes.
 
+`gc.min_free_size` also scales: when less than 10% of a disk is free (bounded
+from 5 GiB to 50 GiB), collection runs sooner and removes learned incremental
+state and managed targets past their budgets. See
+[when the disk runs low](/managed-targets#when-the-disk-runs-low).
+
 Setting an explicit budget overrides the scaling; `"none"` disables
 `target.max_size`, `target.max_age`, `gc.incremental_max_size`,
-`gc.incremental_max_age`, and `gc.max_total_size`.
+`gc.incremental_max_age`, `gc.max_total_size`, and `gc.min_free_size`.
 
 ## Example
 
@@ -141,6 +146,7 @@ max_size = "20GiB"       # default: 5% of the cache disk
 incremental_max_size = "20GiB" # default: 5% of the cache disk
 incremental_max_age = "30d"    # default
 max_total_size = "50GiB" # optional action + target + incremental budget
+min_free_size = "20GiB"  # default: 10% of each disk
 interval = "1h"
 
 [target]

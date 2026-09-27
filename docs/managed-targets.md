@@ -195,6 +195,7 @@ A target directory is removed when any of these is true:
   recently used go first. The most recently used directory is never collected
   for being over budget; if the budget cannot be met without it, mbx says so
   and keeps it.
+- The disk is low on space. See [When the disk runs low](#when-the-disk-runs-low).
 
 Cached compilations shared with a live checkout remain protected throughout.
 [Keep or evict specific checkouts](#keep-or-evict-specific-checkouts) changes
@@ -268,6 +269,40 @@ on. Kept targets count toward `target.max_size`, so the other checkouts' targets
 make room for them. The environment variables take comma-separated lists:
 `MBX_TARGET_EVICT_FIRST=.claude/worktrees,scratch`.
 
+### When the disk runs low
+
+The budgets above are shares of the disk's size, so they hold even when
+something else fills the disk. `gc.min_free_size` sets how much free space mbx
+tries to keep: by default 10% of the disk, from 5 GiB to 50 GiB. The cache disk
+and a custom `target.root` volume are each measured against their own size.
+
+While a disk has less free space than that, collection runs after a build as
+often as every 5 minutes instead of once per `gc.interval`, and it frees the
+shortfall from per-checkout state regardless of the budgets:
+
+1. Learned incremental state and generated source trees, least recently used
+   first.
+2. Managed target directories, least recently used first, with
+   `target.evict_first` checkouts ahead of the rest and `target.keep` checkouts
+   left alone.
+
+The most recently used target directory, and anything a running build is
+using, is kept as usual. The action store stays at `gc.max_size`, because every
+checkout rebuilds from it. If collection cannot free enough, mbx logs a warning
+and leaves the rest to you. The next build reports what was removed and why:
+
+```text
+mbx[gc]: 3.1 GiB free on the disk holding /home/me/.cache/mbx, under the 25.0 GiB minimum; collecting learned incremental state and managed targets past their budgets
+mbx[gc]: removed 4 target directories (18.2 GiB logical, 0 abandoned and 4 live); 6.0 GiB logical remain
+```
+
+Restored outputs that share blocks with the cache through reflinks free less
+disk than their logical size, so collection measures the disk again before
+each step rather than trusting the logical total. Set `gc.min_free_size` to a
+size such as `"20GiB"`, or to `"none"` to collect by the budgets alone.
+`mbx gc --dry-run` shows the most a low disk could remove: it cannot measure
+what each step would free, so a real run may remove fewer target directories.
+
 ### Changing or disabling the limits
 
 ```toml
@@ -280,10 +315,12 @@ max_age = "none"   # keep live checkouts' outputs indefinitely
 max_total_size = "50GiB"
 incremental_max_size = "20GiB"
 incremental_max_age = "30d"
+min_free_size = "20GiB"
 ```
 
 `"none"` turns off `target.max_size`, `target.max_age`,
-`gc.incremental_max_size`, `gc.incremental_max_age`, or `gc.max_total_size`.
+`gc.incremental_max_size`, `gc.incremental_max_age`, `gc.max_total_size`, or
+`gc.min_free_size`.
 Invalid sizes and durations are errors, so a typo cannot disable collection.
 `gc.max_size` does not accept `"none"`; the action store is always bounded. To
 stop creating managed targets, see

@@ -80,6 +80,18 @@ const INCREMENTAL_BUDGET: ScaledBudget = ScaledBudget {
     fallback: 20 * GIB,
 };
 
+/// How much free space a sweep keeps on the disks it collects, unless
+/// configured: a tenth of a small disk, but never so much of a large one that
+/// hundreds of gigabytes of free space would still count as running out.
+const MIN_FREE: ScaledBudget = ScaledBudget {
+    percent: 10,
+    floor: 5 * GIB,
+    ceiling: 50 * GIB,
+    // Never consulted: the threshold is only resolved against a disk that was
+    // just measured, and a disk that cannot be measured cannot be short either.
+    fallback: 5 * GIB,
+};
+
 impl ScaledBudget {
     fn resolve(self, disk_total_bytes: Option<u64>) -> u64 {
         let Some(total) = disk_total_bytes.filter(|total| *total > 0) else {
@@ -429,6 +441,14 @@ struct RawGc {
     /// Collect learned incremental state unused this long, or "none".
     #[usage(env = "MBX_GC_INCREMENTAL_MAX_AGE", default = "30d", ty = "duration")]
     incremental_max_age: String,
+    /// Free space to keep on the disks holding the cache and managed targets,
+    /// or "none". Below it, sweeps run more often and collect learned
+    /// incremental state and managed targets past their budgets.
+    #[usage(
+        env = "MBX_GC_MIN_FREE_SIZE",
+        default_note = "10% of each disk, from 5GiB to 50GiB"
+    )]
+    min_free_size: Option<String>,
     /// Minimum interval between automatic sweeps.
     #[usage(env = "MBX_GC_INTERVAL", default = "1h", ty = "duration")]
     interval: String,
@@ -737,6 +757,27 @@ pub(crate) struct RetentionSettings {
     pub max_total_bytes: Option<u64>,
     /// Checkouts whose targets `target.keep` and `target.evict_first` set apart.
     pub target_precedence: crate::target::Precedence,
+    /// Free space below which a sweep collects past the budgets above;
+    /// `None` never does.
+    pub min_free: Option<MinFree>,
+}
+
+/// The free space `gc.min_free_size` asks a sweep to keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MinFree {
+    /// A share of whichever disk is being measured. The cache and managed
+    /// targets can be on different disks, so this is resolved per disk.
+    ShareOfDisk,
+    Bytes(u64),
+}
+
+impl MinFree {
+    pub(crate) fn bytes(self, disk_total_bytes: u64) -> u64 {
+        match self {
+            Self::ShareOfDisk => MIN_FREE.resolve(Some(disk_total_bytes)),
+            Self::Bytes(bytes) => bytes,
+        }
+    }
 }
 
 /// Settings only the command line consumes.
@@ -882,6 +923,9 @@ impl Default for RetentionSettings {
             incremental_max_age: Some(DEFAULT_TARGET_MAX_AGE),
             max_total_bytes: None,
             target_precedence: crate::target::Precedence::default(),
+            // Off, unlike the configured default: whether a disk is short
+            // depends on the machine a test happens to run on.
+            min_free: None,
         }
     }
 }
@@ -1054,6 +1098,12 @@ impl Config {
                     .wrap_err("invalid target.keep")?,
                 evict_first: checkout_patterns(raw.target.evict_first.as_deref(), dirs::home_dir())
                     .wrap_err("invalid target.evict_first")?,
+            },
+            min_free: match raw.gc.min_free_size.as_deref() {
+                None => Some(MinFree::ShareOfDisk),
+                Some(value) => parse_optional_byte_size(value)
+                    .wrap_err("invalid gc.min_free_size")?
+                    .map(MinFree::Bytes),
             },
         };
         let mode = raw.remote.mode.parse().wrap_err("invalid remote.mode")?;
@@ -1769,6 +1819,31 @@ mod tests {
         assert_eq!(
             retention.max_total_bytes, None,
             "a combined budget stays opt-in"
+        );
+        assert_eq!(retention.min_free, Some(MinFree::ShareOfDisk));
+    }
+
+    #[test]
+    fn the_free_space_minimum_scales_with_each_disk() {
+        let share = MinFree::ShareOfDisk;
+        assert_eq!(share.bytes(32 * GIB), 5 * GIB, "the floor on a small disk");
+        assert_eq!(share.bytes(256 * GIB), 25 * GIB);
+        assert_eq!(share.bytes(4_096 * GIB), 50 * GIB, "the ceiling");
+        assert_eq!(MinFree::Bytes(GIB).bytes(4_096 * GIB), GIB);
+    }
+
+    #[test]
+    fn the_free_space_minimum_can_be_set_or_turned_off() {
+        let (_, retention) =
+            configured_retention(None, &[("MBX_GC_MIN_FREE_SIZE", "8GiB")]).unwrap();
+        assert_eq!(retention.min_free, Some(MinFree::Bytes(8 * GIB)));
+        let (_, retention) =
+            configured_retention(Some("[gc]\nmin_free_size = \"none\""), &[]).unwrap();
+        assert_eq!(retention.min_free, None);
+        let error = configured_retention(None, &[("MBX_GC_MIN_FREE_SIZE", "lots")]).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("gc.min_free_size"),
+            "{error:#}"
         );
     }
 

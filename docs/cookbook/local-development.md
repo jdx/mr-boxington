@@ -26,6 +26,8 @@ The override lands in rust-analyzer's user configuration file, so one run
 covers every workspace. Project-level `rust-analyzer.toml` files do not apply
 this override to the editor's Cargo process.
 Restart the editor after setup so rust-analyzer reloads its configuration.
+rust-analyzer then reports `check/overrideCommand: unexpected field` for that
+file. The override still applies; see [editor setup](/setup#rust-analyzer).
 
 Setup leaves an existing rust-analyzer check configuration untouched. If
 `mbx setup --status` says that the editor kept its existing settings, either

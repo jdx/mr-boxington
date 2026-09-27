@@ -45,6 +45,7 @@ EOF
   [ ! -L "$MBX_SHIM_DIR/cargo" ]
   assert_file_contains "$MBX_RA_CONFIG" "$MBX_SHIM_DIR/cargo"
   assert_file_contains "$MBX_RA_CONFIG" 'message-format=json'
+  assert_output --partial 'reports `check/overrideCommand: unexpected field`'
   assert_output --partial "export PATH=\"$MBX_SHIM_DIR"
   assert_output --partial ':$PATH"'
   local fish_shim_dir="$BATS_TEST_TMPDIR/Application Support/mbx/bin"
@@ -82,6 +83,7 @@ EOF
   run "$MBX_BIN" setup --status
   assert_success
   assert_output --partial "installed and current"
+  assert_output --partial 'the check still runs through mbx'
 
   run "$MBX_BIN" doctor
   assert_success
@@ -106,6 +108,19 @@ EOF
   assert_output --partial "left in place for other scopes"
   run grep -F 'overrideCommand' "$MBX_RA_CONFIG"
   assert_failure
+}
+
+@test "setup status explains the rust-analyzer warning for a legacy override" {
+  run "$MBX_BIN" setup
+  assert_success
+  cat >"$MBX_RA_CONFIG" <<EOF
+[check]
+overrideCommand = ["$MBX_SHIM_DIR/cargo", "check", "--workspace", "--all-targets", "--message-format=json"]
+EOF
+  run "$MBX_BIN" setup --status
+  assert_failure
+  assert_output --partial "share Cargo's target directory"
+  assert_output --partial 'the check still runs through mbx'
 }
 
 @test "yes setup follows postinstall, global, and local mise scopes" {
