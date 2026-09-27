@@ -307,6 +307,47 @@ pub(crate) fn disk_space(path: &Path) -> Option<DiskSpace> {
     disk_space_at(existing)
 }
 
+/// Whether `a` and `b`, or their nearest existing ancestors, are on the same
+/// filesystem. `false` when either cannot be examined.
+pub(crate) fn same_disk(a: &Path, b: &Path) -> bool {
+    let existing = |path: &Path| {
+        path.ancestors()
+            .find(|ancestor| ancestor.exists())
+            .map(Path::to_path_buf)
+    };
+    let (Some(a), Some(b)) = (existing(a), existing(b)) else {
+        return false;
+    };
+    same_disk_at(&a, &b)
+}
+
+#[cfg(unix)]
+fn same_disk_at(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev(),
+        _ => false,
+    }
+}
+
+/// By drive or share: a volume mounted into a folder shares the drive letter
+/// of its parent and reads as the same disk, which only costs a warning.
+#[cfg(windows)]
+fn same_disk_at(a: &Path, b: &Path) -> bool {
+    let prefix = |path: &Path| {
+        std::fs::canonicalize(path)
+            .ok()
+            .and_then(|path| match path.components().next() {
+                Some(std::path::Component::Prefix(prefix)) => {
+                    Some(prefix.as_os_str().to_ascii_lowercase())
+                }
+                _ => None,
+            })
+    };
+    matches!((prefix(a), prefix(b)), (Some(a), Some(b)) if a == b)
+}
+
 /// Apple's `statvfs` counts blocks in a 32-bit field, which wraps somewhere
 /// above 16TiB and would answer with a smaller disk than the one it measured --
 /// quietly sizing a budget from a fraction of a large volume. `statfs` is the

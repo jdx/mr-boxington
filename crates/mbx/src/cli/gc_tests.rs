@@ -275,3 +275,16 @@ fn a_short_disk_collects_live_targets_past_their_budget() {
         report.removals
     );
 }
+
+#[test]
+fn a_directory_and_one_inside_it_are_on_the_same_disk() {
+    let directory = tempfile::tempdir().unwrap();
+    let nested = directory.path().join("not/created/yet");
+
+    assert!(crate::util::same_disk(directory.path(), &nested));
+    #[cfg(target_os = "linux")]
+    assert!(
+        !crate::util::same_disk(directory.path(), Path::new("/proc")),
+        "procfs is a filesystem of its own"
+    );
+}

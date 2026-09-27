@@ -100,28 +100,17 @@ pub(super) fn run(
     let reserved_bytes = incremental
         .remaining_bytes
         .saturating_add(generated.remaining_bytes);
-    // A dry run freed nothing, so the disk still shows the space the
-    // collections above would have given back.
-    let pending_bytes = if dry_run {
-        incremental
-            .removed_bytes
-            .saturating_add(generated.removed_bytes)
-    } else {
-        0
-    };
-    let target_budget = target_limit(
-        config,
-        retention,
-        max_bytes,
-        reserved_bytes,
-        pending_bytes,
-        &mut low_disk,
-    );
+    let target_budget = target_limit(config, retention, max_bytes, reserved_bytes, &mut low_disk);
     // First, ahead of the removals it explains, all of which print below.
     if let Some(disk) = &low_disk
         && !json
     {
         println!("{}", disk.describe(dry_run));
+        if dry_run {
+            println!(
+                "a real run measures the disk again after each step, so it may remove fewer target directories"
+            );
+        }
     }
     let pruned = target::collect(
         &config.target.root,
@@ -473,12 +462,16 @@ pub(super) fn sweep_store(config: &Config, retention: &RetentionSettings) -> Swe
             if outcome.removed_bytes > 0 {
                 sweep.lines.push(evictions(&outcome));
             }
+            // After the store's own sweep, which can free space on the cache
+            // disk too.
+            warn_if_still_low(config, retention);
         }
         Err(error) => {
             log::warn!("the store was not swept: {error}");
             let pruned = prune_targets(config, retention, config.gc.max_bytes);
             sweep.delta.freed_target_bytes = pruned.freed_bytes;
             sweep.lines.extend(pruned.removals);
+            warn_if_still_low(config, retention);
         }
     }
     sweep
@@ -717,7 +710,6 @@ pub(super) fn prune_targets(
         retention,
         store_reserve,
         incremental_remaining,
-        0,
         &mut low_disk,
     );
     let mut report = match target::collect(
@@ -755,7 +747,6 @@ pub(super) fn prune_targets(
     {
         report.removals.insert(0, disk.describe(false));
     }
-    warn_if_still_low(config, retention);
     report
 }
 
@@ -856,27 +847,25 @@ fn incremental_limit(
 ///
 /// Measured again rather than carried over: the targets may be on another
 /// disk, and on the same one, what learned incremental state gave back already
-/// shows. `pending_bytes` is what a dry run would have freed first, since a dry
-/// run's disk shows none of it.
+/// shows. A dry run's disk shows nothing freed, and what the steps before
+/// would free is not credited either: removing a reflinked copy frees less
+/// than its logical size, by an amount nothing short of removing it can tell.
+/// The preview is the most a real run could remove.
 fn target_limit(
     config: &Config,
     retention: &RetentionSettings,
     store_reserve: u64,
     incremental_reserve: u64,
-    pending_bytes: u64,
     low: &mut Option<LowDisk>,
 ) -> Option<u64> {
     let budget = target_budget(retention, store_reserve, incremental_reserve);
     let Some(disk) = low_disk(retention, &config.target.root) else {
         return budget;
     };
-    let shortfall = disk.shortfall().saturating_sub(pending_bytes);
-    if shortfall == 0 {
-        return budget;
-    }
     let usage = target::stats(&config.target.root).map_or(0, |stats| stats.bytes);
+    let limit = relieve(budget, usage, disk.shortfall());
     low.get_or_insert(disk);
-    relieve(budget, usage, shortfall)
+    limit
 }
 
 /// Say when collection could not bring a disk back above its minimum.
@@ -885,9 +874,13 @@ fn target_limit(
 /// directory is never collected, so a disk filled by something else stays
 /// short, and only the person who owns it can decide what to remove.
 fn warn_if_still_low(config: &Config, retention: &RetentionSettings) {
-    let disk =
-        low_disk(retention, &config.cache_dir).or_else(|| low_disk(retention, &config.target.root));
-    if let Some(disk) = disk {
+    let cache = low_disk(retention, &config.cache_dir);
+    // The target root is its own disk only when it is not the cache's, and
+    // then it can be short on its own account.
+    let target = (!crate::util::same_disk(&config.cache_dir, &config.target.root))
+        .then(|| low_disk(retention, &config.target.root))
+        .flatten();
+    for disk in cache.into_iter().chain(target) {
         log::warn!(
             "the disk holding {} still has {} free after collection, under the {} minimum; the shared cache keeps its gc.max_size budget",
             disk.path.display(),

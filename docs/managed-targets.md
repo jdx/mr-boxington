@@ -268,7 +268,8 @@ Restored outputs that share blocks with the cache through reflinks free less
 disk than their logical size, so collection measures the disk again before
 each step rather than trusting the logical total. Set `gc.min_free_size` to a
 size such as `"20GiB"`, or to `"none"` to collect by the budgets alone.
-`mbx gc --dry-run` shows what a low disk would remove.
+`mbx gc --dry-run` shows the most a low disk could remove: it cannot measure
+what each step would free, so a real run may remove fewer target directories.
 
 ### Changing or disabling the limits
 
