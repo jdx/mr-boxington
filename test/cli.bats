@@ -73,8 +73,17 @@ setup() {
   assert_output --partial "0 B"
 }
 
+# Where the platform configuration directory puts mbx's global file.
+global_config_file() {
+  if [[ "$(uname -s)" == Darwin ]]; then
+    echo "$HOME/Library/Application Support/mbx/config.toml"
+  else
+    echo "$XDG_CONFIG_HOME/mbx/config.toml"
+  fi
+}
+
 @test "settings set writes the global configuration file and unset removes it" {
-  config="$XDG_CONFIG_HOME/mbx/config.toml"
+  config="$(global_config_file)"
 
   run "$MBX_BIN" settings set gc.max_size 20GiB
   assert_success
@@ -98,17 +107,19 @@ setup() {
 }
 
 @test "settings set leaves the file alone when the value does not load" {
+  config="$(global_config_file)"
+
   run "$MBX_BIN" settings set gc.interval soon
   assert_failure
   assert_output --partial "invalid gc.interval"
-  assert_file_not_exists "$XDG_CONFIG_HOME/mbx/config.toml"
+  assert_file_not_exists "$config"
 
   run "$MBX_BIN" settings set savings plain
   assert_success
   run "$MBX_BIN" settings set gc.max_size lots
   assert_failure
   assert_output --partial "was not changed"
-  run cat "$XDG_CONFIG_HOME/mbx/config.toml"
+  run cat "$config"
   assert_output 'savings = "plain"'
 }
 
