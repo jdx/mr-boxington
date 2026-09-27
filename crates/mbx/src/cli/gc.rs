@@ -167,6 +167,9 @@ pub(super) fn run(
                 print_incremental_removals(&incremental, dry_run);
                 print_generated_removals(&generated, dry_run);
             }
+            if !dry_run {
+                warn_if_still_low(config, retention);
+            }
             return Err(error);
         }
     };
@@ -455,6 +458,7 @@ pub(super) fn sweep_store(config: &Config, retention: &RetentionSettings) -> Swe
                 Ok(outcome) => outcome,
                 Err(error) => {
                     log::warn!("the store was not swept: {error}");
+                    warn_if_still_low(config, retention);
                     return sweep;
                 }
             };
