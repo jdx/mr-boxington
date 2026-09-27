@@ -371,27 +371,35 @@ fn parent_table<'a>(
 }
 
 /// Drop the table `key` was in once nothing is left in it, unless a comment
-/// sits above or beside its header.
+/// sits above or beside it.
 fn remove_empty_group(document: &mut DocumentMut, key: &str) {
     let Some((group, _)) = key.split_once('.') else {
         return;
     };
     let empty = match document.get(group) {
-        Some(Item::Table(table)) => {
-            let decor = table.decor();
-            let commented = [decor.prefix(), decor.suffix()]
-                .into_iter()
-                .flatten()
-                .filter_map(|text| text.as_str())
-                .any(|text| text.contains('#'));
-            table.is_empty() && !commented
+        Some(Item::Table(table)) => table.is_empty() && !commented(table.decor()),
+        // An inline table's neighbours are on the key above it and on the
+        // value itself, after its closing brace.
+        Some(Item::Value(toml_edit::Value::InlineTable(table))) => {
+            let key_commented = document
+                .as_table()
+                .key(group)
+                .is_some_and(|key| commented(key.leaf_decor()));
+            table.is_empty() && !commented(table.decor()) && !key_commented
         }
-        Some(Item::Value(toml_edit::Value::InlineTable(table))) => table.is_empty(),
         _ => false,
     };
     if empty {
         document.remove(group);
     }
+}
+
+fn commented(decor: &toml_edit::Decor) -> bool {
+    [decor.prefix(), decor.suffix()]
+        .into_iter()
+        .flatten()
+        .filter_map(|text| text.as_str())
+        .any(|text| text.contains('#'))
 }
 
 /// Write `document` to `path`, refusing it unless `check` loads as a
