@@ -110,6 +110,19 @@ EOF
   assert_failure
 }
 
+@test "setup status explains the rust-analyzer warning for a legacy override" {
+  run "$MBX_BIN" setup
+  assert_success
+  cat >"$MBX_RA_CONFIG" <<EOF
+[check]
+overrideCommand = ["$MBX_SHIM_DIR/cargo", "check", "--workspace", "--all-targets", "--message-format=json"]
+EOF
+  run "$MBX_BIN" setup --status
+  assert_failure
+  assert_output --partial "share Cargo's target directory"
+  assert_output --partial 'the check still runs through mbx'
+}
+
 @test "yes setup follows postinstall, global, and local mise scopes" {
   local fake_bin="$BATS_TEST_TMPDIR/fake-mise-bin"
   local mise_log="$BATS_TEST_TMPDIR/mise.log"

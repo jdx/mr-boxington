@@ -152,7 +152,8 @@ target-directory lock. When `target` is managed, the editor directory lives
 inside that view and is collected with it, while the shared store warms both
 builds. Existing rust-analyzer check settings are left unchanged.
 
-After setup, rust-analyzer shows this message when it loads the user file:
+When setup writes its override, rust-analyzer shows this message when it loads
+the user file:
 
 ```text
 invalid config value:

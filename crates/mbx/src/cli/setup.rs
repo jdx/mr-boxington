@@ -524,6 +524,7 @@ pub(super) fn configure_rust_analyzer(
                 "rust-analyzer checks share Cargo's target directory; run `mbx setup` to update {}",
                 path.display()
             );
+            print_rust_analyzer_warning_note();
             Ok(ExitCode::FAILURE)
         }
         SetupAction::Status if has_check_settings => {
