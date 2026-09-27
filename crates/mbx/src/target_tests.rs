@@ -1203,6 +1203,35 @@ fn precedence_matches_absolute_directories_and_relative_names() {
         Precedence::default().standing(Path::new("/src/app")),
         Standing::Normal
     );
+    let spelled_out = Precedence {
+        keep: vec![PathBuf::from("worktrees")],
+        evict_first: vec![PathBuf::from("/src/app/.claude/worktrees")],
+    };
+    assert_eq!(
+        spelled_out.standing(Path::new("/src/app/.claude/worktrees")),
+        Standing::EvictFirst,
+        "ending at the same place, the entry naming more of the path wins"
+    );
+}
+
+#[test]
+fn a_kept_most_recent_target_does_not_spare_an_older_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let [oldest, agent, human, newest] = ranked_views(directory.path(), &config);
+    let precedence = Precedence {
+        keep: vec![newest.0.clone()],
+        ..Precedence::default()
+    };
+
+    // Only the kept, most recent target fits: sparing `human` as well would
+    // leave the budget unmet for nothing.
+    let outcome = collect_by(&config.target.root, Some(1), None, &precedence, false).unwrap();
+
+    assert_eq!(outcome.removed_views, 3);
+    assert_eq!(outcome.remaining_bytes, 1);
+    assert!(!oldest.1.exists() && !agent.1.exists() && !human.1.exists());
+    assert!(newest.1.exists());
 }
 
 /// Three live checkouts, oldest to newest: `kept`, `agent`, `human`, each with

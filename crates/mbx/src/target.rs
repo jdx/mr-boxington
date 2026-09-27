@@ -115,8 +115,11 @@ impl Precedence {
 }
 
 /// How far into `workspace_root` the deepest of `entries` reaches, counted
-/// in path components; `None` when none matches.
-fn deepest_match(entries: &[PathBuf], workspace_root: &Path) -> Option<usize> {
+/// in path components, then how many components that entry names; `None`
+/// when none matches. The second breaks ties between entries that end at the
+/// same place: `/src/app/.claude/worktrees` says more about a checkout there
+/// than `worktrees` does.
+fn deepest_match(entries: &[PathBuf], workspace_root: &Path) -> Option<(usize, usize)> {
     let components: Vec<_> = workspace_root.components().collect();
     entries
         .iter()
@@ -126,12 +129,14 @@ fn deepest_match(entries: &[PathBuf], workspace_root: &Path) -> Option<usize> {
                 return None;
             }
             if entry.is_absolute() {
-                return components.starts_with(&wanted).then_some(wanted.len());
+                return components
+                    .starts_with(&wanted)
+                    .then_some((wanted.len(), wanted.len()));
             }
             components
                 .windows(wanted.len())
                 .rposition(|window| window == wanted.as_slice())
-                .map(|start| start + wanted.len())
+                .map(|start| (start + wanted.len(), wanted.len()))
         })
         .max()
 }
@@ -1222,10 +1227,9 @@ fn collect_with(
         // Only the views the passes above left alone. An abandoned or expired
         // one is going regardless, so letting it hold the protected place below
         // would spend that protection on a directory already being deleted.
-        // A kept one is not a candidate at all.
         let mut candidates: Vec<&(PathBuf, PathBuf, u64, u64, bool, Standing)> = entries
             .iter()
-            .filter(|entry| !selected.contains(&entry.0) && entry.5 != Standing::Keep)
+            .filter(|entry| !selected.contains(&entry.0))
             .collect();
         // Spare the most recently used of them: that is the checkout somebody
         // is almost certainly working in, very likely the one whose build just
@@ -1233,8 +1237,11 @@ fn collect_with(
         // the next build recreates it, so a budget smaller than one working
         // target directory would otherwise delete those outputs after every
         // build forever. An evict-first checkout gets the same protection,
-        // since an agent's build in its worktree is as current as any.
+        // since an agent's build in its worktree is as current as any. A kept
+        // one that is most recent already has more, and spends this place, so
+        // it does not pass to an older target.
         candidates.pop();
+        candidates.retain(|entry| entry.5 != Standing::Keep);
         // Stable, so each standing stays oldest-first.
         candidates.sort_by_key(|entry| entry.5);
         for entry in candidates {
