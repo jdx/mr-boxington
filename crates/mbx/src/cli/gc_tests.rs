@@ -18,8 +18,8 @@ fn combined_budget_respects_component_caps_and_occupied_reserves() {
     assert_eq!(incremental_budget(&retention, 70), Some(20));
     assert_eq!(incremental_budget(&retention, 90), Some(10));
     assert_eq!(incremental_budget(&retention, 120), Some(0));
-    assert_eq!(store_budget(&retention, 70, 30), 70);
-    assert_eq!(store_budget(&retention, 70, 60), 40);
+    assert_eq!(store_budget(&retention, 70, Some(30)), 70);
+    assert_eq!(store_budget(&retention, 70, Some(60)), 40);
 }
 
 #[test]
@@ -366,5 +366,69 @@ fn a_combined_budget_shares_unoccupied_store_capacity() {
             "the next build receives the budget warning: {:?}",
             sweep.lines
         );
+    }
+}
+
+#[test]
+fn unavailable_component_sizes_do_not_leave_room_in_a_combined_budget() {
+    for component in ["targets", "incremental", "generated"] {
+        for automatic in [false, true] {
+            for combined in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let mut config = super::cargo_tests::managed_target_config(directory.path());
+                config.gc.auto = true;
+                config.gc.interval = Duration::ZERO;
+                config.gc.max_bytes = 160;
+                let retention = RetentionSettings {
+                    max_total_bytes: combined.then_some(160),
+                    min_free: None,
+                    ..always_short()
+                };
+                let broken = match component {
+                    "targets" => config.target.root.join("v1"),
+                    "incremental" => config.cache_dir.join("incremental"),
+                    _ => config.cache_dir.join(crate::out_dir::ROOT),
+                };
+                // A file where a directory is required fails listing on every
+                // platform, including when the tests run with root privileges.
+                std::fs::create_dir_all(broken.parent().unwrap()).unwrap();
+                std::fs::write(&broken, b"not a directory").unwrap();
+                let objects = config.store_dir().join("cas/v1");
+                std::fs::create_dir_all(&objects).unwrap();
+                std::fs::write(objects.join("object"), [0_u8; 64]).unwrap();
+
+                if automatic {
+                    let sweep = sweep_store(&config, &retention);
+                    assert_eq!(
+                        sweep
+                            .lines
+                            .iter()
+                            .any(|line| line.contains("could not be verified")),
+                        combined,
+                        "{component}: {:?}",
+                        sweep.lines
+                    );
+                } else {
+                    // Even a failed preview must leave shared objects alone.
+                    let _ = gc::run(&config, 160, true, false, &retention);
+                    assert_eq!(
+                        crate::store::stats(&config.store_dir())
+                            .unwrap()
+                            .total_bytes(),
+                        64
+                    );
+                    let result = gc::run(&config, 160, false, false, &retention);
+                    assert_eq!(result.is_err(), component == "targets");
+                }
+                assert_eq!(
+                    crate::store::stats(&config.store_dir())
+                        .unwrap()
+                        .total_bytes(),
+                    if combined { 0 } else { 64 },
+                    "{component}, automatic={automatic}, combined={combined}"
+                );
+                assert!(broken.exists(), "the unmeasurable component is left alone");
+            }
+        }
     }
 }

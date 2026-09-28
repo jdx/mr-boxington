@@ -153,7 +153,9 @@ blocks can make physical usage smaller, while metadata, session history, and
 temporary files add overhead outside the budget. Active builds, the most
 recently used state, explicitly kept targets, and untracked state can prevent
 collection from reaching the target; mbx warns when the combined remainder
-exceeds it. Builds can also exceed it between sweeps. Use `mbx gc --dry-run`
+exceeds it. If a component cannot be measured, mbx reports that the combined
+budget could not be verified and conservatively gives the action store no
+remaining allowance. Builds can also exceed it between sweeps. Use `mbx gc --dry-run`
 to inspect collection, or `mbx gc --json` for each component's logical sizes.
 
 The budget spans the cache and managed targets even when they live on separate
