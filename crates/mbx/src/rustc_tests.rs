@@ -1634,4 +1634,17 @@ fn relative_external_native_paths_are_mapped_from_the_working_directory() {
         .unwrap()
     );
     assert!(portable.arguments.is_empty());
+    let absolute_invocation = RustcInvocation::parse(&[
+        "--crate-type=lib".into(),
+        "--emit=metadata,link".into(),
+        format!("-Lnative={}", native.display()).into(),
+        "src.rs".into(),
+    ])
+    .unwrap();
+    let mut absolute_portable = Portable {
+        mappings: vec![PathMapping::new(&workspace, "workspace")],
+        arguments: vec![],
+    };
+    absolute_portable.map_external_native_paths(&absolute_invocation, &workspace);
+    assert_eq!(portable.mappings, absolute_portable.mappings);
 }
