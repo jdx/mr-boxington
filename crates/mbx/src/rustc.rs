@@ -3056,11 +3056,12 @@ impl Portable {
             if normalize_mapped_path(path, working_dir, &self.mappings).is_ok() {
                 continue;
             }
-            let mapping = mbx_cache_core::PathMapping::new(working_dir.join(path), "");
-            let path = mbx_cache_core::resolve_path_mappings(&[mapping])
+            let path = working_dir.join(path);
+            let mapping = mbx_cache_core::PathMapping::new(&path, "");
+            let identity = mbx_cache_core::resolve_path_mappings(&[mapping])
                 .remove(0)
                 .root;
-            let Some(text) = path.to_str().filter(|_| path.is_absolute()) else {
+            let Some(text) = identity.to_str().filter(|_| path.is_absolute()) else {
                 continue;
             };
             // Keep installation locations in the key: these paths are not

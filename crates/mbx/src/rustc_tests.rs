@@ -1646,5 +1646,13 @@ fn relative_external_native_paths_are_mapped_from_the_working_directory() {
         arguments: vec![],
     };
     absolute_portable.map_external_native_paths(&absolute_invocation, &workspace);
-    assert_eq!(portable.mappings, absolute_portable.mappings);
+    assert_eq!(
+        mapped,
+        normalize_mapped_path(
+            &native.join("libssl.a"),
+            &workspace,
+            &absolute_portable.mappings
+        )
+        .unwrap()
+    );
 }
