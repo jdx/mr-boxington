@@ -330,6 +330,28 @@ fn the_first_run_notice_omits_limits_that_are_off() {
 }
 
 #[test]
+fn the_first_run_notice_explains_the_shared_budget_without_a_target_cap() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = managed_target_config(directory.path());
+    let retention = RetentionSettings {
+        target_max_bytes: None,
+        target_max_age: None,
+        max_total_bytes: Some(50 * 1024 * 1024 * 1024),
+        min_free: None,
+        ..RetentionSettings::default()
+    };
+    let notice = first_run_notice(&config, &retention, false);
+    assert!(notice.contains("target/ is managed: deleted when its checkout is gone or combined managed data exceeds 50.0 GiB logical"), "{notice}");
+
+    config.gc.auto = false;
+    let notice = first_run_notice(&config, &retention, false);
+    assert!(
+        !notice.contains("combined managed data exceeds"),
+        "{notice}"
+    );
+}
+
+#[test]
 fn the_first_run_notice_does_not_promise_collection_that_is_off() {
     let directory = tempfile::tempdir().unwrap();
     let mut config = managed_target_config(directory.path());
