@@ -1599,3 +1599,39 @@ fn external_native_mappings_preserve_installation_identity() {
         normalize_mapped_path(&other.join("libssl.a"), &workspace, &portable.mappings).unwrap()
     );
 }
+
+#[test]
+fn relative_external_native_paths_are_mapped_from_the_working_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    let native = directory.path().join("external/lib");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&native).unwrap();
+    let invocation = RustcInvocation::parse(&[
+        "--crate-type=lib".into(),
+        "--emit=metadata,link".into(),
+        "-Lnative=../external/lib".into(),
+        "src.rs".into(),
+    ])
+    .unwrap();
+    let mut portable = Portable {
+        mappings: vec![PathMapping::new(&workspace, "workspace")],
+        arguments: vec![],
+    };
+    portable.map_external_native_paths(&invocation, &workspace);
+    assert_eq!(portable.mappings.len(), 2);
+    let mapped =
+        normalize_mapped_path(&native.join("libssl.a"), &workspace, &portable.mappings).unwrap();
+    assert!(mapped.starts_with("${native_"));
+    assert!(mapped.ends_with("/libssl.a"));
+    assert_eq!(
+        mapped,
+        normalize_mapped_path(
+            Path::new("../external/lib/libssl.a"),
+            &workspace,
+            &portable.mappings,
+        )
+        .unwrap()
+    );
+    assert!(portable.arguments.is_empty());
+}

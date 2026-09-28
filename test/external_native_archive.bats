@@ -105,3 +105,15 @@ build_into() {
   run cmp "$first_rlib" "$changed_rlib"
   assert_failure
 }
+
+@test "relative external native paths reuse cached archives" {
+  write_archive 7
+  cd "$PROJECT"
+  export EXTERNAL_NATIVE=../external-native
+  local first="$BATS_TEST_TMPDIR/first-target"
+  local warm="$BATS_TEST_TMPDIR/warm-target"
+  build_into "$first"
+  build_into "$warm"
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*[2-9]' "$warm.json"
+  assert_success
+}

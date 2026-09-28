@@ -3056,6 +3056,7 @@ impl Portable {
             if normalize_mapped_path(path, working_dir, &self.mappings).is_ok() {
                 continue;
             }
+            let path = working_dir.join(path);
             let Some(text) = path.to_str().filter(|_| path.is_absolute()) else {
                 continue;
             };
