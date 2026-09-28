@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.19.0...mbx-cache-rustc-v0.19.1) - 2026-09-28
+
+### Fixed
+
+- *(cache)* track external native library inputs ([#595](https://github.com/jdx/mr-boxington/pull/595))
+- *(cache)* model rustc codegen backend selection ([#592](https://github.com/jdx/mr-boxington/pull/592))
+- *(cache)* avoid stale rlibs from external native archives ([#589](https://github.com/jdx/mr-boxington/pull/589))
+
 ## [0.19.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.18.2...mbx-cache-rustc-v0.19.0) - 2026-09-27
 
 ### Fixed

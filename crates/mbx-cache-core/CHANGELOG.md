@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.19.0...mbx-cache-core-v0.19.1) - 2026-09-28
+
+### Fixed
+
+- *(cache)* pin linker search directories by absolute path on WSL ([#597](https://github.com/jdx/mr-boxington/pull/597))
+- *(stats)* make cache lookups add up to hits plus misses ([#583](https://github.com/jdx/mr-boxington/pull/583))
+
 ## [0.19.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.18.2...mbx-cache-core-v0.19.0) - 2026-09-27
 
 ### Added

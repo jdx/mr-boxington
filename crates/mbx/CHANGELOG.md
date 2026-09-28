@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.0](https://github.com/jdx/mr-boxington/compare/v1.19.0...v1.20.0) - 2026-09-28
+
+### Added
+
+- *(cache)* share one budget across managed build data ([#594](https://github.com/jdx/mr-boxington/pull/594))
+- add opt-in eager incremental reuse for workspace builds ([#587](https://github.com/jdx/mr-boxington/pull/587))
+- *(cli)* add `mbx settings` to get, set, and unset config values ([#585](https://github.com/jdx/mr-boxington/pull/585))
+
+### Fixed
+
+- *(cache)* pin linker search directories by absolute path on WSL ([#597](https://github.com/jdx/mr-boxington/pull/597))
+- *(cache)* keep managed targets while a wrapped command uses them ([#596](https://github.com/jdx/mr-boxington/pull/596))
+- *(cache)* track external native library inputs ([#595](https://github.com/jdx/mr-boxington/pull/595))
+- *(cache)* model rustc codegen backend selection ([#592](https://github.com/jdx/mr-boxington/pull/592))
+- *(stats)* make cache lookups add up to hits plus misses ([#583](https://github.com/jdx/mr-boxington/pull/583))
+
 ## [1.19.0](https://github.com/jdx/mr-boxington/compare/v1.18.0...v1.19.0) - 2026-09-27
 
 ### Added
