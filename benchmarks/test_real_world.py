@@ -416,8 +416,48 @@ class WorktreeScenarioTest(unittest.TestCase):
                 )
         self.assertTrue(runner.stopped)
 
+    def test_git_commands_ignore_outer_repository_variables(self) -> None:
+        inherited = {
+            "GIT_DIR": "/other/.git",
+            "GIT_WORK_TREE": "/other",
+            "GIT_INDEX_FILE": "/other/index",
+            "KEEP_ME": "yes",
+        }
+        with mock.patch.dict(real_world.os.environ, inherited), mock.patch.object(
+            real_world.subprocess, "run"
+        ) as run:
+            real_world.git("checkout", "--detach", "abc", cwd=Path("/checkout"))
+            real_world.worktree(Path("/checkout"), "abc", Path("/checkout-next"))
+        for call in run.call_args_list:
+            environment = call.kwargs["env"]
+            self.assertNotIn("GIT_DIR", environment)
+            self.assertNotIn("GIT_WORK_TREE", environment)
+            self.assertNotIn("GIT_INDEX_FILE", environment)
+            self.assertEqual(environment["KEEP_ME"], "yes")
+
 
 class ToolchainTest(unittest.TestCase):
+    def test_version_comes_from_resolved_binary_in_subject_checkout(self) -> None:
+        environment = {"RUSTUP_TOOLCHAIN": "1.90"}
+        with mock.patch.object(real_world.shutil, "which", return_value="/toolchain/bin/rustc"):
+            with mock.patch.object(
+                real_world.subprocess, "check_output", return_value="rustc 1.90.0\n"
+            ) as check_output:
+                self.assertEqual(
+                    real_world.tool_version(
+                        "/toolchain/bin/rustc",
+                        checkout=Path("/subject"),
+                        environment=environment,
+                    ),
+                    "rustc 1.90.0",
+                )
+        check_output.assert_called_once_with(
+            ["/toolchain/bin/rustc", "--version"],
+            text=True,
+            cwd=Path("/subject"),
+            env=environment,
+        )
+
     def environment(self, subject: dict[str, object]) -> dict[str, str]:
         runner = real_world.Runner(Path("/out"), Path("/cargo-home"), Path("/mbx"))
         with mock.patch.dict(real_world.os.environ, {}, clear=False):

@@ -490,18 +490,6 @@ impl RustcInvocation {
                 } else {
                     working_dir.join(path)
                 };
-                // An inert directory outside every mapped root enters the key
-                // by its literal path in the arguments, not by its contents --
-                // predictions skip it under the same rule, so both discovery
-                // paths agree on the action key.
-                if self.native_search_is_inert(&directory)
-                    && matches!(
-                        super::normalize_mapped_path(&directory, &working_dir, path_mappings),
-                        Err(BypassReason::UnmappedAbsolutePath(_))
-                    )
-                {
-                    continue;
-                }
                 collect_native_directory(
                     &directory,
                     &admitted_roots,
@@ -853,9 +841,7 @@ mod tests {
         );
     }
 
-    /// The MSVC toolset directories `cc`-built dependencies hand to every
-    /// downstream compile on Windows: absolute, version-stamped, and outside
-    /// every mapped root.
+    /// An external MSVC toolset directory, outside every mapped root.
     fn toolchain_native_directory(version: &str) -> PathBuf {
         if cfg!(windows) {
             PathBuf::from(format!(
@@ -895,7 +881,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn unmapped_native_directory_is_keyed_by_path_for_library_emits() {
+    fn unmapped_toolchain_directory_cannot_hide_a_static_archive() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         let source = root.join("lib.rs");
@@ -905,42 +891,19 @@ mod tests {
         let mappings = vec![PathMapping::new(root, "workspace")];
         let dep_info = RustcDepInfo::parse(&format!("output: {}\n", source.display())).unwrap();
 
-        // The directory does not even exist: its contents are not inputs.
-        let discovered = invocation
-            .discover_inputs_with_mappings(
+        let context = library_context(root, mappings.clone());
+        assert!(matches!(
+            invocation.invocation_digest(&context),
+            Err(BypassReason::UnmappedAbsolutePath(path)) if path == toolchain
+        ));
+        assert_eq!(
+            invocation.discover_inputs_with_mappings(
                 &dep_info,
                 root,
                 &mappings,
                 &mbx_cache_core::NoFileDigestCache,
-            )
-            .unwrap();
-        assert_eq!(discovered.inputs.len(), 1);
-        assert_eq!(discovered.inputs[0].path, source);
-
-        // The literal path is key material, so a toolset update misses.
-        let context = library_context(root, mappings.clone());
-        let digest = invocation.invocation_digest(&context).unwrap();
-        let updated = library_with_native_search(&source, &toolchain_native_directory("14.52.0"));
-        assert_ne!(digest, updated.invocation_digest(&context).unwrap());
-
-        // The prediction skips the directory the same way discovery does, so a
-        // build that replays it derives the action key dep-info would have.
-        let mut recorded = context.clone();
-        discovered.clone().apply_to(&mut recorded).unwrap();
-        let action = invocation.action(recorded).unwrap();
-        let prediction = invocation.prediction(&context, &discovered).unwrap();
-        let replayed = prediction
-            .discover(
-                root,
-                &context.path_mappings,
-                &mbx_cache_core::NoFileDigestCache,
-            )
-            .unwrap();
-        let mut replay_context = context.clone();
-        replayed.apply_to(&mut replay_context).unwrap();
-        assert_eq!(
-            invocation.action(replay_context).unwrap().digest,
-            action.digest
+            ),
+            Err(BypassReason::UnsupportedSearchPath("native".into()))
         );
     }
 

@@ -544,22 +544,6 @@ impl RustcInvocation {
         enabled
     }
 
-    /// Whether an unmapped native search directory can be treated as a
-    /// versioned toolchain installation for this invocation.
-    ///
-    /// A library emit never runs a linker, so the only file rustc reads out of
-    /// a `-L native` directory is a static archive it bundles into the rlib.
-    /// One named by `-l static` is resolved at parse time and hashed as a
-    /// required input. A source-level `#[link]` can name another archive
-    /// without appearing in the arguments or rustc's dep-info, so an arbitrary
-    /// external directory cannot be keyed by its path alone. The versioned
-    /// MSVC and Windows SDK directories that Cargo passes to downstream crates
-    /// retain the toolchain-identity treatment.
-    fn native_search_is_inert(&self, directory: &Path) -> bool {
-        self.link_output == LinkOutput::Library
-            && versioned_windows_toolchain_native_directory(directory)
-    }
-
     /// Return the source input passed to rustc.
     pub fn source(&self) -> &Path {
         &self.source
@@ -795,19 +779,7 @@ impl RustcInvocation {
             if let Argument::SearchPath { kind, path } = argument
                 && kind == "native"
             {
-                match builder.normalize_path(path) {
-                    Ok(normalized) => {
-                        native_directories.insert(normalized);
-                    }
-                    // Inert and outside every mapped root: the directory
-                    // contributes no content inputs, so the prediction has
-                    // nothing to replay for it. Input discovery skips it the
-                    // same way, which is what keeps the predicted action key
-                    // equal to the one dep-info discovery builds.
-                    Err(BypassReason::UnmappedAbsolutePath(_))
-                        if self.native_search_is_inert(path) => {}
-                    Err(error) => return Err(error),
-                }
+                native_directories.insert(builder.normalize_path(path)?);
             }
         }
         // A file beneath a recorded directory is rediscovered by walking that
@@ -2166,68 +2138,6 @@ fn safe_install_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
-/// Windows passes versioned compiler and SDK library directories to many
-/// library compilations even when they consume no native archive themselves.
-/// Accept only the standard, protected installation layouts. A project-local
-/// directory with a toolchain-looking suffix can contain a mutable archive.
-fn versioned_windows_toolchain_native_directory(directory: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        if !directory.is_absolute()
-            || !matches!(
-                directory.components().next(),
-                Some(Component::Prefix(prefix))
-                    if matches!(prefix.kind(), std::path::Prefix::Disk(_))
-            )
-            || directory
-                .components()
-                .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
-        {
-            return false;
-        }
-        let parts = directory
-            .components()
-            .filter_map(|part| match part {
-                Component::Normal(name) => Some(name.to_string_lossy().to_ascii_lowercase()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let version = |part: &str| {
-            part.contains('.')
-                && part.split('.').all(|segment| {
-                    !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit())
-                })
-        };
-        let architecture = |part: &str| matches!(part, "x86" | "x64" | "arm" | "arm64");
-        let program_files = |part: &str| matches!(part, "program files" | "program files (x86)");
-        let msvc = parts.len() == 10
-            && program_files(&parts[0])
-            && parts[1] == "microsoft visual studio"
-            && parts[2].len() == 4
-            && parts[2].bytes().all(|byte| byte.is_ascii_digit())
-            && matches!(
-                parts[3].as_str(),
-                "community" | "professional" | "enterprise" | "buildtools"
-            )
-            && parts[4..7] == ["vc", "tools", "msvc"]
-            && version(&parts[7])
-            && parts[8] == "lib"
-            && architecture(&parts[9]);
-        let windows_sdk = parts.len() == 7
-            && program_files(&parts[0])
-            && parts[1..4] == ["windows kits", "10", "lib"]
-            && version(&parts[4])
-            && matches!(parts[5].as_str(), "um" | "ucrt")
-            && architecture(&parts[6]);
-        msvc || windows_sdk
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = directory;
-        false
-    }
-}
-
 /// Whether a boolean codegen option is asking for its enabled form. Absent a
 /// value, rustc reads the flag itself as the request.
 fn is_enabled(value: Option<&str>) -> bool {
@@ -2434,25 +2344,7 @@ impl<'a> ActionBuilder<'a> {
             Argument::Plain(value) => Ok(value.clone()),
             Argument::Path { flag, path } => Ok(format!("{flag}={}", self.normalize_path(path)?)),
             Argument::SearchPath { kind, path } => {
-                let text = match self.normalize_path(path) {
-                    Ok(text) => text,
-                    // A native directory outside every mapped root is a host
-                    // toolchain installation, not a checkout location. Its
-                    // literal path is the key material: the path is
-                    // version-stamped on the platforms that pass one (the MSVC
-                    // toolset, the Windows SDK), so hosts that differ miss,
-                    // which is the same identity-over-content stance
-                    // [`LinkerIdentity`] takes.
-                    Err(BypassReason::UnmappedAbsolutePath(absolute))
-                        if kind == "native" && self.invocation.native_search_is_inert(path) =>
-                    {
-                        absolute
-                            .to_str()
-                            .ok_or(BypassReason::NonUtf8Path(absolute.clone()))?
-                            .to_string()
-                    }
-                    Err(error) => return Err(error),
-                };
+                let text = self.normalize_path(path)?;
                 Ok(format!("-L{kind}={text}"))
             }
             Argument::Extern { name, path } => match path {

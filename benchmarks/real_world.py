@@ -337,23 +337,19 @@ def clones_supported(path: Path) -> bool | None:
         shutil.rmtree(probe, ignore_errors=True)
 
 
-def tool_version(command: str, toolchain: str | None = None) -> str | None:
-    """What one tool calls itself, under the toolchain the builds used.
-
-    `cargo` and `rustc` are rustup shims. Asking them without a pin reports the
-    machine's default, which is what the timed builds use unless a subject names
-    a toolchain of its own.
-    """
+def tool_version(
+    command: str, *, checkout: Path | None = None, environment: dict[str, str] | None = None
+) -> str | None:
+    """What the executable used by a build reports about itself."""
     executable = shutil.which(command)
     if executable is None:
         return None
-    environment = os.environ.copy()
-    if toolchain is not None:
-        environment["RUSTUP_TOOLCHAIN"] = toolchain
     for flag in ("--version", "-V"):
         try:
             return (
-                subprocess.check_output([executable, flag], text=True, env=environment)
+                subprocess.check_output(
+                    [executable, flag], text=True, cwd=checkout, env=environment
+                )
                 .strip()
                 .splitlines()[0]
             )
@@ -362,12 +358,30 @@ def tool_version(command: str, toolchain: str | None = None) -> str | None:
     return None
 
 
+def git_environment() -> dict[str, str]:
+    """Prevent an outer Git invocation from redirecting a checkout command."""
+    environment = os.environ.copy()
+    for name in (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_PREFIX",
+    ):
+        environment.pop(name, None)
+    return environment
+
+
 def git(*args: str | Path, cwd: Path | None = None) -> None:
     # --quiet goes right after the subcommand, never after a revision, where
     # checkout would read it as a pathspec. A clone per cell would otherwise
     # bury the phase progress this prints between builds.
     subcommand, *rest = [str(arg) for arg in args]
-    subprocess.run(["git", subcommand, "--quiet", *rest], cwd=cwd, check=True)
+    subprocess.run(
+        ["git", subcommand, "--quiet", *rest], cwd=cwd, env=git_environment(), check=True
+    )
 
 
 def clone(subject: dict[str, object], revision: str, destination: Path) -> None:
@@ -387,6 +401,7 @@ def worktree(source: Path, revision: str, destination: Path) -> None:
     subprocess.run(
         ["git", "worktree", "add", "--quiet", "--detach", str(destination), revision],
         cwd=source,
+        env=git_environment(),
         check=True,
     )
 
@@ -1421,26 +1436,28 @@ def main() -> int:
         # timed while it downloads crates.
         seed = work / "fetch"
         clone(subject, str(subject["child"]), seed)
+        runner = Runner(output, cargo_home, mbx)
+        version_environment = runner.base_environment(subject, seed / "target")
+        cargo_executable = runner.real_rust_tool("cargo", seed, version_environment)
+        rustc_executable = runner.real_rust_tool("rustc", seed, version_environment)
+        version_environment["RUSTC"] = rustc_executable
+        cargo_version = tool_version(
+            cargo_executable, checkout=seed, environment=version_environment
+        )
+        rustc_version = tool_version(
+            rustc_executable, checkout=seed, environment=version_environment
+        )
         subprocess.run(
-            ["cargo", "fetch", "--locked"],
+            [cargo_executable, "fetch", "--locked"],
             cwd=seed,
             check=True,
-            env={
-                **os.environ,
-                "CARGO_HOME": str(cargo_home),
-                **(
-                    {"RUSTUP_TOOLCHAIN": str(subject["toolchain"])}
-                    if subject.get("toolchain") is not None
-                    else {}
-                ),
-            },
+            env=version_environment,
         )
 
         # Described while the scratch tree still exists, since that is the
         # filesystem every timed build ran on.
         filesystem_described = filesystem(work)
 
-        runner = Runner(output, cargo_home, mbx)
         scenarios = []
         for name, tools in plan:
             scenarios.append(
@@ -1448,10 +1465,6 @@ def main() -> int:
             )
 
     failures = validate(scenarios)
-    pin = subject.get("toolchain")
-    pin = None if pin is None else str(pin)
-    cargo_version = tool_version("cargo", pin)
-    rustc_version = tool_version("rustc", pin)
     result: dict[str, object] = {
         # 2 added per-trial timings and named the published timing a median.
         "schema": 2,
