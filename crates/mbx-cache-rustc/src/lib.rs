@@ -544,22 +544,20 @@ impl RustcInvocation {
         enabled
     }
 
-    /// Whether the contents of native search directories cannot reach this
-    /// invocation's outputs.
+    /// Whether an unmapped native search directory can be treated as a
+    /// versioned toolchain installation for this invocation.
     ///
     /// A library emit never runs a linker, so the only file rustc reads out of
     /// a `-L native` directory is a static archive it bundles into the rlib.
     /// One named by `-l static` is resolved at parse time and hashed as a
-    /// required input, so the directory it came from need not be walked for
-    /// it. On Windows every crate downstream of a `cc`-built dependency
-    /// carries the MSVC toolset's `-L native` directories, which sit outside
-    /// every checkout root; treating them as content inputs would leave all of
-    /// those compilations permanently uncacheable. A `#[link]` attribute
-    /// naming a bundled static library could in principle reach through such a
-    /// directory without an `-l` flag, but toolchain directories are
-    /// version-stamped by their path, which the key still carries verbatim.
-    fn native_search_is_inert(&self) -> bool {
+    /// required input. A source-level `#[link]` can name another archive
+    /// without appearing in the arguments or rustc's dep-info, so an arbitrary
+    /// external directory cannot be keyed by its path alone. The versioned
+    /// MSVC and Windows SDK directories that Cargo passes to downstream crates
+    /// retain the toolchain-identity treatment.
+    fn native_search_is_inert(&self, directory: &Path) -> bool {
         self.link_output == LinkOutput::Library
+            && versioned_windows_toolchain_native_directory(directory)
     }
 
     /// Return the source input passed to rustc.
@@ -806,8 +804,8 @@ impl RustcInvocation {
                     // nothing to replay for it. Input discovery skips it the
                     // same way, which is what keeps the predicted action key
                     // equal to the one dep-info discovery builds.
-                    Err(BypassReason::UnmappedAbsolutePath(_)) if self.native_search_is_inert() => {
-                    }
+                    Err(BypassReason::UnmappedAbsolutePath(_))
+                        if self.native_search_is_inert(path) => {}
                     Err(error) => return Err(error),
                 }
             }
@@ -2168,6 +2166,44 @@ fn safe_install_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
+/// Windows passes versioned compiler and SDK library directories to many
+/// library compilations even when they consume no native archive themselves.
+/// Their path is the toolchain identity; arbitrary external `-L native` paths
+/// have no such identity and must be refused when their contents cannot be
+/// mapped into the action key.
+fn versioned_windows_toolchain_native_directory(directory: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let parts = directory
+            .components()
+            .filter_map(|part| match part {
+                Component::Normal(name) => Some(name.to_string_lossy().to_ascii_lowercase()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let version = |part: &str| {
+            part.contains('.')
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte == b'.')
+        };
+        parts
+            .windows(3)
+            .any(|parts| parts[0] == "msvc" && version(&parts[1]) && parts[2] == "lib")
+            || parts.windows(4).any(|parts| {
+                parts[0] == "windows kits"
+                    && parts[1] == "10"
+                    && parts[2] == "lib"
+                    && version(&parts[3])
+            })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = directory;
+        false
+    }
+}
+
 /// Whether a boolean codegen option is asking for its enabled form. Absent a
 /// value, rustc reads the flag itself as the request.
 fn is_enabled(value: Option<&str>) -> bool {
@@ -2384,7 +2420,7 @@ impl<'a> ActionBuilder<'a> {
                     // which is the same identity-over-content stance
                     // [`LinkerIdentity`] takes.
                     Err(BypassReason::UnmappedAbsolutePath(absolute))
-                        if kind == "native" && self.invocation.native_search_is_inert() =>
+                        if kind == "native" && self.invocation.native_search_is_inert(path) =>
                     {
                         absolute
                             .to_str()

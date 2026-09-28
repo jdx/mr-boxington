@@ -56,6 +56,15 @@ A first build warms the store, then `target/` is wiped and the same commit
 builds again. This is a runner restoring its cache and building something it
 has already seen.
 
+### New worktree
+
+A build at one commit warms the local store, then the same commit is built in a
+new Git worktree with no target directory of its own. Each tool uses its default
+target placement. This tests reuse across checkout paths, including dependency
+target seeding when the tool and Cargo support it. The harness does not copy
+the first worktree's target directory. Cargo's cold build provides the
+uncached baseline.
+
 ### Next commit
 
 The store is warmed at one commit and the build runs at the next. hk's next

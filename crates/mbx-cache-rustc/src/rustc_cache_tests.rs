@@ -695,28 +695,28 @@ fn a_static_library_outside_every_mapped_root_bypasses_as_unmapped() {
         PathMapping::new(directory.path().join("target"), "target"),
     ];
     let dep_info = RustcDepInfo::parse("target/debug/deps/zstd_sys.d: src.rs\n").unwrap();
-    let discovered = invocation
-        .discover_inputs_with_mappings(
+    assert_eq!(
+        invocation.discover_inputs_with_mappings(
             &dep_info,
             &working_dir,
             &mappings,
             &mbx_cache_core::NoFileDigestCache,
-        )
-        .unwrap();
-    let mut action_context = ActionContext {
+        ),
+        Err(BypassReason::UnsupportedSearchPath("native".into()))
+    );
+    let action_context = ActionContext {
         working_dir: working_dir.clone(),
         path_mappings: mappings,
         inputs: Vec::new(),
         ..context(&[])
     };
     assert_eq!(
-        invocation.prediction(&action_context, &discovered),
-        Err(BypassReason::UnmappedAbsolutePath(archive.clone()))
+        invocation.invocation_digest(&action_context),
+        Err(BypassReason::UnmappedAbsolutePath(system.clone()))
     );
-    discovered.apply_to(&mut action_context).unwrap();
     assert_eq!(
         invocation.action(action_context).unwrap_err(),
-        BypassReason::UnmappedAbsolutePath(archive)
+        BypassReason::UnmappedAbsolutePath(system)
     );
 }
 

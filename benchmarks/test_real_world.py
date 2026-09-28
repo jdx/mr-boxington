@@ -311,6 +311,67 @@ class LocalEnvironmentTest(unittest.TestCase):
         # The uncached baseline stays uncached either way.
         self.assertNotIn("RUSTC_WRAPPER", environment)
 
+    def test_new_worktree_uses_each_tools_default_target(self) -> None:
+        runner = real_world.Runner(Path("/out"), Path("/cargo-home"), Path("/mbx"))
+        with mock.patch.dict(real_world.os.environ, {"CARGO_TARGET_DIR": "/inherited"}):
+            environment = runner.base_environment(
+                {}, Path("/ignored"), default_target=True
+            )
+        self.assertNotIn("CARGO_TARGET_DIR", environment)
+
+    def test_cargo_and_kache_bypass_an_installed_cargo_shim(self) -> None:
+        runner = real_world.Runner(Path("/out"), Path("/cargo-home"), Path("/mbx"))
+        subject: dict[str, object] = {"args": ["build"]}
+
+        def resolved(name: str, _checkout: Path, _environment: dict[str, str]) -> str:
+            return f"/toolchain/bin/{name}"
+
+        with mock.patch.object(
+            runner, "real_rust_tool", side_effect=resolved
+        ) as rust_tool, mock.patch.object(real_world.shutil, "which", return_value="/kache"):
+            for tool in ("cargo", "kache"):
+                command, environment = runner.invocation(
+                    tool=tool,
+                    cell=tool,
+                    subject=subject,
+                    checkout=Path("/checkout"),
+                    target=Path("/target"),
+                    store=Path("/store"),
+                )
+                self.assertEqual(command, ["/toolchain/bin/cargo", "build"])
+                self.assertEqual(environment["RUSTC"], "/toolchain/bin/rustc")
+                self.assertEqual(environment["MBX_DISABLE"], "1")
+        self.assertEqual(rust_tool.call_count, 4)
+
+
+class WorktreeScenarioTest(unittest.TestCase):
+    def test_builds_a_distinct_worktree_against_the_same_store(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        class Runner:
+            def run(self, **kwargs: object) -> dict[str, object]:
+                calls.append(kwargs)
+                return {"tool": "mbx", "wall_duration_ns": len(calls)}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            with mock.patch.object(real_world, "clone") as clone, mock.patch.object(
+                real_world, "worktree"
+            ) as add_worktree:
+                measured = real_world.one_trial(
+                    "worktree", "mbx", "worktree-mbx", {"child": "abc"}, Runner(), work
+                )
+
+            first = work / "checkout-worktree-mbx-first"
+            second = work / "checkout-worktree-mbx-second"
+            clone.assert_called_once_with({"child": "abc"}, "abc", first)
+            add_worktree.assert_called_once_with(first, "abc", second)
+            self.assertEqual([call["checkout"] for call in calls], [first, second])
+            self.assertEqual(calls[0]["store"], calls[1]["store"])
+            self.assertTrue(all(call["default_target"] for call in calls))
+            self.assertEqual(measured["seed_wall_duration_ns"], 1)
+            self.assertEqual(measured["wall_duration_ns"], 2)
+
 
 class ToolchainTest(unittest.TestCase):
     def environment(self, subject: dict[str, object]) -> dict[str, str]:

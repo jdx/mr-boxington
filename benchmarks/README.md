@@ -6,7 +6,7 @@ commands from the repository root after `mise install`.
 | Question | Tool or task | Output |
 | --- | --- | --- |
 | Did mbx startup get more expensive? | `mise run perf` | Instruction counts and wall time from `tak` |
-| How does mbx compare on a real project? | `mise run bench` | One trial of warm, commit, and edit scenarios |
+| How does mbx compare on a real project? | `mise run bench` | One trial of warm, second-worktree, commit, and edit scenarios |
 | How are the website's results refreshed? | `mise run bench:refresh` | Three trials of every scenario for hk and aube |
 | Are cached builds correct in this workspace? | `measure_builds.py --verify` | Versioned reports, logs, and verification results |
 
@@ -87,19 +87,29 @@ mise run bench
 mise run bench:refresh
 ```
 
-The scenarios measure a warm store with a fresh target, the next commit, an
-in-place source edit, and six overlapping check, Clippy, and test-compilation
-jobs. The edit scenario runs with `CI` unset and times the second edit, after
-each tool has established its incremental state. The first edit's cost is also
-reported. Parallel jobs receive separate targets so Cargo's target lock does
-not serialize them.
+The scenarios measure a warm store with a fresh target in the same checkout,
+the first build in a second worktree, the next commit, an in-place source edit,
+and six overlapping check, Clippy, and test-compilation jobs. The edit scenario
+runs with `CI` unset and times the second edit, after each tool has established
+its incremental state. The first edit's cost is also reported. Parallel jobs
+receive separate targets so Cargo's target lock does not serialize them.
+
+The second-worktree cell builds one commit in a clone, then builds the same
+commit in its new Git worktree with the same local store and Cargo home. All
+tools use their default target placement, so target seeding is eligible when
+the toolchain supports it. The timed build reports mbx hits, misses, loaded
+predictions, compiler work, and output materialization. No earlier target
+directory is copied into the worktree by the harness. Cargo's cold build is
+the uncached baseline.
 
 Each trial starts from a fresh clone and empty store. The registry is fetched
-outside timed builds, the toolchain is pinned, inherited wrappers are cleared,
-and caches run locally. Validity checks reject runs that did not exercise the
-intended behavior, such as a warm build with no restores or a Cargo baseline
-that accidentally used an mbx shim. Contention checks verify the permit limit
-was exercised; wall-time ordering remains a reported result.
+outside timed builds, the toolchain selection is recorded, inherited wrappers
+are cleared, and caches run locally. Cargo and kache invoke rustup's Cargo
+binary directly, so an installed transparent mbx shim cannot change their
+rows. Validity checks reject runs that did not exercise the intended behavior,
+such as a warm build with no restores or a Cargo baseline that accidentally
+used an mbx shim. Contention checks verify the permit limit was exercised;
+wall-time ordering remains a reported result.
 
 Refreshes measure both projects and write `results.json` for hk and
 `results-aube.json` for aube. Each file retains its own versions and CI

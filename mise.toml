@@ -164,7 +164,7 @@ depends = ["perf:prepare"]
 run = """
 python3 benchmarks/real_world.py \
   --mbx target/release/mbx \
-  --scenarios warm,commit,edit \
+  --scenarios warm,worktree,commit,edit \
   --output target/benchmarks
 """
 
@@ -181,7 +181,7 @@ for subject in hk aube; do
   python3 benchmarks/real_world.py \
     --subject "$subject" \
     --mbx target/release/mbx \
-    --scenarios warm,commit,edit,contention \
+    --scenarios warm,worktree,commit,edit,contention \
     --trials 3 \
     --output "target/benchmarks/$subject" \
     --write-results "$results" || exit "$?"

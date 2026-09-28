@@ -494,7 +494,7 @@ impl RustcInvocation {
                 // by its literal path in the arguments, not by its contents --
                 // predictions skip it under the same rule, so both discovery
                 // paths agree on the action key.
-                if self.native_search_is_inert()
+                if self.native_search_is_inert(&directory)
                     && matches!(
                         super::normalize_mapped_path(&directory, &working_dir, path_mappings),
                         Err(BypassReason::UnmappedAbsolutePath(_))
@@ -891,6 +891,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn unmapped_native_directory_is_keyed_by_path_for_library_emits() {
         let directory = tempfile::tempdir().unwrap();
@@ -938,6 +939,42 @@ mod tests {
         assert_eq!(
             invocation.action(replay_context).unwrap().digest,
             action.digest
+        );
+    }
+
+    #[test]
+    fn source_level_static_link_cannot_hide_an_unmapped_archive() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let external = directory.path().join("external");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&external).unwrap();
+        let source = workspace.join("lib.rs");
+        std::fs::write(
+            &source,
+            "#[link(name = \"foo\", kind = \"static\")] unsafe extern \"C\" {}\n",
+        )
+        .unwrap();
+        std::fs::write(external.join("libfoo.a"), b"first archive").unwrap();
+        let invocation = library_with_native_search(&source, &external);
+        let mappings = vec![PathMapping::new(&workspace, "workspace")];
+        let context = library_context(&workspace, mappings.clone());
+        let dep_info = RustcDepInfo::parse(&format!("output: {}\n", source.display())).unwrap();
+
+        // rustc's dep-info names the source but not an archive from #[link].
+        // A path-only key would restore a stale rlib after libfoo.a changed.
+        assert!(matches!(
+            invocation.invocation_digest(&context),
+            Err(BypassReason::UnmappedAbsolutePath(path)) if path == external
+        ));
+        assert_eq!(
+            invocation.discover_inputs_with_mappings(
+                &dep_info,
+                &workspace,
+                &mappings,
+                &mbx_cache_core::NoFileDigestCache,
+            ),
+            Err(BypassReason::UnsupportedSearchPath("native".into()))
         );
     }
 

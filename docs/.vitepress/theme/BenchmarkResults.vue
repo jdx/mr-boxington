@@ -150,6 +150,11 @@ const COPY: Record<string, { title: string; caption: string }> = {
     caption:
       "The store is warm from an earlier build of the same commit and target/ is empty. Cargo is left out: with nothing to reuse it would repeat that earlier build.",
   },
+  worktree: {
+    title: "A new worktree builds the same commit",
+    caption:
+      "The local store was warmed in one checkout, then the same commit was built in a new Git worktree with no target directory. All tools use their default target placement; Cargo provides the uncached baseline.",
+  },
   commit: {
     title: "CI builds the next push",
     caption:
