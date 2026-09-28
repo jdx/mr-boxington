@@ -463,8 +463,8 @@ class Runner:
         if toolchain is not None:
             environment["RUSTUP_TOOLCHAIN"] = toolchain
         # A directly invoked Cargo can otherwise find a different rustc via
-        # mise's PATH shim. Pin both binaries to one rustup toolchain for every
-        # row, including the mbx row it is compared against.
+        # mise's PATH shim. Resolve both binaries the same way for every row,
+        # including the mbx row it is compared against.
         environment["RUSTC"] = self.real_rust_tool("rustc", checkout, environment)
         args = list(subject["args"]) if args is None else args  # type: ignore[arg-type]
 
@@ -508,13 +508,40 @@ class Runner:
     def real_rust_tool(name: str, checkout: Path, environment: dict[str, str]) -> str:
         # A developer may have installed mbx as a transparent cargo shim on
         # PATH. The raw Cargo baseline and kache row must bypass that shim.
-        # Resolve in the subject checkout so rustup honors its toolchain file.
-        return subprocess.check_output(
-            ["rustup", "which", name],
+        # Prefer rustup in the subject checkout so its toolchain file is
+        # honored. System Rust installations can use their binaries on PATH.
+        if shutil.which("rustup") is not None:
+            return subprocess.check_output(
+                ["rustup", "which", name],
+                cwd=checkout,
+                env=environment,
+                text=True,
+            ).strip()
+        if environment.get("RUSTUP_TOOLCHAIN"):
+            raise Skipped("a requested Rust toolchain requires rustup")
+        resolved = shutil.which(name)
+        if resolved is None:
+            raise Skipped(f"{name} is not on PATH")
+        return resolved
+
+    def stop_kache(self, *, subject: dict[str, object], checkout: Path, store: Path) -> None:
+        """Stop the daemon for this cell before its scratch directory is removed."""
+        environment = self.base_environment(subject, checkout / "target", default_target=True)
+        environment.update(
+            {
+                "KACHE_CACHE_DIR": str(store),
+                "KACHE_RUNTIME_DIR": str(store.parent / f"{store.name}-runtime"),
+                "KACHE_LOCAL_ONLY": "1",
+            }
+        )
+        subprocess.run(
+            [shutil.which("kache") or "kache", "daemon", "stop"],
             cwd=checkout,
             env=environment,
             text=True,
-        ).strip()
+            capture_output=True,
+            check=False,
+        )
 
     def run(
         self,
@@ -565,6 +592,8 @@ class Runner:
             f"$ {' '.join(command)}\n\n{completed.stdout}\n{completed.stderr}", encoding="utf-8"
         )
         if completed.returncode != 0:
+            if tool == "kache" and not keep_daemon:
+                self.stop_kache(subject=subject, checkout=checkout, store=store)
             raise RuntimeError(f"{cell}/{tool} build failed; see {log}")
 
         if tool in MBX_TOOLS:
@@ -587,14 +616,7 @@ class Runner:
             # worktree seed keeps that daemon running for the timed build;
             # other calls stop it before their scratch tree is removed.
             if not keep_daemon:
-                subprocess.run(
-                    [shutil.which("kache") or "kache", "daemon", "stop"],
-                    cwd=checkout,
-                    env=environment,
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                )
+                self.stop_kache(subject=subject, checkout=checkout, store=store)
 
         # An edit that invalidated nothing would render as a very fast
         # rebuild, so the gate needs to know whether a compiler ran at all.
@@ -896,28 +918,33 @@ def one_trial(
         second = work / f"checkout-{cell}-second"
         revision = str(subject["child"])
         clone(subject, revision, first)
-        seed = runner.run(
-            tool=tool,
-            cell=f"{cell}-seed",
-            subject=subject,
-            checkout=first,
-            target=first / "target",
-            store=store,
-            default_target=True,
-            keep_daemon=True,
-        )
-        worktree(first, revision, second)
-        measured = runner.run(
-            tool=tool,
-            cell=cell,
-            subject=subject,
-            checkout=second,
-            target=second / "target",
-            store=store,
-            default_target=True,
-        )
-        measured["seed_wall_duration_ns"] = seed["wall_duration_ns"]
-        return measured
+        try:
+            seed = runner.run(
+                tool=tool,
+                cell=f"{cell}-seed",
+                subject=subject,
+                checkout=first,
+                target=first / "target",
+                store=store,
+                default_target=True,
+                keep_daemon=True,
+            )
+            worktree(first, revision, second)
+            measured = runner.run(
+                tool=tool,
+                cell=cell,
+                subject=subject,
+                checkout=second,
+                target=second / "target",
+                store=store,
+                default_target=True,
+                keep_daemon=True,
+            )
+            measured["seed_wall_duration_ns"] = seed["wall_duration_ns"]
+            return measured
+        finally:
+            if tool == "kache":
+                runner.stop_kache(subject=subject, checkout=first, store=store)
 
     if scenario == "commit":
         checkout = work / f"checkout-{cell}"

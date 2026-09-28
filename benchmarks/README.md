@@ -105,8 +105,9 @@ the uncached baseline.
 Each trial starts from a fresh clone and empty store. The registry is fetched
 outside timed builds, the toolchain selection is recorded, inherited wrappers
 are cleared, and caches run locally. Cargo and kache invoke rustup's Cargo
-binary directly, so an installed transparent mbx shim cannot change their
-rows. Validity checks reject runs that did not exercise the intended behavior,
+binary directly when rustup is available, or the Cargo on PATH for a system
+Rust installation. The control rows disable mbx, and validity checks reject
+runs that did not exercise the intended behavior,
 such as a warm build with no restores or a Cargo baseline that accidentally
 used an mbx shim. Contention checks verify the permit limit was exercised;
 wall-time ordering remains a reported result.

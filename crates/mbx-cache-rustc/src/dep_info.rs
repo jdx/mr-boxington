@@ -858,7 +858,9 @@ mod tests {
     /// every mapped root.
     fn toolchain_native_directory(version: &str) -> PathBuf {
         if cfg!(windows) {
-            PathBuf::from(format!(r"C:\Program Files\MSVC\{version}\lib\x64"))
+            PathBuf::from(format!(
+                r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\{version}\lib\x64"
+            ))
         } else {
             PathBuf::from(format!("/opt/msvc/{version}/lib/x64"))
         }
@@ -976,6 +978,25 @@ mod tests {
             ),
             Err(BypassReason::UnsupportedSearchPath("native".into()))
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn project_directory_with_toolchain_suffix_is_not_trusted() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("lib.rs");
+        std::fs::write(&source, "pub fn library() {}\n").unwrap();
+        let fake_toolchain = directory.path().join("MSVC/14.51.36231/lib/x64");
+        let invocation = library_with_native_search(&source, &fake_toolchain);
+        let context = library_context(&root, vec![PathMapping::new(&root, "workspace")]);
+
+        // The apparent toolset version cannot make a mutable project archive inert.
+        assert!(matches!(
+            invocation.invocation_digest(&context),
+            Err(BypassReason::UnmappedAbsolutePath(path)) if path == fake_toolchain
+        ));
     }
 
     #[test]

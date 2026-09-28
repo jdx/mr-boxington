@@ -2168,12 +2168,23 @@ fn safe_install_name(name: &str) -> bool {
 
 /// Windows passes versioned compiler and SDK library directories to many
 /// library compilations even when they consume no native archive themselves.
-/// Their path is the toolchain identity; arbitrary external `-L native` paths
-/// have no such identity and must be refused when their contents cannot be
-/// mapped into the action key.
+/// Accept only the standard, protected installation layouts. A project-local
+/// directory with a toolchain-looking suffix can contain a mutable archive.
 fn versioned_windows_toolchain_native_directory(directory: &Path) -> bool {
     #[cfg(windows)]
     {
+        if !directory.is_absolute()
+            || !matches!(
+                directory.components().next(),
+                Some(Component::Prefix(prefix))
+                    if matches!(prefix.kind(), std::path::Prefix::Disk(_))
+            )
+            || directory
+                .components()
+                .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+        {
+            return false;
+        }
         let parts = directory
             .components()
             .filter_map(|part| match part {
@@ -2183,19 +2194,32 @@ fn versioned_windows_toolchain_native_directory(directory: &Path) -> bool {
             .collect::<Vec<_>>();
         let version = |part: &str| {
             part.contains('.')
-                && part
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || byte == b'.')
+                && part.split('.').all(|segment| {
+                    !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit())
+                })
         };
-        parts
-            .windows(3)
-            .any(|parts| parts[0] == "msvc" && version(&parts[1]) && parts[2] == "lib")
-            || parts.windows(4).any(|parts| {
-                parts[0] == "windows kits"
-                    && parts[1] == "10"
-                    && parts[2] == "lib"
-                    && version(&parts[3])
-            })
+        let architecture = |part: &str| matches!(part, "x86" | "x64" | "arm" | "arm64");
+        let program_files = |part: &str| matches!(part, "program files" | "program files (x86)");
+        let msvc = parts.len() == 10
+            && program_files(&parts[0])
+            && parts[1] == "microsoft visual studio"
+            && parts[2].len() == 4
+            && parts[2].bytes().all(|byte| byte.is_ascii_digit())
+            && matches!(
+                parts[3].as_str(),
+                "community" | "professional" | "enterprise" | "buildtools"
+            )
+            && parts[4..7] == ["vc", "tools", "msvc"]
+            && version(&parts[7])
+            && parts[8] == "lib"
+            && architecture(&parts[9]);
+        let windows_sdk = parts.len() == 7
+            && program_files(&parts[0])
+            && parts[1..4] == ["windows kits", "10", "lib"]
+            && version(&parts[4])
+            && matches!(parts[5].as_str(), "um" | "ucrt")
+            && architecture(&parts[6]);
+        msvc || windows_sdk
     }
     #[cfg(not(windows))]
     {

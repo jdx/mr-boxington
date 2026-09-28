@@ -343,6 +343,29 @@ class LocalEnvironmentTest(unittest.TestCase):
                 self.assertEqual(environment["MBX_DISABLE"], "1")
         self.assertEqual(rust_tool.call_count, 4)
 
+    def test_system_rust_without_rustup_uses_path(self) -> None:
+        with mock.patch.object(
+            real_world.shutil,
+            "which",
+            side_effect={"rustup": None, "rustc": "/usr/bin/rustc", "cargo": "/usr/bin/cargo"}.get,
+        ), mock.patch.object(real_world.subprocess, "check_output") as rustup:
+            self.assertEqual(
+                real_world.Runner.real_rust_tool("rustc", Path("/checkout"), {}),
+                "/usr/bin/rustc",
+            )
+            self.assertEqual(
+                real_world.Runner.real_rust_tool("cargo", Path("/checkout"), {}),
+                "/usr/bin/cargo",
+            )
+        rustup.assert_not_called()
+
+    def test_system_rust_does_not_ignore_a_requested_toolchain(self) -> None:
+        with mock.patch.object(real_world.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(real_world.Skipped, "requires rustup"):
+                real_world.Runner.real_rust_tool(
+                    "rustc", Path("/checkout"), {"RUSTUP_TOOLCHAIN": "1.90"}
+                )
+
 
 class WorktreeScenarioTest(unittest.TestCase):
     def test_builds_a_distinct_worktree_against_the_same_store(self) -> None:
@@ -371,6 +394,27 @@ class WorktreeScenarioTest(unittest.TestCase):
             self.assertTrue(all(call["default_target"] for call in calls))
             self.assertEqual(measured["seed_wall_duration_ns"], 1)
             self.assertEqual(measured["wall_duration_ns"], 2)
+
+    def test_stops_kache_daemon_when_creating_worktree_fails(self) -> None:
+        class Runner:
+            def __init__(self) -> None:
+                self.stopped = False
+
+            def run(self, **_kwargs: object) -> dict[str, object]:
+                return {"tool": "kache", "wall_duration_ns": 1}
+
+            def stop_kache(self, **_kwargs: object) -> None:
+                self.stopped = True
+
+        runner = Runner()
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            real_world, "clone"
+        ), mock.patch.object(real_world, "worktree", side_effect=RuntimeError("worktree failed")):
+            with self.assertRaisesRegex(RuntimeError, "worktree failed"):
+                real_world.one_trial(
+                    "worktree", "kache", "worktree-kache", {"child": "abc"}, runner, Path(temporary)
+                )
+        self.assertTrue(runner.stopped)
 
 
 class ToolchainTest(unittest.TestCase):
