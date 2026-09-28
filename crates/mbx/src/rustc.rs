@@ -188,11 +188,12 @@ pub(crate) fn compile(
     // which value they see.
     crate::out_dir::stabilize_for(initial_invocation.source());
     let initial_outputs = initial_invocation.outputs(&working_dir)?;
-    let portable = Portable::detect(
+    let mut portable = Portable::detect(
         &working_dir,
         Some(&initial_outputs.directory),
         initial_invocation.target(),
     );
+    portable.map_external_native_paths(&initial_invocation, &working_dir);
     let mut arguments = portable.applied_to(arguments);
     // Include the flag in both parsing/key construction and execution. This
     // separates old path-bearing artifacts without changing content hashing.
@@ -3050,6 +3051,23 @@ struct Portable {
 }
 
 impl Portable {
+    fn map_external_native_paths(&mut self, invocation: &RustcInvocation, working_dir: &Path) {
+        for path in invocation.native_search_paths() {
+            if normalize_mapped_path(path, working_dir, &self.mappings).is_ok() {
+                continue;
+            }
+            let Some(text) = path.to_str().filter(|_| path.is_absolute()) else {
+                continue;
+            };
+            // Keep installation locations in the key: these paths are not
+            // remapped in the compiler's output. Only explicitly named search
+            // directories are admitted, and discovery hashes their contents.
+            let placeholder = format!("native_{}", CacheDigest::blake3(text.as_bytes()).hash);
+            self.mappings.push(PathMapping::new(path, placeholder));
+        }
+        self.mappings = PathMapping::ordered(&self.mappings);
+    }
+
     fn detect(working_dir: &Path, target_output: Option<&Path>, target: Option<&str>) -> Self {
         let mut portable = Self {
             mappings: PathMapping::ordered(&path_mappings(working_dir, target_output, target)),

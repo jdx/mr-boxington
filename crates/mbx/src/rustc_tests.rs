@@ -1557,3 +1557,45 @@ fn a_stable_out_dir_is_mapped_by_name_beneath_its_root() {
             .any(|mapping| mapping.placeholder == "out_dir")
     );
 }
+
+#[test]
+fn external_native_mappings_preserve_installation_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    let native = directory.path().join("openssl/lib");
+    let invocation = RustcInvocation::parse(&[
+        "--crate-type=lib".into(),
+        "--emit=metadata,link".into(),
+        format!("-Lnative={}", native.display()).into(),
+        format!("-Lnative={}", native.display()).into(),
+        "src.rs".into(),
+    ])
+    .unwrap();
+    let mut portable = Portable {
+        mappings: vec![PathMapping::new(&workspace, "workspace")],
+        arguments: vec![],
+    };
+    portable.map_external_native_paths(&invocation, &workspace);
+    assert_eq!(portable.mappings.len(), 2);
+    let mapped =
+        normalize_mapped_path(&native.join("libssl.a"), &workspace, &portable.mappings).unwrap();
+    assert!(mapped.starts_with("${native_"));
+    assert!(mapped.ends_with("/libssl.a"));
+    assert!(
+        portable.arguments.is_empty(),
+        "external paths are not remapped in compiler output"
+    );
+    let other = directory.path().join("other/lib");
+    let invocation = RustcInvocation::parse(&[
+        "--crate-type=lib".into(),
+        "--emit=metadata,link".into(),
+        format!("-Lnative={}", other.display()).into(),
+        "src.rs".into(),
+    ])
+    .unwrap();
+    portable.map_external_native_paths(&invocation, &workspace);
+    assert_ne!(
+        mapped,
+        normalize_mapped_path(&other.join("libssl.a"), &workspace, &portable.mappings).unwrap()
+    );
+}

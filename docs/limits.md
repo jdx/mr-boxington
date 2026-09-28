@@ -137,11 +137,22 @@ Windows MSVC and UEFI targets; the literal name with `+verbatim`), and hashes
 it into the action key exactly like an `--extern` artifact. A rebuilt archive
 with the same name therefore gives the library a new key, on a fresh
 compilation and on a predicted restore alike. If no search directory holds
-the archive, the compilation bypasses as `missing-native-library`; an archive
-outside the workspace, target, Cargo, toolchain, and home roots bypasses as
-`unmapped-absolute-path`, like any other input there. A custom target
-specification names its archives its own way, so a `-l static` compile for
-one bypasses as `custom-target-native-library` unless the flag is `+verbatim`.
+the archive, the compilation bypasses as `missing-native-library`.
+
+Explicit external `-L native` directories, including Homebrew installations,
+are tracked by their location and file contents. Predictions rescan those
+directories, so changing, adding, or removing an archive invalidates reuse even
+when the library is named by a source-level `#[link]` attribute. Regular-file
+symlinks within the searched tree are hashed through their referents; directory
+symlinks within the tree, dangling links, and file links escaping it still
+bypass. The search root itself may be a symlink, such as a Homebrew `opt` path.
+Existing directory size and input-count limits still apply. Installation paths
+remain part of the key, so different installations do not share artifacts just
+because their files match.
+
+A custom target specification names its archives its own way, so a `-l static`
+compile for one bypasses as `custom-target-native-library` unless the flag is
+`+verbatim`.
 A bare target name counts as one when a specification file for it exists
 under `RUST_TARGET_PATH` or in the toolchain's `lib/rustlib` directory.
 

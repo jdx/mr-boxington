@@ -52,14 +52,20 @@ build_into() {
   run env CARGO_TARGET_DIR="$1" MBX_STATS_REPORT="$1.json" \
     "$MBX_BIN" build --offline --lib --manifest-path "$PROJECT/Cargo.toml"
   assert_success
-  assert_output --partial 'result was not stored: rustc search path kind is not cacheable yet: native'
+  refute_output --partial 'result was not stored'
+  refute_output --partial 'prediction was not restored'
 }
 
-@test "a source-level native archive outside mapped roots cannot restore a stale rlib" {
+@test "external native archives are cached and invalidate after a content change" {
   local first="$BATS_TEST_TMPDIR/first-target"
   local second="$BATS_TEST_TMPDIR/second-target"
   write_archive 7
   build_into "$first"
+
+  local warm="$BATS_TEST_TMPDIR/warm-target"
+  build_into "$warm"
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*[2-9]' "$warm.json"
+  assert_success
 
   write_archive 8
   build_into "$second"
@@ -70,5 +76,32 @@ build_into() {
   assert_file_exists "$first_rlib"
   assert_file_exists "$second_rlib"
   run cmp "$first_rlib" "$second_rlib"
+  assert_failure
+}
+
+@test "retargeting a native archive symlink invalidates a warm cache" {
+  write_archive 7
+  mv "$EXTERNAL_NATIVE/libfixture.a" "$EXTERNAL_NATIVE/libfirst.a"
+  write_archive 8
+  mv "$EXTERNAL_NATIVE/libfixture.a" "$EXTERNAL_NATIVE/libsecond.a"
+  ln -s libfirst.a "$EXTERNAL_NATIVE/libfixture.a"
+
+  local first="$BATS_TEST_TMPDIR/first-target"
+  local warm="$BATS_TEST_TMPDIR/warm-target"
+  local changed="$BATS_TEST_TMPDIR/changed-target"
+  build_into "$first"
+  build_into "$warm"
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*[2-9]' "$warm.json"
+  assert_success
+
+  rm "$EXTERNAL_NATIVE/libfixture.a"
+  ln -s libsecond.a "$EXTERNAL_NATIVE/libfixture.a"
+  build_into "$changed"
+  local first_rlib changed_rlib
+  first_rlib="$(find "$first/debug" -name 'libexternal_native_archive*.rlib' -print -quit)"
+  changed_rlib="$(find "$changed/debug" -name 'libexternal_native_archive*.rlib' -print -quit)"
+  assert_file_exists "$first_rlib"
+  assert_file_exists "$changed_rlib"
+  run cmp "$first_rlib" "$changed_rlib"
   assert_failure
 }

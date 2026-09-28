@@ -529,6 +529,16 @@ pub(super) fn collect_native_directory(
         return Err(BypassReason::UnsupportedSearchPath("native".into()));
     }
 
+    let canonical_root = match directory.canonicalize() {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(BypassReason::InputRead {
+                path: directory,
+                message: error.to_string(),
+            });
+        }
+    };
     let mut pending = vec![directory];
     while let Some(directory) = pending.pop() {
         let entries = match std::fs::read_dir(&directory) {
@@ -553,11 +563,24 @@ pub(super) fn collect_native_directory(
             })?;
             if file_type.is_dir() {
                 pending.push(path);
-            } else if file_type.is_file() {
+            } else if file_type.is_file() || file_type.is_symlink() {
+                // Homebrew's versionless dylibs are symlinks. Hash their
+                // referents under the searched name, but do not follow directory
+                // links, dangling links, or links outside this search tree.
+                if file_type.is_symlink() {
+                    let resolved =
+                        path.canonicalize()
+                            .map_err(|error| BypassReason::InputRead {
+                                path: path.clone(),
+                                message: error.to_string(),
+                            })?;
+                    if !resolved.starts_with(&canonical_root) || !resolved.is_file() {
+                        return Err(BypassReason::UnsupportedSearchPath("native".into()));
+                    }
+                }
                 *native_bytes = native_bytes
                     .checked_add(
-                        entry
-                            .metadata()
+                        std::fs::metadata(&path)
                             .map_err(|error| BypassReason::InputRead {
                                 path: path.clone(),
                                 message: error.to_string(),
@@ -1355,6 +1378,89 @@ mod tests {
             discovered.inputs[0].digest,
             CacheDigest::blake3_file(&path).unwrap(),
             "the disguised rewrite is hashed, not answered from the ledger"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn native_file_symlinks_are_rehashed_on_prediction() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let native = directory.path().join("cellar/lib");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&native).unwrap();
+        let source = workspace.join("lib.rs");
+        std::fs::write(&source, "pub fn value() {}\n").unwrap();
+        std::fs::write(native.join("libssl.3.dylib"), "first").unwrap();
+        symlink("libssl.3.dylib", native.join("libssl.dylib")).unwrap();
+        let opt = directory.path().join("opt");
+        symlink(&native, &opt).unwrap();
+        let invocation = library_with_native_search(&source, &opt);
+        let mappings = vec![
+            PathMapping::new(&workspace, "workspace"),
+            PathMapping::new(&opt, "native"),
+        ];
+        let dep_info = RustcDepInfo {
+            files: vec![source],
+            environment: BTreeMap::new(),
+        };
+        let discover = || {
+            invocation
+                .discover_inputs_with_mappings(
+                    &dep_info,
+                    &workspace,
+                    &mappings,
+                    &mbx_cache_core::NoFileDigestCache,
+                )
+                .unwrap()
+        };
+        let original = discover();
+        let mut context = library_context(&workspace, mappings.clone());
+        original.clone().apply_to(&mut context).unwrap();
+        let initial = invocation.action(context.clone()).unwrap();
+        let prediction = invocation.prediction(&context, &original).unwrap();
+        context.inputs.clear();
+        let mut previous = initial.digest;
+        for change in ["contents", "add", "retarget", "remove"] {
+            match change {
+                "contents" => std::fs::write(native.join("libssl.3.dylib"), "updated").unwrap(),
+                "add" => std::fs::write(native.join("libssl.4.dylib"), "replacement").unwrap(),
+                "retarget" => {
+                    std::fs::remove_file(native.join("libssl.dylib")).unwrap();
+                    symlink("libssl.4.dylib", native.join("libssl.dylib")).unwrap();
+                }
+                _ => std::fs::remove_file(native.join("libssl.3.dylib")).unwrap(),
+            }
+            let predicted = prediction
+                .discover(&workspace, &mappings, &mbx_cache_core::NoFileDigestCache)
+                .unwrap();
+            let mut predicted_context = context.clone();
+            predicted.apply_to(&mut predicted_context).unwrap();
+            let predicted_action = invocation.action(predicted_context).unwrap();
+            let mut discovered_context = context.clone();
+            discover().apply_to(&mut discovered_context).unwrap();
+            assert_eq!(
+                predicted_action,
+                invocation.action(discovered_context).unwrap()
+            );
+            assert_ne!(predicted_action.digest, previous, "{change}");
+            previous = predicted_action.digest;
+        }
+        std::fs::remove_file(native.join("libssl.dylib")).unwrap();
+        let outside = directory.path().join("outside");
+        std::fs::write(&outside, "untracked").unwrap();
+        symlink(&outside, native.join("libssl.dylib")).unwrap();
+        assert!(
+            prediction
+                .discover(&workspace, &mappings, &mbx_cache_core::NoFileDigestCache)
+                .is_err()
+        );
+        std::fs::remove_file(native.join("libssl.dylib")).unwrap();
+        symlink(".", native.join("loop")).unwrap();
+        assert!(
+            prediction
+                .discover(&workspace, &mappings, &mbx_cache_core::NoFileDigestCache)
+                .is_err()
         );
     }
 }

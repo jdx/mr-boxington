@@ -544,6 +544,16 @@ impl RustcInvocation {
         enabled
     }
 
+    /// Native directories explicitly searched by this invocation. Callers can
+    /// map external installations so their contents participate in discovery
+    /// and prediction, rather than treating their paths as immutable inputs.
+    pub fn native_search_paths(&self) -> impl Iterator<Item = &Path> {
+        self.arguments.iter().filter_map(|argument| match argument {
+            Argument::SearchPath { kind, path } if kind == "native" => Some(path.as_path()),
+            _ => None,
+        })
+    }
+
     /// Return the source input passed to rustc.
     pub fn source(&self) -> &Path {
         &self.source
@@ -2255,7 +2265,7 @@ impl<'a> ActionBuilder<'a> {
                 .digest
                 .validate()
                 .map_err(|_| BypassReason::InvalidInputDigest(input.path.display().to_string()))?;
-            let path = self.normalize_path(&input.path)?;
+            let path = self.normalize_input_path(&input.path)?;
             if inputs
                 .insert(path.clone(), input.digest.clone())
                 .is_some_and(|existing| existing != input.digest)
@@ -2267,7 +2277,7 @@ impl<'a> ActionBuilder<'a> {
             .invocation
             .required_inputs
             .iter()
-            .map(|path| self.normalize_path(path))
+            .map(|path| self.normalize_input_path(path))
             .collect::<Result<BTreeSet<_>, _>>()?;
         if let Some(missing) = required.iter().find(|path| !inputs.contains_key(*path)) {
             return Err(BypassReason::MissingRequiredInput(missing.clone()));
@@ -2423,6 +2433,34 @@ impl<'a> ActionBuilder<'a> {
                 Ok((name.clone(), value))
             })
             .collect()
+    }
+
+    fn normalize_input_path(&self, path: &Path) -> Result<String, BypassReason> {
+        let absolute = normalize_components(&self.context.working_dir.join(path));
+        for directory in self.invocation.native_search_paths() {
+            let directory = normalize_components(&self.context.working_dir.join(directory));
+            if let Ok(relative) = absolute.strip_prefix(&directory) {
+                // Preserve the searched filename. Resolving a symlink here
+                // would collapse libssl.dylib into its versioned referent, so
+                // retargeting that link between two existing files could leave
+                // the input map unchanged. Discovery rejects directory links
+                // inside the tree and hashes regular-file links by content.
+                let suffix = relative
+                    .components()
+                    .map(|component| {
+                        component
+                            .as_os_str()
+                            .to_str()
+                            .ok_or_else(|| BypassReason::NonUtf8Path(path.to_path_buf()))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join("/");
+                if !suffix.is_empty() {
+                    return Ok(format!("{}/{}", self.normalize_path(&directory)?, suffix));
+                }
+            }
+        }
+        self.normalize_path(path)
     }
 
     fn normalize_path(&self, path: &Path) -> Result<String, BypassReason> {
