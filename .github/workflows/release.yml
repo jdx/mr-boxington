@@ -336,6 +336,18 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+      - name: Resolve the skill's release source
+        id: source
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          # Manual recovery can target a release from before skills shipped.
+          if [[ -s skills/mbx/SKILL.md ]]; then
+            echo "skill=skill/mbx=repo:skills/mbx" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
@@ -435,9 +447,11 @@ jobs:
       - uses: jdx/packslip@87479dfc6443253dff69601cace5fc6ea07e6df5 # v1.4.0
         with:
           tag: ${{ inputs.tag }}
+          commit: ${{ steps.source.outputs.commit }}
           artifacts: release-assets/mbx-*.tar.gz release-assets/mbx-*.zip
           bin: mbx
           resources: |
+            ${{ steps.source.outputs.skill }}
             cli-spec/usage=asset:mbx.usage.kdl
             completion/bash=asset:mbx.bash
             completion/zsh=asset:mbx.zsh
