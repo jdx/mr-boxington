@@ -51,6 +51,7 @@ from the environment, such as `MBX_VERIFY`, cannot be written with
 | Change | Command or guide |
 | --- | --- |
 | Leave capacity for your editor | `mbx settings set scheduler.reserve_cpus 2`; [parallel builds](/scheduling) |
+| Set one budget for cached build data | `gc.max_total_size = "50GiB"`; [single cache budget](#single-cache-budget) |
 | Keep the action store under a fixed size | `mbx settings set gc.max_size 20GiB` |
 | Keep live targets longer | `mbx settings set target.max_age 60d`; [managed targets](/managed-targets) |
 | Collect agent worktrees' targets first | `mbx settings set target.evict_first .claude/worktrees`; [managed targets](/managed-targets#keep-or-evict-specific-checkouts) |
@@ -119,9 +120,50 @@ reapplying its original configure options). Do not
 remove a shim directory while a build uses it. Updating mbx during an active build
 retains the existing executable-replacement limitations.
 
+## Single cache budget
+
+To manage cached build data with one size setting, add this to your global
+configuration:
+
+```toml
+[gc]
+max_total_size = "50GiB"
+```
+
+Or run `mbx settings set gc.max_total_size 50GiB`. The environment equivalent is
+`MBX_GC_MAX_TOTAL_SIZE`.
+
+The budget covers action-store objects and results, managed targets, learned
+incremental state, and generated source copies. These components share the
+budget without the usual disk-scaled size caps. The per-crate learned
+incremental limit defaults to this same budget. Explicit component limits
+still apply; remove those settings if you want mbx to manage the allocation.
+Age limits and the automatic disk-free-space safeguard remain enabled.
+
+Collection reserves only the space the action store actually occupies, up to
+its limit, so an empty store does not force useful targets out. Learned
+incremental state and generated sources use the remaining allowance; targets
+use what remains after them. If protected state leaves less room, the action
+store is collected to fit the remaining budget. This favors shared cached
+results and incremental state over older target directories; allocation is
+not based on measured rebuild cost.
+
+This is a **logical-byte collection target**, not a physical disk quota. Shared
+blocks can make physical usage smaller, while metadata, session history, and
+temporary files add overhead outside the budget. Active builds, the most
+recently used state, explicitly kept targets, and untracked state can prevent
+collection from reaching the target; mbx warns when the combined remainder
+exceeds it. Builds can also exceed it between sweeps. Use `mbx gc --dry-run`
+to inspect collection, or `mbx gc --json` for each component's logical sizes.
+
+The budget spans the cache and managed targets even when they live on separate
+disks; free-space safeguards still operate per disk. Setting
+`gc.max_total_size = "none"` restores the disk-scaled defaults below for any
+component without an explicit limit.
+
 ## Disk-scaled defaults
 
-Three size budgets default to a share of the disk holding their data: 5% for
+Without a combined budget, three size budgets default to a share of the disk holding their data: 5% for
 the action store (`gc.max_size`), 10% for managed target directories
 (`target.max_size`), and 5% for learned incremental state
 (`gc.incremental_max_size`), each bounded at both ends. Managed targets and

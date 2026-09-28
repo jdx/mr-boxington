@@ -175,9 +175,9 @@ pub(crate) struct RawConfig {
     #[usage(
         key = "learned_incremental_max_size",
         env = "MBX_LEARNED_INCREMENTAL_MAX_SIZE",
-        default = "8GiB"
+        default_note = "8GiB, or gc.max_total_size when set"
     )]
-    learned_incremental_max_size: String,
+    learned_incremental_max_size: Option<String>,
     /// How much per-compilation history one build may record, or "none" for no
     /// limit. Past this the counters carry on but the rows stop, and
     /// `mbx explain` says so.
@@ -400,7 +400,7 @@ struct RawTarget {
     /// Managed-target budget, or "none". Live views are collected oldest-first.
     #[usage(
         env = "MBX_TARGET_MAX_SIZE",
-        default_note = "10% of the cache disk, from 10GiB to 100GiB"
+        default_note = "10% of the target disk, from 10GiB to 100GiB; shared budget when gc.max_total_size is set"
     )]
     max_size: Option<String>,
     /// Collect live managed targets, and build units inside them, unused this
@@ -427,18 +427,20 @@ struct RawGc {
     /// Action-store and per-session remote-download budget.
     #[usage(
         env = "MBX_GC_MAX_SIZE",
-        default_note = "5% of the cache disk, from 5GiB to 500GiB"
+        default_note = "5% of the cache disk, from 5GiB to 500GiB; gc.max_total_size when set"
     )]
     max_size: Option<String>,
-    /// Combined action-store, managed-target, and learned-incremental budget,
-    /// or "none".
+    /// Combined logical-byte collection target for the action store, managed
+    /// targets, learned incremental state, and generated sources, or "none".
+    /// When set, replaces disk-scaled component defaults; explicit component
+    /// limits still apply. Active and protected state may exceed this target.
     #[usage(env = "MBX_GC_MAX_TOTAL_SIZE")]
     max_total_size: Option<String>,
     /// Aggregate learned-incremental budget, or "none". Inactive checkouts are
     /// collected oldest-first while the most recently used checkout is kept.
     #[usage(
         env = "MBX_GC_INCREMENTAL_MAX_SIZE",
-        default_note = "5% of the cache disk, from 10GiB to 100GiB"
+        default_note = "5% of the cache disk, from 10GiB to 100GiB; shared budget when gc.max_total_size is set"
     )]
     incremental_max_size: Option<String>,
     /// Collect learned incremental state unused this long, or "none".
@@ -1077,35 +1079,40 @@ impl Config {
             .map(parse_optional_byte_size)
             .transpose()
             .wrap_err(Invalid("gc.incremental_max_size"))?;
-        // Measured only where a budget actually needs scaling, so a fully
-        // configured machine pays for no syscall at all. The two budgets are
-        // measured separately because `target.root` can be on another volume,
-        // and sizing a 4TB scratch disk from a 128GB home directory would prune
-        // it to the floor.
-        let store_disk = (store_budget.is_none() || incremental_budget.is_none())
-            .then(|| measure_disk(&cache_dir))
+        let total_budget = raw
+            .gc
+            .max_total_size
+            .as_deref()
+            .map(parse_optional_byte_size)
+            .transpose()
+            .wrap_err(Invalid("gc.max_total_size"))?
             .flatten();
-        let target_disk = target_budget
-            .is_none()
+        // A combined budget replaces only implicit component caps. Explicit
+        // limits (including "none") still win; no disk scaling is needed in
+        // this mode, even when targets live on another volume.
+        let store_disk = (total_budget.is_none()
+            && (store_budget.is_none() || incremental_budget.is_none()))
+        .then(|| measure_disk(&cache_dir))
+        .flatten();
+        let target_disk = (total_budget.is_none() && target_budget.is_none())
             .then(|| measure_disk(&target_root))
             .flatten();
         let retention = RetentionSettings {
-            target_max_bytes: target_budget
-                .unwrap_or_else(|| Some(TARGET_BUDGET.resolve(target_disk))),
+            target_max_bytes: target_budget.unwrap_or_else(|| {
+                total_budget
+                    .is_none()
+                    .then(|| TARGET_BUDGET.resolve(target_disk))
+            }),
             target_max_age: parse_optional_duration(&raw.target.max_age)
                 .wrap_err(Invalid("target.max_age"))?,
-            incremental_max_bytes: incremental_budget
-                .unwrap_or_else(|| Some(INCREMENTAL_BUDGET.resolve(store_disk))),
+            incremental_max_bytes: incremental_budget.unwrap_or_else(|| {
+                total_budget
+                    .is_none()
+                    .then(|| INCREMENTAL_BUDGET.resolve(store_disk))
+            }),
             incremental_max_age: parse_optional_duration(&raw.gc.incremental_max_age)
                 .wrap_err(Invalid("gc.incremental_max_age"))?,
-            max_total_bytes: raw
-                .gc
-                .max_total_size
-                .as_deref()
-                .map(parse_optional_byte_size)
-                .transpose()
-                .wrap_err(Invalid("gc.max_total_size"))?
-                .flatten(),
+            max_total_bytes: total_budget,
             target_precedence: crate::target::Precedence {
                 keep: checkout_patterns(raw.target.keep.as_deref(), dirs::home_dir())
                     .wrap_err(Invalid("target.keep"))?,
@@ -1135,7 +1142,9 @@ impl Config {
         };
         let gc = GcSettings {
             auto: raw.gc.auto,
-            max_bytes: store_budget.unwrap_or_else(|| STORE_BUDGET.resolve(store_disk)),
+            max_bytes: store_budget
+                .or(total_budget)
+                .unwrap_or_else(|| STORE_BUDGET.resolve(store_disk)),
             interval: parse_duration(&raw.gc.interval).wrap_err(Invalid("gc.interval"))?,
         };
         let target = TargetSettings {
@@ -1236,10 +1245,15 @@ impl Config {
                 pretty_inspect: raw.pretty_inspect,
                 plain_output: raw.display == "plain",
                 learned_incremental: raw._learned_incremental,
-                learned_incremental_max_size: parse_optional_byte_size(
-                    &raw.learned_incremental_max_size,
-                )
-                .wrap_err(Invalid("learned_incremental_max_size"))?,
+                learned_incremental_max_size: raw
+                    .learned_incremental_max_size
+                    .as_deref()
+                    .map(parse_optional_byte_size)
+                    .transpose()
+                    .wrap_err(Invalid("learned_incremental_max_size"))?
+                    .unwrap_or(Some(
+                        total_budget.unwrap_or(DEFAULT_LEARNED_INCREMENTAL_MAX_SIZE),
+                    )),
                 cache_links: raw.cache_links,
                 events_max_size: parse_optional_byte_size(&raw.events_max_size)
                     .wrap_err(Invalid("events_max_size"))?,
@@ -2212,6 +2226,90 @@ mod tests {
     }
 
     #[test]
+    fn a_total_budget_replaces_only_implicit_size_limits() {
+        for total in [1, 100] {
+            let value = format!("{total}GiB");
+            let (config, settings) =
+                configured_measuring(None, &[("MBX_GC_MAX_TOTAL_SIZE", &value)], |_| {
+                    panic!("a total budget needs no disk-scaled defaults")
+                })
+                .unwrap();
+            assert_eq!(config.gc.max_bytes, total * GIB);
+            assert_eq!(settings.retention.max_total_bytes, Some(total * GIB));
+            assert_eq!(settings.retention.target_max_bytes, None);
+            assert_eq!(settings.retention.incremental_max_bytes, None);
+            assert_eq!(settings.learned_incremental_max_size, Some(total * GIB));
+            assert_eq!(settings.retention.min_free, Some(MinFree::ShareOfDisk));
+            assert_eq!(
+                settings.retention.target_max_age,
+                Some(DEFAULT_TARGET_MAX_AGE)
+            );
+        }
+
+        let (config, settings) = configured_for_cli(
+            Some(
+                r#"
+learned_incremental_max_size = "2GiB"
+[target]
+max_size = "3GiB"
+[gc]
+max_total_size = "10GiB"
+max_size = "4GiB"
+incremental_max_size = "5GiB"
+"#,
+            ),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(config.gc.max_bytes, 4 * GIB);
+        assert_eq!(settings.retention.target_max_bytes, Some(3 * GIB));
+        assert_eq!(settings.retention.incremental_max_bytes, Some(5 * GIB));
+        assert_eq!(settings.learned_incremental_max_size, Some(2 * GIB));
+
+        let (_, settings) = configured_for_cli(
+            Some(
+                r#"
+learned_incremental_max_size = "none"
+[target]
+max_size = "none"
+[gc]
+max_total_size = "10GiB"
+incremental_max_size = "none"
+"#,
+            ),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(settings.retention.target_max_bytes, None);
+        assert_eq!(settings.retention.incremental_max_bytes, None);
+        assert_eq!(settings.learned_incremental_max_size, None);
+    }
+
+    #[test]
+    fn disabling_the_total_budget_restores_component_defaults() {
+        let (expected_config, expected) = configured_for_cli(None, &[]).unwrap();
+        let (config, settings) = configured_for_cli(
+            Some("[gc]\nmax_total_size = \"1GiB\""),
+            &[("MBX_GC_MAX_TOTAL_SIZE", "none")],
+        )
+        .unwrap();
+        assert_eq!(config.gc.max_bytes, expected_config.gc.max_bytes);
+        assert_eq!(settings.retention.max_total_bytes, None);
+        assert_eq!(
+            settings.retention.target_max_bytes,
+            expected.retention.target_max_bytes
+        );
+        assert_eq!(
+            settings.retention.incremental_max_bytes,
+            expected.retention.incremental_max_bytes
+        );
+        assert_eq!(
+            settings.learned_incremental_max_size,
+            expected.learned_incremental_max_size
+        );
+    }
+
+    #[test]
     fn reads_target_and_whole_cache_retention_limits() {
         let (_, retention) = configured_retention(
             None,
@@ -2862,7 +2960,7 @@ default = "rust-lld"
         // The scaled budgets have no literal default to declare, so the
         // generated reference has to describe them instead.
         assert!(spec.contains("5% of the cache disk"));
-        assert!(spec.contains("10% of the cache disk"));
+        assert!(spec.contains("10% of the target disk"));
         assert!(spec.contains(r#"env "MBX_SAVINGS""#));
         assert!(spec.contains(r#"default="quips""#));
         // The declared log default is the filter the logger actually installs.

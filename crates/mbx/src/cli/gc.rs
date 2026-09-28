@@ -63,7 +63,8 @@ pub(super) fn run(
         collector.lock()?;
     }
     let mut low_disk = None;
-    let incremental_limit = incremental_limit(config, retention, max_bytes, &mut low_disk);
+    let store_reserve = occupied_store_budget(config, retention, max_bytes);
+    let incremental_limit = incremental_limit(config, retention, store_reserve, &mut low_disk);
     // The collector below remains the authority for store errors. Estimating
     // a combined budget must not prevent independent target collection when
     // the action store is damaged.
@@ -100,7 +101,13 @@ pub(super) fn run(
     let reserved_bytes = incremental
         .remaining_bytes
         .saturating_add(generated.remaining_bytes);
-    let target_budget = target_limit(config, retention, max_bytes, reserved_bytes, &mut low_disk);
+    let target_budget = target_limit(
+        config,
+        retention,
+        store_reserve,
+        reserved_bytes,
+        &mut low_disk,
+    );
     // First, ahead of the removals it explains, all of which print below.
     if let Some(disk) = &low_disk
         && !json
@@ -184,6 +191,16 @@ pub(super) fn run(
             + generated.removed_bytes,
         dry_run,
     );
+    if let Some(warning) = total_budget_warning(
+        retention,
+        outcome
+            .remaining_bytes
+            .saturating_add(projected_target_bytes)
+            .saturating_add(reserved_bytes),
+        dry_run,
+    ) {
+        log::warn!("{warning}");
+    }
     if json {
         let pruned = pruned?;
         print_json(&GcReport {
@@ -467,6 +484,14 @@ pub(super) fn sweep_store(config: &Config, retention: &RetentionSettings) -> Swe
             if outcome.removed_bytes > 0 {
                 sweep.lines.push(evictions(&outcome));
             }
+            if let Some(warning) = total_budget_warning(
+                retention,
+                outcome.remaining_bytes.saturating_add(non_store_bytes),
+                false,
+            ) {
+                log::warn!("{warning}");
+                sweep.lines.push(warning);
+            }
             // After the store's own sweep, which can free space on the cache
             // disk too.
             warn_if_still_low(config, retention);
@@ -680,6 +705,7 @@ pub(super) fn prune_targets(
     // collection ever frees, and walking for it on every build would be the
     // slowest, so callers keep this inside the store sweep's throttle.
     let mut low_disk = None;
+    let store_reserve = occupied_store_budget(config, retention, store_reserve);
     let incremental_limit = incremental_limit(config, retention, store_reserve, &mut low_disk);
     let incremental = crate::incremental::collect(
         &config.cache_dir.join("incremental"),
@@ -894,6 +920,38 @@ fn warn_if_still_low(config: &Config, retention: &RetentionSettings) {
             ByteSize::b(disk.min_free).display().iec(),
         );
     }
+}
+
+/// Reserve only occupied store space, capped at what its own sweep will keep.
+/// An empty store must not evict warm targets merely because it could grow.
+/// If measurement fails, keep the former conservative allowance; the store
+/// collector still reports the error without blocking independent cleanup.
+pub(super) fn occupied_store_budget(
+    config: &Config,
+    retention: &RetentionSettings,
+    max_bytes: u64,
+) -> u64 {
+    if retention.max_total_bytes.is_none() {
+        return max_bytes;
+    }
+    store::stats(&config.store_dir()).map_or(max_bytes, |stats| stats.total_bytes().min(max_bytes))
+}
+
+fn total_budget_warning(
+    retention: &RetentionSettings,
+    remaining: u64,
+    dry_run: bool,
+) -> Option<String> {
+    let budget = retention.max_total_bytes?;
+    if remaining <= budget {
+        return None;
+    }
+    let verb = if dry_run { "would remain" } else { "remain" };
+    Some(format!(
+        "{} logical {verb} after collection, over gc.max_total_size ({}); active, most-recently-used, kept, or untracked state can prevent reaching this collection target",
+        ByteSize::b(remaining).display().iec(),
+        ByteSize::b(budget).display().iec(),
+    ))
 }
 
 pub(super) fn target_budget(

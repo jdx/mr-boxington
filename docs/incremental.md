@@ -65,7 +65,10 @@ mbx settings set gc.incremental_max_age 14d      # or none
 ```
 
 `gc.max_total_size`, when set, covers the action store, managed targets, and
-learned incremental state together.
+learned incremental state together, including generated source copies. With
+that setting, the default aggregate incremental cap is replaced by the shared
+budget, and the per-crate limit defaults to the combined budget. Explicit
+incremental limits still apply. See [single cache budget](/configuration#single-cache-budget).
 
 ## Cargo incremental mode
 

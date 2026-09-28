@@ -136,7 +136,7 @@ Collect learned incremental state unused this long, or "none".
 
 - **Type:** `option<string>`
 - **Optional:** true
-- **Default:** 5% of the cache disk, from 10GiB to 100GiB
+- **Default:** 5% of the cache disk, from 10GiB to 100GiB; shared budget when gc.max_total_size is set
 - **Set with:** `MBX_GC_INCREMENTAL_MAX_SIZE`
 
 Aggregate learned-incremental budget, or "none". Inactive checkouts are collected oldest-first while the most recently used checkout is kept.
@@ -153,7 +153,7 @@ Minimum interval between automatic sweeps.
 
 - **Type:** `option<string>`
 - **Optional:** true
-- **Default:** 5% of the cache disk, from 5GiB to 500GiB
+- **Default:** 5% of the cache disk, from 5GiB to 500GiB; gc.max_total_size when set
 - **Set with:** `MBX_GC_MAX_SIZE`
 
 Action-store and per-session remote-download budget.
@@ -164,7 +164,7 @@ Action-store and per-session remote-download budget.
 - **Optional:** true
 - **Set with:** `MBX_GC_MAX_TOTAL_SIZE`
 
-Combined action-store, managed-target, and learned-incremental budget, or "none".
+Combined logical-byte collection target for the action store, managed targets, learned incremental state, and generated sources, or "none". When set, replaces disk-scaled component defaults; explicit component limits still apply. Active and protected state may exceed this target.
 
 ### `gc.min_free_size`
 
@@ -225,8 +225,9 @@ Compile crates that keep missing the cache with changed content incrementally, k
 
 ### `learned_incremental_max_size`
 
-- **Type:** `string`
-- **Default:** `8GiB`
+- **Type:** `option<string>`
+- **Optional:** true
+- **Default:** 8GiB, or gc.max_total_size when set
 - **Set with:** `MBX_LEARNED_INCREMENTAL_MAX_SIZE`
 
 How much learned incremental state one crate may keep, or "none". State past this is discarded before the crate compiles again.
@@ -541,7 +542,7 @@ Collect live managed targets, and build units inside them, unused this long, or 
 
 - **Type:** `option<string>`
 - **Optional:** true
-- **Default:** 10% of the cache disk, from 10GiB to 100GiB
+- **Default:** 10% of the target disk, from 10GiB to 100GiB; shared budget when gc.max_total_size is set
 - **Set with:** `MBX_TARGET_MAX_SIZE`
 
 Managed-target budget, or "none". Live views are collected oldest-first.

@@ -302,6 +302,18 @@ what each step would free, so a real run may remove fewer target directories.
 
 ### Changing or disabling the limits
 
+For one setting covering all managed build data, use `gc.max_total_size` alone:
+
+```toml
+[gc]
+max_total_size = "50GiB"
+```
+
+This replaces implicit component size caps with a shared logical-byte budget.
+Explicit component caps still apply. See [single cache budget](/configuration#single-cache-budget)
+for allocation order, protected state, and physical-space limitations. The
+following example instead sets advanced overrides:
+
 ```toml
 [target]
 max_size = "60GiB"
