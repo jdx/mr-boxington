@@ -57,6 +57,7 @@ target/            (linked to the managed target)
 └── check/debug/   check, clippy
 ```
 
+Aliases count: `mbx c`, and an alias such as `chk = "check"`, get the lane too.
 Builds keep writing to `target/debug`, so binaries stay where they always were.
 Both commands share one compile budget and one cache, so the second starts
 with whatever the first has already stored. The `check` directory is part of
@@ -71,8 +72,9 @@ mbx leaves a command alone, and it uses `target/` as before, when:
 
 - the target directory is set by `--target-dir`, `CARGO_TARGET_DIR`, or
   `build.target-dir`;
-- Cargo's build directory is set apart from the target, because that is where
-  the lock lives;
+- Cargo's build directory is set at all, with `build.build-dir`,
+  `CARGO_BUILD_BUILD_DIR`, or `--config`, because that is where the lock lives
+  and a lane cannot move it;
 - mbx is not placing the target, for example in CI or with
   `target.views = false`.
 

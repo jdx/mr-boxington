@@ -564,6 +564,23 @@ fn placed(workspace: &Path) -> TargetViewPlacement {
     }
 }
 
+fn lane(
+    working_dir: &Path,
+    config: &Config,
+    roots: &Roots,
+    placement: &TargetViewPlacement,
+    arguments: &[String],
+) -> Option<PathBuf> {
+    check_lane(
+        config,
+        roots,
+        placement,
+        std::ffi::OsStr::new("cargo"),
+        working_dir,
+        arguments,
+    )
+}
+
 fn arguments(arguments: &[&str]) -> Vec<String> {
     arguments.iter().map(ToString::to_string).collect()
 }
@@ -583,7 +600,13 @@ fn check_and_clippy_get_a_lane_inside_the_managed_target() {
         &["--config", "term.color='never'", "check", "--all-targets"],
     ] {
         assert_eq!(
-            check_lane(&config, &roots, &placement, &arguments(command)),
+            lane(
+                directory.path(),
+                &config,
+                &roots,
+                &placement,
+                &arguments(command)
+            ),
             Some(workspace.join(CHECK_LANE_TARGET_DIR)),
             "{command:?}"
         );
@@ -608,7 +631,13 @@ fn commands_that_leave_outputs_behind_keep_the_shared_target() {
         &["run", "--", "check"],
     ] {
         assert_eq!(
-            check_lane(&config, &roots, &placement, &arguments(command)),
+            lane(
+                directory.path(),
+                &config,
+                &roots,
+                &placement,
+                &arguments(command)
+            ),
             None,
             "{command:?}"
         );
@@ -628,28 +657,37 @@ fn a_lane_is_only_used_where_mbx_is_placing_an_undirected_target() {
         target_dir_requested: true,
         ..lane_roots(&workspace)
     };
-    assert_eq!(check_lane(&config, &requested, &placement, &check), None);
+    assert_eq!(
+        lane(directory.path(), &config, &requested, &placement, &check),
+        None
+    );
 
     // Configuration moved the target somewhere other than the default.
     let elsewhere = Roots {
         target_dir: directory.path().join("elsewhere"),
         ..lane_roots(&workspace)
     };
-    assert_eq!(check_lane(&config, &elsewhere, &placement, &check), None);
+    assert_eq!(
+        lane(directory.path(), &config, &elsewhere, &placement, &check),
+        None
+    );
 
     // Cargo keeps its intermediate files, and the lock, out of the target.
     let separate = Roots {
         build_dir: Some(directory.path().join("build")),
         ..lane_roots(&workspace)
     };
-    assert_eq!(check_lane(&config, &separate, &placement, &check), None);
+    assert_eq!(
+        lane(directory.path(), &config, &separate, &placement, &check),
+        None
+    );
 
     // A build directory that is the target itself is not separate.
     let same = Roots {
         build_dir: Some(workspace.join("target")),
         ..lane_roots(&workspace)
     };
-    assert!(check_lane(&config, &same, &placement, &check).is_some());
+    assert!(lane(directory.path(), &config, &same, &placement, &check).is_some());
 
     // Placement declined, so there is no managed view to put a lane in.
     let unplaced = TargetViewPlacement {
@@ -657,13 +695,25 @@ fn a_lane_is_only_used_where_mbx_is_placing_an_undirected_target() {
         touch_path: workspace.join("target"),
     };
     assert_eq!(
-        check_lane(&config, &lane_roots(&workspace), &unplaced, &check),
+        lane(
+            directory.path(),
+            &config,
+            &lane_roots(&workspace),
+            &unplaced,
+            &check
+        ),
         None
     );
 
     config.target.lanes = false;
     assert_eq!(
-        check_lane(&config, &lane_roots(&workspace), &placement, &check),
+        lane(
+            directory.path(),
+            &config,
+            &lane_roots(&workspace),
+            &placement,
+            &check
+        ),
         None
     );
 }
@@ -701,4 +751,67 @@ fn a_lane_is_named_right_after_the_subcommand() {
             "/work/project/target/check",
         ])
     );
+}
+
+#[test]
+fn a_config_naming_the_build_directory_rules_out_a_lane() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = managed_target_config(directory.path());
+    let workspace = directory.path().join("project");
+    std::fs::create_dir_all(workspace.join(".cargo")).unwrap();
+    // The same path as the target, so the probe reports nothing unusual, yet
+    // the lock lives where the caller put it and no lane can move it.
+    std::fs::write(
+        workspace.join(".cargo/config.toml"),
+        "[build]\nbuild-dir = \"target\"\n",
+    )
+    .unwrap();
+    let roots = Roots {
+        build_dir: Some(workspace.join("target")),
+        ..lane_roots(&workspace)
+    };
+    let check = arguments(&["check"]);
+
+    assert!(build_dir_configured(&workspace, &check));
+    assert_eq!(
+        lane(&workspace, &config, &roots, &placed(&workspace), &check),
+        None
+    );
+}
+
+#[test]
+fn a_config_flag_that_could_name_the_build_directory_rules_out_a_lane() {
+    for named in [
+        &["--config", "build.build-dir='target'", "check"][..],
+        &["--config=build.build-dir='target'", "check"],
+        // A file can set anything, including the build directory.
+        &["--config", "extra.toml", "check"],
+    ] {
+        assert!(build_dir_named_in(&arguments(named)), "{named:?}");
+    }
+    for unrelated in [
+        &["--config", "term.color='never'", "check"][..],
+        &["check", "--", "--config", "extra.toml"],
+        &["check"],
+        &["--config"],
+    ] {
+        assert!(!build_dir_named_in(&arguments(unrelated)), "{unrelated:?}");
+    }
+}
+
+#[test]
+fn the_expanded_command_of_a_plain_name_needs_no_configuration() {
+    let cargo = std::ffi::OsStr::new("cargo");
+    for (typed, expanded) in [
+        (&["check"][..], "check"),
+        (&["+stable", "clippy", "--workspace"], "clippy"),
+        (&["build", "--release"], "build"),
+        (&["test"], "test"),
+    ] {
+        assert_eq!(
+            super::cargo_invocation::expanded_subcommand(cargo, &arguments(typed)).as_deref(),
+            Some(expanded),
+            "{typed:?}"
+        );
+    }
 }

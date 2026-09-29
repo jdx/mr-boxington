@@ -133,6 +133,30 @@ fn config_override(arguments: &[OsString]) -> bool {
         .any(|arg| arg == "--config" || arg.to_string_lossy().starts_with("--config="))
 }
 
+/// The command Cargo runs once aliases are expanded, for a caller that only
+/// needs to know which one it is.
+///
+/// Commands Cargo will not let configuration redefine are answered from the
+/// command line alone. `clippy` is one of them here: it is an external command,
+/// and a lane is chosen on every run, so reading configuration for it would
+/// cost a lookup on the path this exists to keep short. Only a shorthand such
+/// as `c` or a configured alias reads configuration.
+pub(super) fn expanded_subcommand(cargo: &OsStr, arguments: &[String]) -> Option<String> {
+    let typed = super::launch::cargo_subcommand(arguments)?;
+    if builtin(typed) || typed == "clippy" {
+        return Some(typed.to_owned());
+    }
+    let typed_arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
+    let resolved = super::strings(&resolve(cargo, &typed_arguments)?.arguments).ok()?;
+    // An expansion that brings its own `--` would hand a flag added after the
+    // alias to the compiler rather than to Cargo.
+    let separator = |arguments: &[String]| arguments.iter().any(|argument| argument == "--");
+    if separator(&resolved) && !separator(arguments) {
+        return None;
+    }
+    super::launch::cargo_subcommand(&resolved).map(str::to_owned)
+}
+
 pub(super) fn resolve(cargo: &OsStr, arguments: &[OsString]) -> Option<Invocation> {
     let mut arguments = arguments.to_vec();
     let mut aliases = None;
