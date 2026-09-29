@@ -190,6 +190,88 @@ fn seeding_replaces_the_builders_base_environment_with_the_process_environment()
     );
 }
 
+/// Runs `command` in a PTY and returns what it printed up to its `done` line.
+fn output_through_pty(command: CommandBuilder) -> String {
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 500,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let mut child = pair.slave.spawn_command(command).unwrap();
+    drop(pair.slave);
+    let (send, receive) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = [0; 4096];
+        while let Ok(n @ 1..) = reader.read(&mut bytes) {
+            if send.send(bytes[..n].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    let mut output = Vec::new();
+    while !String::from_utf8_lossy(&output).contains("\ndone") {
+        match receive.recv_timeout(Duration::from_secs(30)) {
+            Ok(chunk) => output.extend(chunk),
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+#[test]
+fn pty_child_inherits_the_seeded_environment_not_the_registry() {
+    let probe = "mbxprobe-process-only";
+    // `OS` and `TEMP` are registry-backed on Windows: override one, remove the
+    // other, and prepend to `PATH`, as a calling shell might.
+    let process: Vec<(OsString, OsString)> = std::env::vars_os()
+        .filter(|(key, _)| !key.eq_ignore_ascii_case("TEMP") && !key.eq_ignore_ascii_case("OS"))
+        .map(|(key, value)| {
+            if key.eq_ignore_ascii_case("PATH") {
+                let paths = std::env::split_paths(&value);
+                let joined = std::env::join_paths(
+                    std::iter::once(std::path::PathBuf::from(probe)).chain(paths),
+                );
+                (key, joined.unwrap())
+            } else {
+                (key, value)
+            }
+        })
+        .chain([("OS".into(), "mbx-process-only-os".into())])
+        .collect();
+
+    #[cfg(windows)]
+    let (mut command, unset) = {
+        let mut command = CommandBuilder::new("cmd");
+        command.args([
+            "/d",
+            "/c",
+            "echo path=%PATH%& echo os=%OS%& echo temp=%TEMP%& echo done",
+        ]);
+        (command, "temp=%TEMP%")
+    };
+    #[cfg(not(windows))]
+    let (mut command, unset) = {
+        let mut command = CommandBuilder::new("sh");
+        command.args([
+            "-c",
+            "echo path=$PATH; echo os=$OS; echo temp=${TEMP-unset}; echo done",
+        ]);
+        (command, "temp=unset")
+    };
+    seed_process_environment(&mut command, process);
+
+    let output = output_through_pty(command);
+    assert!(output.contains(&format!("path={probe}")), "{output}");
+    assert!(output.contains("os=mbx-process-only-os"), "{output}");
+    assert!(output.contains(unset), "{output}");
+}
+
 #[cfg(unix)]
 #[test]
 fn preserves_signalled_exit_status() {
