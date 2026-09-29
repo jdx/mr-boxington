@@ -70,6 +70,14 @@ inside `mbx` is `#[doc(hidden)]` so none of those types are part of the
 promise. See [protocol compatibility](docs/protocol-compatibility.md) for the
 promise each version line makes.
 
+`mbx` is released without cargo-semver-checks (`semver_check = false` in
+`release-plz.toml`). That check reads the library target, which is not part of
+the CLI's promise, so it would force a major CLI release for a change to an
+internal type. `mbx`'s version comes from the conventional commits instead: a
+`feat` is a minor release, a `fix` a patch, and an intended CLI break is
+declared with `!` and a `BREAKING CHANGE:` footer as described above. The
+checks stay on for `mbx-cache-protocol`, whose wire contract is a promise.
+
 ## Tags and asset names
 
 The `mbx` crate is tagged `v{version}`; the library crates are published to

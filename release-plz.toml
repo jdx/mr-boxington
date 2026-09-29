@@ -24,6 +24,13 @@ git_release_draft = true
 [[package]]
 name = "mbx"
 publish = true
+# The CLI's commands and JSON output are the promise; the library target inside
+# `mbx` is not (see RELEASING.md). cargo-semver-checks reads that library, so a
+# change to an internal type it exposes, such as a field added to a public
+# struct, would otherwise turn into a major CLI release. The version follows
+# the commits instead, and a real CLI break is declared with `!` and a
+# `BREAKING CHANGE:` footer.
+semver_check = false
 # release-plz would otherwise tag the binary crate `mbx-vX.Y.Z`. The README's
 # install URLs are written against `v{version}`, and this is the tag people
 # reference, so it takes the bare name. Same workaround as jdx/tak.
