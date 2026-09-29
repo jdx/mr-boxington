@@ -201,12 +201,18 @@ fn output_through_pty(command: CommandBuilder) -> String {
         })
         .unwrap();
     let mut reader = pair.master.try_clone_reader().unwrap();
+    let mut input = pair.master.take_writer().unwrap();
     let mut child = pair.slave.spawn_command(command).unwrap();
     drop(pair.slave);
     let (send, receive) = mpsc::channel();
     std::thread::spawn(move || {
         let mut bytes = [0; 4096];
         while let Ok(n @ 1..) = reader.read(&mut bytes) {
+            // ConPTY asks for the cursor position and emits nothing more until
+            // the host answers.
+            if bytes[..n].windows(4).any(|window| window == b"\x1b[6n") {
+                let _ = input.write_all(b"\x1b[1;1R").and_then(|()| input.flush());
+            }
             if send.send(bytes[..n].to_vec()).is_err() {
                 break;
             }
