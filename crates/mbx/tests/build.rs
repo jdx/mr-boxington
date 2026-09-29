@@ -3885,6 +3885,36 @@ mod target_views {
     }
 
     #[test]
+    fn a_build_directory_in_the_environment_keeps_a_check_in_the_shared_target() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(project.path());
+
+        // The target's own path, so nothing about the probe looks unusual.
+        let output = isolated_cargo_command(
+            mbx_command(),
+            project.path(),
+            store.path(),
+            &reports.path().join("check.json"),
+            &["check", "--offline"],
+            &[("MBX_TARGET_VIEWS", "1")],
+        )
+        .env("CARGO_BUILD_BUILD_DIR", "target")
+        .output()
+        .expect("mbx should run");
+
+        assert!(
+            output.status.success(),
+            "check failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let directory = managed(project.path());
+        assert!(!directory.join("check").exists());
+        assert!(directory.join("debug").is_dir());
+    }
+
+    #[test]
     fn a_configured_build_directory_keeps_a_check_in_the_shared_target() {
         let store = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();

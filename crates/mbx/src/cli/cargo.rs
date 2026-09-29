@@ -635,7 +635,10 @@ pub(super) fn target_dir_named_in(arguments: &[String]) -> bool {
 /// path is indistinguishable from none. A lane moves the target but not a
 /// build directory that was set, so any setting rules a lane out.
 pub(super) fn build_dir_configured(working_dir: &Path, arguments: &[String]) -> bool {
-    build_dir_named_in(arguments)
+    // Checked by name: the configuration loader below reads files, and Cargo
+    // lets this variable stand in for the setting.
+    std::env::var_os("CARGO_BUILD_BUILD_DIR").is_some()
+        || build_dir_named_in(arguments)
         || match cargo_config2::Config::load_with_cwd(invocation_dir(working_dir, arguments)) {
             Ok(config) => config.build.build_dir.is_some(),
             // Cargo will not run with configuration it cannot read either.
@@ -644,19 +647,21 @@ pub(super) fn build_dir_configured(working_dir: &Path, arguments: &[String]) -> 
 }
 
 /// The directory Cargo reads its configuration from: where it is run, moved by
-/// any `-C` or `--directory` ahead of the command.
+/// any `-C` or `--directory`. Cargo takes both as global options, so they count
+/// before or after the command, in every spelling clap accepts, and up to the
+/// arguments meant for the program.
 pub(super) fn invocation_dir(working_dir: &Path, arguments: &[String]) -> PathBuf {
-    let global = super::launch::cargo_subcommand_at(arguments)
-        .map_or(arguments, |(index, _)| &arguments[..index]);
     let mut directory = working_dir.to_path_buf();
-    let mut global = global.iter();
-    while let Some(argument) = global.next() {
+    let mut arguments = arguments.iter().take_while(|argument| *argument != "--");
+    while let Some(argument) = arguments.next() {
         let moved = if argument == "-C" || argument == "--directory" {
-            global.next().map(String::as_str)
+            arguments.next().map(String::as_str)
         } else if let Some(value) = argument.strip_prefix("--directory=") {
             Some(value)
         } else {
-            argument.strip_prefix("-C")
+            argument
+                .strip_prefix("-C")
+                .map(|value| value.strip_prefix('=').unwrap_or(value))
         };
         if let Some(moved) = moved {
             directory = directory.join(moved);
