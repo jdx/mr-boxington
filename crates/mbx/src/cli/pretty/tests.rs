@@ -620,3 +620,26 @@ fn output_after_the_block_is_committed_passes_through_untouched() {
     assert_eq!(frame.write(b"output\r\n"), b"output\r\n");
     assert!(frame.present(true).is_empty());
 }
+
+#[test]
+fn a_crlf_split_across_chunks_is_written_together() {
+    let mut frame = drawn_frame();
+    // The PTY's CRLF reaches the decoder as `text\r` and then `\n`.
+    assert!(frame.write(b"Finished\r").is_empty());
+    assert!(frame.write(b"\n").is_empty());
+    assert_eq!(
+        String::from_utf8(frame.present(true)).unwrap(),
+        format!("{ERASE}Finished\r\nblock\r\nrows\r\n")
+    );
+}
+
+#[test]
+fn a_bare_carriage_return_is_not_followed_by_the_block() {
+    let mut frame = drawn_frame();
+    assert!(frame.write(b"progress\r").is_empty());
+    assert_eq!(
+        String::from_utf8(frame.present(true)).unwrap(),
+        format!("{ERASE}progress\r")
+    );
+    assert_eq!(frame.drawn, 0);
+}

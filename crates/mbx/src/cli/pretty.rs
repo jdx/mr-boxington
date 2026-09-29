@@ -520,12 +520,14 @@ impl Frame {
     }
 
     /// Output that ends a line waits while a block is showing, so that
-    /// [`Frame::present`] or [`Frame::draw`] can erase, print and repaint it in
-    /// one update. Anything else (a prompt, a partial line) is shown at once,
-    /// without the block, which stays away until the line is complete.
+    /// [`Frame::present`] or [`Frame::draw`] can erase, print and repaint it
+    /// in one update. A CR waits too: the PTY's CRLF arrives as two chunks, and
+    /// nothing may be written between them. Anything else (a prompt, a partial
+    /// line) is shown at once, without the block, which stays away until the
+    /// line is complete.
     fn write(&mut self, bytes: &[u8]) -> Vec<u8> {
         self.held.extend_from_slice(bytes);
-        if self.drawn > 0 && bytes.ends_with(b"\n") {
+        if self.drawn > 0 && matches!(bytes.last(), Some(b'\n' | b'\r')) {
             Vec::new()
         } else {
             self.present(false)
@@ -533,8 +535,10 @@ impl Frame {
     }
 
     /// Show held output, and put the last block back below it if `repaint`.
+    /// The block is not repainted after a bare CR: it would overwrite the line
+    /// the CR returned to, so it waits for the next frame, as it always has.
     fn present(&mut self, repaint: bool) -> Vec<u8> {
-        let repaint = repaint && self.drawn > 0;
+        let repaint = repaint && self.drawn > 0 && !self.held.ends_with(b"\r");
         if repaint && self.held.is_empty() {
             return Vec::new();
         }
