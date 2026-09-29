@@ -535,11 +535,12 @@ impl Frame {
     }
 
     /// Show held output, and put the last block back below it if `repaint`.
-    /// The block is not repainted after a bare CR: it would overwrite the line
-    /// the CR returned to, so it waits for the next frame, as it always has.
+    /// Output that ends in a CR keeps waiting for a repaint: its LF may be in
+    /// the next read, and a bare CR would have the block overwrite the line it
+    /// returned to. The next [`Frame::draw`] shows it.
     fn present(&mut self, repaint: bool) -> Vec<u8> {
-        let repaint = repaint && self.drawn > 0 && !self.held.ends_with(b"\r");
-        if repaint && self.held.is_empty() {
+        let repaint = repaint && self.drawn > 0;
+        if repaint && (self.held.is_empty() || self.held.ends_with(b"\r")) {
             return Vec::new();
         }
         let mut out = Vec::with_capacity(self.held.len());

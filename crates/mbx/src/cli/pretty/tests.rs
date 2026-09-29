@@ -634,12 +634,26 @@ fn a_crlf_split_across_chunks_is_written_together() {
 }
 
 #[test]
-fn a_bare_carriage_return_is_not_followed_by_the_block() {
+fn a_crlf_split_across_reads_keeps_the_block_until_the_lf_arrives() {
     let mut frame = drawn_frame();
-    assert!(frame.write(b"progress\r").is_empty());
+    assert!(frame.write(b"Finished\r").is_empty());
+    // The read ended between CR and LF: nothing is erased yet.
+    assert!(frame.present(true).is_empty());
+    assert_eq!(frame.drawn, 2);
+    assert!(frame.write(b"\n").is_empty());
     assert_eq!(
         String::from_utf8(frame.present(true)).unwrap(),
-        format!("{ERASE}progress\r")
+        format!("{ERASE}Finished\r\nblock\r\nrows\r\n")
     );
-    assert_eq!(frame.drawn, 0);
+}
+
+#[test]
+fn a_bare_carriage_return_is_shown_by_the_next_frame() {
+    let mut frame = drawn_frame();
+    assert!(frame.write(b"progress\r").is_empty());
+    assert!(frame.present(true).is_empty());
+    assert_eq!(
+        String::from_utf8(frame.draw(b"", "next\r\n".into(), 1)).unwrap(),
+        format!("{ERASE}progress\rnext\r\n")
+    );
 }
