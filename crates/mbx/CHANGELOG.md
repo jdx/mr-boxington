@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.21.0](https://github.com/jdx/mr-boxington/compare/v1.20.0...v1.21.0) - 2026-09-29
+
+### Added
+
+- *(cache)* run check and clippy beside builds without a separate target ([#603](https://github.com/jdx/mr-boxington/pull/603))
+- *(remote)* use the EC2 instance role for s3 remotes without AWS_* credentials ([#602](https://github.com/jdx/mr-boxington/pull/602))
+
+### Fixed
+
+- *(cli)* read an empty rustc-wrapper as no wrapper ([#607](https://github.com/jdx/mr-boxington/pull/607))
+- *(cli)* keep the progress block on screen while build output scrolls ([#604](https://github.com/jdx/mr-boxington/pull/604))
+- *(mbx)* keep the caller's environment in the pretty display on Windows ([#601](https://github.com/jdx/mr-boxington/pull/601))
+
+### Other
+
+- skip cargo-semver-checks for mbx so library-only changes stay minor ([#605](https://github.com/jdx/mr-boxington/pull/605))
+
 ## [1.20.0](https://github.com/jdx/mr-boxington/compare/v1.19.0...v1.20.0) - 2026-09-28
 
 ### Added

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.2](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.19.1...mbx-cache-core-v0.19.2) - 2026-09-29
+
+### Added
+
+- *(remote)* use the EC2 instance role for s3 remotes without AWS_* credentials ([#602](https://github.com/jdx/mr-boxington/pull/602))
+
 ## [0.19.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.19.0...mbx-cache-core-v0.19.1) - 2026-09-28
 
 ### Fixed
