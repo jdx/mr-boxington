@@ -973,8 +973,24 @@ fn signed_with(access_key_id: &str) -> mockito::Matcher {
     mockito::Matcher::Regex(format!("Credential={access_key_id}/"))
 }
 
+/// The instance role credentials the store currently signs with.
+async fn signing_key(store: &S3RemoteCache) -> String {
+    store.credentials.current().await.access_key_id
+}
+
+/// Wait for something a background renewal does, which no request waits for.
+async fn eventually(mut done: impl AsyncFnMut() -> bool) {
+    for _ in 0..200 {
+        if done().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the background renewal did not finish");
+}
+
 #[tokio::test]
-async fn instance_role_credentials_are_renewed_shortly_before_they_expire() {
+async fn lapsed_instance_role_credentials_are_renewed_before_signing() {
     let (metadata, lookup) = metadata_service().await;
     let mut server = mockito::Server::new_async().await;
     let request = server
@@ -985,8 +1001,9 @@ async fn instance_role_credentials_are_renewed_shortly_before_they_expire() {
         .expect(2)
         .create_async()
         .await;
-    // Inside the renewal margin, so the first request has to renew.
-    let expires_at = SystemTime::now() + Duration::from_secs(60);
+    // Already expired: nothing valid is left to sign with, so the first
+    // request waits for the renewal.
+    let expires_at = SystemTime::now() - Duration::from_secs(1);
     let store = test_store(&server).with_instance_role(
         InstanceRoleCredentials::new(metadata.url().parse().unwrap()).unwrap(),
         expires_at,
@@ -998,6 +1015,65 @@ async fn instance_role_credentials_are_renewed_shortly_before_they_expire() {
 
     request.assert_async().await;
     lookup.assert_async().await;
+}
+
+#[tokio::test]
+async fn credentials_inside_the_renewal_margin_are_renewed_in_the_background() {
+    let (metadata, lookup) = metadata_service().await;
+    let mut server = mockito::Server::new_async().await;
+    let request = server
+        .mock("GET", "/cache-bucket/acme/v1/connectivity-probe")
+        .match_header("authorization", signed_with("AKIDEXAMPLE"))
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let store = test_store(&server).with_instance_role(
+        InstanceRoleCredentials::new(metadata.url().parse().unwrap()).unwrap(),
+        SystemTime::now() + Duration::from_secs(60),
+    );
+
+    // Still valid, so this request signs with what is held.
+    store.check_connection().await.unwrap();
+    request.assert_async().await;
+
+    eventually(async || lookup.matched_async().await).await;
+    eventually(async || signing_key(&store).await == "ASIARENEWED").await;
+}
+
+#[tokio::test]
+async fn a_metadata_service_that_hangs_does_not_stall_requests() {
+    // Accepts connections and never answers.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let held = tokio::spawn(async move {
+        let mut connections = Vec::new();
+        while let Ok((connection, _)) = listener.accept().await {
+            connections.push(connection);
+        }
+    });
+    let mut server = mockito::Server::new_async().await;
+    let request = server
+        .mock("GET", "/cache-bucket/acme/v1/connectivity-probe")
+        .match_header("authorization", signed_with("AKIDEXAMPLE"))
+        .with_status(200)
+        .expect(3)
+        .create_async()
+        .await;
+    let store = test_store(&server).with_instance_role(
+        InstanceRoleCredentials::new(format!("http://{address}").parse().unwrap()).unwrap(),
+        SystemTime::now() + Duration::from_secs(60),
+    );
+
+    let started = Instant::now();
+    for _ in 0..3 {
+        store.check_connection().await.unwrap();
+    }
+    held.abort();
+
+    // A lookup takes seconds to give up on a service like this one.
+    assert!(started.elapsed() < Duration::from_millis(900));
+    request.assert_async().await;
 }
 
 #[tokio::test]
@@ -1030,10 +1106,11 @@ async fn credentials_with_time_left_are_not_renewed() {
 #[tokio::test]
 async fn a_failed_renewal_keeps_the_current_credentials_and_backs_off() {
     let mut metadata = mockito::Server::new_async().await;
+    // The lookup itself retries a failing service before giving up.
     let lookup = metadata
         .mock("PUT", "/latest/api/token")
         .with_status(500)
-        .expect(1)
+        .expect(3)
         .create_async()
         .await;
     let mut server = mockito::Server::new_async().await;
@@ -1041,7 +1118,7 @@ async fn a_failed_renewal_keeps_the_current_credentials_and_backs_off() {
         .mock("GET", "/cache-bucket/acme/v1/connectivity-probe")
         .match_header("authorization", signed_with("AKIDEXAMPLE"))
         .with_status(200)
-        .expect(3)
+        .expect(4)
         .create_async()
         .await;
     let store = test_store(&server).with_instance_role(
@@ -1052,8 +1129,52 @@ async fn a_failed_renewal_keeps_the_current_credentials_and_backs_off() {
     for _ in 0..3 {
         store.check_connection().await.unwrap();
     }
+    eventually(async || lookup.matched_async().await).await;
+    // Once the failed renewal is over, the service is left alone for a while.
+    eventually(async || {
+        let CredentialSource::InstanceRole(role) = &store.credentials else {
+            unreachable!()
+        };
+        role.state.lock().unwrap().retry_at.is_some()
+    })
+    .await;
+    store.check_connection().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     request.assert_async().await;
-    // Asked once; the other two requests did not ask a service that had just failed.
     lookup.assert_async().await;
+}
+
+#[tokio::test]
+async fn rejected_credentials_name_where_they_came_from() {
+    let mut server = mockito::Server::new_async().await;
+    server
+        .mock("GET", "/cache-bucket/acme/v1/connectivity-probe")
+        .with_status(403)
+        .with_body(s3_error_body("InvalidAccessKeyId"))
+        .create_async()
+        .await;
+
+    let from_environment = test_store(&server)
+        .check_connection()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        from_environment.contains("AWS_ACCESS_KEY_ID"),
+        "{from_environment}"
+    );
+
+    let (metadata, _) = metadata_service().await;
+    let from_role = test_store(&server)
+        .with_instance_role(
+            InstanceRoleCredentials::new(metadata.url().parse().unwrap()).unwrap(),
+            SystemTime::now() + Duration::from_secs(3_600),
+        )
+        .check_connection()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(from_role.contains("instance role"), "{from_role}");
+    assert!(!from_role.contains("AWS_ACCESS_KEY_ID"), "{from_role}");
 }

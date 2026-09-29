@@ -28,6 +28,7 @@ use reqwest::header::{CONTENT_LENGTH, ETAG, IF_MATCH, IF_NONE_MATCH};
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::io::AsyncWriteExt;
 use url::Url;
@@ -121,14 +122,19 @@ enum CredentialSource {
     /// The same credentials for the whole session.
     Fixed(S3Credentials),
     /// Credentials that expire and are fetched again from the instance role.
-    InstanceRole(InstanceRole),
+    InstanceRole(Arc<InstanceRole>),
 }
 
 struct InstanceRole {
     provider: InstanceRoleCredentials,
-    /// Held across a renewal, so requests that arrive meanwhile wait for the
-    /// one lookup instead of each making their own.
-    state: tokio::sync::Mutex<RenewalState>,
+    /// Never held across an await, so signing a request never waits on the
+    /// metadata service while the held credentials are still good.
+    state: Mutex<RenewalState>,
+    /// Held for the length of a lookup, so callers that need new credentials
+    /// while one is running wait for it instead of making their own.
+    lookup: tokio::sync::Mutex<()>,
+    /// Whether a background renewal is already running.
+    renewing: AtomicBool,
 }
 
 struct RenewalState {
@@ -142,46 +148,98 @@ struct RenewalState {
     failing: bool,
 }
 
+impl RenewalState {
+    /// Whether the credentials are inside the renewal margin.
+    fn renewal_due(&self) -> bool {
+        self.expires_at
+            .checked_sub(RENEWAL_MARGIN)
+            .is_none_or(|due| due <= SystemTime::now())
+    }
+
+    /// Whether the credentials have already stopped working.
+    fn expired(&self) -> bool {
+        self.expires_at <= SystemTime::now()
+    }
+
+    /// Whether the last lookup was recent enough that another would be noise.
+    fn backing_off(&self) -> bool {
+        self.retry_at.is_some_and(|at| at > Instant::now())
+    }
+}
+
+impl InstanceRole {
+    /// Fetch new credentials unless another caller just did or the service was
+    /// asked too recently.
+    ///
+    /// A failed lookup keeps the credentials already held: they usually have
+    /// minutes left, and once they lapse S3 rejects them with an error that
+    /// says so.
+    async fn renew(&self) {
+        let _lookup = self.lookup.lock().await;
+        {
+            let state = self.state.lock().unwrap();
+            if !state.renewal_due() || state.backing_off() {
+                return;
+            }
+        }
+        let fetched = self.provider.fetch().await;
+        let mut state = self.state.lock().unwrap();
+        match fetched {
+            Ok(fresh) => {
+                state.credentials = fresh.credentials;
+                state.expires_at = fresh.expires_at;
+                state.failing = false;
+            }
+            Err(error) => {
+                if !state.failing {
+                    warn!(
+                        "could not renew the EC2 instance role credentials, \
+                         continuing with the current ones: {error:#}"
+                    );
+                }
+                state.failing = true;
+            }
+        }
+        state.retry_at = state.renewal_due().then(|| Instant::now() + RENEWAL_RETRY);
+    }
+}
+
 impl CredentialSource {
     /// The credentials to sign the next request with.
     ///
-    /// A failed renewal keeps the credentials already held: they usually have
-    /// minutes left, and once they lapse S3 rejects them with an error that
-    /// says so.
+    /// Instance role credentials are renewed in the background once they are
+    /// inside the renewal margin, and requests keep signing with the ones held
+    /// until the new set arrives. A metadata service that hangs therefore
+    /// costs nothing while the held set is valid. Only a set that has already
+    /// lapsed makes a request wait, since nothing valid is left to sign with.
     async fn current(&self) -> S3Credentials {
+        let role = match self {
+            Self::Fixed(credentials) => return credentials.clone(),
+            Self::InstanceRole(role) => role,
+        };
+        let (due, expired) = {
+            let state = role.state.lock().unwrap();
+            (state.renewal_due() && !state.backing_off(), state.expired())
+        };
+        if due && expired {
+            role.renew().await;
+        } else if due && !role.renewing.swap(true, Ordering::AcqRel) {
+            let role = Arc::clone(role);
+            tokio::spawn(async move {
+                role.renew().await;
+                role.renewing.store(false, Ordering::Release);
+            });
+        }
+        role.state.lock().unwrap().credentials.clone()
+    }
+
+    /// What to check when the store rejects these credentials.
+    fn rejection_hint(&self) -> &'static str {
         match self {
-            Self::Fixed(credentials) => credentials.clone(),
-            Self::InstanceRole(role) => {
-                let mut state = role.state.lock().await;
-                let due = state
-                    .expires_at
-                    .checked_sub(RENEWAL_MARGIN)
-                    .is_none_or(|due| due <= SystemTime::now());
-                let waiting = state.retry_at.is_some_and(|at| at > Instant::now());
-                if due && !waiting {
-                    match role.provider.fetch().await {
-                        Ok(fresh) => {
-                            state.credentials = fresh.credentials;
-                            state.expires_at = fresh.expires_at;
-                            state.failing = false;
-                        }
-                        Err(error) => {
-                            if !state.failing {
-                                warn!(
-                                    "could not renew the EC2 instance role credentials, \
-                                     continuing with the current ones: {error:#}"
-                                );
-                            }
-                            state.failing = true;
-                        }
-                    }
-                    let still_due = state
-                        .expires_at
-                        .checked_sub(RENEWAL_MARGIN)
-                        .is_none_or(|due| due <= SystemTime::now());
-                    state.retry_at = still_due.then(|| Instant::now() + RENEWAL_RETRY);
-                }
-                state.credentials.clone()
+            Self::Fixed(_) => "Check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY",
+            Self::InstanceRole(_) => {
+                "These are the EC2 instance role's credentials, so check the role's \
+                 permissions on the bucket"
             }
         }
     }
@@ -245,15 +303,17 @@ impl S3RemoteCache {
         let CredentialSource::Fixed(credentials) = self.credentials else {
             return self;
         };
-        self.credentials = CredentialSource::InstanceRole(InstanceRole {
+        self.credentials = CredentialSource::InstanceRole(Arc::new(InstanceRole {
             provider,
-            state: tokio::sync::Mutex::new(RenewalState {
+            state: Mutex::new(RenewalState {
                 credentials,
                 expires_at,
                 retry_at: None,
                 failing: false,
             }),
-        });
+            lookup: tokio::sync::Mutex::new(()),
+            renewing: AtomicBool::new(false),
+        }));
         self
     }
 
@@ -354,9 +414,9 @@ impl S3RemoteCache {
                     if failure.is_credentials_rejected() {
                         bail!(
                             "the remote object store rejected these credentials for {url}: {}. \
-                             Check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, and that this \
-                             machine's clock is correct",
-                            failure.code.as_deref().unwrap_or("forbidden")
+                             {}, and that this machine's clock is correct",
+                            failure.code.as_deref().unwrap_or("forbidden"),
+                            self.credentials.rejection_hint()
                         );
                     }
                     // The signature was accepted; something declined this one

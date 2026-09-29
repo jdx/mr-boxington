@@ -65,10 +65,14 @@ mbx looks for credentials in two places, in order:
    `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` for temporary credentials.
 2. The EC2 instance role, through IMDSv2. This is tried only when
    `AWS_ACCESS_KEY_ID` is not set. If it is set without
-   `AWS_SECRET_ACCESS_KEY`, or if `AWS_WEB_IDENTITY_TOKEN_FILE` or an
-   `AWS_CONTAINER_CREDENTIALS_*` variable names a source mbx does not read, mbx
-   refuses the remote rather than sign as the instance's identity, which can be
-   broader than a pod or task role.
+   `AWS_SECRET_ACCESS_KEY`, or if `AWS_PROFILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`,
+   or an `AWS_CONTAINER_CREDENTIALS_*` variable names a source mbx does not
+   read, mbx refuses the remote rather than sign as the instance's identity,
+   which can be broader than a profile, pod, or task role. A `[default]`
+   profile in `~/.aws/credentials` or `~/.aws/config` that sets access keys, a
+   `credential_process`, SSO, or a role blocks the lookup the same way. Point
+   `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` at empty files to use the
+   instance role anyway.
 
 `MBX_REMOTE_S3_REGION` names the signing region, falling back to `AWS_REGION` or
 `AWS_DEFAULT_REGION`. When credentials come from an instance role and none of
@@ -79,6 +83,19 @@ mbx fetches the role's credentials when a build starts and asks for new ones a
 few minutes before they expire, so a build that outlives one set of credentials
 keeps its remote cache. Nothing is exported, so other tools in the same job keep
 using the instance profile through their own credential chain.
+
+The metadata service throttles per instance, so a lookup that gets a `429`, a
+server error, or no answer is tried up to three times with a short backoff. Renewal
+runs in the background: requests keep signing with the credentials they hold
+until the new set arrives, so a metadata service that hangs does not slow the
+cache while those credentials are valid.
+
+A job in a container on an EC2 instance can fail the first lookup with a timeout
+even though the instance has a role. The metadata service's default hop limit of
+1 keeps its answer from reaching the container. Raise it to 2 with
+`aws ec2 modify-instance-metadata-options --http-put-response-hop-limit 2`. The
+error names `HttpPutResponseHopLimit` when the token request times out after
+connecting.
 
 Off EC2, a lookup that finds no metadata service fails after about a second and
 the remote is refused with the usual missing-credentials error, which names both

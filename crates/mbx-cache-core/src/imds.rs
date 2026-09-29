@@ -22,6 +22,17 @@ const TOKEN_TTL_SECONDS: &str = "21600";
 /// slower than this means no metadata service is listening: a machine that is
 /// not on EC2 fails a lookup in about this long.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
+/// Attempts per request. The service throttles per instance, and AWS asks
+/// clients to retry with exponential backoff, which matters when several jobs
+/// start on one runner at once.
+const ATTEMPTS: u32 = 3;
+/// Wait before the second attempt; each later wait doubles.
+const RETRY_BACKOFF: Duration = Duration::from_millis(200);
+/// Appended when the token request times out after connecting, which is what a
+/// hop limit of 1 looks like from inside a container.
+const HOP_LIMIT_HINT: &str = "the metadata service accepted the connection but never answered. \
+    From a container, the instance's metadata hop limit may be 1; raise \
+    HttpPutResponseHopLimit to 2 with `aws ec2 modify-instance-metadata-options`";
 
 const TOKEN_TTL_HEADER: &str = "x-aws-ec2-metadata-token-ttl-seconds";
 const TOKEN_HEADER: &str = "x-aws-ec2-metadata-token";
@@ -38,20 +49,29 @@ pub struct TemporaryCredentials {
 pub struct InstanceRoleCredentials {
     client: reqwest::Client,
     endpoint: Url,
+    backoff: Duration,
 }
 
 impl InstanceRoleCredentials {
     /// A provider for the metadata service at `endpoint`.
     pub fn new(endpoint: Url) -> Result<Self> {
+        Self::with_timing(endpoint, REQUEST_TIMEOUT, RETRY_BACKOFF)
+    }
+
+    fn with_timing(endpoint: Url, timeout: Duration, backoff: Duration) -> Result<Self> {
         let client = reqwest::Client::builder()
-            .connect_timeout(REQUEST_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT * 2)
+            .connect_timeout(timeout)
+            .timeout(timeout * 2)
             .redirect(reqwest::redirect::Policy::none())
             // A link-local address is never behind a proxy, and sending role
             // credentials through one would hand them to it.
             .no_proxy()
             .build()?;
-        Ok(Self { client, endpoint })
+        Ok(Self {
+            client,
+            endpoint,
+            backoff,
+        })
     }
 
     /// A provider configured the way the AWS SDKs read it, or `None` when
@@ -129,33 +149,65 @@ impl InstanceRoleCredentials {
     }
 
     async fn token(&self) -> Result<String> {
-        let response = self
+        let request = self
             .client
             .put(self.endpoint.join("latest/api/token")?)
-            .header(TOKEN_TTL_HEADER, TOKEN_TTL_SECONDS)
-            .send()
-            .await?;
-        expect_success(response.status())?;
-        Ok(response.text().await?.trim().to_string())
+            .header(TOKEN_TTL_HEADER, TOKEN_TTL_SECONDS);
+        let token = self.send(request).await.map_err(|error| {
+            let unanswered = error
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(|error| error.is_timeout() && !error.is_connect());
+            if unanswered {
+                error.wrap_err(HOP_LIMIT_HINT)
+            } else {
+                error
+            }
+        })?;
+        Ok(token.trim().to_string())
     }
 
     async fn get(&self, token: &str, path: &str) -> Result<String> {
-        let response = self
+        let request = self
             .client
             .get(self.endpoint.join(path)?)
-            .header(TOKEN_HEADER, token)
-            .send()
-            .await?;
-        expect_success(response.status())?;
-        Ok(response.text().await?)
+            .header(TOKEN_HEADER, token);
+        self.send(request).await
     }
-}
 
-fn expect_success(status: StatusCode) -> Result<()> {
-    if status.is_success() {
-        Ok(())
-    } else {
-        bail!("the metadata service answered {status}")
+    /// Send a request and return the body of a successful answer.
+    ///
+    /// Throttling, server errors, and a request that connected but got no
+    /// answer are tried again. A refusal to connect is not: nothing is
+    /// listening, and waiting would only slow the answer on a machine that is
+    /// not on EC2.
+    async fn send(&self, request: reqwest::RequestBuilder) -> Result<String> {
+        let mut attempt = 1;
+        loop {
+            let request = request
+                .try_clone()
+                .expect("a request without a body can be cloned");
+            let (error, transient) = match request.send().await {
+                Ok(response) if response.status().is_success() => match response.text().await {
+                    Ok(body) => return Ok(body),
+                    Err(error) => (eyre::Report::new(error), true),
+                },
+                Ok(response) => {
+                    let status = response.status();
+                    let transient =
+                        status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+                    (eyre!("the metadata service answered {status}"), transient)
+                }
+                Err(error) => {
+                    let transient = !error.is_connect();
+                    (eyre::Report::new(error), transient)
+                }
+            };
+            if !transient || attempt == ATTEMPTS {
+                return Err(error);
+            }
+            tokio::time::sleep(self.backoff * 2u32.pow(attempt - 1)).await;
+            attempt += 1;
+        }
     }
 }
 
@@ -242,7 +294,12 @@ mod tests {
     use super::*;
 
     fn provider(server: &mockito::ServerGuard) -> InstanceRoleCredentials {
-        InstanceRoleCredentials::new(server.url().parse().unwrap()).unwrap()
+        InstanceRoleCredentials::with_timing(
+            server.url().parse().unwrap(),
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+        )
+        .unwrap()
     }
 
     fn role_document(expiration: &str) -> String {
@@ -407,9 +464,10 @@ mod tests {
     #[tokio::test]
     async fn a_service_that_refuses_the_token_is_reported() {
         let mut server = mockito::Server::new_async().await;
-        server
+        let token = server
             .mock("PUT", "/latest/api/token")
             .with_status(403)
+            .expect(1)
             .create_async()
             .await;
 
@@ -417,6 +475,77 @@ mod tests {
 
         assert!(error.contains("session token"), "{error}");
         assert!(error.contains("403"), "{error}");
+        // A refusal is an answer, so it is not asked again.
+        token.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn throttling_and_server_errors_are_retried() {
+        for status in [429, 503] {
+            let mut server = mockito::Server::new_async().await;
+            let throttled = server
+                .mock("PUT", "/latest/api/token")
+                .with_status(status)
+                .expect(2)
+                .create_async()
+                .await;
+            let token = server
+                .mock("PUT", "/latest/api/token")
+                .with_body("session-token")
+                .expect(1)
+                .create_async()
+                .await;
+            server
+                .mock("GET", "/latest/meta-data/placement/region")
+                .with_body("eu-west-1")
+                .create_async()
+                .await;
+
+            assert_eq!(provider(&server).region().await.unwrap(), "eu-west-1");
+
+            throttled.assert_async().await;
+            token.assert_async().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_stop_after_the_last_attempt() {
+        let mut server = mockito::Server::new_async().await;
+        let token = server
+            .mock("PUT", "/latest/api/token")
+            .with_status(503)
+            .expect(ATTEMPTS as usize)
+            .create_async()
+            .await;
+
+        let error = format!("{:#}", provider(&server).fetch().await.err().unwrap());
+
+        assert!(error.contains("503"), "{error}");
+        token.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_token_request_that_connects_but_gets_no_answer_mentions_the_hop_limit() {
+        // Accepts connections and never replies, as a hop limit of 1 does.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let held = tokio::spawn(async move {
+            let mut connections = Vec::new();
+            while let Ok((connection, _)) = listener.accept().await {
+                connections.push(connection);
+            }
+        });
+        let provider = InstanceRoleCredentials::with_timing(
+            format!("http://{address}").parse().unwrap(),
+            Duration::from_millis(50),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+
+        let error = format!("{:#}", provider.fetch().await.err().unwrap());
+        held.abort();
+
+        assert!(error.contains("HttpPutResponseHopLimit"), "{error}");
     }
 
     #[tokio::test]

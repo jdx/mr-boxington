@@ -75,7 +75,10 @@ impl AwsEnvironment {
         Self {
             credentials: S3Credentials::from_env(),
             instance_role: None,
-            instance_role_failure: instance_role_blocker(|name| std::env::var(name).ok()),
+            instance_role_failure: instance_role_blocker(
+                |name| std::env::var(name).ok(),
+                |name| read_shared_file(name, |name| std::env::var(name).ok()),
+            ),
             region_failure: None,
             region: ["AWS_REGION", "AWS_DEFAULT_REGION"]
                 .into_iter()
@@ -92,11 +95,17 @@ impl AwsEnvironment {
 /// Why the instance role must not supply credentials, when the environment
 /// names a source that the AWS credential chain consults first.
 ///
-/// mbx cannot read web identity or container credentials itself. Falling
-/// through to the instance role would sign as the host's identity, which can
-/// be broader than the pod or task role the environment asks for, so it stops
-/// and says what to export instead.
-fn instance_role_blocker(var: impl Fn(&str) -> Option<String>) -> Option<String> {
+/// mbx cannot read profiles, web identity, or container credentials itself.
+/// Falling through to the instance role would sign as the host's identity,
+/// which can be broader than the profile, pod, or task role the environment
+/// asks for, so it stops and says what to export instead.
+///
+/// `shared_file` returns the text of the shared `credentials` or `config`
+/// file, and is only asked when nothing in the environment already decides.
+fn instance_role_blocker(
+    var: impl Fn(&str) -> Option<String>,
+    shared_file: impl Fn(SharedFile) -> Option<String>,
+) -> Option<String> {
     let set = |name: &str| var(name).is_some_and(|value| !value.trim().is_empty());
     if set("AWS_ACCESS_KEY_ID") {
         return Some(
@@ -105,20 +114,86 @@ fn instance_role_blocker(var: impl Fn(&str) -> Option<String>) -> Option<String>
                 .to_string(),
         );
     }
-    [
+    let named = [
+        "AWS_PROFILE",
         "AWS_WEB_IDENTITY_TOKEN_FILE",
         "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
         "AWS_CONTAINER_CREDENTIALS_FULL_URI",
     ]
     .into_iter()
-    .find(|name| set(name))
-    .map(|name| {
-        format!(
+    .find(|name| set(name));
+    if let Some(name) = named {
+        return Some(format!(
             "{name} is set, and mbx does not read that credential source. Export its \
              credentials as AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN, \
              or unset {name} to use the instance role"
-        )
-    })
+        ));
+    }
+    [SharedFile::Credentials, SharedFile::Config]
+        .into_iter()
+        .any(|file| shared_file(file).is_some_and(|text| default_profile_names_credentials(&text)))
+        .then(|| {
+            "the default AWS profile names credentials, and mbx does not read profiles. \
+             Export them as AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN, \
+             or point AWS_SHARED_CREDENTIALS_FILE and AWS_CONFIG_FILE at empty files to use \
+             the instance role"
+                .to_string()
+        })
+}
+
+/// The files the AWS tools read profiles from.
+#[derive(Clone, Copy)]
+enum SharedFile {
+    Credentials,
+    Config,
+}
+
+/// The text of a shared AWS file, from the location the AWS tools would use.
+fn read_shared_file(file: SharedFile, var: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let (variable, name) = match file {
+        SharedFile::Credentials => ("AWS_SHARED_CREDENTIALS_FILE", "credentials"),
+        SharedFile::Config => ("AWS_CONFIG_FILE", "config"),
+    };
+    let path = var(variable)
+        .filter(|path| !path.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| Some(dirs::home_dir()?.join(".aws").join(name)))?;
+    std::fs::read_to_string(path).ok()
+}
+
+/// Whether a shared file's `default` profile sets a credential source: static
+/// keys, a credential process, SSO, or an assumed role.
+///
+/// A default profile that only sets a region or an output format does not
+/// name credentials, and the AWS tools fall through to the instance role past
+/// it, so it does not block the lookup here either.
+fn default_profile_names_credentials(text: &str) -> bool {
+    const CREDENTIAL_KEYS: [&str; 6] = [
+        "aws_access_key_id",
+        "credential_process",
+        "sso_session",
+        "sso_start_url",
+        "role_arn",
+        "web_identity_token_file",
+    ];
+    let mut in_default = false;
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(header) = line
+            .strip_prefix('[')
+            .and_then(|line| line.strip_suffix(']'))
+        {
+            in_default = matches!(header.trim(), "default" | "profile default");
+        } else if in_default {
+            let key = line.split('=').next().unwrap_or_default().trim();
+            if CREDENTIAL_KEYS.contains(&key) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// A remote cache client and where its credentials came from.
@@ -573,17 +648,18 @@ mod tests {
             }
         };
 
-        assert!(instance_role_blocker(vars(&[])).is_none());
-        assert!(instance_role_blocker(vars(&[("AWS_ACCESS_KEY_ID", " ")])).is_none());
+        assert!(instance_role_blocker(vars(&[]), |_| None).is_none());
+        assert!(instance_role_blocker(vars(&[("AWS_ACCESS_KEY_ID", " ")]), |_| None).is_none());
         // AWS_ACCESS_KEY_ID without its secret yields no credentials, but the
         // environment is still the source and the refusal should say so.
         assert!(
-            instance_role_blocker(vars(&[("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")]))
+            instance_role_blocker(vars(&[("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")]), |_| None)
                 .unwrap()
                 .contains("without AWS_SECRET_ACCESS_KEY")
         );
         // EKS IRSA, ECS, and Pod Identity name a narrower identity than the node's.
         for (name, value) in [
+            ("AWS_PROFILE", "dev"),
             ("AWS_WEB_IDENTITY_TOKEN_FILE", "/token"),
             (
                 "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
@@ -594,9 +670,12 @@ mod tests {
                 "http://169.254.170.23/v1/credentials",
             ),
         ] {
-            let blocker = instance_role_blocker(|asked| (asked == name).then(|| value.to_string()));
+            let blocker =
+                instance_role_blocker(|asked| (asked == name).then(|| value.to_string()), |_| None);
             assert!(blocker.unwrap().contains(name));
         }
+        // A blank AWS_PROFILE names nothing.
+        assert!(instance_role_blocker(vars(&[("AWS_PROFILE", " ")]), |_| None).is_none());
 
         let blocked = AwsEnvironment {
             instance_role_failure: Some("blocked".into()),
@@ -605,6 +684,65 @@ mod tests {
         assert!(AwsEnvironment::default().wants_instance_role());
         assert!(!blocked.wants_instance_role());
         assert!(!aws().wants_instance_role());
+    }
+
+    #[test]
+    fn a_default_profile_with_credentials_blocks_the_lookup() {
+        let credentials = "[default]\naws_access_key_id = AKIDEXAMPLE\naws_secret_access_key = x\n";
+        let blocker = instance_role_blocker(
+            |_| None,
+            |file| matches!(file, SharedFile::Credentials).then(|| credentials.to_string()),
+        );
+        assert!(blocker.unwrap().contains("default AWS profile"));
+
+        let config = "[default]\nsso_session = work\n";
+        assert!(
+            instance_role_blocker(
+                |_| None,
+                |file| matches!(file, SharedFile::Config).then(|| config.to_string()),
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn a_default_profile_without_credentials_leaves_the_instance_role_alone() {
+        for text in [
+            "",
+            "[default]\nregion = eu-west-1\noutput = json\n",
+            "# aws_access_key_id = commented\n[default]\nregion = eu-west-1\n",
+            "[profile dev]\naws_access_key_id = AKIDEXAMPLE\n[default]\nregion = eu-west-1\n",
+            "[other]\ncredential_process = /bin/creds\n",
+        ] {
+            assert!(!default_profile_names_credentials(text), "{text:?}");
+        }
+        for text in [
+            "[default]\naws_access_key_id=AKIDEXAMPLE\n",
+            "[profile default]\ncredential_process = /bin/creds\n",
+            "[dev]\nregion = x\n[default]\n  ; note\n  role_arn = arn:aws:iam::1:role/x\n",
+        ] {
+            assert!(default_profile_names_credentials(text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn shared_files_are_read_from_the_paths_the_aws_tools_use() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("creds");
+        std::fs::write(&path, "[default]\naws_access_key_id = AKIDEXAMPLE\n").unwrap();
+        let path = path.to_string_lossy().to_string();
+
+        let text = read_shared_file(SharedFile::Credentials, |name| {
+            (name == "AWS_SHARED_CREDENTIALS_FILE").then(|| path.clone())
+        });
+        assert!(text.unwrap().contains("AKIDEXAMPLE"));
+        // A path that does not exist is no file, not an error.
+        assert!(
+            read_shared_file(SharedFile::Config, |name| {
+                (name == "AWS_CONFIG_FILE").then(|| "/nonexistent/aws-config".to_string())
+            })
+            .is_none()
+        );
     }
 
     #[test]
