@@ -511,6 +511,9 @@ struct Frame {
     rows: u16,
     /// Complete lines of child output not yet shown, in arrival order.
     held: Vec<u8>,
+    /// A held CR was ended with an LF of our own, so the child's LF, if it
+    /// arrives, must not end the line a second time.
+    lf_owed: bool,
 }
 
 impl Frame {
@@ -528,6 +531,14 @@ impl Frame {
     /// line) is shown at once, without the block, which stays away until the
     /// line is complete.
     fn write(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let bytes = match bytes {
+            [b'\n', rest @ ..] if self.lf_owed => rest,
+            _ => bytes,
+        };
+        self.lf_owed = false;
+        if bytes.is_empty() {
+            return Vec::new();
+        }
         self.held.extend_from_slice(bytes);
         if self.drawn > 0 && matches!(bytes.last(), Some(b'\n' | b'\r')) {
             Vec::new()
@@ -555,6 +566,26 @@ impl Frame {
         out
     }
 
+    /// Move held output to `out`. A line that ends in a bare CR is ended with an
+    /// LF, or the block drawn next would print over it.
+    fn flush_held(&mut self, out: &mut Vec<u8>) {
+        let unterminated = self.trailing_cr();
+        out.append(&mut self.held);
+        if unterminated {
+            out.push(b'\n');
+            self.lf_owed = true;
+        }
+    }
+
+    /// Erase the block and show what was held, for a block about to be redrawn
+    /// from scratch.
+    fn clear(&mut self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.held.len());
+        self.erase(&mut out);
+        self.flush_held(&mut out);
+        out
+    }
+
     /// Held output ends in a CR: either half a CRLF or a line that rewrites itself.
     fn trailing_cr(&self) -> bool {
         self.held.ends_with(b"\r")
@@ -565,12 +596,7 @@ impl Frame {
     fn draw(&mut self, diagnostics: &[u8], block: String, rows: u16) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.held.len() + block.len());
         self.erase(&mut out);
-        // A held line that ends in a bare CR would have the block print over it.
-        let unterminated = self.trailing_cr();
-        out.append(&mut self.held);
-        if unterminated {
-            out.push(b'\n');
-        }
+        self.flush_held(&mut out);
         out.extend_from_slice(
             String::from_utf8_lossy(diagnostics)
                 .replace("\r\n", "\n")
@@ -654,7 +680,7 @@ impl Screen {
     }
     fn clear(&mut self) -> io::Result<()> {
         let synchronized = self.frame.drawn > 0;
-        let bytes = self.frame.present(false);
+        let bytes = self.frame.clear();
         self.emit(&bytes, synchronized)
     }
     fn draw(&mut self, block: norimel::Block) -> io::Result<()> {

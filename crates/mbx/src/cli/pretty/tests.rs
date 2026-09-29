@@ -667,3 +667,34 @@ fn only_output_ending_in_a_cr_makes_a_frame_wait() {
     frame.write(b"\n");
     assert!(!frame.trailing_cr());
 }
+
+#[test]
+fn the_lf_after_a_bare_cr_that_a_frame_already_ended_is_not_written_twice() {
+    let mut frame = drawn_frame();
+    assert!(frame.write(b"50%\r").is_empty());
+    assert_eq!(
+        String::from_utf8(frame.draw(b"", "next\r\n".into(), 1)).unwrap(),
+        format!("{ERASE}50%\r\nnext\r\n")
+    );
+    // The child's LF arrives after the grace period, once the line has ended.
+    assert!(frame.write(b"\n").is_empty());
+    assert!(frame.present(true).is_empty(), "no blank row");
+    // Only one LF is owed; the next is ordinary output.
+    assert!(frame.write(b"\n").is_empty());
+    assert_eq!(
+        String::from_utf8(frame.present(true)).unwrap(),
+        "\r\x1b[1A\x1b[J\nnext\r\n"
+    );
+}
+
+#[test]
+fn clearing_the_block_ends_a_held_bare_cr_line() {
+    let mut frame = drawn_frame();
+    assert!(frame.write(b"progress\r").is_empty());
+    assert_eq!(
+        String::from_utf8(frame.clear()).unwrap(),
+        format!("{ERASE}progress\r\n")
+    );
+    assert_eq!(frame.drawn, 0);
+    assert!(frame.write(b"\n").is_empty(), "the LF is already owed");
+}
