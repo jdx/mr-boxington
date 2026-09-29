@@ -3857,6 +3857,34 @@ mod target_views {
     }
 
     #[test]
+    fn an_alias_that_names_a_target_directory_keeps_it() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(project.path());
+        std::fs::create_dir_all(project.path().join(".cargo")).unwrap();
+        std::fs::write(
+            project.path().join(".cargo/config.toml"),
+            "[alias]\nchk-elsewhere = \"check --target-dir elsewhere\"\n",
+        )
+        .unwrap();
+
+        cargo_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("alias.json"),
+            &["chk-elsewhere", "--offline"],
+            &[("MBX_TARGET_VIEWS", "1")],
+        );
+
+        // Where the alias sent it, not a lane laid over the top of it.
+        assert!(project.path().join("elsewhere/debug").is_dir());
+        if let Ok(managed) = std::fs::read_link(project.path().join("target")) {
+            assert!(!managed.join("check").exists());
+        }
+    }
+
+    #[test]
     fn a_configured_build_directory_keeps_a_check_in_the_shared_target() {
         let store = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();

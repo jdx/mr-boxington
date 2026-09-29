@@ -800,54 +800,51 @@ fn a_config_flag_that_could_name_the_build_directory_rules_out_a_lane() {
 }
 
 #[test]
-fn the_expanded_command_of_a_plain_name_needs_no_configuration() {
+fn a_plain_command_name_is_not_expanded() {
     let cargo = std::ffi::OsStr::new("cargo");
-    for (typed, expanded) in [
-        (&["check"][..], "check"),
-        (&["+stable", "clippy", "--workspace"], "clippy"),
-        (&["build", "--release"], "build"),
-        (&["test"], "test"),
+    for typed in [
+        &["check"][..],
+        &["+stable", "clippy", "--workspace"],
+        &["build", "--release"],
+        &["test"],
     ] {
+        let typed = arguments(typed);
         assert_eq!(
-            super::cargo_invocation::expanded_subcommand(cargo, &arguments(typed)).as_deref(),
-            Some(expanded),
-            "{typed:?}"
+            super::cargo_invocation::expanded_arguments(cargo, &typed),
+            Some(typed.clone()),
         );
     }
 }
 
 #[test]
-fn configuration_is_read_from_the_directory_the_command_moves_to() {
-    let directory = tempfile::tempdir().unwrap();
-    let project = directory.path().join("project");
-    std::fs::create_dir_all(project.join(".cargo")).unwrap();
-    std::fs::write(
-        project.join(".cargo/config.toml"),
-        "[build]\nbuild-dir = \"target\"\n",
-    )
-    .unwrap();
-    let elsewhere = directory.path().join("elsewhere");
-    std::fs::create_dir_all(&elsewhere).unwrap();
-
-    for moved in [
-        &["-C", "../project", "check"][..],
-        &["-C../project", "check"],
-        &["--directory", "../project", "check"],
-        &["--directory=../project", "check"],
-        &["-C", "..", "-C", "project", "check"],
-        &["-C", project.to_str().unwrap(), "check"],
+fn a_target_dir_ahead_of_the_program_arguments_rules_out_a_lane() {
+    for named in [
+        &["check", "--target-dir", "elsewhere"][..],
+        &["clippy", "--target-dir=elsewhere", "--workspace"],
+        &["--target-dir", "elsewhere", "check"],
     ] {
-        let moved = arguments(moved);
-        assert_eq!(
-            invocation_dir(&elsewhere, &moved).canonicalize().unwrap(),
-            project.canonicalize().unwrap(),
-            "{moved:?}"
-        );
-        // The setting is in the project, not where the command was typed.
-        assert!(build_dir_configured(&elsewhere, &moved), "{moved:?}");
+        assert!(target_dir_named_in(&arguments(named)), "{named:?}");
+    }
+    for unrelated in [
+        &["check", "--workspace"][..],
+        &["clippy", "--", "--target-dir", "elsewhere"],
+    ] {
+        assert!(!target_dir_named_in(&arguments(unrelated)), "{unrelated:?}");
     }
 
-    // Arguments after the command belong to the program, not to Cargo.
-    let unmoved = arguments(&["check", "--", "-C", "../project"]);
-    assert_eq!(invocation_dir(&elsewhere, &unmoved), elsewhere);
+    let directory = tempfile::tempdir().unwrap();
+    let config = managed_target_config(directory.path());
+    let workspace = directory.path().join("project");
+    let roots = lane_roots(&workspace);
+    let check = arguments(&["check", "--target-dir", "elsewhere"]);
+    assert_eq!(
+        lane(
+            directory.path(),
+            &config,
+            &roots,
+            &placed(&workspace),
+            &check
+        ),
+        None
+    );
 }

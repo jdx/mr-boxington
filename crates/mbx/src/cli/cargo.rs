@@ -610,11 +610,22 @@ pub(super) fn check_lane(
     {
         return None;
     }
-    matches!(
-        super::cargo_invocation::expanded_subcommand(cargo, arguments).as_deref(),
+    // What Cargo will run, not what was typed: an alias can name a target of
+    // its own, which the roots probe never sees.
+    let expanded = super::cargo_invocation::expanded_arguments(cargo, arguments)?;
+    (matches!(
+        super::launch::cargo_subcommand(&expanded),
         Some("check" | "clippy")
-    )
+    ) && !target_dir_named_in(&expanded))
     .then(|| roots.workspace_root.join(super::CHECK_LANE_TARGET_DIR))
+}
+
+/// A `--target-dir` among the arguments meant for Cargo.
+pub(super) fn target_dir_named_in(arguments: &[String]) -> bool {
+    arguments
+        .iter()
+        .take_while(|argument| *argument != "--")
+        .any(|argument| argument == "--target-dir" || argument.starts_with("--target-dir="))
 }
 
 /// Whether the caller named Cargo's build directory, where its lock lives.
