@@ -206,13 +206,18 @@ fn output_through_pty(command: CommandBuilder) -> String {
     drop(pair.slave);
     let (send, receive) = mpsc::channel();
     std::thread::spawn(move || {
+        const QUERY: &[u8] = b"\x1b[6n";
         let mut bytes = [0; 4096];
+        // The query can straddle two reads, so keep the last few bytes.
+        let mut seen = Vec::new();
         while let Ok(n @ 1..) = reader.read(&mut bytes) {
             // ConPTY asks for the cursor position and emits nothing more until
             // the host answers.
-            if bytes[..n].windows(4).any(|window| window == b"\x1b[6n") {
+            seen.extend_from_slice(&bytes[..n]);
+            if seen.windows(QUERY.len()).any(|window| window == QUERY) {
                 let _ = input.write_all(b"\x1b[1;1R").and_then(|()| input.flush());
             }
+            seen.drain(..seen.len().saturating_sub(QUERY.len() - 1));
             if send.send(bytes[..n].to_vec()).is_err() {
                 break;
             }
