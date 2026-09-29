@@ -70,7 +70,7 @@ impl TestRunner {
         // Resolution is best-effort, like the pool itself: a configuration
         // mbx cannot read runs the tests unscheduled rather than failing.
         let resolved = (|| -> Result<_> {
-            let cargo = cargo_config2::Config::load()?;
+            let cargo = super::launch::load_cargo_config()?;
             let inherited = inherited_overlay().runners;
             let mut keys = Vec::new();
             let mut runners = BTreeMap::new();

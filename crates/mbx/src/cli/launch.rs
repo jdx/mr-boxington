@@ -115,6 +115,32 @@ pub(super) fn cargo_subcommand_at<T: AsRef<OsStr>>(arguments: &[T]) -> Option<(u
     None
 }
 
+/// Cargo's configuration, read the way Cargo reads it.
+///
+/// Cargo takes an empty `build.rustc-wrapper` to mean no wrapper: a workspace
+/// writes `rustc-wrapper = ""` to cancel one it inherits from a parent
+/// directory or the global configuration. cargo-config2 would run the empty
+/// string as the wrapper program, so evaluating a `[target.'cfg(...)']`
+/// section, which asks rustc for the target's cfg, failed to execute `""`.
+pub(super) fn load_cargo_config() -> Result<cargo_config2::Config> {
+    Ok(without_empty_wrappers(cargo_config2::Config::load()?))
+}
+
+pub(super) fn without_empty_wrappers(mut config: cargo_config2::Config) -> cargo_config2::Config {
+    for wrapper in [
+        &mut config.build.rustc_wrapper,
+        &mut config.build.rustc_workspace_wrapper,
+    ] {
+        if wrapper
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            *wrapper = None;
+        }
+    }
+    config
+}
+
 /// The targets a Cargo command builds for: its `--target` flags, or else the
 /// configured or host target.
 pub(super) fn requested_targets(
@@ -233,7 +259,7 @@ impl Launch {
         if !matches!(cargo_subcommand(arguments), Some("run" | "r")) {
             return Ok(None);
         }
-        let config = cargo_config2::Config::load()?;
+        let config = load_cargo_config()?;
         let targets = requested_targets(&config, arguments)?;
         eyre::ensure!(targets.len() == 1, "cargo run requires exactly one target");
         let target = &targets[0];

@@ -889,3 +889,65 @@ fn configuration_is_read_from_the_directory_the_command_moves_to() {
     let unmoved = arguments(&["check", "--", "-C", "../project"]);
     assert_eq!(invocation_dir(&elsewhere, &unmoved), elsewhere);
 }
+
+fn config_with_wrappers(
+    root: &Path,
+    wrapper: Option<&str>,
+    workspace_wrapper: Option<&str>,
+) -> cargo_config2::Config {
+    let mut text = String::from("[build]\n");
+    if let Some(wrapper) = wrapper {
+        text.push_str(&format!("rustc-wrapper = \"{wrapper}\"\n"));
+    }
+    if let Some(wrapper) = workspace_wrapper {
+        text.push_str(&format!("rustc-workspace-wrapper = \"{wrapper}\"\n"));
+    }
+    std::fs::create_dir_all(root.join(".cargo")).unwrap();
+    std::fs::write(root.join(".cargo/config.toml"), text).unwrap();
+    // An empty environment and a Cargo home of its own: the RUSTC_WRAPPER that
+    // mbx sets for this very process would otherwise outrank the file.
+    cargo_config2::Config::load_with_options(
+        root,
+        cargo_config2::ResolveOptions::default()
+            .env(Vec::<(String, String)>::new())
+            .cargo_home(root.join("cargo-home")),
+    )
+    .unwrap()
+}
+
+#[test]
+fn an_empty_rustc_wrapper_is_no_wrapper() {
+    let directory = tempfile::tempdir().unwrap();
+    // Left alone, the empty string becomes the program that would run rustc.
+    let unfixed = config_with_wrappers(directory.path(), Some(""), Some(""));
+    assert!(unfixed.rustc().path.as_os_str().is_empty());
+
+    let config = super::launch::without_empty_wrappers(config_with_wrappers(
+        directory.path(),
+        Some(""),
+        Some(""),
+    ));
+
+    assert_eq!(config.build.rustc_wrapper, None);
+    assert_eq!(config.build.rustc_workspace_wrapper, None);
+    assert!(!config.rustc().path.as_os_str().is_empty());
+}
+
+#[test]
+fn a_real_rustc_wrapper_is_kept() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = super::launch::without_empty_wrappers(config_with_wrappers(
+        directory.path(),
+        Some("sccache"),
+        Some("workspace-wrapper"),
+    ));
+
+    assert_eq!(
+        config.build.rustc_wrapper,
+        Some(std::path::PathBuf::from("sccache"))
+    );
+    assert_eq!(
+        config.build.rustc_workspace_wrapper,
+        Some(std::path::PathBuf::from("workspace-wrapper"))
+    );
+}

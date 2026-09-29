@@ -629,3 +629,40 @@ pub fn documented() {}
         "{ledger}"
     );
 }
+
+#[test]
+fn cargo_run_reads_an_empty_rustc_wrapper_as_none() {
+    let root = tempfile::tempdir().unwrap();
+    project(
+        root.path(),
+        "fn main() { println!(\"application started\"); }",
+    );
+    std::fs::create_dir_all(root.path().join(".cargo")).unwrap();
+    // A `cfg()` section makes the runner lookup ask rustc for the target's cfg,
+    // and an empty wrapper is how a workspace cancels one it inherits.
+    std::fs::write(
+        root.path().join(".cargo/config.toml"),
+        r#"[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "split-debuginfo=unpacked"]
+
+[build]
+rustc-wrapper = ""
+"#,
+    )
+    .unwrap();
+
+    let output = mbx(root.path())
+        .args(["run", "--offline"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("application started"));
+}
