@@ -815,3 +815,39 @@ fn the_expanded_command_of_a_plain_name_needs_no_configuration() {
         );
     }
 }
+
+#[test]
+fn configuration_is_read_from_the_directory_the_command_moves_to() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    std::fs::create_dir_all(project.join(".cargo")).unwrap();
+    std::fs::write(
+        project.join(".cargo/config.toml"),
+        "[build]\nbuild-dir = \"target\"\n",
+    )
+    .unwrap();
+    let elsewhere = directory.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+
+    for moved in [
+        &["-C", "../project", "check"][..],
+        &["-C../project", "check"],
+        &["--directory", "../project", "check"],
+        &["--directory=../project", "check"],
+        &["-C", "..", "-C", "project", "check"],
+        &["-C", project.to_str().unwrap(), "check"],
+    ] {
+        let moved = arguments(moved);
+        assert_eq!(
+            invocation_dir(&elsewhere, &moved).canonicalize().unwrap(),
+            project.canonicalize().unwrap(),
+            "{moved:?}"
+        );
+        // The setting is in the project, not where the command was typed.
+        assert!(build_dir_configured(&elsewhere, &moved), "{moved:?}");
+    }
+
+    // Arguments after the command belong to the program, not to Cargo.
+    let unmoved = arguments(&["check", "--", "-C", "../project"]);
+    assert_eq!(invocation_dir(&elsewhere, &unmoved), elsewhere);
+}

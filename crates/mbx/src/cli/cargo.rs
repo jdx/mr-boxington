@@ -625,11 +625,33 @@ pub(super) fn check_lane(
 /// build directory that was set, so any setting rules a lane out.
 pub(super) fn build_dir_configured(working_dir: &Path, arguments: &[String]) -> bool {
     build_dir_named_in(arguments)
-        || match cargo_config2::Config::load_with_cwd(working_dir) {
+        || match cargo_config2::Config::load_with_cwd(invocation_dir(working_dir, arguments)) {
             Ok(config) => config.build.build_dir.is_some(),
             // Cargo will not run with configuration it cannot read either.
             Err(_) => true,
         }
+}
+
+/// The directory Cargo reads its configuration from: where it is run, moved by
+/// any `-C` or `--directory` ahead of the command.
+pub(super) fn invocation_dir(working_dir: &Path, arguments: &[String]) -> PathBuf {
+    let global = super::launch::cargo_subcommand_at(arguments)
+        .map_or(arguments, |(index, _)| &arguments[..index]);
+    let mut directory = working_dir.to_path_buf();
+    let mut global = global.iter();
+    while let Some(argument) = global.next() {
+        let moved = if argument == "-C" || argument == "--directory" {
+            global.next().map(String::as_str)
+        } else if let Some(value) = argument.strip_prefix("--directory=") {
+            Some(value)
+        } else {
+            argument.strip_prefix("-C")
+        };
+        if let Some(moved) = moved {
+            directory = directory.join(moved);
+        }
+    }
+    directory
 }
 
 /// A `--config` that mentions the build directory, or names a file that could.
