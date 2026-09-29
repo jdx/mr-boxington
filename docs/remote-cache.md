@@ -93,10 +93,13 @@ cache while those credentials are valid.
 
 A job in a container on an EC2 instance can fail the first lookup with a timeout
 even though the instance has a role. The metadata service's default hop limit of
-1 keeps its answer from reaching the container. Raise it to 2 with
-`aws ec2 modify-instance-metadata-options --http-put-response-hop-limit 2`. The
-error names `HttpPutResponseHopLimit` when the token request times out after
-connecting.
+1 keeps its answer from reaching the container. Raising it to 2 with
+`aws ec2 modify-instance-metadata-options --http-put-response-hop-limit 2`
+fixes that, but the setting covers the whole instance: every container on the
+host can then read the instance role's credentials, not only the mbx job. Do
+that only where the role's permissions suit everything that runs there, or run
+the job outside a container. The error names `HttpPutResponseHopLimit` when the
+token request times out after connecting.
 
 Off EC2, a lookup that finds no metadata service fails after about a second and
 the remote is refused with the usual missing-credentials error, which names both

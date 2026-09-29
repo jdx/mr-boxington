@@ -31,8 +31,10 @@ const RETRY_BACKOFF: Duration = Duration::from_millis(200);
 /// Appended when the token request times out after connecting, which is what a
 /// hop limit of 1 looks like from inside a container.
 const HOP_LIMIT_HINT: &str = "the metadata service accepted the connection but never answered. \
-    From a container, the instance's metadata hop limit may be 1; raise \
-    HttpPutResponseHopLimit to 2 with `aws ec2 modify-instance-metadata-options`";
+    From a container, the instance's metadata hop limit may be 1. Raising \
+    HttpPutResponseHopLimit to 2 with `aws ec2 modify-instance-metadata-options` fixes \
+    that for every container on the instance, so first consider whether they should all \
+    be able to use its role";
 
 const TOKEN_TTL_HEADER: &str = "x-aws-ec2-metadata-token-ttl-seconds";
 const TOKEN_HEADER: &str = "x-aws-ec2-metadata-token";
