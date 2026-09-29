@@ -108,6 +108,26 @@ impl InstanceRoleCredentials {
         parse_role_document(&document)
     }
 
+    /// The region the instance runs in, for a machine that names none itself.
+    ///
+    /// The metadata service answers this without any role, so it is a separate
+    /// lookup that only runs when the region would otherwise be missing.
+    pub async fn region(&self) -> Result<String> {
+        let token = self
+            .token()
+            .await
+            .wrap_err("could not get an IMDSv2 session token")?;
+        let region = self
+            .get(&token, "latest/meta-data/placement/region")
+            .await
+            .wrap_err("could not read the instance's region")?;
+        let region = region.trim();
+        if region.is_empty() {
+            bail!("the metadata service returned an empty region");
+        }
+        Ok(region.to_string())
+    }
+
     async fn token(&self) -> Result<String> {
         let response = self
             .client
@@ -364,6 +384,24 @@ mod tests {
         token.assert_async().await;
         roles.assert_async().await;
         credentials.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn the_instances_region_is_read_from_placement_metadata() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("PUT", "/latest/api/token")
+            .with_body("session-token")
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/latest/meta-data/placement/region")
+            .match_header(TOKEN_HEADER, "session-token")
+            .with_body("eu-west-1\n")
+            .create_async()
+            .await;
+
+        assert_eq!(provider(&server).region().await.unwrap(), "eu-west-1");
     }
 
     #[tokio::test]

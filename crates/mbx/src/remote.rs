@@ -22,8 +22,13 @@ pub struct AwsEnvironment {
     /// Credentials, absent when neither the environment nor an instance role
     /// supplied any.
     pub credentials: Option<S3Credentials>,
-    /// Region named by `AWS_REGION` or `AWS_DEFAULT_REGION`.
+    /// Region named by `AWS_REGION` or `AWS_DEFAULT_REGION`, or failing both,
+    /// the one the instance reports.
     pub region: Option<String>,
+    /// Whether `AWS_ACCESS_KEY_ID` is set. When it is, the environment is the
+    /// credential source even if `AWS_SECRET_ACCESS_KEY` is missing, and the
+    /// instance role must not quietly take its place.
+    pub access_key_id_set: bool,
     /// The instance role `credentials` came from, and when they expire.
     /// Absent when the environment supplied them.
     pub instance_role: Option<(InstanceRoleCredentials, SystemTime)>,
@@ -69,6 +74,8 @@ impl AwsEnvironment {
     fn from_env() -> Self {
         Self {
             credentials: S3Credentials::from_env(),
+            access_key_id_set: std::env::var("AWS_ACCESS_KEY_ID")
+                .is_ok_and(|value| !value.trim().is_empty()),
             instance_role: None,
             instance_role_failure: None,
             region: ["AWS_REGION", "AWS_DEFAULT_REGION"]
@@ -102,13 +109,10 @@ pub async fn remote_client(config: &Config) -> Result<Option<RemoteCacheClient>>
 /// async.
 pub async fn connect(config: &Config) -> Result<Option<ConnectedRemote>> {
     let mut aws = AwsEnvironment::from_env();
-    let is_s3 = config
-        .remote
-        .url
-        .as_deref()
-        .is_some_and(|url| url.trim_start().starts_with("s3://"));
-    if is_s3 && aws.credentials.is_none() {
-        aws.use_instance_role().await;
+    let is_s3 = is_s3_remote(config);
+    if is_s3 && aws.wants_instance_role() {
+        aws.use_instance_role(config.remote.s3_region.is_none())
+            .await;
     }
     let credentials = match (&aws.credentials, &aws.instance_role) {
         _ if !is_s3 => None,
@@ -126,9 +130,29 @@ pub async fn connect(config: &Config) -> Result<Option<ConnectedRemote>> {
     )
 }
 
+/// Whether the URL names an object store. Read from the parsed URL, which
+/// lowercases the scheme, so this agrees with how the client is built.
+fn is_s3_remote(config: &Config) -> bool {
+    config
+        .remote
+        .url
+        .as_deref()
+        .and_then(|url| url.trim().parse::<Url>().ok())
+        .is_some_and(|url| url.scheme() == "s3")
+}
+
 impl AwsEnvironment {
+    /// The instance role is the fallback for an environment with no access key
+    /// at all. A half-set pair is a mistake to report, not a reason to sign as
+    /// a different identity.
+    fn wants_instance_role(&self) -> bool {
+        self.credentials.is_none() && !self.access_key_id_set
+    }
+
     /// Try the EC2 instance role, filling in credentials when it has some.
-    async fn use_instance_role(&mut self) {
+    /// With `needs_region`, also asks the instance where it runs when no
+    /// region was configured.
+    async fn use_instance_role(&mut self, needs_region: bool) {
         let provider = match InstanceRoleCredentials::from_env() {
             Ok(Some(provider)) => provider,
             Ok(None) => {
@@ -141,12 +165,15 @@ impl AwsEnvironment {
                 return;
             }
         };
-        self.fetch_instance_role(provider).await;
+        self.fetch_instance_role(provider, needs_region).await;
     }
 
-    async fn fetch_instance_role(&mut self, provider: InstanceRoleCredentials) {
+    async fn fetch_instance_role(&mut self, provider: InstanceRoleCredentials, needs_region: bool) {
         match provider.fetch().await {
             Ok(fetched) => {
+                if needs_region && self.region.is_none() {
+                    self.region = provider.region().await.ok();
+                }
                 self.credentials = Some(fetched.credentials);
                 self.instance_role = Some((provider, fetched.expires_at));
             }
@@ -451,18 +478,59 @@ mod tests {
             )
             .create_async()
             .await;
+        metadata
+            .mock("GET", "/latest/meta-data/placement/region")
+            .with_body("eu-west-1")
+            .create_async()
+            .await;
         let provider = InstanceRoleCredentials::new(metadata.url().parse().unwrap()).unwrap();
         let mut environment = AwsEnvironment {
             credentials: None,
+            region: None,
             ..aws()
         };
 
-        environment.fetch_instance_role(provider).await;
+        environment.fetch_instance_role(provider, true).await;
 
         let credentials = environment.credentials.as_ref().unwrap();
         assert_eq!(credentials.access_key_id, "ASIAROLE");
         assert!(environment.instance_role.is_some());
+        // The instance names its own region, so no AWS_REGION is needed.
+        assert_eq!(environment.region.as_deref(), Some("eu-west-1"));
         assert!(client(s3_remote(), environment).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_half_set_access_key_pair_does_not_fall_back_to_the_instance_role() {
+        let unset = AwsEnvironment::default();
+        assert!(unset.wants_instance_role());
+
+        // AWS_ACCESS_KEY_ID without its secret yields no credentials, but the
+        // environment is still the source and the refusal should say so.
+        let half_set = AwsEnvironment {
+            access_key_id_set: true,
+            ..AwsEnvironment::default()
+        };
+        assert!(!half_set.wants_instance_role());
+
+        assert!(!aws().wants_instance_role());
+    }
+
+    #[test]
+    fn the_scheme_is_matched_the_way_the_url_parser_reads_it() {
+        let config = |url: &str| Config {
+            remote: RemoteSettings {
+                url: Some(url.into()),
+                ..RemoteSettings::default()
+            },
+            ..Config::for_test(std::path::Path::new("."))
+        };
+
+        assert!(is_s3_remote(&config("s3://cache-bucket")));
+        assert!(is_s3_remote(&config("S3://cache-bucket")));
+        assert!(is_s3_remote(&config("  s3://cache-bucket ")));
+        assert!(!is_s3_remote(&config("https://cache.example")));
+        assert!(!is_s3_remote(&Config::for_test(std::path::Path::new("."))));
     }
 
     #[tokio::test]
@@ -481,7 +549,7 @@ mod tests {
             InstanceRoleCredentials::new(format!("http://127.0.0.1:{port}").parse().unwrap())
                 .unwrap();
 
-        environment.fetch_instance_role(provider).await;
+        environment.fetch_instance_role(provider, true).await;
 
         assert!(environment.credentials.is_none());
         assert!(environment.instance_role_failure.is_some());

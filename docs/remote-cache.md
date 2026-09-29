@@ -64,10 +64,13 @@ mbx looks for credentials in two places, in order:
 1. The standard AWS environment variables: `AWS_ACCESS_KEY_ID`,
    `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` for temporary credentials.
 2. The EC2 instance role, through IMDSv2. This is tried only when
-   `AWS_ACCESS_KEY_ID` is not set.
+   `AWS_ACCESS_KEY_ID` is not set. If it is set without
+   `AWS_SECRET_ACCESS_KEY`, mbx reports the missing secret instead of signing
+   as a different identity.
 
 `MBX_REMOTE_S3_REGION` names the signing region, falling back to `AWS_REGION` or
-`AWS_DEFAULT_REGION`.
+`AWS_DEFAULT_REGION`. When credentials come from an instance role and none of
+these is set, mbx uses the region the instance reports.
 
 On an EC2 instance with a role attached, such as a CI runner, no setup is needed.
 mbx fetches the role's credentials when a build starts and asks for new ones a
