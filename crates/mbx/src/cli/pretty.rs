@@ -20,7 +20,7 @@ use ratatui::crossterm::{
 };
 use std::{
     collections::BTreeMap,
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     io::{self, IsTerminal, Read, Write},
     process::ExitCode,
     sync::mpsc,
@@ -111,6 +111,23 @@ pub(super) fn run(
     }
 }
 
+/// Replaces the builder's base environment with the caller's.
+///
+/// On Windows, `portable-pty` overlays the registry's machine and user
+/// environments onto the process environment when it constructs a builder. That
+/// drops `PATH` entries added in the calling shell, overwrites overridden
+/// variables, and restores variables the shell removed, so the pretty display
+/// would change what Cargo inherits compared with the plain launch.
+fn seed_process_environment(
+    command: &mut CommandBuilder,
+    process: impl IntoIterator<Item = (OsString, OsString)>,
+) {
+    command.env_clear();
+    for (key, value) in process {
+        command.env(key, value);
+    }
+}
+
 fn run_inner(
     cargo: &OsStr,
     arguments: &[String],
@@ -124,6 +141,9 @@ fn run_inner(
         .openpty(pty_size(cols, rows))
         .map_err(|e| eyre::eyre!(e))?;
     let mut command = CommandBuilder::new(cargo);
+    if cfg!(windows) {
+        seed_process_environment(&mut command, std::env::vars_os());
+    }
     command.args(cargo_arguments(arguments));
     // Cargo supplies the denominator itself, without an unstable unit-graph
     // probe. Include presentation overrides in the launch overlay so native

@@ -158,6 +158,38 @@ fn argument_injection_preserves_command_and_program_arguments() {
     }
 }
 
+#[test]
+fn seeding_replaces_the_builders_base_environment_with_the_process_environment() {
+    let mut command = CommandBuilder::new("cargo");
+    // Stand-ins for what portable-pty reads from the Windows registry.
+    command.env("PATH", "registry-path");
+    command.env("OS", "Windows_NT");
+    command.env("REMOVED_BY_SHELL", "registry-value");
+
+    seed_process_environment(
+        &mut command,
+        [
+            ("PATH".into(), "process-only;registry-path".into()),
+            ("OS".into(), "mbx-process-only-os".into()),
+        ],
+    );
+    command.env("CARGO_TERM_PROGRESS_WHEN", "always");
+
+    assert_eq!(
+        command.get_env("PATH"),
+        Some(OsStr::new("process-only;registry-path"))
+    );
+    assert_eq!(
+        command.get_env("OS"),
+        Some(OsStr::new("mbx-process-only-os"))
+    );
+    assert_eq!(command.get_env("REMOVED_BY_SHELL"), None);
+    assert_eq!(
+        command.get_env("CARGO_TERM_PROGRESS_WHEN"),
+        Some(OsStr::new("always"))
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn preserves_signalled_exit_status() {
