@@ -666,3 +666,52 @@ rustc-wrapper = ""
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("application started"));
 }
+
+#[cfg(unix)]
+#[test]
+fn scheduled_test_binaries_hold_a_permit_with_an_empty_rustc_wrapper() {
+    let root = tempfile::tempdir().unwrap();
+    project(
+        root.path(),
+        r#"
+fn main() {}
+#[test]
+fn scheduled() {
+    let leases = std::path::Path::new(&std::env::var_os("MBX_CACHE_DIR").unwrap())
+        .join("scheduler/leases");
+    let held = std::fs::read_dir(&leases).map(|entries| entries.count()).unwrap_or(0);
+    assert_eq!(held, 1, "this test should hold a permit");
+}
+"#,
+    );
+    std::fs::create_dir(root.path().join(".cargo")).unwrap();
+    // The runner lookup that schedules tests evaluates `cfg()` sections by
+    // asking rustc, and an emptied wrapper used to make that lookup fail. It
+    // fails quietly, so a passing `cargo test` alone would not show it: the
+    // tests just ran without a permit.
+    std::fs::write(
+        root.path().join(".cargo/config.toml"),
+        r#"[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[build]
+rustc-wrapper = ""
+"#,
+    )
+    .unwrap();
+
+    let output = mbx(root.path())
+        .env("MBX_SCHEDULER_CPUS", "8")
+        .env("MBX_SCHEDULER_MEMORY", "none")
+        .env("MBX_SCHEDULER_TESTS", "1")
+        .args(["test", "--offline"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
