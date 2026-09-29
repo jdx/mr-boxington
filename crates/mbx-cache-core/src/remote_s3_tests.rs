@@ -1180,7 +1180,7 @@ async fn rejected_credentials_name_where_they_came_from() {
 }
 
 #[tokio::test]
-async fn expired_role_credentials_point_at_renewal_only_when_renewal_failed() {
+async fn expired_role_credentials_name_renewal_and_clocks_not_permissions() {
     let mut server = mockito::Server::new_async().await;
     server
         .mock("GET", "/cache-bucket/acme/v1/connectivity-probe")
@@ -1194,19 +1194,12 @@ async fn expired_role_credentials_point_at_renewal_only_when_renewal_failed() {
         SystemTime::now() + Duration::from_secs(3_600),
     );
 
-    // An hour is left by the local record, so renewal has not been attempted
-    // and cannot be blamed.
     let error = store.check_connection().await.unwrap_err().to_string();
-    assert!(!error.contains("could not be renewed"), "{error}");
-    assert!(error.contains("reported them valid"), "{error}");
-    assert!(!error.contains("permissions"), "{error}");
 
-    let CredentialSource::InstanceRole(role) = &store.credentials else {
-        unreachable!()
-    };
-    role.state.lock().unwrap().failing = true;
-    let error = store.check_connection().await.unwrap_err().to_string();
-    assert!(error.contains("could not be renewed"), "{error}");
+    // The message must not depend on the credentials held now, which a
+    // renewal may have replaced since the rejected request was signed.
+    assert!(error.contains("renewal warning"), "{error}");
+    assert!(error.contains("clocks"), "{error}");
     assert!(!error.contains("permissions"), "{error}");
 }
 
