@@ -43,10 +43,11 @@ pub struct S3Credentials {
 impl S3Credentials {
     /// Read credentials from the environment variables the AWS tools set.
     ///
-    /// This is the whole credential chain mbx implements, and `None` means the
-    /// environment does not carry one. Anything that produces temporary
-    /// credentials -- an OIDC exchange, an instance role -- is expected to have
-    /// exported them here first, which is what
+    /// `None` means the environment does not carry any. These come first in
+    /// the credential chain; [`InstanceRoleCredentials`](crate::InstanceRoleCredentials)
+    /// is the fallback for a machine that has an EC2 instance role instead.
+    /// Anything else that produces temporary credentials, such as an OIDC
+    /// exchange, is expected to have exported them here, which is what
     /// `aws-actions/configure-aws-credentials` does on GitHub Actions.
     pub fn from_env() -> Option<Self> {
         Some(Self {

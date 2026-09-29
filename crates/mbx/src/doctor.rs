@@ -661,8 +661,8 @@ async fn remote_checks_with_policy(
         .trim();
     // The build builds its client the same way, so a configuration it would
     // refuse is reported here rather than discovered mid-compilation.
-    let client = match crate::remote::remote_client(config) {
-        Ok(Some(client)) => client,
+    let (client, credentials) = match crate::remote::connect(config).await {
+        Ok(Some(remote)) => (remote.client, remote.credentials),
         Ok(None) => {
             return vec![
                 policy,
@@ -679,7 +679,10 @@ async fn remote_checks_with_policy(
         Ok(()) => Check::pass("remote", format!("{base_url} ({namespace}) is compatible")),
         Err(error) => Check::fail("remote", format!("{error:#}")),
     };
-    vec![policy, remote]
+    let mut checks = vec![policy];
+    checks.extend(credentials.map(|origin| Check::pass("credentials", origin.describe())));
+    checks.push(remote);
+    checks
 }
 
 #[cfg(test)]

@@ -13,6 +13,7 @@
 //! which is the same answer the client already handles from a server that does
 //! not implement them.
 
+use crate::imds::InstanceRoleCredentials;
 use crate::sigv4::{PayloadHash, S3Credentials, SigningContext, sign};
 use crate::{
     BlobPackReceipt, BlobSource, BlobUpload, CacheDigest, MAX_REMOTE_BLOB_BYTES,
@@ -27,7 +28,7 @@ use reqwest::header::{CONTENT_LENGTH, ETAG, IF_MATCH, IF_NONE_MATCH};
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::io::AsyncWriteExt;
 use url::Url;
 
@@ -41,6 +42,13 @@ const LAYOUT_VERSION: u8 = 1;
 const CONNECTIVITY_PROBE_KEY: &str = "connectivity-probe";
 /// Bytes of an S3 error document read before giving up on a diagnosis.
 const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
+/// How long before expiry instance role credentials are fetched again. EC2
+/// publishes the next set at least five minutes ahead, so asking any earlier
+/// would only return the set already held.
+const RENEWAL_MARGIN: Duration = Duration::from_secs(5 * 60);
+/// How long to wait before asking the metadata service again after it failed
+/// or had nothing newer, so a stalled service is not asked once per request.
+const RENEWAL_RETRY: Duration = Duration::from_secs(30);
 
 /// Whether conditional writes are required, refused, or tried and given up on.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, strum::EnumString, strum::Display)]
@@ -108,6 +116,77 @@ impl ObjectKind {
     }
 }
 
+/// Where the credentials that sign requests come from.
+enum CredentialSource {
+    /// The same credentials for the whole session.
+    Fixed(S3Credentials),
+    /// Credentials that expire and are fetched again from the instance role.
+    InstanceRole(InstanceRole),
+}
+
+struct InstanceRole {
+    provider: InstanceRoleCredentials,
+    /// Held across a renewal, so requests that arrive meanwhile wait for the
+    /// one lookup instead of each making their own.
+    state: tokio::sync::Mutex<RenewalState>,
+}
+
+struct RenewalState {
+    credentials: S3Credentials,
+    expires_at: SystemTime,
+    /// Earliest time to ask the metadata service again, after a lookup that
+    /// failed or returned credentials still inside the renewal margin.
+    retry_at: Option<Instant>,
+    /// Whether the last lookup failed, so a stalled service is reported once
+    /// rather than on every retry.
+    failing: bool,
+}
+
+impl CredentialSource {
+    /// The credentials to sign the next request with.
+    ///
+    /// A failed renewal keeps the credentials already held: they usually have
+    /// minutes left, and once they lapse S3 rejects them with an error that
+    /// says so.
+    async fn current(&self) -> S3Credentials {
+        match self {
+            Self::Fixed(credentials) => credentials.clone(),
+            Self::InstanceRole(role) => {
+                let mut state = role.state.lock().await;
+                let due = state
+                    .expires_at
+                    .checked_sub(RENEWAL_MARGIN)
+                    .is_none_or(|due| due <= SystemTime::now());
+                let waiting = state.retry_at.is_some_and(|at| at > Instant::now());
+                if due && !waiting {
+                    match role.provider.fetch().await {
+                        Ok(fresh) => {
+                            state.credentials = fresh.credentials;
+                            state.expires_at = fresh.expires_at;
+                            state.failing = false;
+                        }
+                        Err(error) => {
+                            if !state.failing {
+                                warn!(
+                                    "could not renew the EC2 instance role credentials, \
+                                     continuing with the current ones: {error:#}"
+                                );
+                            }
+                            state.failing = true;
+                        }
+                    }
+                    let still_due = state
+                        .expires_at
+                        .checked_sub(RENEWAL_MARGIN)
+                        .is_none_or(|due| due <= SystemTime::now());
+                    state.retry_at = still_due.then(|| Instant::now() + RENEWAL_RETRY);
+                }
+                state.credentials.clone()
+            }
+        }
+    }
+}
+
 pub(crate) struct S3RemoteCache {
     client: reqwest::Client,
     /// Bucket root, always ending in `/` so keys join onto it.
@@ -115,7 +194,7 @@ pub(crate) struct S3RemoteCache {
     /// Key prefix covering the configured prefix, namespace, and layout version.
     root: String,
     region: String,
-    credentials: S3Credentials,
+    credentials: CredentialSource,
     conditional_writes: S3ConditionalWrites,
     /// Latched once a store has told us it does not implement conditional
     /// writes, so the rest of the session stops asking.
@@ -145,13 +224,37 @@ impl S3RemoteCache {
             base_url: base_url(&config)?,
             root: format!("{prefix}{}/v{LAYOUT_VERSION}/", config.namespace.trim()),
             region: config.region.trim().to_string(),
-            credentials: config.credentials,
+            credentials: CredentialSource::Fixed(config.credentials),
             conditional_writes: config.conditional_writes,
             conditionals_disabled: AtomicBool::new(false),
             absence_is_ambiguous: AtomicBool::new(false),
             download_timeout: config.download_timeout,
             retries: config.retries,
         })
+    }
+
+    /// Hand credentials to `provider` for renewal before they expire.
+    ///
+    /// `expires_at` is when the credentials the store was built with stop
+    /// working, as reported alongside them.
+    pub(crate) fn with_instance_role(
+        mut self,
+        provider: InstanceRoleCredentials,
+        expires_at: SystemTime,
+    ) -> Self {
+        let CredentialSource::Fixed(credentials) = self.credentials else {
+            return self;
+        };
+        self.credentials = CredentialSource::InstanceRole(InstanceRole {
+            provider,
+            state: tokio::sync::Mutex::new(RenewalState {
+                credentials,
+                expires_at,
+                retry_at: None,
+                failing: false,
+            }),
+        });
+        self
     }
 
     fn object_url(&self, kind: ObjectKind, digest: &CacheDigest) -> Result<Url> {
@@ -179,14 +282,15 @@ impl S3RemoteCache {
     /// Signing happens per attempt rather than once per operation: a retry
     /// after a long backoff would otherwise present a stale `x-amz-date` and be
     /// refused for clock skew.
-    fn signed(
+    async fn signed(
         &self,
         method: reqwest::Method,
         url: &Url,
         payload: &PayloadHash,
     ) -> Result<reqwest::RequestBuilder> {
+        let credentials = self.credentials.current().await;
         let context = SigningContext {
-            credentials: &self.credentials,
+            credentials: &credentials,
             region: &self.region,
             timestamp: SystemTime::now(),
         };
@@ -237,7 +341,8 @@ impl S3RemoteCache {
         // expected answer is a 404 carrying an error document.
         retry_async("GET", &url, self.retries, || async {
             let response = self
-                .signed(reqwest::Method::GET, &url, &PayloadHash::empty())?
+                .signed(reqwest::Method::GET, &url, &PayloadHash::empty())
+                .await?
                 .send()
                 .await?;
             match response.status() {
@@ -368,7 +473,8 @@ impl S3RemoteCache {
     /// Fetch an object that must exist, turning any other status into an error.
     async fn get(&self, url: &Url) -> Result<reqwest::Response> {
         let response = self
-            .signed(reqwest::Method::GET, url, &PayloadHash::empty())?
+            .signed(reqwest::Method::GET, url, &PayloadHash::empty())
+            .await?
             .send()
             .await?;
         if response.status().is_success() {
@@ -413,7 +519,8 @@ impl S3RemoteCache {
         let url = self.object_url(ObjectKind::ActionResult, action)?;
         let result = retry_async("GET", &url, self.retries, || async {
             let response = self
-                .signed(reqwest::Method::GET, &url, &PayloadHash::empty())?
+                .signed(reqwest::Method::GET, &url, &PayloadHash::empty())
+                .await?
                 .send()
                 .await?;
             if !response.status().is_success() {
@@ -454,7 +561,8 @@ impl S3RemoteCache {
         let url = self.object_url(ObjectKind::ActionManifest, key)?;
         retry_async("GET", &url, self.retries, || async {
             let response = self
-                .signed(reqwest::Method::GET, &url, &PayloadHash::empty())?
+                .signed(reqwest::Method::GET, &url, &PayloadHash::empty())
+                .await?
                 .send()
                 .await?;
             if !response.status().is_success() {
@@ -488,7 +596,8 @@ impl S3RemoteCache {
             let outcome = loop {
                 let conditional = self.conditionals_enabled() && !dropped_condition;
                 let mut request = self
-                    .signed(reqwest::Method::PUT, &url, &PayloadHash::of(&body))?
+                    .signed(reqwest::Method::PUT, &url, &PayloadHash::of(&body))
+                    .await?
                     .header(CONTENT_LENGTH, body.len())
                     .body(body.clone());
                 if conditional {
@@ -555,7 +664,8 @@ impl S3RemoteCache {
         loop {
             let conditional = self.conditionals_enabled() && !dropped_condition;
             let mut request = self
-                .signed(reqwest::Method::PUT, url, &PayloadHash::of(body))?
+                .signed(reqwest::Method::PUT, url, &PayloadHash::of(body))
+                .await?
                 .header(CONTENT_LENGTH, body.len())
                 .body(body.to_vec());
             if conditional {
@@ -589,7 +699,8 @@ impl S3RemoteCache {
             let file = tokio::fs::File::open(path).await?;
             let length = file.metadata().await?.len();
             let mut request = self
-                .signed(reqwest::Method::PUT, url, &PayloadHash::Unsigned)?
+                .signed(reqwest::Method::PUT, url, &PayloadHash::Unsigned)
+                .await?
                 .header(CONTENT_LENGTH, length)
                 .body(reqwest::Body::wrap_stream(
                     tokio_util::io::ReaderStream::new(file),

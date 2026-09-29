@@ -1479,6 +1479,7 @@ dependencies = [
  "mbx-cache-rustc",
  "mbx-cache-store",
  "memchr",
+ "mockito",
  "portable-pty",
  "rand 0.10.3",
  "ratatui",

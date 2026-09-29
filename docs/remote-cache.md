@@ -59,17 +59,35 @@ namespace = "acme/backend"
 mode = "read-write"
 ```
 
-Credentials come from the standard AWS environment variables:
-`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` for
-temporary credentials. `MBX_REMOTE_S3_REGION` names the signing region, falling
-back to `AWS_REGION` or `AWS_DEFAULT_REGION`.
+mbx looks for credentials in two places, in order:
 
-Export temporary credentials into those variables before starting mbx. On GitHub
-Actions,
+1. The standard AWS environment variables: `AWS_ACCESS_KEY_ID`,
+   `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` for temporary credentials.
+2. The EC2 instance role, through IMDSv2. This is tried only when
+   `AWS_ACCESS_KEY_ID` is not set.
+
+`MBX_REMOTE_S3_REGION` names the signing region, falling back to `AWS_REGION` or
+`AWS_DEFAULT_REGION`.
+
+On an EC2 instance with a role attached, such as a CI runner, no setup is needed.
+mbx fetches the role's credentials when a build starts and asks for new ones a
+few minutes before they expire, so a build that outlives one set of credentials
+keeps its remote cache. Nothing is exported, so other tools in the same job keep
+using the instance profile through their own credential chain.
+
+Off EC2, a lookup that finds no metadata service fails after about a second and
+the remote is refused with the usual missing-credentials error, which names both
+sources. Set `AWS_EC2_METADATA_DISABLED=true` to skip the lookup, as with the AWS
+SDKs. `AWS_EC2_METADATA_SERVICE_ENDPOINT` overrides the metadata address.
+`mbx doctor` reports which source supplied the credentials and, for an instance
+role, how long they have left.
+
+For other environments, export temporary credentials into the variables above
+before starting mbx. On GitHub Actions,
 [`aws-actions/configure-aws-credentials`](https://github.com/aws-actions/configure-aws-credentials)
 can exchange the runner's OIDC token for temporary role credentials. mbx does
-not directly read EKS IRSA, EC2 or ECS instance roles, `~/.aws/config` profiles,
-or SSO sessions; export their credentials first.
+not directly read EKS IRSA, ECS task roles, `~/.aws/config` profiles, or SSO
+sessions; export their credentials first.
 
 The URL may carry a prefix, as `s3://acme-build-cache/teams/backend`, to share
 one bucket between projects. Keys are laid out under

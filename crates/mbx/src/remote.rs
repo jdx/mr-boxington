@@ -8,24 +8,69 @@
 use crate::config::Config;
 use eyre::{Context as _, Result, bail};
 use mbx_cache_core::{
-    RemoteCacheClient, RemoteCacheConfig, S3ConditionalWrites, S3Credentials, S3RemoteCacheConfig,
+    InstanceRoleCredentials, RemoteCacheClient, RemoteCacheConfig, S3ConditionalWrites,
+    S3Credentials, S3RemoteCacheConfig,
 };
+use std::time::{Duration, SystemTime};
 use url::Url;
 
 /// What the AWS environment variables say, read once at the edge so that
 /// everything below is a decision about configuration rather than about this
 /// process's environment.
+#[derive(Default)]
 pub struct AwsEnvironment {
-    /// Credentials, absent when the environment carries none.
+    /// Credentials, absent when neither the environment nor an instance role
+    /// supplied any.
     pub credentials: Option<S3Credentials>,
     /// Region named by `AWS_REGION` or `AWS_DEFAULT_REGION`.
     pub region: Option<String>,
+    /// The instance role `credentials` came from, and when they expire.
+    /// Absent when the environment supplied them.
+    pub instance_role: Option<(InstanceRoleCredentials, SystemTime)>,
+    /// Why no instance role credentials were found, for the refusal message.
+    pub instance_role_failure: Option<String>,
+}
+
+/// Where a remote's credentials came from, for `mbx doctor`.
+pub enum CredentialOrigin {
+    /// `AWS_ACCESS_KEY_ID` and its companions.
+    Environment,
+    /// The EC2 instance role, renewed before this instant.
+    InstanceRole { expires_at: SystemTime },
+}
+
+impl CredentialOrigin {
+    /// One line saying where the credentials are from and how long they last.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Environment => "AWS_ACCESS_KEY_ID in the environment".to_string(),
+            Self::InstanceRole { expires_at } => {
+                match expires_at.duration_since(SystemTime::now()) {
+                    Ok(left) => format!(
+                        "EC2 instance role, expires in {}, renewed automatically",
+                        format_remaining(left)
+                    ),
+                    Err(_) => "EC2 instance role, credentials have expired".to_string(),
+                }
+            }
+        }
+    }
+}
+
+fn format_remaining(left: Duration) -> String {
+    let minutes = left.as_secs() / 60;
+    match (minutes / 60, minutes % 60) {
+        (0, minutes) => format!("{minutes}m"),
+        (hours, minutes) => format!("{hours}h {minutes}m"),
+    }
 }
 
 impl AwsEnvironment {
     fn from_env() -> Self {
         Self {
             credentials: S3Credentials::from_env(),
+            instance_role: None,
+            instance_role_failure: None,
             region: ["AWS_REGION", "AWS_DEFAULT_REGION"]
                 .into_iter()
                 .find_map(|name| {
@@ -38,9 +83,76 @@ impl AwsEnvironment {
     }
 }
 
+/// A remote cache client and where its credentials came from.
+pub struct ConnectedRemote {
+    pub client: RemoteCacheClient,
+    /// Absent for a cache server, which authenticates with a token instead.
+    pub credentials: Option<CredentialOrigin>,
+}
+
 /// Build the client the configuration names, or `None` when none is configured.
-pub fn remote_client(config: &Config) -> Result<Option<RemoteCacheClient>> {
-    remote_client_with(config, AwsEnvironment::from_env())
+pub async fn remote_client(config: &Config) -> Result<Option<RemoteCacheClient>> {
+    Ok(connect(config).await?.map(|remote| remote.client))
+}
+
+/// Like [`remote_client`], also reporting where the credentials came from.
+///
+/// An `s3://` remote with no `AWS_ACCESS_KEY_ID` asks the EC2 metadata service
+/// for an instance role before giving up, which is the only reason this is
+/// async.
+pub async fn connect(config: &Config) -> Result<Option<ConnectedRemote>> {
+    let mut aws = AwsEnvironment::from_env();
+    let is_s3 = config
+        .remote
+        .url
+        .as_deref()
+        .is_some_and(|url| url.trim_start().starts_with("s3://"));
+    if is_s3 && aws.credentials.is_none() {
+        aws.use_instance_role().await;
+    }
+    let credentials = match (&aws.credentials, &aws.instance_role) {
+        _ if !is_s3 => None,
+        (_, Some((_, expires_at))) => Some(CredentialOrigin::InstanceRole {
+            expires_at: *expires_at,
+        }),
+        (Some(_), None) => Some(CredentialOrigin::Environment),
+        (None, None) => None,
+    };
+    Ok(
+        remote_client_with(config, aws)?.map(|client| ConnectedRemote {
+            client,
+            credentials,
+        }),
+    )
+}
+
+impl AwsEnvironment {
+    /// Try the EC2 instance role, filling in credentials when it has some.
+    async fn use_instance_role(&mut self) {
+        let provider = match InstanceRoleCredentials::from_env() {
+            Ok(Some(provider)) => provider,
+            Ok(None) => {
+                self.instance_role_failure =
+                    Some("instance role lookup is disabled by AWS_EC2_METADATA_DISABLED".into());
+                return;
+            }
+            Err(error) => {
+                self.instance_role_failure = Some(format!("{error:#}"));
+                return;
+            }
+        };
+        self.fetch_instance_role(provider).await;
+    }
+
+    async fn fetch_instance_role(&mut self, provider: InstanceRoleCredentials) {
+        match provider.fetch().await {
+            Ok(fetched) => {
+                self.credentials = Some(fetched.credentials);
+                self.instance_role = Some((provider, fetched.expires_at));
+            }
+            Err(error) => self.instance_role_failure = Some(format!("{error:#}")),
+        }
+    }
 }
 
 pub(crate) fn remote_client_with(
@@ -138,13 +250,18 @@ fn s3_client(
         validate_endpoint(endpoint)?;
     }
     let Some(credentials) = aws.credentials else {
+        let instance_role = aws
+            .instance_role_failure
+            .map(|reason| format!(" No EC2 instance role was used: {reason}."))
+            .unwrap_or_default();
         bail!(
-            "an s3:// remote cache needs AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; \
-             on GitHub Actions, aws-actions/configure-aws-credentials exports them from an \
-             OIDC role assumption"
+            "an s3:// remote cache needs AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or an EC2 \
+             instance role.{instance_role} On GitHub Actions, \
+             aws-actions/configure-aws-credentials exports credentials from an OIDC role \
+             assumption"
         );
     };
-    RemoteCacheClient::new_s3(S3RemoteCacheConfig {
+    let config = S3RemoteCacheConfig {
         bucket,
         prefix: url.path().to_string(),
         namespace,
@@ -157,7 +274,13 @@ fn s3_client(
         read_timeout: config.http.timeout,
         download_timeout: config.http.download_timeout,
         retries: config.http.retries,
-    })
+    };
+    match aws.instance_role {
+        Some((provider, expires_at)) => {
+            RemoteCacheClient::new_s3_with_instance_role(config, provider, expires_at)
+        }
+        None => RemoteCacheClient::new_s3(config),
+    }
 }
 
 /// The region requests are signed for.
@@ -221,6 +344,7 @@ mod tests {
                 session_token: None,
             }),
             region: Some("us-west-2".into()),
+            ..AwsEnvironment::default()
         }
     }
 
@@ -286,6 +410,100 @@ mod tests {
         );
 
         assert!(refusal.contains("AWS_ACCESS_KEY_ID"));
+    }
+
+    #[test]
+    fn a_missing_instance_role_is_named_in_the_refusal() {
+        let refusal = refusal(
+            s3_remote(),
+            AwsEnvironment {
+                credentials: None,
+                instance_role_failure: Some("the metadata service answered 404".into()),
+                ..aws()
+            },
+        );
+
+        assert!(refusal.contains("AWS_ACCESS_KEY_ID"));
+        assert!(refusal.contains("EC2 instance role"));
+        assert!(refusal.contains("the metadata service answered 404"));
+    }
+
+    #[tokio::test]
+    async fn an_instance_role_supplies_credentials_the_environment_lacks() {
+        let mut metadata = mockito::Server::new_async().await;
+        metadata
+            .mock("PUT", "/latest/api/token")
+            .with_body("session-token")
+            .create_async()
+            .await;
+        metadata
+            .mock("GET", "/latest/meta-data/iam/security-credentials/")
+            .with_body("build-runner")
+            .create_async()
+            .await;
+        metadata
+            .mock(
+                "GET",
+                "/latest/meta-data/iam/security-credentials/build-runner",
+            )
+            .with_body(
+                r#"{"Code":"Success","AccessKeyId":"ASIAROLE","SecretAccessKey":"secret","Token":"token","Expiration":"2999-01-01T00:00:00Z"}"#,
+            )
+            .create_async()
+            .await;
+        let provider = InstanceRoleCredentials::new(metadata.url().parse().unwrap()).unwrap();
+        let mut environment = AwsEnvironment {
+            credentials: None,
+            ..aws()
+        };
+
+        environment.fetch_instance_role(provider).await;
+
+        let credentials = environment.credentials.as_ref().unwrap();
+        assert_eq!(credentials.access_key_id, "ASIAROLE");
+        assert!(environment.instance_role.is_some());
+        assert!(client(s3_remote(), environment).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_metadata_service_leaves_the_refusal_to_explain() {
+        let mut environment = AwsEnvironment {
+            credentials: None,
+            ..aws()
+        };
+        // Nothing listens on a port that was just released.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let provider =
+            InstanceRoleCredentials::new(format!("http://127.0.0.1:{port}").parse().unwrap())
+                .unwrap();
+
+        environment.fetch_instance_role(provider).await;
+
+        assert!(environment.credentials.is_none());
+        assert!(environment.instance_role_failure.is_some());
+    }
+
+    #[test]
+    fn the_credential_origin_says_when_an_instance_role_expires() {
+        assert_eq!(
+            CredentialOrigin::Environment.describe(),
+            "AWS_ACCESS_KEY_ID in the environment"
+        );
+        let in_six_hours = CredentialOrigin::InstanceRole {
+            expires_at: SystemTime::now() + Duration::from_secs(6 * 3_600 - 30),
+        };
+        assert_eq!(
+            in_six_hours.describe(),
+            "EC2 instance role, expires in 5h 59m, renewed automatically"
+        );
+        let lapsed = CredentialOrigin::InstanceRole {
+            expires_at: SystemTime::now() - Duration::from_secs(1),
+        };
+        assert!(lapsed.describe().contains("expired"));
     }
 
     #[test]

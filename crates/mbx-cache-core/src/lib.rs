@@ -38,6 +38,7 @@ use url::Url;
 
 mod agent;
 mod client;
+mod imds;
 mod local;
 mod path_mapping;
 mod remote_http;
@@ -54,6 +55,7 @@ pub use agent::{
     is_task_identity, merge_task_action_predictions, task_manifest_actions,
 };
 pub use client::BlockingAgentClient;
+pub use imds::{InstanceRoleCredentials, TemporaryCredentials};
 pub use local::{LocalActionCache, LocalCas};
 pub use mbx_cache_protocol::{
     ACTION_PROMISE_MEDIA_TYPE, ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE,
@@ -302,6 +304,25 @@ impl RemoteCacheClient {
     pub fn new_s3(config: S3RemoteCacheConfig) -> Result<Self> {
         Ok(Self {
             backend: Backend::S3(S3RemoteCache::new(config)?),
+        })
+    }
+
+    /// Construct an S3 client whose credentials come from an EC2 instance role
+    /// and are renewed before they expire.
+    ///
+    /// `config.credentials` and `expires_at` are the credentials the role
+    /// returned when `provider` was first asked, and the instant they lapse.
+    /// From then on the client fetches a new set from `provider` shortly
+    /// before that, so a session that outlives its credentials keeps working.
+    pub fn new_s3_with_instance_role(
+        config: S3RemoteCacheConfig,
+        provider: InstanceRoleCredentials,
+        expires_at: std::time::SystemTime,
+    ) -> Result<Self> {
+        Ok(Self {
+            backend: Backend::S3(
+                S3RemoteCache::new(config)?.with_instance_role(provider, expires_at),
+            ),
         })
     }
 

@@ -940,3 +940,120 @@ async fn transient_failures_exhaust_retries_within_a_generous_deadline() {
     assert!(!error.to_string().contains("budget"), "{error}");
     request.assert_async().await;
 }
+
+/// A metadata service double whose role credentials stay valid for centuries.
+/// The second value is the credentials lookup, which should happen once.
+async fn metadata_service() -> (mockito::ServerGuard, mockito::Mock) {
+    let mut server = mockito::Server::new_async().await;
+    server
+        .mock("PUT", "/latest/api/token")
+        .with_body("session-token")
+        .create_async()
+        .await;
+    server
+        .mock("GET", "/latest/meta-data/iam/security-credentials/")
+        .with_body("build-runner")
+        .create_async()
+        .await;
+    let lookup = server
+        .mock(
+            "GET",
+            "/latest/meta-data/iam/security-credentials/build-runner",
+        )
+        .with_body(
+            r#"{"Code":"Success","AccessKeyId":"ASIARENEWED","SecretAccessKey":"renewed-secret","Token":"renewed-token","Expiration":"2999-01-01T00:00:00Z"}"#,
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    (server, lookup)
+}
+
+fn signed_with(access_key_id: &str) -> mockito::Matcher {
+    mockito::Matcher::Regex(format!("Credential={access_key_id}/"))
+}
+
+#[tokio::test]
+async fn instance_role_credentials_are_renewed_shortly_before_they_expire() {
+    let (metadata, lookup) = metadata_service().await;
+    let mut server = mockito::Server::new_async().await;
+    let request = server
+        .mock("GET", "/cache-bucket/acme/v1/connectivity-probe")
+        .match_header("authorization", signed_with("ASIARENEWED"))
+        .match_header("x-amz-security-token", "renewed-token")
+        .with_status(200)
+        .expect(2)
+        .create_async()
+        .await;
+    // Inside the renewal margin, so the first request has to renew.
+    let expires_at = SystemTime::now() + Duration::from_secs(60);
+    let store = test_store(&server).with_instance_role(
+        InstanceRoleCredentials::new(metadata.url().parse().unwrap()).unwrap(),
+        expires_at,
+    );
+
+    store.check_connection().await.unwrap();
+    // The renewed credentials are good for far longer, so no second lookup.
+    store.check_connection().await.unwrap();
+
+    request.assert_async().await;
+    lookup.assert_async().await;
+}
+
+#[tokio::test]
+async fn credentials_with_time_left_are_not_renewed() {
+    let mut metadata = mockito::Server::new_async().await;
+    let lookup = metadata
+        .mock("PUT", "/latest/api/token")
+        .expect(0)
+        .create_async()
+        .await;
+    let mut server = mockito::Server::new_async().await;
+    let request = server
+        .mock("GET", "/cache-bucket/acme/v1/connectivity-probe")
+        .match_header("authorization", signed_with("AKIDEXAMPLE"))
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let store = test_store(&server).with_instance_role(
+        InstanceRoleCredentials::new(metadata.url().parse().unwrap()).unwrap(),
+        SystemTime::now() + Duration::from_secs(3_600),
+    );
+
+    store.check_connection().await.unwrap();
+
+    request.assert_async().await;
+    lookup.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_failed_renewal_keeps_the_current_credentials_and_backs_off() {
+    let mut metadata = mockito::Server::new_async().await;
+    let lookup = metadata
+        .mock("PUT", "/latest/api/token")
+        .with_status(500)
+        .expect(1)
+        .create_async()
+        .await;
+    let mut server = mockito::Server::new_async().await;
+    let request = server
+        .mock("GET", "/cache-bucket/acme/v1/connectivity-probe")
+        .match_header("authorization", signed_with("AKIDEXAMPLE"))
+        .with_status(200)
+        .expect(3)
+        .create_async()
+        .await;
+    let store = test_store(&server).with_instance_role(
+        InstanceRoleCredentials::new(metadata.url().parse().unwrap()).unwrap(),
+        SystemTime::now() + Duration::from_secs(60),
+    );
+
+    for _ in 0..3 {
+        store.check_connection().await.unwrap();
+    }
+
+    request.assert_async().await;
+    // Asked once; the other two requests did not ask a service that had just failed.
+    lookup.assert_async().await;
+}

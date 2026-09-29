@@ -235,7 +235,7 @@ impl CacheSession {
             initialized: tokio::sync::OnceCell::new(),
             connected: std::sync::atomic::AtomicBool::new(false),
         });
-        let agent = if let Some(remote) = action_remote_cache(config, &store)? {
+        let agent = if let Some(remote) = action_remote_cache(config, &store).await? {
             CacheAgent::new_remote_with_download_limit(
                 store.clone(),
                 VERSION,
@@ -1144,8 +1144,8 @@ fn origin_marker_from_output(output: &[u8]) -> Option<String> {
     (!url.is_empty()).then(|| format!("origin\0{url}"))
 }
 
-fn action_remote_cache(config: &Config, store: &Path) -> Result<Option<AgentRemoteCache>> {
-    let Some(client) = crate::remote::remote_client(config)? else {
+async fn action_remote_cache(config: &Config, store: &Path) -> Result<Option<AgentRemoteCache>> {
+    let Some(client) = crate::remote::remote_client(config).await? else {
         return Ok(None);
     };
     let Some(mode) = crate::policy::effective_remote_cache_mode(config.remote.mode) else {
