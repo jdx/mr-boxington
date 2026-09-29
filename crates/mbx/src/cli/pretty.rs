@@ -205,9 +205,11 @@ fn run_inner(
                     screen.clear()?;
                 }
             }
+            let awaiting_lf = screen.awaiting_lf();
             if !proxy
                 && decoder.pending.is_empty()
                 && !decoder.partial
+                && !awaiting_lf
                 && last_frame.elapsed() >= Duration::from_millis(80)
             {
                 model.update_stats(stats());
@@ -540,7 +542,7 @@ impl Frame {
     /// returned to. The next [`Frame::draw`] shows it, on a line of its own.
     fn present(&mut self, repaint: bool) -> Vec<u8> {
         let repaint = repaint && self.drawn > 0;
-        if repaint && (self.held.is_empty() || self.held.ends_with(b"\r")) {
+        if repaint && (self.held.is_empty() || self.trailing_cr()) {
             return Vec::new();
         }
         let mut out = Vec::with_capacity(self.held.len());
@@ -553,13 +555,18 @@ impl Frame {
         out
     }
 
+    /// Held output ends in a CR: either half a CRLF or a line that rewrites itself.
+    fn trailing_cr(&self) -> bool {
+        self.held.ends_with(b"\r")
+    }
+
     /// Replace the block: erase the old one, then held output, diagnostics
     /// and the new block.
     fn draw(&mut self, diagnostics: &[u8], block: String, rows: u16) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.held.len() + block.len());
         self.erase(&mut out);
         // A held line that ends in a bare CR would have the block print over it.
-        let unterminated = self.held.ends_with(b"\r");
+        let unterminated = self.trailing_cr();
         out.append(&mut self.held);
         if unterminated {
             out.push(b'\n');
@@ -584,8 +591,13 @@ impl Frame {
     }
 }
 
+/// How long a trailing CR may wait for its LF before it is taken as a line
+/// that rewrites itself. A CRLF split by a read boundary completes far sooner.
+const CR_GRACE: Duration = Duration::from_millis(250);
+
 struct Screen {
     frame: Frame,
+    cr_since: Option<Instant>,
     diagnostics: crate::logging::Capture,
 }
 impl Screen {
@@ -594,6 +606,7 @@ impl Screen {
         terminal::enable_raw_mode()?;
         let mut screen = Self {
             frame: Frame::default(),
+            cr_since: None,
             diagnostics,
         };
         if let Err(error) = execute!(io::stderr(), cursor::Hide) {
@@ -628,6 +641,16 @@ impl Screen {
             stderr.flush()?;
         }
         Ok(())
+    }
+    /// Whether a frame should wait for what follows a trailing CR. Drawing now
+    /// would put a newline after half a CRLF and leave a blank row when the LF
+    /// arrives.
+    fn awaiting_lf(&mut self) -> bool {
+        if !self.frame.trailing_cr() {
+            self.cr_since = None;
+            return false;
+        }
+        self.cr_since.get_or_insert_with(Instant::now).elapsed() < CR_GRACE
     }
     fn clear(&mut self) -> io::Result<()> {
         let synchronized = self.frame.drawn > 0;

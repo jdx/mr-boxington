@@ -657,3 +657,13 @@ fn a_bare_carriage_return_is_shown_above_the_next_frame_not_overwritten_by_it() 
         format!("{ERASE}progress\r\nnext\r\n")
     );
 }
+
+#[test]
+fn only_output_ending_in_a_cr_makes_a_frame_wait() {
+    let mut frame = drawn_frame();
+    assert!(!frame.trailing_cr());
+    frame.write(b"Finished\r");
+    assert!(frame.trailing_cr());
+    frame.write(b"\n");
+    assert!(!frame.trailing_cr());
+}
