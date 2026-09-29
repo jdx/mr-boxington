@@ -514,6 +514,9 @@ struct Frame {
     /// A held CR was ended with an LF of our own, so the child's LF, if it
     /// arrives, must not end the line a second time.
     lf_owed: bool,
+    /// When a frame first found the held CR waiting. Cleared when held output is
+    /// shown, so the next CR gets a full grace period of its own.
+    cr_since: Option<Instant>,
 }
 
 impl Frame {
@@ -559,6 +562,7 @@ impl Frame {
         let mut out = Vec::with_capacity(self.held.len());
         self.erase(&mut out);
         out.append(&mut self.held);
+        self.cr_since = None;
         if repaint {
             out.extend_from_slice(self.block.as_bytes());
             self.drawn = self.rows;
@@ -571,6 +575,7 @@ impl Frame {
     fn flush_held(&mut self, out: &mut Vec<u8>) {
         let unterminated = self.trailing_cr();
         out.append(&mut self.held);
+        self.cr_since = None;
         if unterminated {
             out.push(b'\n');
             self.lf_owed = true;
@@ -584,6 +589,18 @@ impl Frame {
         self.erase(&mut out);
         self.flush_held(&mut out);
         out
+    }
+
+    /// Whether a frame should wait for what follows a trailing CR. Drawing now
+    /// would put a newline after half a CRLF and leave a blank row when the LF
+    /// arrives. The wait ends [`CR_GRACE`] after it was first seen.
+    fn awaiting_lf(&mut self, now: Instant) -> bool {
+        if !self.trailing_cr() {
+            self.cr_since = None;
+            return false;
+        }
+        let since = *self.cr_since.get_or_insert(now);
+        now.saturating_duration_since(since) < CR_GRACE
     }
 
     /// Held output ends in a CR: either half a CRLF or a line that rewrites itself.
@@ -623,7 +640,6 @@ const CR_GRACE: Duration = Duration::from_millis(250);
 
 struct Screen {
     frame: Frame,
-    cr_since: Option<Instant>,
     diagnostics: crate::logging::Capture,
 }
 impl Screen {
@@ -632,7 +648,6 @@ impl Screen {
         terminal::enable_raw_mode()?;
         let mut screen = Self {
             frame: Frame::default(),
-            cr_since: None,
             diagnostics,
         };
         if let Err(error) = execute!(io::stderr(), cursor::Hide) {
@@ -668,15 +683,9 @@ impl Screen {
         }
         Ok(())
     }
-    /// Whether a frame should wait for what follows a trailing CR. Drawing now
-    /// would put a newline after half a CRLF and leave a blank row when the LF
-    /// arrives.
+    /// Whether a frame should wait for what follows a trailing CR.
     fn awaiting_lf(&mut self) -> bool {
-        if !self.frame.trailing_cr() {
-            self.cr_since = None;
-            return false;
-        }
-        self.cr_since.get_or_insert_with(Instant::now).elapsed() < CR_GRACE
+        self.frame.awaiting_lf(Instant::now())
     }
     fn clear(&mut self) -> io::Result<()> {
         let synchronized = self.frame.drawn > 0;

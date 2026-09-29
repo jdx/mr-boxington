@@ -698,3 +698,20 @@ fn clearing_the_block_ends_a_held_bare_cr_line() {
     assert_eq!(frame.drawn, 0);
     assert!(frame.write(b"\n").is_empty(), "the LF is already owed");
 }
+
+#[test]
+fn each_carriage_return_gets_its_own_grace_period() {
+    let start = Instant::now();
+    let mut frame = drawn_frame();
+    assert!(!frame.awaiting_lf(start), "nothing held");
+    assert!(frame.write(b"a\r").is_empty());
+    assert!(frame.awaiting_lf(start));
+    assert!(frame.awaiting_lf(start + CR_GRACE / 2));
+    let expired = start + CR_GRACE;
+    assert!(!frame.awaiting_lf(expired), "no LF came: draw the line");
+    frame.draw(b"", "next\r\n".into(), 1);
+    // A new CR after the flush must not inherit the expired timer.
+    assert!(frame.write(b"b\r").is_empty());
+    assert!(frame.awaiting_lf(expired + Duration::from_millis(1)));
+    assert!(!frame.awaiting_lf(expired + Duration::from_millis(1) + CR_GRACE));
+}
