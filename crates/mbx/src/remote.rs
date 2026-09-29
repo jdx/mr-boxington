@@ -213,7 +213,9 @@ fn default_profile_names_credentials(text: &str) -> bool {
             .strip_prefix('[')
             .and_then(|line| line.strip_suffix(']'))
         {
-            in_default = matches!(header.trim(), "default" | "profile default");
+            // The AWS tools accept extra spaces inside the brackets.
+            let header: Vec<&str> = header.split_whitespace().collect();
+            in_default = matches!(header.as_slice(), ["default"] | ["profile", "default"]);
         } else if in_default {
             let key = line.split('=').next().unwrap_or_default().trim();
             if CREDENTIAL_KEYS.contains(&key) {
@@ -741,12 +743,15 @@ mod tests {
             "# aws_access_key_id = commented\n[default]\nregion = eu-west-1\n",
             "[profile dev]\naws_access_key_id = AKIDEXAMPLE\n[default]\nregion = eu-west-1\n",
             "[other]\ncredential_process = /bin/creds\n",
+            "[profile default extra]\ncredential_process = /bin/creds\n",
         ] {
             assert!(!default_profile_names_credentials(text), "{text:?}");
         }
         for text in [
             "[default]\naws_access_key_id=AKIDEXAMPLE\n",
             "[profile default]\ncredential_process = /bin/creds\n",
+            "[ profile   default ]\ncredential_process = /bin/creds\n",
+            "[  default]\naws_access_key_id = AKIDEXAMPLE\n",
             "[dev]\nregion = x\n[default]\n  ; note\n  role_arn = arn:aws:iam::1:role/x\n",
         ] {
             assert!(default_profile_names_credentials(text), "{text:?}");

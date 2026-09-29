@@ -237,14 +237,20 @@ impl CredentialSource {
     fn rejection_hint(&self, code: Option<&str>) -> &'static str {
         match self {
             Self::Fixed(_) => "Check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY",
-            // The role's credentials lapsed because renewal kept failing, and
-            // the warning logged for that failure says why.
-            Self::InstanceRole(_)
+            Self::InstanceRole(role)
                 if matches!(code, Some("ExpiredToken" | "TokenRefreshRequired")) =>
             {
-                "The EC2 instance role's credentials have expired and could not be renewed, so \
-                 check the renewal warning above and that the instance metadata service is \
-                 reachable"
+                let state = role.state.lock().unwrap();
+                if state.failing || state.expired() {
+                    "The EC2 instance role's credentials have expired and could not be renewed, \
+                     so check the renewal warning above and that the instance metadata service \
+                     is reachable"
+                } else {
+                    // Nothing went wrong with renewal, so the two sides disagree
+                    // about the time.
+                    "S3 says the EC2 instance role's credentials have expired, though the \
+                     metadata service reported them valid"
+                }
             }
             Self::InstanceRole(_) => {
                 "These are the EC2 instance role's credentials, so check the role's \
