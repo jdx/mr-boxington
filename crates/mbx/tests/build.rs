@@ -3667,6 +3667,124 @@ mod target_views {
     }
 
     #[test]
+    fn check_and_clippy_get_their_own_directory_inside_the_managed_target() {
+        // Clippy is an external subcommand, so it takes a different route to
+        // the lane than the built-in `check` does.
+        for command in ["check", "clippy"] {
+            let store = tempfile::tempdir().unwrap();
+            let project = tempfile::tempdir().unwrap();
+            let reports = tempfile::tempdir().unwrap();
+            write_project(project.path());
+            let settings = [("MBX_TARGET_VIEWS", "1")];
+
+            cargo_with(
+                project.path(),
+                store.path(),
+                &reports.path().join("check.json"),
+                &[command, "--offline"],
+                &settings,
+            );
+
+            let directory = managed(project.path());
+            assert!(
+                directory.join("check/debug/.cargo-lock").is_file(),
+                "`{command}` should write to the lane inside the managed target"
+            );
+            assert!(
+                !directory.join("debug").exists(),
+                "`{command}` should leave the build's profile directory alone"
+            );
+
+            build_with(
+                project.path(),
+                store.path(),
+                &reports.path().join("build.json"),
+                &settings,
+            );
+            assert!(
+                project.path().join("target/debug/libfixture.rlib").exists(),
+                "a build should still write where builds have always written"
+            );
+        }
+    }
+
+    fn lane_check(
+        project: &Path,
+        store: &Path,
+        report: &Path,
+        settings: &[(&str, &str)],
+    ) -> std::process::Child {
+        isolated_cargo_command(
+            mbx_command(),
+            project,
+            store,
+            report,
+            &["check", "--offline"],
+            settings,
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("mbx should run")
+    }
+
+    /// Whether `child` finished within `wait`, killing it if it did not.
+    fn finishes_within(child: &mut std::process::Child, wait: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + wait;
+        while std::time::Instant::now() < deadline {
+            if child.try_wait().unwrap().is_some() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        false
+    }
+
+    #[test]
+    fn a_check_does_not_wait_for_a_build_holding_the_target_lock() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(project.path());
+        build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("build.json"),
+            &[("MBX_TARGET_VIEWS", "1")],
+        );
+        // What a build in progress holds for as long as it compiles.
+        let lock = std::fs::File::open(project.path().join("target/debug/.cargo-lock"))
+            .expect("a build should leave Cargo's lock file behind");
+        lock.lock().unwrap();
+
+        // The control: with lanes off, the check queues behind the build.
+        let mut queued = lane_check(
+            project.path(),
+            store.path(),
+            &reports.path().join("queued.json"),
+            &[("MBX_TARGET_VIEWS", "1"), ("MBX_TARGET_LANES", "0")],
+        );
+        assert!(
+            !finishes_within(&mut queued, std::time::Duration::from_secs(3)),
+            "without a lane the check should wait for the build's lock"
+        );
+
+        let mut check = lane_check(
+            project.path(),
+            store.path(),
+            &reports.path().join("check.json"),
+            &[("MBX_TARGET_VIEWS", "1")],
+        );
+        assert!(
+            finishes_within(&mut check, std::time::Duration::from_secs(60)),
+            "a check in its own lane should not wait for the build"
+        );
+        assert!(check.wait().unwrap().success());
+    }
+
+    #[test]
     fn mbx_clean_removes_the_managed_view_and_link() {
         let store = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();

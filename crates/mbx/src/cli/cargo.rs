@@ -105,7 +105,7 @@ fn cargo_with_settings_bypass_log_and_roots(
     }
     crate::storage::check_cache(config)?;
     let working_dir = std::env::current_dir()?;
-    let roots = match roots {
+    let mut roots = match roots {
         Some(roots) => roots,
         None => {
             let target_dir_env = std::env::var_os(CARGO_TARGET_DIR_ENV);
@@ -291,6 +291,12 @@ fn cargo_with_settings_bypass_log_and_roots(
         }
         None => (place_target_view(config, &roots), None, None),
     };
+    // Chosen after placement, because it is a directory inside the managed
+    // view: a build that could not place `target/` has nowhere to put one.
+    let check_lane = check_lane(config, &roots, &placement, arguments);
+    if let Some(lane) = &check_lane {
+        roots.target_dir.clone_from(lane);
+    }
     crate::storage::require_local(
         &roots.target_dir,
         "Cargo target directory",
@@ -315,6 +321,7 @@ fn cargo_with_settings_bypass_log_and_roots(
     }
     if config.target.seed
         && !placing_editor
+        && check_lane.is_none()
         && let Some(view) = placement.directory.as_deref()
     {
         seed_target_view(config, &cargo, &roots.workspace_root, view, arguments);
@@ -455,7 +462,10 @@ fn cargo_with_settings_bypass_log_and_roots(
         // inherited by tests and build scripts. Their nested Cargo builds
         // resolve their own targets, including any caller-specified setting.
         let placed_arguments;
-        let cargo_arguments = if placement.directory.is_some() {
+        let cargo_arguments = if check_lane.is_some() {
+            placed_arguments = lane_cargo_arguments(arguments, &roots.target_dir);
+            &placed_arguments
+        } else if placement.directory.is_some() {
             placed_arguments = placed_cargo_arguments(arguments, &roots.target_dir);
             &placed_arguments
         } else {
@@ -539,9 +549,59 @@ pub(super) fn placed_cargo_arguments(arguments: &[String], target: &Path) -> Vec
     arguments
 }
 
+/// Send a check to its lane. Unlike the placement above, this has to reach
+/// `cargo-clippy`: an external subcommand never sees the global `--config`, but
+/// it forwards its own flags to the `cargo check` it runs, so the flag goes
+/// right after the subcommand and ahead of anything meant for the compiler.
+pub(super) fn lane_cargo_arguments(arguments: &[String], lane: &Path) -> Vec<String> {
+    let mut arguments = arguments.to_vec();
+    let after_subcommand = super::launch::cargo_subcommand_at(&arguments)
+        .map_or(arguments.len(), |(index, _)| index + 1);
+    arguments.splice(
+        after_subcommand..after_subcommand,
+        ["--target-dir".into(), lane.to_string_lossy().into_owned()],
+    );
+    arguments
+}
+
 pub(super) struct TargetViewPlacement {
     pub(super) directory: Option<PathBuf>,
     pub(super) touch_path: PathBuf,
+}
+
+/// The directory a diagnostics-only command writes to, when it should not
+/// share `target/` with builds.
+///
+/// Cargo holds a lock on the target directory while it compiles, so a `cargo
+/// clippy` started beside a `cargo build` waits for the build to finish. Checks
+/// write metadata rather than the binaries a build leaves in `target/`, so they
+/// can live in a directory of their own inside the managed view, the way the
+/// editor's checks do. The shared cache warms both.
+///
+/// Only for a build that mbx is placing and that nobody has directed
+/// elsewhere: a flag, the environment, or Cargo's configuration naming a target
+/// or build directory is the caller's choice, and one Cargo keeps outside the
+/// target would leave the lock shared anyway.
+pub(super) fn check_lane(
+    config: &Config,
+    roots: &Roots,
+    placement: &TargetViewPlacement,
+    arguments: &[String],
+) -> Option<PathBuf> {
+    let separate_build_dir = roots
+        .build_dir
+        .as_deref()
+        .is_some_and(|build_dir| *build_dir != *roots.target_dir);
+    (config.target.lanes
+        && placement.directory.is_some()
+        && !roots.target_dir_requested
+        && !separate_build_dir
+        && roots.target_dir == roots.workspace_root.join("target")
+        && matches!(
+            super::launch::cargo_subcommand(arguments),
+            Some("check" | "clippy")
+        ))
+    .then(|| roots.workspace_root.join(super::CHECK_LANE_TARGET_DIR))
 }
 
 /// Place the editor's explicit target inside the checkout's managed view.

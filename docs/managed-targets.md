@@ -39,6 +39,48 @@ mbx does not override an explicit target directory supplied by:
 - `CARGO_TARGET_DIR`
 - Cargo's `build.target-dir` configuration
 
+## Checks run beside builds {#check-lanes}
+
+Cargo locks a target directory while it compiles, so a `cargo clippy` started
+next to a `cargo build` waits for the build to finish. In a managed target,
+`check` and `clippy` write to a directory of their own inside it, so the two
+run at the same time with nothing to configure:
+
+```sh
+mbx build &
+mbx clippy --workspace --all-targets -- -D warnings
+```
+
+```text
+target/            (linked to the managed target)
+├── debug/         build, test, run
+└── check/debug/   check, clippy
+```
+
+Builds keep writing to `target/debug`, so binaries stay where they always were.
+Both commands share one compile budget and one cache, so the second starts
+with whatever the first has already stored. The `check` directory is part of
+the managed target: it is collected, moved, and removed with it.
+
+The first `check` or `clippy` in a checkout after upgrading compiles into the
+new directory rather than reusing `target/debug`. The cache restores most of
+it. Proc macros and build scripts, which Cargo compiles for both, exist once in
+each directory.
+
+mbx leaves a command alone, and it uses `target/` as before, when:
+
+- the target directory is set by `--target-dir`, `CARGO_TARGET_DIR`, or
+  `build.target-dir`;
+- Cargo's build directory is set apart from the target, because that is where
+  the lock lives;
+- mbx is not placing the target, for example in CI or with
+  `target.views = false`.
+
+Set `target.lanes = false` (`MBX_TARGET_LANES=0`) to keep every command in
+`target/`. Two builds, or a build and a test run, still share `target/debug`
+and wait for each other; give them separate targets as described in
+[Parallel builds](/scheduling).
+
 ## Change target placement
 
 Set `target.root` to place managed targets on another local disk:

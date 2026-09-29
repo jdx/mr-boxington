@@ -7,6 +7,11 @@ Give independent Cargo commands their own target directories. mbx coordinates
 their real compiler processes through a shared CPU and memory budget; Cargo
 continues to plan dependencies within each build.
 
+`check` and `clippy` need no setup: in a managed target they already write to
+their own [directory](/managed-targets#check-lanes), so `mbx clippy` runs beside
+`mbx build`. The rest of this page is for commands that would otherwise share
+a target directory, such as two builds or several lint configurations.
+
 ## Run independent tasks
 
 Any task runner can start multiple mbx commands at the same time. For example,

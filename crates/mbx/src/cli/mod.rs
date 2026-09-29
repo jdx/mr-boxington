@@ -36,6 +36,7 @@ mod tui;
 
 const CARGO_SHIM_TARGET_FILE: &str = "mbx-target";
 const RUST_ANALYZER_TARGET_DIR: &str = "target/rust-analyzer";
+const CHECK_LANE_TARGET_DIR: &str = "target/check";
 
 pub(crate) use cargo::{cargo_with_bypass_log, cargo_with_settings_and_bypass_log};
 pub(crate) use setup::{cargo_shim_is_current, setup_install_dir};

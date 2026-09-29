@@ -137,6 +137,7 @@ fn test_config(cache_dir: &Path) -> Config {
         linker: Default::default(),
         target: crate::config::TargetSettings {
             views: false,
+            lanes: true,
             seed: false,
             root: cache_dir.join("targets"),
         },

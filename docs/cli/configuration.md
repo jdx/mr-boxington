@@ -530,6 +530,14 @@ Checkouts whose managed targets are collected first when targets are over budget
 
 Checkouts whose managed targets are never collected for age or size. An absolute path covers the checkouts under it; a relative one matches wherever it appears in a checkout's path.
 
+### `target.lanes`
+
+- **Type:** `bool`
+- **Default:** `true`
+- **Set with:** `MBX_TARGET_LANES`
+
+Give `cargo check` and `cargo clippy` a directory of their own inside the managed target, so they run beside a build instead of waiting for Cargo's target lock.
+
 ### `target.max_age`
 
 - **Type:** `duration`

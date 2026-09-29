@@ -390,6 +390,11 @@ struct RawTarget {
     /// Let mbx place eligible target directories under the managed root.
     #[usage(env = "MBX_TARGET_VIEWS", default = true)]
     views: bool,
+    /// Give `cargo check` and `cargo clippy` a directory of their own inside
+    /// the managed target, so they run beside a build instead of waiting for
+    /// Cargo's target lock.
+    #[usage(env = "MBX_TARGET_LANES", default = true)]
+    lanes: bool,
     /// Copy registry build units from another checkout's managed target into
     /// a profile this checkout has not built yet (Cargo 1.100 or later).
     #[usage(env = "MBX_TARGET_SEED", default = true)]
@@ -622,6 +627,7 @@ impl Config {
             gc: Default::default(),
             target: TargetSettings {
                 views: true,
+                lanes: true,
                 seed: false,
                 root: cache_dir.join("targets"),
             },
@@ -744,6 +750,7 @@ pub struct HttpSettings {
 #[derive(Debug, Clone)]
 pub struct TargetSettings {
     pub views: bool,
+    pub lanes: bool,
     pub seed: bool,
     pub root: PathBuf,
 }
@@ -1149,6 +1156,7 @@ impl Config {
         };
         let target = TargetSettings {
             views: raw.target.views,
+            lanes: raw.target.lanes,
             seed: raw.target.seed,
             root: target_root,
         };

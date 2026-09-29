@@ -902,6 +902,7 @@ mod tests {
             linker: Default::default(),
             target: crate::config::TargetSettings {
                 views: true,
+                lanes: true,
                 seed: false,
                 root: directory.path().join("targets"),
             },
@@ -950,6 +951,7 @@ mod tests {
             linker: Default::default(),
             target: crate::config::TargetSettings {
                 views: true,
+                lanes: true,
                 seed: false,
                 root: directory.path().join("targets"),
             },
